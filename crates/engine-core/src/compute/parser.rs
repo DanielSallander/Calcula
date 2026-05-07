@@ -441,12 +441,31 @@ impl Parser {
             "BLANK" => self.parse_blank_call(),
             "ISBLANK" => self.parse_isblank_call(),
             "COALESCE" => self.parse_coalesce_call(),
+            // Conditional: GREATEST, LEAST, NULLIF
+            "GREATEST" => self.parse_greatest_call(),
+            "LEAST" => self.parse_least_call(),
+            "NULLIF" => self.parse_nullif_call(),
+            // Aggregation: COUNTIF, ANY_VALUE, MODE, LISTAGG, MAX_BY, MIN_BY
+            "COUNTIF" | "COUNT_IF" => self.parse_countif_call(),
+            "ANY_VALUE" | "ANYVALUE" => self.parse_aggregate_call("ANY_VALUE"),
+            "MODE" => self.parse_aggregate_call("MODE"),
+            "LISTAGG" | "STRING_AGG" => self.parse_listagg_call(),
+            "MAX_BY" | "MAXBY" => self.parse_maxby_call(),
+            "MIN_BY" | "MINBY" => self.parse_minby_call(),
             // Table-producing query
             "QUERY" => self.parse_query_call(),
             // Window functions
             "WINDOW" => self.parse_window_call(),
             "OFFSET" => self.parse_offset_call(),
             "INDEX" => self.parse_index_call(),
+            // Ranking window functions
+            "ROW_NUMBER" | "ROWNUMBER" => {
+                self.parse_rank_window_call(expr::RankFunction::RowNumber)
+            }
+            "RANK" => self.parse_rank_window_call(expr::RankFunction::Rank),
+            "DENSE_RANK" | "DENSERANK" => {
+                self.parse_rank_window_call(expr::RankFunction::DenseRank)
+            }
             // Value inspection functions
             "HASONEVALUE" => self.parse_hasonevalue_call(),
             "SELECTEDVALUE" => self.parse_selectedvalue_call(),
@@ -478,6 +497,18 @@ impl Parser {
             "DATEDIFF" => self.parse_datediff_call(),
             "TODAY" => self.parse_datetime_call(DateTimeFunction::Today, 0),
             "NOW" => self.parse_datetime_call(DateTimeFunction::Now, 0),
+            "DATEADD" => self.parse_dateadd_call(),
+            "DATE_TRUNC" | "DATETRUNC" => self.parse_datetrunc_call(),
+            "LAST_DAY" | "LASTDAY" => self.parse_lastday_call(),
+            "EOMONTH" => self.parse_datetime_call(DateTimeFunction::EoMonth, 1),
+            "DAYOFWEEK" => self.parse_datetime_call(DateTimeFunction::DayOfWeek, 1),
+            "DAYOFYEAR" => self.parse_datetime_call(DateTimeFunction::DayOfYear, 1),
+            "WEEKNUM" => self.parse_datetime_call(DateTimeFunction::WeekNum, 1),
+            "DAYNAME" => self.parse_datetime_call(DateTimeFunction::DayName, 1),
+            "MONTHNAME" => self.parse_datetime_call(DateTimeFunction::MonthName, 1),
+            "MONTHS_BETWEEN" | "MONTHSBETWEEN" => {
+                self.parse_datetime_call(DateTimeFunction::MonthsBetween, 2)
+            }
             // Error handling
             "IFERROR" => self.parse_iferror_call(),
             // Scope check
@@ -515,6 +546,10 @@ impl Parser {
             "REVERSE" => self.parse_text_call(TextFunction::Reverse, 1),
             "SPLIT" => self.parse_text_call(TextFunction::Split, 3),
             "FORMAT" => self.parse_text_call(TextFunction::Format, 2),
+            "CONTAINS" => self.parse_text_call(TextFunction::Contains, 2),
+            "STARTSWITH" => self.parse_text_call(TextFunction::StartsWith, 2),
+            "ENDSWITH" => self.parse_text_call(TextFunction::EndsWith, 2),
+            "INITCAP" => self.parse_text_call(TextFunction::InitCap, 1),
             _ => Err(EngineError::InvalidData(format!(
                 "unknown function: {name}"
             ))),
@@ -535,6 +570,8 @@ impl Parser {
             "STDEVP" => AggregateOp::StdevPop,
             "VARIANCE" => AggregateOp::VarSample,
             "VARIANCEP" => AggregateOp::VarPop,
+            "ANY_VALUE" => AggregateOp::AnyValue,
+            "MODE" => AggregateOp::Mode,
             _ => unreachable!(),
         };
 
@@ -1827,6 +1864,100 @@ impl Parser {
         ))
     }
 
+    /// Parse `DATEADD(date, n, interval)` where interval is DAY/MONTH/YEAR/QUARTER/HOUR/MINUTE/SECOND.
+    fn parse_dateadd_call(&mut self) -> EngineResult<Expression> {
+        let date = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let n = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let interval = match self.advance()?.clone() {
+            Token::Ident(s) => {
+                let upper = s.to_uppercase();
+                match upper.as_str() {
+                    "DAY" | "MONTH" | "YEAR" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => upper,
+                    _ => {
+                        return Err(EngineError::InvalidData(format!(
+                            "DATEADD: invalid interval '{s}'"
+                        )));
+                    }
+                }
+            }
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "DATEADD: expected interval keyword, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok(expr::datetime_fn(
+            DateTimeFunction::DateAdd,
+            vec![date, n, Expression::LiteralString(interval)],
+        ))
+    }
+
+    /// Parse `DATE_TRUNC(date, interval)` where interval is YEAR/QUARTER/MONTH/WEEK/DAY/HOUR/MINUTE/SECOND.
+    fn parse_datetrunc_call(&mut self) -> EngineResult<Expression> {
+        let date = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let interval = match self.advance()?.clone() {
+            Token::Ident(s) => {
+                let upper = s.to_uppercase();
+                match upper.as_str() {
+                    "YEAR" | "QUARTER" | "MONTH" | "WEEK" | "DAY" | "HOUR" | "MINUTE"
+                    | "SECOND" => upper,
+                    _ => {
+                        return Err(EngineError::InvalidData(format!(
+                            "DATE_TRUNC: invalid interval '{s}'"
+                        )));
+                    }
+                }
+            }
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "DATE_TRUNC: expected interval keyword, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok(expr::datetime_fn(
+            DateTimeFunction::DateTrunc,
+            vec![date, Expression::LiteralString(interval)],
+        ))
+    }
+
+    /// Parse `LAST_DAY(date [, interval])` where optional interval defaults to MONTH.
+    fn parse_lastday_call(&mut self) -> EngineResult<Expression> {
+        let date = self.parse_expression()?;
+        let interval = if self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            match self.advance()?.clone() {
+                Token::Ident(s) => {
+                    let upper = s.to_uppercase();
+                    match upper.as_str() {
+                        "YEAR" | "QUARTER" | "MONTH" | "WEEK" => upper,
+                        _ => {
+                            return Err(EngineError::InvalidData(format!(
+                                "LAST_DAY: invalid interval '{s}'"
+                            )));
+                        }
+                    }
+                }
+                tok => {
+                    return Err(EngineError::InvalidData(format!(
+                        "LAST_DAY: expected interval keyword, got {tok:?}"
+                    )));
+                }
+            }
+        } else {
+            "MONTH".to_string()
+        };
+        self.expect(&Token::RParen)?;
+        Ok(expr::datetime_fn(
+            DateTimeFunction::LastDay,
+            vec![date, Expression::LiteralString(interval)],
+        ))
+    }
+
     /// Parse `IFERROR(expr, alternate)`.
     fn parse_iferror_call(&mut self) -> EngineResult<Expression> {
         let inner = self.parse_expression()?;
@@ -1942,6 +2073,161 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         Ok(result)
+    }
+
+    /// Parse `GREATEST(a, b, ...)` — at least 2 args.
+    fn parse_greatest_call(&mut self) -> EngineResult<Expression> {
+        let mut args = vec![self.parse_expression()?];
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            args.push(self.parse_expression()?);
+        }
+        if args.len() < 2 {
+            return Err(EngineError::InvalidData(
+                "GREATEST: expected at least 2 arguments".to_string(),
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Expression::Greatest(args))
+    }
+
+    /// Parse `LEAST(a, b, ...)` — at least 2 args.
+    fn parse_least_call(&mut self) -> EngineResult<Expression> {
+        let mut args = vec![self.parse_expression()?];
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            args.push(self.parse_expression()?);
+        }
+        if args.len() < 2 {
+            return Err(EngineError::InvalidData(
+                "LEAST: expected at least 2 arguments".to_string(),
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Expression::Least(args))
+    }
+
+    /// Parse `NULLIF(expr, value)`.
+    fn parse_nullif_call(&mut self) -> EngineResult<Expression> {
+        let expr = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let value = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expression::NullIf {
+            expr: Box::new(expr),
+            value: Box::new(value),
+        })
+    }
+
+    /// Parse `COUNTIF(condition)` or `COUNT_IF(condition)`.
+    fn parse_countif_call(&mut self) -> EngineResult<Expression> {
+        let condition = self.parse_condition()?;
+        // Check for optional context arguments
+        let mut result = Expression::CountIf {
+            condition: Box::new(condition),
+        };
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            let context_arg = self.parse_context_arg()?;
+            result = wrap_context_op(result, context_arg)?;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(result)
+    }
+
+    /// Parse `LISTAGG(column, delimiter)` or `STRING_AGG(column, delimiter)`.
+    fn parse_listagg_call(&mut self) -> EngineResult<Expression> {
+        let column = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let delimiter = self.parse_expression()?;
+        // Check for optional context arguments
+        let mut result = Expression::ListAgg {
+            column: Box::new(column),
+            delimiter: Box::new(delimiter),
+        };
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            let context_arg = self.parse_context_arg()?;
+            result = wrap_context_op(result, context_arg)?;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(result)
+    }
+
+    /// Parse `MAX_BY(value, sort_by)`.
+    fn parse_maxby_call(&mut self) -> EngineResult<Expression> {
+        let value = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let sort_by = self.parse_expression()?;
+        // Check for optional context arguments
+        let mut result = Expression::MaxBy {
+            value: Box::new(value),
+            sort_by: Box::new(sort_by),
+        };
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            let context_arg = self.parse_context_arg()?;
+            result = wrap_context_op(result, context_arg)?;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(result)
+    }
+
+    /// Parse `MIN_BY(value, sort_by)`.
+    fn parse_minby_call(&mut self) -> EngineResult<Expression> {
+        let value = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let sort_by = self.parse_expression()?;
+        // Check for optional context arguments
+        let mut result = Expression::MinBy {
+            value: Box::new(value),
+            sort_by: Box::new(sort_by),
+        };
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            let context_arg = self.parse_context_arg()?;
+            result = wrap_context_op(result, context_arg)?;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(result)
+    }
+
+    /// Parse ranking window: `ROW_NUMBER(ORDERBY(...), [PARTITIONBY(...)])` etc.
+    fn parse_rank_window_call(&mut self, function: expr::RankFunction) -> EngineResult<Expression> {
+        // Parse ORDERBY clause — required.
+        match self.advance()?.clone() {
+            Token::Ident(ref s) if s.eq_ignore_ascii_case("ORDERBY") => {}
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "{function}: expected ORDERBY, got {tok:?}"
+                )));
+            }
+        }
+        let order_by = self.parse_orderby_clause()?;
+
+        // Optional PARTITIONBY clause.
+        let mut partition_by = Vec::new();
+        if self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            match self.peek().cloned() {
+                Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("PARTITIONBY") => {
+                    self.advance()?;
+                    partition_by = self.parse_partitionby_clause()?;
+                }
+                other => {
+                    return Err(EngineError::InvalidData(format!(
+                        "{function}: expected PARTITIONBY, got {other:?}"
+                    )));
+                }
+            }
+        }
+
+        self.expect(&Token::RParen)?;
+        Ok(Expression::RankWindow {
+            function,
+            order_by,
+            partition_by,
+        })
     }
 }
 

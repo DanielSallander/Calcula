@@ -804,6 +804,66 @@ impl<'a> ContextResolver<'a> {
                     percentile: Box::new(percentile),
                 })
             }
+
+            // GREATEST / LEAST: recurse into all args.
+            Expression::Greatest(args) => {
+                let args = args
+                    .iter()
+                    .map(|a| self.walk(a, ctx))
+                    .collect::<EngineResult<Vec<_>>>()?;
+                Ok(Expression::Greatest(args))
+            }
+            Expression::Least(args) => {
+                let args = args
+                    .iter()
+                    .map(|a| self.walk(a, ctx))
+                    .collect::<EngineResult<Vec<_>>>()?;
+                Ok(Expression::Least(args))
+            }
+            // NULLIF: recurse into both.
+            Expression::NullIf { expr, value } => {
+                let expr = self.walk(expr, ctx)?;
+                let value = self.walk(value, ctx)?;
+                Ok(Expression::NullIf {
+                    expr: Box::new(expr),
+                    value: Box::new(value),
+                })
+            }
+            // COUNTIF: implicit aggregate, recurse into condition.
+            Expression::CountIf { condition } => {
+                let condition = self.walk(condition, ctx)?;
+                Ok(Expression::CountIf {
+                    condition: Box::new(condition),
+                })
+            }
+            // LISTAGG: implicit aggregate, recurse into both.
+            Expression::ListAgg { column, delimiter } => {
+                let column = self.walk(column, ctx)?;
+                let delimiter = self.walk(delimiter, ctx)?;
+                Ok(Expression::ListAgg {
+                    column: Box::new(column),
+                    delimiter: Box::new(delimiter),
+                })
+            }
+            // MAX_BY / MIN_BY: implicit aggregate, recurse into both.
+            Expression::MaxBy { value, sort_by } => {
+                let value = self.walk(value, ctx)?;
+                let sort_by = self.walk(sort_by, ctx)?;
+                Ok(Expression::MaxBy {
+                    value: Box::new(value),
+                    sort_by: Box::new(sort_by),
+                })
+            }
+            Expression::MinBy { value, sort_by } => {
+                let value = self.walk(value, ctx)?;
+                let sort_by = self.walk(sort_by, ctx)?;
+                Ok(Expression::MinBy {
+                    value: Box::new(value),
+                    sort_by: Box::new(sort_by),
+                })
+            }
+            // RankWindow: no inner expression to recurse into.
+            Expression::RankWindow { .. } => Ok(expr.clone()),
         }
     }
 

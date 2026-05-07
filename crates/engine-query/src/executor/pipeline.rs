@@ -48,9 +48,12 @@ impl QueryExecutor {
                 let batches = connector.fetch_data(request).await?;
                 Ok(batches)
             }
-            QueryPlan::PushedJoinAggregation { source_table, sql } => {
+            QueryPlan::PushedJoinAggregation {
+                source_table,
+                request,
+            } => {
                 let connector = registry.connector_for(source_table)?;
-                let batches = connector.execute_query(sql).await?;
+                let batches = connector.execute_join_aggregation(request).await?;
                 Ok(batches)
             }
             QueryPlan::LocalAggregation {

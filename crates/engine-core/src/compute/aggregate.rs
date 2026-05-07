@@ -39,6 +39,12 @@ pub enum AggregateOp {
     VarSample,
     /// Population variance (N denominator).
     VarPop,
+    /// Any arbitrary value from the group: `ANY_VALUE(col)`.
+    /// SQL: `MIN(col)` (semantically equivalent for non-empty groups).
+    AnyValue,
+    /// Most frequent value in the group: `MODE(col)`.
+    /// SQL: `MODE() WITHIN GROUP (ORDER BY col)` (PostgreSQL).
+    Mode,
 }
 
 impl std::fmt::Display for AggregateOp {
@@ -56,6 +62,8 @@ impl std::fmt::Display for AggregateOp {
             AggregateOp::StdevPop => write!(f, "stddev_pop"),
             AggregateOp::VarSample => write!(f, "var"),
             AggregateOp::VarPop => write!(f, "var_pop"),
+            AggregateOp::AnyValue => write!(f, "MIN"),
+            AggregateOp::Mode => write!(f, "MODE"),
         }
     }
 }
@@ -147,11 +155,13 @@ async fn run_single_aggregate(
         // Statistical aggregates use DataFusion's built-in functions via SQL.
         // This code path is not normally reached for statistical aggregates
         // since they go through the SQL-based execution path.
+        AggregateOp::AnyValue => min(col(column_name)),
         AggregateOp::Median
         | AggregateOp::StdevSample
         | AggregateOp::StdevPop
         | AggregateOp::VarSample
-        | AggregateOp::VarPop => {
+        | AggregateOp::VarPop
+        | AggregateOp::Mode => {
             use datafusion::functions_aggregate::median::median;
             use datafusion::functions_aggregate::stddev::stddev;
             use datafusion::functions_aggregate::variance::var_sample;
@@ -161,6 +171,7 @@ async fn run_single_aggregate(
                 AggregateOp::StdevPop => stddev(col(column_name)), // approximate
                 AggregateOp::VarSample => var_sample(col(column_name)),
                 AggregateOp::VarPop => var_sample(col(column_name)), // approximate
+                AggregateOp::Mode => min(col(column_name)), // approximate: MODE not in DataFusion API
                 _ => unreachable!(),
             }
         }

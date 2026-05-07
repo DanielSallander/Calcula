@@ -177,6 +177,8 @@ pub async fn aggregate_over_relationship(
             use datafusion::functions_aggregate::variance::var_sample;
             var_sample(col(aggregate_column)) // approximate — sample variance
         }
+        AggregateOp::AnyValue => min(col(aggregate_column)),
+        AggregateOp::Mode => min(col(aggregate_column)), // approximate
     };
 
     let result_df = joined_df.aggregate(vec![group_expr], vec![agg_expr])?;

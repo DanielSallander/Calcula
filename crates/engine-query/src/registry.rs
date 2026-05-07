@@ -81,6 +81,17 @@ impl AnyConnector {
             AnyConnector::SqlServer(c) => c.row_count(schema, table_name).await,
         }
     }
+
+    /// Execute a multi-table aggregation query with JOINs.
+    pub async fn execute_join_aggregation(
+        &self,
+        request: &engine_connectors::JoinAggregationRequest,
+    ) -> ConnectorResult<Vec<RecordBatch>> {
+        match self {
+            AnyConnector::Postgres(c) => c.execute_join_aggregation(request).await,
+            AnyConnector::SqlServer(c) => c.execute_join_aggregation(request).await,
+        }
+    }
 }
 
 /// Registry that maps data model table names to their connectors and

@@ -154,6 +154,63 @@ pub struct FetchRequest {
     pub max_inline_in_values: Option<usize>,
 }
 
+/// A join condition for multi-table aggregation pushdown.
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    /// Source schema + table of the dimension being joined.
+    pub dim_schema: String,
+    /// Source table name of the dimension being joined.
+    pub dim_table: String,
+    /// Column on the fact (left) side of the join.
+    pub fact_column: String,
+    /// Column on the dimension (right) side of the join.
+    pub dim_column: String,
+}
+
+/// A column reference in a multi-table query (source table + column).
+#[derive(Debug, Clone)]
+pub struct QualifiedColumn {
+    /// Source table name (as registered in the data source).
+    pub table: String,
+    /// Column name.
+    pub column: String,
+}
+
+/// A measure expression for multi-table aggregation pushdown.
+///
+/// Carries the engine Expression tree so each connector can render
+/// it using its own SQL dialect.
+#[derive(Debug, Clone)]
+pub struct MeasureExpr {
+    /// The engine expression tree (aggregates, arithmetic, CASE WHEN, etc.).
+    pub expression: engine_core::compute::expression::Expression,
+    /// Output alias for this measure.
+    pub alias: String,
+}
+
+/// A request for multi-table aggregation with JOINs.
+///
+/// This is the structured, dialect-neutral representation of a pushed
+/// join query. Each connector translates it to its own SQL syntax.
+#[derive(Debug, Clone)]
+pub struct JoinAggregationRequest {
+    /// Fact table schema.
+    pub fact_schema: String,
+    /// Fact table name.
+    pub fact_table: String,
+    /// JOIN clauses to dimension tables.
+    pub joins: Vec<JoinClause>,
+    /// Measure expressions to compute.
+    pub measures: Vec<MeasureExpr>,
+    /// Columns to GROUP BY.
+    pub group_by: Vec<QualifiedColumn>,
+    /// Optional WHERE filter conditions.
+    pub filters: Vec<FilterCondition>,
+    /// Mapping from model table names to source table names.
+    /// Used by the connector to qualify column references in expressions.
+    pub table_map: Vec<(String, String)>,
+}
+
 /// Trait for data source connectors.
 ///
 /// Implementations provide access to external databases, translating
@@ -187,6 +244,22 @@ pub trait Connector {
 
     /// Get the total row count for a table (pushes `COUNT(*)` to the source).
     async fn row_count(&self, schema: &str, table_name: &str) -> ConnectorResult<usize>;
+
+    /// Execute a multi-table aggregation query with JOINs.
+    ///
+    /// Each connector translates the structured [`JoinAggregationRequest`]
+    /// to its own SQL dialect (PostgreSQL, SQL Server, etc.) and executes it.
+    ///
+    /// Default implementation returns an error — connectors that support
+    /// join pushdown override this.
+    async fn execute_join_aggregation(
+        &self,
+        _request: &JoinAggregationRequest,
+    ) -> ConnectorResult<Vec<RecordBatch>> {
+        Err(crate::error::ConnectorError::UnsupportedOperation(
+            "join aggregation pushdown not supported by this connector".into(),
+        ))
+    }
 }
 
 #[cfg(test)]

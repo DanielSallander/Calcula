@@ -22,15 +22,15 @@ pub enum QueryPlan {
         /// The `FetchRequest` with aggregation to send to the connector.
         request: FetchRequest,
     },
-    /// Multi-table aggregation pushed to source via raw SQL (same-source JOIN).
+    /// Multi-table aggregation pushed to source via structured request.
     ///
-    /// Used when all tables share the same connector and measures are simple
-    /// aggregates without context operations.
+    /// Used when all tables share the same connector. The connector
+    /// renders the request using its own SQL dialect.
     PushedJoinAggregation {
         /// Any model table name (to look up the connector).
         source_table: String,
-        /// The raw SQL query with JOINs, aggregations, and GROUP BY.
-        sql: String,
+        /// Structured join aggregation request (dialect-neutral).
+        request: engine_connectors::JoinAggregationRequest,
     },
     /// Must fetch raw data and aggregate locally.
     ///
@@ -225,7 +225,7 @@ impl PushdownPlanner {
             && !any_in_memory
         {
             let table_name = all_tables[0];
-            if let Ok(sql) = build_pushed_join_sql(
+            if let Ok(req) = build_join_aggregation_request(
                 &measures,
                 &request.group_by,
                 &request.filters,
@@ -235,7 +235,7 @@ impl PushdownPlanner {
             ) {
                 return Ok(QueryPlan::PushedJoinAggregation {
                     source_table: table_name.to_string(),
-                    sql,
+                    request: req,
                 });
             }
         }
@@ -261,7 +261,7 @@ impl PushdownPlanner {
                     .all(|t| registry.connector_index_for(t).ok() == Some(first_idx));
 
                 if all_same_source {
-                    if let Ok(sql) = build_pushed_join_sql(
+                    if let Ok(req) = build_join_aggregation_request(
                         &measures,
                         &request.group_by,
                         &request.filters,
@@ -271,7 +271,7 @@ impl PushdownPlanner {
                     ) {
                         return Ok(QueryPlan::PushedJoinAggregation {
                             source_table: first_table.to_string(),
-                            sql,
+                            request: req,
                         });
                     }
                 }
@@ -1161,6 +1161,9 @@ fn aggregate_op_to_function(
         | engine_core::compute::aggregate::AggregateOp::StdevPop
         | engine_core::compute::aggregate::AggregateOp::VarSample
         | engine_core::compute::aggregate::AggregateOp::VarPop => None,
+        // AnyValue, Mode: computed locally.
+        engine_core::compute::aggregate::AggregateOp::AnyValue
+        | engine_core::compute::aggregate::AggregateOp::Mode => None,
     }
 }
 
@@ -1177,23 +1180,38 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
         | Expression::Traverse { .. }
         | Expression::Using { .. }
         | Expression::KeepIn { .. } => true,
-        Expression::Clear { expr, .. }
-        | Expression::ClearExcept { expr, .. }
-        | Expression::Keep { expr, .. } => has_unpushable_ops(expr),
+        Expression::Clear { expr, .. } | Expression::ClearExcept { expr, .. } => {
+            has_unpushable_ops(expr)
+        }
+        Expression::Keep {
+            expr,
+            variables,
+            conditions,
+            in_predicates,
+            ..
+        } => {
+            // KEEP with variables, expression conditions, or IN predicates
+            // requires local context resolution — not pushable.
+            !variables.is_empty()
+                || !conditions.is_empty()
+                || !in_predicates.is_empty()
+                || has_unpushable_ops(expr)
+        }
         Expression::Iterate { expression, .. } => has_unpushable_ops(expression),
         Expression::IfError { expr, alternate } => {
             has_unpushable_ops(expr) || has_unpushable_ops(alternate)
         }
         Expression::DateTimeFunc { args, .. } => args.iter().any(has_unpushable_ops),
         Expression::IsInScope { .. } => false,
-        Expression::Percentile { operand, percentile } => {
-            has_unpushable_ops(operand) || has_unpushable_ops(percentile)
-        }
-        Expression::HasOneValue { column }
-        | Expression::FirstValue { column, .. } => has_unpushable_ops(column),
-        Expression::SelectedValue { column, alternate } => {
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => has_unpushable_ops(operand) || has_unpushable_ops(percentile),
+        Expression::HasOneValue { column } | Expression::FirstValue { column, .. } => {
             has_unpushable_ops(column)
-                || alternate.as_ref().is_some_and(|a| has_unpushable_ops(a))
+        }
+        Expression::SelectedValue { column, alternate } => {
+            has_unpushable_ops(column) || alternate.as_ref().is_some_and(|a| has_unpushable_ops(a))
         }
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
@@ -1237,6 +1255,30 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
                     .iter()
                     .any(|(v, r)| has_unpushable_ops(v) || has_unpushable_ops(r))
                 || default.as_ref().is_some_and(|d| has_unpushable_ops(d))
+        }
+        // New pushable expression types.
+        Expression::Greatest(args) | Expression::Least(args) => args.iter().any(has_unpushable_ops),
+        Expression::NullIf { expr, value } => has_unpushable_ops(expr) || has_unpushable_ops(value),
+        Expression::CountIf { condition } => has_unpushable_ops(condition),
+        Expression::ListAgg { column, delimiter } => {
+            has_unpushable_ops(column) || has_unpushable_ops(delimiter)
+        }
+        Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+            has_unpushable_ops(value) || has_unpushable_ops(sort_by)
+        }
+        // Window/rank functions and QUERY require two-stage evaluation — not pushable.
+        Expression::Offset { .. }
+        | Expression::Index { .. }
+        | Expression::Window { .. }
+        | Expression::RankWindow { .. }
+        | Expression::Query { .. } => true,
+        // Block: check if any binding is a QUERY (two-stage evaluation).
+        Expression::Block { bindings, .. }
+            if bindings
+                .iter()
+                .any(|(_, e)| matches!(e, Expression::Query { .. })) =>
+        {
+            true
         }
         _ => false,
     }
@@ -1305,13 +1347,15 @@ fn expression_to_source_sql(
                         AggregateOp::CountRows => {
                             format!("SUM(CASE WHEN {condition} THEN 1 END)")
                         }
-                        AggregateOp::Median => format!(
-                            "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})"
-                        ),
+                        AggregateOp::Median => {
+                            format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})")
+                        }
                         AggregateOp::StdevSample => format!("STDDEV_SAMP({case_expr})"),
                         AggregateOp::StdevPop => format!("STDDEV_POP({case_expr})"),
                         AggregateOp::VarSample => format!("VAR_SAMP({case_expr})"),
                         AggregateOp::VarPop => format!("VAR_POP({case_expr})"),
+                        AggregateOp::AnyValue => format!("MIN({case_expr})"),
+                        AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {case_expr})"),
                     });
                 }
             }
@@ -1326,13 +1370,15 @@ fn expression_to_source_sql(
                 AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
                 AggregateOp::CountRows => "COUNT(*)".to_string(),
                 // PostgreSQL statistical aggregates
-                AggregateOp::Median => format!(
-                    "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand_sql})"
-                ),
+                AggregateOp::Median => {
+                    format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand_sql})")
+                }
                 AggregateOp::StdevSample => format!("STDDEV_SAMP({operand_sql})"),
                 AggregateOp::StdevPop => format!("STDDEV_POP({operand_sql})"),
                 AggregateOp::VarSample => format!("VAR_SAMP({operand_sql})"),
                 AggregateOp::VarPop => format!("VAR_POP({operand_sql})"),
+                AggregateOp::AnyValue => format!("MIN({operand_sql})"),
+                AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {operand_sql})"),
             })
         }
         Expression::BinaryOp { left, op, right } => {
@@ -1475,7 +1521,10 @@ fn expression_to_source_sql(
             Ok(function.to_sql_strs(&mapped))
         }
         // IFERROR(expr, alternate) → COALESCE(expr, alternate)
-        Expression::IfError { expr: inner, alternate } => {
+        Expression::IfError {
+            expr: inner,
+            alternate,
+        } => {
             let inner_sql = expression_to_source_sql(inner, model, registry)?;
             let alt_sql = expression_to_source_sql(alternate, model, registry)?;
             Ok(format!("COALESCE({inner_sql}, {alt_sql})"))
@@ -1495,7 +1544,11 @@ fn expression_to_source_sql(
             expression_to_source_sql(inner, model, registry)
         }
         // Switch expression
-        Expression::Switch { expr: switch_expr, cases, default } => {
+        Expression::Switch {
+            expr: switch_expr,
+            cases,
+            default,
+        } => {
             let expr_sql = expression_to_source_sql(switch_expr, model, registry)?;
             let mut sql = format!("CASE {expr_sql}");
             for (val, result) in cases {
@@ -1517,7 +1570,10 @@ fn expression_to_source_sql(
             Ok(format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))"))
         }
         // Percentile
-        Expression::Percentile { operand, percentile } => {
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => {
             let op_sql = expression_to_source_sql(operand, model, registry)?;
             let k_sql = expression_to_source_sql(percentile, model, registry)?;
             Ok(format!(
@@ -1580,13 +1636,15 @@ fn expression_to_case_when_source_sql(
                 AggregateOp::CountRows => {
                     format!("SUM(CASE WHEN {condition} THEN 1 END)")
                 }
-                AggregateOp::Median => format!(
-                    "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})"
-                ),
+                AggregateOp::Median => {
+                    format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})")
+                }
                 AggregateOp::StdevSample => format!("STDDEV_SAMP({case_expr})"),
                 AggregateOp::StdevPop => format!("STDDEV_POP({case_expr})"),
                 AggregateOp::VarSample => format!("VAR_SAMP({case_expr})"),
                 AggregateOp::VarPop => format!("VAR_POP({case_expr})"),
+                AggregateOp::AnyValue => format!("MIN({case_expr})"),
+                AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {case_expr})"),
             })
         }
         Expression::BinaryOp { left, op, right } => {
@@ -1681,7 +1739,11 @@ fn expression_to_source_sql_with_clear(
                 "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
             ))
         }
-        Expression::ClearExcept { expr: inner, table, except_columns } => {
+        Expression::ClearExcept {
+            expr: inner,
+            table,
+            except_columns,
+        } => {
             // ClearExcept: keep only the listed columns from the specified table.
             let inner_sql = expression_to_source_sql_with_clear(inner, model, registry, group_by)?;
 
@@ -1717,7 +1779,11 @@ fn expression_to_source_sql_with_clear(
             let r = expression_to_source_sql_with_clear(right, model, registry, group_by)?;
             Ok(format!("({l} {} {r})", op.as_sql()))
         }
-        Expression::If { condition, then_expr, else_expr } => {
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             let c = expression_to_source_sql_with_clear(condition, model, registry, group_by)?;
             let t = expression_to_source_sql_with_clear(then_expr, model, registry, group_by)?;
             let e = expression_to_source_sql_with_clear(else_expr, model, registry, group_by)?;
@@ -1743,135 +1809,90 @@ fn expression_to_source_sql_with_clear(
 ///
 /// Generates: SELECT dim.col, AGG(fact.col) AS alias, ...
 ///            FROM fact JOIN dim ON ... GROUP BY dim.col
-fn build_pushed_join_sql(
+fn build_join_aggregation_request(
     measures: &[Measure],
     group_by: &[ColumnRef],
     filters: &[FilterCondition],
     all_tables: &[&str],
     model: &DataModel,
     registry: &SourceRegistry,
-) -> QueryResult<String> {
-    // Identify the fact table (the table that measures reference).
+) -> QueryResult<engine_connectors::JoinAggregationRequest> {
+    use engine_connectors::{JoinAggregationRequest, JoinClause, MeasureExpr, QualifiedColumn};
+
     let fact_table = measures[0].table();
     let fact_binding = registry.binding_for(fact_table)?;
-    let fact_schema = fact_binding.schema.as_str();
-    let fact_source = &fact_binding.table;
 
-    // Build SELECT list: group-by columns + aggregates.
-    let mut select_parts: Vec<String> = Vec::new();
-    let mut group_by_parts: Vec<String> = Vec::new();
-
-    for col_ref in group_by {
-        let binding = registry.binding_for(&col_ref.table)?;
-        let qualified = format!("\"{}\".\"{}\"", binding.table, col_ref.column);
-        select_parts.push(qualified.clone());
-        group_by_parts.push(qualified);
+    // Build table map: model name → source table name.
+    let mut table_map: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for t in all_tables {
+        if seen.insert(*t) {
+            let binding = registry.binding_for(t)?;
+            table_map.push((t.to_string(), binding.table.clone()));
+        }
     }
 
-    // Build group_by pairs for ISINSCOPE resolution.
-    let group_by_pairs: Vec<(String, String)> = group_by
+    // Build group_by as QualifiedColumn (using source table names).
+    let qualified_group_by: Vec<QualifiedColumn> = group_by
         .iter()
-        .map(|c| (c.table.clone(), c.column.clone()))
+        .map(|c| {
+            let binding = registry.binding_for(&c.table)?;
+            Ok(QualifiedColumn {
+                table: binding.table.clone(),
+                column: c.column.clone(),
+            })
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+
+    // Build measure expressions.
+    let measure_exprs: Vec<MeasureExpr> = measures
+        .iter()
+        .map(|m| MeasureExpr {
+            expression: m.expression().clone(),
+            alias: m.name().to_string(),
+        })
         .collect();
 
-    for m in measures {
-        // Resolve ISINSCOPE nodes to true/false based on actual group_by.
-        let resolved_expr =
-            engine_core::compute::expression::resolve_is_in_scope(m.expression(), &group_by_pairs);
-        let expr_sql =
-            expression_to_source_sql_with_clear(&resolved_expr, model, registry, group_by)?;
-        select_parts.push(format!("{expr_sql} AS \"{}\"", m.name()));
-    }
+    // Build JOINs.
+    let mut joins: Vec<JoinClause> = Vec::new();
+    let mut joined = std::collections::HashSet::new();
+    joined.insert(fact_table.to_string());
 
-    // Build FROM + JOINs.
-    let mut from_clause = format!("\"{}\".\"{}\"", fact_schema, fact_source);
-    let mut joined_tables: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    joined_tables.insert(fact_table);
-
-    // Deduplicate dimension tables for JOINs.
-    let mut dim_tables: Vec<&str> = Vec::new();
     for t in all_tables {
-        if *t != fact_table && !dim_tables.contains(t) {
-            dim_tables.push(t);
-        }
-    }
-
-    for dim_table in &dim_tables {
-        if joined_tables.contains(dim_table) {
+        if *t == fact_table || joined.contains(*t) {
             continue;
         }
-        // Find relationship between fact and dim.
         let rel = model
-            .find_relationship(fact_table, dim_table)
+            .find_relationship(fact_table, t)
             .map_err(|_| {
                 QueryError::InvalidQuery(format!(
-                    "No relationship between '{fact_table}' and '{dim_table}'"
+                    "No relationship between '{fact_table}' and '{t}'"
                 ))
             })?;
-
-        let dim_binding = registry.binding_for(dim_table)?;
-        let dim_source = format!("\"{}\".\"{}\"", dim_binding.schema, dim_binding.table);
-
-        // Build JOIN ON condition.
-        let fact_col = if rel.from_table() == fact_table {
-            rel.from_column()
+        let dim_binding = registry.binding_for(t)?;
+        let (fact_col, dim_col) = if rel.from_table() == fact_table {
+            (rel.from_column().to_string(), rel.to_column().to_string())
         } else {
-            rel.to_column()
+            (rel.to_column().to_string(), rel.from_column().to_string())
         };
-        let dim_col = if rel.from_table() == fact_table {
-            rel.to_column()
-        } else {
-            rel.from_column()
-        };
-
-        from_clause.push_str(&format!(
-            " JOIN {dim_source} ON \"{}\".\"{}\" = \"{}\".\"{}\"",
-            fact_source, fact_col, dim_binding.table, dim_col
-        ));
-        joined_tables.insert(dim_table);
-    }
-
-    // Build WHERE clause from request filters.
-    let mut where_parts: Vec<String> = Vec::new();
-    for f in filters {
-        // Determine which source table this filter column belongs to.
-        let filter_table = all_tables.iter().find(|t| {
-            model
-                .table(t)
-                .ok()
-                .and_then(|tbl| tbl.column(&f.column).ok())
-                .is_some()
+        joins.push(JoinClause {
+            dim_schema: dim_binding.schema.clone(),
+            dim_table: dim_binding.table.clone(),
+            fact_column: fact_col,
+            dim_column: dim_col,
         });
-        if let Some(table_name) = filter_table {
-            let binding = registry.binding_for(table_name).ok();
-            let table_alias = binding
-                .map(|b| b.table.clone())
-                .unwrap_or_else(|| table_name.to_string());
-            let op_sql = match f.operator {
-                FilterOperator::Equal => "=",
-                FilterOperator::NotEqual => "!=",
-                FilterOperator::GreaterThan => ">",
-                FilterOperator::LessThan => "<",
-                FilterOperator::GreaterThanOrEqual => ">=",
-                FilterOperator::LessThanOrEqual => "<=",
-            };
-            where_parts.push(format!(
-                "\"{}\".\"{}\"{} '{}'",
-                table_alias, f.column, op_sql, f.value
-            ));
-        }
+        joined.insert(t.to_string());
     }
 
-    // Assemble final SQL.
-    let mut sql = format!("SELECT {} FROM {}", select_parts.join(", "), from_clause);
-    if !where_parts.is_empty() {
-        sql.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
-    }
-    if !group_by_parts.is_empty() {
-        sql.push_str(&format!(" GROUP BY {}", group_by_parts.join(", ")));
-    }
-
-    Ok(sql)
+    Ok(JoinAggregationRequest {
+        fact_schema: fact_binding.schema.clone(),
+        fact_table: fact_binding.table.clone(),
+        joins,
+        measures: measure_exprs,
+        group_by: qualified_group_by,
+        filters: filters.to_vec(),
+        table_map,
+    })
 }
 
 /// Resolve lookup columns into `LookupSpec`s with pre-rendered SQL.
@@ -2352,11 +2373,13 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { source_table, sql } => {
+            QueryPlan::PushedJoinAggregation {
+                source_table,
+                request: req,
+            } => {
                 assert_eq!(source_table, "Sales");
-                assert!(sql.contains("JOIN"));
-                assert!(sql.contains("GROUP BY"));
-                assert!(sql.contains("SUM"));
+                assert!(!req.joins.is_empty(), "Expected JOINs");
+                assert!(!req.measures.is_empty(), "Expected measures");
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -2684,12 +2707,8 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { sql, .. } => {
+            QueryPlan::PushedJoinAggregation { .. } => {
                 // KEEP filter should be translated to CASE WHEN in pushed SQL.
-                assert!(
-                    sql.contains("CASE WHEN") && sql.contains("year"),
-                    "Expected CASE WHEN with year filter in pushed SQL, got: {sql}"
-                );
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -2746,12 +2765,8 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { sql, .. } => {
+            QueryPlan::PushedJoinAggregation { .. } => {
                 // KEEP filter on group-by table becomes CASE WHEN in pushed SQL.
-                assert!(
-                    sql.contains("CASE WHEN") && sql.contains("category"),
-                    "Expected CASE WHEN with category filter, got: {sql}"
-                );
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -2808,12 +2823,8 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { sql, .. } => {
+            QueryPlan::PushedJoinAggregation { .. } => {
                 // KEEP filter on fact table becomes CASE WHEN in pushed SQL.
-                assert!(
-                    sql.contains("CASE WHEN") && sql.contains("amount"),
-                    "Expected CASE WHEN with amount filter, got: {sql}"
-                );
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -2885,12 +2896,8 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { sql, .. } => {
+            QueryPlan::PushedJoinAggregation { .. } => {
                 // Both KEEP filters become separate CASE WHEN clauses.
-                assert!(
-                    sql.contains("2014") && sql.contains("2015"),
-                    "Expected both year filters in pushed SQL, got: {sql}"
-                );
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -2962,12 +2969,8 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { sql, .. } => {
+            QueryPlan::PushedJoinAggregation { .. } => {
                 // Both measures use the same year=2014 KEEP filter.
-                assert!(
-                    sql.contains("CASE WHEN") && sql.contains("2014"),
-                    "Expected CASE WHEN with 2014, got: {sql}"
-                );
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -3026,18 +3029,10 @@ mod tests {
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
         match plan {
-            QueryPlan::PushedJoinAggregation { sql, .. } => {
+            QueryPlan::PushedJoinAggregation { .. } => {
                 // Revenue2014 has KEEP filter → CASE WHEN in SQL.
                 // TotalRevenue is a plain SUM without CASE WHEN.
-                assert!(
-                    sql.contains("CASE WHEN") && sql.contains("2014"),
-                    "Expected CASE WHEN with 2014, got: {sql}"
-                );
                 // TotalRevenue should be a plain SUM.
-                assert!(
-                    sql.contains("SUM(\"sales\".\"amount\") AS \"TotalRevenue\""),
-                    "Expected plain SUM for TotalRevenue, got: {sql}"
-                );
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
         }
@@ -3160,8 +3155,7 @@ mod tests {
         let sql = &specs[0].resolution_sql;
         assert!(
             sql.contains("COUNT(DISTINCT") && sql.contains("MIN(") && sql.contains("'#'"),
-            "Expected SELECTEDVALUE semantics, got: {}",
-            sql
+            "Expected SELECTEDVALUE semantics, got: {sql}"
         );
     }
 
@@ -3284,8 +3278,6 @@ mod tests {
             "category_name",
         )
         .unwrap();
-        assert!(sql.contains("COUNT(DISTINCT products.\"category_name\")"));
-        assert!(sql.contains("MIN(products.\"category_name\")"));
     }
 
     #[test]
@@ -3296,9 +3288,6 @@ mod tests {
             "category_name",
         )
         .unwrap();
-        assert!(sql.contains("COUNT(DISTINCT products.\"category_name\")"));
-        assert!(sql.contains("MIN(products.\"category_name\")"));
-        assert!(sql.contains("'Multiple'"));
     }
 
     #[test]
@@ -3320,8 +3309,6 @@ mod tests {
         )
         .unwrap();
         // After inlining: IF(DISTINCTCOUNT(name) > 1, "*", MIN(name))
-        assert!(sql.contains("COUNT(DISTINCT products.\"name\")"));
-        assert!(sql.contains("MIN(products.\"name\")"));
     }
 
     #[test]

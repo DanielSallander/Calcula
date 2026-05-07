@@ -29,6 +29,12 @@ Functions that compute a single value from a column of data.
 | [VARIANCE](VARIANCE.md) | Returns the sample variance |
 | [VARIANCEP](VARIANCEP.md) | Returns the population variance |
 | [PERCENTILE](PERCENTILE.md) | Returns the k-th percentile of values |
+| [COUNTIF](COUNTIF.md) | Counts rows where a condition is true |
+| [ANY_VALUE](ANY_VALUE.md) | Returns an arbitrary value from the group |
+| [MODE](MODE.md) | Returns the most frequently occurring value |
+| [LISTAGG](LISTAGG.md) | Concatenates values into a delimited string |
+| [MAX_BY](MAX_BY.md) | Returns the value from the row with the maximum of another column |
+| [MIN_BY](MIN_BY.md) | Returns the value from the row with the minimum of another column |
 
 ## Information Functions
 
@@ -67,6 +73,9 @@ Functions for branching logic and handling NULL values.
 | [ISBLANK](ISBLANK.md) | Tests whether an expression is BLANK (NULL) |
 | [COALESCE](COALESCE.md) | Returns the first non-BLANK value from a list of expressions |
 | [IFERROR](IFERROR.md) | Returns an alternate value when an expression evaluates to NULL/error |
+| [GREATEST](GREATEST.md) | Returns the largest value from a list of expressions |
+| [LEAST](LEAST.md) | Returns the smallest value from a list of expressions |
+| [NULLIF](NULLIF.md) | Returns NULL if two values are equal, otherwise returns the first value |
 
 ## Math Functions
 
@@ -106,6 +115,16 @@ Functions that extract parts from dates or perform date arithmetic.
 | [DATEDIFF](DATEDIFF.md) | Returns the difference between two dates in the specified interval |
 | [TODAY](TODAY.md) | Returns the current date |
 | [NOW](NOW.md) | Returns the current date and time |
+| [DATEADD](DATEADD.md) | Adds a specified number of intervals to a date |
+| [DATE_TRUNC](DATE_TRUNC.md) | Truncates a date to the start of a period |
+| [LAST_DAY](LAST_DAY.md) | Returns the last day of the period containing a date |
+| [EOMONTH](EOMONTH.md) | Returns the last day of the month, with optional offset |
+| [DAYOFWEEK](DAYOFWEEK.md) | Returns the day of the week as a number (0-6) |
+| [DAYOFYEAR](DAYOFYEAR.md) | Returns the day of the year (1-366) |
+| [WEEKNUM](WEEKNUM.md) | Returns the ISO week number (1-53) |
+| [DAYNAME](DAYNAME.md) | Returns the name of the day of the week |
+| [MONTHNAME](MONTHNAME.md) | Returns the name of the month |
+| [MONTHS_BETWEEN](MONTHS_BETWEEN.md) | Returns the number of months between two dates |
 
 ## Text Functions
 
@@ -139,6 +158,10 @@ Functions that manipulate text strings.
 | [REVERSE](REVERSE.md) | Reverses the order of characters in a text string (Calcula extension) |
 | [SPLIT](SPLIT.md) | Splits text by a delimiter and returns a specified part (Calcula extension) |
 | [FORMAT](FORMAT.md) | Formats a value as text using a format pattern |
+| [CONTAINS](CONTAINS.md) | Tests whether text contains a substring (case-insensitive) |
+| [STARTSWITH](STARTSWITH.md) | Tests whether text starts with a prefix |
+| [ENDSWITH](ENDSWITH.md) | Tests whether text ends with a suffix |
+| [INITCAP](INITCAP.md) | Capitalizes the first letter of each word |
 
 ## Context Functions
 
@@ -168,6 +191,16 @@ These are advanced variants of CLEAR and RESET that target only one filter sourc
 | Function | Description |
 |----------|-------------|
 | [ITERATE](ITERATE.md) | Declares row-context iteration over a table for use with any aggregate (Calcula's composable alternative to DAX X-functions) |
+
+## Window Ranking Functions
+
+Functions that assign ordinal values to rows based on ordering and partitioning. These use the same `ORDERBY`/`PARTITIONBY` syntax as WINDOW, OFFSET, and INDEX.
+
+| Function | Description |
+|----------|-------------|
+| [ROW_NUMBER](ROW_NUMBER.md) | Assigns a unique sequential number to each row |
+| [RANK](RANK.md) | Assigns a rank with gaps for tied values |
+| [DENSE_RANK](DENSE_RANK.md) | Assigns a rank without gaps for tied values |
 
 ## Two-Stage Aggregation
 

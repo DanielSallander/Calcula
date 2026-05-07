@@ -24,5 +24,6 @@ pub use postgres::{PostgresConfig, PostgresConnector};
 pub use sqlserver::{SqlServerConfig, SqlServerConnector};
 pub use traits::{
     AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
-    InFilterCondition, SourceTable,
+    InFilterCondition, JoinAggregationRequest, JoinClause, MeasureExpr, QualifiedColumn,
+    SourceTable,
 };

@@ -210,6 +210,27 @@ pub enum DateTimeFunction {
     Today,
     /// Current date and time: `NOW()`.
     Now,
+    /// Add an interval to a date: `DATEADD(date, n, "DAY")`.
+    /// Interval: DAY, MONTH, YEAR, QUARTER, HOUR, MINUTE, SECOND.
+    DateAdd,
+    /// Truncate date to period boundary: `DATE_TRUNC(date, "MONTH")`.
+    DateTrunc,
+    /// Last day of the period containing date: `LAST_DAY(date [, "MONTH"])`.
+    LastDay,
+    /// End of month with optional offset: `EOMONTH(date [, months])`.
+    EoMonth,
+    /// Day of the week (0=Sunday..6=Saturday): `DAYOFWEEK(date)`.
+    DayOfWeek,
+    /// Day of the year (1–366): `DAYOFYEAR(date)`.
+    DayOfYear,
+    /// ISO week number: `WEEKNUM(date)`.
+    WeekNum,
+    /// Name of the day: `DAYNAME(date)` — returns text.
+    DayName,
+    /// Name of the month: `MONTHNAME(date)` — returns text.
+    MonthName,
+    /// Months between two dates: `MONTHS_BETWEEN(start, end)`.
+    MonthsBetween,
 }
 
 impl ScalarFunction {
@@ -332,6 +353,55 @@ impl DateTimeFunction {
             }
             Self::Today => "CURRENT_DATE".to_string(),
             Self::Now => "NOW()".to_string(),
+            Self::DateAdd => {
+                // DATEADD(date, n, interval) → (date + INTERVAL '1 <interval>' * n)
+                let interval_raw = args
+                    .get(2)
+                    .map(|s| s.trim_matches('\'').to_uppercase())
+                    .unwrap_or_else(|| "DAY".to_string());
+                let date = &args[0];
+                let n = &args[1];
+                format!("({date} + INTERVAL '1 {interval_raw}' * {n})")
+            }
+            Self::DateTrunc => {
+                let interval_raw = args
+                    .get(1)
+                    .map(|s| s.trim_matches('\'').to_lowercase())
+                    .unwrap_or_else(|| "month".to_string());
+                format!("DATE_TRUNC('{interval_raw}', {})", args[0])
+            }
+            Self::LastDay => {
+                let interval_raw = args
+                    .get(1)
+                    .map(|s| s.trim_matches('\'').to_lowercase())
+                    .unwrap_or_else(|| "month".to_string());
+                // last day = truncate to next period - 1 day
+                format!(
+                    "CAST(DATE_TRUNC('{interval_raw}', {}) + INTERVAL '1 {interval_raw}' - INTERVAL '1 day' AS DATE)",
+                    args[0]
+                )
+            }
+            Self::EoMonth => {
+                let months = args.get(1).map(|s| s.as_str()).unwrap_or("0");
+                // end of month: add months, then last day of that month
+                format!(
+                    "CAST(DATE_TRUNC('month', {} + INTERVAL '1 month' * {months}) + INTERVAL '1 month' - INTERVAL '1 day' AS DATE)",
+                    args[0]
+                )
+            }
+            Self::DayOfWeek => format!("EXTRACT(DOW FROM {})", args[0]),
+            Self::DayOfYear => format!("EXTRACT(DOY FROM {})", args[0]),
+            Self::WeekNum => format!("EXTRACT(WEEK FROM {})", args[0]),
+            Self::DayName => format!("TRIM(TO_CHAR({}, 'Day'))", args[0]),
+            Self::MonthName => format!("TRIM(TO_CHAR({}, 'Month'))", args[0]),
+            Self::MonthsBetween => {
+                let start = &args[0];
+                let end = &args[1];
+                format!(
+                    "((date_part('year', {end}) - date_part('year', {start})) * 12 \
+                     + date_part('month', {end}) - date_part('month', {start}))"
+                )
+            }
         }
     }
 }
@@ -347,6 +417,16 @@ impl std::fmt::Display for DateTimeFunction {
             Self::DateDiff => write!(f, "DATEDIFF"),
             Self::Today => write!(f, "TODAY"),
             Self::Now => write!(f, "NOW"),
+            Self::DateAdd => write!(f, "DATEADD"),
+            Self::DateTrunc => write!(f, "DATE_TRUNC"),
+            Self::LastDay => write!(f, "LAST_DAY"),
+            Self::EoMonth => write!(f, "EOMONTH"),
+            Self::DayOfWeek => write!(f, "DAYOFWEEK"),
+            Self::DayOfYear => write!(f, "DAYOFYEAR"),
+            Self::WeekNum => write!(f, "WEEKNUM"),
+            Self::DayName => write!(f, "DAYNAME"),
+            Self::MonthName => write!(f, "MONTHNAME"),
+            Self::MonthsBetween => write!(f, "MONTHS_BETWEEN"),
         }
     }
 }
@@ -415,6 +495,17 @@ pub enum TextFunction {
     /// Format a value as text: `FORMAT(value, format_string)`.
     /// Maps to SQL `TO_CHAR(value, format)` for dates, `CAST` for numbers.
     Format,
+    /// Check if text contains a substring: `CONTAINS(text, search)`.
+    /// Returns boolean. Case-insensitive.
+    Contains,
+    /// Check if text starts with a prefix: `STARTSWITH(text, prefix)`.
+    /// Returns boolean.
+    StartsWith,
+    /// Check if text ends with a suffix: `ENDSWITH(text, suffix)`.
+    /// Returns boolean.
+    EndsWith,
+    /// Capitalize first letter of each word: `INITCAP(text)`.
+    InitCap,
 }
 
 impl TextFunction {
@@ -542,6 +633,17 @@ impl TextFunction {
                 // For numbers, falls back to CAST.
                 format!("TO_CHAR({}, {})", args[0], args[1])
             }
+            Self::Contains => {
+                // Case-insensitive: POSITION(LOWER(search) IN LOWER(text)) > 0
+                format!("(POSITION(LOWER({}) IN LOWER({})) > 0)", args[1], args[0])
+            }
+            Self::StartsWith => {
+                format!("(LEFT({}, LENGTH({})) = {})", args[0], args[1], args[1])
+            }
+            Self::EndsWith => {
+                format!("(RIGHT({}, LENGTH({})) = {})", args[0], args[1], args[1])
+            }
+            Self::InitCap => format!("INITCAP({})", args[0]),
         }
     }
 }
@@ -575,6 +677,31 @@ impl std::fmt::Display for TextFunction {
             Self::Reverse => write!(f, "REVERSE"),
             Self::Split => write!(f, "SPLIT"),
             Self::Format => write!(f, "FORMAT"),
+            Self::Contains => write!(f, "CONTAINS"),
+            Self::StartsWith => write!(f, "STARTSWITH"),
+            Self::EndsWith => write!(f, "ENDSWITH"),
+            Self::InitCap => write!(f, "INITCAP"),
+        }
+    }
+}
+
+/// Ranking window functions that have no inner expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RankFunction {
+    /// `ROW_NUMBER()` — sequential row number.
+    RowNumber,
+    /// `RANK()` — rank with gaps on ties.
+    Rank,
+    /// `DENSE_RANK()` — rank without gaps on ties.
+    DenseRank,
+}
+
+impl std::fmt::Display for RankFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RowNumber => write!(f, "ROW_NUMBER"),
+            Self::Rank => write!(f, "RANK"),
+            Self::DenseRank => write!(f, "DENSE_RANK"),
         }
     }
 }
@@ -1081,6 +1208,74 @@ pub enum Expression {
         /// The percentile value (0.0 to 1.0), typically a literal float.
         percentile: Box<Expression>,
     },
+
+    // --- Group 3: Conditional functions ---
+    /// Maximum of multiple values: `GREATEST(a, b, ...)`.
+    /// SQL: `GREATEST(a, b, ...)`.
+    Greatest(Vec<Expression>),
+
+    /// Minimum of multiple values: `LEAST(a, b, ...)`.
+    /// SQL: `LEAST(a, b, ...)`.
+    Least(Vec<Expression>),
+
+    /// Return NULL if two values are equal: `NULLIF(a, b)`.
+    /// SQL: `NULLIF(a, b)`.
+    NullIf {
+        /// The expression to return (if not equal to value).
+        expr: Box<Expression>,
+        /// The comparison value.
+        value: Box<Expression>,
+    },
+
+    // --- Group 4: Aggregation functions ---
+    /// Conditional count: `COUNT_IF(condition)` or `COUNTIF(condition)`.
+    /// Counts rows where the condition is true.
+    /// SQL: `SUM(CASE WHEN cond THEN 1 ELSE 0 END)`.
+    CountIf {
+        /// Boolean condition expression.
+        condition: Box<Expression>,
+    },
+
+    /// Concatenate strings within a group: `LISTAGG(column, delimiter)`.
+    /// SQL: `STRING_AGG(col, delimiter)`.
+    ListAgg {
+        /// The column/expression to concatenate.
+        column: Box<Expression>,
+        /// The delimiter between values.
+        delimiter: Box<Expression>,
+    },
+
+    /// Value at the row with the maximum of another column: `MAX_BY(value, sort_col)`.
+    /// SQL: uses a subquery or window function approach.
+    MaxBy {
+        /// The value to retrieve.
+        value: Box<Expression>,
+        /// The column to maximize.
+        sort_by: Box<Expression>,
+    },
+
+    /// Value at the row with the minimum of another column: `MIN_BY(value, sort_col)`.
+    /// SQL: uses a subquery or window function approach.
+    MinBy {
+        /// The value to retrieve.
+        value: Box<Expression>,
+        /// The column to minimize.
+        sort_by: Box<Expression>,
+    },
+
+    // --- Group 5: Window ranking functions ---
+    /// Ranking window function: `ROW_NUMBER(...)`, `RANK(...)`, `DENSE_RANK(...)`.
+    ///
+    /// Unlike `Window` which wraps an aggregate, these produce ordinal values
+    /// based on ordering and partitioning alone.
+    RankWindow {
+        /// The ranking function to apply.
+        function: RankFunction,
+        /// ORDER BY columns as `(table, column)` pairs.
+        order_by: Vec<(String, String)>,
+        /// PARTITION BY columns as `(table, column)` pairs.
+        partition_by: Vec<(String, String)>,
+    },
 }
 
 impl Expression {
@@ -1270,6 +1465,27 @@ impl Expression {
                     v.collect_column_refs(refs);
                 }
             }
+            Expression::Greatest(args) | Expression::Least(args) => {
+                for a in args {
+                    a.collect_column_refs(refs);
+                }
+            }
+            Expression::NullIf { expr, value } => {
+                expr.collect_column_refs(refs);
+                value.collect_column_refs(refs);
+            }
+            Expression::CountIf { condition } => {
+                condition.collect_column_refs(refs);
+            }
+            Expression::ListAgg { column, delimiter } => {
+                column.collect_column_refs(refs);
+                delimiter.collect_column_refs(refs);
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                value.collect_column_refs(refs);
+                sort_by.collect_column_refs(refs);
+            }
+            Expression::RankWindow { .. } => {}
         }
     }
 
@@ -1356,6 +1572,16 @@ impl Expression {
             Expression::InList { expr, values } => {
                 expr.has_aggregate() || values.iter().any(|v| v.has_aggregate())
             }
+            Expression::Greatest(args) | Expression::Least(args) => {
+                args.iter().any(|a| a.has_aggregate())
+            }
+            Expression::NullIf { expr, value } => expr.has_aggregate() || value.has_aggregate(),
+            // CountIf, ListAgg, MaxBy, MinBy are implicit aggregates.
+            Expression::CountIf { .. }
+            | Expression::ListAgg { .. }
+            | Expression::MaxBy { .. }
+            | Expression::MinBy { .. } => true,
+            Expression::RankWindow { .. } => true,
         }
     }
 
@@ -1452,6 +1678,18 @@ impl Expression {
             Expression::InList { expr, values } => {
                 expr.has_context_ops() || values.iter().any(|v| v.has_context_ops())
             }
+            Expression::Greatest(args) | Expression::Least(args) => {
+                args.iter().any(|a| a.has_context_ops())
+            }
+            Expression::NullIf { expr, value } => expr.has_context_ops() || value.has_context_ops(),
+            Expression::CountIf { condition } => condition.has_context_ops(),
+            Expression::ListAgg { column, delimiter } => {
+                column.has_context_ops() || delimiter.has_context_ops()
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                value.has_context_ops() || sort_by.has_context_ops()
+            }
+            Expression::RankWindow { .. } => false,
         }
     }
 
@@ -1652,6 +1890,38 @@ impl Expression {
                 expr.collect_context_filter_tables(tables);
                 for v in values {
                     v.collect_context_filter_tables(tables);
+                }
+            }
+            Expression::Greatest(args) | Expression::Least(args) => {
+                for a in args {
+                    a.collect_context_filter_tables(tables);
+                }
+            }
+            Expression::NullIf { expr, value } => {
+                expr.collect_context_filter_tables(tables);
+                value.collect_context_filter_tables(tables);
+            }
+            Expression::CountIf { condition } => {
+                condition.collect_context_filter_tables(tables);
+            }
+            Expression::ListAgg { column, delimiter } => {
+                column.collect_context_filter_tables(tables);
+                delimiter.collect_context_filter_tables(tables);
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                value.collect_context_filter_tables(tables);
+                sort_by.collect_context_filter_tables(tables);
+            }
+            Expression::RankWindow {
+                order_by,
+                partition_by,
+                ..
+            } => {
+                for (table, _) in order_by {
+                    tables.push(table);
+                }
+                for (table, _) in partition_by {
+                    tables.push(table);
                 }
             }
         }
@@ -1936,6 +2206,31 @@ impl Expression {
             Expression::InList { expr, values } => Expression::InList {
                 expr: Box::new(expr.substitute_vars(env)),
                 values: values.iter().map(|v| v.substitute_vars(env)).collect(),
+            },
+            Expression::Greatest(args) => {
+                Expression::Greatest(args.iter().map(|a| a.substitute_vars(env)).collect())
+            }
+            Expression::Least(args) => {
+                Expression::Least(args.iter().map(|a| a.substitute_vars(env)).collect())
+            }
+            Expression::NullIf { expr, value } => Expression::NullIf {
+                expr: Box::new(expr.substitute_vars(env)),
+                value: Box::new(value.substitute_vars(env)),
+            },
+            Expression::CountIf { condition } => Expression::CountIf {
+                condition: Box::new(condition.substitute_vars(env)),
+            },
+            Expression::ListAgg { column, delimiter } => Expression::ListAgg {
+                column: Box::new(column.substitute_vars(env)),
+                delimiter: Box::new(delimiter.substitute_vars(env)),
+            },
+            Expression::MaxBy { value, sort_by } => Expression::MaxBy {
+                value: Box::new(value.substitute_vars(env)),
+                sort_by: Box::new(sort_by.substitute_vars(env)),
+            },
+            Expression::MinBy { value, sort_by } => Expression::MinBy {
+                value: Box::new(value.substitute_vars(env)),
+                sort_by: Box::new(sort_by.substitute_vars(env)),
             },
             // Leaf expressions that don't contain ColumnRef — return as-is.
             _ => self.clone(),
@@ -2243,6 +2538,54 @@ impl Expression {
                 let vals: Vec<String> = values.iter().map(|v| v.to_sql_string()).collect();
                 format!("{expr_sql} IN ({})", vals.join(", "))
             }
+            Expression::Greatest(args) => {
+                let a: Vec<String> = args.iter().map(|e| e.to_sql_string()).collect();
+                format!("GREATEST({})", a.join(", "))
+            }
+            Expression::Least(args) => {
+                let a: Vec<String> = args.iter().map(|e| e.to_sql_string()).collect();
+                format!("LEAST({})", a.join(", "))
+            }
+            Expression::NullIf { expr, value } => {
+                format!(
+                    "NULLIF({}, {})",
+                    expr.to_sql_string(),
+                    value.to_sql_string()
+                )
+            }
+            Expression::CountIf { condition } => {
+                format!(
+                    "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
+                    condition.to_sql_string()
+                )
+            }
+            Expression::ListAgg { column, delimiter } => {
+                format!(
+                    "STRING_AGG({}, {})",
+                    column.to_sql_string(),
+                    delimiter.to_sql_string()
+                )
+            }
+            Expression::MaxBy { value, sort_by } => {
+                // First value ordered by sort_by descending
+                format!(
+                    "FIRST_VALUE({} ORDER BY {} DESC)",
+                    value.to_sql_string(),
+                    sort_by.to_sql_string()
+                )
+            }
+            Expression::MinBy { value, sort_by } => {
+                // First value ordered by sort_by ascending
+                format!(
+                    "FIRST_VALUE({} ORDER BY {} ASC)",
+                    value.to_sql_string(),
+                    sort_by.to_sql_string()
+                )
+            }
+            Expression::RankWindow { .. } => {
+                // Rank window expressions must be materialized, not rendered inline.
+                "/* RANK_WINDOW: must be materialized */".to_string()
+            }
         }
     }
 
@@ -2415,6 +2758,46 @@ impl Expression {
                 "/* WINDOW: must be materialized */".to_string()
             }
             Expression::InList { .. } => self.to_sql_string(),
+            Expression::Greatest(args) => {
+                let a: Vec<String> = args
+                    .iter()
+                    .map(|e| e.to_case_when_sql(condition, fact_table))
+                    .collect();
+                format!("GREATEST({})", a.join(", "))
+            }
+            Expression::Least(args) => {
+                let a: Vec<String> = args
+                    .iter()
+                    .map(|e| e.to_case_when_sql(condition, fact_table))
+                    .collect();
+                format!("LEAST({})", a.join(", "))
+            }
+            Expression::NullIf { expr, value } => {
+                let e = expr.to_case_when_sql(condition, fact_table);
+                let v = value.to_case_when_sql(condition, fact_table);
+                format!("NULLIF({e}, {v})")
+            }
+            Expression::CountIf {
+                condition: cond_expr,
+            } => {
+                let c = cond_expr.to_case_when_sql(condition, fact_table);
+                format!("SUM(CASE WHEN {c} THEN 1 ELSE 0 END)")
+            }
+            Expression::ListAgg { column, delimiter } => {
+                let col = column.to_case_when_sql(condition, fact_table);
+                let delim = delimiter.to_case_when_sql(condition, fact_table);
+                format!("STRING_AGG({col}, {delim})")
+            }
+            Expression::MaxBy { value, sort_by } => {
+                let v = value.to_case_when_sql(condition, fact_table);
+                let s = sort_by.to_case_when_sql(condition, fact_table);
+                format!("FIRST_VALUE({v} ORDER BY {s} DESC)")
+            }
+            Expression::MinBy { value, sort_by } => {
+                let v = value.to_case_when_sql(condition, fact_table);
+                let s = sort_by.to_case_when_sql(condition, fact_table);
+                format!("FIRST_VALUE({v} ORDER BY {s} ASC)")
+            }
             // For leaf expressions (literals, column refs, etc.), fall back to regular SQL.
             _ => self.to_sql_string(),
         }
@@ -3512,6 +3895,27 @@ fn collect_query_global_refs(
                 collect_query_global_refs(v, model, found);
             }
         }
+        Expression::Greatest(args) | Expression::Least(args) => {
+            for a in args {
+                collect_query_global_refs(a, model, found);
+            }
+        }
+        Expression::NullIf { expr, value } => {
+            collect_query_global_refs(expr, model, found);
+            collect_query_global_refs(value, model, found);
+        }
+        Expression::CountIf { condition } => {
+            collect_query_global_refs(condition, model, found);
+        }
+        Expression::ListAgg { column, delimiter } => {
+            collect_query_global_refs(column, model, found);
+            collect_query_global_refs(delimiter, model, found);
+        }
+        Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+            collect_query_global_refs(value, model, found);
+            collect_query_global_refs(sort_by, model, found);
+        }
+        Expression::RankWindow { .. } => {}
     }
 }
 
@@ -3788,6 +4192,36 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
                 .map(|v| expand_scalar_globals(v, model))
                 .collect(),
         },
+        Expression::Greatest(args) => Expression::Greatest(
+            args.iter()
+                .map(|a| expand_scalar_globals(a, model))
+                .collect(),
+        ),
+        Expression::Least(args) => Expression::Least(
+            args.iter()
+                .map(|a| expand_scalar_globals(a, model))
+                .collect(),
+        ),
+        Expression::NullIf { expr, value } => Expression::NullIf {
+            expr: Box::new(expand_scalar_globals(expr, model)),
+            value: Box::new(expand_scalar_globals(value, model)),
+        },
+        Expression::CountIf { condition } => Expression::CountIf {
+            condition: Box::new(expand_scalar_globals(condition, model)),
+        },
+        Expression::ListAgg { column, delimiter } => Expression::ListAgg {
+            column: Box::new(expand_scalar_globals(column, model)),
+            delimiter: Box::new(expand_scalar_globals(delimiter, model)),
+        },
+        Expression::MaxBy { value, sort_by } => Expression::MaxBy {
+            value: Box::new(expand_scalar_globals(value, model)),
+            sort_by: Box::new(expand_scalar_globals(sort_by, model)),
+        },
+        Expression::MinBy { value, sort_by } => Expression::MinBy {
+            value: Box::new(expand_scalar_globals(value, model)),
+            sort_by: Box::new(expand_scalar_globals(sort_by, model)),
+        },
+        Expression::RankWindow { .. } => expr.clone(),
         // Leaves that don't contain sub-expressions or ColumnRef.
         Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
@@ -3942,15 +4376,28 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::Iterate { table, expression } => {
             Some(table.clone()).or_else(|| infer_fact_table(expression))
         }
-        Expression::Percentile { operand, percentile } => {
-            infer_fact_table(operand).or_else(|| infer_fact_table(percentile))
-        }
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => infer_fact_table(operand).or_else(|| infer_fact_table(percentile)),
         Expression::ClearExcept { expr, .. } => infer_fact_table(expr),
         Expression::IfError { expr, alternate } => {
             infer_fact_table(expr).or_else(|| infer_fact_table(alternate))
         }
         Expression::DateTimeFunc { args, .. } => args.iter().find_map(infer_fact_table),
         Expression::IsInScope { .. } => None,
+        Expression::Greatest(args) | Expression::Least(args) => {
+            args.iter().find_map(infer_fact_table)
+        }
+        Expression::NullIf { expr, value } => {
+            infer_fact_table(expr).or_else(|| infer_fact_table(value))
+        }
+        Expression::CountIf { condition } => infer_fact_table(condition),
+        Expression::ListAgg { column, .. } => infer_fact_table(column),
+        Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+            infer_fact_table(value).or_else(|| infer_fact_table(sort_by))
+        }
+        Expression::RankWindow { .. } => None,
         _ => None,
     }
 }

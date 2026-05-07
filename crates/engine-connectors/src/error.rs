@@ -45,6 +45,10 @@ pub enum ConnectorError {
     /// An error from the engine-core library.
     #[error(transparent)]
     Engine(#[from] engine_core::error::EngineError),
+
+    /// An operation is not supported by this connector.
+    #[error("Unsupported operation: {0}")]
+    UnsupportedOperation(String),
 }
 
 /// Convenience result type for connector operations.

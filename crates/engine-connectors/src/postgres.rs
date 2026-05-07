@@ -10,7 +10,7 @@ use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
 
 use crate::arrow_convert::rows_to_record_batches;
 use crate::error::{ConnectorError, ConnectorResult};
-use crate::traits::{Connector, FetchRequest, SourceTable};
+use crate::traits::{Connector, FetchRequest, JoinAggregationRequest, SourceTable};
 use crate::type_mapping::pg_type_to_engine_type;
 
 /// Configuration for connecting to a PostgreSQL database.
@@ -643,6 +643,85 @@ impl Connector for PostgresConnector {
         let count: i64 = row.try_get("cnt")?;
         Ok(count as usize)
     }
+
+    async fn execute_join_aggregation(
+        &self,
+        request: &JoinAggregationRequest,
+    ) -> ConnectorResult<Vec<RecordBatch>> {
+        // Resolve ISINSCOPE in expressions before SQL generation.
+        let group_by_pairs: Vec<(String, String)> = request
+            .table_map
+            .iter()
+            .flat_map(|(model, _)| {
+                request
+                    .group_by
+                    .iter()
+                    .filter(move |col| {
+                        request.table_map.iter().any(|(m, s)| {
+                            m.eq_ignore_ascii_case(model) && s == &col.table
+                        })
+                    })
+                    .map(move |col| (model.clone(), col.column.clone()))
+            })
+            .collect();
+
+        // Build SELECT parts.
+        let mut select_parts: Vec<String> = Vec::new();
+        let mut group_by_parts: Vec<String> = Vec::new();
+
+        for col in &request.group_by {
+            let qualified = format!("\"{}\".\"{}\"", col.table, col.column);
+            select_parts.push(qualified.clone());
+            group_by_parts.push(qualified);
+        }
+
+        for m in &request.measures {
+            let resolved = engine_core::compute::expression::resolve_is_in_scope(
+                &m.expression,
+                &group_by_pairs,
+            );
+            let expr_sql =
+                pg_dialect::expr_to_sql_with_clear(&resolved, &request.table_map, &request.group_by)?;
+            select_parts.push(format!("{expr_sql} AS \"{}\"", m.alias));
+        }
+
+        // Build FROM + JOINs.
+        let mut sql = format!(
+            "SELECT {} FROM \"{}\".\"{}\"",
+            select_parts.join(", "),
+            request.fact_schema,
+            request.fact_table
+        );
+
+        for join in &request.joins {
+            sql.push_str(&format!(
+                " JOIN \"{}\".\"{}\" ON \"{}\".\"{}\" = \"{}\".\"{}\"",
+                join.dim_schema,
+                join.dim_table,
+                request.fact_table,
+                join.fact_column,
+                join.dim_table,
+                join.dim_column,
+            ));
+        }
+
+        // WHERE clause.
+        if !request.filters.is_empty() {
+            let where_parts: Vec<String> = request
+                .filters
+                .iter()
+                .map(|f| format!("\"{}\" {} '{}'", f.column, f.operator.as_sql(), f.value))
+                .collect();
+            sql.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
+        }
+
+        // GROUP BY.
+        if !group_by_parts.is_empty() {
+            sql.push_str(&format!(" GROUP BY {}", group_by_parts.join(", ")));
+        }
+
+        self.execute_query(&sql).await
+    }
 }
 
 /// Build an inline `"col"::text IN ('v1', 'v2', ...)` condition for PostgreSQL.
@@ -701,4 +780,374 @@ fn pg_type_name_to_arrow(
             db_type: other.to_string(),
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// PostgreSQL dialect: Expression → SQL rendering
+// ---------------------------------------------------------------------------
+
+mod pg_dialect {
+    use engine_core::compute::aggregate::AggregateOp;
+    use engine_core::compute::expression::Expression;
+
+    use super::ConnectorResult;
+
+    /// Resolve a model table name to its source table name via the table map.
+    fn source_table(model_table: &str, table_map: &[(String, String)]) -> String {
+        table_map
+            .iter()
+            .find(|(m, _)| m.eq_ignore_ascii_case(model_table))
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| model_table.to_string())
+    }
+
+    /// Render an Expression as PostgreSQL SQL.
+    ///
+    /// Uses `"double_quotes"` for identifiers and PostgreSQL-specific function
+    /// syntax (e.g., `PERCENTILE_CONT`, `STDDEV_SAMP`, `::NUMERIC` casts).
+    pub fn expr_to_sql(
+        expr: &Expression,
+        table_map: &[(String, String)],
+    ) -> ConnectorResult<String> {
+        use engine_core::compute::expression::ScalarFunction;
+
+        match expr {
+            Expression::QualifiedColumnRef { table_or_var, column } => {
+                let src = source_table(table_or_var, table_map);
+                Ok(format!("\"{src}\".\"{column}\""))
+            }
+            Expression::ColumnRef(name) => Ok(format!("\"{name}\"")),
+            Expression::LiteralFloat(v) => Ok(format!("{v}")),
+            Expression::LiteralInt(v) => Ok(format!("{v}")),
+            Expression::LiteralBool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
+            Expression::LiteralString(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+            Expression::Blank => Ok("NULL".to_string()),
+
+            Expression::Aggregate { operation, operand } => {
+                // Check for KEEP inside aggregate operand.
+                if let Expression::Keep { expr: inner, filters, variables, conditions, in_predicates } = operand.as_ref() {
+                    if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
+                        let condition = filters_to_condition(filters, table_map)?;
+                        let inner_sql = expr_to_sql(inner, table_map)?;
+                        let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
+                        return Ok(agg_sql(operation, &case_expr));
+                    }
+                }
+                let operand_sql = expr_to_sql(operand, table_map)?;
+                Ok(agg_sql(operation, &operand_sql))
+            }
+            Expression::BinaryOp { left, op, right } => {
+                let l = expr_to_sql(left, table_map)?;
+                let r = expr_to_sql(right, table_map)?;
+                Ok(format!("({l} {} {r})", op.as_sql()))
+            }
+            Expression::SafeDivide { numerator, denominator, alternate } => {
+                let n = expr_to_sql(numerator, table_map)?;
+                let d = expr_to_sql(denominator, table_map)?;
+                let alt = match alternate {
+                    Some(a) => expr_to_sql(a, table_map)?,
+                    None => "NULL".to_string(),
+                };
+                Ok(format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"))
+            }
+            Expression::If { condition, then_expr, else_expr } => {
+                let c = expr_to_sql(condition, table_map)?;
+                let t = expr_to_sql(then_expr, table_map)?;
+                let e = expr_to_sql(else_expr, table_map)?;
+                Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
+            }
+            Expression::Comparison { left, op, right } => {
+                let l = expr_to_sql(left, table_map)?;
+                let r = expr_to_sql(right, table_map)?;
+                Ok(format!("({l} {} {r})", op.as_sql()))
+            }
+            Expression::And(l, r) => {
+                Ok(format!("({} AND {})", expr_to_sql(l, table_map)?, expr_to_sql(r, table_map)?))
+            }
+            Expression::Or(l, r) => {
+                Ok(format!("({} OR {})", expr_to_sql(l, table_map)?, expr_to_sql(r, table_map)?))
+            }
+            Expression::Not(inner) => Ok(format!("(NOT {})", expr_to_sql(inner, table_map)?)),
+            Expression::IsBlank(inner) => Ok(format!("({} IS NULL)", expr_to_sql(inner, table_map)?)),
+            Expression::Coalesce(exprs) => {
+                let parts: Vec<String> = exprs.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("COALESCE({})", parts.join(", ")))
+            }
+            Expression::ScalarFunc { function, args } => {
+                let mapped: Vec<String> = args.iter().map(|a| expr_to_sql(a, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                match function {
+                    ScalarFunction::Round | ScalarFunction::RoundUp | ScalarFunction::RoundDown => {
+                        let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
+                        let func = if matches!(function, ScalarFunction::RoundDown) { "TRUNC" } else { "ROUND" };
+                        Ok(format!("{func}(({})::NUMERIC, {digits})", mapped[0]))
+                    }
+                    ScalarFunction::Trunc => {
+                        let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
+                        Ok(format!("TRUNC(({})::NUMERIC, {digits})", mapped[0]))
+                    }
+                    ScalarFunction::Log10 => Ok(format!("LOG(10, ({})::NUMERIC)", mapped[0])),
+                    ScalarFunction::Sign => Ok(format!("SIGN({})", mapped[0])),
+                    ScalarFunction::Mod => Ok(format!("MOD({}, {})", mapped[0], mapped[1])),
+                    _ => Ok(function.to_sql_strs(&mapped)),
+                }
+            }
+            Expression::TextFunc { function, args } => {
+                let mapped: Vec<String> = args.iter().map(|a| expr_to_sql(a, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(function.to_sql_strs(&mapped))
+            }
+            Expression::DateTimeFunc { function, args } => {
+                let mapped: Vec<String> = args.iter().map(|a| expr_to_sql(a, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(function.to_sql_strs(&mapped))
+            }
+            Expression::IfError { expr: inner, alternate } => {
+                let i = expr_to_sql(inner, table_map)?;
+                let a = expr_to_sql(alternate, table_map)?;
+                Ok(format!("COALESCE({i}, {a})"))
+            }
+            Expression::IsInScope { .. } => Ok("TRUE".to_string()),
+            Expression::Iterate { expression, .. } => expr_to_sql(expression, table_map),
+            Expression::ClearExcept { expr: inner, .. } | Expression::Clear { expr: inner, .. } => {
+                expr_to_sql(inner, table_map)
+            }
+            Expression::Keep { expr: inner, filters, variables, conditions, in_predicates } => {
+                if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
+                    let condition = filters_to_condition(filters, table_map)?;
+                    return case_when_expr(inner, &condition, table_map);
+                }
+                expr_to_sql(inner, table_map)
+            }
+            Expression::Block { .. } => {
+                let inlined = expr.inline_bindings();
+                expr_to_sql(&inlined, table_map)
+            }
+            Expression::Switch { expr: switch_expr, cases, default } => {
+                let e = expr_to_sql(switch_expr, table_map)?;
+                let mut sql = format!("CASE {e}");
+                for (v, r) in cases {
+                    sql.push_str(&format!(" WHEN {} THEN {}", expr_to_sql(v, table_map)?, expr_to_sql(r, table_map)?));
+                }
+                if let Some(d) = default {
+                    sql.push_str(&format!(" ELSE {}", expr_to_sql(d, table_map)?));
+                }
+                sql.push_str(" END");
+                Ok(sql)
+            }
+            Expression::Percentile { operand, percentile } => {
+                let op = expr_to_sql(operand, table_map)?;
+                let k = expr_to_sql(percentile, table_map)?;
+                Ok(format!("PERCENTILE_CONT({k}) WITHIN GROUP (ORDER BY {op})"))
+            }
+            Expression::HasOneValue { column } => {
+                let c = expr_to_sql(column, table_map)?;
+                Ok(format!("(COUNT(DISTINCT {c}) = 1)"))
+            }
+            Expression::SelectedValue { column, alternate } => {
+                let c = expr_to_sql(column, table_map)?;
+                let a = match alternate { Some(v) => expr_to_sql(v, table_map)?, None => "NULL".to_string() };
+                Ok(format!("CASE WHEN COUNT(DISTINCT {c}) = 1 THEN MIN({c}) ELSE {a} END"))
+            }
+            Expression::FirstValue { column, .. } => {
+                let c = expr_to_sql(column, table_map)?;
+                Ok(format!("MIN({c})"))
+            }
+            Expression::Xor(l, r) => {
+                let ls = expr_to_sql(l, table_map)?;
+                let rs = expr_to_sql(r, table_map)?;
+                Ok(format!("(({ls} AND NOT {rs}) OR (NOT {ls} AND {rs}))"))
+            }
+            Expression::Greatest(args) => {
+                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("GREATEST({})", parts.join(", ")))
+            }
+            Expression::Least(args) => {
+                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("LEAST({})", parts.join(", ")))
+            }
+            Expression::NullIf { expr: inner, value } => {
+                let i = expr_to_sql(inner, table_map)?;
+                let v = expr_to_sql(value, table_map)?;
+                Ok(format!("NULLIF({i}, {v})"))
+            }
+            Expression::TableRef(_) => Ok(String::new()),
+            // GREATEST / LEAST
+            Expression::Greatest(args) => {
+                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("GREATEST({})", parts.join(", ")))
+            }
+            Expression::Least(args) => {
+                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("LEAST({})", parts.join(", ")))
+            }
+            // NULLIF
+            Expression::NullIf { expr: inner, value } => {
+                let i = expr_to_sql(inner, table_map)?;
+                let v = expr_to_sql(value, table_map)?;
+                Ok(format!("NULLIF({i}, {v})"))
+            }
+            // COUNT_IF(condition) → SUM(CASE WHEN condition THEN 1 ELSE 0 END)
+            Expression::CountIf { condition } => {
+                let c = expr_to_sql(condition, table_map)?;
+                Ok(format!("SUM(CASE WHEN {c} THEN 1 ELSE 0 END)"))
+            }
+            // STRING_AGG
+            Expression::ListAgg { column, delimiter } => {
+                let col = expr_to_sql(column, table_map)?;
+                let delim = expr_to_sql(delimiter, table_map)?;
+                Ok(format!("STRING_AGG({col}, {delim})"))
+            }
+            // MAXBY / MINBY — needs subquery or ORDER BY, simplified
+            Expression::MaxBy { value, sort_by } => {
+                let v = expr_to_sql(value, table_map)?;
+                let s = expr_to_sql(sort_by, table_map)?;
+                Ok(format!("(ARRAY_AGG({v} ORDER BY {s} DESC NULLS LAST))[1]"))
+            }
+            Expression::MinBy { value, sort_by } => {
+                let v = expr_to_sql(value, table_map)?;
+                let s = expr_to_sql(sort_by, table_map)?;
+                Ok(format!("(ARRAY_AGG({v} ORDER BY {s} ASC NULLS LAST))[1]"))
+            }
+            // IN list
+            Expression::InList { expr: inner, values } => {
+                let e = expr_to_sql(inner, table_map)?;
+                let vals: Vec<String> = values.iter().map(|v| expr_to_sql(v, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("{e} IN ({})", vals.join(", ")))
+            }
+            _ => Err(super::ConnectorError::UnsupportedOperation(
+                format!("PostgreSQL pushdown: unsupported expression {expr:?}")
+            )),
+        }
+    }
+
+    /// Render an aggregate operation as PostgreSQL SQL.
+    fn agg_sql(op: &AggregateOp, operand: &str) -> String {
+        match op {
+            AggregateOp::Sum => format!("SUM({operand})"),
+            AggregateOp::Count => format!("COUNT({operand})"),
+            AggregateOp::Average => format!("AVG({operand})"),
+            AggregateOp::Min => format!("MIN({operand})"),
+            AggregateOp::Max => format!("MAX({operand})"),
+            AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand})"),
+            AggregateOp::CountRows => "COUNT(*)".to_string(),
+            AggregateOp::Median => format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand})"),
+            AggregateOp::StdevSample => format!("STDDEV_SAMP({operand})"),
+            AggregateOp::StdevPop => format!("STDDEV_POP({operand})"),
+            AggregateOp::VarSample => format!("VAR_SAMP({operand})"),
+            AggregateOp::VarPop => format!("VAR_POP({operand})"),
+            AggregateOp::AnyValue => format!("MIN({operand})"),
+            AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {operand})"),
+        }
+    }
+
+    /// Build a CASE WHEN SQL fragment for KEEP filter predicates.
+    fn filters_to_condition(
+        filters: &[engine_core::compute::expression::FilterPredicate],
+        table_map: &[(String, String)],
+    ) -> ConnectorResult<String> {
+        let parts: Vec<String> = filters
+            .iter()
+            .map(|f| {
+                let src = source_table(&f.table, table_map);
+                Ok(format!("\"{src}\".\"{}\" {} '{}'", f.column, f.operator.as_sql(), f.value))
+            })
+            .collect::<ConnectorResult<Vec<_>>>()?;
+        Ok(parts.join(" AND "))
+    }
+
+    /// Wrap an inner expression's aggregates with CASE WHEN.
+    fn case_when_expr(
+        expr: &Expression,
+        condition: &str,
+        table_map: &[(String, String)],
+    ) -> ConnectorResult<String> {
+        match expr {
+            Expression::Aggregate { operation, operand } => {
+                let inner_sql = expr_to_sql(operand, table_map)?;
+                let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
+                Ok(agg_sql(operation, &case_expr))
+            }
+            Expression::BinaryOp { left, op, right } => {
+                let l = case_when_expr(left, condition, table_map)?;
+                let r = case_when_expr(right, condition, table_map)?;
+                Ok(format!("({l} {} {r})", op.as_sql()))
+            }
+            Expression::SafeDivide { numerator, denominator, alternate } => {
+                let n = case_when_expr(numerator, condition, table_map)?;
+                let d = case_when_expr(denominator, condition, table_map)?;
+                let alt = match alternate { Some(a) => expr_to_sql(a, table_map)?, None => "NULL".to_string() };
+                Ok(format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"))
+            }
+            _ => expr_to_sql(expr, table_map),
+        }
+    }
+
+    /// Render a full Expression with CLEAR/CLEAREXCEPT as window functions.
+    pub fn expr_to_sql_with_clear(
+        expr: &Expression,
+        table_map: &[(String, String)],
+        group_by: &[crate::traits::QualifiedColumn],
+    ) -> ConnectorResult<String> {
+        use engine_core::model::ClearTarget;
+
+        match expr {
+            Expression::Clear { expr: inner, targets } => {
+                let inner_sql = expr_to_sql_with_clear(inner, table_map, group_by)?;
+                let partition_cols: Vec<String> = group_by
+                    .iter()
+                    .filter(|col| !targets.iter().any(|t| match t {
+                        ClearTarget::Table(table) => {
+                            table_map.iter().any(|(m, s)| m.eq_ignore_ascii_case(table) && s == &col.table)
+                        }
+                        ClearTarget::Column { table, column } => {
+                            table_map.iter().any(|(m, s)| m.eq_ignore_ascii_case(table) && s == &col.table)
+                                && col.column == *column
+                        }
+                    }))
+                    .map(|col| format!("\"{}\".\"{}\"", col.table, col.column))
+                    .collect();
+                let over = if partition_cols.is_empty() { "OVER ()".to_string() } else { format!("OVER (PARTITION BY {})", partition_cols.join(", ")) };
+                Ok(format!("SUM({inner_sql}) {over}"))
+            }
+            Expression::ClearExcept { expr: inner, table, except_columns } => {
+                let inner_sql = expr_to_sql_with_clear(inner, table_map, group_by)?;
+                let src_table = source_table(table, table_map);
+                let partition_cols: Vec<String> = group_by
+                    .iter()
+                    .filter(|col| {
+                        if col.table != src_table { true }
+                        else { except_columns.contains(&col.column) }
+                    })
+                    .map(|col| format!("\"{}\".\"{}\"", col.table, col.column))
+                    .collect();
+                let over = if partition_cols.is_empty() { "OVER ()".to_string() } else { format!("OVER (PARTITION BY {})", partition_cols.join(", ")) };
+                Ok(format!("SUM({inner_sql}) {over}"))
+            }
+            Expression::SafeDivide { numerator, denominator, alternate } => {
+                let n = expr_to_sql_with_clear(numerator, table_map, group_by)?;
+                let d = expr_to_sql_with_clear(denominator, table_map, group_by)?;
+                let alt = match alternate { Some(a) => expr_to_sql_with_clear(a, table_map, group_by)?, None => "NULL".to_string() };
+                Ok(format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"))
+            }
+            Expression::BinaryOp { left, op, right } => {
+                let l = expr_to_sql_with_clear(left, table_map, group_by)?;
+                let r = expr_to_sql_with_clear(right, table_map, group_by)?;
+                Ok(format!("({l} {} {r})", op.as_sql()))
+            }
+            Expression::If { condition, then_expr, else_expr } => {
+                let c = expr_to_sql_with_clear(condition, table_map, group_by)?;
+                let t = expr_to_sql_with_clear(then_expr, table_map, group_by)?;
+                let e = expr_to_sql_with_clear(else_expr, table_map, group_by)?;
+                Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
+            }
+            Expression::Coalesce(exprs) => {
+                let parts: Vec<String> = exprs.iter().map(|e| expr_to_sql_with_clear(e, table_map, group_by)).collect::<ConnectorResult<Vec<_>>>()?;
+                Ok(format!("COALESCE({})", parts.join(", ")))
+            }
+            Expression::Block { .. } => {
+                let inlined = expr.inline_bindings();
+                expr_to_sql_with_clear(&inlined, table_map, group_by)
+            }
+            _ => expr_to_sql(expr, table_map),
+        }
+    }
+
 }
