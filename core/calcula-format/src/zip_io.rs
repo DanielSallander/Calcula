@@ -9,6 +9,7 @@ use crate::features::slicers::SlicerDef;
 use crate::features::ribbon_filters::RibbonFilterDef;
 use crate::features::scripts::ScriptDef;
 use crate::features::notebooks::NotebookDef;
+use crate::features::pivot_layouts::PivotLayoutDef;
 use crate::manifest::Manifest;
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
 use crate::sheet_layout::SheetLayout;
@@ -18,7 +19,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
-use persistence::{SavedChart, SavedNotebook, SavedRibbonFilter, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
+use persistence::{SavedChart, SavedNotebook, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -52,6 +53,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     }
     if !workbook.charts.is_empty() {
         manifest.features.push("charts".to_string());
+    }
+    if !workbook.pivot_layouts.is_empty() {
+        manifest.features.push("pivot_layouts".to_string());
     }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
@@ -127,6 +131,17 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(slicer_json.as_bytes())?;
+    }
+
+    // Write pivot layouts
+    for layout in &workbook.pivot_layouts {
+        let layout_def = PivotLayoutDef::from(layout);
+        let layout_json = serde_json::to_string_pretty(&layout_def)?;
+        zip.start_file(
+            format!("pivot_layouts/layout_{}.json", layout.id),
+            options.clone(),
+        )?;
+        zip.write_all(layout_json.as_bytes())?;
     }
 
     // Write ribbon filters
@@ -312,6 +327,28 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read pivot layouts
+    let mut pivot_layouts: Vec<SavedPivotLayout> = Vec::new();
+    if manifest.features.contains(&"pivot_layouts".to_string()) {
+        let layout_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("pivot_layouts/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for layout_name in layout_names {
+            if let Some(layout_def) = read_optional_json::<PivotLayoutDef>(&mut archive, &layout_name)? {
+                pivot_layouts.push(SavedPivotLayout::from(&layout_def));
+            }
+        }
+    }
+
     // Read ribbon filters
     let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
     if manifest.features.contains(&"ribbon_filters".to_string()) {
@@ -431,6 +468,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         properties,
         charts,
         named_ranges: Vec::new(),
+        pivot_layouts,
     })
 }
 
@@ -556,6 +594,7 @@ mod tests {
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             named_ranges: Vec::new(),
+            pivot_layouts: Vec::new(),
         }
     }
 

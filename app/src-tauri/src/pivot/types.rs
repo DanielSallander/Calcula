@@ -1143,6 +1143,9 @@ pub struct PivotRegionInfo {
     /// BI model metadata — present only for BI-backed pivots
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bi_model: Option<BiPivotModelInfo>,
+    /// Source table name — present only for Table-linked pivots
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_table_name: Option<String>,
 }
 
 /// Info about a filter dropdown cell position

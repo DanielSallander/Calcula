@@ -3,6 +3,7 @@ pub mod types;
 pub mod utils;
 pub mod operations;
 pub mod commands;
+pub mod layout_commands;
 
 // Re-export commands so they are easy to access from main.rs
 pub use commands::*;

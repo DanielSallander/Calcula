@@ -3,6 +3,22 @@
 // CONTEXT: The ONLY entry point for the Pivot Extension to talk to the engine.
 // Extensions import from this module instead of core/lib/pivot-api directly.
 
+// Import Tauri backend functions for pivot layout persistence
+import {
+  savePivotLayout as backendSavePivotLayout,
+  getPivotLayouts as backendGetPivotLayouts,
+  deletePivotLayout as backendDeletePivotLayout,
+} from './backend';
+
+// Re-export layout persistence types and functions
+export type {
+  SavePivotLayoutRequest,
+  PivotLayoutResponse,
+} from './backend';
+export const savePivotLayout = backendSavePivotLayout;
+export const getPivotLayouts = backendGetPivotLayouts;
+export const deletePivotLayout = backendDeletePivotLayout;
+
 // Import from extension-local pivot-api (API layer bridges to extension code)
 import {
   // Core operations

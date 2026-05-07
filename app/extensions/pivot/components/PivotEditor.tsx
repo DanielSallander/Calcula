@@ -7,8 +7,11 @@ import { DropZones } from './DropZones';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
 import { DesignEditor } from './DesignEditor';
+import { SaveLoadToolbar } from './SaveLoadToolbar';
 import { usePivotEditorState } from './usePivotEditorState';
-import { pivot } from '@api/pivot';
+import { buildSourceSignature } from '../lib/namedConfigs';
+import { pivot, savePivotLayout } from '@api/pivot';
+import type { SavePivotLayoutRequest } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import type {
   SourceField,
@@ -21,6 +24,7 @@ import type {
   BiValueFieldRef,
   MeasureField,
   PivotId,
+  CalculatedFieldDef,
 } from './types';
 
 type EditorTab = 'fields' | 'design';
@@ -35,6 +39,7 @@ interface PivotEditorProps {
   initialLayout?: LayoutConfig;
   initialCalculatedFields?: CalculatedFieldDef[];
   biModel?: BiPivotModelInfo;
+  sourceTableName?: string;
   onClose?: () => void;
   onViewUpdate?: () => void;
 }
@@ -65,6 +70,7 @@ export function PivotEditor({
   initialLayout = {},
   initialCalculatedFields,
   biModel,
+  sourceTableName,
   onClose,
   onViewUpdate,
 }: PivotEditorProps): React.ReactElement {
@@ -221,6 +227,38 @@ export function PivotEditor({
     }
     return set;
   }, [isBiPivot, values]);
+
+  // Saved layouts: track current DSL text and saveAs name for the toolbar
+  const [currentDslText, setCurrentDslText] = useState('');
+  const [currentSaveAsName, setCurrentSaveAsName] = useState<string | undefined>();
+  const [externalDslText, setExternalDslText] = useState<string | null>(null);
+
+  const handleDslTextChange = useCallback((text: string, saveAsName?: string) => {
+    setCurrentDslText(text);
+    setCurrentSaveAsName(saveAsName);
+  }, []);
+
+  const handleSaveAs = useCallback((name: string, dslText: string) => {
+    const sig = buildSourceSignature(sourceFields, biModel, sourceTableName);
+    if (!sig) return; // raw-range pivot — save not allowed
+    const request: SavePivotLayoutRequest = {
+      name,
+      dslText,
+      sourceType: sig.type,
+      sourceTableName: sig.tableName,
+      sourceBiTables: sig.tables?.map(t => t.name) ?? [],
+      sourceBiMeasures: sig.measures ?? [],
+    };
+    savePivotLayout(request).catch(err =>
+      console.error('Failed to save pivot layout:', err),
+    );
+  }, [sourceFields, biModel, sourceTableName]);
+
+  const handleLoadDsl = useCallback((dslText: string) => {
+    setExternalDslText(dslText);
+    // Reset after next render to allow re-loading same text
+    requestAnimationFrame(() => setExternalDslText(null));
+  }, []);
 
   // BI lookup toggle: switch a column between GROUP and LOOKUP mode.
   // Guardrail: a LOOKUP field requires at least one GROUP field from the same table.
@@ -484,7 +522,16 @@ export function PivotEditor({
       </div>
 
       {/* Design tab content */}
-      <div className={styles.content} style={{ display: activeTab === 'design' ? 'flex' : 'none' }}>
+      <div className={styles.content} style={{ display: activeTab === 'design' ? 'flex' : 'none', flexDirection: 'column' }}>
+        <SaveLoadToolbar
+          sourceFields={sourceFields}
+          biModel={biModel}
+          sourceTableName={sourceTableName}
+          currentDslText={currentDslText}
+          currentSaveAsName={currentSaveAsName}
+          pivotId={pivotId}
+          onLoadDsl={handleLoadDsl}
+        />
         <DesignEditor
           sourceFields={sourceFields}
           biModel={biModel}
@@ -496,6 +543,9 @@ export function PivotEditor({
           filterUniqueValues={filterUniqueValues.current}
           calculatedFields={calculatedFields.current}
           onZoneStateChange={setAllZones}
+          onSaveAs={handleSaveAs}
+          onDslTextChange={handleDslTextChange}
+          externalDslText={externalDslText}
           isActive={activeTab === 'design'}
         />
       </div>

@@ -290,6 +290,8 @@ pub struct AppState {
     pub scroll_areas: Mutex<Vec<Option<String>>>,
     /// Reference style: "A1" (default) or "R1C1"
     pub reference_style: Mutex<String>,
+    /// Saved pivot layout configurations (persisted in .cala)
+    pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
 }
 
 impl AppState {
@@ -405,6 +407,7 @@ pub fn create_app_state() -> AppState {
         charts: Mutex::new(Vec::new()),
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
+        pivot_layouts: Mutex::new(Vec::new()),
     };
 
     // Populate built-in named styles
@@ -3957,6 +3960,10 @@ pub fn run() {
             pivot::remove_calculated_field,
             pivot::add_calculated_item,
             pivot::remove_calculated_item,
+            // Pivot layout commands
+            pivot::layout_commands::save_pivot_layout,
+            pivot::layout_commands::get_pivot_layouts,
+            pivot::layout_commands::delete_pivot_layout,
             // Named range commands
             named_ranges::create_named_range,
             named_ranges::update_named_range,

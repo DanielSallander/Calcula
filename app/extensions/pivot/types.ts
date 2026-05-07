@@ -44,6 +44,7 @@ export interface PivotEditorViewData {
   initialFilters: ZoneField[];
   initialLayout: Partial<LayoutConfig>;
   biModel?: BiPivotModelInfo;
+  sourceTableName?: string;
 }
 
 /**

@@ -34,6 +34,12 @@ interface DesignEditorProps {
     calculatedFields?: CalculatedFieldDef[],
     valueColumnOrder?: ValueColumnRefDef[],
   ) => void;
+  /** Called when a SAVE AS clause is compiled from user-typed DSL. */
+  onSaveAs?: (name: string, dslText: string) => void;
+  /** Called when DSL text changes (for toolbar sync). */
+  onDslTextChange?: (text: string, saveAsName?: string) => void;
+  /** When set, programmatically loads this DSL text into the editor. */
+  externalDslText?: string | null;
   /** Whether this tab is currently visible. */
   isActive: boolean;
 }
@@ -49,6 +55,9 @@ export function DesignEditor({
   filterUniqueValues,
   calculatedFields,
   onZoneStateChange,
+  onSaveAs,
+  onDslTextChange,
+  externalDslText,
   isActive,
 }: DesignEditorProps): React.ReactElement {
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -109,6 +118,26 @@ export function DesignEditor({
       }
     }
   }, [isActive, rows, columns, values, filters, layout, biModel]);
+
+  // Handle external DSL text injection (from Load Layout toolbar)
+  useEffect(() => {
+    if (externalDslText == null) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    // Clear the programmatic flag so onChange will compile this change.
+    // The sync effect may have set it to true in the same render batch.
+    isProgrammaticEdit.current = false;
+    lastSerializedText.current = externalDslText;
+    const fullRange = model.getFullModelRange();
+    model.pushEditOperations(
+      [],
+      [{ range: fullRange, text: externalDslText }],
+      () => null,
+    );
+  }, [externalDslText]);
 
   // When the Design tab becomes active, tell Monaco to recalculate its layout.
   // Monaco doesn't handle display:none -> display:flex transitions on its own.
@@ -179,9 +208,19 @@ export function DesignEditor({
           result.calculatedFields.length > 0 ? result.calculatedFields : undefined,
           result.valueColumnOrder.length > 0 ? result.valueColumnOrder : undefined,
         );
+
+        // Notify parent about SAVE AS clause
+        if (result.saveAs && onSaveAs) {
+          onSaveAs(result.saveAs, value);
+        }
+      }
+
+      // Notify parent about current DSL text (for toolbar sync)
+      if (onDslTextChange) {
+        onDslTextChange(value, result.saveAs);
       }
     }, 300);
-  }, [sourceFields, biModel, onZoneStateChange]);
+  }, [sourceFields, biModel, onZoneStateChange, onSaveAs, onDslTextChange]);
 
   // Cleanup debounce timer
   useEffect(() => {

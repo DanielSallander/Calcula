@@ -266,6 +266,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         charts: Vec::new(),
         named_ranges: Vec::new(),
         ribbon_filters: Vec::new(),
+        pivot_layouts: Vec::new(),
     };
 
     // Parse charts from the XLSX archive (separate ZIP pass)

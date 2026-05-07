@@ -1348,6 +1348,7 @@ pub fn get_pivot_at_cell(
         field_configuration,
         filter_zones,
         bi_model,
+        source_table_name: definition.source_table_name.clone(),
     }))
 }
 
@@ -3600,7 +3601,8 @@ pub async fn update_bi_pivot_fields(
 
     // Verify pivot exists and is BI-backed
     {
-        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         if !bi_meta.contains_key(&pivot_id) {
             return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
         }
@@ -3608,10 +3610,12 @@ pub async fn update_bi_pivot_fields(
 
     // Save previous state for revert-on-cancel
     {
-        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivot_tables = pivot_state.pivot_tables.lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         if let Some((def, cache)) = pivot_tables.get(&pivot_id) {
-            pivot_state.previous_states.lock().unwrap()
-                .insert(pivot_id, (def.clone(), cache.clone()));
+            if let Ok(mut prev) = pivot_state.previous_states.lock() {
+                prev.insert(pivot_id, (def.clone(), cache.clone()));
+            }
         }
     }
 
@@ -3623,7 +3627,8 @@ pub async fn update_bi_pivot_fields(
     // If no fields at all, clear to empty pivot
     if !has_values && !has_dimensions && !has_filters && !has_slicer_fields {
         log_info!("PIVOT", "No fields assigned, clearing to empty pivot");
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         let (definition, _cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
@@ -3632,6 +3637,9 @@ pub async fn update_bi_pivot_fields(
         definition.column_fields.clear();
         definition.value_fields.clear();
         definition.filter_fields.clear();
+        definition.calculated_fields.clear();
+        definition.value_column_order.clear();
+        definition.slicer_filters.clear();
         definition.bump_version();
 
         let empty_cache = PivotCache::new(pivot_id, 0);
@@ -3643,7 +3651,8 @@ pub async fn update_bi_pivot_fields(
         drop(pivot_tables);
 
         // Replace cache with empty
-        let mut pt = pivot_state.pivot_tables.lock().unwrap();
+        let mut pt = pivot_state.pivot_tables.lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         if let Some((_, cache)) = pt.get_mut(&pivot_id) {
             *cache = empty_cache;
         }
@@ -3659,7 +3668,8 @@ pub async fn update_bi_pivot_fields(
     // any value_field in the pivot definition, so the engine renders blank data cells
     // — matching Excel's behaviour of showing distinct dimension values without aggregates.
     let synthetic_measure: Option<String> = if !has_values && (has_dimensions || has_filters || has_slicer_fields) {
-        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         bi_meta.get(&pivot_id)
             .and_then(|m| m.measures.first())
             .map(|m| m.name.clone())
@@ -3672,7 +3682,8 @@ pub async fn update_bi_pivot_fields(
     // across deselect/reselect) and show an empty pivot.
     if !has_values && synthetic_measure.is_none() && (has_dimensions || has_filters || has_slicer_fields) {
         log_info!("PIVOT", "No measures in model for synthetic query, saving fields only");
-        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let mut pivot_tables = pivot_state.pivot_tables.lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         let (definition, stored_cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
@@ -3685,6 +3696,8 @@ pub async fn update_bi_pivot_fields(
             .map(|f| PivotField::new(0, format!("{}.{}", f.table, f.column)))
             .collect();
         definition.value_fields.clear();
+        definition.calculated_fields.clear();
+        definition.value_column_order.clear();
         definition.filter_fields = request.filter_fields.iter()
             .map(|f| {
                 let field = PivotField::new(0, format!("{}.{}", f.table, f.column));
@@ -3710,7 +3723,8 @@ pub async fn update_bi_pivot_fields(
 
     // Get the connection_id from BI metadata
     let connection_id = {
-        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         bi_meta.get(&pivot_id)
             .map(|m| m.connection_id)
             .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?
@@ -3827,7 +3841,8 @@ pub async fn update_bi_pivot_fields(
     // Get the shared engine Arc for async query
     let t_query = Instant::now();
     let engine_arc = {
-        let connections = bi_state.connections.lock().unwrap();
+        let connections = bi_state.connections.lock()
+            .map_err(|e| format!("connections lock poisoned: {}", e))?;
         let conn = connections.get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
         conn.engine.clone().ok_or("No BI model loaded.")?
@@ -3842,7 +3857,8 @@ pub async fn update_bi_pivot_fields(
         // Collect all tables referenced by the query (dimensions + measure tables)
         let tables_to_refresh: Vec<String> = {
             let mut tables = referenced_tables.clone();
-            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            let bi_meta = pivot_state.bi_metadata.lock()
+                .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
             if let Some(meta) = bi_meta.get(&pivot_id) {
                 for measure_name in &query_measures {
                     if let Some(m) = meta.measures.iter().find(|m| m.name == *measure_name) {
@@ -3879,7 +3895,8 @@ pub async fn update_bi_pivot_fields(
             // an empty view.
             if synthetic_measure.is_some() {
                 log_info!("PIVOT", "Synthetic measure query failed ({}), saving fields only", e);
-                let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+                let mut pivot_tables = pivot_state.pivot_tables.lock()
+                    .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
                 let (definition, stored_cache) = pivot_tables
                     .get_mut(&pivot_id)
                     .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
@@ -3891,6 +3908,8 @@ pub async fn update_bi_pivot_fields(
                     .map(|f| PivotField::new(0, format!("{}.{}", f.table, f.column)))
                     .collect();
                 definition.value_fields.clear();
+                definition.calculated_fields.clear();
+                definition.value_column_order.clear();
                 definition.filter_fields = request.filter_fields.iter()
                     .map(|f| {
                         let field = PivotField::new(0, format!("{}.{}", f.table, f.column));
@@ -3972,7 +3991,8 @@ pub async fn update_bi_pivot_fields(
         cache_idx += 1;
     }
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock()
+        .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
     let (definition, stored_cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
@@ -4173,7 +4193,8 @@ pub async fn update_bi_pivot_fields(
 
     // Store last query + lookup column set in bi_metadata
     {
-        let mut bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        let mut bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         if let Some(meta) = bi_meta.get_mut(&pivot_id) {
             let group_fields: Vec<BiFieldRef> = request
                 .row_fields

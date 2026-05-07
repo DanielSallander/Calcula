@@ -527,6 +527,8 @@ export interface PivotRegionInfo {
   filterZones: FilterZoneInfo[];
   /** BI model info - present only for BI-backed pivots */
   biModel?: BiPivotModelInfo;
+  /** Source table name - present only for Table-linked pivots */
+  sourceTableName?: string;
 }
 
 /** Pivot region data for rendering placeholders */

@@ -390,6 +390,7 @@ async function checkPivotAtSelection(
         initialLayout,
         initialCalculatedFields: config.calculatedFields,
         biModel: pivotInfo.biModel,
+        sourceTableName: pivotInfo.sourceTableName,
       };
 
       openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);

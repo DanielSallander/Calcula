@@ -20,6 +20,7 @@ export interface PivotEditorViewData {
   initialLayout?: LayoutConfig;
   initialCalculatedFields?: CalculatedFieldDef[];
   biModel?: BiPivotModelInfo;
+  sourceTableName?: string;
 }
 
 /**
@@ -62,6 +63,7 @@ export function PivotEditorView({
       initialLayout={pivotData.initialLayout}
       initialCalculatedFields={pivotData.initialCalculatedFields}
       biModel={pivotData.biModel}
+      sourceTableName={pivotData.sourceTableName}
       onClose={onClose}
       onViewUpdate={onUpdate}
     />

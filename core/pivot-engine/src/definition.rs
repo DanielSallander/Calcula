@@ -701,11 +701,20 @@ impl PivotDefinition {
     }
 
     /// Returns the effective column ordering for the pivot output.
-    /// If `value_column_order` is set, uses it. Otherwise, returns all value
-    /// fields followed by all calculated fields (the default order).
+    /// If `value_column_order` is set and valid, uses it. Otherwise, returns
+    /// all value fields followed by all calculated fields (the default order).
     pub fn effective_value_column_order(&self) -> Vec<ValueColumnRef> {
         if !self.value_column_order.is_empty() {
-            return self.value_column_order.clone();
+            // Validate that all indices are in bounds — stale orders can occur
+            // when fields are cleared without clearing value_column_order.
+            let all_valid = self.value_column_order.iter().all(|r| match r {
+                ValueColumnRef::Value(i) => *i < self.value_fields.len(),
+                ValueColumnRef::Calculated(i) => *i < self.calculated_fields.len(),
+            });
+            if all_valid {
+                return self.value_column_order.clone();
+            }
+            // Fall through to default order if stale indices detected
         }
         let mut order = Vec::new();
         for i in 0..self.value_fields.len() {

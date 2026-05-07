@@ -62,6 +62,8 @@ pub struct Workbook {
     pub named_ranges: Vec<SavedNamedRange>,
     /// Ribbon filter definitions (Filter Pane)
     pub ribbon_filters: Vec<SavedRibbonFilter>,
+    /// Saved pivot layout configurations (persisted in .cala)
+    pub pivot_layouts: Vec<SavedPivotLayout>,
 }
 
 /// Workbook-level document properties.
@@ -204,6 +206,7 @@ impl Workbook {
             charts: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
+            pivot_layouts: Vec::new(),
         }
     }
 
@@ -223,6 +226,7 @@ impl Workbook {
             charts: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
+            pivot_layouts: Vec::new(),
         }
     }
 }
@@ -829,4 +833,27 @@ pub struct SavedNotebookCell {
     pub cells_modified: u32,
     pub duration_ms: u64,
     pub execution_index: Option<u32>,
+}
+
+// ============================================================================
+// Pivot Layouts
+// ============================================================================
+
+/// A saved pivot layout configuration that persists in the .cala file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPivotLayout {
+    pub id: u64,
+    pub name: String,
+    pub dsl_text: String,
+    pub description: Option<String>,
+    /// "table" or "bi"
+    pub source_type: String,
+    /// For table-sourced pivots: the Table object name
+    pub source_table_name: Option<String>,
+    /// For BI pivots: table names from the model
+    pub source_bi_tables: Vec<String>,
+    /// For BI pivots: measure names from the model
+    pub source_bi_measures: Vec<String>,
+    pub created_at: f64,
+    pub updated_at: f64,
 }

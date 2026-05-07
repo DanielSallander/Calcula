@@ -225,6 +225,7 @@ pub fn build_workbook_for_save_with_slicers(
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
     workbook.slicers = collect_slicers_for_save(slicer_state);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
+    workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     Ok(workbook)
 }
 
@@ -833,6 +834,7 @@ pub fn save_file(
     workbook.tables = collect_tables_for_save(&tables);
     workbook.slicers = collect_slicers_for_save(&slicer_state);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
+    workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state);
@@ -1150,6 +1152,9 @@ pub fn open_file(
 
     // Restore ribbon filters from workbook
     restore_ribbon_filters(&workbook.ribbon_filters, &ribbon_filter_state);
+
+    // Restore pivot layouts from workbook
+    *state.pivot_layouts.lock().unwrap() = workbook.pivot_layouts.clone();
 
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state);
@@ -1991,6 +1996,7 @@ pub fn auto_recover_save(
     workbook.tables = collect_tables_for_save(&tables);
     workbook.slicers = collect_slicers_for_save(&slicer_state);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
+    workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state);

@@ -4029,3 +4029,48 @@ export async function setWorkbookProperties(
 ): Promise<WorkbookProperties> {
   return invoke<WorkbookProperties>("set_workbook_properties", { props });
 }
+
+// ============================================================================
+// PIVOT LAYOUT PERSISTENCE
+// ============================================================================
+
+/** Request to save a pivot layout. */
+export interface SavePivotLayoutRequest {
+  id?: number;
+  name: string;
+  dslText: string;
+  description?: string;
+  sourceType: string;
+  sourceTableName?: string;
+  sourceBiTables: string[];
+  sourceBiMeasures: string[];
+}
+
+/** Response from loading a pivot layout. */
+export interface PivotLayoutResponse {
+  id: number;
+  name: string;
+  dslText: string;
+  description?: string;
+  sourceType: string;
+  sourceTableName?: string;
+  sourceBiTables: string[];
+  sourceBiMeasures: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Save (create or update) a pivot layout. Returns the layout ID. */
+export async function savePivotLayout(request: SavePivotLayoutRequest): Promise<number> {
+  return invoke<number>("save_pivot_layout", { request });
+}
+
+/** Get all saved pivot layouts. */
+export async function getPivotLayouts(): Promise<PivotLayoutResponse[]> {
+  return invoke<PivotLayoutResponse[]>("get_pivot_layouts");
+}
+
+/** Delete a pivot layout by ID. */
+export async function deletePivotLayout(id: number): Promise<void> {
+  return invoke<void>("delete_pivot_layout", { id });
+}
