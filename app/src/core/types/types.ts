@@ -1070,7 +1070,8 @@ export function isFormulaExpectingReference(value: string, cursorPosition?: numb
     "^",
     "&", // Operators
     "(",
-    ",", // Function delimiters
+    ",",
+    ";", // Function delimiters (comma for en, semicolon for sv etc.)
     "=",
     "<",
     ">", // Comparison operators (also handles <=, >=, <>)

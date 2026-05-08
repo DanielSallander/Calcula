@@ -68,7 +68,7 @@ export function FormulaBar(): React.ReactElement {
       const currentValue = editing.value;
       if (currentValue === "=" || currentValue === "") {
         updateValue(template);
-      } else if (currentValue.endsWith("(") || currentValue.endsWith(",") || currentValue.endsWith("=")) {
+      } else if (currentValue.endsWith("(") || currentValue.endsWith(",") || currentValue.endsWith(";") || currentValue.endsWith("=")) {
         updateValue(currentValue + functionName + "(");
       } else {
         updateValue(currentValue + functionName + "(");

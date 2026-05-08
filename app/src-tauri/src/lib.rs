@@ -8,15 +8,26 @@ use engine::{
     Cell, CellError, CellStyle, CellValue, EvalResult, Evaluator, Grid, NumberFormat,
     StyleRegistry, MultiSheetContext,
 };
+// Engine re-exports parser AST types — they are the same types.
+// No conversion needed between parser and engine expressions.
 use engine::{
-    BinaryOperator as EngineBinaryOp, BuiltinFunction as EngineBuiltinFn,
-    Expression as EngineExpr, UnaryOperator as EngineUnaryOp, Value as EngineValue,
+    BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value,
 };
-use parser::ast::{
-    BinaryOperator as ParserBinaryOp, BuiltinFunction as ParserBuiltinFn,
-    Expression as ParserExpr, TableSpecifier as ParserTableSpecifier,
-    UnaryOperator as ParserUnaryOp, Value as ParserValue,
-};
+use parser::ast::TableSpecifier;
+
+// Legacy aliases kept for backward compatibility with existing code in this file.
+// These can be removed incrementally as code is updated.
+type EngineExpr = Expression;
+type ParserExpr = Expression;
+type EngineBuiltinFn = BuiltinFunction;
+type ParserBuiltinFn = BuiltinFunction;
+type EngineBinaryOp = BinaryOperator;
+type ParserBinaryOp = BinaryOperator;
+type EngineUnaryOp = UnaryOperator;
+type ParserUnaryOp = UnaryOperator;
+type EngineValue = Value;
+type ParserValue = Value;
+type ParserTableSpecifier = TableSpecifier;
 use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -517,514 +528,17 @@ pub fn format_number_simple(n: f64) -> String {
 // EXPRESSION CONVERSION (Parser -> Engine)
 // ============================================================================
 
-fn convert_value(v: &ParserValue) -> EngineValue {
-    match v {
-        ParserValue::Number(n) => EngineValue::Number(*n),
-        ParserValue::String(s) => EngineValue::String(s.clone()),
-        ParserValue::Boolean(b) => EngineValue::Boolean(*b),
-    }
-}
+// Since parser and engine now share the same AST types, conversion is just cloning.
 
-fn convert_binary_op(op: &ParserBinaryOp) -> EngineBinaryOp {
-    match op {
-        ParserBinaryOp::Add => EngineBinaryOp::Add,
-        ParserBinaryOp::Subtract => EngineBinaryOp::Subtract,
-        ParserBinaryOp::Multiply => EngineBinaryOp::Multiply,
-        ParserBinaryOp::Divide => EngineBinaryOp::Divide,
-        ParserBinaryOp::Power => EngineBinaryOp::Power,
-        ParserBinaryOp::Concat => EngineBinaryOp::Concat,
-        ParserBinaryOp::Equal => EngineBinaryOp::Equal,
-        ParserBinaryOp::NotEqual => EngineBinaryOp::NotEqual,
-        ParserBinaryOp::LessThan => EngineBinaryOp::LessThan,
-        ParserBinaryOp::GreaterThan => EngineBinaryOp::GreaterThan,
-        ParserBinaryOp::LessEqual => EngineBinaryOp::LessEqual,
-        ParserBinaryOp::GreaterEqual => EngineBinaryOp::GreaterEqual,
-    }
-}
+fn convert_value(v: &ParserValue) -> EngineValue { v.clone() }
+fn convert_binary_op(op: &ParserBinaryOp) -> EngineBinaryOp { *op }
+fn convert_unary_op(op: &ParserUnaryOp) -> EngineUnaryOp { *op }
 
-fn convert_unary_op(op: &ParserUnaryOp) -> EngineUnaryOp {
-    match op {
-        ParserUnaryOp::Negate => EngineUnaryOp::Negate,
-    }
-}
-
+/// Convert a parser BuiltinFunction to an engine BuiltinFunction.
+/// Since engine now re-exports the parser's type, this is just a clone.
+/// New functions added to the parser enum are automatically available.
 fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
-    match func {
-        // Aggregate functions
-        ParserBuiltinFn::Sum => EngineBuiltinFn::Sum,
-        ParserBuiltinFn::Average => EngineBuiltinFn::Average,
-        ParserBuiltinFn::Min => EngineBuiltinFn::Min,
-        ParserBuiltinFn::Max => EngineBuiltinFn::Max,
-        ParserBuiltinFn::Count => EngineBuiltinFn::Count,
-        ParserBuiltinFn::CountA => EngineBuiltinFn::CountA,
-
-        // Conditional aggregates
-        ParserBuiltinFn::SumIf => EngineBuiltinFn::SumIf,
-        ParserBuiltinFn::SumIfs => EngineBuiltinFn::SumIfs,
-        ParserBuiltinFn::CountIf => EngineBuiltinFn::CountIf,
-        ParserBuiltinFn::CountIfs => EngineBuiltinFn::CountIfs,
-        ParserBuiltinFn::AverageIf => EngineBuiltinFn::AverageIf,
-        ParserBuiltinFn::AverageIfs => EngineBuiltinFn::AverageIfs,
-        ParserBuiltinFn::CountBlank => EngineBuiltinFn::CountBlank,
-        ParserBuiltinFn::MinIfs => EngineBuiltinFn::MinIfs,
-        ParserBuiltinFn::MaxIfs => EngineBuiltinFn::MaxIfs,
-
-        // Logical functions
-        ParserBuiltinFn::If => EngineBuiltinFn::If,
-        ParserBuiltinFn::And => EngineBuiltinFn::And,
-        ParserBuiltinFn::Or => EngineBuiltinFn::Or,
-        ParserBuiltinFn::Not => EngineBuiltinFn::Not,
-        ParserBuiltinFn::True => EngineBuiltinFn::True,
-        ParserBuiltinFn::False => EngineBuiltinFn::False,
-        ParserBuiltinFn::IfError => EngineBuiltinFn::IfError,
-        ParserBuiltinFn::IfNa => EngineBuiltinFn::IfNa,
-        ParserBuiltinFn::Ifs => EngineBuiltinFn::Ifs,
-        ParserBuiltinFn::Switch => EngineBuiltinFn::Switch,
-        ParserBuiltinFn::Xor => EngineBuiltinFn::Xor,
-
-        // Math functions
-        ParserBuiltinFn::Abs => EngineBuiltinFn::Abs,
-        ParserBuiltinFn::Round => EngineBuiltinFn::Round,
-        ParserBuiltinFn::Floor => EngineBuiltinFn::Floor,
-        ParserBuiltinFn::Ceiling => EngineBuiltinFn::Ceiling,
-        ParserBuiltinFn::Sqrt => EngineBuiltinFn::Sqrt,
-        ParserBuiltinFn::Power => EngineBuiltinFn::Power,
-        ParserBuiltinFn::Mod => EngineBuiltinFn::Mod,
-        ParserBuiltinFn::Int => EngineBuiltinFn::Int,
-        ParserBuiltinFn::Sign => EngineBuiltinFn::Sign,
-        ParserBuiltinFn::SumProduct => EngineBuiltinFn::SumProduct,
-        ParserBuiltinFn::SumX2MY2 => EngineBuiltinFn::SumX2MY2,
-        ParserBuiltinFn::SumX2PY2 => EngineBuiltinFn::SumX2PY2,
-        ParserBuiltinFn::SumXMY2 => EngineBuiltinFn::SumXMY2,
-        ParserBuiltinFn::Product => EngineBuiltinFn::Product,
-        ParserBuiltinFn::Rand => EngineBuiltinFn::Rand,
-        ParserBuiltinFn::RandBetween => EngineBuiltinFn::RandBetween,
-        ParserBuiltinFn::Pi => EngineBuiltinFn::Pi,
-        ParserBuiltinFn::Log => EngineBuiltinFn::Log,
-        ParserBuiltinFn::Log10 => EngineBuiltinFn::Log10,
-        ParserBuiltinFn::Ln => EngineBuiltinFn::Ln,
-        ParserBuiltinFn::Exp => EngineBuiltinFn::Exp,
-        ParserBuiltinFn::Sin => EngineBuiltinFn::Sin,
-        ParserBuiltinFn::Cos => EngineBuiltinFn::Cos,
-        ParserBuiltinFn::Tan => EngineBuiltinFn::Tan,
-        ParserBuiltinFn::Asin => EngineBuiltinFn::Asin,
-        ParserBuiltinFn::Acos => EngineBuiltinFn::Acos,
-        ParserBuiltinFn::Atan => EngineBuiltinFn::Atan,
-        ParserBuiltinFn::Atan2 => EngineBuiltinFn::Atan2,
-        ParserBuiltinFn::RoundUp => EngineBuiltinFn::RoundUp,
-        ParserBuiltinFn::RoundDown => EngineBuiltinFn::RoundDown,
-        ParserBuiltinFn::Trunc => EngineBuiltinFn::Trunc,
-        ParserBuiltinFn::Even => EngineBuiltinFn::Even,
-        ParserBuiltinFn::Odd => EngineBuiltinFn::Odd,
-        ParserBuiltinFn::Gcd => EngineBuiltinFn::Gcd,
-        ParserBuiltinFn::Lcm => EngineBuiltinFn::Lcm,
-        ParserBuiltinFn::Combin => EngineBuiltinFn::Combin,
-        ParserBuiltinFn::Fact => EngineBuiltinFn::Fact,
-        ParserBuiltinFn::Degrees => EngineBuiltinFn::Degrees,
-        ParserBuiltinFn::Radians => EngineBuiltinFn::Radians,
-
-        // Text functions
-        ParserBuiltinFn::Len => EngineBuiltinFn::Len,
-        ParserBuiltinFn::Upper => EngineBuiltinFn::Upper,
-        ParserBuiltinFn::Lower => EngineBuiltinFn::Lower,
-        ParserBuiltinFn::Trim => EngineBuiltinFn::Trim,
-        ParserBuiltinFn::Concatenate => EngineBuiltinFn::Concatenate,
-        ParserBuiltinFn::Left => EngineBuiltinFn::Left,
-        ParserBuiltinFn::Right => EngineBuiltinFn::Right,
-        ParserBuiltinFn::Mid => EngineBuiltinFn::Mid,
-        ParserBuiltinFn::Rept => EngineBuiltinFn::Rept,
-        ParserBuiltinFn::Text => EngineBuiltinFn::Text,
-        ParserBuiltinFn::Find => EngineBuiltinFn::Find,
-        ParserBuiltinFn::Search => EngineBuiltinFn::Search,
-        ParserBuiltinFn::Substitute => EngineBuiltinFn::Substitute,
-        ParserBuiltinFn::Replace => EngineBuiltinFn::Replace,
-        ParserBuiltinFn::ValueFn => EngineBuiltinFn::ValueFn,
-        ParserBuiltinFn::Exact => EngineBuiltinFn::Exact,
-        ParserBuiltinFn::Proper => EngineBuiltinFn::Proper,
-        ParserBuiltinFn::Char => EngineBuiltinFn::Char,
-        ParserBuiltinFn::Code => EngineBuiltinFn::Code,
-        ParserBuiltinFn::Clean => EngineBuiltinFn::Clean,
-        ParserBuiltinFn::NumberValue => EngineBuiltinFn::NumberValue,
-        ParserBuiltinFn::TFn => EngineBuiltinFn::TFn,
-
-        // Date & Time functions
-        ParserBuiltinFn::Today => EngineBuiltinFn::Today,
-        ParserBuiltinFn::Now => EngineBuiltinFn::Now,
-        ParserBuiltinFn::Date => EngineBuiltinFn::Date,
-        ParserBuiltinFn::Year => EngineBuiltinFn::Year,
-        ParserBuiltinFn::Month => EngineBuiltinFn::Month,
-        ParserBuiltinFn::Day => EngineBuiltinFn::Day,
-        ParserBuiltinFn::Hour => EngineBuiltinFn::Hour,
-        ParserBuiltinFn::Minute => EngineBuiltinFn::Minute,
-        ParserBuiltinFn::Second => EngineBuiltinFn::Second,
-        ParserBuiltinFn::DateValue => EngineBuiltinFn::DateValue,
-        ParserBuiltinFn::TimeValue => EngineBuiltinFn::TimeValue,
-        ParserBuiltinFn::EDate => EngineBuiltinFn::EDate,
-        ParserBuiltinFn::EOMonth => EngineBuiltinFn::EOMonth,
-        ParserBuiltinFn::NetworkDays => EngineBuiltinFn::NetworkDays,
-        ParserBuiltinFn::WorkDay => EngineBuiltinFn::WorkDay,
-        ParserBuiltinFn::DateDif => EngineBuiltinFn::DateDif,
-        ParserBuiltinFn::Weekday => EngineBuiltinFn::Weekday,
-        ParserBuiltinFn::WeekNum => EngineBuiltinFn::WeekNum,
-
-        // Information functions
-        ParserBuiltinFn::IsNumber => EngineBuiltinFn::IsNumber,
-        ParserBuiltinFn::IsText => EngineBuiltinFn::IsText,
-        ParserBuiltinFn::IsBlank => EngineBuiltinFn::IsBlank,
-        ParserBuiltinFn::IsError => EngineBuiltinFn::IsError,
-        ParserBuiltinFn::IsNa => EngineBuiltinFn::IsNa,
-        ParserBuiltinFn::IsErr => EngineBuiltinFn::IsErr,
-        ParserBuiltinFn::IsLogical => EngineBuiltinFn::IsLogical,
-        ParserBuiltinFn::IsOdd => EngineBuiltinFn::IsOdd,
-        ParserBuiltinFn::IsEven => EngineBuiltinFn::IsEven,
-        ParserBuiltinFn::TypeFn => EngineBuiltinFn::TypeFn,
-        ParserBuiltinFn::NFn => EngineBuiltinFn::NFn,
-        ParserBuiltinFn::Na => EngineBuiltinFn::Na,
-        ParserBuiltinFn::IsFormula => EngineBuiltinFn::IsFormula,
-
-        // Lookup & Reference functions
-        ParserBuiltinFn::XLookup => EngineBuiltinFn::XLookup,
-        ParserBuiltinFn::XLookups => EngineBuiltinFn::XLookups,
-        ParserBuiltinFn::Index => EngineBuiltinFn::Index,
-        ParserBuiltinFn::Match => EngineBuiltinFn::Match,
-        ParserBuiltinFn::Choose => EngineBuiltinFn::Choose,
-        ParserBuiltinFn::Indirect => EngineBuiltinFn::Indirect,
-        ParserBuiltinFn::Offset => EngineBuiltinFn::Offset,
-        ParserBuiltinFn::Address => EngineBuiltinFn::Address,
-        ParserBuiltinFn::Rows => EngineBuiltinFn::Rows,
-        ParserBuiltinFn::Columns => EngineBuiltinFn::Columns,
-        ParserBuiltinFn::Transpose => EngineBuiltinFn::Transpose,
-
-        // Statistical functions
-        ParserBuiltinFn::Median => EngineBuiltinFn::Median,
-        ParserBuiltinFn::Stdev => EngineBuiltinFn::Stdev,
-        ParserBuiltinFn::StdevP => EngineBuiltinFn::StdevP,
-        ParserBuiltinFn::Var => EngineBuiltinFn::Var,
-        ParserBuiltinFn::VarP => EngineBuiltinFn::VarP,
-        ParserBuiltinFn::Large => EngineBuiltinFn::Large,
-        ParserBuiltinFn::Small => EngineBuiltinFn::Small,
-        ParserBuiltinFn::Rank => EngineBuiltinFn::Rank,
-        ParserBuiltinFn::Percentile => EngineBuiltinFn::Percentile,
-        ParserBuiltinFn::Quartile => EngineBuiltinFn::Quartile,
-        ParserBuiltinFn::Mode => EngineBuiltinFn::Mode,
-        ParserBuiltinFn::Frequency => EngineBuiltinFn::Frequency,
-
-        // Financial functions
-        ParserBuiltinFn::Pmt => EngineBuiltinFn::Pmt,
-        ParserBuiltinFn::Pv => EngineBuiltinFn::Pv,
-        ParserBuiltinFn::Fv => EngineBuiltinFn::Fv,
-        ParserBuiltinFn::Npv => EngineBuiltinFn::Npv,
-        ParserBuiltinFn::Irr => EngineBuiltinFn::Irr,
-        ParserBuiltinFn::Rate => EngineBuiltinFn::Rate,
-        ParserBuiltinFn::Nper => EngineBuiltinFn::Nper,
-        ParserBuiltinFn::Sln => EngineBuiltinFn::Sln,
-        ParserBuiltinFn::Db => EngineBuiltinFn::Db,
-        ParserBuiltinFn::Ddb => EngineBuiltinFn::Ddb,
-
-        // UI GET functions
-        ParserBuiltinFn::GetRowHeight => EngineBuiltinFn::GetRowHeight,
-        ParserBuiltinFn::GetColumnWidth => EngineBuiltinFn::GetColumnWidth,
-        ParserBuiltinFn::GetCellFillColor => EngineBuiltinFn::GetCellFillColor,
-
-        // Reference functions
-        ParserBuiltinFn::Row => EngineBuiltinFn::Row,
-        ParserBuiltinFn::Column => EngineBuiltinFn::Column,
-
-        // Advanced / Lambda
-        ParserBuiltinFn::Let => EngineBuiltinFn::Let,
-        ParserBuiltinFn::TextJoin => EngineBuiltinFn::TextJoin,
-        ParserBuiltinFn::Lambda => EngineBuiltinFn::Lambda,
-        ParserBuiltinFn::Map => EngineBuiltinFn::Map,
-        ParserBuiltinFn::Reduce => EngineBuiltinFn::Reduce,
-        ParserBuiltinFn::Scan => EngineBuiltinFn::Scan,
-        ParserBuiltinFn::MakeArray => EngineBuiltinFn::MakeArray,
-        ParserBuiltinFn::ByRow => EngineBuiltinFn::ByRow,
-        ParserBuiltinFn::ByCol => EngineBuiltinFn::ByCol,
-
-        ParserBuiltinFn::Filter => EngineBuiltinFn::Filter,
-        ParserBuiltinFn::Sort => EngineBuiltinFn::Sort,
-        ParserBuiltinFn::SortBy => EngineBuiltinFn::SortBy,
-        ParserBuiltinFn::Unique => EngineBuiltinFn::Unique,
-        ParserBuiltinFn::Sequence => EngineBuiltinFn::Sequence,
-        ParserBuiltinFn::RandArray => EngineBuiltinFn::RandArray,
-        ParserBuiltinFn::GroupBy => EngineBuiltinFn::GroupBy,
-        ParserBuiltinFn::PivotBy => EngineBuiltinFn::PivotBy,
-        ParserBuiltinFn::GetPivotData => EngineBuiltinFn::GetPivotData,
-
-        // Collection functions (3D cells)
-        ParserBuiltinFn::Collect => EngineBuiltinFn::Collect,
-        ParserBuiltinFn::DictFn => EngineBuiltinFn::DictFn,
-        ParserBuiltinFn::Keys => EngineBuiltinFn::Keys,
-        ParserBuiltinFn::Values => EngineBuiltinFn::Values,
-        ParserBuiltinFn::Contains => EngineBuiltinFn::Contains,
-        ParserBuiltinFn::IsList => EngineBuiltinFn::IsList,
-        ParserBuiltinFn::IsDict => EngineBuiltinFn::IsDict,
-        ParserBuiltinFn::Flatten => EngineBuiltinFn::Flatten,
-        ParserBuiltinFn::Take => EngineBuiltinFn::Take,
-        ParserBuiltinFn::Drop => EngineBuiltinFn::Drop,
-        ParserBuiltinFn::Append => EngineBuiltinFn::Append,
-        ParserBuiltinFn::Merge => EngineBuiltinFn::Merge,
-        ParserBuiltinFn::HStack => EngineBuiltinFn::HStack,
-
-        // File functions
-        ParserBuiltinFn::FileRead => EngineBuiltinFn::FileRead,
-        ParserBuiltinFn::FileLines => EngineBuiltinFn::FileLines,
-        ParserBuiltinFn::FileExists => EngineBuiltinFn::FileExists,
-
-        // Subtotal function
-        ParserBuiltinFn::Subtotal => EngineBuiltinFn::Subtotal,
-
-        // Additional date functions
-        ParserBuiltinFn::Days => EngineBuiltinFn::Days,
-        ParserBuiltinFn::Time => EngineBuiltinFn::Time,
-
-        // Lookup functions (legacy)
-        ParserBuiltinFn::VLookup => EngineBuiltinFn::VLookup,
-        ParserBuiltinFn::HLookup => EngineBuiltinFn::HLookup,
-        ParserBuiltinFn::Lookup => EngineBuiltinFn::Lookup,
-
-        // Hyperbolic & reciprocal trig
-        ParserBuiltinFn::Sinh => EngineBuiltinFn::Sinh,
-        ParserBuiltinFn::Cosh => EngineBuiltinFn::Cosh,
-        ParserBuiltinFn::Tanh => EngineBuiltinFn::Tanh,
-        ParserBuiltinFn::Cot => EngineBuiltinFn::Cot,
-        ParserBuiltinFn::Coth => EngineBuiltinFn::Coth,
-        ParserBuiltinFn::Csc => EngineBuiltinFn::Csc,
-        ParserBuiltinFn::Csch => EngineBuiltinFn::Csch,
-        ParserBuiltinFn::Sec => EngineBuiltinFn::Sec,
-        ParserBuiltinFn::Sech => EngineBuiltinFn::Sech,
-        ParserBuiltinFn::Acot => EngineBuiltinFn::Acot,
-        // Rounding variants
-        ParserBuiltinFn::CeilingMath => EngineBuiltinFn::CeilingMath,
-        ParserBuiltinFn::CeilingPrecise => EngineBuiltinFn::CeilingPrecise,
-        ParserBuiltinFn::FloorMath => EngineBuiltinFn::FloorMath,
-        ParserBuiltinFn::FloorPrecise => EngineBuiltinFn::FloorPrecise,
-        ParserBuiltinFn::IsoCeiling => EngineBuiltinFn::IsoCeiling,
-        // Additional math (Group 3)
-        ParserBuiltinFn::Multinomial => EngineBuiltinFn::Multinomial,
-        ParserBuiltinFn::Combina => EngineBuiltinFn::Combina,
-        ParserBuiltinFn::FactDouble => EngineBuiltinFn::FactDouble,
-        ParserBuiltinFn::SqrtPi => EngineBuiltinFn::SqrtPi,
-        // Aggregate
-        ParserBuiltinFn::Aggregate => EngineBuiltinFn::Aggregate,
-        // Web
-        ParserBuiltinFn::EncodeUrl => EngineBuiltinFn::EncodeUrl,
-
-        // Additional math functions
-        ParserBuiltinFn::MRound => EngineBuiltinFn::MRound,
-        ParserBuiltinFn::Quotient => EngineBuiltinFn::Quotient,
-        ParserBuiltinFn::SumSq => EngineBuiltinFn::SumSq,
-        ParserBuiltinFn::Roman => EngineBuiltinFn::Roman,
-        ParserBuiltinFn::Arabic => EngineBuiltinFn::Arabic,
-        ParserBuiltinFn::Base => EngineBuiltinFn::Base,
-        ParserBuiltinFn::Decimal => EngineBuiltinFn::Decimal,
-
-        // Additional text functions
-        ParserBuiltinFn::Dollar => EngineBuiltinFn::Dollar,
-        ParserBuiltinFn::Euro => EngineBuiltinFn::Euro,
-        ParserBuiltinFn::Fixed => EngineBuiltinFn::Fixed,
-        ParserBuiltinFn::Unichar => EngineBuiltinFn::Unichar,
-        ParserBuiltinFn::Unicode => EngineBuiltinFn::Unicode,
-
-        // Additional information functions
-        ParserBuiltinFn::ErrorType => EngineBuiltinFn::ErrorType,
-        ParserBuiltinFn::IsNonText => EngineBuiltinFn::IsNonText,
-        ParserBuiltinFn::IsRef => EngineBuiltinFn::IsRef,
-        ParserBuiltinFn::Sheet => EngineBuiltinFn::Sheet,
-        ParserBuiltinFn::Sheets => EngineBuiltinFn::Sheets,
-
-        // New probability distributions
-        ParserBuiltinFn::NormInv => EngineBuiltinFn::NormInv,
-        ParserBuiltinFn::NormSDist => EngineBuiltinFn::NormSDist,
-        ParserBuiltinFn::NormSInv => EngineBuiltinFn::NormSInv,
-        ParserBuiltinFn::TDist2T => EngineBuiltinFn::TDist2T,
-        ParserBuiltinFn::TDistRT => EngineBuiltinFn::TDistRT,
-        ParserBuiltinFn::TInv => EngineBuiltinFn::TInv,
-        ParserBuiltinFn::TInv2T => EngineBuiltinFn::TInv2T,
-        ParserBuiltinFn::TTest => EngineBuiltinFn::TTest,
-        ParserBuiltinFn::ChisqDistRT => EngineBuiltinFn::ChisqDistRT,
-        ParserBuiltinFn::ChisqInv => EngineBuiltinFn::ChisqInv,
-        ParserBuiltinFn::ChisqInvRT => EngineBuiltinFn::ChisqInvRT,
-        ParserBuiltinFn::ChisqTest => EngineBuiltinFn::ChisqTest,
-        ParserBuiltinFn::FDistRT => EngineBuiltinFn::FDistRT,
-        ParserBuiltinFn::FInv => EngineBuiltinFn::FInv,
-        ParserBuiltinFn::FInvRT => EngineBuiltinFn::FInvRT,
-        ParserBuiltinFn::FTest => EngineBuiltinFn::FTest,
-        ParserBuiltinFn::BinomInv => EngineBuiltinFn::BinomInv,
-        ParserBuiltinFn::BinomDistRange => EngineBuiltinFn::BinomDistRange,
-        ParserBuiltinFn::BetaDist => EngineBuiltinFn::BetaDist,
-        ParserBuiltinFn::BetaInv => EngineBuiltinFn::BetaInv,
-        ParserBuiltinFn::GammaDist => EngineBuiltinFn::GammaDist,
-        ParserBuiltinFn::GammaInv => EngineBuiltinFn::GammaInv,
-        ParserBuiltinFn::GammaFn => EngineBuiltinFn::GammaFn,
-        ParserBuiltinFn::GammaLnFn => EngineBuiltinFn::GammaLnFn,
-        ParserBuiltinFn::WeibullDist => EngineBuiltinFn::WeibullDist,
-        ParserBuiltinFn::ExponDist => EngineBuiltinFn::ExponDist,
-        ParserBuiltinFn::LognormDist => EngineBuiltinFn::LognormDist,
-        ParserBuiltinFn::LognormInv => EngineBuiltinFn::LognormInv,
-        ParserBuiltinFn::HypgeomDist => EngineBuiltinFn::HypgeomDist,
-        ParserBuiltinFn::NegbinomDist => EngineBuiltinFn::NegbinomDist,
-        // Descriptive/Analytical
-        ParserBuiltinFn::Correl => EngineBuiltinFn::Correl,
-        ParserBuiltinFn::Pearson => EngineBuiltinFn::Pearson,
-        ParserBuiltinFn::Rsq => EngineBuiltinFn::Rsq,
-        ParserBuiltinFn::Slope => EngineBuiltinFn::Slope,
-        ParserBuiltinFn::Intercept => EngineBuiltinFn::Intercept,
-        ParserBuiltinFn::Steyx => EngineBuiltinFn::Steyx,
-        ParserBuiltinFn::CovarianceP => EngineBuiltinFn::CovarianceP,
-        ParserBuiltinFn::CovarianceS => EngineBuiltinFn::CovarianceS,
-        ParserBuiltinFn::Kurt => EngineBuiltinFn::Kurt,
-        ParserBuiltinFn::Skew => EngineBuiltinFn::Skew,
-        ParserBuiltinFn::SkewP => EngineBuiltinFn::SkewP,
-        ParserBuiltinFn::Avedev => EngineBuiltinFn::Avedev,
-        ParserBuiltinFn::Devsq => EngineBuiltinFn::Devsq,
-        ParserBuiltinFn::Geomean => EngineBuiltinFn::Geomean,
-        ParserBuiltinFn::Harmean => EngineBuiltinFn::Harmean,
-        ParserBuiltinFn::Trimmean => EngineBuiltinFn::Trimmean,
-        ParserBuiltinFn::Standardize => EngineBuiltinFn::Standardize,
-        ParserBuiltinFn::PercentileExc => EngineBuiltinFn::PercentileExc,
-        ParserBuiltinFn::PercentRankExc => EngineBuiltinFn::PercentRankExc,
-        ParserBuiltinFn::QuartileExc => EngineBuiltinFn::QuartileExc,
-        ParserBuiltinFn::Prob => EngineBuiltinFn::Prob,
-        ParserBuiltinFn::Fisher => EngineBuiltinFn::Fisher,
-        ParserBuiltinFn::FisherInv => EngineBuiltinFn::FisherInv,
-        ParserBuiltinFn::Permut => EngineBuiltinFn::Permut,
-        ParserBuiltinFn::PermutationA => EngineBuiltinFn::PermutationA,
-        ParserBuiltinFn::Phi => EngineBuiltinFn::Phi,
-        ParserBuiltinFn::Gauss => EngineBuiltinFn::Gauss,
-        // Forecasting
-        ParserBuiltinFn::ForecastLinear => EngineBuiltinFn::ForecastLinear,
-        ParserBuiltinFn::ForecastEts => EngineBuiltinFn::ForecastEts,
-        ParserBuiltinFn::ForecastEtsConfint => EngineBuiltinFn::ForecastEtsConfint,
-        ParserBuiltinFn::ForecastEtsSeason => EngineBuiltinFn::ForecastEtsSeason,
-        ParserBuiltinFn::ForecastEtsStat => EngineBuiltinFn::ForecastEtsStat,
-        // Statistical version variants
-        ParserBuiltinFn::AverageA => EngineBuiltinFn::AverageA,
-        ParserBuiltinFn::MaxA => EngineBuiltinFn::MaxA,
-        ParserBuiltinFn::MinA => EngineBuiltinFn::MinA,
-        ParserBuiltinFn::StdevA => EngineBuiltinFn::StdevA,
-        ParserBuiltinFn::StdevPA => EngineBuiltinFn::StdevPA,
-        ParserBuiltinFn::VarA => EngineBuiltinFn::VarA,
-        ParserBuiltinFn::VarPA => EngineBuiltinFn::VarPA,
-        // Bond & Security financial
-        ParserBuiltinFn::Accrint => EngineBuiltinFn::Accrint,
-        ParserBuiltinFn::Accrintm => EngineBuiltinFn::Accrintm,
-        ParserBuiltinFn::PriceFn => EngineBuiltinFn::PriceFn,
-        ParserBuiltinFn::PriceDisc => EngineBuiltinFn::PriceDisc,
-        ParserBuiltinFn::PriceMat => EngineBuiltinFn::PriceMat,
-        ParserBuiltinFn::YieldFn => EngineBuiltinFn::YieldFn,
-        ParserBuiltinFn::YieldDisc => EngineBuiltinFn::YieldDisc,
-        ParserBuiltinFn::YieldMat => EngineBuiltinFn::YieldMat,
-        ParserBuiltinFn::DurationFn => EngineBuiltinFn::DurationFn,
-        ParserBuiltinFn::Mduration => EngineBuiltinFn::Mduration,
-        ParserBuiltinFn::Disc => EngineBuiltinFn::Disc,
-        ParserBuiltinFn::Intrate => EngineBuiltinFn::Intrate,
-        ParserBuiltinFn::Received => EngineBuiltinFn::Received,
-        ParserBuiltinFn::Coupdaybs => EngineBuiltinFn::Coupdaybs,
-        ParserBuiltinFn::Coupdays => EngineBuiltinFn::Coupdays,
-        ParserBuiltinFn::Coupdaysnc => EngineBuiltinFn::Coupdaysnc,
-        ParserBuiltinFn::Coupncd => EngineBuiltinFn::Coupncd,
-        ParserBuiltinFn::Coupnum => EngineBuiltinFn::Coupnum,
-        ParserBuiltinFn::Couppcd => EngineBuiltinFn::Couppcd,
-        // Treasury
-        ParserBuiltinFn::TbillEq => EngineBuiltinFn::TbillEq,
-        ParserBuiltinFn::TbillPrice => EngineBuiltinFn::TbillPrice,
-        ParserBuiltinFn::TbillYield => EngineBuiltinFn::TbillYield,
-        // Other financial
-        ParserBuiltinFn::DollarDe => EngineBuiltinFn::DollarDe,
-        ParserBuiltinFn::DollarFr => EngineBuiltinFn::DollarFr,
-        ParserBuiltinFn::Pduration => EngineBuiltinFn::Pduration,
-        ParserBuiltinFn::Rri => EngineBuiltinFn::Rri,
-        ParserBuiltinFn::Ispmt => EngineBuiltinFn::Ispmt,
-        ParserBuiltinFn::Amordegrc => EngineBuiltinFn::Amordegrc,
-        ParserBuiltinFn::Amorlinc => EngineBuiltinFn::Amorlinc,
-        ParserBuiltinFn::OddfPrice => EngineBuiltinFn::OddfPrice,
-        ParserBuiltinFn::OddfYield => EngineBuiltinFn::OddfYield,
-        ParserBuiltinFn::OddlPrice => EngineBuiltinFn::OddlPrice,
-        ParserBuiltinFn::OddlYield => EngineBuiltinFn::OddlYield,
-        // Engineering - Base conversion
-        ParserBuiltinFn::Bin2Dec => EngineBuiltinFn::Bin2Dec,
-        ParserBuiltinFn::Bin2Hex => EngineBuiltinFn::Bin2Hex,
-        ParserBuiltinFn::Bin2Oct => EngineBuiltinFn::Bin2Oct,
-        ParserBuiltinFn::Dec2Bin => EngineBuiltinFn::Dec2Bin,
-        ParserBuiltinFn::Dec2Hex => EngineBuiltinFn::Dec2Hex,
-        ParserBuiltinFn::Dec2Oct => EngineBuiltinFn::Dec2Oct,
-        ParserBuiltinFn::Hex2Bin => EngineBuiltinFn::Hex2Bin,
-        ParserBuiltinFn::Hex2Dec => EngineBuiltinFn::Hex2Dec,
-        ParserBuiltinFn::Hex2Oct => EngineBuiltinFn::Hex2Oct,
-        ParserBuiltinFn::Oct2Bin => EngineBuiltinFn::Oct2Bin,
-        ParserBuiltinFn::Oct2Dec => EngineBuiltinFn::Oct2Dec,
-        ParserBuiltinFn::Oct2Hex => EngineBuiltinFn::Oct2Hex,
-        // Engineering - Bit operations
-        ParserBuiltinFn::BitAnd => EngineBuiltinFn::BitAnd,
-        ParserBuiltinFn::BitOr => EngineBuiltinFn::BitOr,
-        ParserBuiltinFn::BitXor => EngineBuiltinFn::BitXor,
-        ParserBuiltinFn::BitLShift => EngineBuiltinFn::BitLShift,
-        ParserBuiltinFn::BitRShift => EngineBuiltinFn::BitRShift,
-        // Engineering - Complex numbers
-        ParserBuiltinFn::ComplexFn => EngineBuiltinFn::ComplexFn,
-        ParserBuiltinFn::ImAbs => EngineBuiltinFn::ImAbs,
-        ParserBuiltinFn::Imaginary => EngineBuiltinFn::Imaginary,
-        ParserBuiltinFn::ImReal => EngineBuiltinFn::ImReal,
-        ParserBuiltinFn::ImArgument => EngineBuiltinFn::ImArgument,
-        ParserBuiltinFn::ImConjugate => EngineBuiltinFn::ImConjugate,
-        ParserBuiltinFn::ImCos => EngineBuiltinFn::ImCos,
-        ParserBuiltinFn::ImCosh => EngineBuiltinFn::ImCosh,
-        ParserBuiltinFn::ImCot => EngineBuiltinFn::ImCot,
-        ParserBuiltinFn::ImCsc => EngineBuiltinFn::ImCsc,
-        ParserBuiltinFn::ImCsch => EngineBuiltinFn::ImCsch,
-        ParserBuiltinFn::ImDiv => EngineBuiltinFn::ImDiv,
-        ParserBuiltinFn::ImExp => EngineBuiltinFn::ImExp,
-        ParserBuiltinFn::ImLn => EngineBuiltinFn::ImLn,
-        ParserBuiltinFn::ImLog10 => EngineBuiltinFn::ImLog10,
-        ParserBuiltinFn::ImLog2 => EngineBuiltinFn::ImLog2,
-        ParserBuiltinFn::ImPower => EngineBuiltinFn::ImPower,
-        ParserBuiltinFn::ImProduct => EngineBuiltinFn::ImProduct,
-        ParserBuiltinFn::ImSec => EngineBuiltinFn::ImSec,
-        ParserBuiltinFn::ImSech => EngineBuiltinFn::ImSech,
-        ParserBuiltinFn::ImSin => EngineBuiltinFn::ImSin,
-        ParserBuiltinFn::ImSinh => EngineBuiltinFn::ImSinh,
-        ParserBuiltinFn::ImSqrt => EngineBuiltinFn::ImSqrt,
-        ParserBuiltinFn::ImSub => EngineBuiltinFn::ImSub,
-        ParserBuiltinFn::ImSum => EngineBuiltinFn::ImSum,
-        ParserBuiltinFn::ImTan => EngineBuiltinFn::ImTan,
-        // Engineering - Bessel
-        ParserBuiltinFn::BesselI => EngineBuiltinFn::BesselI,
-        ParserBuiltinFn::BesselJ => EngineBuiltinFn::BesselJ,
-        ParserBuiltinFn::BesselK => EngineBuiltinFn::BesselK,
-        ParserBuiltinFn::BesselY => EngineBuiltinFn::BesselY,
-        // Engineering - Other
-        ParserBuiltinFn::ConvertFn => EngineBuiltinFn::ConvertFn,
-        ParserBuiltinFn::Delta => EngineBuiltinFn::Delta,
-        ParserBuiltinFn::Erf => EngineBuiltinFn::Erf,
-        ParserBuiltinFn::ErfPrecise => EngineBuiltinFn::ErfPrecise,
-        ParserBuiltinFn::Erfc => EngineBuiltinFn::Erfc,
-        ParserBuiltinFn::ErfcPrecise => EngineBuiltinFn::ErfcPrecise,
-        ParserBuiltinFn::Gestep => EngineBuiltinFn::Gestep,
-        ParserBuiltinFn::SeriesSum => EngineBuiltinFn::SeriesSum,
-        // Matrix
-        ParserBuiltinFn::Mmult => EngineBuiltinFn::Mmult,
-        ParserBuiltinFn::Mdeterm => EngineBuiltinFn::Mdeterm,
-        ParserBuiltinFn::Minverse => EngineBuiltinFn::Minverse,
-        ParserBuiltinFn::Munit => EngineBuiltinFn::Munit,
-
-        // Database functions
-        ParserBuiltinFn::DAverage => EngineBuiltinFn::DAverage,
-        ParserBuiltinFn::DCount => EngineBuiltinFn::DCount,
-        ParserBuiltinFn::DCountA => EngineBuiltinFn::DCountA,
-        ParserBuiltinFn::DGet => EngineBuiltinFn::DGet,
-        ParserBuiltinFn::DMax => EngineBuiltinFn::DMax,
-        ParserBuiltinFn::DMin => EngineBuiltinFn::DMin,
-        ParserBuiltinFn::DProduct => EngineBuiltinFn::DProduct,
-        ParserBuiltinFn::DStdev => EngineBuiltinFn::DStdev,
-        ParserBuiltinFn::DStdevP => EngineBuiltinFn::DStdevP,
-        ParserBuiltinFn::DSum => EngineBuiltinFn::DSum,
-        ParserBuiltinFn::DVar => EngineBuiltinFn::DVar,
-        ParserBuiltinFn::DVarP => EngineBuiltinFn::DVarP,
-
-        ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
-        other => EngineBuiltinFn::Custom(format!("{:?}", other)),
-    }
+    func.clone()
 }
 
 pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
@@ -1040,6 +554,8 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                         sheet: None,
                         col: col.clone(),
                         row: *row,
+                        col_absolute: false,
+                        row_absolute: false,
                     }),
                 };
             }
@@ -1047,6 +563,8 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                 sheet: sheet.clone(),
                 col: col.clone(),
                 row: *row,
+                col_absolute: false,
+                row_absolute: false,
             }
         }
         ParserExpr::Range { sheet, start, end } => {
@@ -1077,6 +595,8 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                         sheet: None,
                         start_col: start_col.clone(),
                         end_col: end_col.clone(),
+                        start_absolute: false,
+                        end_absolute: false,
                     }),
                 };
             }
@@ -1084,6 +604,8 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                 sheet: sheet.clone(),
                 start_col: start_col.clone(),
                 end_col: end_col.clone(),
+                start_absolute: false,
+                end_absolute: false,
             }
         }
         ParserExpr::RowRef { sheet, start_row, end_row, .. } => {
@@ -1095,6 +617,8 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                         sheet: None,
                         start_row: *start_row,
                         end_row: *end_row,
+                        start_absolute: false,
+                        end_absolute: false,
                     }),
                 };
             }
@@ -1102,6 +626,8 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                 sheet: sheet.clone(),
                 start_row: *start_row,
                 end_row: *end_row,
+                start_absolute: false,
+                end_absolute: false,
             }
         }
         ParserExpr::BinaryOp { left, op, right } => EngineExpr::BinaryOp {

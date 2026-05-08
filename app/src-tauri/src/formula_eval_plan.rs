@@ -69,7 +69,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::CellRef { sheet, col, row } => {
+        Expression::CellRef { sheet, col, row, .. } => {
             let label = if let Some(s) = sheet {
                 format!("{}!{}{}", s, col, row)
             } else {
@@ -106,7 +106,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::ColumnRef { sheet, start_col, end_col } => {
+        Expression::ColumnRef { sheet, start_col, end_col, .. } => {
             let label = if let Some(s) = sheet {
                 format!("{}!{}:{}", s, start_col, end_col)
             } else {
@@ -123,7 +123,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::RowRef { sheet, start_row, end_row } => {
+        Expression::RowRef { sheet, start_row, end_row, .. } => {
             let label = if let Some(s) = sheet {
                 format!("{}!{}:{}", s, start_row, end_row)
             } else {
@@ -356,7 +356,7 @@ fn assign_ids_recursive(
 fn short_child_label(expr: &Expression) -> String {
     match expr {
         Expression::Literal(val) => value_to_display(val),
-        Expression::CellRef { sheet, col, row } => {
+        Expression::CellRef { sheet, col, row, .. } => {
             if let Some(s) = sheet {
                 format!("{}!{}{}", s, col, row)
             } else {
@@ -438,7 +438,7 @@ fn build_spans_recursive(
             output.push_str(&value_to_display(val));
         }
 
-        Expression::CellRef { sheet, col, row } => {
+        Expression::CellRef { sheet, col, row, .. } => {
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') {
                     output.push_str(&format!("'{}'!", sheet_name));
@@ -467,7 +467,7 @@ fn build_spans_recursive(
             build_spans_recursive(end, &child_path, output, spans);
         }
 
-        Expression::ColumnRef { sheet, start_col, end_col } => {
+        Expression::ColumnRef { sheet, start_col, end_col, .. } => {
             if let Some(sheet_name) = sheet {
                 output.push_str(&format!("{}!", sheet_name));
             }
@@ -476,7 +476,7 @@ fn build_spans_recursive(
             output.push_str(end_col);
         }
 
-        Expression::RowRef { sheet, start_row, end_row } => {
+        Expression::RowRef { sheet, start_row, end_row, .. } => {
             if let Some(sheet_name) = sheet {
                 output.push_str(&format!("{}!", sheet_name));
             }

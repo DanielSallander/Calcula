@@ -96,7 +96,7 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
         Expression::Literal(_) => None,
 
         // Cell references need resolving
-        Expression::CellRef { sheet, col, row } => Some(NextNode {
+        Expression::CellRef { sheet, col, row, .. } => Some(NextNode {
             path: path.clone(),
             is_cell_ref: true,
             cell_ref_info: Some((sheet.clone(), col.clone(), *row)),

@@ -3,6 +3,8 @@
 // CONTEXT: Determines if the user is typing a function name and which argument
 // they're in (for argument hints).
 
+import { getCachedLocale } from "@api/locale";
+
 /**
  * Context about what the user is typing at the cursor position.
  */
@@ -20,7 +22,7 @@ export interface TokenContext {
 }
 
 /** Characters that mark the start of a new token (where a function name can begin) */
-const TRIGGER_CHARS = new Set(["=", "(", ",", "+", "-", "*", "/", "^", "&", "<", ">", " "]);
+const BASE_TRIGGER_CHARS = new Set(["=", "(", "+", "-", "*", "/", "^", "&", "<", ">", " "]);
 
 /** Regex to detect cell references like A1, $B$2, AA100 */
 const CELL_REF_PATTERN = /^\$?[A-Za-z]{1,3}\$?\d+$/;
@@ -30,6 +32,13 @@ const COLUMN_REF_PATTERN = /^\$?[A-Za-z]{1,3}:\$?[A-Za-z]{1,3}$/;
 
 /** Regex to detect row references like 1:1, $5:$10 */
 const ROW_REF_PATTERN = /^\$?\d+:\$?\d+$/;
+
+/**
+ * Get the locale's list separator (argument separator), defaulting to ",".
+ */
+function getListSeparator(): string {
+  return getCachedLocale()?.listSeparator ?? ",";
+}
 
 /**
  * Check if a character is a valid function name character (letters, digits, underscore).
@@ -67,6 +76,8 @@ export function parseTokenAtCursor(value: string, cursorPosition: number): Token
     };
   }
 
+  const listSep = getListSeparator();
+
   // Scan backwards from cursor to find the token start.
   // A token is a contiguous sequence of identifier characters.
   let tokenStart = cursorPosition;
@@ -89,7 +100,7 @@ export function parseTokenAtCursor(value: string, cursorPosition: number): Token
       shouldTrigger = true;
     } else if (tokenStart > 0) {
       const charBefore = value[tokenStart - 1];
-      shouldTrigger = TRIGGER_CHARS.has(charBefore);
+      shouldTrigger = BASE_TRIGGER_CHARS.has(charBefore) || charBefore === listSep;
     }
   }
 
@@ -138,6 +149,7 @@ function findEnclosingFunction(
   let argIndex = 0;
   let inString = false;
   let stringChar = "";
+  const listSep = getListSeparator();
 
   for (let i = cursorPosition - 1; i >= 0; i--) {
     const ch = value[i];
@@ -180,7 +192,7 @@ function findEnclosingFunction(
         return { enclosingFunction: null, argumentIndex: -1 };
       }
       parenDepth--;
-    } else if (ch === "," && parenDepth === 0) {
+    } else if (ch === listSep && parenDepth === 0) {
       argIndex++;
     }
   }

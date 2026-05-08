@@ -4,6 +4,7 @@
 
 import React, { useRef, useEffect } from "react";
 import type { OverlayProps } from "@api/uiTypes";
+import { getCachedLocale } from "@api/locale";
 import { useAutocompleteStore } from "./useAutocompleteStore";
 import type { ScoredSuggestion } from "./functionCatalog";
 import type { FunctionInfo } from "@api/types";
@@ -219,13 +220,14 @@ function ArgumentHint({
 
   // Split on commas (respecting nested brackets/parens)
   const args = splitArguments(argsStr);
+  const displaySep = (getCachedLocale()?.listSeparator ?? ",") + " ";
 
   return (
     <span>
       <S.FnName>{funcName}</S.FnName>(
       {args.map((arg, i) => (
         <React.Fragment key={i}>
-          {i > 0 && ", "}
+          {i > 0 && displaySep}
           {i === activeArgIndex ? (
             <S.ActiveArg>{arg}</S.ActiveArg>
           ) : (

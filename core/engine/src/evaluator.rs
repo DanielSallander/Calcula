@@ -414,12 +414,12 @@ impl<'a> Evaluator<'a> {
     pub fn evaluate(&self, expr: &Expression) -> EvalResult {
         match expr {
             Expression::Literal(value) => self.eval_literal(value),
-            Expression::CellRef { sheet, col, row } => self.eval_cell_ref(sheet, col, *row),
+            Expression::CellRef { sheet, col, row, .. } => self.eval_cell_ref(sheet, col, *row),
             Expression::Range { sheet, start, end } => self.eval_range(sheet, start, end),
-            Expression::ColumnRef { sheet, start_col, end_col } => {
+            Expression::ColumnRef { sheet, start_col, end_col, .. } => {
                 self.eval_column_ref(sheet, start_col, end_col)
             }
-            Expression::RowRef { sheet, start_row, end_row } => {
+            Expression::RowRef { sheet, start_row, end_row, .. } => {
                 self.eval_row_ref(sheet, *start_row, *end_row)
             }
             Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
@@ -1914,7 +1914,7 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
-                Expression::CellRef { sheet, col, row } => {
+                Expression::CellRef { sheet, col, row, .. } => {
                     let row_idx = row - 1;
                     if !hidden.contains(&row_idx) {
                         let grid = self.get_grid_for_sheet(sheet);
@@ -1926,7 +1926,7 @@ impl<'a> Evaluator<'a> {
                         values.push(result);
                     }
                 }
-                Expression::ColumnRef { sheet, start_col, end_col } => {
+                Expression::ColumnRef { sheet, start_col, end_col, .. } => {
                     let grid = self.get_grid_for_sheet(sheet);
                     let sc = col_to_index(start_col);
                     let ec = col_to_index(end_col);
@@ -1938,7 +1938,7 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
-                Expression::RowRef { sheet, start_row, end_row } => {
+                Expression::RowRef { sheet, start_row, end_row, .. } => {
                     let grid = self.get_grid_for_sheet(sheet);
                     let sr = start_row - 1;
                     let er = end_row - 1;
@@ -2530,7 +2530,7 @@ impl<'a> Evaluator<'a> {
 
         // Check if the cell reference points to an empty cell
         match &args[0] {
-            Expression::CellRef { sheet, col, row } => {
+            Expression::CellRef { sheet, col, row, .. } => {
                 let grid = self.get_grid_for_sheet(sheet);
                 let col_idx = col_to_index(col);
                 let row_idx = row - 1;

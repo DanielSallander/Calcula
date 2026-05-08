@@ -18,6 +18,7 @@ import {
 } from "../api/ui";
 
 import { initKeybindings } from "../api/keybindings";
+import { getLocaleSettings } from "../api/locale";
 
 import {
   registerExtensionRegistryService,
@@ -233,6 +234,10 @@ export function bootstrapShell(): void {
 
   // Initialize centralized keybinding system
   initKeybindings();
+
+  // Eagerly load locale settings so getCachedLocale() is available
+  // for formula autocomplete hints and other synchronous locale consumers.
+  getLocaleSettings();
 
   isBootstrapped = true;
   console.log("[Shell] Bootstrap complete.");
