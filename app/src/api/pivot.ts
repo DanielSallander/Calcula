@@ -87,6 +87,11 @@ import {
   addCalculatedItem,
   removeCalculatedItem,
   showReportFilterPages,
+
+  // DSL API
+  getPivotDsl,
+  validatePivotDsl,
+  applyPivotDsl,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
@@ -182,6 +187,9 @@ export type {
   BiValueFieldRef,
   CreatePivotFromBiModelRequest,
   UpdateBiPivotFieldsRequest,
+  // DSL types
+  ValidatePivotDslResult,
+  ApplyPivotDslResult,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 export type {
@@ -368,4 +376,17 @@ export const pivot = {
 
   /** Persists LOOKUP column set without re-querying (lightweight metadata update). */
   setBiLookupColumns,
+
+  // ---------------------------------------------------------------------------
+  // DSL (Design View Language) API
+  // ---------------------------------------------------------------------------
+
+  /** Serialize the current pivot layout to DSL text. */
+  getDsl: getPivotDsl,
+
+  /** Validate DSL text against a pivot's fields without applying it. */
+  validateDsl: validatePivotDsl,
+
+  /** Parse, compile, and apply DSL text to a pivot table. */
+  applyDsl: applyPivotDsl,
 };
