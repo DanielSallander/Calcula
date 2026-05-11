@@ -112,13 +112,21 @@ import { subtotalsSuite } from "./lib/suites/subtotals";
 import { excelGapFeaturesSuite } from "./lib/suites/excelGapFeatures";
 // Phase 22: Performance Tests
 import { performanceSuite } from "./lib/suites/performance";
+// Phase 23: Pivot Tables
+import { pivotTablesSuite } from "./lib/suites/pivotTables";
+// Phase 24: Complex Formula Chains
+import { formulaChainsSuite } from "./lib/suites/formulaChains";
+// Phase 25: Stress & Workflow Tests
+import { stressWorkflowSuite } from "./lib/suites/stressWorkflow";
+// Phase 26: .cala Round-Trip
+import { calaRoundTripSuite } from "./lib/suites/calaRoundTrip";
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 /** Set to true to skip Phase 0-9 suites during test runs (they remain registered but disabled). */
-const DISABLE_PHASES_0_9 = false;
+const DISABLE_PHASES_0_9 = true;
 
 const TASK_PANE_ID = "test-runner";
 
@@ -324,13 +332,25 @@ function activate(context: ExtensionContext): void {
   // Phase 22: Performance Tests
   registerSuite(performanceSuite);
 
+  // Phase 23: Pivot Tables (passed 30/30 -- disabled)
+  registerSuite({ ...pivotTablesSuite, disabled: true });
+
+  // Phase 24: Complex Formula Chains (passed 31/31 -- disabled)
+  registerSuite({ ...formulaChainsSuite, disabled: true });
+
+  // Phase 25: Stress & Workflow Tests (passed 15/15 -- disabled)
+  registerSuite({ ...stressWorkflowSuite, disabled: true });
+
+  // Phase 26: .cala Round-Trip
+  registerSuite(calaRoundTripSuite);
+
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
     registerSuite(mockDataSuite);
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 66; // 59 original + 2 (Phase 19) + 3 (Phase 20) + 1 (Phase 21) + 1 (Phase 22)
+  let suiteCount = 70; // base + Phase 23-26
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);

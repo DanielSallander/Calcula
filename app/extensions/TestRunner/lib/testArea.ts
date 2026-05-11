@@ -230,3 +230,19 @@ export const AREA_EXCEL_GAP = suiteArea(66);
 // Phase 22: Performance Tests
 /** Suite 67: Performance Tests (row 3850) */
 export const AREA_PERFORMANCE = suiteArea(67);
+
+// Phase 23: Pivot Tables
+/** Suite 68: Pivot Tables (row 3900) — uses 100 rows for source data + pivot output */
+export const AREA_PIVOT = suiteArea(68);
+
+// Phase 24: Complex Formula Chains
+/** Suite 69: Complex Formula Chains (row 3950) */
+export const AREA_FORMULA_CHAINS = suiteArea(69);
+
+// Phase 25: Stress & Workflow Tests
+/** Suite 70: Stress & Workflow (row 4000) — uses 200 rows for large data tests */
+export const AREA_STRESS = suiteArea(70);
+
+// Phase 26: Calcula Format (.cala) Round-Trip
+/** Suite 71: .cala Round-Trip (row 4050) */
+export const AREA_CALA_ROUNDTRIP = suiteArea(71);

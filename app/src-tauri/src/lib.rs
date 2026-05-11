@@ -3138,27 +3138,69 @@ pub fn get_recalculation_order(
     changed_cell: (u32, u32),
     dependents: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
 ) -> Vec<(u32, u32)> {
-    let mut to_recalc = Vec::new();
-    let mut visited = HashSet::new();
-    let mut stack = vec![changed_cell];
-    while let Some(cell) = stack.pop() {
-        if visited.contains(&cell) {
-            continue;
-        }
-        if cell != changed_cell {
-            to_recalc.push(cell);
-        }
-        visited.insert(cell);
+    // Collect all cells reachable from the changed cell via BFS.
+    let mut all_cells = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(changed_cell);
+    while let Some(cell) = queue.pop_front() {
         if let Some(deps) = dependents.get(&cell) {
             for dep in deps {
-                if !visited.contains(dep) {
-                    stack.push(*dep);
+                if all_cells.insert(*dep) {
+                    queue.push_back(*dep);
                 }
             }
         }
     }
-    
-    to_recalc
+
+    if all_cells.is_empty() {
+        return Vec::new();
+    }
+
+    // Build in-degree map for the subgraph of reachable cells.
+    // in_degree counts how many *reachable* precedents feed into each cell.
+    let mut in_degree: HashMap<(u32, u32), usize> = all_cells.iter().map(|c| (*c, 0)).collect();
+    for cell in std::iter::once(&changed_cell).chain(all_cells.iter()) {
+        if let Some(deps) = dependents.get(cell) {
+            for dep in deps {
+                if let Some(deg) = in_degree.get_mut(dep) {
+                    *deg += 1;
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm: start from cells whose only precedent is the changed
+    // cell (in-degree 1 from changed_cell, which we counted above).
+    let mut ready: std::collections::VecDeque<(u32, u32)> = in_degree
+        .iter()
+        .filter(|(_, &deg)| deg == 0)
+        .map(|(&cell, _)| cell)
+        .collect();
+    let mut result = Vec::with_capacity(all_cells.len());
+
+    while let Some(cell) = ready.pop_front() {
+        result.push(cell);
+        if let Some(deps) = dependents.get(&cell) {
+            for dep in deps {
+                if let Some(deg) = in_degree.get_mut(dep) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        ready.push_back(*dep);
+                    }
+                }
+            }
+        }
+    }
+
+    // If there are unreached cells (circular dependencies), append them so
+    // they still get recalculated (even if the order isn't perfect).
+    for cell in &all_cells {
+        if !result.contains(cell) {
+            result.push(*cell);
+        }
+    }
+
+    result
 }
 
 pub fn get_column_row_dependents(
