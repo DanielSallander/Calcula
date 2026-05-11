@@ -1324,6 +1324,36 @@ pub fn delete_rows(
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Check if any spill range would be broken by this row deletion.
+    // Block if any spill range has cells both inside and outside the deleted rows.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let spill_ranges = state.spill_ranges.lock().unwrap();
+        for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
+            if sheet_idx != active_sheet { continue; }
+            // Compute the full extent of this spill range (origin + spilled cells)
+            let mut min_r = origin_row;
+            let mut max_r = origin_row;
+            for &(sr, _) in spill_cells {
+                min_r = min_r.min(sr);
+                max_r = max_r.max(sr);
+            }
+            let del_start = row;
+            let del_end = row + count - 1;
+            // Block if the deletion range partially overlaps the spill range
+            let overlaps = del_start <= max_r && del_end >= min_r;
+            let fully_inside = del_start <= min_r && del_end >= max_r;
+            if overlaps && !fully_inside {
+                let col_letter = crate::pivot::utils::col_index_to_letter(origin_col);
+                let cell_ref = format!("{}{}", col_letter, origin_row + 1);
+                return Err(format!(
+                    "Can't delete rows\n\nThis would affect a spilled array from the formula in {}. Delete or modify that formula first.",
+                    cell_ref
+                ));
+            }
+        }
+    }
+
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
@@ -1510,6 +1540,33 @@ pub fn delete_columns(
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Check if any spill range would be broken by this column deletion.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let spill_ranges = state.spill_ranges.lock().unwrap();
+        for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
+            if sheet_idx != active_sheet { continue; }
+            let mut min_c = origin_col;
+            let mut max_c = origin_col;
+            for &(_, sc) in spill_cells {
+                min_c = min_c.min(sc);
+                max_c = max_c.max(sc);
+            }
+            let del_start = col;
+            let del_end = col + count - 1;
+            let overlaps = del_start <= max_c && del_end >= min_c;
+            let fully_inside = del_start <= min_c && del_end >= max_c;
+            if overlaps && !fully_inside {
+                let col_letter = crate::pivot::utils::col_index_to_letter(origin_col);
+                let cell_ref = format!("{}{}", col_letter, origin_row + 1);
+                return Err(format!(
+                    "Can't delete columns\n\nThis would affect a spilled array from the formula in {}. Delete or modify that formula first.",
+                    cell_ref
+                ));
+            }
+        }
+    }
+
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 

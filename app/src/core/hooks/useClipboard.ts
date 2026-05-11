@@ -559,7 +559,9 @@ export function useClipboard(): UseClipboardReturn {
       try {
         await updateCellsBatch(batchUpdates);
       } catch (err) {
-        console.error(`[Clipboard] Failed to batch paste ${batchUpdates.length} cells:`, err);
+        const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+        alert(msg);
+        return;
       }
 
       const perfPasteEnd = performance.now();
@@ -814,7 +816,10 @@ export function useClipboard(): UseClipboardReturn {
                 }, "paste");
               }
             } catch (err) {
-              console.error(`[Clipboard] Failed to write cell (${destRow}, ${destCol}):`, err);
+              const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+              alert(msg);
+              await commitUndoTransaction();
+              return;
             }
           }
         }
@@ -1033,7 +1038,8 @@ export function useClipboard(): UseClipboardReturn {
 
         console.log("[Clipboard] Move rows complete");
       } catch (error) {
-        console.error("[Clipboard] Move rows failed:", error);
+        const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
+        alert(msg);
       }
     },
     [config.totalCols, dispatch]
@@ -1167,7 +1173,8 @@ export function useClipboard(): UseClipboardReturn {
 
         console.log("[Clipboard] Move columns complete");
       } catch (error) {
-        console.error("[Clipboard] Move columns failed:", error);
+        const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
+        alert(msg);
       }
     },
     [config.totalRows, dispatch]
@@ -1246,7 +1253,10 @@ export function useClipboard(): UseClipboardReturn {
                 }, "paste");
               }
             } catch (err) {
-              console.error(`[Clipboard] Failed to write cell (${destRow}, ${destCol}):`, err);
+              const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+              alert(msg);
+              await commitUndoTransaction();
+              return;
             }
           }
         }

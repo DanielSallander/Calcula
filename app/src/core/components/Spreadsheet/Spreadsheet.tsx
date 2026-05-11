@@ -656,7 +656,8 @@ function SpreadsheetContent({
 
       canvasRef.current?.redraw();
     } catch (error) {
-      console.error("[Spreadsheet] Failed to delete rows:", error);
+      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
+      alert(msg);
     }
   }, [selection, canvasRef, refreshDimensions]);
 
@@ -696,7 +697,8 @@ function SpreadsheetContent({
 
       canvasRef.current?.redraw();
     } catch (error) {
-      console.error("[Spreadsheet] Failed to delete columns:", error);
+      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
+      alert(msg);
     }
   }, [selection, canvasRef, refreshDimensions]);
 

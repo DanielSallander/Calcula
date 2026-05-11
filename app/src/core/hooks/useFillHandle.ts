@@ -1193,7 +1193,16 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
       // Execute all updates in a single batch call
       if (batchUpdates.length > 0) {
-        const updatedCells = await updateCellsBatch(batchUpdates);
+        let updatedCells;
+        try {
+          updatedCells = await updateCellsBatch(batchUpdates);
+        } catch (err) {
+          const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+          alert(msg);
+          setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
+          dragStartRef.current = null;
+          return;
+        }
         const perfFillT2 = performance.now();
 
         // Emit batch event for all updated cells (single notification instead of N)
@@ -1416,7 +1425,14 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
       // Execute all updates in a single batch call
       if (batchUpdates.length > 0) {
-        const updatedCells = await updateCellsBatch(batchUpdates);
+        let updatedCells;
+        try {
+          updatedCells = await updateCellsBatch(batchUpdates);
+        } catch (err) {
+          const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+          alert(msg);
+          return;
+        }
         const perfAutoT2 = performance.now();
 
         // Emit batch event for all updated cells (single notification instead of N)

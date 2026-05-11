@@ -28,6 +28,33 @@ use tauri::State;
 // Note: Assuming parser is available in the crate root based on usage context
 // If 'parser' is a module, ensure it is imported via `use crate::parser;` if needed.
 
+/// Check if any cell in the given range is a spilled value (not the spill origin).
+/// Returns Ok(()) if the range is safe to modify, or Err with a user-facing message
+/// identifying the origin formula cell.
+fn check_spill_protection(
+    spill_hosts: &std::collections::HashMap<(usize, u32, u32), (u32, u32)>,
+    active_sheet: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    for (&(sheet, r, c), &(origin_r, origin_c)) in spill_hosts.iter() {
+        if sheet == active_sheet
+            && r >= start_row && r <= end_row
+            && c >= start_col && c <= end_col
+        {
+            let col_letter = crate::pivot::utils::col_index_to_letter(origin_c);
+            let cell_ref = format!("{}{}", col_letter, origin_r + 1);
+            return Err(format!(
+                "We can't delete this value\n\nThe value contained in this cell is spilled from the formula in {}. To delete this value, you will need to modify that formula.",
+                cell_ref
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Get spill ranges for the active sheet.
 /// Returns the bounding box of each spill range for visual rendering.
 #[tauri::command]
@@ -1480,6 +1507,15 @@ pub fn update_cells_batch(
         return Ok(Vec::new());
     }
 
+    // Check if any target cell is a spilled value (before acquiring other locks)
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        for update in &updates {
+            check_spill_protection(&spill_hosts, active_sheet, update.row, update.col, update.row, update.col)?;
+        }
+    }
+
     // Acquire all locks once
     let sheet_names = state.sheet_names.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
@@ -2174,10 +2210,17 @@ pub fn update_cells_batch(
 
 /// Clear a cell.
 #[tauri::command]
-pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32, col: u32) {
+pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32, col: u32) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Check if cell is a spilled value
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        check_spill_protection(&spill_hosts, active_sheet, row, col, row, col)?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -2230,10 +2273,13 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
         // Mark workbook as dirty
         if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
+
+    Ok(())
 }
 
 /// Clear a range of cells efficiently.
 /// Only clears cells that actually exist within the range.
+/// Returns an error if any cell in the range is a spilled value (not the origin).
 #[tauri::command]
 pub fn clear_range(
     state: State<AppState>,
@@ -2242,10 +2288,17 @@ pub fn clear_range(
     start_col: u32,
     end_row: u32,
     end_col: u32,
-) -> u32 {
+) -> Result<u32, String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Check if any cell in the range is a spill host (part of a spilled array, not the origin)
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        check_spill_protection(&spill_hosts, active_sheet, start_row, start_col, end_row, end_col)?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -2328,7 +2381,7 @@ pub fn clear_range(
         if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
 
-    count
+    Ok(count)
 }
 
 /// Clear a range of cells with options for what to clear.
@@ -2344,10 +2397,21 @@ pub fn clear_range_with_options(
     state: State<AppState>,
     file_state: State<FileState>,
     params: ClearRangeParams,
-) -> ClearRangeResult {
+) -> Result<ClearRangeResult, String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Check if any cell in the range is a spill host (not the origin) — block content-clearing operations
+    if !matches!(params.apply_to, ClearApplyTo::Formats) {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        let min_row = params.start_row.min(params.end_row);
+        let max_row = params.start_row.max(params.end_row);
+        let min_col = params.start_col.min(params.end_col);
+        let max_col = params.start_col.max(params.end_col);
+        check_spill_protection(&spill_hosts, active_sheet, min_row, min_col, max_row, max_col)?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
@@ -2654,10 +2718,10 @@ pub fn clear_range_with_options(
         if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
 
-    ClearRangeResult {
+    Ok(ClearRangeResult {
         count,
         updated_cells,
-    }
+    })
 }
 
 /// Sort a range of cells by one or more criteria.
@@ -2668,7 +2732,18 @@ pub fn clear_range_with_options(
 /// - Header row handling
 /// - Row or column orientation
 #[tauri::command]
-pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: SortRangeParams) -> SortRangeResult {
+pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: SortRangeParams) -> Result<SortRangeResult, String> {
+    // Check if any cell in the sort range is a spilled value
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        check_spill_protection(
+            &spill_hosts, active_sheet,
+            params.start_row, params.start_col,
+            params.end_row, params.end_col,
+        )?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -2690,12 +2765,12 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
 
     // Validate sort fields
     if fields.is_empty() {
-        return SortRangeResult {
+        return Ok(SortRangeResult {
             success: false,
             sorted_count: 0,
             updated_cells: vec![],
             error: Some("At least one sort field is required".to_string()),
-        };
+        });
     }
 
     // Normalize coordinates
@@ -2717,14 +2792,14 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                 && region.start_col >= min_col
                 && region.end_col <= max_col;
             if !fully_inside {
-                return SortRangeResult {
+                return Ok(SortRangeResult {
                     success: false,
                     sorted_count: 0,
                     updated_cells: vec![],
                     error: Some(
                         "Cannot sort a range that partially overlaps with merged cells".to_string(),
                     ),
-                };
+                });
             }
         }
     }
@@ -2735,12 +2810,12 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             let data_start_row = if has_headers { min_row + 1 } else { min_row };
 
             if data_start_row > max_row {
-                return SortRangeResult {
+                return Ok(SortRangeResult {
                     success: true,
                     sorted_count: 0,
                     updated_cells: vec![],
                     error: None,
-                };
+                });
             }
 
             // Collect all rows as vectors of cell data
@@ -2828,24 +2903,24 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             // Mark workbook as dirty
             if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
-            SortRangeResult {
+            Ok(SortRangeResult {
                 success: true,
                 sorted_count,
                 updated_cells,
                 error: None,
-            }
+            })
         }
         SortOrientation::Columns => {
             // Sort by columns (sort data horizontally)
             let data_start_col = if has_headers { min_col + 1 } else { min_col };
 
             if data_start_col > max_col {
-                return SortRangeResult {
+                return Ok(SortRangeResult {
                     success: true,
                     sorted_count: 0,
                     updated_cells: vec![],
                     error: None,
-                };
+                });
             }
 
             // Collect all columns as vectors of cell data
@@ -2933,12 +3008,12 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             // Mark workbook as dirty
             if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
-            SortRangeResult {
+            Ok(SortRangeResult {
                 success: true,
                 sorted_count,
                 updated_cells,
                 error: None,
-            }
+            })
         }
     }
 }

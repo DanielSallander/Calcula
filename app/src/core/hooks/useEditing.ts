@@ -1550,10 +1550,13 @@ export function useEditing(): UseEditingReturn {
         return result;
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      const errorMessage = typeof error === "string" ? error : (error instanceof Error ? error.message : "Unknown error");
       console.error("Failed to update cell:", error);
       setLastError(errorMessage);
-      
+
+      // Show spill protection (or other backend) errors to the user
+      alert(errorMessage);
+
       // FIX: Clear global flag and arrow reference state on error too
       setGlobalIsEditing(false);
       setGlobalEditingValue("");

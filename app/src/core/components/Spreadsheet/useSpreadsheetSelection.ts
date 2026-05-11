@@ -489,7 +489,9 @@ export function useSpreadsheetSelection({
         formula: null,
       });
     } catch (error) {
-      console.error("[useSpreadsheetSelection] Failed to clear contents:", error);
+      // Show spill protection warning (or other backend errors) to the user
+      const message = typeof error === "string" ? error : (error as Error)?.message || String(error);
+      alert(message);
     }
   }, [selection]);
 
