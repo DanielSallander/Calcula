@@ -30,6 +30,7 @@ export {
   fillRange,
   getGridBounds,
   getCellCount,
+  getSpillRanges,
 
   // Navigation
   findCtrlArrowTarget,

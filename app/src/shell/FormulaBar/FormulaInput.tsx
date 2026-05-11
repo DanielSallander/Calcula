@@ -7,7 +7,7 @@
 // REFACTOR: Imports from api layer instead of core internals
 
 import React, { useCallback, useRef, useEffect } from "react";
-import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards } from "../../api";
+import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards, getSpillRanges } from "../../api";
 import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition, setChartSeriesRefMode } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
@@ -26,6 +26,8 @@ export function FormulaInput(): React.ReactElement {
 
   /** Whether a chart series is currently selected (formula bar shows SERIES formula). */
   const [chartSeriesFormula, setChartSeriesFormula] = React.useState<string | null>(null);
+  /** Whether the selected cell is a non-origin spill cell (show formula in grey). */
+  const [isSpillRef, setIsSpillRef] = React.useState(false);
 
   // Sync displayValue with editing state (render-time derived state pattern)
   if (editing !== prevEditing) {
@@ -45,10 +47,10 @@ export function FormulaInput(): React.ReactElement {
       const fetchCellContent = async () => {
         try {
           const mergeInfo = await getMergeInfo(startRow, startCol);
-          
+
           let cellRow = startRow;
           let cellCol = startCol;
-          
+
           if (mergeInfo) {
             cellRow = mergeInfo.startRow;
             cellCol = mergeInfo.startCol;
@@ -62,46 +64,76 @@ export function FormulaInput(): React.ReactElement {
               cellCol = endCol;
             }
           }
-          
-          const cell = await getCell(cellRow, cellCol);
-          if (cell) {
-            let content = cell.formula || cell.display || "";
 
-            // Formula hiding: if sheet is protected and cell has formulaHidden, show blank
-            if (cell.formula && cell.formula.startsWith("=")) {
-              try {
-                const [sheetProt, cellProt] = await Promise.all([
-                  isSheetProtected(),
-                  getCellProtection(cellRow, cellCol),
-                ]);
-                if (sheetProt && cellProt.formulaHidden) {
-                  content = "";
-                }
-              } catch {
-                // Ignore errors - show formula as fallback
-              }
+          // Check if this cell is a non-origin spill cell
+          const spillRanges = await getSpillRanges();
+          let spillOrigin: { row: number; col: number } | null = null;
+          for (const sr of spillRanges) {
+            if (
+              cellRow >= sr.originRow && cellRow <= sr.endRow &&
+              cellCol >= sr.originCol && cellCol <= sr.endCol &&
+              !(cellRow === sr.originRow && cellCol === sr.originCol)
+            ) {
+              spillOrigin = { row: sr.originRow, col: sr.originCol };
+              break;
             }
+          }
 
-            setDisplayValue(content);
-
-            // FIX: Parse formula references for passive highlighting when selecting a formula cell
-            if (content && content.startsWith("=")) {
-              const refs = parseFormulaReferences(content, true);
+          if (spillOrigin) {
+            // Non-origin spill cell: show the origin cell's formula in grey
+            const originCell = await getCell(spillOrigin.row, spillOrigin.col);
+            const formula = originCell?.formula || "";
+            setDisplayValue(formula);
+            setIsSpillRef(true);
+            if (formula && formula.startsWith("=")) {
+              const refs = parseFormulaReferences(formula, true);
               dispatch(setFormulaReferences(refs));
             } else {
               dispatch(clearFormulaReferences());
             }
           } else {
-            setDisplayValue("");
-            dispatch(clearFormulaReferences());
+            setIsSpillRef(false);
+            const cell = await getCell(cellRow, cellCol);
+            if (cell) {
+              let content = cell.formula || cell.display || "";
+
+              // Formula hiding: if sheet is protected and cell has formulaHidden, show blank
+              if (cell.formula && cell.formula.startsWith("=")) {
+                try {
+                  const [sheetProt, cellProt] = await Promise.all([
+                    isSheetProtected(),
+                    getCellProtection(cellRow, cellCol),
+                  ]);
+                  if (sheetProt && cellProt.formulaHidden) {
+                    content = "";
+                  }
+                } catch {
+                  // Ignore errors - show formula as fallback
+                }
+              }
+
+              setDisplayValue(content);
+
+              // FIX: Parse formula references for passive highlighting when selecting a formula cell
+              if (content && content.startsWith("=")) {
+                const refs = parseFormulaReferences(content, true);
+                dispatch(setFormulaReferences(refs));
+              } else {
+                dispatch(clearFormulaReferences());
+              }
+            } else {
+              setDisplayValue("");
+              dispatch(clearFormulaReferences());
+            }
           }
         } catch (error) {
           console.error("[FormulaInput] Failed to fetch cell content:", error);
           setDisplayValue("");
+          setIsSpillRef(false);
           dispatch(clearFormulaReferences());
         }
       };
-      
+
       fetchCellContent();
     }
   }, [editing, state.selection, dispatch, chartSeriesFormula]);
@@ -200,6 +232,12 @@ export function FormulaInput(): React.ReactElement {
   );
 
   const handleFocus = useCallback(async () => {
+    // Block editing in spill ref cells (non-origin spill cells are read-only)
+    if (isSpillRef) {
+      if (inputRef.current) inputRef.current.blur();
+      return;
+    }
+
     // Block editing in protected ranges (e.g., pivot tables)
     if (state.selection) {
       const guard = checkRangeGuards(
@@ -219,7 +257,7 @@ export function FormulaInput(): React.ReactElement {
     if (!editing && state.selection) {
       await startEdit(state.selection.endRow, state.selection.endCol);
     }
-  }, [editing, state.selection, startEdit]);
+  }, [editing, state.selection, startEdit, isSpillRef]);
 
   const handleBlur = useCallback(() => {
     setIsFocused(false);
@@ -342,8 +380,8 @@ export function FormulaInput(): React.ReactElement {
       )?.blocked === true
     : false;
 
-  // Read-only when showing chart series formula or protected cell
-  const isReadOnly = isProtectedCell || chartSeriesFormula !== null;
+  // Read-only when showing chart series formula, protected cell, or spill ref
+  const isReadOnly = isProtectedCell || chartSeriesFormula !== null || isSpillRef;
 
   return (
     <S.StyledInput
@@ -358,6 +396,7 @@ export function FormulaInput(): React.ReactElement {
       onSelect={handleSelect}
       readOnly={isReadOnly}
       $isFocused={isFocused}
+      $isSpillRef={isSpillRef}
       data-formula-bar="true"
       placeholder=""
       aria-label="Formula Bar"

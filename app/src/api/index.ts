@@ -109,6 +109,7 @@ export {
   getWatchCells,
   getCellsInCols,
   getViewportCells,
+  getSpillRanges,
   getMergeInfo,
   detectDataRegion,
   getCurrentRegion,

@@ -5,6 +5,7 @@ const v = (name: string) => `var(${name})`;
 
 interface StyledInputProps {
   $isFocused: boolean;
+  $isSpillRef?: boolean;
 }
 
 export const StyledInput = styled.input<StyledInputProps>`
@@ -17,5 +18,5 @@ export const StyledInput = styled.input<StyledInputProps>`
   font-family: Consolas, 'Courier New', monospace;
   outline: none;
   background-color: ${props => props.$isFocused ? v('--formula-input-bg-focused') : v('--formula-input-bg')};
-  color: ${v('--formula-input-text')};
+  color: ${props => props.$isSpillRef ? '#888' : v('--formula-input-text')};
 `;

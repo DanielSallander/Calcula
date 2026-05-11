@@ -2830,8 +2830,21 @@ pub fn evaluate_formula_multi_sheet_with_ast_and_files(
     ast: &EngineExpr,
     user_files: &HashMap<String, Vec<u8>>,
 ) -> CellValue {
+    evaluate_formula_raw_with_ast_and_files(grids, sheet_names, current_sheet_index, ast, user_files)
+        .to_cell_value()
+}
+
+/// Like evaluate_formula_multi_sheet_with_ast_and_files but returns the raw EvalResult,
+/// preserving array/spill information needed for cascade spill recalculation.
+pub fn evaluate_formula_raw_with_ast_and_files(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    user_files: &HashMap<String, Vec<u8>>,
+) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
-        return CellValue::Error(CellError::Ref);
+        return EvalResult::Error(CellError::Ref);
     }
 
     let current_grid = &grids[current_sheet_index];
@@ -2842,7 +2855,7 @@ pub fn evaluate_formula_multi_sheet_with_ast_and_files(
     };
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
     evaluator.set_file_reader(&reader);
-    evaluator.evaluate(ast).to_cell_value()
+    evaluator.evaluate(ast)
 }
 
 /// Parses a formula and converts it to the engine AST.

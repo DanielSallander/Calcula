@@ -12,6 +12,7 @@ use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
     evaluate_formula_multi_sheet_with_files,
     evaluate_formula_multi_sheet_with_ast_and_files,
+    evaluate_formula_raw_with_ast_and_files,
     evaluate_formula_raw_with_files_and_pivot,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_cell_input_invariant,
@@ -970,101 +971,162 @@ pub fn update_cell(
         let mut perf_eval_total = std::time::Duration::ZERO;
 
         for &(dep_row, dep_col) in &recalc_order {
-            if let Some(dep_cell) = grid.get_cell(dep_row, dep_col) {
+            // Clone dep_cell upfront to release the immutable borrow on grid,
+            // allowing mutable access for spill cell writes below.
+            let dep_cell_opt = grid.get_cell(dep_row, dep_col).cloned();
+            if let Some(dep_cell) = dep_cell_opt {
                 if let Some(ref formula) = dep_cell.formula {
                     let perf_eval_start = Instant::now();
-                    // Use cached AST if available for efficient evaluation
-                    let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+
+                    // Get the AST (cached or freshly parsed) and evaluate to raw EvalResult
+                    let (raw_result, ast_to_cache) = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                         perf_cache_hits += 1;
-                        // Fast path: use pre-parsed AST
-                        evaluate_formula_multi_sheet_with_ast_and_files(
-                            &grids,
-                            &sheet_names,
-                            active_sheet,
-                            cached_ast,
-                            &user_files,
-                        )
+                        let result = evaluate_formula_raw_with_ast_and_files(
+                            &grids, &sheet_names, active_sheet, cached_ast, &user_files,
+                        );
+                        (result, None)
                     } else {
                         perf_cache_misses += 1;
-                        // Slow path: parse, resolve refs, and cache the AST for future use
-                        if let Ok(engine_ast) = {
-                            // Parse and resolve names + table refs before converting
-                            parser::parse(formula).map(|parsed| {
-                                let resolved = if crate::ast_has_named_refs(&parsed) {
-                                    let mut visited = HashSet::new();
-                                    crate::resolve_names_in_ast(&parsed, &cascade_named_ranges, active_sheet, &mut visited)
-                                } else {
-                                    parsed
+                        if let Ok(engine_ast) = parser::parse(formula).map(|parsed| {
+                            let resolved = if crate::ast_has_named_refs(&parsed) {
+                                let mut visited = HashSet::new();
+                                crate::resolve_names_in_ast(&parsed, &cascade_named_ranges, active_sheet, &mut visited)
+                            } else {
+                                parsed
+                            };
+                            let resolved = if crate::ast_has_table_refs(&resolved) {
+                                let ctx = crate::TableRefContext {
+                                    tables: &cascade_tables,
+                                    table_names: &cascade_table_names,
+                                    current_sheet_index: active_sheet,
+                                    current_row: dep_row,
                                 };
-                                let resolved = if crate::ast_has_table_refs(&resolved) {
-                                    let ctx = crate::TableRefContext {
-                                        tables: &cascade_tables,
-                                        table_names: &cascade_table_names,
-                                        current_sheet_index: active_sheet,
-                                        current_row: dep_row,
-                                    };
-                                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
-                                } else {
-                                    resolved
-                                };
-                                crate::convert_expr(&resolved)
-                            }).map_err(|e| format!("{}", e))
-                        } {
-                            let result = evaluate_formula_multi_sheet_with_ast_and_files(
-                                &grids,
-                                &sheet_names,
-                                active_sheet,
-                                &engine_ast,
-                                &user_files,
+                                crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                            } else {
+                                resolved
+                            };
+                            crate::convert_expr(&resolved)
+                        }).map_err(|e| format!("{}", e)) {
+                            let result = evaluate_formula_raw_with_ast_and_files(
+                                &grids, &sheet_names, active_sheet, &engine_ast, &user_files,
                             );
-                            // Cache the AST for next time
-                            let mut updated_with_ast = dep_cell.clone();
-                            updated_with_ast.set_cached_ast(engine_ast);
-                            updated_with_ast.value = result.clone();
-                            grid.set_cell(dep_row, dep_col, updated_with_ast.clone());
-                            if active_sheet < grids.len() {
-                                grids[active_sheet]
-                                    .set_cell(dep_row, dep_col, updated_with_ast.clone());
-                            }
-
-                            let dep_style = styles.get(updated_with_ast.style_index);
-                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
-
-                            let (dep_row_span, dep_col_span) =
-                                if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
-                                    (
-                                        region.end_row - region.start_row + 1,
-                                        region.end_col - region.start_col + 1,
-                                    )
-                                } else {
-                                    (1, 1)
-                                };
-
-                            updated_cells.push(CellData {
-                                row: dep_row,
-                                col: dep_col,
-                                display: dep_display,
-                                display_color: None,
-                                formula: updated_with_ast.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
-                                style_index: updated_with_ast.style_index,
-                                row_span: dep_row_span,
-                                col_span: dep_col_span,
-                                sheet_index: None,
-                                rich_text: None,
-                                accounting_layout: None,
-                            });
-                            perf_eval_total += perf_eval_start.elapsed();
-                            continue; // Skip the rest of this iteration
+                            (result, Some(engine_ast))
+                        } else {
+                            // Fallback to string-based evaluation (no spill support)
+                            let cv = evaluate_formula_multi_sheet_with_files(
+                                &grids, &sheet_names, active_sheet, formula, &user_files,
+                            );
+                            let er = match cv {
+                                engine::CellValue::Number(n) => engine::EvalResult::Number(n),
+                                engine::CellValue::Text(s) => engine::EvalResult::Text(s),
+                                engine::CellValue::Boolean(b) => engine::EvalResult::Boolean(b),
+                                engine::CellValue::Error(e) => engine::EvalResult::Error(e),
+                                _ => engine::EvalResult::Text(String::new()),
+                            };
+                            (er, None)
                         }
-                        // Fallback to string-based evaluation
-                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files)
                     };
 
-                    let mut updated_dep = dep_cell.clone();
-                    updated_dep.value = result;
-                    grid.set_cell(dep_row, dep_col, updated_dep.clone());
+                    // Clear any previous spill range for this dependent cell
+                    {
+                        let mut spill_ranges = state.spill_ranges.lock().unwrap();
+                        let mut spill_hosts = state.spill_hosts.lock().unwrap();
+                        if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, dep_row, dep_col)) {
+                            for (sr, sc) in &old_spill_cells {
+                                spill_hosts.remove(&(active_sheet, *sr, *sc));
+                                grid.cells.remove(&(*sr, *sc));
+                                if active_sheet < grids.len() {
+                                    grids[active_sheet].cells.remove(&(*sr, *sc));
+                                }
+                                updated_cells.push(CellData {
+                                    row: *sr, col: *sc, display: String::new(),
+                                    display_color: None, formula: None, style_index: 0,
+                                    row_span: 1, col_span: 1, sheet_index: None,
+                                    rich_text: None, accounting_layout: None,
+                                });
+                            }
+                        }
+                    }
 
-                    // Also update the grids vector
+                    // Handle spill for array results
+                    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
+                    let cell_value = if spill_rows > 1 || spill_cols > 1 {
+                        let spill_values = raw_result.to_spill_values();
+                        let mut spill_blocked = false;
+
+                        for &(dr, dc, _) in &spill_values {
+                            if dr == 0 && dc == 0 { continue; }
+                            let target_r = dep_row + dr;
+                            let target_c = dep_col + dc;
+                            if let Some(existing) = grid.get_cell(target_r, target_c) {
+                                if existing.value != engine::CellValue::Empty {
+                                    // Check if it's a spill cell from this same origin
+                                    let spill_hosts = state.spill_hosts.lock().unwrap();
+                                    let is_own_spill = spill_hosts.get(&(active_sheet, target_r, target_c))
+                                        .map_or(false, |origin| *origin == (dep_row, dep_col));
+                                    if !is_own_spill {
+                                        spill_blocked = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if spill_blocked {
+                            engine::CellValue::Error(engine::CellError::Value)
+                        } else {
+                            // Write spill cells
+                            let mut new_spill_cells = Vec::new();
+                            let mut spill_ranges = state.spill_ranges.lock().unwrap();
+                            let mut spill_hosts = state.spill_hosts.lock().unwrap();
+
+                            for (dr, dc, cv) in &spill_values {
+                                if *dr == 0 && *dc == 0 { continue; }
+                                let target_r = dep_row + dr;
+                                let target_c = dep_col + dc;
+
+                                let spill_cell = engine::Cell {
+                                    formula: None,
+                                    value: cv.clone(),
+                                    style_index: 0,
+                                    rich_text: None,
+                                    cached_ast: None,
+                                };
+                                grid.set_cell(target_r, target_c, spill_cell.clone());
+                                if active_sheet < grids.len() {
+                                    grids[active_sheet].set_cell(target_r, target_c, spill_cell);
+                                }
+
+                                let style = styles.get(0);
+                                let display = format_cell_value(cv, style, &locale);
+                                updated_cells.push(CellData {
+                                    row: target_r, col: target_c, display,
+                                    display_color: None, formula: None, style_index: 0,
+                                    row_span: 1, col_span: 1, sheet_index: None,
+                                    rich_text: None, accounting_layout: None,
+                                });
+
+                                new_spill_cells.push((target_r, target_c));
+                                spill_hosts.insert((active_sheet, target_r, target_c), (dep_row, dep_col));
+                            }
+
+                            if !new_spill_cells.is_empty() {
+                                spill_ranges.insert((active_sheet, dep_row, dep_col), new_spill_cells);
+                            }
+
+                            raw_result.to_cell_value()
+                        }
+                    } else {
+                        raw_result.to_cell_value()
+                    };
+
+                    // Update the origin cell
+                    let mut updated_dep = dep_cell.clone();
+                    updated_dep.value = cell_value;
+                    if let Some(ast) = ast_to_cache {
+                        updated_dep.set_cached_ast(ast);
+                    }
+                    grid.set_cell(dep_row, dep_col, updated_dep.clone());
                     if active_sheet < grids.len() {
                         grids[active_sheet].set_cell(dep_row, dep_col, updated_dep.clone());
                     }
@@ -1072,7 +1134,6 @@ pub fn update_cell(
                     let dep_style = styles.get(updated_dep.style_index);
                     let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
-                    // Get merge span info for dependent (O(1) HashMap lookup)
                     let (dep_row_span, dep_col_span) =
                         if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
                             (
@@ -1092,7 +1153,7 @@ pub fn update_cell(
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
-                        sheet_index: None, // Current active sheet
+                        sheet_index: None,
                         rich_text: None,
                         accounting_layout: None,
                     });
