@@ -136,6 +136,8 @@ import { whatIfAnalysisSuite } from "./lib/suites/whatIfAnalysis";
 import { advancedFeaturesDeepDiveSuite } from "./lib/suites/advancedFeaturesDeepDive";
 // Phase 34: Enterprise Simulations
 import { enterpriseSimulationsSuite } from "./lib/suites/enterpriseSimulations";
+// Phase 35: BI Engine Integration
+import { biEngineIntegrationSuite } from "./lib/suites/biEngineIntegration";
 
 // ============================================================================
 // Constants
@@ -381,8 +383,11 @@ function activate(context: ExtensionContext): void {
   // Phase 33: Advanced Features Deep Dive (passed 15/15 -- disabled)
   registerSuite({ ...advancedFeaturesDeepDiveSuite, disabled: true });
 
-  // Phase 34: Enterprise Simulations
-  registerSuite(enterpriseSimulationsSuite);
+  // Phase 34: Enterprise Simulations (passed 5/5 -- disabled)
+  registerSuite({ ...enterpriseSimulationsSuite, disabled: true });
+
+  // Phase 35: BI Engine Integration (requires live PostgreSQL database)
+  registerSuite(biEngineIntegrationSuite);
 
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
@@ -390,7 +395,7 @@ function activate(context: ExtensionContext): void {
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 78; // base + Phase 23-34
+  let suiteCount = 79; // base + Phase 23-35
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);

@@ -278,3 +278,7 @@ export const AREA_ADV_FEATURES = suiteArea(78);
 // Phase 34: Enterprise Simulations
 /** Suite 79: Enterprise Simulations (row 4450) — uses 150+ rows */
 export const AREA_ENTERPRISE = suiteArea(79);
+
+// Phase 35: BI Engine Integration
+/** Suite 80: BI Engine (row 4500) */
+export const AREA_BI_ENGINE = suiteArea(80);
