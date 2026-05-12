@@ -262,3 +262,7 @@ export const AREA_MULTI_FEATURE = suiteArea(74);
 // Phase 30: Edge Case Regressions
 /** Suite 75: Edge Cases (row 4250) */
 export const AREA_EDGE_CASES = suiteArea(75);
+
+// Phase 31: Realistic Spreadsheet Simulations
+/** Suite 76: Spreadsheet Simulations (row 4300) — uses 100+ rows */
+export const AREA_SIMULATIONS = suiteArea(76);

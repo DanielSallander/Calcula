@@ -128,6 +128,8 @@ import { tableFormulaStressSuite } from "./lib/suites/tableFormulaStress";
 import { multiFeatureWorkflowsSuite } from "./lib/suites/multiFeatureWorkflows";
 // Phase 30: Edge Case Regressions
 import { edgeCaseRegressionsSuite } from "./lib/suites/edgeCaseRegressions";
+// Phase 31: Realistic Simulations
+import { realisticSimulationsSuite } from "./lib/suites/realisticSimulations";
 
 // ============================================================================
 // Constants
@@ -361,8 +363,11 @@ function activate(context: ExtensionContext): void {
   // Phase 29: Multi-Feature Workflows (passed 10/10 -- disabled)
   registerSuite({ ...multiFeatureWorkflowsSuite, disabled: true });
 
-  // Phase 30: Edge Case Regressions
-  registerSuite(edgeCaseRegressionsSuite);
+  // Phase 30: Edge Case Regressions (passed 25/25 -- disabled)
+  registerSuite({ ...edgeCaseRegressionsSuite, disabled: true });
+
+  // Phase 31: Realistic Simulations
+  registerSuite(realisticSimulationsSuite);
 
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
@@ -370,7 +375,7 @@ function activate(context: ExtensionContext): void {
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 74; // base + Phase 23-30
+  let suiteCount = 75; // base + Phase 23-31
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);
