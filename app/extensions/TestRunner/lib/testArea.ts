@@ -266,3 +266,11 @@ export const AREA_EDGE_CASES = suiteArea(75);
 // Phase 31: Realistic Spreadsheet Simulations
 /** Suite 76: Spreadsheet Simulations (row 4300) — uses 100+ rows */
 export const AREA_SIMULATIONS = suiteArea(76);
+
+// Phase 32: What-If Analysis (Iterative Calc, Goal Seek, Solver, Scenarios, Data Tables)
+/** Suite 77: What-If Analysis (row 4350) */
+export const AREA_WHAT_IF = suiteArea(77);
+
+// Phase 33: Advanced Features Deep Dive
+/** Suite 78: Advanced Features (row 4400) */
+export const AREA_ADV_FEATURES = suiteArea(78);

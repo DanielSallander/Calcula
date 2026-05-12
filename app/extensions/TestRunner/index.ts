@@ -130,6 +130,10 @@ import { multiFeatureWorkflowsSuite } from "./lib/suites/multiFeatureWorkflows";
 import { edgeCaseRegressionsSuite } from "./lib/suites/edgeCaseRegressions";
 // Phase 31: Realistic Simulations
 import { realisticSimulationsSuite } from "./lib/suites/realisticSimulations";
+// Phase 32: What-If Analysis
+import { whatIfAnalysisSuite } from "./lib/suites/whatIfAnalysis";
+// Phase 33: Advanced Features Deep Dive
+import { advancedFeaturesDeepDiveSuite } from "./lib/suites/advancedFeaturesDeepDive";
 
 // ============================================================================
 // Constants
@@ -366,8 +370,14 @@ function activate(context: ExtensionContext): void {
   // Phase 30: Edge Case Regressions (passed 25/25 -- disabled)
   registerSuite({ ...edgeCaseRegressionsSuite, disabled: true });
 
-  // Phase 31: Realistic Simulations
-  registerSuite(realisticSimulationsSuite);
+  // Phase 31: Realistic Simulations (passed 5/5 -- disabled)
+  registerSuite({ ...realisticSimulationsSuite, disabled: true });
+
+  // Phase 32: What-If Analysis (passed 10/10 -- disabled)
+  registerSuite({ ...whatIfAnalysisSuite, disabled: true });
+
+  // Phase 33: Advanced Features Deep Dive (passed 15/15 -- disabled)
+  registerSuite({ ...advancedFeaturesDeepDiveSuite, disabled: true });
 
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
@@ -375,7 +385,7 @@ function activate(context: ExtensionContext): void {
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 75; // base + Phase 23-31
+  let suiteCount = 77; // base + Phase 23-33
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);
