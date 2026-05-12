@@ -274,3 +274,7 @@ export const AREA_WHAT_IF = suiteArea(77);
 // Phase 33: Advanced Features Deep Dive
 /** Suite 78: Advanced Features (row 4400) */
 export const AREA_ADV_FEATURES = suiteArea(78);
+
+// Phase 34: Enterprise Simulations
+/** Suite 79: Enterprise Simulations (row 4450) — uses 150+ rows */
+export const AREA_ENTERPRISE = suiteArea(79);
