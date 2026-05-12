@@ -120,6 +120,14 @@ import { formulaChainsSuite } from "./lib/suites/formulaChains";
 import { stressWorkflowSuite } from "./lib/suites/stressWorkflow";
 // Phase 26: .cala Round-Trip
 import { calaRoundTripSuite } from "./lib/suites/calaRoundTrip";
+// Phase 27: Cross-Sheet Formula Chains
+import { crossSheetFormulasSuite } from "./lib/suites/crossSheetFormulas";
+// Phase 28: Table + Formula Integration Stress
+import { tableFormulaStressSuite } from "./lib/suites/tableFormulaStress";
+// Phase 29: Multi-Feature Workflows
+import { multiFeatureWorkflowsSuite } from "./lib/suites/multiFeatureWorkflows";
+// Phase 30: Edge Case Regressions
+import { edgeCaseRegressionsSuite } from "./lib/suites/edgeCaseRegressions";
 
 // ============================================================================
 // Constants
@@ -341,8 +349,20 @@ function activate(context: ExtensionContext): void {
   // Phase 25: Stress & Workflow Tests (passed 15/15 -- disabled)
   registerSuite({ ...stressWorkflowSuite, disabled: true });
 
-  // Phase 26: .cala Round-Trip
-  registerSuite(calaRoundTripSuite);
+  // Phase 26: .cala Round-Trip (passed 12/12 -- disabled)
+  registerSuite({ ...calaRoundTripSuite, disabled: true });
+
+  // Phase 27: Cross-Sheet Formula Chains (passed 15/15 -- disabled)
+  registerSuite({ ...crossSheetFormulasSuite, disabled: true });
+
+  // Phase 28: Table + Formula Integration Stress (passed 15/15 -- disabled)
+  registerSuite({ ...tableFormulaStressSuite, disabled: true });
+
+  // Phase 29: Multi-Feature Workflows (passed 10/10 -- disabled)
+  registerSuite({ ...multiFeatureWorkflowsSuite, disabled: true });
+
+  // Phase 30: Edge Case Regressions
+  registerSuite(edgeCaseRegressionsSuite);
 
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
@@ -350,7 +370,7 @@ function activate(context: ExtensionContext): void {
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 70; // base + Phase 23-26
+  let suiteCount = 74; // base + Phase 23-30
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);

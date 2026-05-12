@@ -246,3 +246,19 @@ export const AREA_STRESS = suiteArea(70);
 // Phase 26: Calcula Format (.cala) Round-Trip
 /** Suite 71: .cala Round-Trip (row 4050) */
 export const AREA_CALA_ROUNDTRIP = suiteArea(71);
+
+// Phase 27: Cross-Sheet Formula Chains
+/** Suite 72: Cross-Sheet Formulas (row 4100) */
+export const AREA_CROSS_SHEET = suiteArea(72);
+
+// Phase 28: Table + Formula Integration Stress
+/** Suite 73: Table Formula Stress (row 4150) */
+export const AREA_TABLE_STRESS = suiteArea(73);
+
+// Phase 29: Concurrent Multi-Feature Workflows
+/** Suite 74: Multi-Feature Workflows (row 4200) */
+export const AREA_MULTI_FEATURE = suiteArea(74);
+
+// Phase 30: Edge Case Regressions
+/** Suite 75: Edge Cases (row 4250) */
+export const AREA_EDGE_CASES = suiteArea(75);
