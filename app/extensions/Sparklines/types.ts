@@ -5,6 +5,15 @@
 /** Type of sparkline visualization */
 export type SparklineType = "line" | "column" | "winloss";
 
+/** How empty cells in the data range are handled */
+export type EmptyCellHandling = "gaps" | "zero" | "connect";
+
+/** How the vertical axis min/max is determined */
+export type AxisScaleType = "auto" | "sameForAll" | "custom";
+
+/** Plot order direction */
+export type PlotOrder = "default" | "rightToLeft";
+
 /**
  * A Sparkline Group defines a mapping from a Data Range to a Location Range.
  *
@@ -65,6 +74,24 @@ export interface SparklineGroup {
   negativePointColor: string;
   /** Color for general markers (all data points) */
   markerColor: string;
+
+  // -- Axis options --
+  /** Whether to show a horizontal axis line at zero */
+  showAxis: boolean;
+  /** How the vertical scale min/max is determined */
+  axisScaleType: AxisScaleType;
+  /** Custom minimum value (used when axisScaleType is "custom") */
+  axisMinValue: number | null;
+  /** Custom maximum value (used when axisScaleType is "custom") */
+  axisMaxValue: number | null;
+
+  // -- Empty cell handling --
+  /** How empty/non-numeric cells in the data range are treated */
+  emptyCellHandling: EmptyCellHandling;
+
+  // -- Plot order --
+  /** Direction of data plotting */
+  plotOrder: PlotOrder;
 }
 
 /** A contiguous rectangular cell range (0-based, inclusive) */

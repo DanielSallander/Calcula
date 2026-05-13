@@ -264,6 +264,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         default_column_width: 100.0,
         properties: crate::WorkbookProperties::default(),
         charts: Vec::new(),
+        sparklines: Vec::new(),
         named_ranges: Vec::new(),
         ribbon_filters: Vec::new(),
         pivot_layouts: Vec::new(),

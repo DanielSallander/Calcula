@@ -7,6 +7,7 @@ import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, Bar
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
+import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -107,7 +108,7 @@ export function paintBarChart(
   }
 
   // 7. Legend
-  if (spec.legend.visible && data.series.length > 1) {
+  if (spec.legend.visible && data.series.length > 0) {
     drawLegend(ctx, data, spec, layout, theme);
   }
 }
@@ -172,6 +173,7 @@ function drawBars(
     2,
   );
   const zeroY = yScale.scale(0);
+  const overrideMap = buildOverrideMap(spec.dataPointOverrides);
 
   for (let ci = 0; ci < data.categories.length; ci++) {
     const groupX = xScale.scaleIndex(ci);
@@ -180,7 +182,11 @@ function drawBars(
       const value = data.series[si].values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
       const encoding = spec.series[si]?.encoding;
-      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category);
+      let color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category);
+
+      // Apply data point override
+      const override = getOverrideFromMap(overrideMap, si, ci);
+      if (override?.color) color = override.color;
 
       const barX = groupX + si * (barWidth + theme.barGap);
       const barTop = yScale.scale(value);
@@ -194,7 +200,8 @@ function drawBars(
 
       if (clippedHeight <= 0) continue;
 
-      const pointOpacity = resolvePointOpacity(encoding, value, category);
+      let pointOpacity = resolvePointOpacity(encoding, value, category);
+      if (override?.opacity !== undefined) pointOpacity = override.opacity;
       if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
       ctx.fillStyle = color;
 

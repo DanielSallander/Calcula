@@ -36,6 +36,16 @@ import type {
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { fetchPivotChartFields } from "../lib/pivotChartDataReader";
+import {
+  computeQuickAccessButtons,
+  drawQuickAccessButtons,
+  hitTestQuickAccessButtons,
+  setHoveredButton,
+  getHoveredButton,
+  isInQuickAccessArea,
+  type QuickAccessButton,
+  type QuickAccessButtonType,
+} from "./quickAccessButtons";
 
 // ============================================================================
 // OffscreenCanvas Cache
@@ -92,6 +102,11 @@ interface CachedChartData {
   logicalHeight: number;
   /** Pivot chart field buttons (only present for pivot-sourced charts). */
   pivotFieldButtons?: PivotChartFieldButton[];
+  /** Unfiltered data: all series and categories before chart filters applied.
+   *  Used by the filter dropdown to show all available options. */
+  unfilteredData?: ParsedChartData;
+  /** Quick access button positions (computed during render, used for hit-testing). */
+  quickAccessButtons?: QuickAccessButton[];
 }
 
 const chartDataCache = new Map<number, CachedChartData>();
@@ -149,6 +164,27 @@ let hoverState: {
  */
 export function isHoveringFilterButton(): boolean {
   return hoverState !== null && hoverState.hitResult.type === "filterButton";
+}
+
+/**
+ * Returns true if the mouse is currently hovering over a quick access button.
+ */
+export function isHoveringQuickAccessButton(): boolean {
+  return getHoveredButton() !== null;
+}
+
+/**
+ * Returns true if the mouse is currently hovering over an axis region.
+ */
+export function isHoveringAxis(): boolean {
+  return hoverState !== null && hoverState.hitResult.type === "axis";
+}
+
+/**
+ * Get the current hover state (for context menu).
+ */
+export function getHoverState(): typeof hoverState {
+  return hoverState;
 }
 
 /**
@@ -219,12 +255,14 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
 
         const hitResult = hitTestGeometry(localX, localY, cachedData.hitGeometry, cachedData.layout);
 
-        if (hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice") {
+        if (hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice" || hitResult.type === "axis") {
           const changed =
             hoverState === null ||
             hoverState.chartId !== chartId ||
+            hoverState.hitResult.type !== hitResult.type ||
             hoverState.hitResult.seriesIndex !== hitResult.seriesIndex ||
-            hoverState.hitResult.categoryIndex !== hitResult.categoryIndex;
+            hoverState.hitResult.categoryIndex !== hitResult.categoryIndex ||
+            hoverState.hitResult.axisType !== hitResult.axisType;
 
           hoverState = { chartId, hitResult, canvasX, canvasY };
           if (changed) requestOverlayRedraw();
@@ -232,6 +270,36 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
           break;
         }
       }
+    }
+  }
+
+  // Check quick access buttons (outside chart bounds, for selected charts)
+  if (!foundHover) {
+    for (const region of regions) {
+      if (!region.floating) continue;
+      const chartId = region.data?.chartId as number;
+      if (chartId == null || !isChartSelected(chartId)) continue;
+
+      const cachedData = chartDataCache.get(chartId);
+      if (!cachedData?.quickAccessButtons) continue;
+
+      const btnHit = hitTestQuickAccessButtons(canvasX, canvasY, cachedData.quickAccessButtons);
+      if (btnHit) {
+        if (getHoveredButton() !== btnHit) {
+          setHoveredButton(btnHit);
+          requestOverlayRedraw();
+        }
+        foundHover = true;
+        break;
+      }
+    }
+  }
+
+  // Clear quick access hover if not over a button
+  if (!foundHover || (foundHover && hoverState)) {
+    if (getHoveredButton() !== null) {
+      setHoveredButton(null);
+      requestOverlayRedraw();
     }
   }
 
@@ -349,12 +417,23 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     const subSel = getSubSelection();
     if (subSel.level === "series" || subSel.level === "dataPoint") {
       drawSelectionHighlights(ctx, canvasX, canvasY, cachedData, chart.spec, subSel.level, subSel.seriesIndex, subSel.categoryIndex);
+    } else if (subSel.level === "axis" && subSel.axisType) {
+      drawAxisSelectionHighlight(ctx, canvasX, canvasY, cachedData.layout, subSel.axisType);
     }
   }
 
   // 3b. Draw pivot chart field buttons (filter dropdowns)
   if (cachedData?.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
     drawPivotFieldButtons(ctx, canvasX, canvasY, cachedData.pivotFieldButtons);
+  }
+
+  // 3c. Draw filter active indicator (small funnel badge in top-right)
+  if (chart.spec.filters) {
+    const f = chart.spec.filters;
+    const hiddenCount = (f.hiddenSeries?.length ?? 0) + (f.hiddenCategories?.length ?? 0);
+    if (hiddenCount > 0) {
+      drawFilterIndicator(ctx, canvasX + chartWidth - 28, canvasY + 6, hiddenCount);
+    }
   }
 
   // 4. Draw border
@@ -377,6 +456,15 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
 
     // Resize handles at corners
     drawResizeHandles(ctx, canvasX, canvasY, chartWidth, chartHeight);
+
+    // Quick access buttons (to the right of chart)
+    const qaButtons = computeQuickAccessButtons(canvasX, canvasY, chartWidth, chartHeight);
+    drawQuickAccessButtons(ctx, qaButtons);
+
+    // Store for hit-testing
+    if (cachedData) {
+      cachedData.quickAccessButtons = qaButtons;
+    }
   }
 
   // 6. Draw tooltip (always on top)
@@ -403,12 +491,31 @@ export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
   // Use pre-computed canvas bounds for floating overlays
   if (hitCtx.floatingCanvasBounds) {
     const b = hitCtx.floatingCanvasBounds;
-    return (
+
+    // Standard chart bounds check
+    const inChart =
       hitCtx.canvasX >= b.x &&
       hitCtx.canvasX <= b.x + b.width &&
       hitCtx.canvasY >= b.y &&
-      hitCtx.canvasY <= b.y + b.height
-    );
+      hitCtx.canvasY <= b.y + b.height;
+
+    if (inChart) return true;
+
+    // Extended bounds: check quick access buttons area to the right
+    // (only when this chart is selected)
+    const chartId = hitCtx.region.data?.chartId as number;
+    if (chartId != null && isChartSelected(chartId)) {
+      return isInQuickAccessArea(
+        hitCtx.canvasX,
+        hitCtx.canvasY,
+        b.x,
+        b.y,
+        b.width,
+        b.height,
+      );
+    }
+
+    return false;
   }
 
   // Fallback for non-floating (should not happen for charts now)
@@ -448,6 +555,7 @@ async function renderChartAsync(
     const resolved = await readChartDataResolved(chart.spec);
     const data = resolved.data;
     const spec = resolved.spec;
+    const unfilteredData = resolved.unfilteredData;
 
     // Check if version is still current (might have changed during async fetch)
     const currentVersion = chartVersions.get(chartId) ?? 0;
@@ -509,6 +617,7 @@ async function renderChartAsync(
       logicalWidth,
       logicalHeight,
       pivotFieldButtons,
+      unfilteredData,
     });
 
     // Trigger a canvas redraw so the cached chart gets composited.
@@ -929,6 +1038,107 @@ function drawPlaceholder(
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(`Loading ${name}...`, x + w / 2, y + h / 2);
+}
+
+/**
+ * Draw a selection highlight around an axis region.
+ * Draws a blue semi-transparent overlay + border around the selected axis area.
+ */
+function drawAxisSelectionHighlight(
+  ctx: CanvasRenderingContext2D,
+  chartCanvasX: number,
+  chartCanvasY: number,
+  layout: ChartLayout,
+  axisType: "x" | "y",
+): void {
+  const pa = layout.plotArea;
+  ctx.save();
+
+  let x: number, y: number, w: number, h: number;
+
+  if (axisType === "x") {
+    // X axis region: below the plot area
+    x = chartCanvasX + pa.x;
+    y = chartCanvasY + pa.y + pa.height;
+    w = pa.width;
+    h = layout.margin.bottom;
+  } else {
+    // Y axis region: to the left of the plot area
+    x = chartCanvasX;
+    y = chartCanvasY + pa.y;
+    w = pa.x;
+    h = pa.height;
+  }
+
+  // Blue semi-transparent fill
+  ctx.fillStyle = "rgba(14, 99, 156, 0.08)";
+  ctx.fillRect(x, y, w, h);
+
+  // Blue dashed border
+  ctx.strokeStyle = "#0e639c";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.setLineDash([]);
+
+  ctx.restore();
+}
+
+/**
+ * Draw a small filter indicator badge (funnel icon + count).
+ * Shown in the top-right corner of charts that have active filters.
+ */
+function drawFilterIndicator(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  hiddenCount: number,
+): void {
+  const w = 20;
+  const h = 16;
+  const r = 3;
+
+  ctx.save();
+
+  // Background pill
+  ctx.fillStyle = "rgba(0, 95, 184, 0.85)";
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+  ctx.fill();
+
+  // Funnel icon (simple V shape)
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(x + 3, y + 4);
+  ctx.lineTo(x + 8, y + 9);
+  ctx.lineTo(x + 8, y + 12);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x + 13, y + 4);
+  ctx.lineTo(x + 8, y + 9);
+  ctx.stroke();
+
+  // Count text
+  if (hiddenCount > 0) {
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 8px sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(hiddenCount), x + 14, y + h / 2);
+  }
+
+  ctx.restore();
 }
 
 function drawResizeHandles(

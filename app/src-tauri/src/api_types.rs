@@ -2083,6 +2083,21 @@ pub struct ChartEntry {
     pub spec_json: String,
 }
 
+// ============================================================================
+// Sparkline Entry (opaque JSON persistence)
+// ============================================================================
+
+/// A sparkline entry stored in the backend. Sparkline groups are serialized
+/// as JSON strings, similar to charts, to avoid replicating the full type in Rust.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SparklineEntry {
+    /// Sheet index where the sparkline groups belong.
+    pub sheet_index: usize,
+    /// All sparkline groups for this sheet, serialized as a JSON string.
+    pub groups_json: String,
+}
+
 /// Default row height and column width for the workbook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

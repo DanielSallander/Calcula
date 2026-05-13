@@ -271,26 +271,52 @@ export function drawCartesianAxes(
   spec: ChartSpec,
   theme: ChartRenderTheme,
 ): void {
-  ctx.strokeStyle = theme.axisColor;
-  ctx.lineWidth = 1;
+  const xAxisY = plotArea.y + plotArea.height;
+
+  // -- Axis Lines --
 
   // X axis line
-  const xAxisY = plotArea.y + plotArea.height;
-  ctx.beginPath();
-  ctx.moveTo(plotArea.x, xAxisY + 0.5);
-  ctx.lineTo(plotArea.x + plotArea.width, xAxisY + 0.5);
-  ctx.stroke();
+  if (spec.xAxis.showLine !== false) {
+    ctx.strokeStyle = spec.xAxis.lineColor ?? theme.axisColor;
+    ctx.lineWidth = spec.xAxis.lineWidth ?? 1;
+    ctx.setLineDash(spec.xAxis.lineDash ?? []);
+    ctx.beginPath();
+    ctx.moveTo(plotArea.x, xAxisY + 0.5);
+    ctx.lineTo(plotArea.x + plotArea.width, xAxisY + 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   // Y axis line
-  ctx.beginPath();
-  ctx.moveTo(plotArea.x - 0.5, plotArea.y);
-  ctx.lineTo(plotArea.x - 0.5, xAxisY);
-  ctx.stroke();
+  if (spec.yAxis.showLine !== false) {
+    ctx.strokeStyle = spec.yAxis.lineColor ?? theme.axisColor;
+    ctx.lineWidth = spec.yAxis.lineWidth ?? 1;
+    ctx.setLineDash(spec.yAxis.lineDash ?? []);
+    ctx.beginPath();
+    ctx.moveTo(plotArea.x - 0.5, plotArea.y);
+    ctx.lineTo(plotArea.x - 0.5, xAxisY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
-  // X axis labels
-  if (spec.xAxis.showLabels) {
+  // -- Tick Marks --
+  const yTicks = yScale.ticks(spec.yAxis.tickCount ?? 5);
+  drawTickMarks(ctx, spec.yAxis, yTicks.map((t) => yScale.scale(t)), "y", plotArea, theme);
+  drawTickMarks(
+    ctx, spec.xAxis,
+    xScale.domain.map((_, ci) => xScale.scaleIndex(ci) + xScale.bandwidth / 2),
+    "x", plotArea, theme,
+  );
+
+  // -- Display Unit Factor --
+  const displayFactor = getDisplayUnitFactor(spec.yAxis.displayUnit);
+
+  // -- X Axis Labels --
+  if (spec.xAxis.showLabels && spec.xAxis.labelPosition !== "none") {
     ctx.fillStyle = theme.axisLabelColor;
     ctx.font = `${theme.labelFontSize}px ${theme.fontFamily}`;
+    const angle = spec.xAxis.labelAngle ?? 0;
+    const angleRad = (angle * Math.PI) / 180;
 
     for (let ci = 0; ci < xScale.domain.length; ci++) {
       const category = xScale.domain[ci];
@@ -298,24 +324,17 @@ export function drawCartesianAxes(
       const y = xAxisY + 4;
 
       ctx.save();
-      if (spec.xAxis.labelAngle === 0) {
+      if (angle === 0) {
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
         const maxWidth = xScale.bandwidth - 4;
         const label = truncateText(ctx, category, maxWidth);
         ctx.fillText(label, x, y);
-      } else if (spec.xAxis.labelAngle === 45) {
-        ctx.translate(x, y);
-        ctx.rotate(-Math.PI / 4);
-        ctx.textAlign = "right";
-        ctx.textBaseline = "top";
-        ctx.fillText(category, 0, 0);
       } else {
-        // 90 degrees
         ctx.translate(x, y);
-        ctx.rotate(-Math.PI / 2);
-        ctx.textAlign = "right";
-        ctx.textBaseline = "middle";
+        ctx.rotate(-angleRad);
+        ctx.textAlign = Math.abs(angle) > 60 ? "right" : "right";
+        ctx.textBaseline = Math.abs(angle) > 60 ? "middle" : "top";
         ctx.fillText(category, 0, 0);
       }
       ctx.restore();
@@ -335,19 +354,32 @@ export function drawCartesianAxes(
     );
   }
 
-  // Y axis labels
-  if (spec.yAxis.showLabels) {
-    const ticks = yScale.ticks(5);
+  // -- Y Axis Labels --
+  if (spec.yAxis.showLabels && spec.yAxis.labelPosition !== "none") {
     ctx.fillStyle = theme.axisLabelColor;
     ctx.font = `${theme.labelFontSize}px ${theme.fontFamily}`;
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
-    for (const tick of ticks) {
+    for (const tick of yTicks) {
       const y = yScale.scale(tick);
       if (y < plotArea.y || y > plotArea.y + plotArea.height) continue;
-      ctx.fillText(formatTickValue(tick), plotArea.x - 6, y);
+
+      const displayValue = displayFactor !== 1 ? tick / displayFactor : tick;
+      const label = spec.yAxis.tickFormat
+        ? formatTickValueWithFormat(displayValue, spec.yAxis.tickFormat)
+        : formatTickValue(displayValue);
+      ctx.fillText(label, plotArea.x - 6, y);
     }
+  }
+
+  // Y axis display unit label
+  if (spec.yAxis.displayUnit && spec.yAxis.displayUnit !== "none" && spec.yAxis.showDisplayUnitLabel) {
+    ctx.fillStyle = theme.axisLabelColor;
+    ctx.font = `italic ${theme.labelFontSize - 1}px ${theme.fontFamily}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(getDisplayUnitLabel(spec.yAxis.displayUnit), plotArea.x + 2, plotArea.y - 2);
   }
 
   // Y axis title
@@ -362,6 +394,111 @@ export function drawCartesianAxes(
     ctx.fillText(spec.yAxis.title, 0, 0);
     ctx.restore();
   }
+}
+
+// ============================================================================
+// Tick Mark Drawing
+// ============================================================================
+
+function drawTickMarks(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  axisSpec: import("../types").AxisSpec,
+  positions: number[],
+  axis: "x" | "y",
+  plotArea: { x: number; y: number; width: number; height: number },
+  theme: ChartRenderTheme,
+): void {
+  const majorType = axisSpec.majorTickMark ?? "outside";
+  if (majorType === "none") return;
+
+  ctx.strokeStyle = axisSpec.lineColor ?? theme.axisColor;
+  ctx.lineWidth = 1;
+  const tickLen = 5;
+
+  ctx.beginPath();
+  for (const pos of positions) {
+    if (axis === "x") {
+      const y = plotArea.y + plotArea.height;
+      if (majorType === "outside" || majorType === "cross") {
+        ctx.moveTo(pos, y);
+        ctx.lineTo(pos, y + tickLen);
+      }
+      if (majorType === "inside" || majorType === "cross") {
+        ctx.moveTo(pos, y);
+        ctx.lineTo(pos, y - tickLen);
+      }
+    } else {
+      const x = plotArea.x;
+      if (majorType === "outside" || majorType === "cross") {
+        ctx.moveTo(x, pos);
+        ctx.lineTo(x - tickLen, pos);
+      }
+      if (majorType === "inside" || majorType === "cross") {
+        ctx.moveTo(x, pos);
+        ctx.lineTo(x + tickLen, pos);
+      }
+    }
+  }
+  ctx.stroke();
+}
+
+// ============================================================================
+// Display Unit Helpers
+// ============================================================================
+
+function getDisplayUnitFactor(unit: import("../types").DisplayUnit | undefined): number {
+  switch (unit) {
+    case "hundreds": return 100;
+    case "thousands": return 1_000;
+    case "tenThousands": return 10_000;
+    case "hundredThousands": return 100_000;
+    case "millions": return 1_000_000;
+    case "tenMillions": return 10_000_000;
+    case "hundredMillions": return 100_000_000;
+    case "billions": return 1_000_000_000;
+    case "trillions": return 1_000_000_000_000;
+    default: return 1;
+  }
+}
+
+function getDisplayUnitLabel(unit: import("../types").DisplayUnit): string {
+  switch (unit) {
+    case "hundreds": return "Hundreds";
+    case "thousands": return "Thousands";
+    case "tenThousands": return "Ten Thousands";
+    case "hundredThousands": return "Hundred Thousands";
+    case "millions": return "Millions";
+    case "tenMillions": return "Ten Millions";
+    case "hundredMillions": return "Hundred Millions";
+    case "billions": return "Billions";
+    case "trillions": return "Trillions";
+    default: return "";
+  }
+}
+
+function formatTickValueWithFormat(value: number, format: string): string {
+  // Support common d3-style format codes
+  if (format.includes("%")) {
+    const decimals = format.match(/\.(\d+)/)?.[1];
+    const d = decimals ? parseInt(decimals) : 0;
+    return (value * 100).toFixed(d) + "%";
+  }
+  if (format.startsWith("$")) {
+    const decimals = format.match(/\.(\d+)/)?.[1];
+    const d = decimals ? parseInt(decimals) : 0;
+    const formatted = value.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+    return "$" + formatted;
+  }
+  if (format.includes(",")) {
+    const decimals = format.match(/\.(\d+)/)?.[1];
+    const d = decimals ? parseInt(decimals) : 0;
+    return value.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  const decimals = format.match(/\.(\d+)/)?.[1];
+  if (decimals) {
+    return value.toFixed(parseInt(decimals));
+  }
+  return formatTickValue(value);
 }
 
 /**

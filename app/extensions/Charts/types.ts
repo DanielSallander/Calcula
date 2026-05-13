@@ -512,6 +512,20 @@ export interface ScaleSpec {
   exponent?: number;
 }
 
+/** Tick mark display type (Excel-compatible). */
+export type TickMarkType = "none" | "inside" | "outside" | "cross";
+
+/** Axis label position. */
+export type AxisLabelPosition = "nextToAxis" | "high" | "low" | "none";
+
+/** Display unit for value axis (shows values as thousands, millions, etc.). */
+export type DisplayUnit = "none" | "hundreds" | "thousands" | "tenThousands"
+  | "hundredThousands" | "millions" | "tenMillions" | "hundredMillions"
+  | "billions" | "trillions";
+
+/** Where the perpendicular axis crosses this axis. */
+export type AxisCrossesAt = "auto" | "min" | "max" | "value";
+
 /** Axis configuration. */
 export interface AxisSpec {
   /** Axis title (null = auto from headers). */
@@ -520,7 +534,7 @@ export interface AxisSpec {
   gridLines: boolean;
   /** Show axis labels. */
   showLabels: boolean;
-  /** Label rotation in degrees (0, 45, 90). */
+  /** Label rotation in degrees. Default: 0. Supports any angle. */
   labelAngle: number;
   /** Min value for value axis (null = auto). */
   min: number | null;
@@ -532,6 +546,38 @@ export interface AxisSpec {
   tickCount?: number;
   /** Number format string for tick labels (e.g., ",.2f", "$,.0f", "%"). */
   tickFormat?: string;
+
+  // -- Extended Axis Options (Excel-compatible) --
+
+  /** Major unit (distance between major tick marks). null = auto. */
+  majorUnit?: number | null;
+  /** Minor unit (distance between minor tick marks). null = auto. */
+  minorUnit?: number | null;
+  /** Display unit for value axis. Divides values by the unit factor. */
+  displayUnit?: DisplayUnit;
+  /** Show a label on the chart indicating the display unit. */
+  showDisplayUnitLabel?: boolean;
+  /** Major tick mark type. Default: "outside". */
+  majorTickMark?: TickMarkType;
+  /** Minor tick mark type. Default: "none". */
+  minorTickMark?: TickMarkType;
+  /** Axis label position. Default: "nextToAxis". */
+  labelPosition?: AxisLabelPosition;
+  /** Where the perpendicular axis crosses. Default: "auto". */
+  crossesAt?: AxisCrossesAt;
+  /** Custom value where the axis crosses (when crossesAt is "value"). */
+  crossesAtValue?: number;
+
+  // -- Axis Line Styling --
+
+  /** Axis line color override. null = use theme color. */
+  lineColor?: string;
+  /** Axis line width in pixels. Default: 1. */
+  lineWidth?: number;
+  /** Axis line dash pattern [dashLength, gapLength]. null = solid. */
+  lineDash?: number[];
+  /** Whether to show the axis line itself. Default: true. */
+  showLine?: boolean;
 }
 
 /** Legend configuration. */
@@ -774,6 +820,47 @@ export interface TrendlineSpec {
 }
 
 // ============================================================================
+// Data Point Overrides (individual point formatting)
+// ============================================================================
+
+/**
+ * Visual override for a single data point within a chart.
+ * Allows formatting individual bars, pie slices, line markers, etc.
+ * independently from their series defaults.
+ */
+export interface DataPointOverride {
+  /** Index of the series this override applies to. */
+  seriesIndex: number;
+  /** Index of the category (data point) within the series. */
+  categoryIndex: number;
+  /** Override fill color (hex). */
+  color?: string;
+  /** Override opacity (0-1). */
+  opacity?: number;
+  /** Override border/stroke color. */
+  borderColor?: string;
+  /** Override border/stroke width. */
+  borderWidth?: number;
+  /** For pie/donut charts: explode (pull out) this slice by the given offset in pixels. */
+  exploded?: number;
+}
+
+// ============================================================================
+// Chart Filters (show/hide series and categories)
+// ============================================================================
+
+/**
+ * Non-destructive chart filters. Hides series or categories from the chart
+ * without removing them from the data source. Like Excel's funnel button.
+ */
+export interface ChartFilters {
+  /** Indices of series to hide. Empty/undefined = all visible. */
+  hiddenSeries: number[];
+  /** Indices of categories to hide. Empty/undefined = all visible. */
+  hiddenCategories: number[];
+}
+
+// ============================================================================
 // Chart Specification (Vega-Lite inspired)
 // ============================================================================
 
@@ -819,6 +906,10 @@ export interface ChartSpec {
   dataTable?: DataTableOptions;
   /** Per-series cell references for SERIES formula reconstruction (from XLSX import or computed). */
   seriesRefs?: SeriesRef[];
+  /** Non-destructive chart filters (hide series/categories). */
+  filters?: ChartFilters;
+  /** Per-data-point visual overrides (individual bar/slice/point formatting). */
+  dataPointOverrides?: DataPointOverride[];
 }
 
 // ============================================================================
@@ -879,10 +970,12 @@ export interface ChartHitResult {
   categoryName?: string;
   /** Field button info (set when a filter button is hit). */
   fieldButton?: PivotChartFieldButton;
+  /** Axis type (set when type is "axis"). */
+  axisType?: "x" | "y";
 }
 
 /** Hierarchical selection level within a chart. */
-export type ChartSelectionLevel = "none" | "chart" | "series" | "dataPoint";
+export type ChartSelectionLevel = "none" | "chart" | "series" | "dataPoint" | "axis";
 
 /** Sub-selection state within a selected chart. */
 export interface ChartSubSelection {
@@ -891,6 +984,8 @@ export interface ChartSubSelection {
   seriesIndex?: number;
   /** Selected category index (set at "dataPoint" level). */
   categoryIndex?: number;
+  /** Selected axis type (set at "axis" level). */
+  axisType?: "x" | "y";
 }
 
 // ============================================================================

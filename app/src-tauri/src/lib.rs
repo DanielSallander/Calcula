@@ -77,6 +77,7 @@ pub mod locale_commands;
 pub mod error_checking;
 pub mod named_styles_cmd;
 pub mod chart_commands;
+pub mod sparkline_commands;
 pub mod r1c1;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
@@ -297,6 +298,8 @@ pub struct AppState {
     pub calculate_before_save: Mutex<bool>,
     /// Chart entries: persisted chart definitions (opaque JSON)
     pub charts: Mutex<Vec<api_types::ChartEntry>>,
+    /// Sparkline entries: persisted sparkline groups per sheet (opaque JSON)
+    pub sparklines: Mutex<Vec<api_types::SparklineEntry>>,
     /// Scroll area restriction per sheet (A1-style range like "A1:Z100", or None for unrestricted)
     pub scroll_areas: Mutex<Vec<Option<String>>>,
     /// Reference style: "A1" (default) or "R1C1"
@@ -416,6 +419,7 @@ pub fn create_app_state() -> AppState {
         precision_as_displayed: Mutex::new(false),
         calculate_before_save: Mutex::new(true),
         charts: Mutex::new(Vec::new()),
+        sparklines: Mutex::new(Vec::new()),
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: Mutex::new(Vec::new()),
@@ -3873,6 +3877,11 @@ pub fn run() {
             chart_commands::save_chart,
             chart_commands::update_chart,
             chart_commands::delete_chart,
+            // Sparkline persistence commands
+            sparkline_commands::get_sparklines,
+            sparkline_commands::save_sparklines,
+            sparkline_commands::delete_sparklines,
+            sparkline_commands::clear_all_sparklines,
             // R1C1 reference style commands
             r1c1::get_reference_style,
             r1c1::set_reference_style,

@@ -10,11 +10,12 @@ import { emitAppEvent, AppEvents, showDialog } from "@api";
 import type { RibbonContext } from "@api/extensions";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 
-import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, SeriesOrientation } from "../types";
+import type { ChartType, ChartSpec, ChartFilters, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, SeriesOrientation } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
+import { ChartFilterDropdown } from "./ChartFilterDropdown";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
-import { invalidateChartCache } from "../rendering/chartRenderer";
-import { getCurrentChartId } from "../handlers/selectionHandler";
+import { invalidateChartCache, getCachedChartData } from "../rendering/chartRenderer";
+import { getCurrentChartId, getSubSelection } from "../handlers/selectionHandler";
 import { ChartEvents } from "../lib/chartEvents";
 import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
 import { CHART_DIALOG_ID } from "../manifest";
@@ -371,6 +372,7 @@ const GROUP_DEFS = [
   { collapseOrder: 1, expandedWidth: 140 }, // Trendline
   { collapseOrder: 4, expandedWidth: 220 }, // Colors
   { collapseOrder: 3, expandedWidth: 130 }, // Legend
+  { collapseOrder: 8, expandedWidth: 80 },  // Filter
   { collapseOrder: 7, expandedWidth: 260 }, // Actions
 ];
 
@@ -723,7 +725,22 @@ export function ChartDesignTab({
       {/* ================================================================ */}
       {/* Actions: Edit Chart button                                        */}
       {/* ================================================================ */}
-      <RibbonGroup label="Actions" collapsed={collapsed[6]}>
+      {/* ================================================================ */}
+      {/* Filter Group                                                      */}
+      {/* ================================================================ */}
+      <RibbonGroup label="Filter" collapsed={collapsed[6]}>
+        <div className={s.groupContent}>
+          <ChartFilterDropdown
+            spec={spec}
+            unfilteredData={chartId != null ? getCachedChartData(chartId)?.unfilteredData : undefined}
+            onFiltersChange={(newFilters: ChartFilters) => {
+              updateSpec({ filters: newFilters });
+            }}
+          />
+        </div>
+      </RibbonGroup>
+
+      <RibbonGroup label="Actions" collapsed={collapsed[7]}>
         <div className={s.groupContent}>
           {!isPivot && (
             <button
@@ -784,6 +801,33 @@ export function ChartDesignTab({
             <span className={s.actionIcon}><SaveImageIcon /></span>
             Save Image
           </button>
+          {(() => {
+            const subSel = getSubSelection();
+            if (subSel.level === "dataPoint" && chartId != null) {
+              const isPieOrDonut = spec.mark === "pie" || spec.mark === "donut";
+              const cachedData = getCachedChartData(chartId);
+              const categoryName = cachedData?.unfilteredData?.categories?.[subSel.categoryIndex ?? 0] ?? "";
+              return (
+                <button
+                  className={s.actionBtn}
+                  onClick={() => {
+                    showDialog("chart:dataPointFormat", {
+                      chartId,
+                      seriesIndex: subSel.seriesIndex,
+                      categoryIndex: subSel.categoryIndex,
+                      categoryName,
+                      isPieOrDonut,
+                    });
+                  }}
+                  title="Format the selected data point"
+                >
+                  <span className={s.actionIcon}>&#127912;</span>
+                  Format Point
+                </button>
+              );
+            }
+            return null;
+          })()}
         </div>
       </RibbonGroup>
     </div>

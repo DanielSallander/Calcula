@@ -6,6 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, LineMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
 import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -150,20 +151,28 @@ export function paintLineChart(
     }
     ctx.stroke();
 
-    // Draw markers
+    // Draw markers (with per-point overrides)
     if (showMarkers) {
-      ctx.fillStyle = color;
-      for (const pt of points) {
+      const overrideMap = buildOverrideMap(spec.dataPointOverrides);
+      for (let ci = 0; ci < points.length; ci++) {
+        const pt = points[ci];
+        const override = getOverrideFromMap(overrideMap, si, ci);
+        const markerColor = override?.color ?? color;
+        const markerOpacity = override?.opacity;
+
+        if (markerOpacity !== undefined) ctx.globalAlpha = markerOpacity;
+        ctx.fillStyle = markerColor;
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, markerRadius, 0, Math.PI * 2);
         ctx.fill();
-      }
-      // White inner circle for hollow marker look
-      ctx.fillStyle = "#ffffff";
-      for (const pt of points) {
+
+        // White inner circle for hollow marker look
+        ctx.fillStyle = "#ffffff";
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, markerRadius * 0.5, 0, Math.PI * 2);
         ctx.fill();
+
+        if (markerOpacity !== undefined) ctx.globalAlpha = 1;
       }
     }
   }
@@ -176,7 +185,7 @@ export function paintLineChart(
   }
 
   // 7. Legend
-  if (spec.legend.visible && data.series.length > 1) {
+  if (spec.legend.visible && data.series.length > 0) {
     drawLegend(ctx, data, spec, layout, theme);
   }
 }

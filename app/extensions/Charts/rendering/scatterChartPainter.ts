@@ -7,6 +7,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, ScatterMarkO
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolvePointSize } from "../lib/encodingResolver";
+import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
 import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -87,6 +88,8 @@ export function paintScatterChart(
   ctx.rect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
   ctx.clip();
 
+  const overrideMap = buildOverrideMap(spec.dataPointOverrides);
+
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
     const encoding = spec.series[si]?.encoding;
@@ -94,9 +97,14 @@ export function paintScatterChart(
     for (let ci = 0; ci < data.categories.length; ci++) {
       const value = series.values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
-      const color = resolvePointColor(encoding, spec.palette, si, series.color, value, category);
+      let color = resolvePointColor(encoding, spec.palette, si, series.color, value, category);
       const resolvedSize = resolvePointSize(encoding, value, category) ?? pointSize;
-      const pointOpacity = resolvePointOpacity(encoding, value, category);
+      let pointOpacity = resolvePointOpacity(encoding, value, category);
+
+      // Apply data point override
+      const override = getOverrideFromMap(overrideMap, si, ci);
+      if (override?.color) color = override.color;
+      if (override?.opacity !== undefined) pointOpacity = override.opacity;
 
       if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
       ctx.fillStyle = color;
@@ -117,7 +125,7 @@ export function paintScatterChart(
   }
 
   // 7. Legend
-  if (spec.legend.visible && data.series.length > 1) {
+  if (spec.legend.visible && data.series.length > 0) {
     drawLegend(ctx, data, spec, layout, theme);
   }
 }

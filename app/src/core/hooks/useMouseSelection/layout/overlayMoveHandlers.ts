@@ -119,15 +119,29 @@ export function createOverlayMoveHandlers(
       const bounds = getFloatingCanvasBounds(region, config, viewport);
       if (!bounds) continue;
 
-      if (
+      const inBounds =
         mouseX >= bounds.x &&
         mouseX <= bounds.x + bounds.width &&
         mouseY >= bounds.y &&
-        mouseY <= bounds.y + bounds.height
-      ) {
-        // Ask the overlay registration for a cursor hint
+        mouseY <= bounds.y + bounds.height;
+
+      // If within bounds, it's a hit. If outside bounds, consult the
+      // registered hitTest callback — overlays can claim extended areas
+      // (e.g., quick access buttons rendered outside the chart rect).
+      const registration = getOverlayRegistration(region.type);
+      const extendedHit = !inBounds && registration?.hitTest
+        ? registration.hitTest({
+            region,
+            canvasX: mouseX,
+            canvasY: mouseY,
+            row: 0,
+            col: 0,
+            floatingCanvasBounds: bounds,
+          })
+        : false;
+
+      if (inBounds || extendedHit) {
         let cursor: string | null = null;
-        const registration = getOverlayRegistration(region.type);
         if (registration?.getCursor) {
           cursor = registration.getCursor({
             region,

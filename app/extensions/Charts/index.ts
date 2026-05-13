@@ -16,6 +16,7 @@ import {
   type OverlayRenderContext,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
+import { showOverlay, hideOverlay } from "@api/ui";
 
 import {
   ChartManifest,
@@ -51,6 +52,10 @@ import {
 } from "./lib/chartStore";
 import { buildSeriesFormula } from "./lib/seriesFormula";
 import type { DataRangeRef } from "./types";
+import { QuickAccessPopup } from "./components/QuickAccessPopup";
+import { DataPointFormatDialog } from "./components/DataPointFormatDialog";
+import { AxisContextMenu } from "./components/AxisContextMenu";
+import { FormatAxisDialog } from "./components/FormatAxisDialog";
 import {
   renderChart,
   hitTestChart,
@@ -62,8 +67,18 @@ import {
   getCachedChartData,
   isHoveringFilterButton,
   isHoveringDataElement,
+  isHoveringQuickAccessButton,
+  isHoveringAxis,
+  getHoverState,
   removeChartFromCache,
 } from "./rendering/chartRenderer";
+import {
+  hitTestQuickAccessButtons,
+  togglePopup,
+  closePopup,
+  getActivePopup,
+  type QuickAccessButtonType,
+} from "./rendering/quickAccessButtons";
 import { hitTestBarChart } from "./rendering/chartHitTesting";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource } from "./types";
@@ -163,8 +178,170 @@ function activate(context: ExtensionContext): void {
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(ChartManifest);
 
-  // Register dialog
+  // Register dialogs
   context.ui.dialogs.register(ChartDialogDefinition);
+
+  const DATA_POINT_FORMAT_DIALOG_ID = "chart:dataPointFormat";
+  context.ui.dialogs.register({
+    id: DATA_POINT_FORMAT_DIALOG_ID,
+    component: DataPointFormatDialog,
+    priority: 50,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(DATA_POINT_FORMAT_DIALOG_ID));
+
+  // Register axis context menu overlay
+  const AXIS_CONTEXT_MENU_ID = "chart:axisContextMenu";
+  context.ui.overlays.register({
+    id: AXIS_CONTEXT_MENU_ID,
+    component: AxisContextMenu,
+    layer: "dropdown",
+  });
+  cleanupFunctions.push(() => context.ui.overlays.unregister(AXIS_CONTEXT_MENU_ID));
+
+  // Register Format Axis dialog
+  const FORMAT_AXIS_DIALOG_ID = "chart:formatAxisDialog";
+  context.ui.dialogs.register({
+    id: FORMAT_AXIS_DIALOG_ID,
+    component: FormatAxisDialog,
+    priority: 50,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(FORMAT_AXIS_DIALOG_ID));
+
+  // Register API commands for programmatic chart management
+  ExtensionRegistry.registerCommand({
+    id: "chart.filter.set",
+    name: "Set Chart Filters",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number; hiddenSeries?: number[]; hiddenCategories?: number[] };
+      updateChartSpec(args.chartId, {
+        filters: { hiddenSeries: args.hiddenSeries ?? [], hiddenCategories: args.hiddenCategories ?? [] },
+      });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.filter.clear",
+    name: "Clear Chart Filters",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number };
+      updateChartSpec(args.chartId, { filters: undefined });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.filter.toggleSeries",
+    name: "Toggle Chart Series Visibility",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number; seriesIndex: number };
+      const chart = getChartById(args.chartId);
+      if (!chart) return;
+      const current = chart.spec.filters ?? { hiddenSeries: [], hiddenCategories: [] };
+      const hidden = new Set(current.hiddenSeries ?? []);
+      if (hidden.has(args.seriesIndex)) hidden.delete(args.seriesIndex); else hidden.add(args.seriesIndex);
+      updateChartSpec(args.chartId, {
+        filters: { hiddenSeries: Array.from(hidden), hiddenCategories: current.hiddenCategories ?? [] },
+      });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.filter.toggleCategory",
+    name: "Toggle Chart Category Visibility",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number; categoryIndex: number };
+      const chart = getChartById(args.chartId);
+      if (!chart) return;
+      const current = chart.spec.filters ?? { hiddenSeries: [], hiddenCategories: [] };
+      const hidden = new Set(current.hiddenCategories ?? []);
+      if (hidden.has(args.categoryIndex)) hidden.delete(args.categoryIndex); else hidden.add(args.categoryIndex);
+      updateChartSpec(args.chartId, {
+        filters: { hiddenSeries: current.hiddenSeries ?? [], hiddenCategories: Array.from(hidden) },
+      });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.setDataPointOverride",
+    name: "Set Data Point Override",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number; seriesIndex: number; categoryIndex: number; color?: string; opacity?: number; exploded?: boolean };
+      const chart = getChartById(args.chartId);
+      if (!chart) return;
+      const overrides = [...(chart.spec.dataPointOverrides ?? [])];
+      const existing = overrides.findIndex((o) => o.seriesIndex === args.seriesIndex && o.categoryIndex === args.categoryIndex);
+      const override: Record<string, unknown> = { seriesIndex: args.seriesIndex, categoryIndex: args.categoryIndex };
+      if (args.color !== undefined) override.color = args.color;
+      if (args.opacity !== undefined) override.opacity = args.opacity;
+      if (args.exploded !== undefined) override.exploded = args.exploded;
+      if (existing >= 0) {
+        overrides[existing] = { ...overrides[existing], ...override } as any;
+      } else {
+        overrides.push(override as any);
+      }
+      updateChartSpec(args.chartId, { dataPointOverrides: overrides as any });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.clearDataPointOverrides",
+    name: "Clear Data Point Overrides",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number };
+      updateChartSpec(args.chartId, { dataPointOverrides: undefined });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.formatAxis",
+    name: "Format Chart Axis",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number; axisType: "x" | "y"; updates: Record<string, unknown> };
+      const axisKey = args.axisType === "x" ? "xAxis" : "yAxis";
+      const chart = getChartById(args.chartId);
+      if (!chart) return;
+      const currentAxis = chart.spec[axisKey];
+      updateChartSpec(args.chartId, { [axisKey]: { ...currentAxis, ...args.updates } });
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  // Register quick access popup overlay
+  const QA_OVERLAY_ID = "chart:quickAccessPopup";
+  context.ui.overlays.register({
+    id: QA_OVERLAY_ID,
+    component: QuickAccessPopup,
+    layer: "popover",
+  });
+  cleanupFunctions.push(() => context.ui.overlays.unregister(QA_OVERLAY_ID));
+
+  // Close quick access popup when chart selection changes
+  const unsubChartSelection = context.events.on(AppEvents.CHART_SELECTION_CHANGED, (payload: Record<string, unknown>) => {
+    if (payload?.chartId == null && getActivePopup()) {
+      closePopup();
+      hideOverlay(QA_OVERLAY_ID);
+    }
+  });
+  cleanupFunctions.push(unsubChartSelection);
 
   // Register grid overlay renderer for charts
   cleanupFunctions.push(
@@ -385,7 +562,7 @@ function activate(context: ExtensionContext): void {
         // Set pointer cursor when hovering over interactive chart elements
         const canvas = gridContainer?.querySelector("canvas");
         if (canvas) {
-          if (isHoveringFilterButton() || isHoveringDataElement()) {
+          if (isHoveringFilterButton() || isHoveringDataElement() || isHoveringQuickAccessButton() || isHoveringAxis()) {
             canvas.style.cursor = "pointer";
           } else {
             canvas.style.cursor = "";
@@ -412,10 +589,23 @@ function activate(context: ExtensionContext): void {
     const cachedData = getCachedChartData(click.chartId);
     if (!cachedData) return;
 
+    // Check quick access buttons first (they are outside chart bounds)
+    if (cachedData.quickAccessButtons && cachedData.quickAccessButtons.length > 0) {
+      const qaBtnHit = hitTestQuickAccessButtons(
+        click.canvasX,
+        click.canvasY,
+        cachedData.quickAccessButtons,
+      );
+      if (qaBtnHit) {
+        handleQuickAccessButtonClick(click.chartId, qaBtnHit, click.canvasX, click.canvasY);
+        return;
+      }
+    }
+
     const local = getChartLocalCoords(click.chartId, click.canvasX, click.canvasY);
     if (!local) return;
 
-    // Check pivot field buttons first (they take priority)
+    // Check pivot field buttons (they take priority over data elements)
     if (cachedData.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
       const btnHit = findClickedFieldButton(local.localX, local.localY, cachedData.pivotFieldButtons);
       if (btnHit) {
@@ -432,6 +622,31 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("mouseup", handleMouseUp);
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
+  });
+
+  // -----------------------------------------------------------------------
+  // Right-click context menu for chart elements (axes)
+  // -----------------------------------------------------------------------
+
+  const handleContextMenu = (e: MouseEvent) => {
+    const hover = getHoverState();
+    if (!hover || hover.hitResult.type !== "axis") return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    showOverlay(AXIS_CONTEXT_MENU_ID, {
+      data: {
+        chartId: hover.chartId,
+        axisType: hover.hitResult.axisType,
+        screenX: e.clientX,
+        screenY: e.clientY,
+      },
+    });
+  };
+  window.addEventListener("contextmenu", handleContextMenu, true);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("contextmenu", handleContextMenu, true);
   });
 
   // -----------------------------------------------------------------------
@@ -772,6 +987,38 @@ function handlePivotFieldButtonClick(
       anchorY: screenY + 2,
     });
   }
+}
+
+/**
+ * Handle a click on a quick access button (Elements / Styles / Filters).
+ * Toggles the popup panel and dispatches a custom event for the overlay component.
+ */
+function handleQuickAccessButtonClick(
+  chartId: number,
+  buttonType: QuickAccessButtonType,
+  canvasX: number,
+  canvasY: number,
+): void {
+  const QA_OVERLAY_ID = "chart:quickAccessPopup";
+
+  if (!gridContainer) {
+    gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+  }
+  const rect = gridContainer?.getBoundingClientRect();
+  const screenX = (rect?.left ?? 0) + canvasX;
+  const screenY = (rect?.top ?? 0) + canvasY;
+
+  const popup = togglePopup(chartId, buttonType, screenX, screenY);
+
+  if (popup) {
+    showOverlay(QA_OVERLAY_ID, {
+      data: { chartId, buttonType, screenX, screenY },
+    });
+  } else {
+    hideOverlay(QA_OVERLAY_ID);
+  }
+
+  context.events.emit(AppEvents.GRID_REFRESH);
 }
 
 // ============================================================================

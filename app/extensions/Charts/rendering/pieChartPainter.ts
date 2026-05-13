@@ -5,6 +5,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, SliceArc, PieMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
 import { valuesToAngles } from "./scales";
 import {
   computeRadialLayout,
@@ -75,22 +76,48 @@ export function paintPieChart(
   drawChartBackground(ctx, layout, theme);
 
   // 2. Draw slices
+  const overrideMap = buildOverrideMap(spec.dataPointOverrides);
+
   for (let i = 0; i < angles.length; i++) {
     const { startAngle, endAngle } = angles[i];
     if (startAngle === endAngle) continue;
 
-    const color = getSeriesColor(spec.palette, i, null);
+    // Apply data point override (series 0 for pie, category index = i)
+    const override = getOverrideFromMap(overrideMap, 0, i);
+    const color = override?.color ?? getSeriesColor(spec.palette, i, null);
+    const explodeOffset = override?.exploded ?? 0;
+
+    // Compute exploded slice center offset
+    let sliceCenterX = centerX;
+    let sliceCenterY = centerY;
+    if (explodeOffset > 0) {
+      const midAngle = (startAngle + endAngle) / 2;
+      sliceCenterX += Math.cos(midAngle) * explodeOffset;
+      sliceCenterY += Math.sin(midAngle) * explodeOffset;
+    }
+
+    ctx.save();
+    if (override?.opacity !== undefined) ctx.globalAlpha = override.opacity;
 
     ctx.beginPath();
-    ctx.arc(centerX, centerY, outerRadius, startAngle, endAngle);
+    ctx.arc(sliceCenterX, sliceCenterY, outerRadius, startAngle, endAngle);
     if (innerRadius > 0) {
-      ctx.arc(centerX, centerY, innerRadius, endAngle, startAngle, true);
+      ctx.arc(sliceCenterX, sliceCenterY, innerRadius, endAngle, startAngle, true);
     } else {
-      ctx.lineTo(centerX, centerY);
+      ctx.lineTo(sliceCenterX, sliceCenterY);
     }
     ctx.closePath();
     ctx.fillStyle = color;
     ctx.fill();
+
+    // Draw border if override specifies one
+    if (override?.borderColor) {
+      ctx.strokeStyle = override.borderColor;
+      ctx.lineWidth = override.borderWidth ?? 2;
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   // 3. Draw slice labels
@@ -114,8 +141,12 @@ export function paintPieChart(
       if (percent < 3) continue;
 
       const midAngle = (startAngle + endAngle) / 2;
-      const lx = centerX + Math.cos(midAngle) * labelRadius;
-      const ly = centerY + Math.sin(midAngle) * labelRadius;
+
+      // Account for exploded slice offset in label position
+      const override = getOverrideFromMap(overrideMap, 0, i);
+      const explodeOffset = override?.exploded ?? 0;
+      const lx = centerX + Math.cos(midAngle) * (labelRadius + explodeOffset);
+      const ly = centerY + Math.sin(midAngle) * (labelRadius + explodeOffset);
 
       let labelText: string;
       if (labelFormat === "value") {

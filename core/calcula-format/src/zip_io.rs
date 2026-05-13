@@ -19,7 +19,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
-use persistence::{SavedChart, SavedNotebook, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
+use persistence::{SavedChart, SavedNotebook, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -182,6 +182,13 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
         let charts_json = serde_json::to_string_pretty(&workbook.charts)?;
         zip.start_file("charts.json", options.clone())?;
         zip.write_all(charts_json.as_bytes())?;
+    }
+
+    // Write sparklines as a single sparklines.json array
+    if !workbook.sparklines.is_empty() {
+        let sparklines_json = serde_json::to_string_pretty(&workbook.sparklines)?;
+        zip.start_file("sparklines.json", options.clone())?;
+        zip.write_all(sparklines_json.as_bytes())?;
     }
 
     // Write workbook properties (properties.json)
@@ -423,6 +430,11 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         Vec::new()
     };
 
+    // Read sparklines
+    let sparklines: Vec<SavedSparkline> =
+        read_optional_json::<Vec<SavedSparkline>>(&mut archive, "sparklines.json")?
+            .unwrap_or_default();
+
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
     if manifest.features.contains(&"files".to_string()) {
@@ -467,6 +479,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         default_column_width: manifest.default_column_width,
         properties,
         charts,
+        sparklines,
         named_ranges: Vec::new(),
         pivot_layouts,
     })
@@ -593,6 +606,7 @@ mod tests {
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
+            sparklines: Vec::new(),
             named_ranges: Vec::new(),
             pivot_layouts: Vec::new(),
         }

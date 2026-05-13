@@ -189,6 +189,7 @@ pub fn build_workbook_for_save(
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
     workbook.charts = collect_charts_for_save(state);
+    workbook.sparklines = collect_sparklines_for_save(state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
@@ -792,6 +793,30 @@ fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>) {
     }
 }
 
+/// Collect sparkline entries from AppState for saving to .cala.
+fn collect_sparklines_for_save(state: &State<AppState>) -> Vec<persistence::SavedSparkline> {
+    let sparklines = state.sparklines.lock().unwrap();
+    sparklines
+        .iter()
+        .map(|s| persistence::SavedSparkline {
+            sheet_index: s.sheet_index,
+            groups_json: s.groups_json.clone(),
+        })
+        .collect()
+}
+
+/// Restore sparklines from SavedSparkline format into AppState.
+fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppState>) {
+    let mut sparklines = state.sparklines.lock().unwrap();
+    sparklines.clear();
+    for s in saved {
+        sparklines.push(crate::api_types::SparklineEntry {
+            sheet_index: s.sheet_index,
+            groups_json: s.groups_json.clone(),
+        });
+    }
+}
+
 // ============================================================================
 // COMMANDS
 // ============================================================================
@@ -838,6 +863,7 @@ pub fn save_file(
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state);
+    workbook.sparklines = collect_sparklines_for_save(&state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
@@ -1158,6 +1184,9 @@ pub fn open_file(
 
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state);
+
+    // Restore sparklines from workbook
+    restore_sparklines(&workbook.sparklines, &state);
 
     // Restore scripts and notebooks
     restore_scripts(&workbook.scripts, &script_state);
@@ -2000,6 +2029,7 @@ pub fn auto_recover_save(
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state);
+    workbook.sparklines = collect_sparklines_for_save(&state);
     workbook.user_files = user_files_state
         .files
         .lock()

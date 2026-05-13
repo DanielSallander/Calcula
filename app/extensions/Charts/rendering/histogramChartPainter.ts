@@ -180,7 +180,7 @@ export function paintHistogramChart(
   }
 
   // 7. Legend (show series names if multiple input series)
-  if (spec.legend.visible && data.series.length > 1) {
+  if (spec.legend.visible && data.series.length > 0) {
     drawLegend(ctx, data, spec, layout, theme);
   }
 }

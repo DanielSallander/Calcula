@@ -71,6 +71,7 @@ import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransforms } from "./chartTransforms";
 import { readPivotChartData } from "./pivotChartDataReader";
+import { applyChartFilters } from "./chartFilters";
 
 // ============================================================================
 // Public API
@@ -98,6 +99,8 @@ export async function readChartData(spec: ChartSpec): Promise<ParsedChartData> {
 export async function readChartDataResolved(spec: ChartSpec): Promise<{
   spec: ChartSpec;
   data: ParsedChartData;
+  /** Data before chart filters applied (for filter dropdown to show all options). */
+  unfilteredData: ParsedChartData;
 }> {
   // Resolve cell references (=A1, =Sheet1!B5) in string fields
   const resolvedSpec = await resolveSpecReferences(spec);
@@ -111,7 +114,12 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
       parsedData = applyTransforms(parsedData, resolvedSpec.transform);
     }
 
-    return { spec: resolvedSpec, data: parsedData };
+    const unfilteredData = parsedData;
+
+    // Apply chart filters (hide series/categories)
+    parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
+
+    return { spec: resolvedSpec, data: parsedData, unfilteredData };
   }
 
   // Standard cell range data source
@@ -152,7 +160,12 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
     parsedData = applyTransforms(parsedData, resolvedSpec.transform);
   }
 
-  return { spec: resolvedSpec, data: parsedData };
+  const unfilteredData = parsedData;
+
+  // Apply chart filters (hide series/categories)
+  parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
+
+  return { spec: resolvedSpec, data: parsedData, unfilteredData };
 }
 
 /**

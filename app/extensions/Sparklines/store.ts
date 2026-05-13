@@ -10,6 +10,9 @@ import type {
   CellRange,
   DataOrientation,
   ValidationResult,
+  EmptyCellHandling,
+  AxisScaleType,
+  PlotOrder,
 } from "./types";
 import { validateSparklineRanges } from "./types";
 
@@ -21,6 +24,18 @@ let nextGroupId = 1;
 
 /** All sparkline groups */
 const groups: SparklineGroup[] = [];
+
+/** Callback invoked after any mutation to schedule persistence */
+let onMutationCallback: (() => void) | null = null;
+
+/** Set a callback to be called after any mutation (used by index.ts for persistence) */
+export function setOnMutationCallback(cb: (() => void) | null): void {
+  onMutationCallback = cb;
+}
+
+function notifyMutation(): void {
+  if (onMutationCallback) onMutationCallback();
+}
 
 /** Fast lookup: "row,col" -> { group, index within location range } */
 interface CellEntry {
@@ -112,11 +127,18 @@ export function createSparklineGroup(
     lastPointColor: "#43A047",
     negativePointColor: "#D94735",
     markerColor: color,
+    showAxis: false,
+    axisScaleType: "auto",
+    axisMinValue: null,
+    axisMaxValue: null,
+    emptyCellHandling: "zero",
+    plotOrder: "default",
   };
 
   groups.push(group);
   rebuildCellIndex();
   cacheDirty = true;
+  notifyMutation();
 
   return { ...validation, group };
 }
@@ -145,6 +167,7 @@ export function removeSparklineGroup(groupId: number): boolean {
   groups.splice(idx, 1);
   rebuildCellIndex();
   cacheDirty = true;
+  notifyMutation();
   return true;
 }
 
@@ -216,6 +239,7 @@ export function updateSparklineGroup(
 
   cacheDirty = true;
   dataCache.delete(groupId);
+  notifyMutation();
   return true;
 }
 
@@ -250,6 +274,201 @@ export function isDataCacheDirty(): boolean {
 /** Mark data cache as clean. */
 export function markDataCacheClean(): void {
   cacheDirty = false;
+}
+
+/**
+ * Group selected sparkline groups into one group.
+ * Merges all groups whose location overlaps the given range into a single group.
+ * The first group's visual properties are used as the template.
+ * Returns the merged group, or null if fewer than 2 groups overlap.
+ */
+export function groupSparklines(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): SparklineGroup | null {
+  const overlapping = getGroupsForRange(startRow, startCol, endRow, endCol);
+  if (overlapping.length < 2) return null;
+
+  // Use the first group as template for visual properties
+  const template = overlapping[0];
+
+  // Compute the bounding location range and merged data range
+  let locMinRow = Infinity, locMinCol = Infinity, locMaxRow = -Infinity, locMaxCol = -Infinity;
+  let dataMinRow = Infinity, dataMinCol = Infinity, dataMaxRow = -Infinity, dataMaxCol = -Infinity;
+
+  for (const g of overlapping) {
+    locMinRow = Math.min(locMinRow, g.location.startRow);
+    locMinCol = Math.min(locMinCol, g.location.startCol);
+    locMaxRow = Math.max(locMaxRow, g.location.endRow);
+    locMaxCol = Math.max(locMaxCol, g.location.endCol);
+    dataMinRow = Math.min(dataMinRow, g.dataRange.startRow);
+    dataMinCol = Math.min(dataMinCol, g.dataRange.startCol);
+    dataMaxRow = Math.max(dataMaxRow, g.dataRange.endRow);
+    dataMaxCol = Math.max(dataMaxCol, g.dataRange.endCol);
+  }
+
+  // Remove all overlapping groups
+  for (const g of overlapping) {
+    const idx = groups.indexOf(g);
+    if (idx !== -1) {
+      dataCache.delete(g.id);
+      groups.splice(idx, 1);
+    }
+  }
+
+  // Create merged group with template's visual properties
+  const merged: SparklineGroup = {
+    ...template,
+    id: nextGroupId++,
+    location: { startRow: locMinRow, startCol: locMinCol, endRow: locMaxRow, endCol: locMaxCol },
+    dataRange: { startRow: dataMinRow, startCol: dataMinCol, endRow: dataMaxRow, endCol: dataMaxCol },
+  };
+
+  groups.push(merged);
+  rebuildCellIndex();
+  cacheDirty = true;
+  notifyMutation();
+
+  return merged;
+}
+
+/**
+ * Ungroup a sparkline group: split a multi-cell group into individual single-cell groups.
+ * Each cell in the location range becomes its own group with the same visual properties.
+ * Returns the number of new groups created.
+ */
+export function ungroupSparkline(groupId: number): number {
+  const group = groups.find((g) => g.id === groupId);
+  if (!group) return 0;
+
+  const validation = validateSparklineRanges(group.location, group.dataRange);
+  if (!validation.valid || !validation.count || validation.count <= 1) return 0;
+
+  const locRows = group.location.endRow - group.location.startRow + 1;
+  const locCols = group.location.endCol - group.location.startCol + 1;
+  const count = validation.count;
+  const orientation = validation.orientation!;
+  const isLocColumn = locCols === 1;
+
+  // Remove the original group
+  const idx = groups.indexOf(group);
+  if (idx !== -1) {
+    dataCache.delete(group.id);
+    groups.splice(idx, 1);
+  }
+
+  const dataRows = group.dataRange.endRow - group.dataRange.startRow + 1;
+  const dataCols = group.dataRange.endCol - group.dataRange.startCol + 1;
+
+  let created = 0;
+  for (let i = 0; i < count; i++) {
+    const locRow = group.location.startRow + (isLocColumn ? i : 0);
+    const locCol = group.location.startCol + (!isLocColumn ? i : 0);
+
+    // Compute per-cell data range slice
+    let cellDataRange: CellRange;
+    if (orientation === "byRow") {
+      cellDataRange = {
+        startRow: group.dataRange.startRow + i,
+        startCol: group.dataRange.startCol,
+        endRow: group.dataRange.startRow + i,
+        endCol: group.dataRange.endCol,
+      };
+    } else {
+      cellDataRange = {
+        startRow: group.dataRange.startRow,
+        startCol: group.dataRange.startCol + i,
+        endRow: group.dataRange.endRow,
+        endCol: group.dataRange.startCol + i,
+      };
+    }
+
+    const newGroup: SparklineGroup = {
+      ...group,
+      id: nextGroupId++,
+      location: { startRow: locRow, startCol: locCol, endRow: locRow, endCol: locCol },
+      dataRange: cellDataRange,
+    };
+    groups.push(newGroup);
+    created++;
+  }
+
+  rebuildCellIndex();
+  cacheDirty = true;
+  notifyMutation();
+
+  return created;
+}
+
+/**
+ * Export all sparkline groups as serializable data.
+ * Used for persistence (save to backend).
+ */
+export function exportGroups(): SparklineGroup[] {
+  return groups.map((g) => ({ ...g }));
+}
+
+/**
+ * Import sparkline groups from serialized data.
+ * Replaces all existing groups.
+ */
+export function importGroups(imported: SparklineGroup[]): void {
+  groups.length = 0;
+  dataCache.clear();
+  cellIndex.clear();
+
+  let maxId = 0;
+  for (const g of imported) {
+    groups.push({ ...g });
+    if (g.id >= maxId) maxId = g.id;
+  }
+  nextGroupId = maxId + 1;
+
+  rebuildCellIndex();
+  cacheDirty = true;
+}
+
+// ============================================================================
+// Backend Persistence
+// ============================================================================
+
+/**
+ * Save current sparkline groups to the backend for persistence.
+ * Called after any mutation (create, update, delete, group, ungroup).
+ */
+export async function saveToBackend(sheetIndex: number): Promise<void> {
+  try {
+    const { invokeBackend } = await import("../../src/api/backend");
+    const groupsJson = JSON.stringify(exportGroups());
+    await invokeBackend("save_sparklines", {
+      entry: { sheetIndex, groupsJson },
+    });
+  } catch (err) {
+    console.error("[Sparklines] Failed to save to backend:", err);
+  }
+}
+
+/**
+ * Load sparkline groups from the backend for a specific sheet.
+ */
+export async function loadFromBackend(sheetIndex: number): Promise<void> {
+  try {
+    const { invokeBackend } = await import("../../src/api/backend");
+    const entries = await invokeBackend<Array<{ sheetIndex: number; groupsJson: string }>>(
+      "get_sparklines",
+    );
+    const entry = entries.find((e) => e.sheetIndex === sheetIndex);
+    if (entry && entry.groupsJson) {
+      const parsed = JSON.parse(entry.groupsJson) as SparklineGroup[];
+      importGroups(parsed);
+    } else {
+      resetSparklineStore();
+    }
+  } catch (err) {
+    console.error("[Sparklines] Failed to load from backend:", err);
+  }
 }
 
 /** Reset all state. */

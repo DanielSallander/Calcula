@@ -161,7 +161,7 @@ export function paintHorizontalBarChart(
   }
 
   // 7. Legend
-  if (spec.legend.visible && data.series.length > 1) {
+  if (spec.legend.visible && data.series.length > 0) {
     drawLegend(ctx, data, spec, layout, theme);
   }
 }

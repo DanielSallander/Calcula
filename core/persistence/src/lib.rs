@@ -58,6 +58,8 @@ pub struct Workbook {
     pub properties: WorkbookProperties,
     /// Chart entries (opaque JSON blobs)
     pub charts: Vec<SavedChart>,
+    /// Sparkline entries (opaque JSON blobs, one per sheet)
+    pub sparklines: Vec<SavedSparkline>,
     /// Named ranges / defined names
     pub named_ranges: Vec<SavedNamedRange>,
     /// Ribbon filter definitions (Filter Pane)
@@ -98,6 +100,15 @@ pub struct SavedChart {
     pub id: u32,
     pub sheet_index: usize,
     pub spec_json: String,
+}
+
+/// A sparkline entry persisted in the workbook.
+/// Sparkline groups are stored as an opaque JSON string per sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSparkline {
+    pub sheet_index: usize,
+    pub groups_json: String,
 }
 
 /// A merged cell region for persistence.
@@ -204,6 +215,7 @@ impl Workbook {
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
+            sparklines: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pivot_layouts: Vec::new(),
@@ -224,6 +236,7 @@ impl Workbook {
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
+            sparklines: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pivot_layouts: Vec::new(),

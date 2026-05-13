@@ -187,5 +187,48 @@ function hitTestPlotArea(
   ) {
     return { type: "plotArea" };
   }
+
+  // Check if hovering over axis regions (margins adjacent to plot area)
+  const axisResult = hitTestAxes(localX, localY, layout);
+  if (axisResult.type !== "none") return axisResult;
+
+  return { type: "none" };
+}
+
+// ============================================================================
+// Axis Hit-Testing
+// ============================================================================
+
+/**
+ * Hit-test the axis regions (margins adjacent to the plot area).
+ * Returns an "axis" hit with axisType metadata.
+ */
+function hitTestAxes(
+  localX: number,
+  localY: number,
+  layout: ChartLayout,
+): ChartHitResult {
+  const pa = layout.plotArea;
+
+  // X axis region: below the plot area, within horizontal plot bounds
+  if (
+    localX >= pa.x &&
+    localX <= pa.x + pa.width &&
+    localY > pa.y + pa.height &&
+    localY <= pa.y + pa.height + layout.margin.bottom
+  ) {
+    return { type: "axis", axisType: "x" };
+  }
+
+  // Y axis region: to the left of the plot area, within vertical plot bounds
+  if (
+    localX >= 0 &&
+    localX < pa.x &&
+    localY >= pa.y &&
+    localY <= pa.y + pa.height
+  ) {
+    return { type: "axis", axisType: "y" };
+  }
+
   return { type: "none" };
 }

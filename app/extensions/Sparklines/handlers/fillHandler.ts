@@ -211,6 +211,12 @@ function createSparklineGroupFromTemplate(
   g.lastPointColor = template.lastPointColor;
   g.negativePointColor = template.negativePointColor;
   g.markerColor = template.markerColor;
+  g.showAxis = template.showAxis;
+  g.axisScaleType = template.axisScaleType;
+  g.axisMinValue = template.axisMinValue;
+  g.axisMaxValue = template.axisMaxValue;
+  g.emptyCellHandling = template.emptyCellHandling;
+  g.plotOrder = template.plotOrder;
 
   return true;
 }

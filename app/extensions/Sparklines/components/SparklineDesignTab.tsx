@@ -8,8 +8,8 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { css } from "@emotion/css";
 import { useGridState, showDialog, emitAppEvent, AppEvents } from "@api";
 import type { RibbonContext } from "@api/extensions";
-import { getSparklineForCell, updateSparklineGroup, removeSparklineGroup, getAllGroups } from "../store";
-import type { SparklineGroup, SparklineType } from "../types";
+import { getSparklineForCell, updateSparklineGroup, removeSparklineGroup, getAllGroups, groupSparklines as groupSparklinesFn, ungroupSparkline as ungroupSparklineFn } from "../store";
+import type { SparklineGroup, SparklineType, EmptyCellHandling, AxisScaleType, PlotOrder } from "../types";
 import { SparklineColorPicker } from "./SparklineColorPicker";
 import { SPARKLINE_DIALOG_ID } from "../index";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
@@ -250,6 +250,35 @@ const tabStyles = {
       border-color: #f0c0b8;
     }
   `,
+  // -- Axis group --
+  axisGrid: css`
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  `,
+  axisRow: css`
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    white-space: nowrap;
+  `,
+  selectSmall: css`
+    font-size: 11px;
+    padding: 1px 4px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background: #fff;
+    cursor: pointer;
+    min-width: 70px;
+  `,
+  numberInput: css`
+    font-size: 11px;
+    padding: 1px 4px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    width: 50px;
+  `,
 };
 
 // ============================================================================
@@ -261,6 +290,7 @@ const GROUP_DEFS = [
   { collapseOrder: 2, expandedWidth: 200 },   // Type
   { collapseOrder: 3, expandedWidth: 240 },   // Show
   { collapseOrder: 4, expandedWidth: 340 },   // Style
+  { collapseOrder: 6, expandedWidth: 260 },   // Axis
   { collapseOrder: 5, expandedWidth: 160 },   // Group
 ];
 
@@ -498,24 +528,114 @@ export function SparklineDesignTab({
       </RibbonGroup>
 
       {/* ================================================================ */}
-      {/* Group Group - Group, Ungroup, Clear, Axis                         */}
+      {/* Axis Group - Axis line, scaling, empty cells, plot order           */}
       {/* ================================================================ */}
-      <RibbonGroup label="Group" icon={"\u229E"} collapsed={collapsed[4]}>
+      <RibbonGroup label="Axis" icon={"\u2503"} collapsed={collapsed[4]}>
+        <div className={tabStyles.groupContent}>
+          <div className={tabStyles.axisGrid}>
+            <label className={tabStyles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={group.showAxis}
+                onChange={(e) => update({ showAxis: e.target.checked })}
+              />
+              Show Axis
+            </label>
+
+            <div className={tabStyles.axisRow}>
+              <span>Scale:</span>
+              <select
+                className={tabStyles.selectSmall}
+                value={group.axisScaleType}
+                onChange={(e) => update({ axisScaleType: e.target.value as AxisScaleType })}
+              >
+                <option value="auto">Auto</option>
+                <option value="sameForAll">Same for All</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+
+            {group.axisScaleType === "custom" && (
+              <div className={tabStyles.axisRow}>
+                <span>Min:</span>
+                <input
+                  type="number"
+                  className={tabStyles.numberInput}
+                  value={group.axisMinValue ?? ""}
+                  onChange={(e) => update({ axisMinValue: e.target.value === "" ? null : parseFloat(e.target.value) })}
+                  placeholder="Auto"
+                />
+                <span>Max:</span>
+                <input
+                  type="number"
+                  className={tabStyles.numberInput}
+                  value={group.axisMaxValue ?? ""}
+                  onChange={(e) => update({ axisMaxValue: e.target.value === "" ? null : parseFloat(e.target.value) })}
+                  placeholder="Auto"
+                />
+              </div>
+            )}
+
+            <div className={tabStyles.axisRow}>
+              <span>Empty Cells:</span>
+              <select
+                className={tabStyles.selectSmall}
+                value={group.emptyCellHandling}
+                onChange={(e) => update({ emptyCellHandling: e.target.value as EmptyCellHandling })}
+              >
+                <option value="zero">Zero</option>
+                <option value="gaps">Gaps</option>
+                <option value="connect">Connect</option>
+              </select>
+            </div>
+
+            <div className={tabStyles.axisRow}>
+              <span>Plot Order:</span>
+              <select
+                className={tabStyles.selectSmall}
+                value={group.plotOrder}
+                onChange={(e) => update({ plotOrder: e.target.value as PlotOrder })}
+              >
+                <option value="default">Left to Right</option>
+                <option value="rightToLeft">Right to Left</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </RibbonGroup>
+
+      {/* ================================================================ */}
+      {/* Group Group - Group, Ungroup, Clear                               */}
+      {/* ================================================================ */}
+      <RibbonGroup label="Group" icon={"\u229E"} collapsed={collapsed[5]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.actionButtonGroup}>
             <div className={tabStyles.actionRow}>
               <button
                 className={tabStyles.actionButton}
-                onClick={() => groupSparklines(group)}
-                title="Group sparklines"
+                onClick={() => {
+                  if (!sel) return;
+                  const result = groupSparklinesFn(sel.startRow, sel.startCol, sel.endRow, sel.endCol);
+                  if (result) {
+                    emitAppEvent(AppEvents.GRID_REFRESH);
+                    forceUpdate((c) => c + 1);
+                  }
+                }}
+                title="Group selected sparklines into one group"
               >
                 <span className={tabStyles.actionIcon}>&#x229E;</span>
                 Group
               </button>
               <button
                 className={tabStyles.actionButton}
-                onClick={() => ungroupSparkline(group)}
-                title="Ungroup sparklines"
+                onClick={() => {
+                  const count = ungroupSparklineFn(group.id);
+                  if (count > 0) {
+                    emitAppEvent(AppEvents.GRID_REFRESH);
+                    forceUpdate((c) => c + 1);
+                  }
+                }}
+                title="Split sparkline group into individual sparklines"
               >
                 <span className={tabStyles.actionIcon}>&#x229F;</span>
                 Ungroup
@@ -542,16 +662,3 @@ export function SparklineDesignTab({
   );
 }
 
-// ============================================================================
-// Group / Ungroup helpers (future expansion)
-// ============================================================================
-
-function groupSparklines(group: SparklineGroup): void {
-  // Future: merge adjacent single-cell sparkline groups into one multi-cell group
-  console.log("[Sparklines] Group not yet implemented for group:", group.id);
-}
-
-function ungroupSparkline(group: SparklineGroup): void {
-  // Future: split a multi-cell sparkline group into individual single-cell groups
-  console.log("[Sparklines] Ungroup not yet implemented for group:", group.id);
-}
