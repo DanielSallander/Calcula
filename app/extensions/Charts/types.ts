@@ -107,6 +107,10 @@ export interface BarMarkOptions {
   errorBars?: ErrorBarOptions;
   /** Gradient fill applied to all bars (overrides series colors). */
   fill?: GradientFill;
+  /** Series overlap percentage (-100 to 100). Positive = overlap, negative = gap. Default: 0. */
+  seriesOverlap?: number;
+  /** Gap width between category groups as percentage of bar width (0-500). Default: 150. */
+  gapWidth?: number;
 }
 
 /** Line interpolation mode. */
@@ -126,6 +130,24 @@ export interface LineMarkOptions {
   stackMode?: StackMode;
   /** Error bars configuration. */
   errorBars?: ErrorBarOptions;
+  /** Show drop lines from data points down to the category axis. */
+  showDropLines?: boolean;
+  /** Drop line color. null = use series color at reduced opacity. */
+  dropLineColor?: string;
+  /** Drop line dash pattern. Default: [3, 3]. */
+  dropLineDash?: number[];
+  /** Show high-low lines connecting the highest and lowest points at each category. */
+  showHighLowLines?: boolean;
+  /** High-low line color. Default: "#666666". */
+  highLowLineColor?: string;
+  /** Show up/down bars between the first and last data series. */
+  showUpDownBars?: boolean;
+  /** Fill color for "up" bars (last series > first series). Default: "#70AD47". */
+  upBarColor?: string;
+  /** Fill color for "down" bars (last series < first series). Default: "#E15759". */
+  downBarColor?: string;
+  /** Width of up/down bars in pixels. Default: 8. */
+  upDownBarWidth?: number;
 }
 
 /** Options specific to area charts. */
@@ -146,6 +168,10 @@ export interface AreaMarkOptions {
   stacked?: boolean;
   /** Stacking mode (supercedes `stacked` boolean). Default: "none" */
   stackMode?: StackMode;
+  /** Show drop lines from data points down to the category axis. */
+  showDropLines?: boolean;
+  /** Drop line color. null = use series color at reduced opacity. */
+  dropLineColor?: string;
 }
 
 /** Scatter point shape. */

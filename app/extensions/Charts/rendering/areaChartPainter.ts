@@ -286,6 +286,30 @@ export function paintAreaChart(
     }
   }
 
+  // 5d. Drop lines (vertical lines from data points to X axis)
+  const areaOpts = (spec.markOptions ?? {}) as import("../types").AreaMarkOptions;
+  if (areaOpts.showDropLines) {
+    const dropColor = areaOpts.dropLineColor ?? null;
+    const axisY = plotArea.y + plotArea.height;
+
+    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 1;
+
+    for (let si = 0; si < data.series.length; si++) {
+      const color = dropColor ?? getSeriesColor(spec.palette, si, data.series[si].color);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = dropColor ? 1 : 0.4;
+      ctx.beginPath();
+      for (const pt of seriesPoints[si]) {
+        ctx.moveTo(pt.x, pt.y);
+        ctx.lineTo(pt.x, axisY);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+  }
+
   ctx.restore();
 
   // 6. Title

@@ -45,6 +45,8 @@ import {
   moveChart,
   resizeChart,
   deleteChart,
+  undoDeleteChart,
+  canUndoDeleteChart,
   setActiveSheetIndex,
   loadChartsFromBackend,
   getChartById,
@@ -351,6 +353,19 @@ function activate(context: ExtensionContext): void {
       invalidateChartCache(args.chartId);
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.undoDelete",
+    name: "Undo Chart Delete",
+    execute: async () => {
+      const restored = undoDeleteChart();
+      if (restored) {
+        syncChartRegions();
+        window.dispatchEvent(new CustomEvent(ChartEvents.CHART_CREATED));
+        context.events.emit(AppEvents.GRID_REFRESH);
+      }
     },
   });
 
@@ -750,6 +765,17 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.events.on(AppEvents.AFTER_NEW, reloadCharts),
   );
+
+  // Dynamic data ranges: re-render charts when table definitions change
+  // (e.g., table auto-expands when new rows are added)
+  const handleTableDefsUpdated = () => {
+    invalidateAllChartCaches();
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+  window.addEventListener("app:table-definitions-updated", handleTableDefsUpdated);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("app:table-definitions-updated", handleTableDefsUpdated);
+  });
 
   // -----------------------------------------------------------------------
   // Chart Series Reference Drag/Resize

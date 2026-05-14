@@ -168,11 +168,32 @@ function drawBars(
   const numSeries = data.series.length;
   if (numSeries === 0) return;
 
+  const barOpts = (spec.markOptions ?? {}) as BarMarkOptions;
+  const seriesOverlap = barOpts.seriesOverlap ?? 0; // -100 to 100
+  const gapWidthPct = barOpts.gapWidth; // undefined = use default
+
   const groupWidth = xScale.bandwidth;
-  const barWidth = Math.max(
-    (groupWidth - theme.barGap * (numSeries - 1)) / numSeries,
+
+  // Compute bar width accounting for series overlap and gap width
+  let effectiveGap = theme.barGap;
+  if (gapWidthPct !== undefined) {
+    // gapWidth as % of bar width: higher = more gap between groups
+    // This affects the band padding, but since scale is already computed,
+    // we approximate by adjusting the bar gap
+    effectiveGap = Math.max(0, groupWidth * (gapWidthPct / 100) / (numSeries + 1));
+  }
+
+  const baseBarWidth = Math.max(
+    (groupWidth - effectiveGap * (numSeries - 1)) / numSeries,
     2,
   );
+
+  // Series overlap: positive = overlap, negative = extra gap
+  const overlapFraction = seriesOverlap / 100;
+  const overlapOffset = baseBarWidth * overlapFraction;
+  const effectiveBarStep = baseBarWidth - overlapOffset;
+  const barWidth = baseBarWidth;
+
   const zeroY = yScale.scale(0);
   const overrideMap = buildOverrideMap(spec.dataPointOverrides);
 
@@ -189,7 +210,7 @@ function drawBars(
       const override = getOverrideFromMap(overrideMap, si, ci);
       if (override?.color) color = override.color;
 
-      const barX = groupX + si * (barWidth + theme.barGap);
+      const barX = groupX + si * effectiveBarStep;
       const barTop = yScale.scale(value);
       const barHeight = Math.abs(zeroY - barTop);
       const barY = value >= 0 ? barTop : zeroY;

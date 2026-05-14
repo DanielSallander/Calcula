@@ -289,6 +289,38 @@ function ElementsPanel({
         <input type="checkbox" checked={spec.dataTable?.enabled ?? false} onChange={() => {}} />
         <label>Data Table</label>
       </div>
+
+      {/* Line/area chart specific options */}
+      {(spec.mark === "line" || spec.mark === "area") && (
+        <>
+          <div className={styles.divider} />
+          <div className={styles.item} onClick={() => {
+            const opts = (spec.markOptions ?? {}) as Record<string, unknown>;
+            updateSpec({ markOptions: { ...opts, showDropLines: !opts.showDropLines } as any });
+          }}>
+            <input type="checkbox" checked={(spec.markOptions as any)?.showDropLines ?? false} onChange={() => {}} />
+            <label>Drop Lines</label>
+          </div>
+        </>
+      )}
+      {spec.mark === "line" && (
+        <>
+          <div className={styles.item} onClick={() => {
+            const opts = (spec.markOptions ?? {}) as Record<string, unknown>;
+            updateSpec({ markOptions: { ...opts, showHighLowLines: !opts.showHighLowLines } as any });
+          }}>
+            <input type="checkbox" checked={(spec.markOptions as any)?.showHighLowLines ?? false} onChange={() => {}} />
+            <label>High-Low Lines</label>
+          </div>
+          <div className={styles.item} onClick={() => {
+            const opts = (spec.markOptions ?? {}) as Record<string, unknown>;
+            updateSpec({ markOptions: { ...opts, showUpDownBars: !opts.showUpDownBars } as any });
+          }}>
+            <input type="checkbox" checked={(spec.markOptions as any)?.showUpDownBars ?? false} onChange={() => {}} />
+            <label>Up/Down Bars</label>
+          </div>
+        </>
+      )}
     </>
   );
 }

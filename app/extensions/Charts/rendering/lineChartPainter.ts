@@ -177,6 +177,79 @@ export function paintLineChart(
     }
   }
 
+  // 5b. Drop lines (vertical lines from data points to X axis)
+  if (opts.showDropLines && !isStacked) {
+    const dropColor = opts.dropLineColor ?? null;
+    const dropDash = opts.dropLineDash ?? [3, 3];
+    const axisY = plotArea.y + plotArea.height;
+
+    ctx.setLineDash(dropDash);
+    ctx.lineWidth = 1;
+
+    for (let si = 0; si < data.series.length; si++) {
+      const color = dropColor ?? getSeriesColor(spec.palette, si, data.series[si].color);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = dropColor ? 1 : 0.4;
+      ctx.beginPath();
+      for (const pt of allSeriesPoints[si]) {
+        ctx.moveTo(pt.x, pt.y);
+        ctx.lineTo(pt.x, axisY);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+  }
+
+  // 5c. High-low lines (connect highest and lowest values at each category)
+  if (opts.showHighLowLines && data.series.length >= 2 && !isStacked) {
+    ctx.strokeStyle = opts.highLowLineColor ?? "#666666";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let minY = Infinity;
+      let maxY = -Infinity;
+      let x = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        const pt = allSeriesPoints[si][ci];
+        if (pt) {
+          x = pt.x;
+          if (pt.y < minY) minY = pt.y;
+          if (pt.y > maxY) maxY = pt.y;
+        }
+      }
+      if (minY < maxY) {
+        ctx.moveTo(x, minY);
+        ctx.lineTo(x, maxY);
+      }
+    }
+    ctx.stroke();
+  }
+
+  // 5d. Up/down bars (bars between first and last series at each category)
+  if (opts.showUpDownBars && data.series.length >= 2 && !isStacked) {
+    const upColor = opts.upBarColor ?? "#70AD47";
+    const downColor = opts.downBarColor ?? "#E15759";
+    const barW = opts.upDownBarWidth ?? 8;
+    const firstPoints = allSeriesPoints[0];
+    const lastPoints = allSeriesPoints[data.series.length - 1];
+
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      const first = firstPoints[ci];
+      const last = lastPoints[ci];
+      if (!first || !last) continue;
+
+      const top = Math.min(first.y, last.y);
+      const height = Math.abs(last.y - first.y);
+      if (height < 1) continue;
+
+      ctx.fillStyle = last.y < first.y ? upColor : downColor;
+      ctx.fillRect(first.x - barW / 2, top, barW, height);
+    }
+  }
+
   ctx.restore();
 
   // 6. Title

@@ -34,6 +34,9 @@ let charts: ChartDefinition[] = [];
 /** Active sheet index used for filtering which charts to render. */
 let activeSheetIndex = 0;
 
+/** Deleted charts stack for undo (max 10 items). */
+const deletedChartsTrash: ChartDefinition[] = [];
+
 // ============================================================================
 // Backend Sync Helpers
 // ============================================================================
@@ -197,9 +200,35 @@ export function updateChartSpec(
  * Delete a chart from the store.
  */
 export function deleteChart(chartId: number): void {
+  const chart = charts.find((c) => c.chartId === chartId);
+  if (chart) {
+    // Push to trash for undo (keep max 10)
+    deletedChartsTrash.push({ ...chart, spec: { ...chart.spec } });
+    if (deletedChartsTrash.length > 10) deletedChartsTrash.shift();
+  }
   charts = charts.filter((c) => c.chartId !== chartId);
   // Persist to backend
   invokeBackend("delete_chart", { id: chartId }).catch(() => {});
+}
+
+/**
+ * Undo the last chart deletion. Returns the restored chart, or null if nothing to undo.
+ */
+export function undoDeleteChart(): ChartDefinition | null {
+  const chart = deletedChartsTrash.pop();
+  if (!chart) return null;
+
+  charts.push(chart);
+  // Persist restoration to backend
+  scheduleSave(chart.chartId);
+  return chart;
+}
+
+/**
+ * Check if there's a deleted chart that can be restored.
+ */
+export function canUndoDeleteChart(): boolean {
+  return deletedChartsTrash.length > 0;
 }
 
 /**
