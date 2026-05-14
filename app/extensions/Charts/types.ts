@@ -40,6 +40,39 @@ export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
 }
 
 // ============================================================================
+// Gradient Fill
+// ============================================================================
+
+/** Direction of a linear gradient. */
+export type GradientDirection =
+  | "topToBottom" | "bottomToTop"
+  | "leftToRight" | "rightToLeft"
+  | "topLeftToBottomRight" | "bottomRightToTopLeft"
+  | "topRightToBottomLeft" | "bottomLeftToTopRight";
+
+/** A color stop in a gradient (position 0-1, color hex). */
+export interface GradientStop {
+  offset: number;
+  color: string;
+}
+
+/** Gradient fill specification. */
+export interface GradientFill {
+  /** Gradient type. */
+  type: "linear" | "radial";
+  /** Direction for linear gradients. Default: "topToBottom". */
+  direction?: GradientDirection;
+  /** Color stops. At least 2 required. */
+  stops: GradientStop[];
+}
+
+/**
+ * A fill can be a solid color string or a gradient specification.
+ * When a string, treated as a solid hex color.
+ */
+export type FillSpec = string | GradientFill;
+
+// ============================================================================
 // Mark-Specific Options
 // ============================================================================
 
@@ -72,6 +105,8 @@ export interface BarMarkOptions {
   stackMode?: StackMode;
   /** Error bars configuration. */
   errorBars?: ErrorBarOptions;
+  /** Gradient fill applied to all bars (overrides series colors). */
+  fill?: GradientFill;
 }
 
 /** Line interpolation mode. */
@@ -105,6 +140,8 @@ export interface AreaMarkOptions {
   showMarkers?: boolean;
   /** Marker radius in pixels. Default: 4 */
   markerRadius?: number;
+  /** Gradient fill for the area (applied per series). */
+  fill?: GradientFill;
   /** Stack overlapping areas. Default: false */
   stacked?: boolean;
   /** Stacking mode (supercedes `stacked` boolean). Default: "none" */
@@ -843,6 +880,8 @@ export interface DataPointOverride {
   borderWidth?: number;
   /** For pie/donut charts: explode (pull out) this slice by the given offset in pixels. */
   exploded?: number;
+  /** Gradient fill override for this data point. */
+  gradientFill?: GradientFill;
 }
 
 // ============================================================================

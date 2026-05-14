@@ -5,6 +5,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -186,7 +187,8 @@ export function paintAreaChart(
       }
 
       ctx.globalAlpha = fillOpacity;
-      ctx.fillStyle = color;
+      const areaGradient = (spec.markOptions as AreaMarkOptions | undefined)?.fill;
+      applyFillStyle(ctx, color, areaGradient, plotArea.x, plotArea.y, plotArea.width, plotArea.height);
       ctx.beginPath();
 
       // Trace top edge (left to right)

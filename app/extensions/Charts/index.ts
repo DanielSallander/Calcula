@@ -325,6 +325,53 @@ function activate(context: ExtensionContext): void {
     },
   });
 
+  ExtensionRegistry.registerCommand({
+    id: "chart.setGradientFill",
+    name: "Set Chart Gradient Fill",
+    execute: async (ctx) => {
+      const args = ctx as unknown as {
+        chartId: number;
+        target: "bars" | "plotBackground" | "chartBackground";
+        gradient: { type: "linear" | "radial"; direction?: string; stops: Array<{ offset: number; color: string }> };
+      };
+      const chart = getChartById(args.chartId);
+      if (!chart) return;
+
+      if (args.target === "bars") {
+        const markOptions = { ...(chart.spec.markOptions ?? {}), fill: args.gradient };
+        updateChartSpec(args.chartId, { markOptions: markOptions as any });
+      } else if (args.target === "plotBackground") {
+        const theme = { ...(chart.spec.config?.theme ?? {}), plotBackgroundGradient: args.gradient };
+        updateChartSpec(args.chartId, { config: { ...(chart.spec.config ?? {}), theme } as any });
+      } else if (args.target === "chartBackground") {
+        const theme = { ...(chart.spec.config?.theme ?? {}), backgroundGradient: args.gradient };
+        updateChartSpec(args.chartId, { config: { ...(chart.spec.config ?? {}), theme } as any });
+      }
+
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
+  ExtensionRegistry.registerCommand({
+    id: "chart.applyStyle",
+    name: "Apply Chart Style Preset",
+    execute: async (ctx) => {
+      const args = ctx as unknown as { chartId: number; presetId: string };
+      const { getPresetById, buildPresetUpdates } = await import("./lib/chartStylePresets");
+      const preset = getPresetById(args.presetId);
+      if (!preset) return;
+      const chart = getChartById(args.chartId);
+      if (!chart) return;
+      const updates = buildPresetUpdates(preset, chart.spec);
+      updateChartSpec(args.chartId, updates as any);
+      invalidateChartCache(args.chartId);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    },
+  });
+
   // Register quick access popup overlay
   const QA_OVERLAY_ID = "chart:quickAccessPopup";
   context.ui.overlays.register({

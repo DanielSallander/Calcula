@@ -7,6 +7,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import type { LinearScale, BandScale } from "./scales";
+import { applyFillStyle } from "./gradientFill";
 
 // ============================================================================
 // Layout Computation (shared for cartesian charts)
@@ -636,7 +637,7 @@ export function drawChartBackground(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
-  ctx.fillStyle = theme.background;
+  applyFillStyle(ctx, theme.background, theme.backgroundGradient, 0, 0, layout.width, layout.height);
   ctx.fillRect(0, 0, layout.width, layout.height);
 }
 
@@ -645,7 +646,7 @@ export function drawPlotBackground(
   plotArea: { x: number; y: number; width: number; height: number },
   theme: ChartRenderTheme,
 ): void {
-  ctx.fillStyle = theme.plotBackground;
+  applyFillStyle(ctx, theme.plotBackground, theme.plotBackgroundGradient, plotArea.x, plotArea.y, plotArea.width, plotArea.height);
   ctx.fillRect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
 }
 

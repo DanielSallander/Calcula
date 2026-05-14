@@ -7,9 +7,15 @@
 // Chart Render Theme
 // ============================================================================
 
+import type { GradientFill } from "../types";
+
 export interface ChartRenderTheme {
   background: string;
   plotBackground: string;
+  /** Gradient fill for chart background (overrides background when set). */
+  backgroundGradient?: GradientFill;
+  /** Gradient fill for plot area background (overrides plotBackground when set). */
+  plotBackgroundGradient?: GradientFill;
   gridLineColor: string;
   gridLineWidth: number;
   axisColor: string;

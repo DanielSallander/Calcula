@@ -3,11 +3,12 @@
 // CONTEXT: Called by chartRenderer to paint a bar chart onto an OffscreenCanvas
 //          or a preview canvas. Draws axes, grid lines, bars, title, and legend.
 
-import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, BarMarkOptions, StackMode } from "../types";
+import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, BarMarkOptions, StackMode, GradientFill } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
 import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -203,7 +204,10 @@ function drawBars(
       let pointOpacity = resolvePointOpacity(encoding, value, category);
       if (override?.opacity !== undefined) pointOpacity = override.opacity;
       if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
-      ctx.fillStyle = color;
+
+      // Apply gradient fill: per-point override > mark-level > solid color
+      const gradientFill = override?.gradientFill ?? (spec.markOptions as BarMarkOptions | undefined)?.fill;
+      applyFillStyle(ctx, color, gradientFill, barX, clippedY, barWidth, clippedHeight);
 
       if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
         drawRoundedRect(

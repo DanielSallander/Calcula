@@ -14,6 +14,7 @@ import { invalidateChartCache, getCachedChartData } from "../rendering/chartRend
 import { closePopup } from "../rendering/quickAccessButtons";
 import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
 import { ChartEvents } from "../lib/chartEvents";
+import { CHART_STYLE_PRESETS, getPresetColors, buildPresetUpdates, type ChartStylePreset } from "../lib/chartStylePresets";
 
 // ============================================================================
 // Styles
@@ -303,31 +304,68 @@ function StylesPanel({
   spec: ChartSpec;
   updateSpec: (u: Partial<ChartSpec>) => void;
 }): React.ReactElement {
+  const categories: Array<{ key: string; label: string }> = [
+    { key: "colorful", label: "Colorful" },
+    { key: "monochromatic", label: "Monochromatic" },
+    { key: "dark", label: "Dark" },
+    { key: "outline", label: "Flat & Outline" },
+    { key: "gradient", label: "Gradient" },
+  ];
+
   return (
     <>
-      <div className={styles.section}>
-        <div className={styles.sectionTitle}>Color Palette</div>
-      </div>
-      {PALETTE_NAMES.map((name) => {
-        const colors = PALETTES[name];
-        if (!colors) return null;
-        const isActive = spec.palette === name;
-
+      {categories.map(({ key, label }) => {
+        const presets = CHART_STYLE_PRESETS.filter((p) => p.category === key);
+        if (presets.length === 0) return null;
         return (
-          <div
-            key={name}
-            className={isActive ? styles.paletteRowActive : styles.paletteRow}
-            onClick={() => updateSpec({ palette: name })}
-            title={name}
-          >
-            {colors.slice(0, 6).map((color, i) => (
-              <span
-                key={i}
-                className={styles.colorSwatch}
-                style={{ backgroundColor: color }}
-              />
-            ))}
-          </div>
+          <React.Fragment key={key}>
+            <div className={styles.section}>
+              <div className={styles.sectionTitle}>{label}</div>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "2px 12px 6px" }}>
+              {presets.map((preset) => {
+                const colors = getPresetColors(preset);
+                const bg = preset.theme.background ?? "#fff";
+                const isActive = spec.palette === preset.palette &&
+                  spec.config?.theme?.background === preset.theme.background;
+                return (
+                  <div
+                    key={preset.id}
+                    title={preset.name}
+                    onClick={() => {
+                      const updates = buildPresetUpdates(preset, spec);
+                      updateSpec(updates as Partial<ChartSpec>);
+                    }}
+                    style={{
+                      width: 42,
+                      height: 32,
+                      borderRadius: 3,
+                      border: isActive ? "2px solid #005fb8" : "1px solid #ccc",
+                      background: bg,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "flex-end",
+                      justifyContent: "center",
+                      gap: 1,
+                      padding: "3px 2px",
+                    }}
+                  >
+                    {colors.slice(0, 4).map((c, i) => (
+                      <span
+                        key={i}
+                        style={{
+                          width: 7,
+                          height: [16, 22, 12, 20][i],
+                          backgroundColor: c,
+                          borderRadius: preset.barBorderRadius > 0 ? `${Math.min(preset.barBorderRadius, 3)}px ${Math.min(preset.barBorderRadius, 3)}px 0 0` : 0,
+                        }}
+                      />
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          </React.Fragment>
         );
       })}
     </>

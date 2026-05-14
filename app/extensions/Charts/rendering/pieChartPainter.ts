@@ -6,6 +6,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, SliceArc, PieMarkOptions 
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
+import { applyFillStyle } from "./gradientFill";
 import { valuesToAngles } from "./scales";
 import {
   computeRadialLayout,
@@ -107,7 +108,15 @@ export function paintPieChart(
       ctx.lineTo(sliceCenterX, sliceCenterY);
     }
     ctx.closePath();
-    ctx.fillStyle = color;
+
+    // Apply gradient fill if specified (per-slice bounding box)
+    const sliceBounds = {
+      x: sliceCenterX - outerRadius,
+      y: sliceCenterY - outerRadius,
+      w: outerRadius * 2,
+      h: outerRadius * 2,
+    };
+    applyFillStyle(ctx, color, override?.gradientFill, sliceBounds.x, sliceBounds.y, sliceBounds.w, sliceBounds.h);
     ctx.fill();
 
     // Draw border if override specifies one
