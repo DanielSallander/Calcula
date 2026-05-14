@@ -912,22 +912,6 @@ export type AggregationFunction =
   | "variance"
   | "varianceP";
 
-/** Show as calculation type (Excel: ShowAsCalculation) */
-export type ShowAsCalculation =
-  | "none"
-  | "percentOfGrandTotal"
-  | "percentOfRowTotal"
-  | "percentOfColumnTotal"
-  | "percentOfParentRowTotal"
-  | "percentOfParentColumnTotal"
-  | "differenceFrom"
-  | "percentDifferenceFrom"
-  | "runningTotal"
-  | "percentOfRunningTotal"
-  | "rankAscending"
-  | "rankDescending"
-  | "index";
-
 /** Pivot filter type (Excel: PivotFilterType) */
 export type PivotFilterType = "unknown" | "value" | "manual" | "label" | "date";
 
@@ -1450,23 +1434,6 @@ export async function refreshAllPivotTables(): Promise<PivotViewResponse[]> {
 
 /** Date group level for date grouping */
 export type DateGroupLevel = "year" | "quarter" | "month" | "week" | "day";
-
-/** Manual group definition */
-export interface ManualGroupConfig {
-  name: string;
-  members: string[];
-}
-
-/** Grouping configuration for a field */
-export type FieldGroupingConfig =
-  | { type: "None" }
-  | { type: "DateGrouping"; levels: DateGroupLevel[] }
-  | { type: "NumberBinning"; start: number; end: number; interval: number }
-  | {
-      type: "ManualGrouping";
-      groups: ManualGroupConfig[];
-      ungroupedName?: string;
-    };
 
 /** Request to set a pivot item's expand/collapse state */
 export interface SetItemExpandedRequest {

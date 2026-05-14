@@ -14,6 +14,7 @@ import {
   isCellVisible,
   scrollToMakeVisible,
   thumbPositionToScroll,
+  calculateScrollbarMetrics,
   SCROLLBAR_WIDTH,
   SCROLLBAR_HEIGHT,
 } from "./scrollUtils";
@@ -395,5 +396,369 @@ describe("thumbPositionToScroll", () => {
 
   it("returns 0 when thumb fills track", () => {
     expect(thumbPositionToScroll(0, 500, 500, 10000, 1000)).toBe(0);
+  });
+
+  it("returns proportional scroll for mid-track position", () => {
+    const thumbSize = 50;
+    const trackSize = 500;
+    const contentSize = 10000;
+    const vpSize = 1000;
+    const thumbRange = trackSize - thumbSize; // 450
+    const scrollRange = contentSize - vpSize; // 9000
+    // thumb at 50% of range
+    const midPos = thumbRange / 2; // 225
+    const result = thumbPositionToScroll(midPos, thumbSize, trackSize, contentSize, vpSize);
+    expect(result).toBe(scrollRange / 2); // 4500
+  });
+});
+
+// ============================================================================
+// Additional Edge Case Tests
+// ============================================================================
+
+describe("calculateScrollbarMetrics", () => {
+  const config = createTestConfig();
+  const vpWidth = 1000;
+  const vpHeight = 600;
+
+  it("computes thumb sizes proportional to viewport/content ratio", () => {
+    const vp = createViewport();
+    const metrics = calculateScrollbarMetrics(config, vp, vpWidth, vpHeight);
+
+    const contentWidth = config.totalCols * config.defaultCellWidth; // 10000
+    const viewWidth = vpWidth - config.rowHeaderWidth - SCROLLBAR_WIDTH;
+    const expectedHThumb = Math.max(30, (viewWidth / contentWidth) * viewWidth);
+
+    expect(metrics.horizontal.thumbSize).toBe(expectedHThumb);
+    expect(metrics.horizontal.trackSize).toBe(viewWidth);
+  });
+
+  it("returns thumb position 0 when scroll is at origin", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const metrics = calculateScrollbarMetrics(config, vp, vpWidth, vpHeight);
+    expect(metrics.horizontal.thumbPosition).toBe(0);
+    expect(metrics.vertical.thumbPosition).toBe(0);
+  });
+
+  it("returns non-zero thumb position when scrolled", () => {
+    const vp = createViewport({ scrollX: 500, scrollY: 250 });
+    const metrics = calculateScrollbarMetrics(config, vp, vpWidth, vpHeight);
+    expect(metrics.horizontal.thumbPosition).toBeGreaterThan(0);
+    expect(metrics.vertical.thumbPosition).toBeGreaterThan(0);
+  });
+
+  it("enforces minimum thumb size of 30px", () => {
+    // Very large grid -> tiny ratio -> thumb clamped to 30
+    const bigConfig = createTestConfig({ totalRows: 1_000_000, totalCols: 16384 });
+    const vp = createViewport();
+    const metrics = calculateScrollbarMetrics(bigConfig, vp, vpWidth, vpHeight);
+    expect(metrics.horizontal.thumbSize).toBe(30);
+    expect(metrics.vertical.thumbSize).toBe(30);
+  });
+
+  it("handles viewport larger than content (no scrolling needed)", () => {
+    const tinyConfig = createTestConfig({ totalRows: 5, totalCols: 3 });
+    const vp = createViewport();
+    const metrics = calculateScrollbarMetrics(tinyConfig, vp, vpWidth, vpHeight);
+    // Thumb should be >= track size (content fits)
+    expect(metrics.vertical.thumbPosition).toBe(0);
+    expect(metrics.horizontal.thumbPosition).toBe(0);
+  });
+});
+
+describe("cellToScroll - edge cases", () => {
+  const config = createTestConfig();
+
+  it("handles very large row index (1M rows)", () => {
+    const bigConfig = createTestConfig({ totalRows: 1_000_000 });
+    const result = cellToScroll(999_999, 0, bigConfig);
+    expect(result.scrollY).toBe(999_999 * 25);
+  });
+
+  it("handles cell at row 0 col 0 with custom dimensions on other cells", () => {
+    const dims = createDimensions({
+      columnWidths: new Map([[5, 300]]),
+      rowHeights: new Map([[10, 80]]),
+    });
+    const result = cellToScroll(0, 0, config, dims);
+    expect(result.scrollX).toBe(0);
+    expect(result.scrollY).toBe(0);
+  });
+
+  it("handles multiple custom column widths before target", () => {
+    const dims = createDimensions({
+      columnWidths: new Map([
+        [1, 200],
+        [3, 150],
+        [4, 50],
+      ]),
+    });
+    const result = cellToScroll(0, 6, config, dims);
+    // base: 6*100 = 600, adjustments: (200-100)+(150-100)+(50-100) = 100+50-50 = 100
+    expect(result.scrollX).toBe(700);
+  });
+});
+
+describe("cellToCenteredScroll - edge cases", () => {
+  const config = createTestConfig();
+  const vpWidth = 1000;
+  const vpHeight = 600;
+
+  it("may return negative scroll values for cells near origin", () => {
+    const result = cellToCenteredScroll(0, 0, config, vpWidth, vpHeight);
+    // Cell (0,0) is at pixel (0,0). Centering will produce negative scroll values
+    expect(result.scrollX).toBeLessThan(0);
+    expect(result.scrollY).toBeLessThan(0);
+  });
+
+  it("centers cell with custom dimensions", () => {
+    const dims = createDimensions({ columnWidths: new Map([[5, 300]]) });
+    const result = cellToCenteredScroll(0, 5, config, vpWidth, vpHeight, dims);
+    const cellX = getColumnXPosition(5, config, dims); // 500
+    const cellW = 300;
+    const availW = vpWidth - config.rowHeaderWidth - SCROLLBAR_WIDTH;
+    expect(result.scrollX).toBe(cellX - availW / 2 + cellW / 2);
+  });
+});
+
+describe("calculateScrollDelta - additional directions and units", () => {
+  const config = createTestConfig();
+  const vpWidth = 1000;
+  const vpHeight = 600;
+
+  it("page left scrolls by visible columns minus one", () => {
+    const vp = createViewport({ scrollX: 500, scrollY: 0 });
+    const result = calculateScrollDelta("left", "page", config, vp, vpWidth, vpHeight);
+    const availW = vpWidth - config.rowHeaderWidth - SCROLLBAR_WIDTH;
+    const pageCols = Math.max(1, Math.floor(availW / config.defaultCellWidth) - 1);
+    expect(result.deltaX).toBe(-pageCols * config.defaultCellWidth);
+    expect(result.deltaY).toBe(0);
+  });
+
+  it("page right scrolls by visible columns minus one", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const result = calculateScrollDelta("right", "page", config, vp, vpWidth, vpHeight);
+    const availW = vpWidth - config.rowHeaderWidth - SCROLLBAR_WIDTH;
+    const pageCols = Math.max(1, Math.floor(availW / config.defaultCellWidth) - 1);
+    expect(result.deltaX).toBe(pageCols * config.defaultCellWidth);
+  });
+
+  it("document left returns negative of current scrollX", () => {
+    const vp = createViewport({ scrollX: 800, scrollY: 0 });
+    const result = calculateScrollDelta("left", "document", config, vp, vpWidth, vpHeight);
+    expect(result.deltaX).toBe(-800);
+    expect(result.deltaY).toBe(0);
+  });
+
+  it("document right scrolls to the end of column range", () => {
+    const vp = createViewport({ scrollX: 200, scrollY: 0 });
+    const result = calculateScrollDelta("right", "document", config, vp, vpWidth, vpHeight);
+    expect(result.deltaX).toBe(config.totalCols * config.defaultCellWidth - 200);
+  });
+
+  it("cell scroll with zero scroll position", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const down = calculateScrollDelta("down", "cell", config, vp, vpWidth, vpHeight);
+    expect(down).toEqual({ deltaX: 0, deltaY: 25 });
+  });
+});
+
+describe("isCellVisible - edge cases", () => {
+  const config = createTestConfig();
+  const vpWidth = 1000;
+  const vpHeight = 600;
+
+  it("returns true for cells at the very edge of the visible range", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    // Calculate the end of the visible range
+    const range = scrollToVisibleRange(0, 0, config, vpWidth, vpHeight);
+    expect(isCellVisible(range.endRow, range.endCol, vp, config, vpWidth, vpHeight)).toBe(true);
+  });
+
+  it("returns false for cell just beyond the visible range", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const range = scrollToVisibleRange(0, 0, config, vpWidth, vpHeight);
+    expect(isCellVisible(range.endRow + 1, 0, vp, config, vpWidth, vpHeight)).toBe(false);
+    expect(isCellVisible(0, range.endCol + 1, vp, config, vpWidth, vpHeight)).toBe(false);
+  });
+
+  it("returns false for cell just before startRow when scrolled", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 250 }); // startRow = 10
+    expect(isCellVisible(9, 0, vp, config, vpWidth, vpHeight)).toBe(false);
+  });
+
+  it("returns false for cell just before startCol when scrolled", () => {
+    const vp = createViewport({ scrollX: 500, scrollY: 0 }); // startCol = 5
+    expect(isCellVisible(0, 4, vp, config, vpWidth, vpHeight)).toBe(false);
+  });
+});
+
+describe("scrollToMakeVisible - additional scenarios", () => {
+  const config = createTestConfig();
+  const vpWidth = 1000;
+  const vpHeight = 600;
+
+  it("scrolls up to show a cell above the viewport", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 500 }); // viewing from row 20
+    const result = scrollToMakeVisible(5, 0, vp, config, vpWidth, vpHeight);
+    expect(result).not.toBeNull();
+    expect(result!.scrollY).toBe(5 * 25); // align top of cell with viewport top
+  });
+
+  it("handles cell with custom height that exceeds viewport", () => {
+    const dims = createDimensions({ rowHeights: new Map([[10, 1000]]) }); // very tall row
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const result = scrollToMakeVisible(10, 0, vp, config, vpWidth, vpHeight, dims);
+    expect(result).not.toBeNull();
+    // When cell is taller than viewport, scroll to show top edge
+    expect(result!.scrollY).toBe(getRowYPosition(10, config, dims));
+  });
+
+  it("handles cell with custom width that exceeds viewport", () => {
+    const dims = createDimensions({ columnWidths: new Map([[8, 2000]]) }); // very wide col
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const result = scrollToMakeVisible(0, 8, vp, config, vpWidth, vpHeight, dims);
+    expect(result).not.toBeNull();
+    // When cell is wider than viewport, scroll to show left edge
+    expect(result!.scrollX).toBe(getColumnXPosition(8, config, dims));
+  });
+
+  it("returns null when cell is fully in the center of viewport", () => {
+    // Viewport shows rows ~4..25, cols ~1..9
+    const vp = createViewport({ scrollX: 100, scrollY: 100 });
+    const result = scrollToMakeVisible(8, 3, vp, config, vpWidth, vpHeight);
+    expect(result).toBeNull();
+  });
+
+  it("scrolls diagonally when cell is off-screen both horizontally and vertically", () => {
+    const vp = createViewport({ scrollX: 0, scrollY: 0 });
+    const result = scrollToMakeVisible(50, 50, vp, config, vpWidth, vpHeight);
+    expect(result).not.toBeNull();
+    expect(result!.scrollX).toBeGreaterThan(0);
+    expect(result!.scrollY).toBeGreaterThan(0);
+  });
+});
+
+describe("calculateMaxScroll - edge cases", () => {
+  it("accounts for custom column widths in total content width", () => {
+    const config = createTestConfig({ totalCols: 10 });
+    const dims = createDimensions({ columnWidths: new Map([[0, 300]]) }); // +200 extra
+    const vpWidth = 500;
+    const vpHeight = 500;
+
+    const withDims = calculateMaxScroll(config, vpWidth, vpHeight, dims);
+    const withoutDims = calculateMaxScroll(config, vpWidth, vpHeight);
+    expect(withDims.maxScrollX).toBe(withoutDims.maxScrollX + 200);
+  });
+
+  it("accounts for hidden columns reducing content width", () => {
+    const config = createTestConfig({ totalCols: 10 });
+    const dims = createDimensions({ hiddenCols: new Set([0, 1]) });
+    const vpWidth = 500;
+    const vpHeight = 500;
+
+    const withHidden = calculateMaxScroll(config, vpWidth, vpHeight, dims);
+    const withoutHidden = calculateMaxScroll(config, vpWidth, vpHeight);
+    expect(withHidden.maxScrollX).toBe(
+      Math.max(0, withoutHidden.maxScrollX - 2 * config.defaultCellWidth)
+    );
+  });
+
+  it("accounts for hidden rows reducing content height", () => {
+    const config = createTestConfig({ totalRows: 100 });
+    const dims = createDimensions({ hiddenRows: new Set([0, 1, 2]) });
+    const vpWidth = 500;
+    const vpHeight = 500;
+
+    const withHidden = calculateMaxScroll(config, vpWidth, vpHeight, dims);
+    const withoutHidden = calculateMaxScroll(config, vpWidth, vpHeight);
+    expect(withHidden.maxScrollY).toBe(
+      Math.max(0, withoutHidden.maxScrollY - 3 * config.defaultCellHeight)
+    );
+  });
+
+  it("handles 1M rows grid", () => {
+    const bigConfig = createTestConfig({ totalRows: 1_000_000 });
+    const { maxScrollY } = calculateMaxScroll(bigConfig, 1000, 600);
+    const availH = 600 - bigConfig.colHeaderHeight - SCROLLBAR_HEIGHT;
+    expect(maxScrollY).toBe(1_000_000 * 25 - availH);
+  });
+});
+
+describe("clampScroll - edge cases", () => {
+  it("handles zero-dimension viewport", () => {
+    const config = createTestConfig();
+    // viewport size equals just headers + scrollbar -> available = 0
+    const vpWidth = config.rowHeaderWidth + SCROLLBAR_WIDTH;
+    const vpHeight = config.colHeaderHeight + SCROLLBAR_HEIGHT;
+    const result = clampScroll(100, 100, config, vpWidth, vpHeight);
+    // maxScroll should be totalContent - 0 = totalContent
+    expect(result.scrollX).toBe(100);
+    expect(result.scrollY).toBe(100);
+  });
+});
+
+describe("scrollToVisibleRange - edge cases", () => {
+  it("handles scroll at maximum position", () => {
+    const config = createTestConfig();
+    const vpWidth = 1000;
+    const vpHeight = 600;
+    const { maxScrollX, maxScrollY } = calculateMaxScroll(config, vpWidth, vpHeight);
+    const range = scrollToVisibleRange(maxScrollX, maxScrollY, config, vpWidth, vpHeight);
+    // endRow/endCol should be clamped to grid bounds
+    expect(range.endRow).toBeLessThanOrEqual(config.totalRows - 1);
+    expect(range.endCol).toBeLessThanOrEqual(config.totalCols - 1);
+  });
+
+  it("startRow and startCol never go negative", () => {
+    const config = createTestConfig();
+    // Even though we don't pass negative scroll here, verifying the Math.max(0, ...) works
+    const range = scrollToVisibleRange(0, 0, config, 1000, 600);
+    expect(range.startRow).toBeGreaterThanOrEqual(0);
+    expect(range.startCol).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("getColumnXPosition - multiple hidden and custom columns", () => {
+  const config = createTestConfig();
+
+  it("handles multiple hidden columns", () => {
+    const dims = createDimensions({ hiddenCols: new Set([1, 3, 5]) });
+    // Col 7 = 7*100 - 3*100 = 400
+    expect(getColumnXPosition(7, config, dims)).toBe(400);
+  });
+
+  it("handles adjacent custom widths", () => {
+    const dims = createDimensions({
+      columnWidths: new Map([
+        [0, 50],
+        [1, 50],
+        [2, 50],
+      ]),
+    });
+    // Col 3 = 3*100 + (50-100)*3 = 300 - 150 = 150
+    expect(getColumnXPosition(3, config, dims)).toBe(150);
+  });
+});
+
+describe("getRowYPosition - multiple hidden and custom rows", () => {
+  const config = createTestConfig();
+
+  it("handles multiple hidden rows", () => {
+    const dims = createDimensions({ hiddenRows: new Set([0, 2, 4]) });
+    // Row 6 = 6*25 - 3*25 = 75
+    expect(getRowYPosition(6, config, dims)).toBe(75);
+  });
+
+  it("handles hidden row with custom height", () => {
+    const dims = createDimensions({
+      rowHeights: new Map([[2, 80]]),
+      hiddenRows: new Set([2]),
+    });
+    // Row 5 = 5*25 + (80-25) - 80 = 125 + 55 - 80 = 100 ... but let's verify the logic:
+    // base: 5*25 = 125
+    // custom height adj: row 2 < 5, so +80-25 = +55 -> 180
+    // hidden adj: row 2 < 5, has custom width 80, so -80 -> 100
+    expect(getRowYPosition(5, config, dims)).toBe(100);
   });
 });
