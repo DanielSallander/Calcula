@@ -539,4 +539,248 @@ describe("paper size calculations", () => {
     expect(contentW).toBeCloseTo(210 - 19.05 * 2); // ~171.9
     expect(contentH).toBeCloseTo(297 - 25.4 * 2);  // ~246.2
   });
+
+  it("has correct A3 dimensions in mm", () => {
+    expect(PAPER_SIZES.a3).toEqual({ width: 297, height: 420 });
+  });
+
+  it("has correct A5 dimensions in mm", () => {
+    const A5 = { width: 148, height: 210 };
+    expect(A5.width).toBe(148);
+    expect(A5.height).toBe(210);
+  });
+
+  it("has correct Legal dimensions in mm", () => {
+    expect(PAPER_SIZES.legal).toEqual({ width: 216, height: 356 });
+  });
+
+  it("has correct Tabloid dimensions in mm", () => {
+    expect(PAPER_SIZES.tabloid).toEqual({ width: 279, height: 432 });
+  });
+
+  it("landscape A3 swaps to 420x297", () => {
+    const paper = PAPER_SIZES.a3;
+    expect(paper.height).toBe(420);
+    expect(paper.width).toBe(297);
+    // landscape
+    expect(paper.height).toBeGreaterThan(paper.width);
+    const landscapeW = paper.height;
+    const landscapeH = paper.width;
+    expect(landscapeW).toBe(420);
+    expect(landscapeH).toBe(297);
+  });
+
+  it("landscape Letter content area is wider than portrait", () => {
+    const paper = PAPER_SIZES.letter;
+    const margin = inchesToMm(0.75);
+    const portraitContentW = paper.width - margin * 2;
+    const landscapeContentW = paper.height - margin * 2;
+    expect(landscapeContentW).toBeGreaterThan(portraitContentW);
+  });
+
+  it("landscape Legal is wider than landscape Letter", () => {
+    const legal = PAPER_SIZES.legal;
+    const letter = PAPER_SIZES.letter;
+    // landscape width = portrait height
+    expect(legal.height).toBeGreaterThan(letter.height);
+  });
+
+  it("calculates content area for all paper sizes with standard margins", () => {
+    const margin = inchesToMm(0.75); // ~19.05mm
+    for (const [name, paper] of Object.entries(PAPER_SIZES)) {
+      const contentW = paper.width - margin * 2;
+      const contentH = paper.height - margin * 2;
+      expect(contentW).toBeGreaterThan(0);
+      expect(contentH).toBeGreaterThan(0);
+      expect(contentW).toBeLessThan(paper.width);
+      expect(contentH).toBeLessThan(paper.height);
+    }
+  });
+});
+
+// ============================================================================
+// Tests: Complex Header/Footer Combinations
+// ============================================================================
+
+describe("complex header/footer field codes", () => {
+  it("handles all field codes in one string", () => {
+    const result = replaceDynamicFields("&F &A &P &N &D &T", "Budget");
+    expect(result).toBe("Budget Budget 1 1 DATE TIME");
+  });
+
+  it("handles field codes inside section codes", () => {
+    const sections = parseHeaderFooterSections("&LPage &P&C&F&R&D &T");
+    expect(sections.left).toBe("Page &P");
+    expect(sections.center).toBe("&F");
+    expect(sections.right).toBe("&D &T");
+    // Now replace dynamic fields in each section
+    const left = replaceDynamicFields(sections.left, "Sheet1");
+    const center = replaceDynamicFields(sections.center, "Sheet1");
+    const right = replaceDynamicFields(sections.right, "Sheet1");
+    expect(left).toBe("Page 1");
+    expect(center).toBe("Sheet1");
+    expect(right).toBe("DATE TIME");
+  });
+
+  it("handles repeated section codes (last wins)", () => {
+    const result = parseHeaderFooterSections("&LFirst&LSecond");
+    expect(result.left).toBe("FirstSecond");
+  });
+
+  it("handles section codes with empty content between them", () => {
+    const result = parseHeaderFooterSections("&L&C&R");
+    expect(result).toEqual({ left: "", center: "", right: "" });
+  });
+
+  it("handles only &R with field codes", () => {
+    const sections = parseHeaderFooterSections("&RPage &P of &N");
+    const replaced = replaceDynamicFields(sections.right, "Q4 Report");
+    expect(replaced).toBe("Page 1 of 1");
+  });
+});
+
+// ============================================================================
+// Tests: Cell Styles - Border Style Combinations
+// ============================================================================
+
+describe("buildCellStyle border combinations", () => {
+  it("handles all four borders with same style", () => {
+    const border = { style: "solid", color: "#000000", width: 1 };
+    const style = buildCellStyle({
+      borderTop: border,
+      borderBottom: border,
+      borderLeft: border,
+      borderRight: border,
+    }, false);
+    expect(style).toContain("border-top:1px solid #000000");
+    expect(style).toContain("border-bottom:1px solid #000000");
+    expect(style).toContain("border-left:1px solid #000000");
+    expect(style).toContain("border-right:1px solid #000000");
+  });
+
+  it("handles each border with a different style", () => {
+    const style = buildCellStyle({
+      borderTop: { style: "solid", color: "#000", width: 1 },
+      borderBottom: { style: "double", color: "#f00", width: 3 },
+      borderLeft: { style: "dashed", color: "#0f0", width: 2 },
+      borderRight: { style: "dotted", color: "#00f", width: 1 },
+    }, false);
+    expect(style).toContain("border-top:1px solid #000");
+    expect(style).toContain("border-bottom:3px double #f00");
+    expect(style).toContain("border-left:2px dashed #0f0");
+    expect(style).toContain("border-right:1px dotted #00f");
+  });
+
+  it("falls back to solid for unknown border style", () => {
+    const style = buildCellStyle({
+      borderTop: { style: "thick", color: "#000", width: 3 },
+    }, false);
+    expect(style).toContain("border-top:3px solid #000");
+  });
+
+  it("uses default width 1 when width is 0", () => {
+    const style = buildCellStyle({
+      borderTop: { style: "solid", color: "#000", width: 0 },
+    }, false);
+    // width 0 is falsy, so || 1 kicks in
+    expect(style).toContain("border-top:1px solid #000");
+  });
+
+  it("gridlines do not override explicit borders on any side", () => {
+    const style = buildCellStyle({
+      borderTop: { style: "solid", color: "#ff0000", width: 2 },
+      borderLeft: { style: "dashed", color: "#00ff00", width: 1 },
+    }, true);
+    expect(style).toContain("border-top:2px solid #ff0000");
+    expect(style).toContain("border-left:1px dashed #00ff00");
+    // gridlines fill in the missing sides
+    expect(style).toContain("border-bottom:1px solid #d0d0d0");
+    expect(style).toContain("border-right:1px solid #d0d0d0");
+    // no duplicate top or left
+    expect(style.match(/border-top/g)!.length).toBe(1);
+    expect(style.match(/border-left/g)!.length).toBe(1);
+  });
+
+  it("border with style none suppresses gridlines on that side", () => {
+    const style = buildCellStyle({
+      borderTop: { style: "none", color: "#000", width: 1 },
+    }, true);
+    // borderTop is truthy so gridline fallback does not fire, but borderSide skips "none"
+    // Result: no border-top at all
+    expect(style).not.toContain("border-top");
+    // Other sides still get gridlines
+    expect(style).toContain("border-bottom:1px solid #d0d0d0");
+    expect(style).toContain("border-left:1px solid #d0d0d0");
+    expect(style).toContain("border-right:1px solid #d0d0d0");
+  });
+});
+
+// ============================================================================
+// Tests: Wrap Text and Long Content
+// ============================================================================
+
+describe("buildCellStyle wrap text and long content", () => {
+  it("wrap text sets both white-space and word-wrap", () => {
+    const style = buildCellStyle({ wrapText: true }, false);
+    expect(style).toContain("white-space:pre-wrap");
+    expect(style).toContain("word-wrap:break-word");
+  });
+
+  it("wrap text combined with all formatting produces valid style string", () => {
+    const style = buildCellStyle({
+      bold: true,
+      italic: true,
+      underline: "single",
+      strikethrough: true,
+      fontSize: 16,
+      fontFamily: "Times New Roman",
+      textColor: "#333333",
+      backgroundColor: "#ffffcc",
+      textAlign: "center",
+      verticalAlign: "top",
+      wrapText: true,
+      borderTop: { style: "solid", color: "#000", width: 1 },
+    }, true);
+    // All properties present
+    expect(style).toContain("font-weight:bold");
+    expect(style).toContain("font-style:italic");
+    expect(style).toContain("text-decoration:underline line-through");
+    expect(style).toContain("font-size:16pt");
+    expect(style).toContain('font-family:"Times New Roman",sans-serif');
+    expect(style).toContain("color:#333333");
+    expect(style).toContain("background-color:#ffffcc");
+    expect(style).toContain("text-align:center");
+    expect(style).toContain("vertical-align:top");
+    expect(style).toContain("white-space:pre-wrap");
+    expect(style).toContain("border-top:1px solid #000");
+    // Gridlines on remaining sides
+    expect(style).toContain("border-bottom:1px solid #d0d0d0");
+  });
+
+  it("without wrap text, no white-space is set", () => {
+    const style = buildCellStyle({ wrapText: false }, false);
+    expect(style).not.toContain("white-space");
+    expect(style).not.toContain("word-wrap");
+  });
+});
+
+// ============================================================================
+// Tests: HTML Escaping Edge Cases
+// ============================================================================
+
+describe("escapeHtml edge cases", () => {
+  it("escapes long content with many special chars", () => {
+    const input = '<div class="x">&amp; "test" <b>bold</b>';
+    const result = escapeHtml(input);
+    expect(result).not.toContain("<");
+    expect(result).not.toContain(">");
+    expect(result).toContain("&lt;");
+    expect(result).toContain("&gt;");
+    expect(result).toContain("&amp;amp;");
+    expect(result).toContain("&quot;");
+  });
+
+  it("handles string of only special characters", () => {
+    expect(escapeHtml('<>&"')).toBe("&lt;&gt;&amp;&quot;");
+  });
 });

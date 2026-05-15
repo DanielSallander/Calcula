@@ -1,0 +1,642 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`DSL compilation snapshots > "all clauses combined" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Quarter",
+      "sourceIndex": 2,
+    },
+  ],
+  "errors": [],
+  "filters": [
+    {
+      "hiddenItems": [
+        "Office",
+      ],
+      "isNumeric": false,
+      "name": "Category",
+      "sourceIndex": 6,
+    },
+  ],
+  "layout": {
+    "autoFitColumnWidths": true,
+    "reportLayout": "outline",
+    "showRowGrandTotals": false,
+  },
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Product",
+      "sourceIndex": 1,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+    {
+      "index": 1,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+    {
+      "aggregation": "max",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Profit",
+      "showValuesAs": undefined,
+      "sourceIndex": 4,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "calculated field" matches snapshot 1`] = `
+{
+  "calculatedFields": [
+    {
+      "formula": "[Profit] / [Sales]",
+      "name": "Margin",
+    },
+  ],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+    {
+      "index": 1,
+      "type": "value",
+    },
+    {
+      "index": 0,
+      "type": "calculated",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Profit",
+      "showValuesAs": undefined,
+      "sourceIndex": 4,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "compact layout with values on rows" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {
+    "reportLayout": "compact",
+    "valuesPosition": "rows",
+  },
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Category",
+      "sourceIndex": 6,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+    {
+      "index": 1,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Profit",
+      "showValuesAs": undefined,
+      "sourceIndex": 4,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "filter with NOT IN" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [
+    {
+      "hiddenItems": [
+        "East",
+        "West",
+      ],
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "layout directives" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {
+    "repeatRowLabels": true,
+    "reportLayout": "tabular",
+    "showColumnGrandTotals": false,
+    "showRowGrandTotals": false,
+  },
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "multiple rows and columns" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Quarter",
+      "sourceIndex": 2,
+    },
+  ],
+  "errors": [],
+  "filters": [],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Product",
+      "sourceIndex": 1,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "multiple value aggregations" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+    {
+      "index": 1,
+      "type": "value",
+    },
+    {
+      "index": 2,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+    {
+      "aggregation": "average",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Profit",
+      "showValuesAs": undefined,
+      "sourceIndex": 4,
+    },
+    {
+      "aggregation": "count",
+      "customName": undefined,
+      "isNumeric": false,
+      "name": "Product",
+      "showValuesAs": undefined,
+      "sourceIndex": 1,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "show values as percentage" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": "percent_of_row",
+      "sourceIndex": 3,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "simple rows and values" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": undefined,
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+  ],
+}
+`;
+
+exports[`DSL compilation snapshots > "value alias" matches snapshot 1`] = `
+{
+  "calculatedFields": [],
+  "columns": [],
+  "errors": [],
+  "filters": [],
+  "layout": {},
+  "rows": [
+    {
+      "isLookup": undefined,
+      "isNumeric": false,
+      "name": "Region",
+      "sourceIndex": 0,
+    },
+  ],
+  "valueColumnOrder": [
+    {
+      "index": 0,
+      "type": "value",
+    },
+  ],
+  "values": [
+    {
+      "aggregation": "sum",
+      "customName": "Total Revenue",
+      "isNumeric": true,
+      "name": "Sales",
+      "showValuesAs": undefined,
+      "sourceIndex": 3,
+    },
+  ],
+}
+`;
+
+exports[`DSL error message snapshots > "empty input" errors match snapshot 1`] = `[]`;
+
+exports[`DSL error message snapshots > "empty input" errors match snapshot 2`] = `[]`;
+
+exports[`DSL error message snapshots > "only whitespace and comments" errors match snapshot 1`] = `[]`;
+
+exports[`DSL error message snapshots > "only whitespace and comments" errors match snapshot 2`] = `[]`;
+
+exports[`DSL error message snapshots > "unknown aggregation field" errors match snapshot 1`] = `
+[
+  {
+    "location": {
+      "column": 8,
+      "endColumn": 11,
+      "line": 2,
+    },
+    "message": "Unknown field: "Missing"",
+    "severity": "error",
+  },
+  {
+    "location": {
+      "column": 8,
+      "endColumn": 11,
+      "line": 2,
+    },
+    "message": "Unknown field: "Missing"",
+    "severity": "error",
+  },
+]
+`;
+
+exports[`DSL error message snapshots > "unknown aggregation field" errors match snapshot 2`] = `[]`;
+
+exports[`DSL error message snapshots > "unknown field in values" errors match snapshot 1`] = `
+[
+  {
+    "location": {
+      "column": 8,
+      "endColumn": 11,
+      "line": 2,
+    },
+    "message": "Unknown field: "FakeField"",
+    "severity": "error",
+  },
+  {
+    "location": {
+      "column": 8,
+      "endColumn": 11,
+      "line": 2,
+    },
+    "message": "Unknown field: "FakeField"",
+    "severity": "error",
+  },
+]
+`;
+
+exports[`DSL error message snapshots > "unknown field in values" errors match snapshot 2`] = `[]`;
+
+exports[`DSL error message snapshots > "unknown field" errors match snapshot 1`] = `
+[
+  {
+    "location": {
+      "column": 6,
+      "endColumn": 17,
+      "line": 1,
+    },
+    "message": "Unknown field: "NonExistent"",
+    "severity": "error",
+  },
+  {
+    "location": {
+      "column": 6,
+      "endColumn": 17,
+      "line": 1,
+    },
+    "message": "Unknown field: "NonExistent"",
+    "severity": "error",
+  },
+]
+`;
+
+exports[`DSL error message snapshots > "unknown field" errors match snapshot 2`] = `[]`;
+
+exports[`DSL serializer snapshots > filters with NOT IN 1`] = `
+"ROWS:    Region
+VALUES:  Sum(Sales)
+FILTERS: Category NOT IN ("Office", "Furniture")"
+`;
+
+exports[`DSL serializer snapshots > layout directives 1`] = `
+"ROWS:    Region
+VALUES:  Sum(Sales)
+LAYOUT:  tabular, repeat-labels, no-grand-totals, auto-fit"
+`;
+
+exports[`DSL serializer snapshots > multiple values with aliases 1`] = `
+"ROWS:    Region
+VALUES:  Sum(Sales) AS "Total Sales",
+         Average(Profit) AS "Avg Profit""
+`;
+
+exports[`DSL serializer snapshots > rows + columns + values 1`] = `
+"ROWS:    Region
+COLUMNS: Quarter
+VALUES:  Sum(Sales)"
+`;
+
+exports[`DSL serializer snapshots > save as clause 1`] = `
+"ROWS:    Region
+VALUES:  Sum(Sales)
+SAVE AS "My Report""
+`;
+
+exports[`DSL token constants > AGGREGATION_NAMES matches snapshot 1`] = `
+[
+  "average",
+  "count",
+  "countnumbers",
+  "max",
+  "min",
+  "product",
+  "stddev",
+  "stddevp",
+  "sum",
+  "var",
+  "varp",
+]
+`;
+
+exports[`DSL token constants > LAYOUT_DIRECTIVES matches snapshot 1`] = `
+[
+  "auto-fit",
+  "column-totals",
+  "compact",
+  "grand-totals",
+  "no-column-totals",
+  "no-grand-totals",
+  "no-repeat-labels",
+  "no-row-totals",
+  "outline",
+  "repeat-labels",
+  "row-totals",
+  "show-empty-cols",
+  "show-empty-rows",
+  "subtotals-bottom",
+  "subtotals-off",
+  "subtotals-top",
+  "tabular",
+  "values-on-columns",
+  "values-on-rows",
+]
+`;
+
+exports[`DSL token constants > SHOW_VALUES_AS_NAMES matches snapshot 1`] = `
+{
+  "% difference": "percent_difference",
+  "% of column": "percent_of_column",
+  "% of column total": "percent_of_column",
+  "% of grand total": "percent_of_total",
+  "% of parent column": "percent_of_parent_column",
+  "% of parent row": "percent_of_parent_row",
+  "% of row": "percent_of_row",
+  "% of row total": "percent_of_row",
+  "difference": "difference",
+  "index": "index",
+  "running total": "running_total",
+}
+`;

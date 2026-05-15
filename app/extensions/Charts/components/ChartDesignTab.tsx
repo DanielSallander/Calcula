@@ -13,6 +13,9 @@ import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 import type { ChartType, ChartSpec, ChartFilters, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, SeriesOrientation } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
 import { ChartFilterDropdown } from "./ChartFilterDropdown";
+import { useJsonToggle } from "../../JsonView/lib/useJsonToggle";
+import { JsonToggleButton } from "../../JsonView/components/JsonToggleButton";
+import { JsonToggleEditor } from "../../JsonView/components/JsonToggleEditor";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache, getCachedChartData } from "../rendering/chartRenderer";
 import { getCurrentChartId, getSubSelection } from "../handlers/selectionHandler";
@@ -430,6 +433,13 @@ export function ChartDesignTab({
     [chartId],
   );
 
+  // JSON toggle (Phase C)
+  const jsonToggle = useJsonToggle(
+    "chart",
+    chartId != null ? String(chartId) : "",
+    refreshFromStore,
+  );
+
   if (!chartId || !spec) {
     return (
       <div className={s.disabledMessage}>
@@ -828,6 +838,26 @@ export function ChartDesignTab({
             }
             return null;
           })()}
+        </div>
+      </RibbonGroup>
+
+      {/* JSON View toggle */}
+      <RibbonGroup label="JSON" collapsed={false}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "2px 6px" }}>
+          <JsonToggleButton isActive={jsonToggle.isJsonMode} onClick={jsonToggle.toggle} />
+          {jsonToggle.isJsonMode && (
+            <div style={{ position: "fixed", right: 8, top: 140, width: 420, height: 400, zIndex: 500, border: "1px solid #555", borderRadius: 6, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}>
+              <JsonToggleEditor
+                json={jsonToggle.json}
+                onChange={jsonToggle.setJson}
+                onApply={jsonToggle.apply}
+                onRevert={jsonToggle.revert}
+                dirty={jsonToggle.dirty}
+                error={jsonToggle.error}
+                loading={jsonToggle.loading}
+              />
+            </div>
+          )}
         </div>
       </RibbonGroup>
     </div>

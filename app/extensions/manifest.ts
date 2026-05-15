@@ -82,6 +82,7 @@ import SelectVisibleCellsExtension from "./SelectVisibleCells";
 import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
 import AIChatExtension from "./AIChat";
+import JsonViewExtension from "./JsonView";
 import LinkedSheetsExtension from "./LinkedSheets";
 import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
@@ -186,6 +187,7 @@ export const builtInExtensions: ExtensionModule[] = [
   ControlsExtension,
   BusinessIntelligenceExtension,
   AIChatExtension,
+  JsonViewExtension,
   LinkedSheetsExtension,
   // Quick Access (loads last — needs all menu items registered for command palette)
   QuickAccessExtension,

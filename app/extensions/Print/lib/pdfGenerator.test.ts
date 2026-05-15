@@ -618,4 +618,277 @@ describe("computePageBreaks", () => {
     // Content cols start after title cols
     expect(pages[0].startCol).toBe(2);
   });
+
+  it("handles multiple manual row breaks", () => {
+    const pages = computePageBreaks(
+      uniformWidths(3, 80),
+      uniformHeights(30, 24),
+      100,
+      200,
+      500,
+      { startRow: 0, endRow: 29, startCol: 0, endCol: 2 },
+      null, null, false,
+      [10, 20],  // breaks at row 10 and 20
+      [],
+    );
+    expect(pages.length).toBe(3);
+    expect(pages[0]).toEqual({ startRow: 0, endRow: 9, startCol: 0, endCol: 2 });
+    expect(pages[1]).toEqual({ startRow: 10, endRow: 19, startCol: 0, endCol: 2 });
+    expect(pages[2]).toEqual({ startRow: 20, endRow: 29, startCol: 0, endCol: 2 });
+  });
+
+  it("handles many manual row breaks creating many pages", () => {
+    // Break every 5 rows across 50 rows = 10 pages
+    const breaks = [5, 10, 15, 20, 25, 30, 35, 40, 45];
+    const pages = computePageBreaks(
+      uniformWidths(2, 80),
+      uniformHeights(50, 24),
+      100,
+      200,
+      5000, // generous height so only manual breaks matter
+      { startRow: 0, endRow: 49, startCol: 0, endCol: 1 },
+      null, null, false,
+      breaks,
+      [],
+    );
+    expect(pages.length).toBe(10);
+    expect(pages[0].startRow).toBe(0);
+    expect(pages[0].endRow).toBe(4);
+    expect(pages[9].startRow).toBe(45);
+    expect(pages[9].endRow).toBe(49);
+  });
+
+  it("handles combined manual row and column breaks", () => {
+    const pages = computePageBreaks(
+      uniformWidths(10, 80),
+      uniformHeights(20, 24),
+      100,
+      500, 500,
+      { startRow: 0, endRow: 19, startCol: 0, endCol: 9 },
+      null, null, false,
+      [10],  // row break at 10
+      [5],   // col break at 5
+    );
+    // 2 row groups x 2 col groups = 4 pages
+    expect(pages.length).toBe(4);
+  });
+
+  it("scale to fit: 50% scale fits more data per page", () => {
+    const pages100 = computePageBreaks(
+      uniformWidths(10, 100),
+      uniformHeights(50, 24),
+      100, 100, 100,
+      { startRow: 0, endRow: 49, startCol: 0, endCol: 9 },
+      null, null, false, [], [],
+    );
+    const pages50 = computePageBreaks(
+      uniformWidths(10, 100),
+      uniformHeights(50, 24),
+      50, 100, 100,
+      { startRow: 0, endRow: 49, startCol: 0, endCol: 9 },
+      null, null, false, [], [],
+    );
+    expect(pages50.length).toBeLessThan(pages100.length);
+  });
+
+  it("title rows + columns combined with page breaks", () => {
+    // Title rows 0-1, title cols 0-1, manual break at row 10
+    const pages = computePageBreaks(
+      uniformWidths(6, 80),
+      uniformHeights(20, 24),
+      100,
+      200, 500,
+      { startRow: 0, endRow: 19, startCol: 0, endCol: 5 },
+      [0, 1],  // title rows
+      [0, 1],  // title cols
+      false,
+      [10],    // manual row break
+      [],
+    );
+    // All pages should start content after title rows/cols
+    for (const page of pages) {
+      expect(page.startRow).toBeGreaterThanOrEqual(2);
+      expect(page.startCol).toBeGreaterThanOrEqual(2);
+    }
+    expect(pages.length).toBe(2); // split at row 10
+    expect(pages[0].endRow).toBe(9);
+    expect(pages[1].startRow).toBe(10);
+  });
+
+  it("title rows take space reducing content height", () => {
+    // With title rows, less content fits -> more pages
+    const pagesNoTitle = computePageBreaks(
+      uniformWidths(3, 80),
+      uniformHeights(100, 24),
+      100,
+      200, 50, // tight height
+      { startRow: 0, endRow: 99, startCol: 0, endCol: 2 },
+      null, null, false, [], [],
+    );
+    const pagesWithTitle = computePageBreaks(
+      uniformWidths(3, 80),
+      uniformHeights(100, 24),
+      100,
+      200, 50,
+      { startRow: 0, endRow: 99, startCol: 0, endCol: 2 },
+      [0, 2],  // title rows 0-2 (3 rows reserved)
+      null, false, [], [],
+    );
+    expect(pagesWithTitle.length).toBeGreaterThanOrEqual(pagesNoTitle.length);
+  });
+
+  it("print headings with title rows both reduce available space", () => {
+    const pagesBase = computePageBreaks(
+      uniformWidths(5, 100),
+      uniformHeights(40, 24),
+      100, 100, 80,
+      { startRow: 0, endRow: 39, startCol: 0, endCol: 4 },
+      null, null, false, [], [],
+    );
+    const pagesBoth = computePageBreaks(
+      uniformWidths(5, 100),
+      uniformHeights(40, 24),
+      100, 100, 80,
+      { startRow: 0, endRow: 39, startCol: 0, endCol: 4 },
+      [0, 0],  // 1 title row
+      null, true, [], [],  // headings on
+    );
+    expect(pagesBoth.length).toBeGreaterThanOrEqual(pagesBase.length);
+  });
+
+  it("pages are contiguous across both row and column splits", () => {
+    const pages = computePageBreaks(
+      uniformWidths(20, 100),
+      uniformHeights(100, 24),
+      100,
+      60, 60, // tight on both axes
+      { startRow: 0, endRow: 99, startCol: 0, endCol: 19 },
+      null, null, false, [], [],
+    );
+    expect(pages.length).toBeGreaterThan(4);
+    // Verify no gaps: collect all cells covered
+    const covered = new Set<string>();
+    for (const page of pages) {
+      for (let r = page.startRow; r <= page.endRow; r++) {
+        for (let c = page.startCol; c <= page.endCol; c++) {
+          covered.add(`${r},${c}`);
+        }
+      }
+    }
+    // Every cell in bounds should be covered
+    for (let r = 0; r <= 99; r++) {
+      for (let c = 0; c <= 19; c++) {
+        expect(covered.has(`${r},${c}`)).toBe(true);
+      }
+    }
+  });
+});
+
+// ============================================================================
+// Tests: Color Parsing Edge Cases
+// ============================================================================
+
+describe("parseColor edge cases", () => {
+  it("parses rgba with decimal alpha", () => {
+    expect(parseColor("rgba(100, 150, 200, 0.75)")).toEqual([100, 150, 200]);
+  });
+
+  it("parses rgba with 0 alpha", () => {
+    expect(parseColor("rgba(255, 128, 64, 0)")).toEqual([255, 128, 64]);
+  });
+
+  it("returns black for hsl (unsupported)", () => {
+    expect(parseColor("hsl(120, 50%, 50%)")).toEqual([0, 0, 0]);
+  });
+
+  it("returns black for hsla (unsupported)", () => {
+    expect(parseColor("hsla(240, 100%, 50%, 0.5)")).toEqual([0, 0, 0]);
+  });
+
+  it("returns black for named colors", () => {
+    expect(parseColor("red")).toEqual([0, 0, 0]);
+    expect(parseColor("blue")).toEqual([0, 0, 0]);
+    expect(parseColor("transparent")).toEqual([0, 0, 0]);
+  });
+
+  it("parses mixed-case hex", () => {
+    expect(parseColor("#aAbBcC")).toEqual([170, 187, 204]);
+  });
+
+  it("parses 3-digit hex with mixed case", () => {
+    expect(parseColor("#fFf")).toEqual([255, 255, 255]);
+  });
+
+  it("parses rgb with no spaces", () => {
+    expect(parseColor("rgb(10,20,30)")).toEqual([10, 20, 30]);
+  });
+});
+
+// ============================================================================
+// Tests: Print Area and Title Parsing
+// ============================================================================
+
+describe("parsePrintArea edge cases", () => {
+  it("parses large range", () => {
+    expect(parsePrintArea("A1:ZZ1000")).toEqual({
+      startCol: 0,
+      startRow: 0,
+      endCol: colToIndex("ZZ"),
+      endRow: 999,
+    });
+  });
+
+  it("returns null for empty string", () => {
+    expect(parsePrintArea("")).toBeNull();
+  });
+
+  it("returns null for whitespace", () => {
+    expect(parsePrintArea("   ")).toBeNull();
+  });
+
+  it("returns null for invalid format", () => {
+    expect(parsePrintArea("Sheet1!A1:B2")).toBeNull();
+    expect(parsePrintArea("A1")).toBeNull();
+  });
+
+  it("handles lowercase column letters", () => {
+    const result = parsePrintArea("a1:c10");
+    expect(result).toEqual({ startCol: 0, startRow: 0, endCol: 2, endRow: 9 });
+  });
+});
+
+describe("parseTitleRows edge cases", () => {
+  it("parses single row title", () => {
+    expect(parseTitleRows("1:1")).toEqual([0, 0]);
+  });
+
+  it("parses multi-row title", () => {
+    expect(parseTitleRows("1:5")).toEqual([0, 4]);
+  });
+
+  it("returns null for empty", () => {
+    expect(parseTitleRows("")).toBeNull();
+  });
+
+  it("returns null for invalid format", () => {
+    expect(parseTitleRows("A:B")).toBeNull();
+  });
+});
+
+describe("parseTitleCols edge cases", () => {
+  it("parses single column title", () => {
+    expect(parseTitleCols("A:A")).toEqual([0, 0]);
+  });
+
+  it("parses multi-column title", () => {
+    expect(parseTitleCols("A:D")).toEqual([0, 3]);
+  });
+
+  it("returns null for empty", () => {
+    expect(parseTitleCols("")).toBeNull();
+  });
+
+  it("returns null for numeric input", () => {
+    expect(parseTitleCols("1:5")).toBeNull();
+  });
 });

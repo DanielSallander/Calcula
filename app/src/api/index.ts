@@ -362,6 +362,13 @@ export { emitTauriEvent, listenTauriEvent } from "./backend";
 export type { UnlistenFn } from "./backend";
 
 // ============================================================================
+// JSON View (generic object inspection/editing)
+// ============================================================================
+
+export { getObjectJson, setObjectJson, listObjects, getWorkbookTree } from "./jsonView";
+export type { ObjectEntry, TreeNode } from "./jsonView";
+
+// ============================================================================
 // Sheet Grouping (Multi-Sheet Selection)
 // ============================================================================
 

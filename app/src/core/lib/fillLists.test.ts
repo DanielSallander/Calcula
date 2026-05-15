@@ -210,6 +210,226 @@ describe("FillListRegistry", () => {
   });
 
   // ==========================================================================
+  // Edge cases: multi-step sequences
+  // ==========================================================================
+
+  describe("multi-step sequences", () => {
+    it("matches every 2nd month (Jan, Mar, May)", () => {
+      const match = FillListRegistry.matchValues(["Jan", "Mar", "May"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(2);
+    });
+
+    it("matches every 3rd month (Jan, Apr, Jul)", () => {
+      const match = FillListRegistry.matchValues(["Jan", "Apr", "Jul"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(3);
+    });
+
+    it("matches every 3rd weekday (Sun, Wed, Sat)", () => {
+      const match = FillListRegistry.matchValues(["Sun", "Wed", "Sat"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(3);
+    });
+
+    it("generates values for step=2 months correctly", () => {
+      const match = FillListRegistry.matchValues(["Jan", "Mar"])!;
+      expect(match.step).toBe(2);
+      // lastIndex=2 (Mar), offset 1 => May (4), offset 2 => Jul (6)
+      expect(FillListRegistry.generateValue(match, 2, 1)).toBe("May");
+      expect(FillListRegistry.generateValue(match, 2, 2)).toBe("Jul");
+    });
+
+    it("wraps multi-step around list boundary", () => {
+      const match = FillListRegistry.matchValues(["Oct", "Dec"])!;
+      expect(match.step).toBe(2);
+      // lastIndex=11 (Dec), offset 1 => Feb (1)
+      expect(FillListRegistry.generateValue(match, 11, 1)).toBe("Feb");
+    });
+  });
+
+  // ==========================================================================
+  // Edge cases: reverse / wrapping sequences
+  // ==========================================================================
+
+  describe("reverse and wrapping sequences", () => {
+    it("detects wrapping from Dec to Jan as step=1", () => {
+      const match = FillListRegistry.matchValues(["Dec", "Jan"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(1);
+    });
+
+    it("detects Nov, Dec wrapping and generates Jan", () => {
+      const match = FillListRegistry.matchValues(["Nov", "Dec"])!;
+      expect(FillListRegistry.generateValue(match, 11, 1)).toBe("Jan");
+      expect(FillListRegistry.generateValue(match, 11, 2)).toBe("Feb");
+    });
+
+    it("detects Sat, Sun wrapping", () => {
+      const match = FillListRegistry.matchValues(["Sat", "Sun"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(1);
+    });
+  });
+
+  // ==========================================================================
+  // Edge cases: case insensitive matching
+  // ==========================================================================
+
+  describe("case-insensitive matching", () => {
+    it("matches all-uppercase short months (JAN, FEB)", () => {
+      const match = FillListRegistry.matchValues(["JAN", "FEB", "MAR"]);
+      expect(match).not.toBeNull();
+      expect(match!.list.id).toBe("builtin.month.short");
+      expect(match!.step).toBe(1);
+    });
+
+    it("matches all-lowercase short months (jan, feb)", () => {
+      const match = FillListRegistry.matchValues(["jan", "feb"]);
+      expect(match).not.toBeNull();
+      expect(match!.list.id).toBe("builtin.month.short");
+    });
+
+    it("matches mixed case full month names (JANUARY, february)", () => {
+      const match = FillListRegistry.matchValues(["JANUARY", "february"]);
+      expect(match).not.toBeNull();
+      expect(match!.list.id).toBe("builtin.month.full");
+    });
+
+    it("matches with leading/trailing whitespace", () => {
+      const match = FillListRegistry.matchValues(["  Mon  ", " Tue "]);
+      expect(match).not.toBeNull();
+      expect(match!.list.id).toBe("builtin.weekday.short");
+    });
+
+    it("matches user list case-insensitively", () => {
+      FillListRegistry.addList("Grades", ["Alpha", "Beta", "Gamma"]);
+      const match = FillListRegistry.matchValues(["ALPHA", "beta"]);
+      expect(match).not.toBeNull();
+      expect(match!.list.name).toBe("Grades");
+    });
+  });
+
+  // ==========================================================================
+  // Edge cases: custom lists with special content
+  // ==========================================================================
+
+  describe("custom lists with special content", () => {
+    it("handles special characters in list items", () => {
+      FillListRegistry.addList("Symbols", ["@home", "#work", "$money", "&more"]);
+      const match = FillListRegistry.matchValues(["@home", "#work"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(1);
+    });
+
+    it("handles unicode characters", () => {
+      FillListRegistry.addList("Emojis", ["\u2764", "\u2B50", "\u2600", "\u2601"]);
+      const match = FillListRegistry.matchValues(["\u2764", "\u2B50"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(1);
+      expect(FillListRegistry.generateValue(match!, 1, 1)).toBe("\u2600");
+    });
+
+    it("handles a very long custom list (100+ items)", () => {
+      const items = Array.from({ length: 120 }, (_, i) => `Item_${i}`);
+      FillListRegistry.addList("Big", items);
+      const match = FillListRegistry.matchValues(["Item_50", "Item_51", "Item_52"]);
+      expect(match).not.toBeNull();
+      expect(match!.startIndex).toBe(50);
+      expect(match!.step).toBe(1);
+      expect(FillListRegistry.generateValue(match!, 52, 1)).toBe("Item_53");
+    });
+
+    it("wraps around a long list", () => {
+      const items = Array.from({ length: 100 }, (_, i) => `V${i}`);
+      FillListRegistry.addList("Century", items);
+      const match = FillListRegistry.matchValues(["V98", "V99"])!;
+      expect(FillListRegistry.generateValue(match, 99, 1)).toBe("V0");
+    });
+
+    it("handles single-item list", () => {
+      FillListRegistry.addList("One", ["Solo"]);
+      const match = FillListRegistry.matchValues(["Solo"]);
+      expect(match).not.toBeNull();
+      expect(match!.step).toBe(1);
+      // Generating always returns the same item
+      expect(FillListRegistry.generateValue(match!, 0, 1)).toBe("Solo");
+      expect(FillListRegistry.generateValue(match!, 0, 5)).toBe("Solo");
+    });
+
+    it("handles duplicate items in a list (matches first occurrence)", () => {
+      FillListRegistry.addList("Dupes", ["A", "B", "A", "C"]);
+      const match = FillListRegistry.matchValues(["A"]);
+      expect(match).not.toBeNull();
+      expect(match!.startIndex).toBe(0); // indexOf returns first
+    });
+
+    it("handles empty string items in list", () => {
+      FillListRegistry.addList("Blanks", ["", "X", ""]);
+      const match = FillListRegistry.matchValues([""]);
+      expect(match).not.toBeNull();
+      expect(match!.startIndex).toBe(0);
+    });
+
+    it("empty items list does not match anything", () => {
+      FillListRegistry.addList("Empty", []);
+      const match = FillListRegistry.matchValues(["anything"]);
+      // Should fall through to built-in lists or return null
+      expect(match === null || match.list.name !== "Empty").toBe(true);
+    });
+  });
+
+  // ==========================================================================
+  // Edge cases: generateValue with unusual steps
+  // ==========================================================================
+
+  describe("generateValue edge cases", () => {
+    it("step=0 in match returns same item repeatedly", () => {
+      // Manually construct a match with step=0
+      const lists = FillListRegistry.getBuiltInLists();
+      const weekdays = lists.find((l) => l.id === "builtin.weekday.short")!;
+      const fakeMatch = { list: weekdays, startIndex: 3, step: 0 };
+      expect(FillListRegistry.generateValue(fakeMatch, 3, 1)).toBe("Wed");
+      expect(FillListRegistry.generateValue(fakeMatch, 3, 5)).toBe("Wed");
+    });
+
+    it("negative step wraps backwards correctly", () => {
+      const lists = FillListRegistry.getBuiltInLists();
+      const months = lists.find((l) => l.id === "builtin.month.short")!;
+      // step=-1: going backwards
+      const fakeMatch = { list: months, startIndex: 2, step: -1 };
+      // lastIndex=2 (Mar), offset 1 => (2 + (-1)*1) % 12 = 1 => Feb
+      expect(FillListRegistry.generateValue(fakeMatch, 2, 1)).toBe("Feb");
+      // offset 3 => (2 + (-1)*3) % 12 = -1 => 11 => Dec
+      expect(FillListRegistry.generateValue(fakeMatch, 2, 3)).toBe("Dec");
+    });
+
+    it("large offset wraps many times", () => {
+      const match = FillListRegistry.matchValues(["Mon"])!;
+      // offset 700 with step 1, list len 7 => 700 % 7 = 0 => (1+700)%7 = 1 => Mon
+      expect(FillListRegistry.generateValue(match, 1, 700)).toBe("Mon");
+      expect(FillListRegistry.generateValue(match, 1, 701)).toBe("Tue");
+    });
+  });
+
+  // ==========================================================================
+  // Edge cases: inconsistent steps
+  // ==========================================================================
+
+  describe("inconsistent steps return null", () => {
+    it("rejects non-uniform steps (Mon, Wed, Thu)", () => {
+      const match = FillListRegistry.matchValues(["Mon", "Wed", "Thu"]);
+      expect(match).toBeNull();
+    });
+
+    it("rejects values from different lists mixed together", () => {
+      // "Mon" is weekday, "Jan" is month - neither list contains both
+      const match = FillListRegistry.matchValues(["Mon", "Jan"]);
+      expect(match).toBeNull();
+    });
+  });
+
+  // ==========================================================================
   // Persistence
   // ==========================================================================
 

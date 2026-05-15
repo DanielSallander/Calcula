@@ -9,6 +9,9 @@ import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
+import { useJsonToggle } from "../../JsonView/lib/useJsonToggle";
+import { JsonToggleButton } from "../../JsonView/components/JsonToggleButton";
+import { JsonToggleEditor } from "../../JsonView/components/JsonToggleEditor";
 
 // ============================================================================
 // Toggle Switch Component
@@ -101,6 +104,12 @@ export function SlicerSettingsDialog({
   const [itemGap, setItemGap] = useState(4);
   const [itemPadding, setItemPadding] = useState(0);
   const [buttonRadius, setButtonRadius] = useState(2);
+
+  // JSON toggle (Phase C)
+  const jsonToggle = useJsonToggle(
+    "slicer",
+    slicerId != null ? String(slicerId) : "",
+  );
 
   // Computed attributes (attributes controlled by formulas)
   const [computedAttrs, setComputedAttrs] = useState<Set<string>>(new Set());
@@ -201,11 +210,33 @@ export function SlicerSettingsDialog({
         {/* Header */}
         <div style={s.header}>
           <h2 style={s.title}>Slicer Settings</h2>
-          <button style={s.closeButton} onClick={handleClose} aria-label="Close">
-            x
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <JsonToggleButton
+              isActive={jsonToggle.isJsonMode}
+              onClick={jsonToggle.toggle}
+              disabled={slicerId == null}
+            />
+            <button style={s.closeButton} onClick={handleClose} aria-label="Close">
+              x
+            </button>
+          </div>
         </div>
 
+        {/* JSON editor (shown when toggle is active) */}
+        {jsonToggle.isJsonMode ? (
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <JsonToggleEditor
+              json={jsonToggle.json}
+              onChange={jsonToggle.setJson}
+              onApply={jsonToggle.apply}
+              onRevert={jsonToggle.revert}
+              dirty={jsonToggle.dirty}
+              error={jsonToggle.error}
+              loading={jsonToggle.loading}
+            />
+          </div>
+        ) : (
+        <>
         {/* Scrollable Content */}
         <div style={s.scrollContent}>
           {/* Selection Section */}
@@ -356,6 +387,8 @@ export function SlicerSettingsDialog({
             OK
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );

@@ -78,6 +78,7 @@ pub mod error_checking;
 pub mod named_styles_cmd;
 pub mod chart_commands;
 pub mod sparkline_commands;
+pub mod json_view;
 pub mod r1c1;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
@@ -3882,6 +3883,11 @@ pub fn run() {
             sparkline_commands::save_sparklines,
             sparkline_commands::delete_sparklines,
             sparkline_commands::clear_all_sparklines,
+            // JSON View commands (generic object inspection/editing)
+            json_view::get_object_json,
+            json_view::set_object_json,
+            json_view::list_objects,
+            json_view::get_workbook_tree,
             // R1C1 reference style commands
             r1c1::get_reference_style,
             r1c1::set_reference_style,

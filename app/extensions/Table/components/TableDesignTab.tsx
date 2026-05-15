@@ -18,6 +18,9 @@ import {
 import type { RibbonContext } from "@api/extensions";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 import { TableStylesGallery, DEFAULT_TABLE_STYLE_ID } from "./TableStylesGallery";
+import { useJsonToggle } from "../../JsonView/lib/useJsonToggle";
+import { JsonToggleButton } from "../../JsonView/components/JsonToggleButton";
+import { JsonToggleEditor } from "../../JsonView/components/JsonToggleEditor";
 
 // ============================================================================
 // Styles
@@ -191,6 +194,13 @@ export function TableDesignTab({
 
   const groupDefs = useMemo(() => GROUP_DEFS, []);
   const collapsed = useRibbonCollapse(containerRef, groupDefs, 0, 470);
+
+  // JSON toggle (Phase C)
+  const jsonToggle = useJsonToggle(
+    "table",
+    tableState?.table?.id != null ? String(tableState.table.id) : "",
+    () => emitAppEvent(TableEvents.TABLE_REQUEST_STATE),
+  );
 
   // Listen for table state broadcasts from the selection handler
   useEffect(() => {
@@ -417,6 +427,30 @@ export function TableDesignTab({
 
       <RibbonGroup label="Table Style Options" icon={"\u2611"} collapsed={collapsed[2]}>
         {styleOptionsContent}
+      </RibbonGroup>
+
+      {/* JSON View toggle */}
+      <RibbonGroup label="JSON" collapsed={false}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "2px 6px" }}>
+          <JsonToggleButton
+            isActive={jsonToggle.isJsonMode}
+            onClick={jsonToggle.toggle}
+            disabled={!tableState}
+          />
+          {jsonToggle.isJsonMode && (
+            <div style={{ position: "fixed", right: 8, top: 140, width: 420, height: 400, zIndex: 500, border: "1px solid #555", borderRadius: 6, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}>
+              <JsonToggleEditor
+                json={jsonToggle.json}
+                onChange={jsonToggle.setJson}
+                onApply={jsonToggle.apply}
+                onRevert={jsonToggle.revert}
+                dirty={jsonToggle.dirty}
+                error={jsonToggle.error}
+                loading={jsonToggle.loading}
+              />
+            </div>
+          )}
+        </div>
       </RibbonGroup>
 
       <TableStylesGallery

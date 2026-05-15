@@ -26,6 +26,9 @@ import type {
   PivotId,
   CalculatedFieldDef,
 } from './types';
+import { useJsonToggle } from '../../JsonView/lib/useJsonToggle';
+import { JsonToggleButton } from '../../JsonView/components/JsonToggleButton';
+import { JsonToggleEditor } from '../../JsonView/components/JsonToggleEditor';
 
 type EditorTab = 'fields' | 'design';
 
@@ -75,6 +78,9 @@ export function PivotEditor({
   onViewUpdate,
 }: PivotEditorProps): React.ReactElement {
   const isBiPivot = !!biModel;
+
+  // JSON toggle (Phase C)
+  const jsonToggle = useJsonToggle("pivot_layout", String(pivotId), onViewUpdate);
 
   // Tab state: Fields (visual drag-drop) or Design (DSL text editor)
   const [activeTab, setActiveTab] = useState<EditorTab>('fields');
@@ -449,17 +455,35 @@ export function PivotEditor({
             Design
           </button>
         </div>
-        {onClose && (
-          <button
-            className={styles.closeButton}
-            onClick={onClose}
-            title="Close"
-          >
-            x
-          </button>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <JsonToggleButton isActive={jsonToggle.isJsonMode} onClick={jsonToggle.toggle} />
+          {onClose && (
+            <button
+              className={styles.closeButton}
+              onClick={onClose}
+              title="Close"
+            >
+              x
+            </button>
+          )}
+        </div>
       </div>
 
+      {/* JSON editor (shown when toggle is active) */}
+      {jsonToggle.isJsonMode ? (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <JsonToggleEditor
+            json={jsonToggle.json}
+            onChange={jsonToggle.setJson}
+            onApply={jsonToggle.apply}
+            onRevert={jsonToggle.revert}
+            dirty={jsonToggle.dirty}
+            error={jsonToggle.error}
+            loading={jsonToggle.loading}
+          />
+        </div>
+      ) : (
+      <>
       {isBiPivot && biModel && (
         <div style={{
           padding: '4px 10px',
@@ -568,6 +592,9 @@ export function PivotEditor({
           Update
         </button>
       </div>
+
+      </>
+      )}
 
       {/* Value Field Settings Modal */}
       {valueSettingsIndex !== null && values[valueSettingsIndex] && (
