@@ -123,7 +123,7 @@ export function paintTrendlines(
 // ============================================================================
 
 /** Darken a hex color by a given amount (0-1). */
-function darkenColor(hex: string, amount: number): string {
+export function darkenColor(hex: string, amount: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);

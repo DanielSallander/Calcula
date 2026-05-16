@@ -152,7 +152,7 @@ function getErrorBarOptions(spec: ChartSpec): ErrorBarOptions | undefined {
 }
 
 /** Compute the error extent (plus and minus) for a data point. */
-function computeErrorExtent(
+export function computeErrorExtent(
   value: number,
   seriesValues: number[],
   opts: ErrorBarOptions,

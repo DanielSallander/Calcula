@@ -22,14 +22,14 @@ import {
 // Binning
 // ============================================================================
 
-interface HistogramBin {
+export interface HistogramBin {
   label: string;
   count: number;
   low: number;
   high: number;
 }
 
-function computeBins(values: number[], binCount: number): HistogramBin[] {
+export function computeBins(values: number[], binCount: number): HistogramBin[] {
   if (values.length === 0) return [];
 
   const min = Math.min(...values);

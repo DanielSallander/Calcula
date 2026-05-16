@@ -190,7 +190,7 @@ function computeSeriesRanges(
  * E.g., { startRow: 0, startCol: 1, endRow: 3, endCol: 1, sheetName: "Sheet1" }
  *   -> "Sheet1!$B$1:$B$4"
  */
-function formatAbsoluteRef(range: ResolvedRange): string {
+export function formatAbsoluteRef(range: ResolvedRange): string {
   const startCol = `$${columnToLetter(range.startCol)}`;
   const startRow = `$${range.startRow + 1}`;
   const prefix = range.sheetName ? `${formatSheetName(range.sheetName)}!` : "";
@@ -207,7 +207,7 @@ function formatAbsoluteRef(range: ResolvedRange): string {
 /**
  * Format a sheet name for use in a reference, quoting if necessary.
  */
-function formatSheetName(name: string): string {
+export function formatSheetName(name: string): string {
   const needsQuoting = /[\s'![\]]/.test(name) || /^\d/.test(name);
   if (needsQuoting) {
     return `'${name.replace(/'/g, "''")}'`;
@@ -218,7 +218,7 @@ function formatSheetName(name: string): string {
 /**
  * Escape a series name for use inside a quoted SERIES formula argument.
  */
-function escapeSeriesName(name: string): string {
+export function escapeSeriesName(name: string): string {
   return name.replace(/"/g, '""');
 }
 
@@ -226,7 +226,7 @@ function escapeSeriesName(name: string): string {
  * Parse an A1-style reference string into a ResolvedRange.
  * Handles: "A1", "A1:D10", "Sheet1!A1:D10", "'My Sheet'!A1:D10"
  */
-function parseA1ToRange(ref: string): ResolvedRange | undefined {
+export function parseA1ToRange(ref: string): ResolvedRange | undefined {
   let remaining = ref;
   let sheetName: string | undefined;
 
@@ -261,7 +261,7 @@ function parseA1ToRange(ref: string): ResolvedRange | undefined {
 }
 
 /** Convert column letters (e.g., "A", "BC") to 0-based index. */
-function letterToColIndex(letters: string): number {
+export function letterToColIndex(letters: string): number {
   let result = 0;
   for (let i = 0; i < letters.length; i++) {
     result = result * 26 + (letters.charCodeAt(i) - 64);

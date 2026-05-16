@@ -447,7 +447,7 @@ function drawTickMarks(
 // Display Unit Helpers
 // ============================================================================
 
-function getDisplayUnitFactor(unit: import("../types").DisplayUnit | undefined): number {
+export function getDisplayUnitFactor(unit: import("../types").DisplayUnit | undefined): number {
   switch (unit) {
     case "hundreds": return 100;
     case "thousands": return 1_000;
@@ -462,7 +462,7 @@ function getDisplayUnitFactor(unit: import("../types").DisplayUnit | undefined):
   }
 }
 
-function getDisplayUnitLabel(unit: import("../types").DisplayUnit): string {
+export function getDisplayUnitLabel(unit: import("../types").DisplayUnit): string {
   switch (unit) {
     case "hundreds": return "Hundreds";
     case "thousands": return "Thousands";
@@ -477,7 +477,7 @@ function getDisplayUnitLabel(unit: import("../types").DisplayUnit): string {
   }
 }
 
-function formatTickValueWithFormat(value: number, format: string): string {
+export function formatTickValueWithFormat(value: number, format: string): string {
   // Support common d3-style format codes
   if (format.includes("%")) {
     const decimals = format.match(/\.(\d+)/)?.[1];

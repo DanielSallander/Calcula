@@ -77,6 +77,86 @@ describe("numberFormats", () => {
     });
   });
 
+  describe("Swedish locale (space as thousands, comma as decimal)", () => {
+    const cats = getNumberFormatCategories(",", " ");
+
+    it("number format uses space as thousands separator", () => {
+      const numberCat = cats.find((c) => c.id === "number")!;
+      const sepFormat = numberCat.formats.find((f) => f.value === "number_sep")!;
+      expect(sepFormat.example).toBe("1 234,00");
+    });
+
+    it("number format without thousands uses comma decimal", () => {
+      const numberCat = cats.find((c) => c.id === "number")!;
+      const basicFormat = numberCat.formats.find((f) => f.value === "number")!;
+      expect(basicFormat.example).toBe("1234,00");
+    });
+
+    it("currency SEK uses Swedish separators", () => {
+      const currencyCat = cats.find((c) => c.id === "currency")!;
+      const sek = currencyCat.formats.find((f) => f.value === "currency_sek")!;
+      expect(sek.example).toBe("1 234,00 kr");
+    });
+
+    it("percentage uses comma as decimal", () => {
+      const pctCat = cats.find((c) => c.id === "percentage")!;
+      expect(pctCat.formats[0].example).toBe("12,00%");
+    });
+
+    it("accounting SEK uses Swedish separators", () => {
+      const acctCat = cats.find((c) => c.id === "accounting")!;
+      const sek = acctCat.formats.find((f) => f.value === "accounting_sek")!;
+      expect(sek.example).toBe("1 234,00 kr");
+    });
+
+    it("custom format examples use Swedish separators", () => {
+      const customCat = cats.find((c) => c.id === "custom")!;
+      const fmtWithSep = customCat.formats.find((f) => f.value === "#,##0.00")!;
+      expect(fmtWithSep.example).toBe("1 234,50");
+    });
+  });
+
+  describe("German locale (dot as thousands, comma as decimal)", () => {
+    const cats = getNumberFormatCategories(",", ".");
+
+    it("number with thousands uses dot separator", () => {
+      const numberCat = cats.find((c) => c.id === "number")!;
+      const sepFormat = numberCat.formats.find((f) => f.value === "number_sep")!;
+      expect(sepFormat.example).toBe("1.234,00");
+    });
+
+    it("number without thousands uses comma decimal", () => {
+      const numberCat = cats.find((c) => c.id === "number")!;
+      const basicFormat = numberCat.formats.find((f) => f.value === "number")!;
+      expect(basicFormat.example).toBe("1234,00");
+    });
+
+    it("currency USD uses German separators", () => {
+      const currencyCat = cats.find((c) => c.id === "currency")!;
+      const usd = currencyCat.formats.find((f) => f.value === "currency_usd")!;
+      expect(usd.example).toBe("$1.234,00");
+    });
+
+    it("currency EUR uses German separators", () => {
+      const currencyCat = cats.find((c) => c.id === "currency")!;
+      const eur = currencyCat.formats.find((f) => f.value === "currency_eur")!;
+      expect(eur.example).toBe("EUR 1.234,00");
+    });
+
+    it("general format uses German decimal", () => {
+      const generalCat = cats.find((c) => c.id === "general")!;
+      expect(generalCat.formats[0].example).toBe("1234,5");
+    });
+
+    it("accounting formats use German separators", () => {
+      const acctCat = cats.find((c) => c.id === "accounting")!;
+      const usd = acctCat.formats.find((f) => f.value === "accounting_usd")!;
+      expect(usd.example).toBe("$ 1.234,00");
+      const noDecimals = acctCat.formats.find((f) => f.value === "accounting_usd_0")!;
+      expect(noDecimals.example).toBe("$ 1.234");
+    });
+  });
+
   describe("category metadata", () => {
     it("every category has a non-empty description", () => {
       for (const cat of NUMBER_FORMAT_CATEGORIES) {

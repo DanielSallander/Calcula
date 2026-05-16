@@ -3,14 +3,9 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-// Mock React's useMemo to just call the factory
-vi.mock("react", () => ({
-  useMemo: (fn: () => any) => fn(),
-}));
-
 vi.mock("@api", () => ({}));
 
-import { useTreeLayout } from "../useTreeLayout";
+import { computeTreeLayout as useTreeLayout } from "../../lib/treeLayoutEngine";
 import type { EvalPlanNode } from "@api";
 import {
   NODE_MIN_WIDTH,

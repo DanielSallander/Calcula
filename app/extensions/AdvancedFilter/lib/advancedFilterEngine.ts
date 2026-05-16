@@ -113,7 +113,7 @@ function wildcardToRegex(pattern: string): RegExp {
 /**
  * Compare a cell value against a parsed criterion.
  */
-function matchesCriterion(cellValue: string, criterion: ParsedCriterion): boolean {
+export function matchesCriterion(cellValue: string, criterion: ParsedCriterion): boolean {
   // Empty criterion matches everything
   if (criterion.value === "" && criterion.operator === "=") {
     return true;
