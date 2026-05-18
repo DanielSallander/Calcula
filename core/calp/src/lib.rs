@@ -4,11 +4,14 @@
 //! local-filesystem registry operations, version pinning and resolution,
 //! and the publish/pull workflows.
 
+pub mod audit;
 pub mod channels;
+pub mod cross_package;
 pub mod dev_mode;
 pub mod error;
 pub mod manifest;
 pub mod overrides;
+pub mod package_kind;
 pub mod refresh;
 pub mod registry;
 pub mod version;

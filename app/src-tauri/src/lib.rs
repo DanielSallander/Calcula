@@ -311,6 +311,8 @@ pub struct AppState {
     pub subscriptions: Mutex<calp::manifest::SubscriptionManifest>,
     /// Override layer: consumer-side edits to subscribed (.calp) cells
     pub override_layer: Mutex<calp::OverrideLayer>,
+    /// Audit log for subscription events (opt-in, stored in .cala as audit_log.json)
+    pub audit_log: Mutex<calp::audit::AuditLog>,
 }
 
 impl AppState {
@@ -430,6 +432,7 @@ pub fn create_app_state() -> AppState {
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
         override_layer: Mutex::new(calp::OverrideLayer::new()),
+        audit_log: Mutex::new(calp::audit::AuditLog::new()),
     };
 
     // Populate built-in named styles
@@ -3890,6 +3893,9 @@ pub fn run() {
             calp_commands::calp_rename_cell_id,
             calp_commands::calp_merge_cell_ids,
             calp_commands::calp_next_version,
+            calp_commands::calp_get_audit_log,
+            calp_commands::calp_set_audit_enabled,
+            calp_commands::calp_clear_audit_log,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

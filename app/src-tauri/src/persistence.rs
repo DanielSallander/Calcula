@@ -987,6 +987,15 @@ pub fn save_file(
         }
     }
 
+    // Serialize audit log into user_files if enabled or has entries
+    {
+        let audit = state.audit_log.lock().map_err(|e| e.to_string())?;
+        if audit.enabled || !audit.entries.is_empty() {
+            let json = serde_json::to_vec_pretty(&*audit).map_err(|e| e.to_string())?;
+            workbook.user_files.insert("audit_log.json".to_string(), json);
+        }
+    }
+
     // Save workbook properties (update last_modified timestamp)
     {
         let mut props = state.workbook_properties.lock().unwrap();
@@ -1333,6 +1342,18 @@ pub fn open_file(
         }
     }
 
+    // Restore audit log from user_files (if present)
+    {
+        if let Some(json_bytes) = workbook.user_files.remove("audit_log.json") {
+            if let Ok(log) = serde_json::from_slice::<calp::audit::AuditLog>(&json_bytes) {
+                *state.audit_log.lock().map_err(|e| e.to_string())? = log;
+            }
+        } else {
+            *state.audit_log.lock().map_err(|e| e.to_string())? =
+                calp::audit::AuditLog::new();
+        }
+    }
+
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
     // Restore document theme
@@ -1570,6 +1591,10 @@ pub fn new_file(
     // Clear override layer
     *state.override_layer.lock().map_err(|e| e.to_string())? =
         calp::OverrideLayer::new();
+
+    // Reset audit log
+    *state.audit_log.lock().map_err(|e| e.to_string())? =
+        calp::audit::AuditLog::new();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();

@@ -659,6 +659,43 @@ pub fn calp_merge_cell_ids(
     Err("IdRegistry not yet integrated into AppState — merge deferred to full integration".to_string())
 }
 
+// ============================================================================
+// Phase 7: Audit Log Commands
+// ============================================================================
+
+/// Return the full audit log for the current workbook.
+#[tauri::command]
+pub fn calp_get_audit_log(
+    state: State<AppState>,
+) -> Result<calp::audit::AuditLog, String> {
+    let log = state.audit_log.lock().map_err(|e| e.to_string())?;
+    Ok(log.clone())
+}
+
+/// Enable or disable audit logging and set the maximum number of entries.
+/// Pass `max_entries = 0` for unlimited.
+#[tauri::command]
+pub fn calp_set_audit_enabled(
+    state: State<AppState>,
+    enabled: bool,
+    max_entries: usize,
+) -> Result<(), String> {
+    let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
+    log.enabled = enabled;
+    log.max_entries = max_entries;
+    Ok(())
+}
+
+/// Discard all audit log entries.
+#[tauri::command]
+pub fn calp_clear_audit_log(
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
+    log.clear();
+    Ok(())
+}
+
 /// Suggest the next version for a package given a bump type ("major", "minor", "patch").
 #[tauri::command]
 pub fn calp_next_version(

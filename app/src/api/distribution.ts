@@ -278,3 +278,40 @@ export function nextVersion(
 ): Promise<string> {
   return invokeBackend("calp_next_version", { registryPath, packageName, bump });
 }
+
+// ============================================================================
+// Phase 7: Audit Log
+// ============================================================================
+
+export interface AuditEntry {
+  timestamp: string;
+  event: string;
+  description: string;
+  user: string;
+}
+
+export interface AuditLog {
+  formatVersion: number;
+  enabled: boolean;
+  maxEntries: number;
+  entries: AuditEntry[];
+}
+
+/** Return the full audit log for the current workbook. */
+export function getAuditLog(): Promise<AuditLog> {
+  return invokeBackend("calp_get_audit_log");
+}
+
+/**
+ * Enable or disable audit logging and configure the rolling window.
+ * @param enabled    - Whether to enable audit logging.
+ * @param maxEntries - Maximum entries to keep (0 = unlimited).
+ */
+export function setAuditEnabled(enabled: boolean, maxEntries: number): Promise<void> {
+  return invokeBackend("calp_set_audit_enabled", { enabled, maxEntries });
+}
+
+/** Discard all audit log entries. */
+export function clearAuditLog(): Promise<void> {
+  return invokeBackend("calp_clear_audit_log");
+}
