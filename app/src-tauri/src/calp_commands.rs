@@ -336,3 +336,126 @@ pub fn calp_import_overrides(
     patch.apply_to(&mut layer);
     Ok(count)
 }
+
+/// Compute a preview of what a refresh would change, without applying anything.
+#[tauri::command]
+pub fn calp_refresh_preview(
+    state: State<AppState>,
+    registry_path: String,
+) -> Result<calp::refresh::RefreshPreview, String> {
+    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+
+    calp::refresh::compute_preview(&registry, &subs.subscriptions, &layer)
+        .map_err(|e| e.to_string())
+}
+
+/// Apply the refresh after the user has confirmed the preview.
+/// Pulls new versions for all subscriptions that have updates and materializes
+/// new/updated sheets into the workbook grids.
+#[tauri::command]
+pub fn calp_refresh_apply(
+    state: State<AppState>,
+    registry_path: String,
+) -> Result<calp::refresh::RefreshResult, String> {
+    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Pull new versions for all subscriptions that have updates.
+    let payloads = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        calp::refresh::pull_all_updates(&registry, &subs.subscriptions)
+            .map_err(|e| e.to_string())?
+    };
+
+    // Materialize new/updated sheets into grids.
+    {
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+
+        for payload in &payloads {
+            let sub = &subs.subscriptions[payload.subscription_index];
+
+            // Collect package_sheet_ids already tracked in this subscription so
+            // we can distinguish new sheets from updated ones.
+            let old_package_ids: Vec<_> = sub.sheets.iter()
+                .map(|s| s.package_sheet_id)
+                .collect();
+
+            for pulled in &payload.pull_result.sheets {
+                let (mut grid, local_styles) = pulled.sheet.to_grid();
+
+                // Remap local style indices to the shared registry.
+                let local_all = local_styles.all_styles();
+                let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
+                for style in local_all {
+                    remap.push(shared_styles.get_or_create(style.clone()));
+                }
+                for (_key, cell) in grid.cells.iter_mut() {
+                    if cell.style_index < remap.len() {
+                        cell.style_index = remap[cell.style_index];
+                    }
+                }
+
+                if old_package_ids.contains(&pulled.package_sheet_id) {
+                    // Updated sheet — replace the existing grid in-place.
+                    if let Some(pos) = sub.sheets.iter()
+                        .position(|s| s.package_sheet_id == pulled.package_sheet_id)
+                    {
+                        // The local sheet index in the workbook equals the
+                        // position of the subscribed sheet in the global sheet list.
+                        // We track it via the local_sheet_id stored at subscription time.
+                        let local_sid = sub.sheets[pos].local_sheet_id;
+                        if let Some(grid_idx) = sheet_ids.iter().position(|id| *id == local_sid) {
+                            grids[grid_idx] = grid;
+                            all_cw[grid_idx] = pulled.sheet.column_widths.clone();
+                            all_rh[grid_idx] = pulled.sheet.row_heights.clone();
+                        }
+                    }
+                } else {
+                    // New sheet — append to the workbook.
+                    grids.push(grid);
+                    sheet_names.push(pulled.name.clone());
+                    sheet_ids.push(pulled.sheet.id);
+                    all_cw.push(pulled.sheet.column_widths.clone());
+                    all_rh.push(pulled.sheet.row_heights.clone());
+                }
+            }
+        }
+    }
+
+    // Apply refresh: update subscription metadata and rebase overrides.
+    let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+
+    let result = calp::refresh::apply_refresh(
+        payloads,
+        &mut subs.subscriptions,
+        &mut layer,
+        &now,
+    );
+
+    Ok(result)
+}
+
+/// Strip all subscriptions and overrides, converting the workbook to a
+/// standalone (detached) document.
+#[tauri::command]
+pub fn calp_detach(state: State<AppState>) -> Result<(), String> {
+    let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+
+    calp::refresh::detach(&mut subs.subscriptions, &mut layer);
+
+    Ok(())
+}

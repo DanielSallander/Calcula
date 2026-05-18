@@ -3882,6 +3882,9 @@ pub fn run() {
             calp_commands::calp_keep_override,
             calp_commands::calp_export_overrides,
             calp_commands::calp_import_overrides,
+            calp_commands::calp_refresh_preview,
+            calp_commands::calp_refresh_apply,
+            calp_commands::calp_detach,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -7,6 +7,7 @@
 pub mod error;
 pub mod manifest;
 pub mod overrides;
+pub mod refresh;
 pub mod registry;
 pub mod version;
 pub mod publish;
