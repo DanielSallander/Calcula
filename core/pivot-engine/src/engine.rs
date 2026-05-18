@@ -3342,7 +3342,8 @@ mod tests {
         let view = calculate_pivot(&definition, &mut cache);
         
         // Should have filter rows
-        assert_eq!(view.filter_row_count, 1);
+        // filter_row_count includes the spacing row after the filter fields
+        assert_eq!(view.filter_row_count, 2);
         assert_eq!(view.filter_rows.len(), 1);
         assert_eq!(view.filter_rows[0].field_name, "Region");
     }

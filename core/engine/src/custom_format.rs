@@ -1024,6 +1024,7 @@ fn render_number_tokens(
     let mut int_digit_idx: isize = int_digits.len() as isize - int_placeholder_count as isize;
     let mut frac_digit_idx: usize = 0;
     let mut past_decimal = false;
+    let mut emitted_overflow = false;
 
     // Track whether we need to insert thousands separators
     let has_thousands = has_thousands_separator(tokens);
@@ -1032,6 +1033,14 @@ fn render_number_tokens(
         match token {
             FormatToken::DigitZero => {
                 if !past_decimal {
+                    // Emit overflow digits (more digits than placeholders) before the first placeholder
+                    if !emitted_overflow && int_digit_idx > 0 {
+                        for i in 0..(int_digit_idx as usize) {
+                            result.push(int_digits[i]);
+                        }
+                        emitted_overflow = true;
+                    }
+                    if !emitted_overflow { emitted_overflow = true; }
                     // Integer part
                     if int_digit_idx >= 0 && (int_digit_idx as usize) < int_digits.len() {
                         result.push(int_digits[int_digit_idx as usize]);
@@ -1051,8 +1060,21 @@ fn render_number_tokens(
             }
             FormatToken::DigitHash => {
                 if !past_decimal {
+                    // Emit overflow digits before the first placeholder
+                    if !emitted_overflow && int_digit_idx > 0 {
+                        for i in 0..(int_digit_idx as usize) {
+                            result.push(int_digits[i]);
+                        }
+                        emitted_overflow = true;
+                    }
+                    if !emitted_overflow { emitted_overflow = true; }
                     if int_digit_idx >= 0 && (int_digit_idx as usize) < int_digits.len() {
-                        result.push(int_digits[int_digit_idx as usize]);
+                        let ch = int_digits[int_digit_idx as usize];
+                        // # suppresses leading zeros: skip if '0' and all prior digits were also '0'
+                        let is_leading_zero = ch == '0' && int_digits[..int_digit_idx as usize].iter().all(|&c| c == '0');
+                        if !is_leading_zero {
+                            result.push(ch);
+                        }
                     }
                     // else: suppress (show nothing)
                     int_digit_idx += 1;
@@ -1073,6 +1095,14 @@ fn render_number_tokens(
             }
             FormatToken::DigitSpace => {
                 if !past_decimal {
+                    // Emit overflow digits before the first placeholder
+                    if !emitted_overflow && int_digit_idx > 0 {
+                        for i in 0..(int_digit_idx as usize) {
+                            result.push(int_digits[i]);
+                        }
+                        emitted_overflow = true;
+                    }
+                    if !emitted_overflow { emitted_overflow = true; }
                     if int_digit_idx >= 0 && (int_digit_idx as usize) < int_digits.len() {
                         result.push(int_digits[int_digit_idx as usize]);
                     } else {
@@ -1621,6 +1651,10 @@ fn format_datetime_section(value: f64, section: &FormatSection) -> FormatResult 
             }
             FormatToken::SpaceWidth(_) => {
                 result.push(' ');
+            }
+            FormatToken::Comma => {
+                // In date/time context, commas are literal
+                result.push(',');
             }
             _ => {}
         }

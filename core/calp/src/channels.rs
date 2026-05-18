@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use persistence::{Sheet, Workbook};
+use persistence::Sheet;
 
 use crate::error::CalpError;
 use crate::manifest::{Subscription, SubscribedSheet};
@@ -141,6 +141,7 @@ pub fn list_channels(subs: &[Subscription]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use persistence::Workbook;
     use tempfile::TempDir;
     use engine::cell::Cell;
 

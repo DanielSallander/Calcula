@@ -46,7 +46,7 @@ fn format_general(value: f64, locale: &LocaleSettings) -> String {
     let abs_value = value.abs();
 
     // Use scientific notation for very large or very small numbers
-    if abs_value >= 1e10 || (abs_value < 1e-4 && abs_value > 0.0) {
+    if abs_value >= 1e15 || (abs_value < 1e-4 && abs_value > 0.0) {
         let s = format!("{:.5e}", value)
             .trim_end_matches('0')
             .trim_end_matches('.')

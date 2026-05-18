@@ -8,11 +8,10 @@
 //! `dev: true`. They resolve by reading the source .cala directly instead of
 //! going through the registry.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use identity::SheetId;
-use persistence::{Sheet, Workbook};
+use persistence::Sheet;
 
 use crate::error::CalpError;
 use crate::manifest::{Subscription, SubscribedSheet};
@@ -135,6 +134,7 @@ pub fn source_modified_since(source_path: &Path, last_pull: &str) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use persistence::Workbook;
     use tempfile::TempDir;
     use engine::cell::Cell;
 

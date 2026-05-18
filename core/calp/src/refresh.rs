@@ -10,13 +10,12 @@
 use std::collections::HashMap;
 
 use identity::{CellId, SheetId};
-use persistence::{SavedCell, Sheet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CalpError;
-use crate::manifest::{Subscription, SubscribedSheet};
-use crate::overrides::{CellOverride, OverrideLayer, OverrideValue};
-use crate::pull::{self, PullRequest, PullResult, PulledSheet};
+use crate::manifest::Subscription;
+use crate::overrides::{OverrideLayer, OverrideValue};
+use crate::pull::{self, PullRequest, PullResult};
 use crate::registry::LocalRegistry;
 use crate::version::VersionPin;
 
@@ -123,7 +122,7 @@ pub fn compute_preview(
     let mut total_added = 0;
     let mut total_removed = 0;
     let mut total_conflicts = 0;
-    let mut total_cleared = 0;
+    let total_cleared = 0;
 
     for sub in subscriptions {
         let pin = VersionPin::parse(&sub.version_pin)?;
@@ -281,7 +280,7 @@ pub fn apply_refresh(
     let mut sheets_removed = 0;
     let mut sheets_updated = 0;
     let mut structural_conflicts = Vec::new();
-    let mut upstream_values: HashMap<(SheetId, CellId), OverrideValue> = HashMap::new();
+    let upstream_values: HashMap<(SheetId, CellId), OverrideValue> = HashMap::new();
 
     for payload in &payloads {
         let sub = &mut subscriptions[payload.subscription_index];
@@ -356,6 +355,8 @@ pub fn detach(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use persistence::SavedCell;
+    use crate::manifest::SubscribedSheet;
     use tempfile::TempDir;
     use crate::publish::{self, PublishRequest};
     use crate::version::SemVer;

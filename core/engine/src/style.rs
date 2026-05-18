@@ -187,8 +187,10 @@ pub struct Borders {
     pub bottom: BorderStyle,
     pub left: BorderStyle,
     /// Diagonal border from top-left to bottom-right (\).
+    #[serde(default)]
     pub diagonal_down: BorderStyle,
     /// Diagonal border from bottom-left to top-right (/).
+    #[serde(default)]
     pub diagonal_up: BorderStyle,
 }
 

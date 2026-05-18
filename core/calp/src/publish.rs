@@ -174,16 +174,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use persistence::Sheet;
-    use engine::cell::{Cell, CellValue};
-    use std::collections::HashMap;
+    use engine::cell::Cell;
 
     fn make_test_workbook() -> Workbook {
         let mut sheet1 = Sheet::new("Dashboard".to_string());
-        let mut cell = Cell::new_number(42.0);
+        let cell = Cell::new_number(42.0);
         sheet1.cells.insert((0, 0), persistence::SavedCell::from_cell(&cell));
 
         let mut sheet2 = Sheet::new("Data".to_string());
-        let mut cell2 = Cell::new_text("hello".to_string());
+        let cell2 = Cell::new_text("hello".to_string());
         sheet2.cells.insert((0, 0), persistence::SavedCell::from_cell(&cell2));
 
         let mut wb = Workbook::default();

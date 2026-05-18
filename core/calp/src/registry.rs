@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::fs;
 
 use crate::error::CalpError;
-use crate::manifest::{PackageManifest, VersionEntry, VersionManifest};
+use crate::manifest::PackageManifest;
+#[cfg(test)]
+use crate::manifest::VersionEntry;
+use crate::manifest::VersionManifest;
 use crate::version::{SemVer, VersionPin};
 
 /// Local filesystem registry adapter.

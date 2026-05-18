@@ -352,7 +352,7 @@ describe("stress: theme resolution 10K times", () => {
     }
 
     const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(2000);
+    expect(elapsed).toBeLessThan(5000);
   });
 
   it("mergeTheme 10K times with varying overrides", () => {

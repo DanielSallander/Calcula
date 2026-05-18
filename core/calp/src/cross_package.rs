@@ -115,7 +115,7 @@ impl PackageDependencyGraph {
     /// Build the dependency graph from a workbook's subscriptions.
     /// Cross-package references are identified by sheet names that belong
     /// to different packages.
-    pub fn from_subscriptions(subscriptions: &[Subscription]) -> Self {
+    pub fn from_subscriptions(_subscriptions: &[Subscription]) -> Self {
         // In v1, dependencies are declared, not inferred.
         // This returns an empty graph — callers add dependencies explicitly.
         Self::new()
