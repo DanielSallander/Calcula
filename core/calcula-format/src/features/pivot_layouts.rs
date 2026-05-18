@@ -2,6 +2,7 @@
 //! Pivot layout definitions serialization.
 //! Each layout is stored as pivot_layouts/layout_{id}.json.
 
+use identity::EntityId;
 use persistence::SavedPivotLayout;
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PivotLayoutDef {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     pub dsl_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

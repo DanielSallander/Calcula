@@ -3140,10 +3140,14 @@ pub fn drill_down(
 mod tests {
     use super::*;
     use engine::CellValue;
-    use crate::definition::{PivotField, ValueField, AggregationType};
-    
+    use crate::definition::{PivotField, ValueField, AggregationType, PivotId};
+
+    fn test_pivot_id() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    }
+
     fn create_test_cache() -> PivotCache {
-        let mut cache = PivotCache::new(1, 3);
+        let mut cache = PivotCache::new(test_pivot_id(), 3);
         cache.set_field_name(0, "Region".to_string());
         cache.set_field_name(1, "Product".to_string());
         cache.set_field_name(2, "Sales".to_string());
@@ -3174,7 +3178,7 @@ mod tests {
     }
     
     fn create_test_definition() -> PivotDefinition {
-        let mut def = PivotDefinition::new(1, (0, 0), (4, 2));
+        let mut def = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
         
         def.row_fields.push(PivotField::new(0, "Region".to_string()));
         def.column_fields.push(PivotField::new(1, "Product".to_string()));
@@ -3288,7 +3292,7 @@ mod tests {
 
     #[test]
     fn test_show_all_items() {
-        let mut cache = PivotCache::new(1, 3);
+        let mut cache = PivotCache::new(test_pivot_id(), 3);
         cache.set_field_name(0, "Region".to_string());
         cache.set_field_name(1, "Product".to_string());
         cache.set_field_name(2, "Sales".to_string());
@@ -3305,7 +3309,7 @@ mod tests {
             CellValue::Number(200.0),
         ]);
 
-        let mut definition = PivotDefinition::new(1, (0, 0), (2, 2));
+        let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (2, 2));
         let mut region_field = PivotField::new(0, "Region".to_string());
         let mut product_field = PivotField::new(1, "Product".to_string());
         product_field.show_all_items = true; // Show items with no data

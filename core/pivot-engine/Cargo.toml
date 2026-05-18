@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 engine = { path = "../engine" }
+identity = { path = "../identity" }
 rustc-hash = "2.1"
 smallvec = { version = "1.13", features = ["serde"] }
 

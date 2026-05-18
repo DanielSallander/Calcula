@@ -39,7 +39,7 @@ pub fn update_chart(state: State<AppState>, entry: ChartEntry) -> Result<(), Str
 
 /// Delete a chart entry by ID.
 #[tauri::command]
-pub fn delete_chart(state: State<AppState>, id: u32) -> Result<(), String> {
+pub fn delete_chart(state: State<AppState>, id: identity::EntityId) -> Result<(), String> {
     let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
     let len_before = charts.len();
     charts.retain(|c| c.id != id);

@@ -10,7 +10,7 @@ use tauri::State;
 #[serde(rename_all = "camelCase")]
 pub struct SavePivotLayoutRequest {
     /// If provided, updates existing layout with this ID. Otherwise creates new.
-    pub id: Option<u64>,
+    pub id: Option<identity::EntityId>,
     pub name: String,
     pub dsl_text: String,
     pub description: Option<String>,
@@ -23,7 +23,7 @@ pub struct SavePivotLayoutRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PivotLayoutResponse {
-    pub id: u64,
+    pub id: identity::EntityId,
     pub name: String,
     pub dsl_text: String,
     pub description: Option<String>,
@@ -57,7 +57,7 @@ impl From<&SavedPivotLayout> for PivotLayoutResponse {
 pub fn save_pivot_layout(
     state: State<'_, AppState>,
     request: SavePivotLayoutRequest,
-) -> Result<u64, String> {
+) -> Result<identity::EntityId, String> {
     let mut layouts = state.pivot_layouts.lock()
         .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;
 
@@ -80,7 +80,7 @@ pub fn save_pivot_layout(
     }
 
     // Create new
-    let id = layouts.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     layouts.push(SavedPivotLayout {
         id,
         name: request.name,
@@ -111,7 +111,7 @@ pub fn get_pivot_layouts(
 #[tauri::command]
 pub fn delete_pivot_layout(
     state: State<'_, AppState>,
-    id: u64,
+    id: identity::EntityId,
 ) -> Result<(), String> {
     let mut layouts = state.pivot_layouts.lock()
         .map_err(|e| format!("pivot_layouts lock poisoned: {}", e))?;

@@ -13,6 +13,7 @@ pub mod dependency_graph;
 pub mod evaluator;
 pub mod formula_locale;
 pub mod id_operations;
+pub mod identity_graph;
 pub mod grid;
 pub mod locale;
 pub mod number_format;

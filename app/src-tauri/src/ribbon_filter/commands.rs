@@ -22,9 +22,7 @@ pub fn create_ribbon_filter(
     ribbon_filter_state: State<RibbonFilterState>,
     params: CreateRibbonFilterParams,
 ) -> Result<RibbonFilter, String> {
-    let mut next_id = ribbon_filter_state.next_id.lock().unwrap();
-    let id = *next_id;
-    *next_id += 1;
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     let filter = RibbonFilter {
         id,
@@ -70,7 +68,7 @@ pub fn create_ribbon_filter(
 #[tauri::command]
 pub fn delete_ribbon_filter(
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("RIBBON_FILTER", "delete_ribbon_filter id={}", filter_id);
 
@@ -88,7 +86,7 @@ pub fn delete_ribbon_filter(
 #[tauri::command]
 pub fn update_ribbon_filter(
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
     params: UpdateRibbonFilterParams,
 ) -> Result<RibbonFilter, String> {
     log_debug!("RIBBON_FILTER", "update_ribbon_filter id={}", filter_id);
@@ -154,7 +152,7 @@ pub fn update_ribbon_filter(
 #[tauri::command]
 pub fn update_ribbon_filter_selection(
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
 ) -> Result<(), String> {
     log_debug!(
@@ -196,7 +194,7 @@ pub fn get_all_ribbon_filters(
 #[tauri::command]
 pub fn get_ribbon_filter(
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
 ) -> Result<RibbonFilter, String> {
     ribbon_filter_state
         .filters
@@ -212,7 +210,7 @@ pub fn get_ribbon_filter(
 #[tauri::command]
 pub fn clear_ribbon_filter(
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("RIBBON_FILTER", "clear_ribbon_filter id={}", filter_id);
 
@@ -235,7 +233,7 @@ pub fn set_ribbon_filter_item_selected(
     pivot_state: State<'_, PivotState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
     value: String,
     selected: bool,
 ) -> Result<(), String> {
@@ -324,7 +322,7 @@ pub fn get_ribbon_filter_items(
     pivot_state: State<'_, PivotState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<RibbonFilterState>,
-    filter_id: u64,
+    filter_id: identity::EntityId,
 ) -> Result<Vec<SlicerItem>, String> {
     let filters = ribbon_filter_state.filters.lock().unwrap();
     let filter = filters
@@ -334,7 +332,7 @@ pub fn get_ribbon_filter_items(
     let reference_source_id = filter.cache_source_id;
 
     // Collect cross-filters from sibling ribbon filters
-    let filter_connected: std::collections::HashSet<u64> =
+    let filter_connected: std::collections::HashSet<identity::EntityId> =
         filter.connected_sources.iter()
             .filter(|c| c.source_type == filter.source_type)
             .map(|c| c.source_id)
@@ -431,7 +429,7 @@ fn field_name_matches(cache_name: &str, filter_name: &str) -> bool {
 }
 
 /// Get unique values from a table column.
-fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: &str) -> Result<Vec<String>, String> {
+fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
     let tables = state.tables.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -482,7 +480,7 @@ fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: 
 /// Get values from a table column that still have data given cross-filter state.
 fn get_table_available_values(
     state: &State<AppState>,
-    source_id: u64,
+    source_id: identity::EntityId,
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
@@ -558,12 +556,12 @@ fn get_table_available_values(
 /// Get unique values from a pivot table field.
 fn get_pivot_field_values(
     pivot_state: &State<'_, PivotState>,
-    source_id: u64,
+    source_id: identity::EntityId,
     field_name: &str,
 ) -> Result<Vec<String>, String> {
     use pivot_engine::VALUE_ID_EMPTY;
 
-    let pivot_id = source_id as PivotId;
+    let pivot_id = source_id;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
@@ -612,13 +610,13 @@ fn get_pivot_field_values(
 /// Get values from a pivot field that still have data given cross-filter state.
 fn get_pivot_available_values(
     pivot_state: &State<'_, PivotState>,
-    source_id: u64,
+    source_id: identity::EntityId,
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
     use pivot_engine::VALUE_ID_EMPTY;
 
-    let pivot_id = source_id as PivotId;
+    let pivot_id = source_id;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)

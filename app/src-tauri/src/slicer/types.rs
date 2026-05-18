@@ -67,7 +67,7 @@ impl Default for SlicerArrangement {
 #[serde(rename_all = "camelCase")]
 pub struct SlicerConnection {
     pub source_type: SlicerSourceType,
-    pub source_id: u64,
+    pub source_id: identity::EntityId,
 }
 
 // ============================================================================
@@ -79,7 +79,7 @@ pub struct SlicerConnection {
 #[serde(rename_all = "camelCase")]
 pub struct Slicer {
     /// Unique slicer ID
-    pub id: u64,
+    pub id: identity::EntityId,
     /// Display name (used as programmatic reference, e.g. in scripts)
     pub name: String,
     /// Header display text (shown in header bar). If None, `name` is displayed.
@@ -98,7 +98,7 @@ pub struct Slicer {
     /// Source type (table or pivot)
     pub source_type: SlicerSourceType,
     /// The pivot/table ID used as the data source for fetching slicer items.
-    pub cache_source_id: u64,
+    pub cache_source_id: identity::EntityId,
     /// Field/column name to filter on
     pub field_name: String,
     /// Selected items. None = all selected (no filter applied).
@@ -195,7 +195,7 @@ pub struct CreateSlicerParams {
     pub height: Option<f64>,
     pub source_type: SlicerSourceType,
     /// The pivot/table ID used as the data source for fetching slicer items.
-    pub cache_source_id: u64,
+    pub cache_source_id: identity::EntityId,
     pub field_name: String,
     /// Initial Report Connections (pivots/tables this slicer filters).
     #[serde(default)]
@@ -235,13 +235,9 @@ pub struct UpdateSlicerParams {
 /// Slicer state managed by Tauri.
 pub struct SlicerState {
     /// All slicers: id -> Slicer
-    pub slicers: Mutex<HashMap<u64, Slicer>>,
-    /// Next available slicer ID
-    pub next_id: Mutex<u64>,
+    pub slicers: Mutex<HashMap<identity::EntityId, Slicer>>,
     /// Computed properties: slicer_id -> list of properties
     pub computed_properties: Mutex<super::computed::SlicerComputedPropertiesStorage>,
-    /// Next available computed property ID
-    pub next_computed_prop_id: Mutex<u64>,
     /// Dependency tracking: prop_id -> cells it references
     pub computed_prop_dependencies: Mutex<super::computed::SlicerComputedPropDependencies>,
     /// Reverse dependency: cell -> prop_ids
@@ -252,9 +248,7 @@ impl SlicerState {
     pub fn new() -> Self {
         Self {
             slicers: Mutex::new(HashMap::new()),
-            next_id: Mutex::new(1),
             computed_properties: Mutex::new(HashMap::new()),
-            next_computed_prop_id: Mutex::new(1),
             computed_prop_dependencies: Mutex::new(HashMap::new()),
             computed_prop_dependents: Mutex::new(HashMap::new()),
         }

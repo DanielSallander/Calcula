@@ -98,7 +98,7 @@ pub(crate) fn build_cache_from_grid(
         let headers: Vec<String> = (0..col_count)
             .map(|i| col_index_to_letter(i as u32))
             .collect();
-        let cache = PivotCache::new(1, col_count);
+        let cache = PivotCache::new(identity::EntityId::ZERO, col_count);
         return Ok((cache, headers));
     }
 
@@ -133,7 +133,7 @@ pub(crate) fn build_cache_from_grid(
     }
 
     // Create cache
-    let mut cache = PivotCache::new(1, col_count);
+    let mut cache = PivotCache::new(identity::EntityId::ZERO, col_count);
 
     // Set field names
     for (i, name) in headers.iter().enumerate() {
@@ -338,7 +338,7 @@ pub(crate) fn clear_pivot_region_from_grid(
 /// Gets the current protected region for a pivot ID, if it exists.
 pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<ProtectedRegion> {
     let regions = state.protected_regions.lock().unwrap();
-    regions.iter().find(|r| r.region_type == "pivot" && r.owner_id == pivot_id as u64).cloned()
+    regions.iter().find(|r| r.region_type == "pivot" && r.owner_id == pivot_id).cloned()
 }
 
 // ============================================================================
@@ -626,8 +626,8 @@ pub(crate) fn update_pivot_region(
     let mut regions = state.protected_regions.lock().unwrap();
 
     // Remove any existing region for this pivot
-    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id as u64));
-    
+    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
+
     let (dest_row, dest_col) = destination;
     
     // Calculate region size - use actual view size or minimum reserved size for empty pivots
@@ -650,7 +650,7 @@ pub(crate) fn update_pivot_region(
     regions.push(ProtectedRegion {
         id: format!("pivot-{}", pivot_id),
         region_type: "pivot".to_string(),
-        owner_id: pivot_id as u64,
+        owner_id: pivot_id,
         sheet_index,
         start_row: dest_row,
         start_col: dest_col,

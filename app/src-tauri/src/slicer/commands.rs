@@ -21,9 +21,7 @@ pub fn create_slicer(
     slicer_state: State<SlicerState>,
     params: CreateSlicerParams,
 ) -> Result<Slicer, String> {
-    let mut next_id = slicer_state.next_id.lock().unwrap();
-    let id = *next_id;
-    *next_id += 1;
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     let slicer = Slicer {
         id,
@@ -75,7 +73,7 @@ pub fn create_slicer(
 #[tauri::command]
 pub fn delete_slicer(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("SLICER", "delete_slicer id={}", slicer_id);
 
@@ -110,7 +108,7 @@ pub fn delete_slicer(
 #[tauri::command]
 pub fn update_slicer(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
     params: UpdateSlicerParams,
 ) -> Result<Slicer, String> {
     log_debug!("SLICER", "update_slicer id={}", slicer_id);
@@ -182,7 +180,7 @@ pub fn update_slicer(
 #[tauri::command]
 pub fn update_slicer_position(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
     x: f64,
     y: f64,
     width: f64,
@@ -204,7 +202,7 @@ pub fn update_slicer_position(
 #[tauri::command]
 pub fn update_slicer_selection(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
 ) -> Result<(), String> {
     log_debug!(
@@ -231,7 +229,7 @@ pub fn update_slicer_selection(
 #[tauri::command]
 pub fn get_slicer(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
 ) -> Result<Slicer, String> {
     slicer_state
         .slicers
@@ -246,7 +244,7 @@ pub fn get_slicer(
 #[tauri::command]
 pub fn clear_slicer_filter(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
 ) -> Result<(), String> {
     let mut slicers = slicer_state.slicers.lock().unwrap();
     let slicer = slicers
@@ -266,7 +264,7 @@ pub fn set_slicer_item_selected(
     state: State<AppState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
     value: String,
     selected: bool,
 ) -> Result<(), String> {
@@ -378,7 +376,7 @@ pub fn get_slicer_items(
     pivot_state: State<'_, PivotState>,
     slicer_state: State<SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
 ) -> Result<Vec<SlicerItem>, String> {
     let slicers = slicer_state.slicers.lock().unwrap();
     let slicer = slicers
@@ -390,7 +388,7 @@ pub fn get_slicer_items(
     let reference_source_id = slicer.cache_source_id;
 
     // Collect filters from OTHER slicers that share any connected source (cross-filtering).
-    let slicer_connected: std::collections::HashSet<u64> =
+    let slicer_connected: std::collections::HashSet<identity::EntityId> =
         slicer.connected_sources.iter()
             .filter(|c| c.source_type == slicer.source_type)
             .map(|c| c.source_id)
@@ -501,7 +499,7 @@ fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
 }
 
 /// Get unique values from a table column.
-fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: &str) -> Result<Vec<String>, String> {
+fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityId, field_name: &str) -> Result<Vec<String>, String> {
     let tables = state.tables.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -555,7 +553,7 @@ fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: 
 /// Scans the table rows and checks each row against filters from sibling slicers.
 fn get_table_available_values(
     state: &State<AppState>,
-    source_id: u64,
+    source_id: identity::EntityId,
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
@@ -635,12 +633,12 @@ fn get_table_available_values(
 /// Get unique values from a pivot table field.
 fn get_pivot_field_values(
     pivot_state: &State<'_, PivotState>,
-    source_id: u64,
+    source_id: identity::EntityId,
     field_name: &str,
 ) -> Result<Vec<String>, String> {
     use pivot_engine::VALUE_ID_EMPTY;
 
-    let pivot_id = source_id as PivotId;
+    let pivot_id = source_id;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
@@ -699,13 +697,13 @@ fn get_pivot_field_values(
 /// Scans the cache records and checks each record against sibling slicer filters.
 fn get_pivot_available_values(
     pivot_state: &State<'_, PivotState>,
-    source_id: u64,
+    source_id: identity::EntityId,
     field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
     use pivot_engine::VALUE_ID_EMPTY;
 
-    let pivot_id = source_id as PivotId;
+    let pivot_id = source_id;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)

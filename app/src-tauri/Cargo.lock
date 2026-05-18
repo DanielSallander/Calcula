@@ -4690,6 +4690,7 @@ name = "pivot-engine"
 version = "0.1.0"
 dependencies = [
  "engine",
+ "identity",
  "rustc-hash 2.1.1",
  "serde",
  "smallvec",

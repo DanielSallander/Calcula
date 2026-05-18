@@ -21,9 +21,7 @@ pub fn create_timeline_slicer(
     timeline_state: State<TimelineSlicerState>,
     params: CreateTimelineParams,
 ) -> Result<TimelineSlicer, String> {
-    let mut next_id = timeline_state.next_id.lock().unwrap();
-    let id = *next_id;
-    *next_id += 1;
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     let timeline = TimelineSlicer {
         id,
@@ -72,7 +70,7 @@ pub fn create_timeline_slicer(
 #[tauri::command]
 pub fn delete_timeline_slicer(
     timeline_state: State<TimelineSlicerState>,
-    timeline_id: u64,
+    timeline_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("TIMELINE", "delete_timeline_slicer id={}", timeline_id);
 
@@ -88,7 +86,7 @@ pub fn delete_timeline_slicer(
 #[tauri::command]
 pub fn update_timeline_slicer(
     timeline_state: State<TimelineSlicerState>,
-    timeline_id: u64,
+    timeline_id: identity::EntityId,
     params: UpdateTimelineParams,
 ) -> Result<TimelineSlicer, String> {
     log_debug!("TIMELINE", "update_timeline_slicer id={}", timeline_id);
@@ -127,7 +125,7 @@ pub fn update_timeline_slicer(
 #[tauri::command]
 pub fn update_timeline_position(
     timeline_state: State<TimelineSlicerState>,
-    timeline_id: u64,
+    timeline_id: identity::EntityId,
     x: f64,
     y: f64,
     width: f64,
@@ -173,7 +171,7 @@ pub fn update_timeline_selection(
 #[tauri::command]
 pub fn update_timeline_scroll(
     timeline_state: State<TimelineSlicerState>,
-    timeline_id: u64,
+    timeline_id: identity::EntityId,
     scroll_position: f64,
 ) -> Result<(), String> {
     let mut timelines = timeline_state.timelines.lock().unwrap();
@@ -247,7 +245,7 @@ pub fn get_timeline_slicers_for_sheet(
 pub fn get_timeline_data(
     pivot_state: State<'_, PivotState>,
     timeline_state: State<TimelineSlicerState>,
-    timeline_id: u64,
+    timeline_id: identity::EntityId,
 ) -> Result<TimelineDataResponse, String> {
     let timelines = timeline_state.timelines.lock().unwrap();
     let tl = timelines
@@ -295,7 +293,7 @@ pub fn get_timeline_data(
 pub fn get_timeline_selected_items(
     pivot_state: State<'_, PivotState>,
     timeline_state: State<TimelineSlicerState>,
-    timeline_id: u64,
+    timeline_id: identity::EntityId,
 ) -> Result<Option<Vec<String>>, String> {
     let timelines = timeline_state.timelines.lock().unwrap();
     let tl = timelines
@@ -332,9 +330,9 @@ pub fn get_timeline_selected_items(
 #[tauri::command]
 pub fn get_pivot_date_fields(
     pivot_state: State<'_, PivotState>,
-    pivot_id: u64,
+    pivot_id: PivotId,
 ) -> Result<Vec<String>, String> {
-    let pid = pivot_id as PivotId;
+    let pid = pivot_id;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pid)

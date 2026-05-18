@@ -672,7 +672,7 @@ mod tests {
         let mut workbook = make_test_workbook();
         let sheet_id = workbook.sheets[0].id;
         workbook.tables.push(persistence::SavedTable {
-            id: 1,
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
             name: "SalesTable".to_string(),
             sheet_id,
             start_row: 0,
@@ -681,14 +681,14 @@ mod tests {
             end_col: 1,
             columns: vec![
                 persistence::SavedTableColumn {
-                    id: 0,
+                    id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
                     name: "Name".to_string(),
                     totals_row_function: "none".to_string(),
                     totals_row_formula: None,
                     calculated_formula: None,
                 },
                 persistence::SavedTableColumn {
-                    id: 1,
+                    id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
                     name: "Value".to_string(),
                     totals_row_function: "sum".to_string(),
                     totals_row_formula: None,

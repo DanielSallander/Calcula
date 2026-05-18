@@ -2,6 +2,7 @@
 //! Ribbon filter definitions serialization.
 //! Each ribbon filter is stored as ribbon_filters/filter_{id}.json.
 
+use identity::EntityId;
 use persistence::{
     SavedRibbonFilter, SavedRibbonFilterDisplayMode, SavedConnectionMode,
     SavedSlicerSourceType, SavedSlicerConnection,
@@ -12,10 +13,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RibbonFilterDef {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     pub source_type: String,
-    pub cache_source_id: u64,
+    pub cache_source_id: EntityId,
     pub field_name: String,
     #[serde(default = "default_unknown")]
     pub field_data_type: String,
@@ -30,9 +31,9 @@ pub struct RibbonFilterDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_items: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_targets: Vec<u64>,
+    pub cross_filter_targets: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_slicer_targets: Vec<u64>,
+    pub cross_filter_slicer_targets: Vec<EntityId>,
     #[serde(default)]
     pub hide_no_data: bool,
     #[serde(default = "default_true")]
@@ -56,7 +57,7 @@ pub struct RibbonFilterDef {
 #[serde(rename_all = "camelCase")]
 pub struct RibbonFilterConnectionDef {
     pub source_type: String,
-    pub source_id: u64,
+    pub source_id: EntityId,
 }
 
 fn default_unknown() -> String {

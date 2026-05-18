@@ -358,7 +358,7 @@ pub struct ShowAsRule {
 #[serde(rename_all = "camelCase")]
 pub struct CalculatedFieldRequest {
     /// Pivot table ID
-    pub pivot_id: u32,
+    pub pivot_id: PivotId,
     /// Display name for the calculated field
     pub name: String,
     /// Formula using field names (e.g., "Revenue - Cost")
@@ -372,7 +372,7 @@ pub struct CalculatedFieldRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCalculatedFieldRequest {
     /// Pivot table ID
-    pub pivot_id: u32,
+    pub pivot_id: PivotId,
     /// Index of the calculated field to update
     pub field_index: usize,
     /// New display name
@@ -388,7 +388,7 @@ pub struct UpdateCalculatedFieldRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RemoveCalculatedFieldRequest {
     /// Pivot table ID
-    pub pivot_id: u32,
+    pub pivot_id: PivotId,
     /// Index of the calculated field to remove
     pub field_index: usize,
 }
@@ -398,7 +398,7 @@ pub struct RemoveCalculatedFieldRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CalculatedItemRequest {
     /// Pivot table ID
-    pub pivot_id: u32,
+    pub pivot_id: PivotId,
     /// Source index of the field this item belongs to
     pub field_index: usize,
     /// Display name for the calculated item
@@ -412,7 +412,7 @@ pub struct CalculatedItemRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RemoveCalculatedItemRequest {
     /// Pivot table ID
-    pub pivot_id: u32,
+    pub pivot_id: PivotId,
     /// Index of the calculated item to remove
     pub item_index: usize,
 }
@@ -1370,8 +1370,6 @@ impl CancellationToken {
 pub struct PivotState {
     /// Pivot table storage: id -> (definition, cache)
     pub pivot_tables: Mutex<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
-    /// Next available pivot table ID
-    pub next_pivot_id: Mutex<PivotId>,
     /// Currently active pivot table ID (for single-pivot operations)
     pub active_pivot_id: Mutex<Option<PivotId>>,
     /// BI metadata for BI-backed pivots (model tables, measures, last query)
@@ -1388,7 +1386,6 @@ impl PivotState {
     pub fn new() -> Self {
         PivotState {
             pivot_tables: Mutex::new(HashMap::new()),
-            next_pivot_id: Mutex::new(1),
             active_pivot_id: Mutex::new(None),
             bi_metadata: Mutex::new(HashMap::new()),
             views: Mutex::new(HashMap::new()),

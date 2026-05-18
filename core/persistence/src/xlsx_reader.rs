@@ -287,12 +287,12 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     &format!("\"sheetIndex\":{}", sheet_idx),
                     1,
                 );
-                // Set unique chart ID
-                chart.id = (wb.charts.len() + 1) as u32;
+                // Mint unique chart ID
+                chart.id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
                 // Also update chartId in spec JSON
                 chart.spec_json = chart.spec_json.replacen(
                     "\"chartId\":0",
-                    &format!("\"chartId\":{}", chart.id),
+                    &format!("\"chartId\":\"{}\"", chart.id),
                     1,
                 );
                 wb.charts.push(chart);

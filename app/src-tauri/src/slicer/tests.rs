@@ -4,6 +4,12 @@
 #[cfg(test)]
 mod tests {
     use crate::slicer::types::*;
+    use identity::EntityId;
+
+    /// Helper to mint a fresh EntityId for tests.
+    fn mint_id() -> EntityId {
+        EntityId::from_bytes(identity::generate_uuid_v7())
+    }
 
     // ========================================================================
     // Source type serialization
@@ -32,9 +38,10 @@ mod tests {
 
     #[test]
     fn test_slicer_connection_serde() {
+        let src_id = mint_id();
         let conn = SlicerConnection {
             source_type: SlicerSourceType::BiConnection,
-            source_id: 42,
+            source_id: src_id,
         };
         let json = serde_json::to_string(&conn).unwrap();
         assert!(json.contains("\"sourceType\""));
@@ -43,7 +50,7 @@ mod tests {
 
         let back: SlicerConnection = serde_json::from_str(&json).unwrap();
         assert_eq!(back.source_type, SlicerSourceType::BiConnection);
-        assert_eq!(back.source_id, 42);
+        assert_eq!(back.source_id, src_id);
     }
 
     // ========================================================================
@@ -55,17 +62,17 @@ mod tests {
         let state = SlicerState::new();
         let slicers = state.slicers.lock().unwrap();
         assert!(slicers.is_empty());
-        let next_id = state.next_id.lock().unwrap();
-        assert_eq!(*next_id, 1);
     }
 
     #[test]
     fn test_slicer_crud() {
         let state = SlicerState::new();
+        let slicer_id = mint_id();
+        let table_id = mint_id();
 
         // Create
         let slicer = Slicer {
-            id: 1,
+            id: slicer_id,
             name: "Region".to_string(),
             header_text: None,
             sheet_index: 0,
@@ -74,7 +81,7 @@ mod tests {
             width: 180.0,
             height: 240.0,
             source_type: SlicerSourceType::Table,
-            cache_source_id: 1,
+            cache_source_id: table_id,
             field_name: "Region".to_string(),
             selected_items: None,
             show_header: true,
@@ -94,34 +101,34 @@ mod tests {
             button_radius: 2.0,
             connected_sources: vec![SlicerConnection {
                 source_type: SlicerSourceType::Table,
-                source_id: 1,
+                source_id: table_id,
             }],
         };
 
-        state.slicers.lock().unwrap().insert(1, slicer);
+        state.slicers.lock().unwrap().insert(slicer_id, slicer);
         assert_eq!(state.slicers.lock().unwrap().len(), 1);
 
         // Read
-        let s = state.slicers.lock().unwrap().get(&1).unwrap().clone();
+        let s = state.slicers.lock().unwrap().get(&slicer_id).unwrap().clone();
         assert_eq!(s.name, "Region");
         assert!(s.selected_items.is_none());
 
         // Update selection
         {
             let mut slicers = state.slicers.lock().unwrap();
-            let s = slicers.get_mut(&1).unwrap();
+            let s = slicers.get_mut(&slicer_id).unwrap();
             s.selected_items = Some(vec!["North".to_string(), "South".to_string()]);
         }
         {
             let slicers = state.slicers.lock().unwrap();
-            let s = slicers.get(&1).unwrap();
+            let s = slicers.get(&slicer_id).unwrap();
             assert_eq!(s.selected_items.as_ref().unwrap().len(), 2);
         }
 
         // Clear filter
         {
             let mut slicers = state.slicers.lock().unwrap();
-            let s = slicers.get_mut(&1).unwrap();
+            let s = slicers.get_mut(&slicer_id).unwrap();
             s.selected_items = None;
             assert!(s.selected_items.is_none());
         }
@@ -129,15 +136,17 @@ mod tests {
         // Delete
         {
             let mut slicers = state.slicers.lock().unwrap();
-            slicers.remove(&1);
+            slicers.remove(&slicer_id);
             assert!(slicers.is_empty());
         }
     }
 
     #[test]
     fn test_slicer_bi_connection_source() {
+        let slicer_id = mint_id();
+        let cache_id = mint_id();
         let slicer = Slicer {
-            id: 1,
+            id: slicer_id,
             name: "BI City".to_string(),
             header_text: Some("City".to_string()),
             sheet_index: 0,
@@ -146,7 +155,7 @@ mod tests {
             width: 180.0,
             height: 240.0,
             source_type: SlicerSourceType::BiConnection,
-            cache_source_id: 5,
+            cache_source_id: cache_id,
             field_name: "dim_customer.city".to_string(),
             selected_items: Some(vec!["London".to_string()]),
             show_header: true,
@@ -173,7 +182,7 @@ mod tests {
 
         let back: Slicer = serde_json::from_str(&json).unwrap();
         assert_eq!(back.source_type, SlicerSourceType::BiConnection);
-        assert_eq!(back.cache_source_id, 5);
+        assert_eq!(back.cache_source_id, cache_id);
     }
 
     // ========================================================================

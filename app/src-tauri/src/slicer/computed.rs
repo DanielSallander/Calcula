@@ -19,8 +19,8 @@ use crate::log_debug;
 /// A single computed property attached to a slicer.
 #[derive(Debug, Clone)]
 pub struct SlicerComputedProperty {
-    pub id: u64,
-    pub slicer_id: u64,
+    pub id: identity::EntityId,
+    pub slicer_id: identity::EntityId,
     pub attribute: String,
     pub formula: String,
     /// Cached engine AST for fast re-evaluation.
@@ -30,13 +30,13 @@ pub struct SlicerComputedProperty {
 }
 
 /// All slicer computed properties: slicer_id -> list of properties.
-pub type SlicerComputedPropertiesStorage = HashMap<u64, Vec<SlicerComputedProperty>>;
+pub type SlicerComputedPropertiesStorage = HashMap<identity::EntityId, Vec<SlicerComputedProperty>>;
 
 /// Dependency tracking: prop_id -> set of (sheet_index, row, col) cells the formula references.
-pub type SlicerComputedPropDependencies = HashMap<u64, HashSet<(usize, u32, u32)>>;
+pub type SlicerComputedPropDependencies = HashMap<identity::EntityId, HashSet<(usize, u32, u32)>>;
 
 /// Reverse dependency: (sheet_index, row, col) -> set of prop_ids that need re-evaluation.
-pub type SlicerComputedPropDependents = HashMap<(usize, u32, u32), HashSet<u64>>;
+pub type SlicerComputedPropDependents = HashMap<(usize, u32, u32), HashSet<identity::EntityId>>;
 
 // ============================================================================
 // Available attributes
@@ -279,7 +279,7 @@ fn format_value_for_display(value: &CellValue) -> String {
 
 /// Update dependency maps for a slicer computed property.
 fn update_slicer_prop_dependencies(
-    prop_id: u64,
+    prop_id: identity::EntityId,
     formula: &str,
     sheet_index: usize,
     grid: &Grid,
@@ -324,7 +324,7 @@ fn update_slicer_prop_dependencies(
 #[tauri::command]
 pub fn get_slicer_computed_properties(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
 ) -> SlicerComputedPropertyResult {
     let props = slicer_state.computed_properties.lock().unwrap();
     let slicer_props = props.get(&slicer_id);
@@ -364,7 +364,7 @@ pub fn get_slicer_available_attributes() -> Vec<String> {
 pub fn add_slicer_computed_property(
     state: State<AppState>,
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
     attribute: String,
     formula: String,
 ) -> Result<SlicerComputedPropertyResult, String> {
@@ -397,12 +397,7 @@ pub fn add_slicer_computed_property(
     };
 
     // Generate ID
-    let id = {
-        let mut next = slicer_state.next_computed_prop_id.lock().unwrap();
-        let id = *next;
-        *next += 1;
-        id
-    };
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     // Parse formula
     let cached_ast = match parser::parse(&formula) {
@@ -498,7 +493,7 @@ pub fn add_slicer_computed_property(
 pub fn update_slicer_computed_property(
     state: State<AppState>,
     slicer_state: State<SlicerState>,
-    prop_id: u64,
+    prop_id: identity::EntityId,
     attribute: Option<String>,
     formula: Option<String>,
 ) -> Result<SlicerComputedPropertyResult, String> {
@@ -660,7 +655,7 @@ pub fn update_slicer_computed_property(
 #[tauri::command]
 pub fn remove_slicer_computed_property(
     slicer_state: State<SlicerState>,
-    prop_id: u64,
+    prop_id: identity::EntityId,
 ) -> Result<SlicerComputedPropertyResult, String> {
     // Find which slicer owns this property
     let slicer_id = {
@@ -743,9 +738,9 @@ pub fn re_evaluate_slicer_computed_properties(
     column_widths: &HashMap<u32, f64>,
     styles: &StyleRegistry,
     slicer_state: &SlicerState,
-) -> HashSet<u64> {
-    let mut affected_prop_ids: HashSet<u64> = HashSet::new();
-    let mut modified_slicers: HashSet<u64> = HashSet::new();
+) -> HashSet<identity::EntityId> {
+    let mut affected_prop_ids: HashSet<identity::EntityId> = HashSet::new();
+    let mut modified_slicers: HashSet<identity::EntityId> = HashSet::new();
 
     // Collect affected property IDs
     {
@@ -824,7 +819,7 @@ pub fn re_evaluate_slicer_computed_properties(
 #[tauri::command]
 pub fn get_slicer_computed_attributes(
     slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_id: identity::EntityId,
 ) -> Vec<String> {
     let props = slicer_state.computed_properties.lock().unwrap();
     props

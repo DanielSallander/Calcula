@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use engine::CellCoord;
 
 /// Unique identifier for a pivot table within a workbook.
-pub type PivotId = u32;
+pub type PivotId = identity::EntityId;
 
 /// Index into the source data columns (0-based).
 pub type FieldIndex = usize;

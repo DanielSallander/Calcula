@@ -369,7 +369,7 @@ pub async fn bi_delete_connection(
         let conn = connections.remove(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
 
-        let region_ids: Vec<u64> = conn.active_queries.keys().copied().collect();
+        let region_ids: Vec<identity::EntityId> = conn.active_queries.keys().copied().collect();
         (conn.model_key, region_ids)
     };
 
@@ -910,12 +910,7 @@ pub async fn bi_insert_result(
     }
 
     // Generate region ID
-    let region_id = {
-        let mut next_id = bi_state.next_region_id.lock().unwrap();
-        let id = *next_id;
-        *next_id += 1;
-        id
-    };
+    let region_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     // Create protected region
     {

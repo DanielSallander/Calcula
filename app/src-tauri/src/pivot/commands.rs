@@ -142,10 +142,7 @@ pub fn create_pivot_table(
     drop(grids); // Release lock early
 
     // Generate new pivot ID
-    let mut next_id = pivot_state.next_pivot_id.lock().unwrap();
-    let pivot_id = *next_id;
-    *next_id += 1;
-    drop(next_id);
+    let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     // Create definition - START EMPTY (no auto-population)
     let mut definition = PivotDefinition::new(pivot_id, source_start, source_end);
@@ -851,7 +848,7 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
     
     // Remove pivot region tracking (via generic protected region system)
     let mut regions = state.protected_regions.lock().unwrap();
-    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id as u64));
+    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
 
     Ok(())
 }
@@ -1172,7 +1169,7 @@ pub fn get_pivot_at_cell(
     
     // Check if cell is in any pivot region (via the generic protected region system)
     let pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
-        Some(region) if region.region_type == "pivot" => region.owner_id as PivotId,
+        Some(region) if region.region_type == "pivot" => region.owner_id,
         _ => return Ok(None),
     };
     
@@ -1365,7 +1362,7 @@ pub fn get_pivot_data_formula(
 
     // Check if cell is in a pivot region
     let _pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
-        Some(region) if region.region_type == "pivot" => region.owner_id as pivot_engine::PivotId,
+        Some(region) if region.region_type == "pivot" => region.owner_id,
         _ => return Ok(None),
     };
 
@@ -1394,7 +1391,7 @@ pub fn get_pivot_regions_for_sheet(
         .iter()
         .filter(|r| r.region_type == "pivot" && r.sheet_index == active_sheet)
         .map(|r| {
-            let pid = r.owner_id as PivotId;
+            let pid = r.owner_id;
             let (is_empty, name) = pivot_tables
                 .get(&pid)
                 .map(|(def, _)| (
@@ -2759,15 +2756,15 @@ pub fn get_all_pivot_tables(
 pub fn get_pivot_bi_metadata(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
-    pivot_id: u64,
+    pivot_id: PivotId,
 ) -> Option<serde_json::Value> {
     let bi_meta = pivot_state.bi_metadata.lock().unwrap();
     let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
 
-    if let Some(meta) = bi_meta.get(&(pivot_id as PivotId)) {
+    if let Some(meta) = bi_meta.get(&pivot_id) {
         // Get the sheet index from the pivot definition
         let sheet_index = pivot_tables
-            .get(&(pivot_id as PivotId))
+            .get(&pivot_id)
             .map(|(def, _)| resolve_dest_sheet_index(&state, def))
             .unwrap_or(0);
 
@@ -3494,10 +3491,7 @@ pub async fn create_pivot_from_bi_model(
     });
 
     // Generate pivot ID
-    let mut next_id = pivot_state.next_pivot_id.lock().unwrap();
-    let pivot_id = *next_id;
-    *next_id += 1;
-    drop(next_id);
+    let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     // Create empty definition (no fields yet)
     let mut definition = PivotDefinition::new(pivot_id, (0, 0), (0, 0));

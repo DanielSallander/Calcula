@@ -2,7 +2,7 @@
 //! Slicer definitions serialization.
 //! Each slicer is stored as slicers/slicer_{id}.json.
 
-use identity::SheetId;
+use identity::{EntityId, SheetId};
 use persistence::{SavedSlicer, SavedSlicerSourceType, SavedSlicerSelectionMode, SavedSlicerArrangement, SavedSlicerComputedProperty, SavedSlicerConnection};
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerDef {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_text: Option<String>,
@@ -20,7 +20,7 @@ pub struct SlicerDef {
     pub width: f64,
     pub height: f64,
     pub source_type: String,
-    pub cache_source_id: u64,
+    pub cache_source_id: EntityId,
     pub field_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_items: Option<Vec<String>>,
@@ -64,14 +64,14 @@ pub struct SlicerDef {
 #[serde(rename_all = "camelCase")]
 pub struct SlicerConnectionDef {
     pub source_type: String,
-    pub source_id: u64,
+    pub source_id: EntityId,
 }
 
 /// JSON-friendly computed property definition for the .cala format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerComputedPropertyDef {
-    pub id: u64,
+    pub id: EntityId,
     pub attribute: String,
     pub formula: String,
 }

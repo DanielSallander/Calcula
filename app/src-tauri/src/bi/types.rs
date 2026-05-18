@@ -29,8 +29,6 @@ pub struct BiState {
     pub connections: Mutex<HashMap<ConnectionId, Connection>>,
     /// Auto-incrementing ID for new connections.
     pub next_connection_id: Mutex<ConnectionId>,
-    /// Auto-incrementing ID for BI regions (grid-inserted query results).
-    pub next_region_id: Mutex<u64>,
     /// Shared engine registry — multiple connections using the same model share one Engine.
     pub engine_registry: EngineRegistry,
 }
@@ -40,7 +38,6 @@ impl BiState {
         Self {
             connections: Mutex::new(HashMap::new()),
             next_connection_id: Mutex::new(1),
-            next_region_id: Mutex::new(1),
             engine_registry: EngineRegistry::new(),
         }
     }
@@ -80,7 +77,7 @@ pub struct Connection {
     /// Whether the database is currently connected.
     pub is_connected: bool,
     /// Active queries inserted into the grid from this connection.
-    pub active_queries: HashMap<u64, ActiveQuery>,
+    pub active_queries: HashMap<identity::EntityId, ActiveQuery>,
 }
 
 /// Supported connection types.
@@ -172,7 +169,7 @@ pub struct ActiveQuery {
     pub end_row: u32,
     pub end_col: u32,
     /// The region owner ID for ProtectedRegion lookup.
-    pub region_id: u64,
+    pub region_id: identity::EntityId,
 }
 
 // ---------------------------------------------------------------------------

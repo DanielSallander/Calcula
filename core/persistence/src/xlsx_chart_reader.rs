@@ -16,7 +16,7 @@ pub fn parse_xlsx_charts(
     sheet_paths: &[(usize, String)],
 ) -> Vec<(usize, SavedChart)> {
     let mut results = Vec::new();
-    let mut chart_id_counter = 1u32;
+    // Chart IDs are minted as UUIDs during import
 
     // Step 1: Find which sheets reference which drawings
     for (logical_idx, sheet_xml_path) in sheet_paths {
@@ -67,12 +67,11 @@ pub fn parse_xlsx_charts(
                 results.push((
                     sheet_index,
                     SavedChart {
-                        id: chart_id_counter,
+                        id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
                         sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
                         spec_json,
                     },
                 ));
-                chart_id_counter += 1;
             }
         }
     }

@@ -17,7 +17,7 @@ use engine::cell::{Cell, CellValue, DictKey, RichTextRun};
 use engine::grid::Grid;
 use engine::style::{CellStyle, StyleRegistry};
 use engine::theme::ThemeDefinition;
-use identity::SheetId;
+use identity::{EntityId, SheetId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -98,7 +98,7 @@ pub struct WorkbookProperties {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedChart {
-    pub id: u32,
+    pub id: EntityId,
     pub sheet_id: SheetId,
     pub spec_json: String,
 }
@@ -508,7 +508,7 @@ impl SavedCellValue {
 /// Mirrors the runtime `Table` struct from the tables module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedTable {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     pub sheet_id: SheetId,
     pub start_row: u32,
@@ -523,7 +523,7 @@ pub struct SavedTable {
 /// Serializable table column
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedTableColumn {
-    pub id: u32,
+    pub id: EntityId,
     pub name: String,
     pub totals_row_function: String,
     pub totals_row_formula: Option<String>,
@@ -557,7 +557,7 @@ pub enum SavedSlicerSourceType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSlicerConnection {
     pub source_type: SavedSlicerSourceType,
-    pub source_id: u64,
+    pub source_id: EntityId,
 }
 
 /// Serializable slicer selection mode
@@ -597,7 +597,7 @@ impl Default for SavedSlicerArrangement {
 /// Serializable slicer definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSlicer {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_text: Option<String>,
@@ -608,7 +608,7 @@ pub struct SavedSlicer {
     pub height: f64,
     pub source_type: SavedSlicerSourceType,
     /// The pivot/table ID used as the data source for fetching slicer items.
-    pub cache_source_id: u64,
+    pub cache_source_id: EntityId,
     pub field_name: String,
     pub selected_items: Option<Vec<String>>,
     pub show_header: bool,
@@ -649,7 +649,7 @@ pub struct SavedSlicer {
 /// A saved slicer computed property (formula-driven attribute).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSlicerComputedProperty {
-    pub id: u64,
+    pub id: EntityId,
     pub attribute: String,
     pub formula: String,
 }
@@ -726,10 +726,10 @@ impl Default for SavedConnectionMode {
 /// Serializable ribbon filter definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedRibbonFilter {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     pub source_type: SavedSlicerSourceType,
-    pub cache_source_id: u64,
+    pub cache_source_id: EntityId,
     pub field_name: String,
     #[serde(default = "default_unknown")]
     pub field_data_type: String,
@@ -743,9 +743,9 @@ pub struct SavedRibbonFilter {
     pub display_mode: SavedRibbonFilterDisplayMode,
     pub selected_items: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_targets: Vec<u64>,
+    pub cross_filter_targets: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_slicer_targets: Vec<u64>,
+    pub cross_filter_slicer_targets: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<SavedAdvancedFilter>,
     #[serde(default)]
@@ -873,7 +873,7 @@ pub struct SavedNotebookCell {
 /// A saved pivot layout configuration that persists in the .cala file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedPivotLayout {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     pub dsl_text: String,
     pub description: Option<String>,

@@ -10,5 +10,5 @@ pub mod types;
 pub mod uuid_v7;
 
 pub use registry::IdRegistry;
-pub use types::{CellId, RefSiteId, SheetId};
+pub use types::{CellId, EntityId, RefSiteId, SheetId};
 pub use uuid_v7::generate_uuid_v7;

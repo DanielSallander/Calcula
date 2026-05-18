@@ -115,6 +115,14 @@ define_id_type! {
     RefSiteId
 }
 
+define_id_type! {
+    /// Generic stable identity for persisted workbook entities.
+    /// Used for tables, charts, slicers, ribbon filters, pivot layouts,
+    /// table columns, computed properties, and any other persisted entity
+    /// that needs globally unique identity across publishers.
+    EntityId
+}
+
 // ---------------------------------------------------------------------------
 // UUID string formatting and parsing
 // ---------------------------------------------------------------------------

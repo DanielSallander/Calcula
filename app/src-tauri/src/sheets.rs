@@ -8,6 +8,7 @@ use tauri::State;
 use crate::AppState;
 use identity;
 use crate::pivot::types::PivotState;
+use pivot_engine::PivotId;
 use serde::{Deserialize, Serialize};
 
 /// Freeze panes configuration for a sheet
@@ -350,7 +351,7 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     // Remove pivot tables whose destination is the deleted sheet
     {
         let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-        let pivots_to_delete: Vec<u32> = pivot_tables
+        let pivots_to_delete: Vec<PivotId> = pivot_tables
             .iter()
             .filter(|(_, (def, _))| {
                 def.destination_sheet.as_deref() == Some(deleted_name.as_str())

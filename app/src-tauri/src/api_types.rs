@@ -1497,8 +1497,8 @@ pub struct ComputedPropertyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerComputedPropertyData {
-    pub id: u64,
-    pub slicer_id: u64,
+    pub id: identity::EntityId,
+    pub slicer_id: identity::EntityId,
     pub attribute: String,
     pub formula: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2075,8 +2075,8 @@ pub struct UsedRangeResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartEntry {
-    /// Unique chart ID (numeric, assigned by the frontend).
-    pub id: u32,
+    /// Unique chart ID (UUID, assigned by the frontend).
+    pub id: identity::EntityId,
     /// Sheet index where the chart is rendered.
     pub sheet_index: usize,
     /// The full ChartDefinition serialized as a JSON string.

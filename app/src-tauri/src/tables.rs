@@ -92,7 +92,7 @@ impl Default for TableStyleOptions {
 #[serde(rename_all = "camelCase")]
 pub struct TableColumn {
     /// Column ID (unique within table)
-    pub id: u32,
+    pub id: identity::EntityId,
     /// Column name (header text)
     pub name: String,
     /// Function for totals row
@@ -106,7 +106,7 @@ pub struct TableColumn {
 }
 
 impl TableColumn {
-    pub fn new(id: u32, name: String) -> Self {
+    pub fn new(id: identity::EntityId, name: String) -> Self {
         Self {
             id,
             name,
@@ -126,7 +126,7 @@ impl TableColumn {
 #[serde(rename_all = "camelCase")]
 pub struct Table {
     /// Unique table ID
-    pub id: u64,
+    pub id: identity::EntityId,
     /// Table name (must be unique across workbook)
     pub name: String,
     /// Sheet where the table is located
@@ -228,10 +228,10 @@ impl Table {
 // ============================================================================
 
 /// Storage: sheet_index -> table_id -> Table
-pub type TableStorage = HashMap<usize, HashMap<u64, Table>>;
+pub type TableStorage = HashMap<usize, HashMap<identity::EntityId, Table>>;
 
 /// Name registry: table_name (uppercase) -> (sheet_index, table_id)
-pub type TableNameRegistry = HashMap<String, (usize, u64)>;
+pub type TableNameRegistry = HashMap<String, (usize, identity::EntityId)>;
 
 // ============================================================================
 // RESULT TYPES
@@ -357,7 +357,7 @@ pub struct CreateTableParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResizeTableParams {
-    pub table_id: u64,
+    pub table_id: identity::EntityId,
     pub start_row: u32,
     pub start_col: u32,
     pub end_row: u32,
@@ -368,7 +368,7 @@ pub struct ResizeTableParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTableStyleParams {
-    pub table_id: u64,
+    pub table_id: identity::EntityId,
     #[serde(default)]
     pub style_options: Option<TableStyleOptions>,
     #[serde(default)]
@@ -379,7 +379,7 @@ pub struct UpdateTableStyleParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetTotalsRowFunctionParams {
-    pub table_id: u64,
+    pub table_id: identity::EntityId,
     pub column_name: String,
     pub function: TotalsRowFunction,
     #[serde(default)]
@@ -500,7 +500,6 @@ pub fn create_table(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
-    let mut next_id = state.next_table_id.lock().unwrap();
 
     // Validate or generate name
     let name = if params.name.is_empty() {
@@ -557,8 +556,7 @@ pub fn create_table(
     let unique_names = ensure_unique_headers(&header_names);
     let columns: Vec<TableColumn> = unique_names
         .into_iter()
-        .enumerate()
-        .map(|(i, name)| TableColumn::new(i as u32, name))
+        .map(|name| TableColumn::new(identity::EntityId::from_bytes(identity::generate_uuid_v7()), name))
         .collect();
     drop(grid);
 
@@ -570,7 +568,7 @@ pub fn create_table(
 
     // Create table
     let mut table = Table {
-        id: *next_id,
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
         name: name.clone(),
         sheet_index: active_sheet,
         start_row: min_row,
@@ -582,8 +580,6 @@ pub fn create_table(
         style_name: params.style_name.unwrap_or_else(|| "TableStyleMedium2".to_string()),
         auto_filter_id: None,
     };
-
-    *next_id += 1;
 
     // Create an AutoFilter for the table range if show_filter_button is enabled
     if table.style_options.show_filter_button {
@@ -608,7 +604,7 @@ pub fn create_table(
 #[tauri::command]
 pub fn delete_table(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
@@ -634,7 +630,7 @@ pub fn delete_table(
 #[tauri::command]
 pub fn rename_table(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     new_name: String,
 ) -> TableResult {
     if !is_valid_table_name(&new_name) {
@@ -704,7 +700,7 @@ pub fn update_table_style(
 #[tauri::command]
 pub fn add_table_column(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     column_name: String,
     position: Option<usize>,
 ) -> TableResult {
@@ -727,7 +723,7 @@ pub fn add_table_column(
     }
 
     // Generate new column ID
-    let new_id = table.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+    let new_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     let new_column = TableColumn::new(new_id, column_name);
 
     // Insert at position or end
@@ -748,7 +744,7 @@ pub fn add_table_column(
 #[tauri::command]
 pub fn remove_table_column(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     column_name: String,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -784,7 +780,7 @@ pub fn remove_table_column(
 #[tauri::command]
 pub fn rename_table_column(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     old_name: String,
     new_name: String,
 ) -> TableResult {
@@ -890,7 +886,7 @@ pub fn set_totals_row_function(
 #[tauri::command]
 pub fn toggle_totals_row(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     show: bool,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -995,7 +991,7 @@ pub fn resize_table(
     if new_col_count > old_col_count {
         // Add columns
         for i in old_col_count..new_col_count {
-            let new_id = table.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+            let new_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
             table.columns.push(TableColumn::new(new_id, format!("Column{}", i + 1)));
         }
     } else if new_col_count < old_col_count {
@@ -1017,7 +1013,7 @@ pub fn resize_table(
 #[tauri::command]
 pub fn convert_to_range(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
@@ -1162,7 +1158,7 @@ pub fn check_table_auto_expand(
             }
         }
         "col" => {
-            let new_col_id = table.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+            let new_col_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
             let existing_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
 
             // Try to read the header cell text from the grid for the new column
@@ -1220,7 +1216,7 @@ pub fn check_table_auto_expand(
 #[tauri::command]
 pub fn enforce_table_header(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     column_index: u32,
     new_value: String,
 ) -> TableResult {
@@ -1259,7 +1255,7 @@ pub fn enforce_table_header(
 #[tauri::command]
 pub fn get_table(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
 ) -> Option<Table> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let tables = state.tables.lock().unwrap();
@@ -1358,7 +1354,7 @@ pub fn resolve_structured_reference(
 pub fn set_calculated_column(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     column_name: String,
     formula: String,
 ) -> TableResult {
@@ -1486,7 +1482,7 @@ pub fn set_calculated_column(
 #[tauri::command]
 pub fn convert_formula_to_table_refs(
     state: State<AppState>,
-    table_id: u64,
+    table_id: identity::EntityId,
     formula: String,
     formula_row: u32,
 ) -> String {

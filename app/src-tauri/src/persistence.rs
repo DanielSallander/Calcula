@@ -163,16 +163,12 @@ fn collect_tables_for_save(
 fn restore_tables(
     saved_tables: &[SavedTable],
     workbook: &persistence::Workbook,
-) -> (TableStorage, TableNameRegistry, u64) {
+) -> (TableStorage, TableNameRegistry) {
     let mut tables: TableStorage = HashMap::new();
     let mut table_names: TableNameRegistry = HashMap::new();
-    let mut max_id: u64 = 0;
 
     for saved in saved_tables {
         let table = saved_to_table(saved, workbook);
-        if table.id > max_id {
-            max_id = table.id;
-        }
         table_names.insert(table.name.to_uppercase(), (table.sheet_index, table.id));
         tables
             .entry(table.sheet_index)
@@ -180,7 +176,7 @@ fn restore_tables(
             .insert(table.id, table);
     }
 
-    (tables, table_names, max_id + 1)
+    (tables, table_names)
 }
 
 // ============================================================================
@@ -548,20 +544,13 @@ fn restore_slicers(
     workbook: &persistence::Workbook,
 ) {
     let mut slicers = slicer_state.slicers.lock().unwrap();
-    let mut next_id = slicer_state.next_id.lock().unwrap();
     let mut computed_props = slicer_state.computed_properties.lock().unwrap();
-    let mut next_cprop_id = slicer_state.next_computed_prop_id.lock().unwrap();
 
     slicers.clear();
     computed_props.clear();
-    let mut max_id: u64 = 0;
-    let mut max_cprop_id: u64 = 0;
 
     for saved in saved_slicers {
         let slicer = saved_to_slicer(saved, workbook);
-        if slicer.id > max_id {
-            max_id = slicer.id;
-        }
         let slicer_id = slicer.id;
         slicers.insert(slicer.id, slicer);
 
@@ -571,9 +560,6 @@ fn restore_slicers(
                 .computed_properties
                 .iter()
                 .map(|sp| {
-                    if sp.id > max_cprop_id {
-                        max_cprop_id = sp.id;
-                    }
                     let cached_ast = parser::parse(&sp.formula)
                         .ok()
                         .map(|parsed| crate::convert_expr(&parsed));
@@ -590,9 +576,6 @@ fn restore_slicers(
             computed_props.insert(slicer_id, props);
         }
     }
-
-    *next_id = max_id + 1;
-    *next_cprop_id = max_cprop_id + 1;
 }
 
 // ============================================================================
@@ -768,20 +751,13 @@ fn restore_ribbon_filters(
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
 ) {
     let mut filters = ribbon_filter_state.filters.lock().unwrap();
-    let mut next_id = ribbon_filter_state.next_id.lock().unwrap();
 
     filters.clear();
-    let mut max_id: u64 = 0;
 
     for saved in saved_filters {
         let filter = saved_to_ribbon_filter(saved);
-        if filter.id > max_id {
-            max_id = filter.id;
-        }
         filters.insert(filter.id, filter);
     }
-
-    *next_id = max_id + 1;
 }
 
 // ============================================================================
@@ -961,7 +937,7 @@ pub fn open_file(
     let active_idx = workbook.active_sheet.min(workbook.sheets.len() - 1);
 
     // Restore tables from the workbook metadata
-    let (new_tables, new_table_names, next_id) = restore_tables(&workbook.tables, &workbook);
+    let (new_tables, new_table_names) = restore_tables(&workbook.tables, &workbook);
 
     {
         // Build a single shared StyleRegistry from all sheets.
@@ -1038,10 +1014,8 @@ pub fn open_file(
         // Restore table state
         let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
         let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
-        let mut next_table_id = state.next_table_id.lock().map_err(|e| e.to_string())?;
         *tables = new_tables;
         *table_names = new_table_names;
-        *next_table_id = next_id;
 
         // Restore default dimensions
         *state.default_row_height.lock().unwrap() = workbook.default_row_height;
@@ -1289,7 +1263,6 @@ pub fn new_file(
         let mut deps = state.dependents.lock().map_err(|e| e.to_string())?;
         let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
         let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
-        let mut next_table_id = state.next_table_id.lock().map_err(|e| e.to_string())?;
 
         *grid = engine::grid::Grid::new();
         *styles = engine::style::StyleRegistry::new();
@@ -1320,7 +1293,6 @@ pub fn new_file(
         // Clear table state
         tables.clear();
         table_names.clear();
-        *next_table_id = 1;
 
         // Reset default dimensions
         *state.default_row_height.lock().unwrap() = 24.0;
@@ -1436,9 +1408,7 @@ pub fn new_file(
 
     // Clear slicer state
     slicer_state.slicers.lock().unwrap().clear();
-    *slicer_state.next_id.lock().unwrap() = 1;
     slicer_state.computed_properties.lock().unwrap().clear();
-    *slicer_state.next_computed_prop_id.lock().unwrap() = 1;
     slicer_state.computed_prop_dependencies.lock().unwrap().clear();
     slicer_state.computed_prop_dependents.lock().unwrap().clear();
 

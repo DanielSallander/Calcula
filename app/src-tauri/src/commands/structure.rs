@@ -74,7 +74,7 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, pivot_state: &PivotState
 
         // Pivot-specific: also update the pivot definition's destination
         if region.region_type == "pivot" {
-            let pid = region.owner_id as PivotId;
+            let pid = region.owner_id;
             if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
                 let (dest_row, dest_col) = definition.destination;
                 if dest_row >= from_row {
@@ -117,7 +117,7 @@ fn shift_pivot_regions_for_col_insert(state: &AppState, pivot_state: &PivotState
 
         // Pivot-specific: update the pivot definition's destination
         if region.region_type == "pivot" {
-            let pid = region.owner_id as PivotId;
+            let pid = region.owner_id;
             if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
                 let (dest_row, dest_col) = definition.destination;
                 if dest_col >= from_col {
@@ -176,7 +176,7 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState
 
         // Pivot-specific: update definition
         if region.region_type == "pivot" {
-            let pid = region.owner_id as PivotId;
+            let pid = region.owner_id;
             if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
                 let (dest_row, dest_col) = definition.destination;
                 if dest_row >= delete_end {
@@ -214,7 +214,7 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState
     for region_id in &regions_to_remove {
         if let Some(region) = regions.iter().find(|r| &r.id == region_id) {
             if region.region_type == "pivot" {
-                let pid = region.owner_id as PivotId;
+                let pid = region.owner_id;
                 pivot_tables.remove(&pid);
             }
         }
@@ -276,7 +276,7 @@ fn shift_table_boundaries_for_row_delete(state: &AppState, from_row: u32, count:
 
     if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
         // Collect IDs of tables to remove (fully within deleted range)
-        let to_remove: Vec<u64> = sheet_tables
+        let to_remove: Vec<identity::EntityId> = sheet_tables
             .values()
             .filter(|t| t.start_row >= from_row && t.end_row < delete_end)
             .map(|t| t.id)
@@ -325,7 +325,7 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
 
     if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
         // Collect IDs of tables to remove (fully within deleted range)
-        let to_remove: Vec<u64> = sheet_tables
+        let to_remove: Vec<identity::EntityId> = sheet_tables
             .values()
             .filter(|t| t.start_col >= from_col && t.end_col < delete_end)
             .map(|t| t.id)
@@ -414,7 +414,7 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState
 
         // Pivot-specific: update definition
         if region.region_type == "pivot" {
-            let pid = region.owner_id as PivotId;
+            let pid = region.owner_id;
             if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
                 let (dest_row, dest_col) = definition.destination;
                 if dest_col >= delete_end {
@@ -452,7 +452,7 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState
     for region_id in &regions_to_remove {
         if let Some(region) = regions.iter().find(|r| &r.id == region_id) {
             if region.region_type == "pivot" {
-                let pid = region.owner_id as PivotId;
+                let pid = region.owner_id;
                 pivot_tables.remove(&pid);
             }
         }

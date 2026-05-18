@@ -4,25 +4,31 @@
 #[cfg(test)]
 mod tests {
     use crate::features::ribbon_filters::*;
+    use identity::EntityId;
     use persistence::*;
+
+    /// Helper to mint a fresh EntityId for tests.
+    fn mint_id() -> EntityId {
+        EntityId::from_bytes(identity::generate_uuid_v7())
+    }
 
     fn make_test_saved_filter() -> SavedRibbonFilter {
         SavedRibbonFilter {
-            id: 7,
+            id: mint_id(),
             name: "City Filter".to_string(),
             source_type: SavedSlicerSourceType::BiConnection,
-            cache_source_id: 3,
+            cache_source_id: mint_id(),
             field_name: "dim_customer.city".to_string(),
             field_data_type: "unknown".to_string(),
             connection_mode: SavedConnectionMode::BySheet,
             connected_sources: vec![
                 SavedSlicerConnection {
                     source_type: SavedSlicerSourceType::Pivot,
-                    source_id: 1,
+                    source_id: mint_id(),
                 },
                 SavedSlicerConnection {
                     source_type: SavedSlicerSourceType::Table,
-                    source_id: 2,
+                    source_id: mint_id(),
                 },
             ],
             connected_sheets: vec![0, 2],
@@ -48,16 +54,16 @@ mod tests {
         let def = RibbonFilterDef::from(&saved);
 
         // Check conversion to def
-        assert_eq!(def.id, 7);
+        assert_eq!(def.id, saved.id);
         assert_eq!(def.name, "City Filter");
         assert_eq!(def.source_type, "biConnection");
-        assert_eq!(def.cache_source_id, 3);
+        assert_eq!(def.cache_source_id, saved.cache_source_id);
         assert_eq!(def.field_name, "dim_customer.city");
         assert_eq!(def.connection_mode, "bySheet");
         assert_eq!(def.connected_sheets, vec![0, 2]);
         assert_eq!(def.connected_sources.len(), 2);
         assert_eq!(def.connected_sources[0].source_type, "pivot");
-        assert_eq!(def.connected_sources[0].source_id, 1);
+        assert_eq!(def.connected_sources[0].source_id, saved.connected_sources[0].source_id);
         assert_eq!(def.connected_sources[1].source_type, "table");
         assert_eq!(def.display_mode, "checklist");
         assert_eq!(def.selected_items.as_ref().unwrap().len(), 2);
@@ -89,10 +95,10 @@ mod tests {
 
         for (mode, expected_str) in modes {
             let saved = SavedRibbonFilter {
-                id: 1,
+                id: mint_id(),
                 name: "test".to_string(),
                 source_type: SavedSlicerSourceType::Table,
-                cache_source_id: 1,
+                cache_source_id: mint_id(),
                 field_name: "col".to_string(),
                 field_data_type: "unknown".to_string(),
                 connection_mode: mode,
@@ -133,10 +139,10 @@ mod tests {
 
         for (src_type, expected_str) in types {
             let saved = SavedRibbonFilter {
-                id: 1,
+                id: mint_id(),
                 name: "test".to_string(),
                 source_type: src_type,
-                cache_source_id: 1,
+                cache_source_id: mint_id(),
                 field_name: "col".to_string(),
                 field_data_type: "unknown".to_string(),
                 connection_mode: SavedConnectionMode::Manual,
@@ -172,10 +178,10 @@ mod tests {
 
         for (mode, expected_str) in modes {
             let saved = SavedRibbonFilter {
-                id: 1,
+                id: mint_id(),
                 name: "test".to_string(),
                 source_type: SavedSlicerSourceType::Table,
-                cache_source_id: 1,
+                cache_source_id: mint_id(),
                 field_name: "col".to_string(),
                 field_data_type: "unknown".to_string(),
                 connection_mode: SavedConnectionMode::Manual,
@@ -223,10 +229,10 @@ mod tests {
     #[test]
     fn test_empty_optional_fields_not_in_json() {
         let saved = SavedRibbonFilter {
-            id: 1,
+            id: mint_id(),
             name: "minimal".to_string(),
             source_type: SavedSlicerSourceType::Table,
-            cache_source_id: 1,
+            cache_source_id: mint_id(),
             field_name: "col".to_string(),
             field_data_type: "unknown".to_string(),
             connection_mode: SavedConnectionMode::Manual,

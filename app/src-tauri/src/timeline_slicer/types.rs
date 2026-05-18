@@ -51,7 +51,7 @@ pub struct TimelineStylePreset {
 #[serde(rename_all = "camelCase")]
 pub struct TimelineSlicer {
     /// Unique timeline slicer ID
-    pub id: u64,
+    pub id: identity::EntityId,
     /// Display name (programmatic reference)
     pub name: String,
     /// Header display text. If None, `name` is displayed.
@@ -70,7 +70,7 @@ pub struct TimelineSlicer {
     /// Source type — currently only "pivot" is supported for timelines
     pub source_type: TimelineSourceType,
     /// Source pivot table ID
-    pub source_id: u64,
+    pub source_id: identity::EntityId,
     /// Date field name to filter on
     pub field_name: String,
     /// Current timeline granularity level
@@ -97,7 +97,7 @@ pub struct TimelineSlicer {
     pub scroll_position: f64,
     /// Connected pivot table IDs (for report connections)
     #[serde(default)]
-    pub connected_pivot_ids: Vec<u64>,
+    pub connected_pivot_ids: Vec<identity::EntityId>,
 }
 
 // ============================================================================
@@ -170,7 +170,7 @@ pub struct CreateTimelineParams {
     pub y: f64,
     pub width: Option<f64>,
     pub height: Option<f64>,
-    pub source_id: u64,
+    pub source_id: identity::EntityId,
     pub field_name: String,
     pub level: Option<TimelineLevel>,
     pub style_preset: Option<String>,
@@ -193,7 +193,7 @@ pub struct UpdateTimelineParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTimelineSelectionParams {
-    pub timeline_id: u64,
+    pub timeline_id: identity::EntityId,
     /// Start of selected range (ISO 8601). None = clear selection.
     pub selection_start: Option<String>,
     /// End of selected range (ISO 8601). None = clear selection.
@@ -204,8 +204,8 @@ pub struct UpdateTimelineSelectionParams {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTimelineConnectionsParams {
-    pub timeline_id: u64,
-    pub connected_pivot_ids: Vec<u64>,
+    pub timeline_id: identity::EntityId,
+    pub connected_pivot_ids: Vec<identity::EntityId>,
 }
 
 // ============================================================================
@@ -215,16 +215,13 @@ pub struct UpdateTimelineConnectionsParams {
 /// Timeline slicer state managed by Tauri.
 pub struct TimelineSlicerState {
     /// All timeline slicers: id -> TimelineSlicer
-    pub timelines: Mutex<HashMap<u64, TimelineSlicer>>,
-    /// Next available timeline slicer ID
-    pub next_id: Mutex<u64>,
+    pub timelines: Mutex<HashMap<identity::EntityId, TimelineSlicer>>,
 }
 
 impl TimelineSlicerState {
     pub fn new() -> Self {
         Self {
             timelines: Mutex::new(HashMap::new()),
-            next_id: Mutex::new(1),
         }
     }
 }

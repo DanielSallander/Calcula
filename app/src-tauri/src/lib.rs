@@ -155,8 +155,8 @@ pub struct ProtectedRegion {
     pub id: String,
     /// Region type (e.g., "pivot", "chart")
     pub region_type: String,
-    /// Numeric owner ID within the extension's namespace
-    pub owner_id: u64,
+    /// Owner entity ID within the extension's namespace
+    pub owner_id: identity::EntityId,
     pub sheet_index: usize,
     pub start_row: u32,
     pub start_col: u32,
@@ -251,8 +251,6 @@ pub struct AppState {
     pub tables: Mutex<tables::TableStorage>,
     /// Table name registry: table_name (uppercase) -> (sheet_index, table_id)
     pub table_names: Mutex<tables::TableNameRegistry>,
-    /// Next table ID
-    pub next_table_id: Mutex<u64>,
     /// Computed properties per sheet: sheet_index -> SheetComputedProperties
     pub computed_properties: Mutex<computed_properties::ComputedPropertiesStorage>,
     /// Next computed property ID (auto-incremented)
@@ -382,7 +380,6 @@ pub fn create_app_state() -> AppState {
         next_cf_rule_id: Mutex::new(1),
         tables: Mutex::new(HashMap::new()),
         table_names: Mutex::new(HashMap::new()),
-        next_table_id: Mutex::new(1),
         computed_properties: Mutex::new(HashMap::new()),
         next_computed_prop_id: Mutex::new(1),
         computed_prop_dependencies: Mutex::new(HashMap::new()),

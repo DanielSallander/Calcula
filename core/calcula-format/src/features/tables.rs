@@ -2,7 +2,7 @@
 //! Table definitions serialization.
 //! Each table is stored as tables/table_{id}.json.
 
-use identity::SheetId;
+use identity::{EntityId, SheetId};
 use persistence::{SavedTable, SavedTableColumn, SavedTableStyleOptions};
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDef {
-    pub id: u64,
+    pub id: EntityId,
     pub name: String,
     pub sheet_id: SheetId,
     pub start_row: u32,
@@ -25,7 +25,7 @@ pub struct TableDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableColumnDef {
-    pub id: u32,
+    pub id: EntityId,
     pub name: String,
     pub totals_row_function: String,
     #[serde(skip_serializing_if = "Option::is_none")]

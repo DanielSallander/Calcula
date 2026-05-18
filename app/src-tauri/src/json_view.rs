@@ -36,14 +36,14 @@ pub fn get_object_json(
 ) -> Result<String, String> {
     match object_type.as_str() {
         "chart" => {
-            let id: u32 = object_id.parse().map_err(|_| "Invalid chart id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid chart id".to_string())?;
             let charts = state.charts.lock().unwrap();
             let entry = charts.iter().find(|c| c.id == id)
                 .ok_or_else(|| format!("Chart {} not found", id))?;
             serde_json::to_string_pretty(entry).map_err(|e| e.to_string())
         }
         "table" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid table id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid table id".to_string())?;
             let tables = state.tables.lock().unwrap();
             for sheet_tables in tables.values() {
                 if let Some(table) = sheet_tables.get(&id) {
@@ -53,21 +53,21 @@ pub fn get_object_json(
             Err(format!("Table {} not found", id))
         }
         "slicer" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid slicer id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid slicer id".to_string())?;
             let slicers = slicer_state.slicers.lock().unwrap();
             let slicer = slicers.get(&id)
                 .ok_or_else(|| format!("Slicer {} not found", id))?;
             serde_json::to_string_pretty(slicer).map_err(|e| e.to_string())
         }
         "ribbon_filter" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid ribbon filter id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid ribbon filter id".to_string())?;
             let filters = ribbon_filter_state.filters.lock().unwrap();
             let filter = filters.get(&id)
                 .ok_or_else(|| format!("Ribbon filter {} not found", id))?;
             serde_json::to_string_pretty(filter).map_err(|e| e.to_string())
         }
         "timeline_slicer" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid timeline slicer id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid timeline slicer id".to_string())?;
             let timelines = timeline_slicer_state.timelines.lock().unwrap();
             let timeline = timelines.get(&id)
                 .ok_or_else(|| format!("Timeline slicer {} not found", id))?;
@@ -93,7 +93,7 @@ pub fn get_object_json(
             serde_json::to_string_pretty(notebook).map_err(|e| e.to_string())
         }
         "pivot_layout" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid pivot layout id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
             let layouts = state.pivot_layouts.lock().unwrap();
             let layout = layouts.iter().find(|l| l.id == id)
                 .ok_or_else(|| format!("Pivot layout {} not found", id))?;
@@ -128,7 +128,7 @@ pub fn set_object_json(
 ) -> Result<(), String> {
     match object_type.as_str() {
         "chart" => {
-            let id: u32 = object_id.parse().map_err(|_| "Invalid chart id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid chart id".to_string())?;
             let new_entry: api_types::ChartEntry = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid chart JSON: {}", e))?;
             let mut charts = state.charts.lock().unwrap();
@@ -140,7 +140,7 @@ pub fn set_object_json(
             }
         }
         "table" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid table id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid table id".to_string())?;
             let new_table: crate::tables::Table = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid table JSON: {}", e))?;
             let mut tables = state.tables.lock().unwrap();
@@ -159,7 +159,7 @@ pub fn set_object_json(
             Err(format!("Table {} not found", id))
         }
         "slicer" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid slicer id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid slicer id".to_string())?;
             let new_slicer: crate::slicer::Slicer = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid slicer JSON: {}", e))?;
             let mut slicers = slicer_state.slicers.lock().unwrap();
@@ -171,7 +171,7 @@ pub fn set_object_json(
             }
         }
         "ribbon_filter" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid ribbon filter id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid ribbon filter id".to_string())?;
             let new_filter: crate::ribbon_filter::RibbonFilter = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid ribbon filter JSON: {}", e))?;
             let mut filters = ribbon_filter_state.filters.lock().unwrap();
@@ -183,7 +183,7 @@ pub fn set_object_json(
             }
         }
         "timeline_slicer" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid timeline slicer id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid timeline slicer id".to_string())?;
             let new_timeline: crate::timeline_slicer::TimelineSlicer = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid timeline slicer JSON: {}", e))?;
             let mut timelines = timeline_slicer_state.timelines.lock().unwrap();
@@ -229,7 +229,7 @@ pub fn set_object_json(
             }
         }
         "pivot_layout" => {
-            let id: u64 = object_id.parse().map_err(|_| "Invalid pivot layout id".to_string())?;
+            let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
             let new_layout: ::persistence::SavedPivotLayout = serde_json::from_str(&json)
                 .map_err(|e| format!("Invalid pivot layout JSON: {}", e))?;
             let mut layouts = state.pivot_layouts.lock().unwrap();

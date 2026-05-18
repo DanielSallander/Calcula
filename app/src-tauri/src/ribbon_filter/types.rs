@@ -57,13 +57,13 @@ impl Default for RibbonFilterDisplayMode {
 #[serde(rename_all = "camelCase")]
 pub struct RibbonFilter {
     /// Unique filter ID
-    pub id: u64,
+    pub id: identity::EntityId,
     /// Display name
     pub name: String,
     /// Source type (table, pivot, or biConnection)
     pub source_type: SlicerSourceType,
     /// The pivot/table/connection ID used as the data source for fetching filter items
-    pub cache_source_id: u64,
+    pub cache_source_id: identity::EntityId,
     /// Field/column name to filter on
     pub field_name: String,
     /// Data type of the field (text, number, date, unknown)
@@ -88,10 +88,10 @@ pub struct RibbonFilter {
     /// When this filter's selection changes, the listed filters' items
     /// are re-evaluated for hasData. Empty = no cross-filtering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_targets: Vec<u64>,
+    pub cross_filter_targets: Vec<identity::EntityId>,
     /// IDs of canvas slicers that this filter cross-filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cross_filter_slicer_targets: Vec<u64>,
+    pub cross_filter_slicer_targets: Vec<identity::EntityId>,
     /// Advanced filter condition (None = basic checklist mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<AdvancedFilter>,
@@ -218,7 +218,7 @@ where
 pub struct CreateRibbonFilterParams {
     pub name: String,
     pub source_type: SlicerSourceType,
-    pub cache_source_id: u64,
+    pub cache_source_id: identity::EntityId,
     pub field_name: String,
     #[serde(default = "default_field_data_type")]
     pub field_data_type: String,
@@ -244,8 +244,8 @@ pub struct UpdateRibbonFilterParams {
     pub connection_mode: Option<ConnectionMode>,
     pub connected_sources: Option<Vec<SlicerConnection>>,
     pub connected_sheets: Option<Vec<usize>>,
-    pub cross_filter_targets: Option<Vec<u64>>,
-    pub cross_filter_slicer_targets: Option<Vec<u64>>,
+    pub cross_filter_targets: Option<Vec<identity::EntityId>>,
+    pub cross_filter_slicer_targets: Option<Vec<identity::EntityId>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub advanced_filter: Option<Option<AdvancedFilter>>,
     pub hide_no_data: Option<bool>,
@@ -262,16 +262,13 @@ pub struct UpdateRibbonFilterParams {
 /// Ribbon filter state managed by Tauri.
 pub struct RibbonFilterState {
     /// All ribbon filters: id -> RibbonFilter
-    pub filters: Mutex<HashMap<u64, RibbonFilter>>,
-    /// Next available filter ID
-    pub next_id: Mutex<u64>,
+    pub filters: Mutex<HashMap<identity::EntityId, RibbonFilter>>,
 }
 
 impl RibbonFilterState {
     pub fn new() -> Self {
         Self {
             filters: Mutex::new(HashMap::new()),
-            next_id: Mutex::new(1),
         }
     }
 }
