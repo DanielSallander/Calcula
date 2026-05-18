@@ -86,6 +86,7 @@ import JsonViewExtension from "./JsonView";
 import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
 import DataFormExtension from "./DataForm";
+import DistributionExtension from "./Distribution";
 
 // Dev-only extensions
 import TestRunnerExtension from "./TestRunner";
@@ -187,6 +188,7 @@ export const builtInExtensions: ExtensionModule[] = [
   BusinessIntelligenceExtension,
   AIChatExtension,
   JsonViewExtension,
+  DistributionExtension,
   // Quick Access (loads last — needs all menu items registered for command palette)
   QuickAccessExtension,
   // Test Runner (dev-only, macro-based integration tests)

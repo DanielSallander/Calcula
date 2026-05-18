@@ -1228,7 +1228,47 @@ export type {
   IterationSettings,
 } from "./lib";
 
-// Linked Sheets removed: replaced by .calp distribution system (Phase 2+)
+// ============================================================================
+// Distribution (.calp)
+// ============================================================================
+
+export {
+  publishPackage,
+  pullPackage,
+  browseRegistry,
+  getSubscriptions,
+  getOverrides,
+  revertOverride,
+  acceptUpstream,
+  keepOverride,
+  exportOverrides,
+  importOverrides,
+  refreshPreview,
+  refreshApply,
+  detach,
+} from "./distribution";
+
+export type {
+  PublishParams,
+  PublishResponse,
+  PullParams,
+  PullResponse,
+  PackageInfo,
+  VersionInfo,
+  SheetInfo as DistSheetInfo,
+  SubscriptionManifest,
+  Subscription,
+  SubscribedSheet,
+  OverrideLayer,
+  CellOverride,
+  OverrideValue,
+  OverridePatch,
+  RefreshPreview,
+  SubscriptionPreview,
+  SheetChangeInfo,
+  RefreshResult,
+  StructuralConflict,
+} from "./distribution";
 
 // ============================================================================
 // Scenario Manager

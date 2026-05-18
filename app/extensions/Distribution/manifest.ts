@@ -1,0 +1,47 @@
+// FILENAME: app/extensions/Distribution/manifest.ts
+// PURPOSE: Distribution extension manifest and UI definitions.
+
+import type { AddInManifest, DialogDefinition, DialogProps } from "@api";
+import React from "react";
+import { PublishDialog } from "./components/PublishDialog";
+import { SubscribeDialog } from "./components/SubscribeDialog";
+import { RefreshPreviewDialog } from "./components/RefreshPreviewDialog";
+
+export const DISTRIBUTION_EXTENSION_ID = "calcula.distribution";
+export const OVERRIDES_PANE_ID = "distribution:overrides";
+
+export const DistributionManifest: AddInManifest = {
+  id: DISTRIBUTION_EXTENSION_ID,
+  name: "Distribution",
+  version: "1.0.0",
+  description: "Publish and subscribe to .calp packages",
+  ribbonTabs: [],
+  ribbonGroups: [],
+  commands: [],
+};
+
+// ============================================================================
+// Dialogs
+// ============================================================================
+
+export const PUBLISH_DIALOG_ID = "distribution:publishDialog";
+export const SUBSCRIBE_DIALOG_ID = "distribution:subscribeDialog";
+export const REFRESH_PREVIEW_DIALOG_ID = "distribution:refreshPreviewDialog";
+
+export const PublishDialogDefinition: DialogDefinition = {
+  id: PUBLISH_DIALOG_ID,
+  component: PublishDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const SubscribeDialogDefinition: DialogDefinition = {
+  id: SUBSCRIBE_DIALOG_ID,
+  component: SubscribeDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const RefreshPreviewDialogDefinition: DialogDefinition = {
+  id: REFRESH_PREVIEW_DIALOG_ID,
+  component: RefreshPreviewDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
