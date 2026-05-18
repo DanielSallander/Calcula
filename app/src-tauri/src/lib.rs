@@ -309,6 +309,8 @@ pub struct AppState {
     pub sheet_ids: Mutex<Vec<identity::SheetId>>,
     /// Subscription metadata for .calp packages linked to this workbook
     pub subscriptions: Mutex<calp::manifest::SubscriptionManifest>,
+    /// Override layer: consumer-side edits to subscribed (.calp) cells
+    pub override_layer: Mutex<calp::OverrideLayer>,
 }
 
 impl AppState {
@@ -427,6 +429,7 @@ pub fn create_app_state() -> AppState {
         pivot_layouts: Mutex::new(Vec::new()),
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
+        override_layer: Mutex::new(calp::OverrideLayer::new()),
     };
 
     // Populate built-in named styles
@@ -3873,6 +3876,12 @@ pub fn run() {
             calp_commands::calp_pull,
             calp_commands::calp_browse_registry,
             calp_commands::calp_get_subscriptions,
+            calp_commands::calp_get_overrides,
+            calp_commands::calp_revert_override,
+            calp_commands::calp_accept_upstream,
+            calp_commands::calp_keep_override,
+            calp_commands::calp_export_overrides,
+            calp_commands::calp_import_overrides,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

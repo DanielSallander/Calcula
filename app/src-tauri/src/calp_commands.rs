@@ -9,6 +9,7 @@ use crate::AppState;
 use calp::manifest::SubscriptionManifest;
 use calp::registry::LocalRegistry;
 use calp::version::{SemVer, VersionPin};
+use identity::{CellId, SheetId};
 
 // ============================================================================
 // API Types (camelCase for TypeScript)
@@ -245,4 +246,93 @@ pub fn calp_get_subscriptions(
 ) -> Result<SubscriptionManifest, String> {
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     Ok(subs.clone())
+}
+
+/// Return the entire override layer for the current workbook.
+#[tauri::command]
+pub fn calp_get_overrides(
+    state: State<AppState>,
+) -> Result<calp::OverrideLayer, String> {
+    let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    Ok(layer.clone())
+}
+
+/// Revert a single override, restoring the upstream value for that cell.
+#[tauri::command]
+pub fn calp_revert_override(
+    state: State<AppState>,
+    sheet_id: String,
+    cell_id: String,
+) -> Result<bool, String> {
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+    let cid = CellId::parse(&cell_id)
+        .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
+    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    Ok(layer.remove_override(sid, cid))
+}
+
+/// Accept the upstream value for a conflicted cell (discards the override).
+#[tauri::command]
+pub fn calp_accept_upstream(
+    state: State<AppState>,
+    sheet_id: String,
+    cell_id: String,
+) -> Result<bool, String> {
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+    let cid = CellId::parse(&cell_id)
+        .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
+    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    Ok(layer.accept_upstream(sid, cid))
+}
+
+/// Keep the consumer's override for a conflicted cell (rebases onto new upstream baseline).
+#[tauri::command]
+pub fn calp_keep_override(
+    state: State<AppState>,
+    sheet_id: String,
+    cell_id: String,
+) -> Result<bool, String> {
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+    let cid = CellId::parse(&cell_id)
+        .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
+    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    Ok(layer.keep_override(sid, cid))
+}
+
+/// Export the current override layer as a portable OverridePatch for the given package.
+#[tauri::command]
+pub fn calp_export_overrides(
+    state: State<AppState>,
+    package_name: String,
+) -> Result<calp::OverridePatch, String> {
+    let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    // Determine baseline version from subscription manifest (first match wins).
+    let baseline_version = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions.iter()
+            .find(|s| s.package_name == package_name)
+            .map(|s| s.resolved_version.clone())
+            .unwrap_or_else(|| "0.0.0".to_string())
+    };
+    let patch = calp::OverridePatch::from_layer(&layer, &package_name, &baseline_version, &now);
+    Ok(patch)
+}
+
+/// Import (merge) an OverridePatch JSON string into the current override layer.
+/// Returns the number of overrides imported.
+#[tauri::command]
+pub fn calp_import_overrides(
+    state: State<AppState>,
+    patch_json: String,
+) -> Result<usize, String> {
+    let patch: calp::OverridePatch =
+        serde_json::from_str(&patch_json).map_err(|e| e.to_string())?;
+    let count = patch.overrides.len();
+    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+    patch.apply_to(&mut layer);
+    Ok(count)
 }

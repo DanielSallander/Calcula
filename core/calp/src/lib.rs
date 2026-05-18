@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod manifest;
+pub mod overrides;
 pub mod registry;
 pub mod version;
 pub mod publish;
@@ -13,5 +14,6 @@ pub mod pull;
 
 pub use error::CalpError;
 pub use manifest::{PackageManifest, VersionEntry, VersionManifest, PublishedSheet};
+pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
 pub use version::{VersionPin, SemVer};
