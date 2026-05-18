@@ -80,6 +80,7 @@ pub mod chart_commands;
 pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
+pub mod calp_commands;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -306,6 +307,8 @@ pub struct AppState {
     pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
     /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
     pub sheet_ids: Mutex<Vec<identity::SheetId>>,
+    /// Subscription metadata for .calp packages linked to this workbook
+    pub subscriptions: Mutex<calp::manifest::SubscriptionManifest>,
 }
 
 impl AppState {
@@ -423,6 +426,7 @@ pub fn create_app_state() -> AppState {
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: Mutex::new(Vec::new()),
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
+        subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
     };
 
     // Populate built-in named styles
@@ -3864,6 +3868,11 @@ pub fn run() {
             // Third-party extension loading
             scan_extension_directory,
             get_extensions_directory,
+            // .calp distribution commands
+            calp_commands::calp_publish,
+            calp_commands::calp_pull,
+            calp_commands::calp_browse_registry,
+            calp_commands::calp_get_subscriptions,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

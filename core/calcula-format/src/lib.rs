@@ -21,7 +21,7 @@
 mod error;
 mod manifest;
 mod cell_ref;
-mod sheet_data;
+pub mod sheet_data;
 mod sheet_styles;
 pub mod sheet_layout;
 mod zip_io;

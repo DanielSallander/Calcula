@@ -245,6 +245,108 @@ pub fn build_workbook_for_save_with_slicers(
     Ok(workbook)
 }
 
+/// Build a multi-sheet Workbook snapshot from the current AppState.
+/// Used by the .calp publish command to access all sheets by index.
+/// Unlike `build_workbook_for_save`, this captures ALL sheets, not just the active one.
+pub fn build_workbook_snapshot(state: &State<AppState>) -> Result<Workbook, String> {
+    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+    let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+
+    let mut workbook = Workbook::new();
+    workbook.sheets.clear();
+    workbook.active_sheet = active_sheet;
+    workbook.default_row_height = *state.default_row_height.lock().unwrap();
+    workbook.default_column_width = *state.default_column_width.lock().unwrap();
+    workbook.theme = state.theme.lock().unwrap().clone();
+
+    // Workbook properties
+    {
+        let props = state.workbook_properties.lock().unwrap();
+        workbook.properties = persistence::WorkbookProperties {
+            title: props.title.clone(),
+            author: props.author.clone(),
+            subject: props.subject.clone(),
+            description: props.description.clone(),
+            keywords: props.keywords.clone(),
+            category: props.category.clone(),
+            created: props.created.clone(),
+            last_modified: chrono::Utc::now().to_rfc3339(),
+        };
+    }
+
+    // Build a Sheet for each grid using the shared style registry
+    for (i, grid) in grids.iter().enumerate() {
+        let id = sheet_ids.get(i).copied().unwrap_or_else(|| {
+            identity::SheetId::from_bytes(identity::generate_uuid_v7())
+        });
+        let name = sheet_names.get(i).cloned().unwrap_or_else(|| format!("Sheet{}", i + 1));
+        let col_widths = all_cw.get(i).cloned().unwrap_or_default();
+        let row_heights = all_rh.get(i).cloned().unwrap_or_default();
+        let dimensions = DimensionData { column_widths: col_widths, row_heights: row_heights };
+        let mut sheet = persistence::Sheet::from_grid(id, name, grid, &styles, &dimensions);
+
+        // Populate sheet-level metadata
+        // Merged regions
+        if let Ok(all_merged) = state.all_merged_regions.lock() {
+            if let Some(sheet_merges) = all_merged.get(i) {
+                sheet.merged_regions = sheet_merges.iter().map(|r| SavedMergedRegion {
+                    start_row: r.start_row,
+                    start_col: r.start_col,
+                    end_row: r.end_row,
+                    end_col: r.end_col,
+                }).collect();
+            }
+        }
+        // Freeze panes
+        if let Ok(freeze_configs) = state.freeze_configs.lock() {
+            if let Some(fc) = freeze_configs.get(i) {
+                sheet.freeze_row = fc.freeze_row;
+                sheet.freeze_col = fc.freeze_col;
+            }
+        }
+        // Tab color
+        if let Ok(tab_colors) = state.tab_colors.lock() {
+            if let Some(color) = tab_colors.get(i) {
+                sheet.tab_color = color.clone();
+            }
+        }
+        // Visibility
+        if let Ok(vis) = state.sheet_visibility.lock() {
+            if let Some(v) = vis.get(i) {
+                sheet.visibility = v.clone();
+            }
+        }
+        // Gridlines
+        if let Ok(gridlines) = state.show_gridlines.lock() {
+            if let Some(&visible) = gridlines.get(i) {
+                sheet.show_gridlines = visible;
+            }
+        }
+
+        workbook.sheets.push(sheet);
+    }
+
+    // Named ranges
+    if let Ok(named_ranges) = state.named_ranges.lock() {
+        workbook.named_ranges = named_ranges.values().map(|nr| persistence::SavedNamedRange {
+            name: nr.name.clone(),
+            refers_to: nr.refers_to.clone(),
+            sheet_id: nr.sheet_index.map(|idx| sheet_index_to_id(&sheet_ids, idx)),
+        }).collect();
+    }
+
+    // Tables
+    workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
+
+    Ok(workbook)
+}
+
 /// Enrich a workbook with sheet-level metadata from AppState:
 /// merged regions, freeze panes, hidden rows/cols, tab colors,
 /// sheet visibility, notes, hyperlinks, page setup, and named ranges.
@@ -867,6 +969,15 @@ pub fn save_file(
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
 
+    // Serialize subscription metadata into user_files so it persists in the .cala archive
+    {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        if !subs.subscriptions.is_empty() {
+            let json = serde_json::to_vec_pretty(&*subs).map_err(|e| e.to_string())?;
+            workbook.user_files.insert("subscriptions.json".to_string(), json);
+        }
+    }
+
     // Save workbook properties (update last_modified timestamp)
     {
         let mut props = state.workbook_properties.lock().unwrap();
@@ -1189,6 +1300,18 @@ pub fn open_file(
     restore_scripts(&workbook.scripts, &script_state);
     restore_notebooks(&workbook.notebooks, &script_state);
 
+    // Restore subscription metadata from user_files (if present)
+    {
+        if let Some(json_bytes) = workbook.user_files.remove("subscriptions.json") {
+            if let Ok(subs) = serde_json::from_slice::<calp::manifest::SubscriptionManifest>(&json_bytes) {
+                *state.subscriptions.lock().map_err(|e| e.to_string())? = subs;
+            }
+        } else {
+            *state.subscriptions.lock().map_err(|e| e.to_string())? =
+                calp::manifest::SubscriptionManifest::default();
+        }
+    }
+
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
     // Restore document theme
@@ -1418,6 +1541,10 @@ pub fn new_file(
     // Clear script/notebook state
     script_state.workbook_scripts.lock().unwrap().clear();
     script_state.workbook_notebooks.lock().unwrap().clear();
+
+    // Clear subscription metadata
+    *state.subscriptions.lock().map_err(|e| e.to_string())? =
+        calp::manifest::SubscriptionManifest::default();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();

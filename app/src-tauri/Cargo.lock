@@ -109,6 +109,7 @@ dependencies = [
  "axum",
  "bi-engine",
  "calcula-format",
+ "calp",
  "chrono",
  "engine",
  "identity",
@@ -903,6 +904,19 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "zip",
+]
+
+[[package]]
+name = "calp"
+version = "0.1.0"
+dependencies = [
+ "calcula-format",
+ "engine",
+ "identity",
+ "persistence",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

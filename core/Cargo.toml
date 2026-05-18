@@ -6,7 +6,8 @@ members = [
     "persistence",
     "pivot-engine",
     "script-engine",
-    "calcula-format"
+    "calcula-format",
+    "calp"
 ]
 exclude = ["pivot-bench"]
 resolver = "2"

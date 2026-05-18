@@ -115,6 +115,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "calp"
+version = "0.1.0"
+dependencies = [
+ "calcula-format",
+ "engine",
+ "identity",
+ "persistence",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
