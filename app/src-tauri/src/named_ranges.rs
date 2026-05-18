@@ -337,7 +337,7 @@ fn range_matches_selection(
             let row_idx = row.saturating_sub(1); // Parser uses 1-indexed
             row_idx == start_row && col_idx == start_col
         }
-        parser::ast::Expression::Range { sheet, start, end } => {
+        parser::ast::Expression::Range { sheet, start, end, .. } => {
             if let Some(s) = sheet {
                 if !s.eq_ignore_ascii_case(current_sheet_name) {
                     return false;
@@ -629,7 +629,7 @@ pub fn apply_names_to_formulas(
             continue;
         }
 
-        if let Some(ref formula) = cell.formula {
+        if let Some(formula) = cell.formula_string() {
             let mut new_formula = formula.clone();
 
             for (name, patterns) in &replacements {
@@ -647,9 +647,7 @@ pub fn apply_names_to_formulas(
 
     for (row, col, new_formula) in &modifications {
         if let Some(cell) = grid.cells.get_mut(&(*row, *col)) {
-            cell.formula = Some(new_formula.clone());
-            // Clear cached AST so it gets re-parsed with the new formula
-            cell.cached_ast = None;
+            cell.ast = parser::parse(new_formula).ok().map(Box::new);
         }
     }
 

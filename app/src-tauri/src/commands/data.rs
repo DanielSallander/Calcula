@@ -171,7 +171,7 @@ pub fn get_viewport_cells(
                     symbol_before: a.symbol_before,
                     value: a.value,
                 });
-                (result.text, result.color, c.formula.as_ref().map(|f| engine::localize_formula(f, &locale)), c.style_index, rt, acct)
+                (result.text, result.color, c.formula_string().map(|f| engine::localize_formula(&f, &locale)), c.style_index, rt, acct)
             } else {
                 (String::new(), None, None, 0, None, None)
             };
@@ -247,7 +247,7 @@ pub fn get_watch_cells(
                 col,
                 display: r.text,
                 display_color: r.color,
-                formula: c.formula.as_ref().map(|f| engine::localize_formula(f, locale)),
+                formula: c.formula_string().map(|f| engine::localize_formula(&f, locale)),
                 style_index: c.style_index,
                 row_span: 1,
                 col_span: 1,
@@ -467,7 +467,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, lo
         col,
         display,
         display_color: None,
-        formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, locale)),
+        formula: cell.formula_string().map(|f| engine::localize_formula(&f, locale)),
         style_index: cell.style_index,
         row_span: 1,
         col_span: 1,
@@ -665,9 +665,9 @@ pub fn update_cell(
     }
 
     // If it's a formula, evaluate it using multi-sheet context
-    if let Some(ref formula) = cell.formula {
+    if let Some(formula) = cell.formula_string() {
         // Extract references for dependency tracking AND cache the AST
-        match parser::parse(formula) {
+        match parser::parse(&formula) {
             Ok(parsed) => {
                 // Resolve named references (AST splicing) before extracting refs or evaluating.
                 let resolved = if crate::ast_has_named_refs(&parsed) {
@@ -848,11 +848,10 @@ pub fn update_cell(
                             let target_c = col + dc;
 
                             let spill_cell = engine::Cell {
-                                formula: None,
+                                ast: None,
                                 value: cv.clone(),
                                 style_index: 0,
                                 rich_text: None,
-                                cached_ast: None,
                             };
                             grid.set_cell(target_r, target_c, spill_cell.clone());
                             if active_sheet < grids.len() {
@@ -885,7 +884,7 @@ pub fn update_cell(
                 // Formula parse error - dependencies won't be tracked
                 // Still try to evaluate (will return error)
                 let result =
-                    evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files);
+                    evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files);
                 cell.value = result;
             }
         }
@@ -950,7 +949,7 @@ pub fn update_cell(
         col,
         display,
         display_color: None,
-        formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+        formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -1002,7 +1001,7 @@ pub fn update_cell(
             // allowing mutable access for spill cell writes below.
             let dep_cell_opt = grid.get_cell(dep_row, dep_col).cloned();
             if let Some(dep_cell) = dep_cell_opt {
-                if let Some(ref formula) = dep_cell.formula {
+                if let Some(formula) = dep_cell.formula_string() {
                     let perf_eval_start = Instant::now();
 
                     // Get the AST (cached or freshly parsed) and evaluate to raw EvalResult
@@ -1014,7 +1013,7 @@ pub fn update_cell(
                         (result, None)
                     } else {
                         perf_cache_misses += 1;
-                        if let Ok(engine_ast) = parser::parse(formula).map(|parsed| {
+                        if let Ok(engine_ast) = parser::parse(&formula).map(|parsed| {
                             let resolved = if crate::ast_has_named_refs(&parsed) {
                                 let mut visited = HashSet::new();
                                 crate::resolve_names_in_ast(&parsed, &cascade_named_ranges, active_sheet, &mut visited)
@@ -1041,7 +1040,7 @@ pub fn update_cell(
                         } else {
                             // Fallback to string-based evaluation (no spill support)
                             let cv = evaluate_formula_multi_sheet_with_files(
-                                &grids, &sheet_names, active_sheet, formula, &user_files,
+                                &grids, &sheet_names, active_sheet, &formula, &user_files,
                             );
                             let er = match cv {
                                 engine::CellValue::Number(n) => engine::EvalResult::Number(n),
@@ -1113,11 +1112,10 @@ pub fn update_cell(
                                 let target_c = dep_col + dc;
 
                                 let spill_cell = engine::Cell {
-                                    formula: None,
+                                    ast: None,
                                     value: cv.clone(),
                                     style_index: 0,
                                     rich_text: None,
-                                    cached_ast: None,
                                 };
                                 grid.set_cell(target_r, target_c, spill_cell.clone());
                                 if active_sheet < grids.len() {
@@ -1176,7 +1174,7 @@ pub fn update_cell(
                         col: dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                        formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -1220,7 +1218,7 @@ pub fn update_cell(
                     // Get the dependent cell from its sheet
                     if *dep_sheet_idx < grids.len() {
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
-                            if let Some(ref formula) = dep_cell.formula {
+                            if let Some(formula) = dep_cell.formula_string() {
                                 // Use cached AST if available
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                                     evaluate_formula_multi_sheet_with_ast_and_files(
@@ -1236,7 +1234,7 @@ pub fn update_cell(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
-                                        formula,
+                                        &formula,
                                         &user_files,
                                     )
                                 };
@@ -1285,7 +1283,7 @@ pub fn update_cell(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: dep_row_span,
                                     col_span: dep_col_span,
@@ -1327,7 +1325,7 @@ pub fn update_cell(
                         if let Some(dep_cell) =
                             grids[source_sheet_idx].get_cell(ss_dep_row, ss_dep_col)
                         {
-                            if let Some(ref formula) = dep_cell.formula {
+                            if let Some(formula) = dep_cell.formula_string() {
                                 processed.insert((source_sheet_idx, ss_dep_row, ss_dep_col));
 
                                 // Use cached AST if available
@@ -1345,7 +1343,7 @@ pub fn update_cell(
                                         &grids,
                                         &sheet_names,
                                         source_sheet_idx,
-                                        formula,
+                                        &formula,
                                         &user_files,
                                     )
                                 };
@@ -1367,7 +1365,7 @@ pub fn update_cell(
                                     col: ss_dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -1656,8 +1654,8 @@ pub fn update_cells_batch(
         }
 
         // If it's a formula, evaluate it
-        if let Some(ref formula) = cell.formula {
-            match parser::parse(formula) {
+        if let Some(formula) = cell.formula_string() {
+            match parser::parse(&formula) {
                 Ok(parsed) => {
                     // Resolve named references (AST splicing)
                     let resolved = if crate::ast_has_named_refs(&parsed) {
@@ -1828,11 +1826,10 @@ pub fn update_cells_batch(
                                 let target_c = col + dc;
 
                                 let spill_cell = engine::Cell {
-                                    formula: None,
+                                    ast: None,
                                     value: cv.clone(),
                                     style_index: 0,
                                     rich_text: None,
-                                    cached_ast: None,
                                 };
                                 grid.set_cell(target_r, target_c, spill_cell.clone());
                                 if active_sheet < grids.len() {
@@ -1863,7 +1860,7 @@ pub fn update_cells_batch(
                 }
                 Err(_e) => {
                     let result =
-                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files);
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files);
                     cell.value = result;
                 }
             }
@@ -1919,7 +1916,7 @@ pub fn update_cells_batch(
             col,
             display,
             display_color: None,
-            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
             style_index: cell.style_index,
             row_span,
             col_span,
@@ -1972,7 +1969,7 @@ pub fn update_cells_batch(
         // Recalculate all dependents
         for (dep_row, dep_col) in &all_recalc_order {
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
-                if let Some(ref formula) = dep_cell.formula {
+                if let Some(formula) = dep_cell.formula_string() {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                         evaluate_formula_multi_sheet_with_ast_and_files(
                             &grids,
@@ -1984,7 +1981,7 @@ pub fn update_cells_batch(
                     } else {
                         // Slow path: parse, resolve refs, and cache AST
                         if let Ok(engine_ast) = {
-                            parser::parse(formula).map(|parsed| {
+                            parser::parse(&formula).map(|parsed| {
                                 let resolved = if crate::ast_has_named_refs(&parsed) {
                                     let mut visited = HashSet::new();
                                     crate::resolve_names_in_ast(&parsed, &batch_named_ranges, active_sheet, &mut visited)
@@ -2038,7 +2035,7 @@ pub fn update_cells_batch(
                                 col: *dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: updated_with_ast.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                formula: updated_with_ast.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                                 style_index: updated_with_ast.style_index,
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
@@ -2048,7 +2045,7 @@ pub fn update_cells_batch(
                             });
                             continue;
                         }
-                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files)
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files)
                     };
 
                     let mut updated_dep = dep_cell.clone();
@@ -2077,7 +2074,7 @@ pub fn update_cells_batch(
                         col: *dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                        formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -2118,7 +2115,7 @@ pub fn update_cells_batch(
 
                     if *dep_sheet_idx < grids.len() {
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
-                            if let Some(ref formula) = dep_cell.formula {
+                            if let Some(formula) = dep_cell.formula_string() {
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                                     evaluate_formula_multi_sheet_with_ast_and_files(
                                         &grids,
@@ -2132,7 +2129,7 @@ pub fn update_cells_batch(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
-                                        formula,
+                                        &formula,
                                         &user_files,
                                     )
                                 };
@@ -2153,7 +2150,7 @@ pub fn update_cells_batch(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -2652,7 +2649,7 @@ pub fn clear_range_with_options(
                         col,
                         display,
                         display_color: None,
-                        formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                        formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                         style_index: 0,
                         row_span,
                         col_span,
@@ -2698,7 +2695,7 @@ pub fn clear_range_with_options(
                             col,
                             display,
                             display_color: None,
-                            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                             style_index: 0,
                             row_span,
                             col_span,
@@ -2867,7 +2864,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             col: target_col,
                             display,
                             display_color: None,
-                            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
@@ -2972,7 +2969,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             col: target_col,
                             display,
                             display_color: None,
-                            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
@@ -3420,7 +3417,7 @@ pub fn has_content_in_range(
             && row <= end_row
             && col >= start_col
             && col <= end_col
-            && (cell.formula.is_some() || !matches!(cell.value, engine::CellValue::Empty))
+            && (cell.has_formula() || !matches!(cell.value, engine::CellValue::Empty))
     })
 }
 
@@ -3598,7 +3595,7 @@ pub fn remove_duplicates(
                     col: target_col,
                     display,
                     display_color: None,
-                    formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                    formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                     style_index: cell.style_index,
                     row_span: 1,
                     col_span: 1,
@@ -3708,11 +3705,11 @@ pub fn update_cell_on_sheets(
 
     // Parse the input (same logic as update_cell)
     let cell_template = parse_cell_input(&value, &locale);
-    let is_formula = cell_template.formula.is_some();
+    let is_formula = cell_template.has_formula();
 
     // If formula, parse and convert the AST once for reuse across sheets
-    let engine_ast = if let Some(ref formula) = cell_template.formula {
-        match parser::parse(formula) {
+    let engine_ast = if let Some(formula) = cell_template.formula_string() {
+        match parser::parse(&formula) {
             Ok(parser_ast) => Some(crate::convert_expr(&parser_ast)),
             Err(_) => None,
         }
@@ -3746,7 +3743,7 @@ pub fn update_cell_on_sheets(
                     &user_files,
                 );
                 cell.value = result_value;
-                cell.cached_ast = Some(Box::new(ast.clone()));
+                cell.ast = Some(Box::new(ast.clone()));
             }
         }
 
@@ -3932,18 +3929,18 @@ pub fn fill_range(
 
                 let mut new_cell = src.clone();
                 // Clear cached AST - it will be rebuilt
-                new_cell.cached_ast = None;
+                new_cell.ast = None;
                 // Clear rich text (not meaningful when filling)
                 new_cell.rich_text = None;
 
                 // If the source has a formula, shift the references
-                if let Some(ref formula) = src.formula {
+                if let Some(formula) = src.formula_string() {
                     let shifted = crate::commands::structure::shift_formula_internal(
-                        formula,
+                        &formula,
                         row_delta,
                         col_delta,
                     );
-                    new_cell.formula = Some(shifted.clone());
+                    new_cell.ast = parser::parse(&shifted).ok().map(Box::new);
 
                     // Parse and evaluate the shifted formula
                     match parser::parse(&shifted) {
@@ -4095,7 +4092,7 @@ pub fn fill_range(
                     col: tc,
                     display,
                     display_color: None,
-                    formula: new_cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                    formula: new_cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                     style_index: new_cell.style_index,
                     row_span,
                     col_span,
@@ -4197,7 +4194,7 @@ pub fn fill_range(
 
         for (dep_row, dep_col) in &all_recalc_order {
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
-                if let Some(ref formula) = dep_cell.formula {
+                if let Some(formula) = dep_cell.formula_string() {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                         evaluate_formula_multi_sheet_with_ast_and_files(
                             &grids,
@@ -4208,7 +4205,7 @@ pub fn fill_range(
                         )
                     } else {
                         if let Ok(engine_ast) = {
-                            parser::parse(formula).map(|parsed| {
+                            parser::parse(&formula).map(|parsed| {
                                 let resolved = if crate::ast_has_named_refs(&parsed) {
                                     let mut visited = HashSet::new();
                                     crate::resolve_names_in_ast(&parsed, &batch_named_ranges, active_sheet, &mut visited)
@@ -4253,14 +4250,14 @@ pub fn fill_range(
                             updated_cells.push(CellData {
                                 row: *dep_row, col: *dep_col, display: dep_display,
                                 display_color: None,
-                                formula: updated_with_ast.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                formula: updated_with_ast.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                                 style_index: updated_with_ast.style_index,
                                 row_span: drspan, col_span: dcspan,
                                 sheet_index: None, rich_text: None, accounting_layout: None,
                             });
                             continue;
                         }
-                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files)
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, &formula, &user_files)
                     };
 
                     let mut updated_dep = dep_cell.clone();
@@ -4279,7 +4276,7 @@ pub fn fill_range(
                     updated_cells.push(CellData {
                         row: *dep_row, col: *dep_col, display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                        formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                         style_index: updated_dep.style_index,
                         row_span: drspan, col_span: dcspan,
                         sheet_index: None, rich_text: None, accounting_layout: None,
@@ -4311,14 +4308,14 @@ pub fn fill_range(
                     processed.insert((*dep_sheet_idx, *dep_row, *dep_col));
                     if *dep_sheet_idx < grids.len() {
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
-                            if let Some(ref formula) = dep_cell.formula {
+                            if let Some(formula) = dep_cell.formula_string() {
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                                     evaluate_formula_multi_sheet_with_ast_and_files(
                                         &grids, &sheet_names, *dep_sheet_idx, cached_ast, &user_files,
                                     )
                                 } else {
                                     evaluate_formula_multi_sheet_with_files(
-                                        &grids, &sheet_names, *dep_sheet_idx, formula, &user_files,
+                                        &grids, &sheet_names, *dep_sheet_idx, &formula, &user_files,
                                     )
                                 };
                                 let mut updated_dep = dep_cell.clone();
@@ -4329,7 +4326,7 @@ pub fn fill_range(
                                 updated_cells.push(CellData {
                                     row: *dep_row, col: *dep_col, display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: 1, col_span: 1,
                                     sheet_index: Some(*dep_sheet_idx), rich_text: None, accounting_layout: None,

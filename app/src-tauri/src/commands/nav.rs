@@ -54,7 +54,7 @@ fn detect_data_region_impl(state: &AppState, row: u32, col: u32) -> Option<(u32,
     // Helper: does this cell have content?
     let has_content = |r: u32, c: u32| -> bool {
         grid.get_cell(r, c)
-            .map(|cell| cell.formula.is_some() || !matches!(cell.value, CellValue::Empty))
+            .map(|cell| cell.has_formula() || !matches!(cell.value, CellValue::Empty))
             .unwrap_or(false)
     };
 
@@ -274,7 +274,7 @@ pub fn go_to_special(
             for row in sr..=er {
                 for col in sc..=ec {
                     let is_blank = grid.get_cell(row, col)
-                        .map(|cell| cell.formula.is_none() && matches!(cell.value, CellValue::Empty))
+                        .map(|cell| !cell.has_formula() && matches!(cell.value, CellValue::Empty))
                         .unwrap_or(true);
                     if is_blank {
                         cells.push(CellCoord { row, col });
@@ -286,7 +286,7 @@ pub fn go_to_special(
             for row in sr..=er {
                 for col in sc..=ec {
                     let has_formula = grid.get_cell(row, col)
-                        .map(|cell| cell.formula.is_some())
+                        .map(|cell| cell.has_formula())
                         .unwrap_or(false);
                     if has_formula {
                         cells.push(CellCoord { row, col });
@@ -298,7 +298,7 @@ pub fn go_to_special(
             for row in sr..=er {
                 for col in sc..=ec {
                     let is_constant = grid.get_cell(row, col)
-                        .map(|cell| cell.formula.is_none() && !matches!(cell.value, CellValue::Empty))
+                        .map(|cell| !cell.has_formula() && !matches!(cell.value, CellValue::Empty))
                         .unwrap_or(false);
                     if is_constant {
                         cells.push(CellCoord { row, col });

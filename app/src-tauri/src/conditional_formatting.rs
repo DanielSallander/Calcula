@@ -1518,7 +1518,7 @@ fn resolve_cf_point_value(
             stats.sorted_values[idx.min(stats.sorted_values.len() - 1)]
         }
         CFValueType::Formula => {
-            if let Some(ref formula) = point.formula {
+            if let Some(formula) = point.formula.as_deref() {
                 evaluate_cf_formula(formula, ctx, point.value.unwrap_or(stats.min))
             } else {
                 // No formula string provided; fall back to literal value
@@ -1548,7 +1548,7 @@ fn resolve_threshold_value(
             stats.sorted_values[idx.min(stats.sorted_values.len() - 1)]
         }
         CFValueType::Formula => {
-            if let Some(ref formula) = threshold.formula {
+            if let Some(formula) = threshold.formula.as_deref() {
                 evaluate_cf_formula(formula, ctx, threshold.value)
             } else {
                 threshold.value

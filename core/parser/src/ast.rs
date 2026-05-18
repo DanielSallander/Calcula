@@ -14,56 +14,81 @@
 //! - Binary operations: +, -, *, /, ^, &, =, <>, <, >, <=, >=
 //! - Unary operations: - (negation)
 //! - Function calls: SUM(A1:A10), IF(A1>0, "yes", "no")
+//!
+//! IDENTITY:
+//! Reference-bearing nodes carry a `ref_site_id: RefSiteId` field for stable
+//! identity across formula edits. See the .calp design doc for details.
+
+use identity::RefSiteId;
+use serde::{Deserialize, Serialize};
 
 /// Represents a parsed formula expression.
 /// This is the core data structure that the evaluator will traverse.
-#[derive(Debug, PartialEq, Clone)]
+///
+/// Serialized with explicit `"node"` tag so on-disk names are stable and
+/// decoupled from Rust identifiers.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[serde(tag = "node")]
 pub enum Expression {
     /// A literal value: number, string, or boolean.
+    #[serde(rename = "literal")]
     Literal(Value),
 
     /// A single cell reference like A1, B2, AA100, $A$1, or Sheet1!A1.
     /// The column is stored as a string (e.g., "A", "AA") and row as 1-indexed integer.
     /// The sheet is optional and only present for cross-sheet references.
     /// col_absolute and row_absolute indicate if $ prefix was used.
+    #[serde(rename = "cell_ref")]
     CellRef {
         sheet: Option<String>,
         col: String,
         row: u32,
         col_absolute: bool,
         row_absolute: bool,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// A range reference like A1:B10 or Sheet1!$A$1:$B$10.
     /// Both start and end should be CellRef expressions.
     /// The sheet applies to the entire range.
+    #[serde(rename = "range")]
     Range {
         sheet: Option<String>,
         start: Box<Expression>,
         end: Box<Expression>,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// A column reference like A:A, A:B, $A:$B, or Sheet1!A:B (entire columns).
     /// Used for referencing all cells in one or more columns.
+    #[serde(rename = "col_ref")]
     ColumnRef {
         sheet: Option<String>,
         start_col: String,
         end_col: String,
         start_absolute: bool,
         end_absolute: bool,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// A row reference like 1:1, 1:5, $1:$5, or Sheet1!1:5 (entire rows).
     /// Used for referencing all cells in one or more rows.
+    #[serde(rename = "row_ref")]
     RowRef {
         sheet: Option<String>,
         start_row: u32,
         end_row: u32,
         start_absolute: bool,
         end_absolute: bool,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// A binary operation: left op right (e.g., 5 + 3, A1 > 10).
+    #[serde(rename = "binary_op")]
     BinaryOp {
         left: Box<Expression>,
         op: BinaryOperator,
@@ -71,6 +96,7 @@ pub enum Expression {
     },
 
     /// A unary operation: op operand (e.g., -5).
+    #[serde(rename = "unary_op")]
     UnaryOp {
         op: UnaryOperator,
         operand: Box<Expression>,
@@ -79,34 +105,55 @@ pub enum Expression {
     /// A function call like SUM(A1:A10) or IF(A1 > 0, "yes", "no").
     /// The function is resolved to a `BuiltinFunction` enum at parse time
     /// to avoid heap-allocating and string-comparing on every evaluation.
-    FunctionCall { func: BuiltinFunction, args: Vec<Expression> },
+    /// Dynamic-target functions (INDIRECT, OFFSET, INDEX) carry a call-site
+    /// ref_site_id for override anchoring.
+    #[serde(rename = "fn_call")]
+    FunctionCall {
+        func: BuiltinFunction,
+        args: Vec<Expression>,
+        /// Call-site ID for dynamic-target functions. ZERO for non-dynamic.
+        #[serde(default)]
+        ref_site_id: RefSiteId,
+    },
 
     /// A named reference like Tax_Rate, SalesData, or Q1.Sales.
     /// Represents a user-defined name that will be resolved during evaluation
     /// to a cell range, constant, or formula via the name resolution system.
     /// The name is stored uppercased for case-insensitive matching.
-    NamedRef { name: String },
+    #[serde(rename = "named_ref")]
+    NamedRef {
+        name: String,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
+    },
 
     /// A 3D (cross-sheet) reference like Sheet1:Sheet5!A1 or 'Jan:Dec'!A1:B10.
     /// Aggregates data across the same spatial coordinates on multiple contiguous
     /// worksheet tabs. The inner reference (CellRef, Range, ColumnRef, or RowRef)
     /// has sheet=None because the sheet range is defined by start_sheet..end_sheet.
+    #[serde(rename = "sheet_3d_ref")]
     Sheet3DRef {
         start_sheet: String,
         end_sheet: String,
         reference: Box<Expression>,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// A structured table reference like Table1[Revenue], [@Price], or Table1[#All].
     /// Resolved during the table-reference resolution pass before evaluation.
+    #[serde(rename = "table_ref")]
     TableRef {
         table_name: String,
         specifier: TableSpecifier,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// Subscript access into a List or Dict cell: expr[index]
     /// Supports chaining: A1[0]["name"] parses as nested IndexAccess nodes.
     /// Only allowed after CellRef, FunctionCall, NamedRef, or another IndexAccess.
+    #[serde(rename = "index_access")]
     IndexAccess {
         target: Box<Expression>,
         index: Box<Expression>,
@@ -114,24 +161,30 @@ pub enum Expression {
 
     /// List literal: ={1, 2, 3}
     /// Creates an EvalResult::List from comma-separated expressions.
+    #[serde(rename = "list_literal")]
     ListLiteral {
         elements: Vec<Expression>,
     },
 
     /// Dict literal: ={"name": "Alice", "age": 30}
     /// Creates an EvalResult::Dict from colon-separated key:value pairs.
+    #[serde(rename = "dict_literal")]
     DictLiteral {
         entries: Vec<(Expression, Expression)>,
     },
 
     /// Spill range operator: A1# references the entire spill range anchored at the cell.
     /// Resolved in the Tauri layer before evaluation by replacing with an actual Range.
+    #[serde(rename = "spill_ref")]
     SpillRef {
         cell: Box<Expression>,
+        #[serde(default)]
+        ref_site_id: RefSiteId,
     },
 
     /// Implicit intersection operator: @A1:A10 extracts the single value
     /// at the formula's row (or column) from a multi-cell range.
+    #[serde(rename = "implicit_intersection")]
     ImplicitIntersection {
         operand: Box<Expression>,
     },
@@ -139,7 +192,7 @@ pub enum Expression {
 
 /// Specifier for structured table references.
 /// Determines which part of the table a structured reference refers to.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum TableSpecifier {
     /// A single column reference: Table1[Revenue]
     Column(String),
@@ -164,6 +217,9 @@ pub enum TableSpecifier {
 /// Built-in spreadsheet functions resolved at parse time.
 /// Using an enum instead of a String avoids heap allocations and enables
 /// fast integer-based dispatch in the evaluator.
+///
+/// Serialized as the canonical uppercase function name string (e.g., "SUM"),
+/// not the Rust variant name (e.g., "Sum"). Deserialized via `from_name()`.
 #[derive(Debug, PartialEq, Clone)]
 pub enum BuiltinFunction {
     // Aggregate functions
@@ -1287,6 +1343,473 @@ impl BuiltinFunction {
         }
     }
 
+    /// Returns the canonical uppercase function name for serialization.
+    /// This is the inverse of `from_name`: for each variant, returns the primary
+    /// (most common) name. Aliases like "AVG" map to "AVERAGE".
+    pub fn to_canonical_name(&self) -> &str {
+        match self {
+            BuiltinFunction::Sum => "SUM",
+            BuiltinFunction::Average => "AVERAGE",
+            BuiltinFunction::Min => "MIN",
+            BuiltinFunction::Max => "MAX",
+            BuiltinFunction::Count => "COUNT",
+            BuiltinFunction::CountA => "COUNTA",
+            BuiltinFunction::SumIf => "SUMIF",
+            BuiltinFunction::SumIfs => "SUMIFS",
+            BuiltinFunction::CountIf => "COUNTIF",
+            BuiltinFunction::CountIfs => "COUNTIFS",
+            BuiltinFunction::AverageIf => "AVERAGEIF",
+            BuiltinFunction::AverageIfs => "AVERAGEIFS",
+            BuiltinFunction::CountBlank => "COUNTBLANK",
+            BuiltinFunction::MinIfs => "MINIFS",
+            BuiltinFunction::MaxIfs => "MAXIFS",
+            BuiltinFunction::If => "IF",
+            BuiltinFunction::And => "AND",
+            BuiltinFunction::Or => "OR",
+            BuiltinFunction::Not => "NOT",
+            BuiltinFunction::True => "TRUE",
+            BuiltinFunction::False => "FALSE",
+            BuiltinFunction::IfError => "IFERROR",
+            BuiltinFunction::IfNa => "IFNA",
+            BuiltinFunction::Ifs => "IFS",
+            BuiltinFunction::Switch => "SWITCH",
+            BuiltinFunction::Xor => "XOR",
+            BuiltinFunction::Abs => "ABS",
+            BuiltinFunction::Round => "ROUND",
+            BuiltinFunction::Floor => "FLOOR",
+            BuiltinFunction::Ceiling => "CEILING",
+            BuiltinFunction::Sqrt => "SQRT",
+            BuiltinFunction::Power => "POWER",
+            BuiltinFunction::Mod => "MOD",
+            BuiltinFunction::Int => "INT",
+            BuiltinFunction::Sign => "SIGN",
+            BuiltinFunction::SumProduct => "SUMPRODUCT",
+            BuiltinFunction::SumX2MY2 => "SUMX2MY2",
+            BuiltinFunction::SumX2PY2 => "SUMX2PY2",
+            BuiltinFunction::SumXMY2 => "SUMXMY2",
+            BuiltinFunction::Product => "PRODUCT",
+            BuiltinFunction::Rand => "RAND",
+            BuiltinFunction::RandBetween => "RANDBETWEEN",
+            BuiltinFunction::Pi => "PI",
+            BuiltinFunction::Log => "LOG",
+            BuiltinFunction::Log10 => "LOG10",
+            BuiltinFunction::Ln => "LN",
+            BuiltinFunction::Exp => "EXP",
+            BuiltinFunction::Sin => "SIN",
+            BuiltinFunction::Cos => "COS",
+            BuiltinFunction::Tan => "TAN",
+            BuiltinFunction::Asin => "ASIN",
+            BuiltinFunction::Acos => "ACOS",
+            BuiltinFunction::Atan => "ATAN",
+            BuiltinFunction::Atan2 => "ATAN2",
+            BuiltinFunction::RoundUp => "ROUNDUP",
+            BuiltinFunction::RoundDown => "ROUNDDOWN",
+            BuiltinFunction::Trunc => "TRUNC",
+            BuiltinFunction::Even => "EVEN",
+            BuiltinFunction::Odd => "ODD",
+            BuiltinFunction::Gcd => "GCD",
+            BuiltinFunction::Lcm => "LCM",
+            BuiltinFunction::Combin => "COMBIN",
+            BuiltinFunction::Fact => "FACT",
+            BuiltinFunction::Degrees => "DEGREES",
+            BuiltinFunction::Radians => "RADIANS",
+            BuiltinFunction::Len => "LEN",
+            BuiltinFunction::Upper => "UPPER",
+            BuiltinFunction::Lower => "LOWER",
+            BuiltinFunction::Trim => "TRIM",
+            BuiltinFunction::Concatenate => "CONCATENATE",
+            BuiltinFunction::Left => "LEFT",
+            BuiltinFunction::Right => "RIGHT",
+            BuiltinFunction::Mid => "MID",
+            BuiltinFunction::Rept => "REPT",
+            BuiltinFunction::Text => "TEXT",
+            BuiltinFunction::Find => "FIND",
+            BuiltinFunction::Search => "SEARCH",
+            BuiltinFunction::Substitute => "SUBSTITUTE",
+            BuiltinFunction::Replace => "REPLACE",
+            BuiltinFunction::ValueFn => "VALUE",
+            BuiltinFunction::Exact => "EXACT",
+            BuiltinFunction::Proper => "PROPER",
+            BuiltinFunction::Char => "CHAR",
+            BuiltinFunction::Code => "CODE",
+            BuiltinFunction::Clean => "CLEAN",
+            BuiltinFunction::NumberValue => "NUMBERVALUE",
+            BuiltinFunction::TFn => "T",
+            BuiltinFunction::Today => "TODAY",
+            BuiltinFunction::Now => "NOW",
+            BuiltinFunction::Date => "DATE",
+            BuiltinFunction::Year => "YEAR",
+            BuiltinFunction::Month => "MONTH",
+            BuiltinFunction::Day => "DAY",
+            BuiltinFunction::Hour => "HOUR",
+            BuiltinFunction::Minute => "MINUTE",
+            BuiltinFunction::Second => "SECOND",
+            BuiltinFunction::DateValue => "DATEVALUE",
+            BuiltinFunction::TimeValue => "TIMEVALUE",
+            BuiltinFunction::EDate => "EDATE",
+            BuiltinFunction::EOMonth => "EOMONTH",
+            BuiltinFunction::NetworkDays => "NETWORKDAYS",
+            BuiltinFunction::WorkDay => "WORKDAY",
+            BuiltinFunction::DateDif => "DATEDIF",
+            BuiltinFunction::Weekday => "WEEKDAY",
+            BuiltinFunction::WeekNum => "WEEKNUM",
+            BuiltinFunction::IsNumber => "ISNUMBER",
+            BuiltinFunction::IsText => "ISTEXT",
+            BuiltinFunction::IsBlank => "ISBLANK",
+            BuiltinFunction::IsError => "ISERROR",
+            BuiltinFunction::IsNa => "ISNA",
+            BuiltinFunction::IsErr => "ISERR",
+            BuiltinFunction::IsLogical => "ISLOGICAL",
+            BuiltinFunction::IsOdd => "ISODD",
+            BuiltinFunction::IsEven => "ISEVEN",
+            BuiltinFunction::TypeFn => "TYPE",
+            BuiltinFunction::NFn => "N",
+            BuiltinFunction::Na => "NA",
+            BuiltinFunction::IsFormula => "ISFORMULA",
+            BuiltinFunction::XLookup => "XLOOKUP",
+            BuiltinFunction::XLookups => "XLOOKUPS",
+            BuiltinFunction::Index => "INDEX",
+            BuiltinFunction::Match => "MATCH",
+            BuiltinFunction::Choose => "CHOOSE",
+            BuiltinFunction::Indirect => "INDIRECT",
+            BuiltinFunction::Offset => "OFFSET",
+            BuiltinFunction::Address => "ADDRESS",
+            BuiltinFunction::Rows => "ROWS",
+            BuiltinFunction::Columns => "COLUMNS",
+            BuiltinFunction::Transpose => "TRANSPOSE",
+            BuiltinFunction::Median => "MEDIAN",
+            BuiltinFunction::Stdev => "STDEV",
+            BuiltinFunction::StdevP => "STDEVP",
+            BuiltinFunction::Var => "VAR",
+            BuiltinFunction::VarP => "VARP",
+            BuiltinFunction::Large => "LARGE",
+            BuiltinFunction::Small => "SMALL",
+            BuiltinFunction::Rank => "RANK",
+            BuiltinFunction::Percentile => "PERCENTILE",
+            BuiltinFunction::Quartile => "QUARTILE",
+            BuiltinFunction::Mode => "MODE",
+            BuiltinFunction::Frequency => "FREQUENCY",
+            BuiltinFunction::Pmt => "PMT",
+            BuiltinFunction::Pv => "PV",
+            BuiltinFunction::Fv => "FV",
+            BuiltinFunction::Npv => "NPV",
+            BuiltinFunction::Irr => "IRR",
+            BuiltinFunction::Rate => "RATE",
+            BuiltinFunction::Nper => "NPER",
+            BuiltinFunction::Sln => "SLN",
+            BuiltinFunction::Db => "DB",
+            BuiltinFunction::Ddb => "DDB",
+            BuiltinFunction::GetRowHeight => "GET.ROW.HEIGHT",
+            BuiltinFunction::GetColumnWidth => "GET.COLUMN.WIDTH",
+            BuiltinFunction::GetCellFillColor => "GET.CELL.FILLCOLOR",
+            BuiltinFunction::Row => "ROW",
+            BuiltinFunction::Column => "COLUMN",
+            BuiltinFunction::Let => "LET",
+            BuiltinFunction::TextJoin => "TEXTJOIN",
+            BuiltinFunction::Lambda => "LAMBDA",
+            BuiltinFunction::Map => "MAP",
+            BuiltinFunction::Reduce => "REDUCE",
+            BuiltinFunction::Scan => "SCAN",
+            BuiltinFunction::MakeArray => "MAKEARRAY",
+            BuiltinFunction::ByRow => "BYROW",
+            BuiltinFunction::ByCol => "BYCOL",
+            BuiltinFunction::Filter => "FILTER",
+            BuiltinFunction::Sort => "SORT",
+            BuiltinFunction::SortBy => "SORTBY",
+            BuiltinFunction::Unique => "UNIQUE",
+            BuiltinFunction::Sequence => "SEQUENCE",
+            BuiltinFunction::RandArray => "RANDARRAY",
+            BuiltinFunction::GroupBy => "GROUPBY",
+            BuiltinFunction::PivotBy => "PIVOTBY",
+            BuiltinFunction::GetPivotData => "GETPIVOTDATA",
+            BuiltinFunction::Collect => "COLLECT",
+            BuiltinFunction::DictFn => "DICT",
+            BuiltinFunction::Keys => "KEYS",
+            BuiltinFunction::Values => "VALUES",
+            BuiltinFunction::Contains => "CONTAINS",
+            BuiltinFunction::IsList => "ISLIST",
+            BuiltinFunction::IsDict => "ISDICT",
+            BuiltinFunction::Flatten => "FLATTEN",
+            BuiltinFunction::Take => "TAKE",
+            BuiltinFunction::Drop => "DROP",
+            BuiltinFunction::Append => "APPEND",
+            BuiltinFunction::Merge => "MERGE",
+            BuiltinFunction::HStack => "HSTACK",
+            BuiltinFunction::FileRead => "FILEREAD",
+            BuiltinFunction::FileLines => "FILELINES",
+            BuiltinFunction::FileExists => "FILEEXISTS",
+            BuiltinFunction::Subtotal => "SUBTOTAL",
+            BuiltinFunction::TextSplit => "TEXTSPLIT",
+            BuiltinFunction::TextBefore => "TEXTBEFORE",
+            BuiltinFunction::TextAfter => "TEXTAFTER",
+            BuiltinFunction::ValueToText => "VALUETOTEXT",
+            BuiltinFunction::ArrayToText => "ARRAYTOTEXT",
+            BuiltinFunction::Days => "DAYS",
+            BuiltinFunction::Time => "TIME",
+            BuiltinFunction::Days360 => "DAYS360",
+            BuiltinFunction::YearFrac => "YEARFRAC",
+            BuiltinFunction::IsoWeekNum => "ISOWEEKNUM",
+            BuiltinFunction::NetworkDaysIntl => "NETWORKDAYS.INTL",
+            BuiltinFunction::WorkDayIntl => "WORKDAY.INTL",
+            BuiltinFunction::ModeMult => "MODE.MULT",
+            BuiltinFunction::StdevS => "STDEV.S",
+            BuiltinFunction::VarS => "VAR.S",
+            BuiltinFunction::RankAvg => "RANK.AVG",
+            BuiltinFunction::PercentRank => "PERCENTRANK",
+            BuiltinFunction::Trend => "TREND",
+            BuiltinFunction::Growth => "GROWTH",
+            BuiltinFunction::Linest => "LINEST",
+            BuiltinFunction::Logest => "LOGEST",
+            BuiltinFunction::NormDist => "NORM.DIST",
+            BuiltinFunction::NormInv => "NORM.INV",
+            BuiltinFunction::NormSDist => "NORM.S.DIST",
+            BuiltinFunction::NormSInv => "NORM.S.INV",
+            BuiltinFunction::TDist => "T.DIST",
+            BuiltinFunction::TDist2T => "T.DIST.2T",
+            BuiltinFunction::TDistRT => "T.DIST.RT",
+            BuiltinFunction::TInv => "T.INV",
+            BuiltinFunction::TInv2T => "T.INV.2T",
+            BuiltinFunction::TTest => "T.TEST",
+            BuiltinFunction::ChisqDist => "CHISQ.DIST",
+            BuiltinFunction::ChisqDistRT => "CHISQ.DIST.RT",
+            BuiltinFunction::ChisqInv => "CHISQ.INV",
+            BuiltinFunction::ChisqInvRT => "CHISQ.INV.RT",
+            BuiltinFunction::ChisqTest => "CHISQ.TEST",
+            BuiltinFunction::FDist => "F.DIST",
+            BuiltinFunction::FDistRT => "F.DIST.RT",
+            BuiltinFunction::FInv => "F.INV",
+            BuiltinFunction::FInvRT => "F.INV.RT",
+            BuiltinFunction::FTest => "F.TEST",
+            BuiltinFunction::BinomDist => "BINOM.DIST",
+            BuiltinFunction::BinomInv => "BINOM.INV",
+            BuiltinFunction::BinomDistRange => "BINOM.DIST.RANGE",
+            BuiltinFunction::PoissonDist => "POISSON.DIST",
+            BuiltinFunction::BetaDist => "BETA.DIST",
+            BuiltinFunction::BetaInv => "BETA.INV",
+            BuiltinFunction::GammaDist => "GAMMA.DIST",
+            BuiltinFunction::GammaInv => "GAMMA.INV",
+            BuiltinFunction::GammaFn => "GAMMA",
+            BuiltinFunction::GammaLnFn => "GAMMALN",
+            BuiltinFunction::WeibullDist => "WEIBULL.DIST",
+            BuiltinFunction::ExponDist => "EXPON.DIST",
+            BuiltinFunction::LognormDist => "LOGNORM.DIST",
+            BuiltinFunction::LognormInv => "LOGNORM.INV",
+            BuiltinFunction::HypgeomDist => "HYPGEOM.DIST",
+            BuiltinFunction::NegbinomDist => "NEGBINOM.DIST",
+            BuiltinFunction::ConfidenceNorm => "CONFIDENCE.NORM",
+            BuiltinFunction::ConfidenceT => "CONFIDENCE.T",
+            BuiltinFunction::Correl => "CORREL",
+            BuiltinFunction::Pearson => "PEARSON",
+            BuiltinFunction::Rsq => "RSQ",
+            BuiltinFunction::Slope => "SLOPE",
+            BuiltinFunction::Intercept => "INTERCEPT",
+            BuiltinFunction::Steyx => "STEYX",
+            BuiltinFunction::CovarianceP => "COVARIANCE.P",
+            BuiltinFunction::CovarianceS => "COVARIANCE.S",
+            BuiltinFunction::Kurt => "KURT",
+            BuiltinFunction::Skew => "SKEW",
+            BuiltinFunction::SkewP => "SKEW.P",
+            BuiltinFunction::Avedev => "AVEDEV",
+            BuiltinFunction::Devsq => "DEVSQ",
+            BuiltinFunction::Geomean => "GEOMEAN",
+            BuiltinFunction::Harmean => "HARMEAN",
+            BuiltinFunction::Trimmean => "TRIMMEAN",
+            BuiltinFunction::Standardize => "STANDARDIZE",
+            BuiltinFunction::PercentileExc => "PERCENTILE.EXC",
+            BuiltinFunction::PercentRankExc => "PERCENTRANK.EXC",
+            BuiltinFunction::QuartileExc => "QUARTILE.EXC",
+            BuiltinFunction::Prob => "PROB",
+            BuiltinFunction::Fisher => "FISHER",
+            BuiltinFunction::FisherInv => "FISHERINV",
+            BuiltinFunction::Permut => "PERMUT",
+            BuiltinFunction::PermutationA => "PERMUTATIONA",
+            BuiltinFunction::Phi => "PHI",
+            BuiltinFunction::Gauss => "GAUSS",
+            BuiltinFunction::ForecastLinear => "FORECAST",
+            BuiltinFunction::ForecastEts => "FORECAST.ETS",
+            BuiltinFunction::ForecastEtsConfint => "FORECAST.ETS.CONFINT",
+            BuiltinFunction::ForecastEtsSeason => "FORECAST.ETS.SEASONALITY",
+            BuiltinFunction::ForecastEtsStat => "FORECAST.ETS.STAT",
+            BuiltinFunction::AverageA => "AVERAGEA",
+            BuiltinFunction::MaxA => "MAXA",
+            BuiltinFunction::MinA => "MINA",
+            BuiltinFunction::StdevA => "STDEVA",
+            BuiltinFunction::StdevPA => "STDEVPA",
+            BuiltinFunction::VarA => "VARA",
+            BuiltinFunction::VarPA => "VARPA",
+            BuiltinFunction::Ipmt => "IPMT",
+            BuiltinFunction::Ppmt => "PPMT",
+            BuiltinFunction::FvSchedule => "FVSCHEDULE",
+            BuiltinFunction::Xnpv => "XNPV",
+            BuiltinFunction::Xirr => "XIRR",
+            BuiltinFunction::Mirr => "MIRR",
+            BuiltinFunction::Syd => "SYD",
+            BuiltinFunction::Vdb => "VDB",
+            BuiltinFunction::Cumipmt => "CUMIPMT",
+            BuiltinFunction::Cumprinc => "CUMPRINC",
+            BuiltinFunction::Effect => "EFFECT",
+            BuiltinFunction::Nominal => "NOMINAL",
+            BuiltinFunction::Accrint => "ACCRINT",
+            BuiltinFunction::Accrintm => "ACCRINTM",
+            BuiltinFunction::PriceFn => "PRICE",
+            BuiltinFunction::PriceDisc => "PRICEDISC",
+            BuiltinFunction::PriceMat => "PRICEMAT",
+            BuiltinFunction::YieldFn => "YIELD",
+            BuiltinFunction::YieldDisc => "YIELDDISC",
+            BuiltinFunction::YieldMat => "YIELDMAT",
+            BuiltinFunction::DurationFn => "DURATION",
+            BuiltinFunction::Mduration => "MDURATION",
+            BuiltinFunction::Disc => "DISC",
+            BuiltinFunction::Intrate => "INTRATE",
+            BuiltinFunction::Received => "RECEIVED",
+            BuiltinFunction::Coupdaybs => "COUPDAYBS",
+            BuiltinFunction::Coupdays => "COUPDAYS",
+            BuiltinFunction::Coupdaysnc => "COUPDAYSNC",
+            BuiltinFunction::Coupncd => "COUPNCD",
+            BuiltinFunction::Coupnum => "COUPNUM",
+            BuiltinFunction::Couppcd => "COUPPCD",
+            BuiltinFunction::TbillEq => "TBILLEQ",
+            BuiltinFunction::TbillPrice => "TBILLPRICE",
+            BuiltinFunction::TbillYield => "TBILLYIELD",
+            BuiltinFunction::DollarDe => "DOLLARDE",
+            BuiltinFunction::DollarFr => "DOLLARFR",
+            BuiltinFunction::Pduration => "PDURATION",
+            BuiltinFunction::Rri => "RRI",
+            BuiltinFunction::Ispmt => "ISPMT",
+            BuiltinFunction::Amordegrc => "AMORDEGRC",
+            BuiltinFunction::Amorlinc => "AMORLINC",
+            BuiltinFunction::OddfPrice => "ODDFPRICE",
+            BuiltinFunction::OddfYield => "ODDFYIELD",
+            BuiltinFunction::OddlPrice => "ODDLPRICE",
+            BuiltinFunction::OddlYield => "ODDLYIELD",
+            BuiltinFunction::XMatch => "XMATCH",
+            BuiltinFunction::ChooseCols => "CHOOSECOLS",
+            BuiltinFunction::ChooseRows => "CHOOSEROWS",
+            BuiltinFunction::Areas => "AREAS",
+            BuiltinFunction::CellFn => "CELL",
+            BuiltinFunction::FormulaText => "FORMULATEXT",
+            BuiltinFunction::VLookup => "VLOOKUP",
+            BuiltinFunction::HLookup => "HLOOKUP",
+            BuiltinFunction::Lookup => "LOOKUP",
+            BuiltinFunction::Sinh => "SINH",
+            BuiltinFunction::Cosh => "COSH",
+            BuiltinFunction::Tanh => "TANH",
+            BuiltinFunction::Cot => "COT",
+            BuiltinFunction::Coth => "COTH",
+            BuiltinFunction::Csc => "CSC",
+            BuiltinFunction::Csch => "CSCH",
+            BuiltinFunction::Sec => "SEC",
+            BuiltinFunction::Sech => "SECH",
+            BuiltinFunction::Acot => "ACOT",
+            BuiltinFunction::CeilingMath => "CEILING.MATH",
+            BuiltinFunction::CeilingPrecise => "CEILING.PRECISE",
+            BuiltinFunction::FloorMath => "FLOOR.MATH",
+            BuiltinFunction::FloorPrecise => "FLOOR.PRECISE",
+            BuiltinFunction::IsoCeiling => "ISO.CEILING",
+            BuiltinFunction::Multinomial => "MULTINOMIAL",
+            BuiltinFunction::Combina => "COMBINA",
+            BuiltinFunction::FactDouble => "FACTDOUBLE",
+            BuiltinFunction::SqrtPi => "SQRTPI",
+            BuiltinFunction::Aggregate => "AGGREGATE",
+            BuiltinFunction::EncodeUrl => "ENCODEURL",
+            BuiltinFunction::MRound => "MROUND",
+            BuiltinFunction::Quotient => "QUOTIENT",
+            BuiltinFunction::SumSq => "SUMSQ",
+            BuiltinFunction::Roman => "ROMAN",
+            BuiltinFunction::Arabic => "ARABIC",
+            BuiltinFunction::Base => "BASE",
+            BuiltinFunction::Decimal => "DECIMAL",
+            BuiltinFunction::Dollar => "DOLLAR",
+            BuiltinFunction::Euro => "EURO",
+            BuiltinFunction::Fixed => "FIXED",
+            BuiltinFunction::Unichar => "UNICHAR",
+            BuiltinFunction::Unicode => "UNICODE",
+            BuiltinFunction::ErrorType => "ERROR.TYPE",
+            BuiltinFunction::IsNonText => "ISNONTEXT",
+            BuiltinFunction::IsRef => "ISREF",
+            BuiltinFunction::Sheet => "SHEET",
+            BuiltinFunction::Sheets => "SHEETS",
+            BuiltinFunction::Expand => "EXPAND",
+            BuiltinFunction::VStack => "VSTACK",
+            BuiltinFunction::ToCol => "TOCOL",
+            BuiltinFunction::ToRow => "TOROW",
+            BuiltinFunction::WrapCols => "WRAPCOLS",
+            BuiltinFunction::WrapRows => "WRAPROWS",
+            BuiltinFunction::Bin2Dec => "BIN2DEC",
+            BuiltinFunction::Bin2Hex => "BIN2HEX",
+            BuiltinFunction::Bin2Oct => "BIN2OCT",
+            BuiltinFunction::Dec2Bin => "DEC2BIN",
+            BuiltinFunction::Dec2Hex => "DEC2HEX",
+            BuiltinFunction::Dec2Oct => "DEC2OCT",
+            BuiltinFunction::Hex2Bin => "HEX2BIN",
+            BuiltinFunction::Hex2Dec => "HEX2DEC",
+            BuiltinFunction::Hex2Oct => "HEX2OCT",
+            BuiltinFunction::Oct2Bin => "OCT2BIN",
+            BuiltinFunction::Oct2Dec => "OCT2DEC",
+            BuiltinFunction::Oct2Hex => "OCT2HEX",
+            BuiltinFunction::BitAnd => "BITAND",
+            BuiltinFunction::BitOr => "BITOR",
+            BuiltinFunction::BitXor => "BITXOR",
+            BuiltinFunction::BitLShift => "BITLSHIFT",
+            BuiltinFunction::BitRShift => "BITRSHIFT",
+            BuiltinFunction::ComplexFn => "COMPLEX",
+            BuiltinFunction::ImAbs => "IMABS",
+            BuiltinFunction::Imaginary => "IMAGINARY",
+            BuiltinFunction::ImReal => "IMREAL",
+            BuiltinFunction::ImArgument => "IMARGUMENT",
+            BuiltinFunction::ImConjugate => "IMCONJUGATE",
+            BuiltinFunction::ImCos => "IMCOS",
+            BuiltinFunction::ImCosh => "IMCOSH",
+            BuiltinFunction::ImCot => "IMCOT",
+            BuiltinFunction::ImCsc => "IMCSC",
+            BuiltinFunction::ImCsch => "IMCSCH",
+            BuiltinFunction::ImDiv => "IMDIV",
+            BuiltinFunction::ImExp => "IMEXP",
+            BuiltinFunction::ImLn => "IMLN",
+            BuiltinFunction::ImLog10 => "IMLOG10",
+            BuiltinFunction::ImLog2 => "IMLOG2",
+            BuiltinFunction::ImPower => "IMPOWER",
+            BuiltinFunction::ImProduct => "IMPRODUCT",
+            BuiltinFunction::ImSec => "IMSEC",
+            BuiltinFunction::ImSech => "IMSECH",
+            BuiltinFunction::ImSin => "IMSIN",
+            BuiltinFunction::ImSinh => "IMSINH",
+            BuiltinFunction::ImSqrt => "IMSQRT",
+            BuiltinFunction::ImSub => "IMSUB",
+            BuiltinFunction::ImSum => "IMSUM",
+            BuiltinFunction::ImTan => "IMTAN",
+            BuiltinFunction::BesselI => "BESSELI",
+            BuiltinFunction::BesselJ => "BESSELJ",
+            BuiltinFunction::BesselK => "BESSELK",
+            BuiltinFunction::BesselY => "BESSELY",
+            BuiltinFunction::ConvertFn => "CONVERT",
+            BuiltinFunction::Delta => "DELTA",
+            BuiltinFunction::Erf => "ERF",
+            BuiltinFunction::ErfPrecise => "ERF.PRECISE",
+            BuiltinFunction::Erfc => "ERFC",
+            BuiltinFunction::ErfcPrecise => "ERFC.PRECISE",
+            BuiltinFunction::Gestep => "GESTEP",
+            BuiltinFunction::SeriesSum => "SERIESSUM",
+            BuiltinFunction::Mmult => "MMULT",
+            BuiltinFunction::Mdeterm => "MDETERM",
+            BuiltinFunction::Minverse => "MINVERSE",
+            BuiltinFunction::Munit => "MUNIT",
+            BuiltinFunction::DAverage => "DAVERAGE",
+            BuiltinFunction::DCount => "DCOUNT",
+            BuiltinFunction::DCountA => "DCOUNTA",
+            BuiltinFunction::DGet => "DGET",
+            BuiltinFunction::DMax => "DMAX",
+            BuiltinFunction::DMin => "DMIN",
+            BuiltinFunction::DProduct => "DPRODUCT",
+            BuiltinFunction::DStdev => "DSTDEV",
+            BuiltinFunction::DStdevP => "DSTDEVP",
+            BuiltinFunction::DSum => "DSUM",
+            BuiltinFunction::DVar => "DVAR",
+            BuiltinFunction::DVarP => "DVARP",
+            BuiltinFunction::Custom(name) => name.as_str(),
+        }
+    }
+
     /// Returns metadata for every built-in function.
     /// This is the **single source of truth** for the function catalog:
     /// name, category, syntax string, and description.
@@ -1893,6 +2416,22 @@ impl BuiltinFunction {
     }
 }
 
+// Custom Serialize/Deserialize for BuiltinFunction — persisted as the canonical
+// function name string (e.g., "SUM"), not the Rust variant name (e.g., "Sum").
+
+impl Serialize for BuiltinFunction {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.to_canonical_name())
+    }
+}
+
+impl<'de> Deserialize<'de> for BuiltinFunction {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(BuiltinFunction::from_name(&s))
+    }
+}
+
 /// Metadata for a single built-in function.
 /// This is the single source of truth for the function catalog.
 #[derive(Debug, Clone)]
@@ -1940,16 +2479,20 @@ impl FunctionMeta {
 }
 
 /// Literal values that can appear in formulas.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Value {
+    #[serde(rename = "number")]
     Number(f64),
+    #[serde(rename = "string")]
     String(String),
+    #[serde(rename = "boolean")]
     Boolean(bool),
 }
 
 /// Binary operators for expressions.
 /// Listed in order of precedence groups (comparison is lowest).
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum BinaryOperator {
     // Comparison operators (lowest precedence)
     Equal,        // =
@@ -1971,7 +2514,7 @@ pub enum BinaryOperator {
 }
 
 /// Unary operators.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum UnaryOperator {
     Negate, // -
 }

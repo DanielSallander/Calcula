@@ -217,12 +217,12 @@ mod tests {
     use engine::cell::{Cell, CellValue};
 
     fn make_cell(value: CellValue, formula: Option<String>) -> Cell {
-        Cell {
-            value,
-            formula,
-            style_index: 0,
-            rich_text: None,
-            cached_ast: None,
+        if let Some(f) = formula {
+            let mut cell = Cell::new_formula(f);
+            cell.value = value;
+            cell
+        } else {
+            Cell { ast: None, value, style_index: 0, rich_text: None }
         }
     }
 

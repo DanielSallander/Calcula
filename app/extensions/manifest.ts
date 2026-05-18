@@ -83,7 +83,6 @@ import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
 import AIChatExtension from "./AIChat";
 import JsonViewExtension from "./JsonView";
-import LinkedSheetsExtension from "./LinkedSheets";
 import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
 import DataFormExtension from "./DataForm";
@@ -188,7 +187,6 @@ export const builtInExtensions: ExtensionModule[] = [
   BusinessIntelligenceExtension,
   AIChatExtension,
   JsonViewExtension,
-  LinkedSheetsExtension,
   // Quick Access (loads last — needs all menu items registered for command palette)
   QuickAccessExtension,
   // Test Runner (dev-only, macro-based integration tests)

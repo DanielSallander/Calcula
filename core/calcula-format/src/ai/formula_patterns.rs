@@ -25,11 +25,12 @@ pub fn detect_formula_patterns(grid: &Grid) -> Vec<FormulaPattern> {
     let mut col_formulas: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
 
     for (&(row, col), cell) in &grid.cells {
-        if let Some(ref formula) = cell.formula {
+        if let Some(formula) = cell.formula_string() {
+            let display = format!("={}", formula);
             col_formulas
                 .entry(col)
                 .or_default()
-                .push((row, formula.clone()));
+                .push((row, display));
         }
     }
 
@@ -166,13 +167,9 @@ mod tests {
     use engine::grid::Grid;
 
     fn make_formula_cell(value: f64, formula: &str) -> Cell {
-        Cell {
-            value: CellValue::Number(value),
-            formula: Some(formula.to_string()),
-            style_index: 0,
-            rich_text: None,
-            cached_ast: None,
-        }
+        let mut cell = Cell::new_formula(formula.to_string());
+        cell.value = CellValue::Number(value);
+        cell
     }
 
     #[test]

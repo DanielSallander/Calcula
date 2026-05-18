@@ -214,9 +214,10 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
     for nr in &workbook.named_ranges {
         // rust_xlsxwriter define_name expects the formula with sheet reference
         // For sheet-scoped names, prefix with "SheetName!"
-        let full_name = if let Some(si) = nr.sheet_index {
-            if si < workbook.sheets.len() {
-                format!("'{}'!{}", workbook.sheets[si].name, nr.name)
+        let full_name = if let Some(sid) = nr.sheet_id {
+            // Find the sheet's position by its stable SheetId
+            if let Some(sheet) = workbook.sheets.iter().find(|s| s.id == sid) {
+                format!("'{}'!{}", sheet.name, nr.name)
             } else {
                 nr.name.clone()
             }

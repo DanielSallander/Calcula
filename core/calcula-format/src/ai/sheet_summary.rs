@@ -162,12 +162,12 @@ fn infer_column_type(cells: &[(u32, &Cell)], skip_header: bool) -> (ColumnType, 
         if skip_header && row == 0 {
             continue;
         }
-        if matches!(cell.value, CellValue::Empty) && cell.formula.is_none() {
+        if matches!(cell.value, CellValue::Empty) && !cell.has_formula() {
             continue;
         }
         total += 1;
 
-        if cell.formula.is_some() {
+        if cell.has_formula() {
             formula_count += 1;
         }
 
@@ -258,12 +258,12 @@ mod tests {
     use engine::style::StyleRegistry;
 
     fn make_cell(value: CellValue, formula: Option<String>) -> Cell {
-        Cell {
-            value,
-            formula,
-            style_index: 0,
-            rich_text: None,
-            cached_ast: None,
+        if let Some(f) = formula {
+            let mut cell = Cell::new_formula(f);
+            cell.value = value;
+            cell
+        } else {
+            Cell { ast: None, value, style_index: 0, rich_text: None }
         }
     }
 

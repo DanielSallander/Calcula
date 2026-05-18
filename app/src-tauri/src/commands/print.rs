@@ -67,7 +67,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     for (&(row, col), cell) in &grid.cells {
         let style = styles.get(cell.style_index);
         let display = format_cell_value(&cell.value, style, &locale);
-        if display.is_empty() && cell.formula.is_none() {
+        if display.is_empty() && !cell.has_formula() {
             continue; // Skip truly empty cells
         }
 
@@ -89,7 +89,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
             col,
             display,
             display_color: None,
-            formula: cell.formula.clone(),
+            formula: cell.formula_string(),
             style_index: cell.style_index,
             row_span,
             col_span,

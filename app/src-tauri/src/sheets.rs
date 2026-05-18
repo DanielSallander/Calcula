@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 use crate::AppState;
+use identity;
 use crate::pivot::types::PivotState;
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +88,12 @@ fn build_sheet_list(
 fn ensure_vec_len<T: Default>(v: &mut Vec<T>, min_len: usize) {
     while v.len() < min_len {
         v.push(T::default());
+    }
+}
+
+fn ensure_vec_len_with<T, F: Fn() -> T>(v: &mut Vec<T>, min_len: usize, make: F) {
+    while v.len() < min_len {
+        v.push(make());
     }
 }
 
@@ -257,6 +264,10 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
         let mut scroll_areas = state.scroll_areas.lock().unwrap();
         scroll_areas.push(None);
     }
+    {
+        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        sheet_ids.push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+    }
     tab_colors.push(String::new());
     sheet_visibility.push("visible".to_string());
     // New sheet shows gridlines by default
@@ -409,6 +420,12 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     sheet_names.remove(index);
     if index < grids.len() {
         grids.remove(index);
+    }
+    {
+        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        if index < sheet_ids.len() {
+            sheet_ids.remove(index);
+        }
     }
 
     // Repair 3D reference bookends in all formulas
@@ -709,6 +726,11 @@ pub fn move_sheet(
         ensure_vec_len(&mut scroll_areas, count);
         rotate_element(&mut *scroll_areas, from_index, to_index);
     }
+    {
+        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        ensure_vec_len_with(&mut *sheet_ids, count, || identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        rotate_element(&mut *sheet_ids, from_index, to_index);
+    }
     rotate_element(&mut *tab_colors, from_index, to_index);
     rotate_element(&mut *sheet_visibility, from_index, to_index);
     rotate_element(&mut *all_column_widths, from_index, to_index);
@@ -854,6 +876,12 @@ pub fn copy_sheet(
     }
     tab_colors.insert(insert_at, cloned_tab_color);
     sheet_visibility.insert(insert_at, "visible".to_string()); // Copy is always visible
+    {
+        let mut sheet_ids = state.sheet_ids.lock().unwrap();
+        ensure_vec_len_with(&mut *sheet_ids, count, || identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        // Copy gets a fresh ID (it's a new distinct sheet)
+        sheet_ids.insert(insert_at, identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+    }
     {
         let mut gridlines = state.show_gridlines.lock().unwrap();
         while gridlines.len() < count {

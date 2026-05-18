@@ -47,7 +47,7 @@ fn build_cell_data(
         col: c,
         display,
         display_color: None,
-        formula: cell.formula.clone(),
+        formula: cell.formula_string(),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -95,8 +95,8 @@ fn evaluate_constraint_cell(
     col: u32,
 ) -> f64 {
     if let Some(cell) = grids[sheet_idx].get_cell(row, col) {
-        if let Some(formula) = &cell.formula {
-            match evaluate_formula_multi_sheet(grids, sheet_names, sheet_idx, formula) {
+        if let Some(formula) = cell.formula_string() {
+            match evaluate_formula_multi_sheet(grids, sheet_names, sheet_idx, &formula) {
                 CellValue::Number(n) => return n,
                 _ => {}
             }
@@ -616,7 +616,7 @@ pub fn solver_solve(
     // Validate objective cell has a formula
     let objective_formula = match grids[sheet_idx]
         .get_cell(params.objective_row, params.objective_col)
-        .and_then(|c| c.formula.clone())
+        .and_then(|c| c.formula_string())
     {
         Some(f) => f,
         None => {
@@ -747,9 +747,9 @@ pub fn solver_solve(
 
     for &(r, c) in &all_deps {
         if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-            if let Some(formula) = &cell.formula {
+            if let Some(formula) = cell.formula_string() {
                 let new_value =
-                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, formula);
+                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
                 let mut updated = cell;
                 updated.value = new_value;
                 grids[sheet_idx].set_cell(r, c, updated.clone());
@@ -869,9 +869,9 @@ pub fn solver_revert(
 
     for &(r, c) in &all_deps {
         if let Some(cell) = grids[sheet_index].get_cell(r, c).cloned() {
-            if let Some(formula) = &cell.formula {
+            if let Some(formula) = cell.formula_string() {
                 let new_value =
-                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_index, formula);
+                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_index, &formula);
                 let mut updated = cell;
                 updated.value = new_value;
                 grids[sheet_index].set_cell(r, c, updated.clone());

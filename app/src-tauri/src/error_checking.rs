@@ -48,7 +48,7 @@ pub fn get_error_indicators(
             if let Some(cell) = grid.get_cell(row, col) {
                 // Check 1: Number stored as text
                 // Cell has no formula and its value is a Text that looks like a number
-                if cell.formula.is_none() {
+                if !cell.has_formula() {
                     if let CellValue::Text(ref text) = cell.value {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() && is_numeric_string(trimmed) {
@@ -65,7 +65,7 @@ pub fn get_error_indicators(
 
                 // Check 2: Formula error
                 // Cell has a formula and its value is an Error variant
-                if cell.formula.is_some() {
+                if cell.has_formula() {
                     if let CellValue::Error(ref err) = cell.value {
                         // Match the display format used in cell.rs
                         let error_display = match err {

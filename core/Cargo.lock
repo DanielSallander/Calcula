@@ -105,6 +105,7 @@ name = "calcula-format"
 version = "0.1.0"
 dependencies = [
  "engine",
+ "identity",
  "persistence",
  "serde",
  "serde_json",
@@ -342,6 +343,7 @@ dependencies = [
 name = "engine"
 version = "0.1.0"
 dependencies = [
+ "identity",
  "parser",
  "serde",
  "serde_json",
@@ -446,6 +448,14 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "identity"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "indexmap"
@@ -604,6 +614,10 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 [[package]]
 name = "parser"
 version = "0.1.0"
+dependencies = [
+ "identity",
+ "serde",
+]
 
 [[package]]
 name = "persistence"
@@ -611,6 +625,7 @@ version = "0.1.0"
 dependencies = [
  "calamine",
  "engine",
+ "identity",
  "quick-xml",
  "rust_xlsxwriter",
  "serde",

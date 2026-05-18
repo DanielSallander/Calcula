@@ -232,6 +232,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             .unwrap_or(true);
 
         sheets.push(Sheet {
+            id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
             name: sheet_name.clone(),
             cells,
             column_widths,
@@ -276,9 +277,11 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             let sheet_paths = crate::xlsx_style_reader::build_sheet_path_mapping(&mut archive);
             let chart_entries = crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
             for (sheet_idx, mut chart) in chart_entries {
-                // Fix sheet index in the chart entry
-                chart.sheet_index = sheet_idx;
-                // Update the sheetIndex inside the JSON spec
+                // Resolve the positional sheet index to the sheet's stable SheetId
+                if sheet_idx < wb.sheets.len() {
+                    chart.sheet_id = wb.sheets[sheet_idx].id;
+                }
+                // Update the sheetIndex inside the JSON spec (positional, for rendering)
                 chart.spec_json = chart.spec_json.replacen(
                     "\"sheetIndex\":0",
                     &format!("\"sheetIndex\":{}", sheet_idx),

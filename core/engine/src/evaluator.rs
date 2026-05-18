@@ -415,7 +415,7 @@ impl<'a> Evaluator<'a> {
         match expr {
             Expression::Literal(value) => self.eval_literal(value),
             Expression::CellRef { sheet, col, row, .. } => self.eval_cell_ref(sheet, col, *row),
-            Expression::Range { sheet, start, end } => self.eval_range(sheet, start, end),
+            Expression::Range { sheet, start, end, .. } => self.eval_range(sheet, start, end),
             Expression::ColumnRef { sheet, start_col, end_col, .. } => {
                 self.eval_column_ref(sheet, start_col, end_col)
             }
@@ -424,8 +424,8 @@ impl<'a> Evaluator<'a> {
             }
             Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
             Expression::UnaryOp { op, operand } => self.eval_unary_op(op, operand),
-            Expression::FunctionCall { func, args } => self.eval_function(func, args),
-            Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            Expression::FunctionCall { func, args, .. } => self.eval_function(func, args),
+            Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
                 self.eval_3d_ref(start_sheet, end_sheet, reference)
             }
             Expression::TableRef { .. } => {
@@ -442,7 +442,7 @@ impl<'a> Evaluator<'a> {
             Expression::DictLiteral { entries } => {
                 self.eval_dict_literal(entries)
             }
-            Expression::NamedRef { name } => {
+            Expression::NamedRef { name, .. } => {
                 // Check scope first (LAMBDA/LET bindings)
                 let key = name.to_uppercase();
                 let scope = self.scope.borrow();
@@ -473,7 +473,7 @@ impl<'a> Evaluator<'a> {
 
         // Try to determine the range start position from the operand
         match operand {
-            Expression::Range { start, end, sheet } => {
+            Expression::Range { start, end, sheet, .. } => {
                 let grid = self.get_grid_for_sheet(sheet);
                 let (start_col_s, start_row) = if let Expression::CellRef { col, row, .. } = start.as_ref() {
                     (col.clone(), *row)
@@ -1886,7 +1886,7 @@ impl<'a> Evaluator<'a> {
         let mut values = Vec::new();
         for arg in args {
             match arg {
-                Expression::Range { sheet, start, end } => {
+                Expression::Range { sheet, start, end, .. } => {
                     let grid = self.get_grid_for_sheet(sheet);
                     if let (
                         Expression::CellRef { col: start_col, row: start_row, .. },
@@ -4904,7 +4904,7 @@ impl<'a> Evaluator<'a> {
         if let Expression::CellRef { col, row, .. } = &args[0] {
             let col_idx = col_to_index(col);
             let row_idx = row - 1;
-            let has_formula = self.grid.get_cell(row_idx, col_idx).map_or(false, |c| c.formula.is_some());
+            let has_formula = self.grid.get_cell(row_idx, col_idx).map_or(false, |c| c.has_formula());
             EvalResult::Boolean(has_formula)
         } else {
             EvalResult::Boolean(false)
@@ -5561,7 +5561,7 @@ impl<'a> Evaluator<'a> {
     /// Extract a parameter name from a NamedRef expression.
     /// Returns the uppercased name, or empty string if not a NamedRef.
     fn extract_param_name(&self, expr: &Expression) -> String {
-        if let Expression::NamedRef { name } = expr {
+        if let Expression::NamedRef { name, .. } = expr {
             name.to_uppercase()
         } else {
             String::new()
@@ -12155,7 +12155,11 @@ mod tests {
                 sheet: None,
                 start_col: "A".to_string(),
                 end_col: "A".to_string(),
+                start_absolute: false,
+                end_absolute: false,
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(60.0));
@@ -12173,7 +12177,11 @@ mod tests {
                 sheet: None,
                 start_row: 1,
                 end_row: 1,
+                start_absolute: false,
+                end_absolute: false,
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(15.0));
@@ -12222,6 +12230,9 @@ mod tests {
             sheet: None,
             col: "A".to_string(),
             row: 1,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
 
@@ -12238,6 +12249,9 @@ mod tests {
             sheet: None,
             col: "Z".to_string(),
             row: 99,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
 
@@ -12255,12 +12269,18 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
                 row: 2,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
         };
         let result = eval.evaluate(&expr);
@@ -12298,13 +12318,21 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
                     row: 3,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
 
@@ -12332,6 +12360,9 @@ mod tests {
             sheet: Some("Sheet2".to_string()),
             col: "A".to_string(),
             row: 1,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
 
@@ -12364,13 +12395,21 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
                     row: 2,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
 
@@ -12407,6 +12446,7 @@ mod tests {
         Expression::FunctionCall {
             func: BuiltinFunction::XLookup,
             args,
+            ref_site_id: Default::default(),
         }
     }
 
@@ -12420,13 +12460,15 @@ mod tests {
             Expression::Literal(Value::String("Cherry".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -12443,13 +12485,15 @@ mod tests {
             Expression::Literal(Value::String("banana".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -12466,13 +12510,15 @@ mod tests {
             Expression::Literal(Value::String("Fig".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -12489,13 +12535,15 @@ mod tests {
             Expression::Literal(Value::String("Fig".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Literal(Value::String("Not found".to_string())),
         ]);
@@ -12521,13 +12569,15 @@ mod tests {
             Expression::Literal(Value::Number(20.0)),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -12552,13 +12602,15 @@ mod tests {
             Expression::Literal(Value::Number(25.0)),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Literal(Value::String("N/A".to_string())),
             Expression::Literal(Value::Number(-1.0)),
@@ -12585,13 +12637,15 @@ mod tests {
             Expression::Literal(Value::Number(25.0)),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Literal(Value::String("N/A".to_string())),
             Expression::Literal(Value::Number(1.0)),
@@ -12610,13 +12664,15 @@ mod tests {
             Expression::Literal(Value::String("Ch*".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Literal(Value::String("N/A".to_string())),
             Expression::Literal(Value::Number(2.0)),
@@ -12635,13 +12691,15 @@ mod tests {
             Expression::Literal(Value::String("Da?e".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Literal(Value::String("N/A".to_string())),
             Expression::Literal(Value::Number(2.0)),
@@ -12668,13 +12726,15 @@ mod tests {
             Expression::Literal(Value::String("X".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Literal(Value::String("N/A".to_string())),
             Expression::Literal(Value::Number(0.0)),
@@ -12694,8 +12754,9 @@ mod tests {
             Expression::Literal(Value::String("X".to_string())),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -12736,6 +12797,7 @@ mod tests {
         Expression::FunctionCall {
             func: BuiltinFunction::XLookups,
             args,
+            ref_site_id: Default::default(),
         }
     }
 
@@ -12747,12 +12809,19 @@ mod tests {
                 sheet: None,
                 col: col.to_string(),
                 row: start_row,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             end: Box::new(Expression::CellRef {
                 sheet: None,
                 col: col.to_string(),
                 row: end_row,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
+            ref_site_id: Default::default(),
         }
     }
 
@@ -12964,8 +13033,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(60.0));
@@ -12987,8 +13061,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(30.0));
@@ -13010,8 +13089,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(60.0));
@@ -13056,14 +13140,23 @@ mod tests {
                         sheet: None,
                         col: "A".to_string(),
                         row: 1,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
                     }),
                     end: Box::new(Expression::CellRef {
                         sheet: None,
                         col: "A".to_string(),
                         row: 2,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
                     }),
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(333.0));
@@ -13085,8 +13178,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(20.0));
@@ -13110,8 +13208,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         assert_eq!(eval.evaluate(&expr_max), EvalResult::Number(30.0));
 
@@ -13128,8 +13231,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         assert_eq!(eval2.evaluate(&expr_min), EvalResult::Number(10.0));
     }
@@ -13150,8 +13258,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(3.0));
@@ -13173,8 +13286,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         // The 3D ref returns Array([]); SUM of empty = 0
@@ -13195,7 +13313,11 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Error(CellError::Ref));
@@ -13217,8 +13339,13 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(60.0));
@@ -13230,8 +13357,9 @@ mod tests {
     fn range_a1_a3() -> Expression {
         Expression::Range {
             sheet: None,
-            start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-            end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+            end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                    ref_site_id: Default::default(),
         }
     }
 
@@ -13243,6 +13371,7 @@ mod tests {
                 Expression::Literal(Value::Number(func_num)),
                 range,
             ],
+            ref_site_id: Default::default(),
         }
     }
 
@@ -13280,8 +13409,9 @@ mod tests {
         let eval = Evaluator::new(&grid);
         let range_b = Expression::Range {
             sheet: None,
-            start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-            end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 3 }),
+            start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+            end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                    ref_site_id: Default::default(),
         };
         let expr = subtotal_expr(3.0, range_b);
         assert_eq!(eval.evaluate(&expr), EvalResult::Number(3.0));
@@ -13448,6 +13578,7 @@ mod tests {
         let expr = Expression::FunctionCall {
             func: BuiltinFunction::Subtotal,
             args: vec![Expression::Literal(Value::Number(9.0))],
+            ref_site_id: Default::default(),
         };
         assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Value));
     }
@@ -13463,15 +13594,18 @@ mod tests {
                 Expression::Literal(Value::Number(9.0)),
                 Expression::Range {
                     sheet: None,
-                    start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                    end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+                    start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                    end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                            ref_site_id: Default::default(),
                 },
                 Expression::Range {
                     sheet: None,
-                    start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
-                    end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                    start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                    end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                            ref_site_id: Default::default(),
                 },
             ],
+            ref_site_id: Default::default(),
         };
         assert_eq!(eval.evaluate(&expr), EvalResult::Number(60.0));
     }
@@ -13517,7 +13651,9 @@ mod tests {
     // ==================== Helper for new function tests ====================
 
     fn make_fn_expr(func: BuiltinFunction, args: Vec<Expression>) -> Expression {
-        Expression::FunctionCall { func, args }
+        Expression::FunctionCall { func, args,
+            ref_site_id: Default::default(),
+        }
     }
 
     fn num(n: f64) -> Expression { Expression::Literal(Value::Number(n)) }
@@ -13637,8 +13773,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::ArrayToText, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             }
         ]);
         let result = eval.evaluate(&expr);
@@ -13755,8 +13892,9 @@ mod tests {
             num(10.0),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -13776,8 +13914,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::PercentRank, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(3.0),
         ]);
@@ -13797,8 +13936,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::ModeMult, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -13819,8 +13959,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::StdevS, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -13834,8 +13975,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::VarS, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -13853,8 +13995,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Trend, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -13879,8 +14022,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Linest, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -13995,8 +14139,9 @@ mod tests {
             num(1000.0),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -14017,8 +14162,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Mirr, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(0.10),
             num(0.12),
@@ -14068,8 +14214,9 @@ mod tests {
             num(20.0),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         assert_num(&eval.evaluate(&expr), 2.0, 0.01);
@@ -14085,8 +14232,9 @@ mod tests {
             num(99.0),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         assert_error(&eval.evaluate(&expr));
@@ -14104,8 +14252,9 @@ mod tests {
             num(15.0),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(1.0),
         ]);
@@ -14121,8 +14270,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::ChooseRows, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(1.0),
             num(3.0),
@@ -14151,13 +14301,15 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::VStack, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 2 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 2, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -14174,8 +14326,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::ToCol, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 2 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 2, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -14198,8 +14351,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::ToRow, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -14219,8 +14373,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::WrapRows, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(3.0),
         ]);
@@ -14243,8 +14398,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::WrapCols, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(3.0),
         ]);
@@ -14264,8 +14420,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Expand, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             num(4.0), // expand to 4 rows
         ]);
@@ -14292,8 +14449,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Areas, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         assert_num(&eval.evaluate(&expr), 1.0, 0.01);
@@ -14304,7 +14462,7 @@ mod tests {
         let grid = Grid::new();
         let eval = Evaluator::new(&grid);
         let expr = make_fn_expr(BuiltinFunction::FormulaText, vec![
-            Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 },
+            Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() },
         ]);
         assert_error(&eval.evaluate(&expr));
     }
@@ -14323,8 +14481,9 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Growth, vec![
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 4 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 4, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -14366,13 +14525,15 @@ mod tests {
             num(0.09),
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
             Expression::Range {
                 sheet: None,
-                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
-                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
+                        ref_site_id: Default::default(),
             },
         ]);
         let result = eval.evaluate(&expr);
@@ -14471,13 +14632,13 @@ mod tests {
         let expr = make_fn_expr(BuiltinFunction::Ifs, vec![
             Expression::BinaryOp {
                 op: BinaryOperator::GreaterThan,
-                left: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                left: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
                 right: Box::new(num(5.0)),
             },
             text("big"),
             Expression::BinaryOp {
                 op: BinaryOperator::LessEqual,
-                left: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                left: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() }),
                 right: Box::new(num(5.0)),
             },
             text("small"),
@@ -14578,7 +14739,7 @@ mod tests {
         let eval = Evaluator::new(&grid);
         // SWITCH(A1, "red", "#FF0000", "green", "#00FF00", "blue", "#0000FF")
         let expr = make_fn_expr(BuiltinFunction::Switch, vec![
-            Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 },
+            Expression::CellRef { sheet: None, col: "A".to_string(), row: 1, col_absolute: false, row_absolute: false, ref_site_id: Default::default() },
             text("red"), text("#FF0000"),
             text("green"), text("#00FF00"),
             text("blue"), text("#0000FF"),

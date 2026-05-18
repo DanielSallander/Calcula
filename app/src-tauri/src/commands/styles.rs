@@ -83,7 +83,7 @@ pub fn set_cell_style(
             col,
             display: result.text,
             display_color: result.color,
-            formula: updated_cell.formula,
+            formula: updated_cell.formula_string(),
             style_index,
             row_span,
             col_span,
@@ -95,10 +95,9 @@ pub fn set_cell_style(
         // Create a new empty cell with the style
         let cell = Cell {
             value: CellValue::Empty,
-            formula: None,
+            ast: None,
             style_index,
             rich_text: None,
-            cached_ast: None,
         };
         grid.set_cell(row, col, cell.clone());
 
@@ -172,10 +171,9 @@ pub fn apply_formatting(
                 (
                     Cell {
                         value: CellValue::Empty,
-                        formula: None,
+                        ast: None,
                         style_index: 0,
                         rich_text: None,
-                        cached_ast: None,
                     },
                     0,
                 )
@@ -209,7 +207,7 @@ pub fn apply_formatting(
                     col,
                     display: fmt_result.text,
                     display_color: fmt_result.color,
-                    formula: updated_cell.formula,
+                    formula: updated_cell.formula_string(),
                     style_index: cached_new_index,
                     row_span,
                     col_span,
@@ -373,7 +371,7 @@ pub fn apply_formatting(
                 col,
                 display: fmt_result.text,
                 display_color: fmt_result.color,
-                formula: updated_cell.formula,
+                formula: updated_cell.formula_string(),
                 style_index: new_style_index,
                 row_span,
                 col_span,
@@ -452,10 +450,9 @@ pub fn apply_formatting_to_sheets(
                     (
                         Cell {
                             value: CellValue::Empty,
-                            formula: None,
+                            ast: None,
                             style_index: 0,
                             rich_text: None,
-                            cached_ast: None,
                         },
                         0,
                     )
@@ -960,7 +957,7 @@ pub fn set_cell_rich_text(
         col,
         display: result.text,
         display_color: result.color,
-        formula: cell.formula.clone(),
+        formula: cell.formula_string(),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -1035,10 +1032,9 @@ pub fn apply_border_preset(
                 (
                     Cell {
                         value: CellValue::Empty,
-                        formula: None,
+                        ast: None,
                         style_index: 0,
                         rich_text: None,
-                        cached_ast: None,
                     },
                     0,
                 )
@@ -1145,7 +1141,7 @@ pub fn apply_border_preset(
                 col,
                 display: fmt_result.text,
                 display_color: fmt_result.color,
-                formula: updated_cell.formula,
+                formula: updated_cell.formula_string(),
                 style_index: new_style_index,
                 row_span,
                 col_span,

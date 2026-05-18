@@ -5,6 +5,7 @@ use crate::ast::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Val
 use crate::lexer::Lexer;
 use crate::parser::parse;
 use crate::token::Token;
+use identity::RefSiteId;
 
 // ========================================
 // LEXER TESTS (Originally from lexer.rs)
@@ -149,7 +150,8 @@ fn parser_parses_simple_cell_ref() {
             col: "A".to_string(),
             row: 1,
             col_absolute: false,
-            row_absolute: false
+            row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -164,7 +166,8 @@ fn parser_parses_multi_letter_column() {
             col: "AA".to_string(),
             row: 100,
             col_absolute: false,
-            row_absolute: false
+            row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -181,15 +184,18 @@ fn parser_parses_range() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             end: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
                 row: 10,
                 col_absolute: false,
-                row_absolute: false
-            })
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
+            }),
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -291,7 +297,8 @@ fn parser_parses_equal() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::Equal,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -310,7 +317,8 @@ fn parser_parses_not_equal() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::NotEqual,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -329,7 +337,8 @@ fn parser_parses_less_than() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::LessThan,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -348,7 +357,8 @@ fn parser_parses_greater_than() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::GreaterThan,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -367,7 +377,8 @@ fn parser_parses_less_equal() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::LessEqual,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -386,7 +397,8 @@ fn parser_parses_greater_equal() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::GreaterEqual,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -483,7 +495,8 @@ fn parser_respects_precedence_add_before_comparison() {
                     col: "A".to_string(),
                     row: 1,
                     col_absolute: false,
-                    row_absolute: false
+                    row_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }),
                 op: BinaryOperator::Add,
                 right: Box::new(Expression::Literal(Value::Number(1.0)))
@@ -627,8 +640,9 @@ fn parser_parses_function_no_args() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            func: BuiltinFunction::Custom("NOW".to_string()),
-            args: vec![]
+            func: BuiltinFunction::Now,
+            args: vec![],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -643,7 +657,8 @@ fn parser_parses_function_single_arg() {
             args: vec![Expression::UnaryOp {
                 op: UnaryOperator::Negate,
                 operand: Box::new(Expression::Literal(Value::Number(5.0)))
-            }]
+            }],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -659,7 +674,8 @@ fn parser_parses_function_multiple_args() {
                 Expression::Literal(Value::Number(1.0)),
                 Expression::Literal(Value::Number(2.0)),
                 Expression::Literal(Value::Number(3.0))
-            ]
+            ],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -678,16 +694,20 @@ fn parser_parses_function_with_range_arg() {
                     col: "A".to_string(),
                     row: 1,
                     col_absolute: false,
-                    row_absolute: false
+                    row_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
                     row: 10,
                     col_absolute: false,
-                    row_absolute: false
-                })
-            }]
+                    row_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
+                }),
+                ref_site_id: RefSiteId::ZERO,
+            }],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -705,16 +725,19 @@ fn parser_parses_nested_function_calls() {
                     args: vec![Expression::UnaryOp {
                         op: UnaryOperator::Negate,
                         operand: Box::new(Expression::Literal(Value::Number(1.0)))
-                    }]
+                    }],
+                    ref_site_id: RefSiteId::ZERO,
                 },
                 Expression::FunctionCall {
                     func: BuiltinFunction::Abs,
                     args: vec![Expression::UnaryOp {
                         op: UnaryOperator::Negate,
                         operand: Box::new(Expression::Literal(Value::Number(2.0)))
-                    }]
+                    }],
+                    ref_site_id: RefSiteId::ZERO,
                 }
-            ]
+            ],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -737,7 +760,8 @@ fn parser_parses_function_with_expression_arg() {
                     op: BinaryOperator::Multiply,
                     right: Box::new(Expression::Literal(Value::Number(4.0)))
                 }
-            ]
+            ],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -757,14 +781,16 @@ fn parser_parses_if_function_with_comparison() {
                         col: "A".to_string(),
                         row: 1,
                         col_absolute: false,
-                        row_absolute: false
+                        row_absolute: false,
+                        ref_site_id: RefSiteId::ZERO,
                     }),
                     op: BinaryOperator::GreaterThan,
                     right: Box::new(Expression::Literal(Value::Number(10.0)))
                 },
                 Expression::Literal(Value::String("big".to_string())),
                 Expression::Literal(Value::String("small".to_string()))
-            ]
+            ],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -784,7 +810,8 @@ fn parser_parses_cell_ref_in_expression() {
                 col: "A".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::CellRef {
@@ -792,7 +819,8 @@ fn parser_parses_cell_ref_in_expression() {
                 col: "B".to_string(),
                 row: 2,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             })
         }
     );
@@ -815,16 +843,20 @@ fn parser_parses_complex_formula() {
                             col: "A".to_string(),
                             row: 1,
                             col_absolute: false,
-                            row_absolute: false
+                            row_absolute: false,
+                            ref_site_id: RefSiteId::ZERO,
                         }),
                         end: Box::new(Expression::CellRef {
                             sheet: None,
                             col: "A".to_string(),
                             row: 10,
                             col_absolute: false,
-                            row_absolute: false
-                        })
-                    }]
+                            row_absolute: false,
+                            ref_site_id: RefSiteId::ZERO,
+                        }),
+                        ref_site_id: RefSiteId::ZERO,
+                    }],
+                    ref_site_id: RefSiteId::ZERO,
                 }),
                 op: BinaryOperator::Multiply,
                 right: Box::new(Expression::Literal(Value::Number(2.0)))
@@ -835,7 +867,8 @@ fn parser_parses_complex_formula() {
                 col: "B".to_string(),
                 row: 1,
                 col_absolute: false,
-                row_absolute: false
+                row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             })
         }
     );
@@ -858,7 +891,8 @@ fn parser_parses_complex_formula_with_all_operators() {
                                 col: "A".to_string(),
                                 row: 1,
                                 col_absolute: false,
-                                row_absolute: false
+                                row_absolute: false,
+                                ref_site_id: RefSiteId::ZERO,
                             }),
                             op: BinaryOperator::Power,
                             right: Box::new(Expression::Literal(Value::Number(2.0)))
@@ -905,7 +939,7 @@ fn parser_error_on_unclosed_function() {
 fn parser_column_only_identifier_is_named_ref() {
     // "ABC" without a row number is now parsed as a named reference
     let result = parse("=ABC").unwrap();
-    assert_eq!(result, Expression::NamedRef { name: "ABC".to_string() });
+    assert_eq!(result, Expression::NamedRef { name: "ABC".to_string(), ref_site_id: RefSiteId::ZERO });
 }
 
 #[test]
@@ -951,7 +985,8 @@ fn test_parse_column_reference() {
             start_col: "A".to_string(),
             end_col: "A".to_string(),
             start_absolute: false,
-            end_absolute: false
+            end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -966,7 +1001,8 @@ fn test_parse_column_range() {
             start_col: "A".to_string(),
             end_col: "C".to_string(),
             start_absolute: false,
-            end_absolute: false
+            end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -981,7 +1017,8 @@ fn test_parse_row_reference() {
             start_row: 1,
             end_row: 1,
             start_absolute: false,
-            end_absolute: false
+            end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -996,7 +1033,8 @@ fn test_parse_row_range() {
             start_row: 1,
             end_row: 5,
             start_absolute: false,
-            end_absolute: false
+            end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1011,7 +1049,8 @@ fn test_parse_sheet_cell_ref() {
             col: "A".to_string(),
             row: 1,
             col_absolute: false,
-            row_absolute: false
+            row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1026,7 +1065,8 @@ fn test_parse_quoted_sheet_cell_ref() {
             col: "A".to_string(),
             row: 1,
             col_absolute: false,
-            row_absolute: false
+            row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1035,7 +1075,7 @@ fn test_parse_quoted_sheet_cell_ref() {
 fn test_parse_sheet_range() {
     let result = parse("=Sheet1!A1:B10").unwrap();
     match result {
-        Expression::Range { sheet, start, end } => {
+        Expression::Range { sheet, start, end, .. } => {
             assert_eq!(sheet, Some("SHEET1".to_string()));
             assert_eq!(
                 *start,
@@ -1044,7 +1084,8 @@ fn test_parse_sheet_range() {
                     col: "A".to_string(),
                     row: 1,
                     col_absolute: false,
-                    row_absolute: false
+                    row_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }
             );
             assert_eq!(
@@ -1054,7 +1095,8 @@ fn test_parse_sheet_range() {
                     col: "B".to_string(),
                     row: 10,
                     col_absolute: false,
-                    row_absolute: false
+                    row_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }
             );
         }
@@ -1072,7 +1114,8 @@ fn test_parse_sheet_column_ref() {
             start_col: "A".to_string(),
             end_col: "B".to_string(),
             start_absolute: false,
-            end_absolute: false
+            end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1087,7 +1130,8 @@ fn test_parse_sheet_row_ref() {
             start_row: 1,
             end_row: 5,
             start_absolute: false,
-            end_absolute: false
+            end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1096,7 +1140,7 @@ fn test_parse_sheet_row_ref() {
 fn test_parse_sum_with_sheet_ref() {
     let result = parse("=SUM(Sheet1!A1:A10)").unwrap();
     match result {
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             match &args[0] {
@@ -1114,7 +1158,7 @@ fn test_parse_sum_with_sheet_ref() {
 fn test_parse_sum_with_column_ref() {
     let result = parse("=SUM(A:A)").unwrap();
     match result {
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             assert_eq!(
@@ -1124,7 +1168,8 @@ fn test_parse_sum_with_column_ref() {
                     start_col: "A".to_string(),
                     end_col: "A".to_string(),
                     start_absolute: false,
-                    end_absolute: false
+                    end_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }
             );
         }
@@ -1136,7 +1181,7 @@ fn test_parse_sum_with_column_ref() {
 fn test_parse_sum_with_row_ref() {
     let result = parse("=SUM(1:3)").unwrap();
     match result {
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             assert_eq!(
@@ -1146,7 +1191,8 @@ fn test_parse_sum_with_row_ref() {
                     start_row: 1,
                     end_row: 3,
                     start_absolute: false,
-                    end_absolute: false
+                    end_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }
             );
         }
@@ -1164,7 +1210,7 @@ fn parser_parses_underscore_name_as_named_ref() {
     let result = parse("=Tax_Rate").unwrap();
     assert_eq!(
         result,
-        Expression::NamedRef { name: "TAX_RATE".to_string() }
+        Expression::NamedRef { name: "TAX_RATE".to_string(), ref_site_id: RefSiteId::ZERO }
     );
 }
 
@@ -1175,9 +1221,9 @@ fn parser_parses_named_ref_in_expression() {
     assert_eq!(
         result,
         Expression::BinaryOp {
-            left: Box::new(Expression::NamedRef { name: "REVENUE".to_string() }),
+            left: Box::new(Expression::NamedRef { name: "REVENUE".to_string(), ref_site_id: RefSiteId::ZERO }),
             op: BinaryOperator::Subtract,
-            right: Box::new(Expression::NamedRef { name: "COSTS".to_string() }),
+            right: Box::new(Expression::NamedRef { name: "COSTS".to_string(), ref_site_id: RefSiteId::ZERO }),
         }
     );
 }
@@ -1190,7 +1236,8 @@ fn parser_parses_named_ref_in_function() {
         result,
         Expression::FunctionCall {
             func: BuiltinFunction::Sum,
-            args: vec![Expression::NamedRef { name: "SALESDATA".to_string() }],
+            args: vec![Expression::NamedRef { name: "SALESDATA".to_string(), ref_site_id: RefSiteId::ZERO }],
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1201,7 +1248,7 @@ fn parser_parses_dotted_name_as_named_ref() {
     let result = parse("=Q1.Sales").unwrap();
     assert_eq!(
         result,
-        Expression::NamedRef { name: "Q1.SALES".to_string() }
+        Expression::NamedRef { name: "Q1.SALES".to_string(), ref_site_id: RefSiteId::ZERO }
     );
 }
 
@@ -1211,7 +1258,7 @@ fn parser_parses_backslash_name_as_named_ref() {
     let result = parse("=\\TaxRate").unwrap();
     assert_eq!(
         result,
-        Expression::NamedRef { name: "\\TAXRATE".to_string() }
+        Expression::NamedRef { name: "\\TAXRATE".to_string(), ref_site_id: RefSiteId::ZERO }
     );
 }
 
@@ -1227,6 +1274,7 @@ fn parser_parses_a1_as_cell_ref_not_named_ref() {
             row: 1,
             col_absolute: false,
             row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1243,6 +1291,7 @@ fn parser_parses_xfd1_as_cell_ref() {
             row: 1,
             col_absolute: false,
             row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1253,7 +1302,7 @@ fn parser_parses_xfe1_as_named_ref() {
     let result = parse("=XFE1").unwrap();
     assert_eq!(
         result,
-        Expression::NamedRef { name: "XFE1".to_string() }
+        Expression::NamedRef { name: "XFE1".to_string(), ref_site_id: RefSiteId::ZERO }
     );
 }
 
@@ -1263,7 +1312,7 @@ fn parser_parses_pure_letters_as_named_ref() {
     let result = parse("=REVENUE").unwrap();
     assert_eq!(
         result,
-        Expression::NamedRef { name: "REVENUE".to_string() }
+        Expression::NamedRef { name: "REVENUE".to_string(), ref_site_id: RefSiteId::ZERO }
     );
 }
 
@@ -1274,7 +1323,7 @@ fn parser_parses_single_letter_not_followed_by_colon_as_named_ref() {
     assert_eq!(
         result,
         Expression::BinaryOp {
-            left: Box::new(Expression::NamedRef { name: "A".to_string() }),
+            left: Box::new(Expression::NamedRef { name: "A".to_string(), ref_site_id: RefSiteId::ZERO }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::Literal(Value::Number(1.0))),
         }
@@ -1293,6 +1342,7 @@ fn parser_parses_column_ref_still_works() {
             end_col: "B".to_string(),
             start_absolute: false,
             end_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1310,9 +1360,10 @@ fn parser_named_ref_with_cell_and_named_ref_mixed() {
                 row: 1,
                 col_absolute: false,
                 row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             }),
             op: BinaryOperator::Multiply,
-            right: Box::new(Expression::NamedRef { name: "TAXRATE".to_string() }),
+            right: Box::new(Expression::NamedRef { name: "TAXRATE".to_string(), ref_site_id: RefSiteId::ZERO }),
         }
     );
 }
@@ -1325,7 +1376,7 @@ fn parser_parses_row_beyond_limit_as_named_ref() {
     let result = parse("=A1048577").unwrap();
     assert_eq!(
         result,
-        Expression::NamedRef { name: "A1048577".to_string() }
+        Expression::NamedRef { name: "A1048577".to_string(), ref_site_id: RefSiteId::ZERO }
     );
 }
 
@@ -1341,6 +1392,7 @@ fn parser_parses_max_row_as_cell_ref() {
             row: 1048576,
             col_absolute: false,
             row_absolute: false,
+            ref_site_id: RefSiteId::ZERO,
         }
     );
 }
@@ -1354,7 +1406,7 @@ fn test_parse_3d_ref_cell() {
     // =Sheet1:Sheet3!A1
     let result = parse("=Sheet1:Sheet3!A1").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "SHEET1");
             assert_eq!(end_sheet, "SHEET3");
             assert_eq!(*reference, Expression::CellRef {
@@ -1363,6 +1415,7 @@ fn test_parse_3d_ref_cell() {
                 row: 1,
                 col_absolute: false,
                 row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             });
         }
         _ => panic!("Expected Sheet3DRef, got {:?}", result),
@@ -1374,7 +1427,7 @@ fn test_parse_3d_ref_range() {
     // =Sheet1:Sheet3!A1:B10
     let result = parse("=Sheet1:Sheet3!A1:B10").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "SHEET1");
             assert_eq!(end_sheet, "SHEET3");
             match *reference {
@@ -1393,7 +1446,7 @@ fn test_parse_3d_ref_quoted() {
     // ='Jan 2023:Dec 2023'!A1
     let result = parse("='Jan 2023:Dec 2023'!A1").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "Jan 2023");
             assert_eq!(end_sheet, "Dec 2023");
             assert_eq!(*reference, Expression::CellRef {
@@ -1402,6 +1455,7 @@ fn test_parse_3d_ref_quoted() {
                 row: 1,
                 col_absolute: false,
                 row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             });
         }
         _ => panic!("Expected Sheet3DRef, got {:?}", result),
@@ -1413,7 +1467,7 @@ fn test_parse_3d_ref_quoted_simple() {
     // ='Jan:Dec'!B4
     let result = parse("='Jan:Dec'!B4").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "Jan");
             assert_eq!(end_sheet, "Dec");
             assert_eq!(*reference, Expression::CellRef {
@@ -1422,6 +1476,7 @@ fn test_parse_3d_ref_quoted_simple() {
                 row: 4,
                 col_absolute: false,
                 row_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             });
         }
         _ => panic!("Expected Sheet3DRef, got {:?}", result),
@@ -1433,11 +1488,11 @@ fn test_parse_3d_ref_in_function() {
     // =SUM(Sheet1:Sheet3!A1:A10)
     let result = parse("=SUM(Sheet1:Sheet3!A1:A10)").unwrap();
     match result {
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             match &args[0] {
-                Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+                Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
                     assert_eq!(start_sheet, "SHEET1");
                     assert_eq!(end_sheet, "SHEET3");
                     assert!(matches!(**reference, Expression::Range { .. }));
@@ -1454,7 +1509,7 @@ fn test_parse_3d_ref_column_ref() {
     // =Sheet1:Sheet3!A:B should parse as 3D with ColumnRef inner
     let result = parse("=Sheet1:Sheet3!A:B").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "SHEET1");
             assert_eq!(end_sheet, "SHEET3");
             assert_eq!(*reference, Expression::ColumnRef {
@@ -1463,6 +1518,7 @@ fn test_parse_3d_ref_column_ref() {
                 end_col: "B".to_string(),
                 start_absolute: false,
                 end_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             });
         }
         _ => panic!("Expected Sheet3DRef, got {:?}", result),
@@ -1474,7 +1530,7 @@ fn test_parse_3d_ref_row_ref() {
     // =Sheet1:Sheet3!1:5 should parse as 3D with RowRef inner
     let result = parse("=Sheet1:Sheet3!1:5").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "SHEET1");
             assert_eq!(end_sheet, "SHEET3");
             assert_eq!(*reference, Expression::RowRef {
@@ -1483,6 +1539,7 @@ fn test_parse_3d_ref_row_ref() {
                 end_row: 5,
                 start_absolute: false,
                 end_absolute: false,
+                ref_site_id: RefSiteId::ZERO,
             });
         }
         _ => panic!("Expected Sheet3DRef, got {:?}", result),
@@ -1494,11 +1551,11 @@ fn test_parse_3d_ref_absolute() {
     // =Sheet1:Sheet3!$A$1:$B$10
     let result = parse("=Sheet1:Sheet3!$A$1:$B$10").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "SHEET1");
             assert_eq!(end_sheet, "SHEET3");
             match *reference {
-                Expression::Range { sheet, ref start, ref end } => {
+                Expression::Range { sheet, ref start, ref end, .. } => {
                     assert_eq!(sheet, None);
                     match start.as_ref() {
                         Expression::CellRef { col_absolute, row_absolute, .. } => {
@@ -1534,7 +1591,7 @@ fn test_parse_3d_ref_sum_quoted_range() {
     // =SUM('Jan:Dec'!B4) - quoted 3D in function
     let result = parse("=SUM('Jan:Dec'!B4)").unwrap();
     match result {
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             match &args[0] {
@@ -1554,7 +1611,7 @@ fn test_parse_3d_ref_with_range_and_spaces() {
     // ='Q1 Sales:Q4 Sales'!A1:A10
     let result = parse("='Q1 Sales:Q4 Sales'!A1:A10").unwrap();
     match result {
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             assert_eq!(start_sheet, "Q1 Sales");
             assert_eq!(end_sheet, "Q4 Sales");
             assert!(matches!(*reference, Expression::Range { .. }));

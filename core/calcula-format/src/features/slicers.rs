@@ -2,6 +2,7 @@
 //! Slicer definitions serialization.
 //! Each slicer is stored as slicers/slicer_{id}.json.
 
+use identity::SheetId;
 use persistence::{SavedSlicer, SavedSlicerSourceType, SavedSlicerSelectionMode, SavedSlicerArrangement, SavedSlicerComputedProperty, SavedSlicerConnection};
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +14,7 @@ pub struct SlicerDef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_text: Option<String>,
-    pub sheet_index: usize,
+    pub sheet_id: SheetId,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -101,7 +102,7 @@ impl From<&SavedSlicer> for SlicerDef {
             id: s.id,
             name: s.name.clone(),
             header_text: s.header_text.clone(),
-            sheet_index: s.sheet_index,
+            sheet_id: s.sheet_id,
             x: s.x,
             y: s.y,
             width: s.width,
@@ -164,7 +165,7 @@ impl From<&SlicerDef> for SavedSlicer {
             id: s.id,
             name: s.name.clone(),
             header_text: s.header_text.clone(),
-            sheet_index: s.sheet_index,
+            sheet_id: s.sheet_id,
             x: s.x,
             y: s.y,
             width: s.width,

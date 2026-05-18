@@ -372,6 +372,68 @@ impl DependencyGraph {
         self.precedents.clear();
         self.dependents.clear();
     }
+
+    /// Rename a vertex: atomically rekey all edges from `old` to `new`.
+    /// Used by IdRegistry::rename_cell to keep the dep graph consistent.
+    pub fn rename_vertex(&mut self, old: CellCoord, new: CellCoord) {
+        // Move precedents entry
+        if let Some(precs) = self.precedents.remove(&old) {
+            // Update dependents maps: each precedent's dependent set
+            for &prec in &precs {
+                if let Some(deps) = self.dependents.get_mut(&prec) {
+                    deps.remove(&old);
+                    deps.insert(new);
+                }
+            }
+            self.precedents.insert(new, precs);
+        }
+
+        // Move dependents entry
+        if let Some(deps) = self.dependents.remove(&old) {
+            // Update precedents maps: each dependent's precedent set
+            for &dep in &deps {
+                if let Some(precs) = self.precedents.get_mut(&dep) {
+                    precs.remove(&old);
+                    precs.insert(new);
+                }
+            }
+            self.dependents.insert(new, deps);
+        }
+    }
+
+    /// Merge two vertices: all edges to/from `absorbed` redirect to `survivor`.
+    /// Used by IdRegistry::merge_cells to consolidate identities.
+    pub fn merge_vertices(&mut self, absorbed: CellCoord, survivor: CellCoord) {
+        // Redirect precedents: anything `absorbed` depends on, `survivor` now depends on
+        if let Some(absorbed_precs) = self.precedents.remove(&absorbed) {
+            for &prec in &absorbed_precs {
+                if let Some(deps) = self.dependents.get_mut(&prec) {
+                    deps.remove(&absorbed);
+                    deps.insert(survivor);
+                }
+            }
+            // Merge into survivor's precedents
+            let survivor_precs = self.precedents.entry(survivor).or_default();
+            for prec in absorbed_precs {
+                survivor_precs.insert(prec);
+            }
+        }
+
+        // Redirect dependents: anything depending on `absorbed` now depends on `survivor`
+        if let Some(absorbed_deps) = self.dependents.remove(&absorbed) {
+            for &dep in &absorbed_deps {
+                if let Some(precs) = self.precedents.get_mut(&dep) {
+                    precs.remove(&absorbed);
+                    precs.insert(survivor);
+                }
+            }
+            // Merge into survivor's dependents
+            let survivor_deps = self.dependents.entry(survivor).or_default();
+            for dep in absorbed_deps {
+                survivor_deps.insert(dep);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

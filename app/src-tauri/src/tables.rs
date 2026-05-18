@@ -1045,11 +1045,11 @@ pub fn convert_to_range(
             .cells
             .iter()
             .filter_map(|(&(row, col), cell)| {
-                cell.formula.as_ref().and_then(|f| {
+                cell.formula_string().and_then(|f| {
                     let f_upper = f.to_uppercase();
                     // Check if formula mentions the table name or uses standalone @ refs
                     if f_upper.contains(&table_name_upper) || f_upper.contains("[@") {
-                        Some((row, col, f.clone()))
+                        Some((row, col, f))
                     } else {
                         None
                     }
@@ -1086,7 +1086,7 @@ pub fn convert_to_range(
             // Update the cell's formula (keep existing value/style)
             if let Some(cell) = sheet_grid.get_cell(row, col) {
                 let mut updated = cell.clone();
-                updated.formula = Some(new_formula.clone());
+                updated.ast = parser::parse(&new_formula).ok().map(Box::new);
                 sheet_grid.set_cell(row, col, updated.clone());
 
                 // Also update the primary grid if this is the active sheet
@@ -1541,7 +1541,7 @@ fn convert_cell_refs_to_table_refs(
     use parser::ast::TableSpecifier;
 
     match expr {
-        Expression::CellRef { sheet, col, row, col_absolute: _, row_absolute: _ } => {
+        Expression::CellRef { sheet, col, row, .. } => {
             // Only convert same-sheet references (no sheet prefix) on the same row
             if sheet.is_none() && *row == formula_row + 1 {
                 let col_idx = col_letters_to_index(col);
@@ -1552,6 +1552,7 @@ fn convert_cell_refs_to_table_refs(
                         return Expression::TableRef {
                             table_name: String::new(), // Empty = inferred from context
                             specifier: TableSpecifier::ThisRow(col_name.clone()),
+                            ref_site_id: Default::default(),
                         };
                     }
                 }
@@ -1571,10 +1572,11 @@ fn convert_cell_refs_to_table_refs(
                 operand: Box::new(convert_cell_refs_to_table_refs(operand, table, formula_row)),
             }
         }
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             Expression::FunctionCall {
                 func: func.clone(),
                 args: args.iter().map(|a| convert_cell_refs_to_table_refs(a, table, formula_row)).collect(),
+                ref_site_id: Default::default(),
             }
         }
         // Leave everything else unchanged (Literal, Range, TableRef, etc.)

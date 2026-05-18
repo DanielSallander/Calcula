@@ -17,6 +17,7 @@ use engine::cell::{Cell, CellValue, DictKey, RichTextRun};
 use engine::grid::Grid;
 use engine::style::{CellStyle, StyleRegistry};
 use engine::theme::ThemeDefinition;
+use identity::SheetId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -98,7 +99,7 @@ pub struct WorkbookProperties {
 #[serde(rename_all = "camelCase")]
 pub struct SavedChart {
     pub id: u32,
-    pub sheet_index: usize,
+    pub sheet_id: SheetId,
     pub spec_json: String,
 }
 
@@ -107,7 +108,7 @@ pub struct SavedChart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedSparkline {
-    pub sheet_index: usize,
+    pub sheet_id: SheetId,
     pub groups_json: String,
 }
 
@@ -129,8 +130,8 @@ pub struct SavedNamedRange {
     pub name: String,
     /// The formula this name refers to (e.g. "Sheet1!$A$1:$B$10")
     pub refers_to: String,
-    /// Sheet index for sheet-scoped names, None for workbook-scoped
-    pub sheet_index: Option<usize>,
+    /// Sheet ID for sheet-scoped names, None for workbook-scoped
+    pub sheet_id: Option<SheetId>,
 }
 
 /// A note/comment attached to a cell for persistence.
@@ -224,7 +225,7 @@ impl Workbook {
 
     pub fn from_grid(grid: &Grid, styles: &StyleRegistry, dimensions: &DimensionData) -> Self {
         Self {
-            sheets: vec![Sheet::from_grid("Sheet1".to_string(), grid, styles, dimensions)],
+            sheets: vec![Sheet::from_grid(SheetId::from_bytes(identity::generate_uuid_v7()), "Sheet1".to_string(), grid, styles, dimensions)],
             active_sheet: 0,
             tables: Vec::new(),
             slicers: Vec::new(),
@@ -257,6 +258,8 @@ impl Default for Workbook {
 /// Represents a single worksheet
 #[derive(Debug, Clone)]
 pub struct Sheet {
+    /// Stable identity for this sheet (UUID v7). Survives renames and reordering.
+    pub id: SheetId,
     pub name: String,
     pub cells: HashMap<(u32, u32), SavedCell>,
     pub column_widths: HashMap<u32, f64>,
@@ -289,6 +292,7 @@ pub struct Sheet {
 impl Sheet {
     pub fn new(name: String) -> Self {
         Self {
+            id: SheetId::from_bytes(identity::generate_uuid_v7()),
             name,
             cells: HashMap::new(),
             column_widths: HashMap::new(),
@@ -308,7 +312,13 @@ impl Sheet {
         }
     }
 
-    pub fn from_grid(name: String, grid: &Grid, styles: &StyleRegistry, dimensions: &DimensionData) -> Self {
+    pub fn new_with_id(id: SheetId, name: String) -> Self {
+        let mut s = Self::new(name);
+        s.id = id;
+        s
+    }
+
+    pub fn from_grid(id: SheetId, name: String, grid: &Grid, styles: &StyleRegistry, dimensions: &DimensionData) -> Self {
         let mut cells = HashMap::new();
 
         for ((row, col), cell) in grid.cells.iter() {
@@ -316,6 +326,7 @@ impl Sheet {
         }
 
         Self {
+            id,
             name,
             cells,
             column_widths: dimensions.column_widths.clone(),
@@ -383,19 +394,26 @@ impl SavedCell {
     pub fn from_cell(cell: &Cell) -> Self {
         Self {
             value: SavedCellValue::from_value(&cell.value),
-            formula: cell.formula.clone(),
+            formula: cell.formula_string(),
             style_index: cell.style_index,
             rich_text: cell.rich_text.clone(),
         }
     }
 
     pub fn to_cell(&self) -> Cell {
-        Cell {
-            value: self.value.to_value(),
-            formula: self.formula.clone(),
-            style_index: self.style_index,
-            rich_text: self.rich_text.clone(),
-            cached_ast: None,
+        if let Some(ref formula_str) = self.formula {
+            let mut cell = Cell::new_formula(formula_str.clone());
+            cell.value = self.value.to_value();
+            cell.style_index = self.style_index;
+            cell.rich_text = self.rich_text.clone();
+            cell
+        } else {
+            Cell {
+                ast: None,
+                value: self.value.to_value(),
+                style_index: self.style_index,
+                rich_text: self.rich_text.clone(),
+            }
         }
     }
 }
@@ -492,7 +510,7 @@ impl SavedCellValue {
 pub struct SavedTable {
     pub id: u64,
     pub name: String,
-    pub sheet_index: usize,
+    pub sheet_id: SheetId,
     pub start_row: u32,
     pub start_col: u32,
     pub end_row: u32,
@@ -583,7 +601,7 @@ pub struct SavedSlicer {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_text: Option<String>,
-    pub sheet_index: usize,
+    pub sheet_id: SheetId,
     pub x: f64,
     pub y: f64,
     pub width: f64,

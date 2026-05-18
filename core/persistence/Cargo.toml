@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 engine = { path = "../engine" }
+identity = { path = "../identity" }
 rust_xlsxwriter = "0.79"
 calamine = "0.26"
 quick-xml = "0.31"

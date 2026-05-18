@@ -277,13 +277,7 @@ mod tests {
     use engine::cell::Cell;
 
     fn make_cell(value: CellValue) -> Cell {
-        Cell {
-            value,
-            formula: None,
-            style_index: 0,
-            rich_text: None,
-            cached_ast: None,
-        }
+        Cell { ast: None, value, style_index: 0, rich_text: None }
     }
 
     #[test]

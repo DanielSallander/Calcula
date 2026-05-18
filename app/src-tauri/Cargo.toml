@@ -21,6 +21,7 @@ serde_json = "1"
 engine = { path = "../../core/engine" }
 parser = { path = "../../core/parser" }
 persistence = { path = "../../core/persistence" }
+identity = { path = "../../core/identity" }
 calcula-format = { path = "../../core/calcula-format" }
 pivot-engine = { path = "../../core/pivot-engine" }
 script-engine = { path = "../../core/script-engine" }

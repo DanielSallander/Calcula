@@ -19,6 +19,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
+use identity::SheetId;
 use persistence::{SavedChart, SavedNotebook, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -31,9 +32,10 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     let mut zip = zip::ZipWriter::new(file);
     let options = FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
 
-    // Build manifest
+    // Build manifest with sheet IDs
     let sheet_names: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
-    let mut manifest = Manifest::from_sheet_names(&sheet_names, workbook.active_sheet);
+    let sheet_ids: Vec<SheetId> = workbook.sheets.iter().map(|s| s.id).collect();
+    let mut manifest = Manifest::from_sheets(&sheet_names, &sheet_ids, workbook.active_sheet);
 
     // Track which features are present
     if !workbook.tables.is_empty() {
@@ -269,7 +271,13 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         });
         let (col_widths, row_heights) = layout.to_dimensions();
 
+        // Use stored sheet_id or mint a fresh one for old .cala files
+        let sheet_id = sheet_entry.sheet_id.unwrap_or_else(|| {
+            SheetId::from_bytes(identity::generate_uuid_v7())
+        });
+
         sheets.push(persistence::Sheet {
+            id: sheet_id,
             name: sheet_entry.name.clone(),
             cells,
             column_widths: col_widths,
@@ -575,6 +583,7 @@ mod tests {
         row_heights.insert(0, 25.0);
 
         let sheet = persistence::Sheet {
+            id: SheetId::from_bytes(identity::generate_uuid_v7()),
             name: "Sales Data".to_string(),
             cells,
             column_widths: col_widths,
@@ -590,6 +599,7 @@ mod tests {
             notes: Vec::new(),
             hyperlinks: Vec::new(),
             page_setup: None,
+            show_gridlines: true,
         };
 
         Workbook {
@@ -625,6 +635,9 @@ mod tests {
         assert_eq!(loaded.sheets[0].name, "Sales Data");
         assert_eq!(loaded.active_sheet, 0);
 
+        // Sheet ID should survive the roundtrip
+        assert_eq!(loaded.sheets[0].id, workbook.sheets[0].id);
+
         // Check cells
         let cells = &loaded.sheets[0].cells;
         assert!(cells.len() >= 4); // At least the non-empty cells
@@ -657,10 +670,11 @@ mod tests {
     #[test]
     fn test_roundtrip_with_tables() {
         let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
         workbook.tables.push(persistence::SavedTable {
             id: 1,
             name: "SalesTable".to_string(),
-            sheet_index: 0,
+            sheet_id,
             start_row: 0,
             start_col: 0,
             end_row: 2,
@@ -701,6 +715,7 @@ mod tests {
 
         assert_eq!(loaded.tables.len(), 1);
         assert_eq!(loaded.tables[0].name, "SalesTable");
+        assert_eq!(loaded.tables[0].sheet_id, sheet_id);
         assert_eq!(loaded.tables[0].columns.len(), 2);
         assert_eq!(loaded.tables[0].style_options.banded_rows, true);
     }

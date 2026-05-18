@@ -45,7 +45,7 @@ pub(crate) fn get_cell_internal_with_merge(
             symbol_before: a.symbol_before,
             value: a.value,
         });
-        let localized_formula = c.formula.as_ref().map(|f| localize_formula(f, locale));
+        let localized_formula = c.formula_string().map(|f| localize_formula(&f, locale));
         (result.text, result.color, localized_formula, c.style_index, acct)
     } else {
         // Empty merge master

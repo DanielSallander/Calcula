@@ -597,16 +597,16 @@ pub fn insert_rows(
         .collect();
     
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = &cell.formula {
-            let updated_formula = shift_formula_row_references(formula, row, count as i32);
-            if updated_formula != *formula {
+        if let Some(formula) = cell.formula_string() {
+            let updated_formula = shift_formula_row_references(&formula, row, count as i32);
+            if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.formula = Some(updated_formula);
+                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
             }
         }
     }
-    
+
     // Collect all cells that need to be moved (from row onwards)
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
     for (&(r, c), cell) in grid.cells.iter() {
@@ -759,16 +759,16 @@ pub fn insert_columns(
         .collect();
     
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = &cell.formula {
-            let updated_formula = shift_formula_col_references(formula, col, count as i32);
-            if updated_formula != *formula {
+        if let Some(formula) = cell.formula_string() {
+            let updated_formula = shift_formula_col_references(&formula, col, count as i32);
+            if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.formula = Some(updated_formula);
+                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
             }
         }
     }
-    
+
     // Collect all cells that need to be moved (from col onwards)
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
     for (&(r, c), cell) in grid.cells.iter() {
@@ -1394,16 +1394,16 @@ pub fn delete_rows(
         .collect();
     
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = &cell.formula {
-            let updated_formula = shift_formula_row_references(formula, row, -(count as i32));
-            if updated_formula != *formula {
+        if let Some(formula) = cell.formula_string() {
+            let updated_formula = shift_formula_row_references(&formula, row, -(count as i32));
+            if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.formula = Some(updated_formula);
+                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
             }
         }
     }
-    
+
     // Move remaining cells up
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
     for (&(r, c), cell) in grid.cells.iter() {
@@ -1607,16 +1607,16 @@ pub fn delete_columns(
         .collect();
     
     for ((r, c), cell) in &all_cells {
-        if let Some(formula) = &cell.formula {
-            let updated_formula = shift_formula_col_references(formula, col, -(count as i32));
-            if updated_formula != *formula {
+        if let Some(formula) = cell.formula_string() {
+            let updated_formula = shift_formula_col_references(&formula, col, -(count as i32));
+            if updated_formula != formula {
                 let mut updated_cell = cell.clone();
-                updated_cell.formula = Some(updated_formula);
+                updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
                 grid.cells.insert((*r, *c), updated_cell);
             }
         }
     }
-    
+
     // Move remaining cells left
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
     for (&(r, c), cell) in grid.cells.iter() {
@@ -1898,9 +1898,9 @@ pub fn relocate_cell_references(
             }
 
             if let Some(cell) = grid.get_cell(r, c) {
-                if let Some(ref formula) = cell.formula {
+                if let Some(formula) = cell.formula_string() {
                     let new_formula = relocate_references_in_formula(
-                        formula,
+                        &formula,
                         src_min_row,
                         src_min_col,
                         src_max_row,
@@ -1938,11 +1938,10 @@ pub fn relocate_cell_references(
 
         // Build new cell
         let mut new_cell = Cell {
-            formula: Some(new_formula.clone()),
+            ast: parser::parse(new_formula).ok().map(Box::new),
             value: cell_value,
             style_index: existing_style_index,
             rich_text: prev.as_ref().and_then(|c| c.rich_text.clone()),
-            cached_ast: None,
         };
 
         // Parse the formula to extract references for dependency tracking

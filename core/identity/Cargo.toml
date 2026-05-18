@@ -1,0 +1,11 @@
+[package]
+name = "identity"
+version = "0.1.0"
+edition = "2021"
+description = "Stable identity system for Calcula — UUID v7 types, registry, and operations"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"

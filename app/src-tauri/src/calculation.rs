@@ -346,7 +346,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
         .cells
         .iter()
         .filter_map(|(&(row, col), cell)| {
-            cell.formula.as_ref().map(|f| (row, col, f.clone()))
+            cell.formula_string().map(|f| (row, col, f))
         })
         .collect();
 
@@ -387,7 +387,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 col: *col,
                 display,
                 display_color: None,
-                formula: updated.formula,
+                formula: updated.formula_string(),
                 style_index: updated.style_index,
                 row_span: 1,
                 col_span: 1,
@@ -418,7 +418,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         col: *col,
                         display,
                         display_color: None,
-                        formula: updated.formula,
+                        formula: updated.formula_string(),
                         style_index: updated.style_index,
                         row_span: 1,
                         col_span: 1,
@@ -483,7 +483,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         col: *col,
                         display,
                         display_color: None,
-                        formula: cell.formula.clone(),
+                        formula: cell.formula_string(),
                         style_index: cell.style_index,
                         row_span: 1,
                         col_span: 1,

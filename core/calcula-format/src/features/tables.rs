@@ -2,6 +2,7 @@
 //! Table definitions serialization.
 //! Each table is stored as tables/table_{id}.json.
 
+use identity::SheetId;
 use persistence::{SavedTable, SavedTableColumn, SavedTableStyleOptions};
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub struct TableDef {
     pub id: u64,
     pub name: String,
-    pub sheet_index: usize,
+    pub sheet_id: SheetId,
     pub start_row: u32,
     pub start_col: u32,
     pub end_row: u32,
@@ -50,7 +51,7 @@ impl From<&SavedTable> for TableDef {
         TableDef {
             id: t.id,
             name: t.name.clone(),
-            sheet_index: t.sheet_index,
+            sheet_id: t.sheet_id,
             start_row: t.start_row,
             start_col: t.start_col,
             end_row: t.end_row,
@@ -81,7 +82,7 @@ impl From<&TableDef> for SavedTable {
         SavedTable {
             id: t.id,
             name: t.name.clone(),
-            sheet_index: t.sheet_index,
+            sheet_id: t.sheet_id,
             start_row: t.start_row,
             start_col: t.start_col,
             end_row: t.end_row,

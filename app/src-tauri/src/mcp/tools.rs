@@ -52,7 +52,7 @@ pub fn read_cell_range(
                 let style = styles.get(cell.style_index);
                 let display = format_cell_value(&cell.value, style, &locale);
                 vals.push(display);
-                if let Some(ref f) = cell.formula {
+                if let Some(f) = cell.formula_string() {
                     formulas.push(format!("{}{}:{}", col_letter(col), row + 1, f));
                 }
             } else {
@@ -252,10 +252,9 @@ pub fn apply_cell_formatting(
             } else {
                 let cell = engine::Cell {
                     value: engine::CellValue::Empty,
-                    formula: None,
+                    ast: None,
                     style_index: new_index,
                     rich_text: None,
-                    cached_ast: None,
                 };
                 grid.set_cell(row, col, cell.clone());
                 if active_sheet < grids.len() {

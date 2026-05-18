@@ -198,9 +198,9 @@ impl Grid {
 
         // Optionally check formula text
         if search_formulas {
-            if let Some(ref formula) = cell.formula {
+            if let Some(formula) = cell.formula_string() {
                 let formula_normalized = if case_sensitive {
-                    formula.clone()
+                    formula
                 } else {
                     formula.to_lowercase()
                 };

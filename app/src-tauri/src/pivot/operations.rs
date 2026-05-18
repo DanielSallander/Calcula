@@ -570,19 +570,17 @@ pub(crate) fn write_pivot_to_grid(
             // Write to both grids using unchecked insert (bounds set once after loop)
             if let Some(ag) = active_grid.as_deref_mut() {
                 ag.set_cell_unchecked(grid_row, grid_col, Cell {
-                    formula: None,
+                    ast: None,
                     value: cell_value.clone(),
                     style_index: style_idx,
                     rich_text: None,
-                    cached_ast: None,
                 });
             }
             grid.set_cell_unchecked(grid_row, grid_col, Cell {
-                formula: None,
+                ast: None,
                 value: cell_value,
                 style_index: style_idx,
                 rich_text: None,
-                cached_ast: None,
             });
 
             // Collect merge regions for spanned cells
@@ -1097,7 +1095,7 @@ pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotSt
         .cells
         .iter()
         .filter_map(|(&(row, col), cell)| {
-            cell.formula.as_ref().map(|f| (row, col, f.clone()))
+            cell.formula_string().map(|f| (row, col, f))
         })
         .collect();
 

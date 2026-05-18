@@ -230,7 +230,7 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
         Expression::ImplicitIntersection { .. } => None,
 
         // Function calls: special handling for IF short-circuit
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             if matches!(func, BuiltinFunction::If) && args.len() >= 2 {
                 // IF: evaluate condition first (skip range-like conditions)
                 if !matches!(&args[0], Expression::Range { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. }) {
@@ -382,7 +382,7 @@ pub(crate) fn build_display_recursive(
             output.push_str(&row.to_string());
         }
 
-        Expression::Range { sheet, start, end } => {
+        Expression::Range { sheet, start, end, .. } => {
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') {
                     output.push_str(&format!("'{}'!", sheet_name));
@@ -454,7 +454,7 @@ pub(crate) fn build_display_recursive(
             build_display_recursive(operand, target_path, &child_path, output, underline);
         }
 
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             output.push_str(&builtin_fn_name(func));
             output.push('(');
             for (i, arg) in args.iter().enumerate() {
@@ -468,14 +468,14 @@ pub(crate) fn build_display_recursive(
             output.push(')');
         }
 
-        Expression::TableRef { table_name, specifier } => {
+        Expression::TableRef { table_name, specifier, .. } => {
             output.push_str(table_name);
             output.push('[');
             output.push_str(&table_specifier_to_display(specifier));
             output.push(']');
         }
 
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             // Format sheet range prefix
             if start_sheet.contains(' ') || end_sheet.contains(' ') {
                 output.push_str(&format!("'{}:{}'!", start_sheet, end_sheet));
@@ -528,11 +528,11 @@ pub(crate) fn build_display_recursive(
             output.push('}');
         }
 
-        Expression::NamedRef { name } => {
+        Expression::NamedRef { name, .. } => {
             output.push_str(name);
         }
 
-        Expression::SpillRef { cell } => {
+        Expression::SpillRef { cell, .. } => {
             build_display_recursive(cell, target_path, current_path, output, underline);
             output.push('#');
         }
@@ -888,7 +888,7 @@ fn cell_has_formula(
         return false;
     }
     if let Some(cell) = grids[sheet_index].get_cell(row, col) {
-        cell.formula.is_some()
+        cell.has_formula()
     } else {
         false
     }
@@ -1037,8 +1037,8 @@ pub fn eval_formula_init(
 
     // Get the cell's formula
     let formula = match grids[active_sheet].get_cell(row, col) {
-        Some(cell) => match &cell.formula {
-            Some(f) => f.clone(),
+        Some(cell) => match cell.formula_string() {
+            Some(f) => f,
             None => return error_state(&session_id, "Cell does not contain a formula."),
         },
         None => return error_state(&session_id, "Cell is empty."),
@@ -1186,8 +1186,8 @@ pub fn eval_formula_step_in(
 
     // Get the target cell's formula
     let target_formula = match grids[target_sheet].get_cell(row_0, col_0) {
-        Some(cell) => match &cell.formula {
-            Some(f) => f.clone(),
+        Some(cell) => match cell.formula_string() {
+            Some(f) => f,
             None => return error_state(&session_id, "Target cell has no formula."),
         },
         None => return error_state(&session_id, "Target cell is empty."),

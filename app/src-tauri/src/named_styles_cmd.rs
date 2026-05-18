@@ -114,10 +114,9 @@ pub fn apply_named_style(
             } else {
                 Cell {
                     value: CellValue::Empty,
-                    formula: None,
+                    ast: None,
                     style_index: 0,
                     rich_text: None,
-                    cached_ast: None,
                 }
             };
 
@@ -154,7 +153,7 @@ pub fn apply_named_style(
                 col,
                 display: fmt_result.text,
                 display_color: fmt_result.color,
-                formula: updated_cell.formula,
+                formula: updated_cell.formula_string(),
                 style_index,
                 row_span,
                 col_span,

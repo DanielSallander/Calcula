@@ -146,8 +146,8 @@ pub fn goal_seek(
 
     // 1. Target cell must contain a formula
     let target_formula = match grid.get_cell(params.target_row, params.target_col) {
-        Some(cell) => match &cell.formula {
-            Some(f) => f.clone(),
+        Some(cell) => match cell.formula_string() {
+            Some(f) => f,
             None => return error_result("Cell must contain a formula"),
         },
         None => return error_result("Cell must contain a formula"),
@@ -155,7 +155,7 @@ pub fn goal_seek(
 
     // 2. Variable cell must NOT contain a formula
     let variable_cell = grid.get_cell(params.variable_row, params.variable_col);
-    if variable_cell.map_or(false, |c| c.formula.is_some()) {
+    if variable_cell.map_or(false, |c| c.has_formula()) {
         return error_result("Changing cell must not contain a formula");
     }
 
@@ -389,12 +389,12 @@ fn finalize_result(
 
     for &(r, c) in &recalc_order {
         if let Some(cell) = grids[active_sheet].get_cell(r, c).cloned() {
-            if let Some(formula) = &cell.formula {
+            if let Some(formula) = cell.formula_string() {
                 let new_value = evaluate_formula_multi_sheet(
                     grids,
                     sheet_names,
                     active_sheet,
-                    formula,
+                    &formula,
                 );
                 let mut updated = cell;
                 updated.value = new_value;
@@ -424,7 +424,7 @@ fn finalize_result(
             col: c,
             display,
             display_color: None,
-            formula: cell.formula.clone(),
+            formula: cell.formula_string(),
             style_index: cell.style_index,
             row_span,
             col_span,

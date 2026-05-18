@@ -42,7 +42,7 @@ fn build_cell_data(
         col: c,
         display,
         display_color: None,
-        formula: cell.formula.clone(),
+        formula: cell.formula_string(),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -150,7 +150,7 @@ pub fn data_table_one_var(
         for c in (params.start_col + 1)..=params.end_col {
             let formula = grids[sheet_idx]
                 .get_cell(params.start_row, c)
-                .and_then(|cell| cell.formula.clone());
+                .and_then(|cell| cell.formula_string());
             formulas.push(formula);
         }
 
@@ -218,7 +218,7 @@ pub fn data_table_one_var(
         for r in (params.start_row + 1)..=params.end_row {
             let formula = grids[sheet_idx]
                 .get_cell(r, params.start_col)
-                .and_then(|cell| cell.formula.clone());
+                .and_then(|cell| cell.formula_string());
             formulas.push(formula);
         }
 
@@ -336,7 +336,7 @@ pub fn data_table_two_var(
     // The formula is in the top-left cell
     let formula = match grids[sheet_idx]
         .get_cell(params.start_row, params.start_col)
-        .and_then(|cell| cell.formula.clone())
+        .and_then(|cell| cell.formula_string())
     {
         Some(f) => f,
         None => {
@@ -504,9 +504,9 @@ fn re_evaluate_formulas(
         for r in 0..=max_row {
             for c in 0..=max_col {
                 if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-                    if let Some(formula) = &cell.formula {
+                    if let Some(formula) = cell.formula_string() {
                         let new_value = evaluate_formula_multi_sheet(
-                            grids, sheet_names, sheet_idx, formula,
+                            grids, sheet_names, sheet_idx, &formula,
                         );
                         let mut updated = cell;
                         updated.value = new_value;

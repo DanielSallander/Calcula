@@ -104,7 +104,7 @@ fn test_parse_cell_input() {
 
     // Formula (value is Empty until evaluated)
     let cell = parse_cell_input("=A1+B1", &locale);
-    assert_eq!(cell.formula, Some("=A1+B1".to_string()));
+    assert_eq!(cell.formula_string(), Some("=A1+B1".to_string()));
 
     // Percentage
     let cell = parse_cell_input("50%", &locale);
@@ -407,7 +407,7 @@ fn run_go_to_special(
             for row in sr..=er {
                 for col in sc..=ec {
                     let is_blank = grid.get_cell(row, col)
-                        .map(|cell| cell.formula.is_none() && matches!(cell.value, CellValue::Empty))
+                        .map(|cell| !cell.has_formula() && matches!(cell.value, CellValue::Empty))
                         .unwrap_or(true);
                     if is_blank {
                         cells.push((row, col));
@@ -419,7 +419,7 @@ fn run_go_to_special(
             for row in sr..=er {
                 for col in sc..=ec {
                     let has_formula = grid.get_cell(row, col)
-                        .map(|cell| cell.formula.is_some())
+                        .map(|cell| cell.has_formula())
                         .unwrap_or(false);
                     if has_formula {
                         cells.push((row, col));
@@ -431,7 +431,7 @@ fn run_go_to_special(
             for row in sr..=er {
                 for col in sc..=ec {
                     let is_constant = grid.get_cell(row, col)
-                        .map(|cell| cell.formula.is_none() && !matches!(cell.value, CellValue::Empty))
+                        .map(|cell| !cell.has_formula() && !matches!(cell.value, CellValue::Empty))
                         .unwrap_or(false);
                     if is_constant {
                         cells.push((row, col));
@@ -528,7 +528,7 @@ fn test_go_to_special_formulas() {
         let mut grid = state.grid.lock().unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0)); // constant
         let mut formula_cell = Cell::new_number(30.0);
-        formula_cell.formula = Some("=A1+20".to_string());
+        formula_cell.ast = parser::parse("=A1+20").ok().map(Box::new);
         grid.set_cell(0, 1, formula_cell); // formula
         grid.set_cell(1, 0, Cell::new_text("text".to_string())); // constant
     }
@@ -545,7 +545,7 @@ fn test_go_to_special_constants() {
         let mut grid = state.grid.lock().unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0)); // constant
         let mut formula_cell = Cell::new_number(30.0);
-        formula_cell.formula = Some("=10+20".to_string());
+        formula_cell.ast = parser::parse("=10+20").ok().map(Box::new);
         grid.set_cell(0, 1, formula_cell); // formula (not a constant)
         grid.set_cell(1, 0, Cell::new_text("hello".to_string())); // constant
         // (1, 1) is empty

@@ -310,11 +310,10 @@ mod tests {
 
     fn make_cell(val: f64) -> Cell {
         Cell {
-            formula: None,
+            ast: None,
             value: CellValue::Number(val),
             style_index: 0,
             rich_text: None,
-            cached_ast: None,
         }
     }
 

@@ -27,6 +27,7 @@
 use crate::ast::{BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
 use crate::lexer::Lexer;
 use crate::token::Token;
+use identity::RefSiteId;
 
 /// Parser errors with descriptive messages.
 #[derive(Debug, PartialEq, Clone)]
@@ -303,6 +304,7 @@ impl<'a> Parser<'a> {
                             result = Expression::FunctionCall {
                                 func: BuiltinFunction::Custom("__INVOKE__".to_string()),
                                 args: call_args,
+                                ref_site_id: RefSiteId::ZERO,
                             };
                         }
                         _ => break,
@@ -315,6 +317,7 @@ impl<'a> Parser<'a> {
                             self.advance(); // consume '#'
                             result = Expression::SpillRef {
                                 cell: Box::new(result),
+                                ref_site_id: RefSiteId::ZERO,
                             };
                         }
                         _ => break,
@@ -374,6 +377,7 @@ impl<'a> Parser<'a> {
                         start_sheet,
                         end_sheet,
                         reference: Box::new(inner),
+                        ref_site_id: RefSiteId::ZERO,
                     });
                 }
 
@@ -419,6 +423,7 @@ impl<'a> Parser<'a> {
                                     start_sheet: name.to_uppercase(),
                                     end_sheet: end_name.to_uppercase(),
                                     reference: Box::new(inner),
+                                    ref_site_id: RefSiteId::ZERO,
                                 });
                             }
                             return Err(ParseError::new(format!(
@@ -429,7 +434,7 @@ impl<'a> Parser<'a> {
                             "Unexpected ':' after '{}'", name
                         )));
                     }
-                    return Ok(Expression::NamedRef { name });
+                    return Ok(Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO });
                 }
 
                 // From here, the identifier has a valid column/cell pattern.
@@ -464,6 +469,7 @@ impl<'a> Parser<'a> {
                             row,
                             col_absolute: false,
                             row_absolute: true,
+                            ref_site_id: RefSiteId::ZERO,
                         });
                     }
                     return Err(ParseError::new(format!(
@@ -476,7 +482,7 @@ impl<'a> Parser<'a> {
                 // it cannot be a cell reference. Treat as a named reference.
                 // Examples: =REVENUE + 1, =A (where A is a defined name)
                 if is_col_only {
-                    return Ok(Expression::NamedRef { name });
+                    return Ok(Expression::NamedRef { name, ref_site_id: RefSiteId::ZERO });
                 }
 
                 // Otherwise it's a simple cell reference (letters + digits like A1, AA100)
@@ -608,6 +614,7 @@ impl<'a> Parser<'a> {
                                 row,
                                 col_absolute: true,
                                 row_absolute: true,
+                                ref_site_id: RefSiteId::ZERO,
                             });
                         } else {
                             return Err(ParseError::new("Expected row number after $"));
@@ -696,6 +703,7 @@ impl<'a> Parser<'a> {
                                 row,
                                 col_absolute: false,
                                 row_absolute: true,
+                                ref_site_id: RefSiteId::ZERO,
                             });
                         }
                         return Err(ParseError::new(format!(
@@ -767,6 +775,7 @@ impl<'a> Parser<'a> {
                                 row,
                                 col_absolute: false,
                                 row_absolute: true,
+                                ref_site_id: RefSiteId::ZERO,
                             });
                         }
                         return Err(ParseError::new(format!(
@@ -794,12 +803,13 @@ impl<'a> Parser<'a> {
         row_absolute: bool,
     ) -> ParseResult<Expression> {
         let (col, row) = self.split_cell_reference(&identifier)?;
-        Ok(Expression::CellRef { 
-            sheet, 
-            col, 
+        Ok(Expression::CellRef {
+            sheet,
+            col,
             row,
             col_absolute,
             row_absolute,
+            ref_site_id: RefSiteId::ZERO,
         })
     }
 
@@ -855,6 +865,7 @@ impl<'a> Parser<'a> {
                     start_sheet: start_identifier.to_uppercase(),
                     end_sheet: end_identifier.to_uppercase(),
                     reference: Box::new(inner),
+                    ref_site_id: RefSiteId::ZERO,
                 });
             }
 
@@ -865,6 +876,7 @@ impl<'a> Parser<'a> {
                 end_col: end_identifier.to_uppercase(),
                 start_absolute: start_col_absolute,
                 end_absolute: end_col_absolute,
+                ref_site_id: RefSiteId::ZERO,
             })
         } else {
             // Cell range like A1:B10 or D2:D$6
@@ -903,6 +915,7 @@ impl<'a> Parser<'a> {
                     row: start_row,
                     col_absolute: start_col_absolute,
                     row_absolute: false,
+                    ref_site_id: RefSiteId::ZERO,
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
@@ -910,7 +923,9 @@ impl<'a> Parser<'a> {
                     row: end_row,
                     col_absolute: end_col_absolute,
                     row_absolute: end_row_absolute,
+                    ref_site_id: RefSiteId::ZERO,
                 }),
+                ref_site_id: RefSiteId::ZERO,
             })
         }
     }
@@ -974,6 +989,7 @@ impl<'a> Parser<'a> {
                 row: start_row,
                 col_absolute: start_col_absolute,
                 row_absolute: start_row_absolute,
+                ref_site_id: RefSiteId::ZERO,
             }),
             end: Box::new(Expression::CellRef {
                 sheet: None,
@@ -981,7 +997,9 @@ impl<'a> Parser<'a> {
                 row: end_row,
                 col_absolute: end_col_absolute,
                 row_absolute: end_row_absolute,
+                ref_site_id: RefSiteId::ZERO,
             }),
+            ref_site_id: RefSiteId::ZERO,
         })
     }
 
@@ -1023,6 +1041,7 @@ impl<'a> Parser<'a> {
             end_col: end_col.to_uppercase(),
             start_absolute,
             end_absolute,
+            ref_site_id: RefSiteId::ZERO,
         })
     }
 
@@ -1070,6 +1089,7 @@ impl<'a> Parser<'a> {
             end_row,
             start_absolute,
             end_absolute,
+            ref_site_id: RefSiteId::ZERO,
         })
     }
 
@@ -1087,7 +1107,7 @@ impl<'a> Parser<'a> {
         // Handle empty argument list
         if self.current_token == Token::RParen {
             self.advance();
-            return Ok(Expression::FunctionCall { func, args });
+            return Ok(Expression::FunctionCall { func, args, ref_site_id: RefSiteId::ZERO });
         }
 
         // Parse first argument
@@ -1102,7 +1122,7 @@ impl<'a> Parser<'a> {
         // Expect closing ')'
         self.expect(Token::RParen)?;
 
-        Ok(Expression::FunctionCall { func, args })
+        Ok(Expression::FunctionCall { func, args, ref_site_id: RefSiteId::ZERO })
     }
 
     // ========================================================================
@@ -1134,6 +1154,7 @@ impl<'a> Parser<'a> {
         Ok(Expression::TableRef {
             table_name,
             specifier,
+            ref_site_id: RefSiteId::ZERO,
         })
     }
 

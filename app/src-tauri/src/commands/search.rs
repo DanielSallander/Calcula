@@ -100,7 +100,7 @@ pub fn replace_all(
         
         if let Some(cell) = grid.get_cell(row, col).cloned() {
             // Only replace in text values, not formulas
-            if cell.formula.is_some() {
+            if cell.has_formula() {
                 continue; // Skip formula cells for safety
             }
 
@@ -192,7 +192,7 @@ pub fn replace_all(
                     col,
                     display,
                     display_color: None,
-                    formula: new_cell.formula,
+                    formula: new_cell.formula_string(),
                     style_index: new_cell.style_index,
                     row_span,
                     col_span,
@@ -258,7 +258,7 @@ pub fn replace_single(
     
     if let Some(cell) = previous_cell.clone() {
         // Skip formula cells
-        if cell.formula.is_some() {
+        if cell.has_formula() {
             return Ok(None);
         }
 
@@ -331,7 +331,7 @@ pub fn replace_single(
                 col,
                 display,
                 display_color: None,
-                formula: new_cell.formula,
+                formula: new_cell.formula_string(),
                 style_index: new_cell.style_index,
                 row_span,
                 col_span,

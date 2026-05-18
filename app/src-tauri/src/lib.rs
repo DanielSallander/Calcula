@@ -15,24 +15,24 @@ use engine::{
 };
 use parser::ast::TableSpecifier;
 
-// Legacy aliases kept for backward compatibility with existing code in this file.
-// These can be removed incrementally as code is updated.
+// Legacy aliases — these are all identical types since engine re-exports parser's AST.
+// Retained temporarily to avoid mass-renaming across the file.
+// TODO(phase1): Remove these aliases; use Expression/BuiltinFunction/etc. directly.
+// Legacy aliases — these are all identical types since engine re-exports parser's AST.
+// All point to the same type: e.g., ParserExpr == EngineExpr == Expression.
+// Retained to avoid mass-renaming across this large file.
 type EngineExpr = Expression;
 type ParserExpr = Expression;
 type EngineBuiltinFn = BuiltinFunction;
 type ParserBuiltinFn = BuiltinFunction;
-type EngineBinaryOp = BinaryOperator;
-type ParserBinaryOp = BinaryOperator;
-type EngineUnaryOp = UnaryOperator;
-type ParserUnaryOp = UnaryOperator;
-type EngineValue = Value;
-type ParserValue = Value;
 type ParserTableSpecifier = TableSpecifier;
+type ParserValue = Value;
 use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use persistence::{FileState, UserFilesState};
 use engine::UndoStack;
+pub use identity;
 
 pub mod persistence;
 pub mod api_types;
@@ -54,7 +54,7 @@ pub mod autofilter;
 pub mod hyperlinks;
 pub mod protection;
 pub mod grouping;
-pub mod linked_sheets;
+// pub mod linked_sheets; // Removed: replaced by .calp distribution system (Phase 2+)
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
@@ -281,8 +281,7 @@ pub struct AppState {
     pub theme: Mutex<engine::ThemeDefinition>,
     /// Scenario Manager: per-sheet list of scenarios
     pub scenarios: Mutex<HashMap<usize, Vec<api_types::Scenario>>>,
-    /// Linked sheets: tracks which sheets are linked to published sources
-    pub linked_sheets: Mutex<Vec<calcula_format::publish::linked::LinkedSheetInfo>>,
+    // linked_sheets removed: replaced by .calp distribution system (Phase 2+)
     /// Locale/regional settings (decimal separator, list separator, date format, etc.)
     pub locale: Mutex<engine::LocaleSettings>,
     /// Auto-recover enabled (background save to prevent data loss)
@@ -307,6 +306,8 @@ pub struct AppState {
     pub reference_style: Mutex<String>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
+    /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
+    pub sheet_ids: Mutex<Vec<identity::SheetId>>,
 }
 
 impl AppState {
@@ -395,7 +396,7 @@ pub fn create_app_state() -> AppState {
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
         theme: Mutex::new(engine::ThemeDefinition::default()),
         scenarios: Mutex::new(HashMap::new()),
-        linked_sheets: Mutex::new(Vec::new()),
+        // linked_sheets removed
         locale: Mutex::new({
             let system_locale = sys_locale::get_locale()
                 .unwrap_or_else(|| "en-US".to_string());
@@ -424,6 +425,7 @@ pub fn create_app_state() -> AppState {
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: Mutex::new(Vec::new()),
+        sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
     };
 
     // Populate built-in named styles
@@ -530,166 +532,105 @@ pub fn format_number_simple(n: f64) -> String {
 }
 
 // ============================================================================
-// EXPRESSION CONVERSION (Parser -> Engine)
+// AST POST-PROCESSING
 // ============================================================================
 
-// Since parser and engine now share the same AST types, conversion is just cloning.
+/// Expand wildcard '*' sheet references to Sheet3DRef nodes.
+/// The wildcard sheet is a Calcula-specific feature where '*' means "all sheets."
+/// This is applied after parsing, before evaluation.
+pub fn expand_wildcard_sheets(expr: &mut engine::Expression) {
+    // Helper: check if a sheet field contains the wildcard
+    fn is_wildcard(sheet: &Option<String>) -> bool {
+        sheet.as_deref() == Some("*")
+    }
 
-fn convert_value(v: &ParserValue) -> EngineValue { v.clone() }
-fn convert_binary_op(op: &ParserBinaryOp) -> EngineBinaryOp { *op }
-fn convert_unary_op(op: &ParserUnaryOp) -> EngineUnaryOp { *op }
-
-/// Convert a parser BuiltinFunction to an engine BuiltinFunction.
-/// Since engine now re-exports the parser's type, this is just a clone.
-/// New functions added to the parser enum are automatically available.
-fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
-    func.clone()
+    // We need to take ownership to restructure, so use a replace strategy.
+    // Only descend into children for non-wildcard nodes.
+    match expr {
+        engine::Expression::CellRef { sheet, .. }
+        | engine::Expression::Range { sheet, .. }
+        | engine::Expression::ColumnRef { sheet, .. }
+        | engine::Expression::RowRef { sheet, .. } => {
+            if is_wildcard(sheet) {
+                // Take the node out and wrap it in Sheet3DRef
+                let mut inner = engine::Expression::Literal(engine::Value::Boolean(false)); // placeholder
+                std::mem::swap(&mut inner, expr);
+                // Clear the sheet from the inner node
+                match &mut inner {
+                    engine::Expression::CellRef { sheet, .. }
+                    | engine::Expression::Range { sheet, .. }
+                    | engine::Expression::ColumnRef { sheet, .. }
+                    | engine::Expression::RowRef { sheet, .. } => {
+                        *sheet = None;
+                    }
+                    _ => {}
+                }
+                // Recursively process inner children
+                expand_wildcard_sheets(&mut inner);
+                *expr = engine::Expression::Sheet3DRef {
+                    start_sheet: "*".to_string(),
+                    end_sheet: "*".to_string(),
+                    reference: Box::new(inner),
+                    ref_site_id: Default::default(),
+                };
+            } else {
+                // Recurse into Range children
+                if let engine::Expression::Range { start, end, .. } = expr {
+                    expand_wildcard_sheets(start);
+                    expand_wildcard_sheets(end);
+                }
+            }
+        }
+        engine::Expression::BinaryOp { left, right, .. } => {
+            expand_wildcard_sheets(left);
+            expand_wildcard_sheets(right);
+        }
+        engine::Expression::UnaryOp { operand, .. } => {
+            expand_wildcard_sheets(operand);
+        }
+        engine::Expression::FunctionCall { args, .. } => {
+            for arg in args.iter_mut() {
+                expand_wildcard_sheets(arg);
+            }
+        }
+        engine::Expression::Sheet3DRef { reference, .. } => {
+            expand_wildcard_sheets(reference);
+        }
+        engine::Expression::IndexAccess { target, index } => {
+            expand_wildcard_sheets(target);
+            expand_wildcard_sheets(index);
+        }
+        engine::Expression::ListLiteral { elements } => {
+            for e in elements.iter_mut() {
+                expand_wildcard_sheets(e);
+            }
+        }
+        engine::Expression::DictLiteral { entries } => {
+            for (k, v) in entries.iter_mut() {
+                expand_wildcard_sheets(k);
+                expand_wildcard_sheets(v);
+            }
+        }
+        engine::Expression::SpillRef { cell, .. } => {
+            expand_wildcard_sheets(cell);
+        }
+        engine::Expression::ImplicitIntersection { operand } => {
+            expand_wildcard_sheets(operand);
+        }
+        // Leaf nodes — nothing to expand
+        engine::Expression::Literal(_)
+        | engine::Expression::NamedRef { .. }
+        | engine::Expression::TableRef { .. } => {}
+    }
 }
 
-pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
-    match expr {
-        ParserExpr::Literal(v) => EngineExpr::Literal(convert_value(v)),
-        ParserExpr::CellRef { sheet, col, row, .. } => {
-            // Wildcard '*' sheet means all sheets — convert to Sheet3DRef
-            if sheet.as_deref() == Some("*") {
-                return EngineExpr::Sheet3DRef {
-                    start_sheet: "*".to_string(),
-                    end_sheet: "*".to_string(),
-                    reference: Box::new(EngineExpr::CellRef {
-                        sheet: None,
-                        col: col.clone(),
-                        row: *row,
-                        col_absolute: false,
-                        row_absolute: false,
-                    }),
-                };
-            }
-            EngineExpr::CellRef {
-                sheet: sheet.clone(),
-                col: col.clone(),
-                row: *row,
-                col_absolute: false,
-                row_absolute: false,
-            }
-        }
-        ParserExpr::Range { sheet, start, end } => {
-            // Wildcard '*' sheet means all sheets — convert to Sheet3DRef
-            if sheet.as_deref() == Some("*") {
-                return EngineExpr::Sheet3DRef {
-                    start_sheet: "*".to_string(),
-                    end_sheet: "*".to_string(),
-                    reference: Box::new(EngineExpr::Range {
-                        sheet: None,
-                        start: Box::new(convert_expr(start)),
-                        end: Box::new(convert_expr(end)),
-                    }),
-                };
-            }
-            EngineExpr::Range {
-                sheet: sheet.clone(),
-                start: Box::new(convert_expr(start)),
-                end: Box::new(convert_expr(end)),
-            }
-        }
-        ParserExpr::ColumnRef { sheet, start_col, end_col, .. } => {
-            if sheet.as_deref() == Some("*") {
-                return EngineExpr::Sheet3DRef {
-                    start_sheet: "*".to_string(),
-                    end_sheet: "*".to_string(),
-                    reference: Box::new(EngineExpr::ColumnRef {
-                        sheet: None,
-                        start_col: start_col.clone(),
-                        end_col: end_col.clone(),
-                        start_absolute: false,
-                        end_absolute: false,
-                    }),
-                };
-            }
-            EngineExpr::ColumnRef {
-                sheet: sheet.clone(),
-                start_col: start_col.clone(),
-                end_col: end_col.clone(),
-                start_absolute: false,
-                end_absolute: false,
-            }
-        }
-        ParserExpr::RowRef { sheet, start_row, end_row, .. } => {
-            if sheet.as_deref() == Some("*") {
-                return EngineExpr::Sheet3DRef {
-                    start_sheet: "*".to_string(),
-                    end_sheet: "*".to_string(),
-                    reference: Box::new(EngineExpr::RowRef {
-                        sheet: None,
-                        start_row: *start_row,
-                        end_row: *end_row,
-                        start_absolute: false,
-                        end_absolute: false,
-                    }),
-                };
-            }
-            EngineExpr::RowRef {
-                sheet: sheet.clone(),
-                start_row: *start_row,
-                end_row: *end_row,
-                start_absolute: false,
-                end_absolute: false,
-            }
-        }
-        ParserExpr::BinaryOp { left, op, right } => EngineExpr::BinaryOp {
-            left: Box::new(convert_expr(left)),
-            op: convert_binary_op(op),
-            right: Box::new(convert_expr(right)),
-        },
-        ParserExpr::UnaryOp { op, operand } => EngineExpr::UnaryOp {
-            op: convert_unary_op(op),
-            operand: Box::new(convert_expr(operand)),
-        },
-        ParserExpr::FunctionCall { func, args } => EngineExpr::FunctionCall {
-            func: convert_builtin_function(func),
-            args: args.iter().map(convert_expr).collect(),
-        },
-        // NamedRef nodes may survive resolution when used as LAMBDA/LET parameter
-        // names or references to those parameters in the body. The evaluator will
-        // check the current scope for these names; unresolved ones produce #NAME?.
-        ParserExpr::NamedRef { name } => EngineExpr::NamedRef {
-            name: name.clone(),
-        },
-        // 3D cross-sheet reference: Sheet1:Sheet5!A1 or 'Jan:Dec'!A1:B10
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => EngineExpr::Sheet3DRef {
-            start_sheet: start_sheet.clone(),
-            end_sheet: end_sheet.clone(),
-            reference: Box::new(convert_expr(reference)),
-        },
-        // TableRef nodes should have been resolved before reaching convert_expr.
-        // If one reaches here unresolved, produce #NAME? error.
-        ParserExpr::TableRef { table_name, .. } => {
-            let display = if table_name.is_empty() {
-                "TABLE_REF".to_string()
-            } else {
-                table_name.clone()
-            };
-            EngineExpr::FunctionCall {
-                func: EngineBuiltinFn::Custom(format!("_UNRESOLVED_{}", display)),
-                args: vec![],
-            }
-        }
-        ParserExpr::IndexAccess { target, index } => EngineExpr::IndexAccess {
-            target: Box::new(convert_expr(target)),
-            index: Box::new(convert_expr(index)),
-        },
-        ParserExpr::ListLiteral { elements } => EngineExpr::ListLiteral {
-            elements: elements.iter().map(|e| convert_expr(e)).collect(),
-        },
-        ParserExpr::DictLiteral { entries } => EngineExpr::DictLiteral {
-            entries: entries.iter().map(|(k, v)| (convert_expr(k), convert_expr(v))).collect(),
-        },
-        ParserExpr::SpillRef { cell } => EngineExpr::SpillRef {
-            cell: Box::new(convert_expr(cell)),
-        },
-        ParserExpr::ImplicitIntersection { operand } => EngineExpr::ImplicitIntersection {
-            operand: Box::new(convert_expr(operand)),
-        },
-    }
+/// Backward-compatible wrapper: clones the expression and expands wildcards.
+/// Callers should migrate to using the parsed AST directly with
+/// `expand_wildcard_sheets()` applied in-place.
+pub fn convert_expr(expr: &engine::Expression) -> engine::Expression {
+    let mut result = expr.clone();
+    expand_wildcard_sheets(&mut result);
+    result
 }
 
 fn col_letter_to_index(col: &str) -> u32 {
@@ -746,9 +687,9 @@ pub fn resolve_spill_refs_in_ast(
     current_sheet_index: usize,
 ) -> ParserExpr {
     match ast {
-        ParserExpr::SpillRef { cell } => {
+        ParserExpr::SpillRef { cell, .. } => {
             // Extract the cell reference coordinates
-            if let ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute } = cell.as_ref() {
+            if let ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute, .. } = cell.as_ref() {
                 let col_idx = col_letter_to_index(col);
                 let row_idx = row - 1; // Convert to 0-based
 
@@ -776,6 +717,7 @@ pub fn resolve_spill_refs_in_ast(
                             row: min_row + 1,
                             col_absolute: *col_absolute,
                             row_absolute: *row_absolute,
+                            ref_site_id: Default::default(),
                         }),
                         end: Box::new(ParserExpr::CellRef {
                             sheet: None,
@@ -783,7 +725,9 @@ pub fn resolve_spill_refs_in_ast(
                             row: max_row + 1,
                             col_absolute: *col_absolute,
                             row_absolute: *row_absolute,
+                            ref_site_id: Default::default(),
                         }),
+                        ref_site_id: Default::default(),
                     }
                 } else {
                     // No spill range at this cell - just return the single cell ref
@@ -803,14 +747,16 @@ pub fn resolve_spill_refs_in_ast(
             op: op.clone(),
             operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index)),
         },
-        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+        ParserExpr::FunctionCall { func, args, .. } => ParserExpr::FunctionCall {
             func: func.clone(),
             args: args.iter().map(|a| resolve_spill_refs_in_ast(a, spill_ranges, current_sheet_index)).collect(),
+            ref_site_id: Default::default(),
         },
-        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+        ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
             start: Box::new(resolve_spill_refs_in_ast(start, spill_ranges, current_sheet_index)),
             end: Box::new(resolve_spill_refs_in_ast(end, spill_ranges, current_sheet_index)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
             target: Box::new(resolve_spill_refs_in_ast(target, spill_ranges, current_sheet_index)),
@@ -819,10 +765,11 @@ pub fn resolve_spill_refs_in_ast(
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
             operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index)),
         },
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
             reference: Box::new(resolve_spill_refs_in_ast(reference, spill_ranges, current_sheet_index)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
             elements: elements.iter().map(|e| resolve_spill_refs_in_ast(e, spill_ranges, current_sheet_index)).collect(),
@@ -888,7 +835,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 refs.cells.insert((row_idx, col_idx));
             }
         }
-        ParserExpr::Range { sheet, start, end } => {
+        ParserExpr::Range { sheet, start, end, .. } => {
             if let (
                 ParserExpr::CellRef { col: start_col, row: start_row, .. },
                 ParserExpr::CellRef { col: end_col, row: end_row, .. },
@@ -960,7 +907,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             }
         }
         // 3D cross-sheet reference: tag inner cells with each bookend sheet
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             // Extract the inner reference's cells (without sheet context)
             let mut inner_refs = ExtractedRefs::new();
             extract_references_recursive(reference, grid, &mut inner_refs);
@@ -994,7 +941,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 extract_references_recursive(value, grid, refs);
             }
         }
-        ParserExpr::SpillRef { cell } => {
+        ParserExpr::SpillRef { cell, .. } => {
             extract_references_recursive(cell, grid, refs);
         }
         ParserExpr::ImplicitIntersection { operand } => {
@@ -1021,7 +968,7 @@ pub fn resolve_names_in_ast(
     visited: &mut HashSet<String>,
 ) -> ParserExpr {
     match ast {
-        ParserExpr::NamedRef { name } => {
+        ParserExpr::NamedRef { name, .. } => {
             let key = name.to_uppercase();
 
             // Circular reference detection
@@ -1089,7 +1036,7 @@ pub fn resolve_names_in_ast(
             op: *op,
             operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
         },
-        ParserExpr::FunctionCall { func, args } => {
+        ParserExpr::FunctionCall { func, args, .. } => {
             // For LAMBDA and LET, parameter name positions must NOT be resolved
             // as named ranges — they are local bindings that shadow global names.
             match func {
@@ -1098,7 +1045,7 @@ pub fn resolve_names_in_ast(
                     // Collect parameter names to shadow them in the body
                     let mut param_names: Vec<String> = Vec::new();
                     for p_arg in &args[..args.len() - 1] {
-                        if let ParserExpr::NamedRef { name } = p_arg {
+                        if let ParserExpr::NamedRef { name, .. } = p_arg {
                             param_names.push(name.to_uppercase());
                         }
                     }
@@ -1115,6 +1062,7 @@ pub fn resolve_names_in_ast(
                     ParserExpr::FunctionCall {
                         func: func.clone(),
                         args: resolved_args,
+                        ref_site_id: Default::default(),
                     }
                 }
                 ParserBuiltinFn::Let if args.len() >= 3 && args.len() % 2 == 1 => {
@@ -1123,7 +1071,7 @@ pub fn resolve_names_in_ast(
                     let pair_count = (args.len() - 1) / 2;
                     let mut let_names: Vec<String> = Vec::new();
                     for i in 0..pair_count {
-                        if let ParserExpr::NamedRef { name } = &args[i * 2] {
+                        if let ParserExpr::NamedRef { name, .. } = &args[i * 2] {
                             let_names.push(name.to_uppercase());
                         }
                     }
@@ -1142,6 +1090,7 @@ pub fn resolve_names_in_ast(
                     ParserExpr::FunctionCall {
                         func: func.clone(),
                         args: resolved_args,
+                        ref_site_id: Default::default(),
                     }
                 }
                 _ => {
@@ -1179,6 +1128,7 @@ pub fn resolve_names_in_ast(
                                 return ParserExpr::FunctionCall {
                                     func: ParserBuiltinFn::Custom("__INVOKE__".to_string()),
                                     args: invoke_args,
+                                    ref_site_id: Default::default(),
                                 };
                             }
                         }
@@ -1189,20 +1139,23 @@ pub fn resolve_names_in_ast(
                             .iter()
                             .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
                             .collect(),
+                        ref_site_id: Default::default(),
                     }
                 },
             }
         }
-        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+        ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
             start: Box::new(resolve_names_in_ast(start, named_ranges, current_sheet_index, visited)),
             end: Box::new(resolve_names_in_ast(end, named_ranges, current_sheet_index, visited)),
+            ref_site_id: Default::default(),
         },
         // 3D cross-sheet reference: recurse into inner reference
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
             reference: Box::new(resolve_names_in_ast(reference, named_ranges, current_sheet_index, visited)),
+            ref_site_id: Default::default(),
         },
         // TableRef is resolved separately by resolve_table_refs_in_ast — pass through
         ParserExpr::TableRef { .. } => ast.clone(),
@@ -1219,8 +1172,9 @@ pub fn resolve_names_in_ast(
                 resolve_names_in_ast(v, named_ranges, current_sheet_index, visited),
             )).collect(),
         },
-        ParserExpr::SpillRef { cell } => ParserExpr::SpillRef {
+        ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
             cell: Box::new(resolve_names_in_ast(cell, named_ranges, current_sheet_index, visited)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
             operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
@@ -1239,7 +1193,7 @@ fn resolve_names_in_ast_with_shadows(
     shadows: &[String],
 ) -> ParserExpr {
     match ast {
-        ParserExpr::NamedRef { name } => {
+        ParserExpr::NamedRef { name, .. } => {
             let key = name.to_uppercase();
             // If the name is shadowed by a LAMBDA/LET param, keep it as NamedRef
             if shadows.iter().any(|s| s == &key) {
@@ -1260,13 +1214,13 @@ fn resolve_names_in_ast_with_shadows(
             op: *op,
             operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
         },
-        ParserExpr::FunctionCall { func, args } => {
+        ParserExpr::FunctionCall { func, args, .. } => {
             // For nested LAMBDA/LET inside a shadowed context, extend shadows
             match func {
                 ParserBuiltinFn::Lambda if args.len() >= 2 => {
                     let mut inner_shadows: Vec<String> = shadows.to_vec();
                     for p_arg in &args[..args.len() - 1] {
-                        if let ParserExpr::NamedRef { name } = p_arg {
+                        if let ParserExpr::NamedRef { name, .. } = p_arg {
                             inner_shadows.push(name.to_uppercase());
                         }
                     }
@@ -1277,13 +1231,13 @@ fn resolve_names_in_ast_with_shadows(
                     resolved_args.push(resolve_names_in_ast_with_shadows(
                         args.last().unwrap(), named_ranges, current_sheet_index, visited, &inner_shadows,
                     ));
-                    ParserExpr::FunctionCall { func: func.clone(), args: resolved_args }
+                    ParserExpr::FunctionCall { func: func.clone(), args: resolved_args, ref_site_id: Default::default() }
                 }
                 ParserBuiltinFn::Let if args.len() >= 3 && args.len() % 2 == 1 => {
                     let pair_count = (args.len() - 1) / 2;
                     let mut inner_shadows: Vec<String> = shadows.to_vec();
                     for i in 0..pair_count {
-                        if let ParserExpr::NamedRef { name } = &args[i * 2] {
+                        if let ParserExpr::NamedRef { name, .. } = &args[i * 2] {
                             inner_shadows.push(name.to_uppercase());
                         }
                     }
@@ -1297,7 +1251,7 @@ fn resolve_names_in_ast_with_shadows(
                             ));
                         }
                     }
-                    ParserExpr::FunctionCall { func: func.clone(), args: resolved_args }
+                    ParserExpr::FunctionCall { func: func.clone(), args: resolved_args, ref_site_id: Default::default() }
                 }
                 _ => {
                     // Check if a Custom function name is actually a named range
@@ -1334,6 +1288,7 @@ fn resolve_names_in_ast_with_shadows(
                                     return ParserExpr::FunctionCall {
                                         func: ParserBuiltinFn::Custom("__INVOKE__".to_string()),
                                         args: invoke_args,
+                                        ref_site_id: Default::default(),
                                     };
                                 }
                             }
@@ -1342,19 +1297,22 @@ fn resolve_names_in_ast_with_shadows(
                     ParserExpr::FunctionCall {
                         func: func.clone(),
                         args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, visited, shadows)).collect(),
+                        ref_site_id: Default::default(),
                     }
                 },
             }
         }
-        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+        ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
             start: Box::new(resolve_names_in_ast_with_shadows(start, named_ranges, current_sheet_index, visited, shadows)),
             end: Box::new(resolve_names_in_ast_with_shadows(end, named_ranges, current_sheet_index, visited, shadows)),
+            ref_site_id: Default::default(),
         },
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
             reference: Box::new(resolve_names_in_ast_with_shadows(reference, named_ranges, current_sheet_index, visited, shadows)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
             target: Box::new(resolve_names_in_ast_with_shadows(target, named_ranges, current_sheet_index, visited, shadows)),
@@ -1369,8 +1327,9 @@ fn resolve_names_in_ast_with_shadows(
                 resolve_names_in_ast_with_shadows(v, named_ranges, current_sheet_index, visited, shadows),
             )).collect(),
         },
-        ParserExpr::SpillRef { cell } => ParserExpr::SpillRef {
+        ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
             cell: Box::new(resolve_names_in_ast_with_shadows(cell, named_ranges, current_sheet_index, visited, shadows)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
             operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
@@ -1389,7 +1348,7 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
             ast_has_named_refs(left) || ast_has_named_refs(right)
         }
         ParserExpr::UnaryOp { operand, .. } => ast_has_named_refs(operand),
-        ParserExpr::FunctionCall { func, args } => {
+        ParserExpr::FunctionCall { func, args, .. } => {
             // Custom function names might be named ranges pointing to LAMBDAs
             if matches!(func, ParserBuiltinFn::Custom(_)) {
                 return true;
@@ -1405,7 +1364,7 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
         }
         ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_named_refs),
         ParserExpr::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_named_refs(k) || ast_has_named_refs(v)),
-        ParserExpr::SpillRef { cell } => ast_has_named_refs(cell),
+        ParserExpr::SpillRef { cell, .. } => ast_has_named_refs(cell),
         ParserExpr::ImplicitIntersection { operand } => ast_has_named_refs(operand),
     }
 }
@@ -1431,7 +1390,7 @@ pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
         ParserExpr::Sheet3DRef { reference, .. } => ast_has_table_refs(reference),
         ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_table_refs),
         ParserExpr::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_table_refs(k) || ast_has_table_refs(v)),
-        ParserExpr::SpillRef { cell } => ast_has_table_refs(cell),
+        ParserExpr::SpillRef { cell, .. } => ast_has_table_refs(cell),
         ParserExpr::ImplicitIntersection { operand } => ast_has_table_refs(operand),
     }
 }
@@ -1462,7 +1421,7 @@ pub fn resolve_table_refs_in_ast(
     ctx: &TableRefContext,
 ) -> ParserExpr {
     match ast {
-        ParserExpr::TableRef { table_name, specifier } => {
+        ParserExpr::TableRef { table_name, specifier, .. } => {
             resolve_single_table_ref(table_name, specifier, ctx)
         }
         ParserExpr::Literal(_) => ast.clone(),
@@ -1479,20 +1438,23 @@ pub fn resolve_table_refs_in_ast(
             op: *op,
             operand: Box::new(resolve_table_refs_in_ast(operand, ctx)),
         },
-        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+        ParserExpr::FunctionCall { func, args, .. } => ParserExpr::FunctionCall {
             func: func.clone(),
             args: args.iter().map(|a| resolve_table_refs_in_ast(a, ctx)).collect(),
+            ref_site_id: Default::default(),
         },
-        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+        ParserExpr::Range { sheet, start, end, .. } => ParserExpr::Range {
             sheet: sheet.clone(),
             start: Box::new(resolve_table_refs_in_ast(start, ctx)),
             end: Box::new(resolve_table_refs_in_ast(end, ctx)),
+            ref_site_id: Default::default(),
         },
         // 3D cross-sheet reference: recurse into inner reference
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => ParserExpr::Sheet3DRef {
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
             reference: Box::new(resolve_table_refs_in_ast(reference, ctx)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
             target: Box::new(resolve_table_refs_in_ast(target, ctx)),
@@ -1507,8 +1469,9 @@ pub fn resolve_table_refs_in_ast(
                 resolve_table_refs_in_ast(v, ctx),
             )).collect(),
         },
-        ParserExpr::SpillRef { cell } => ParserExpr::SpillRef {
+        ParserExpr::SpillRef { cell, .. } => ParserExpr::SpillRef {
             cell: Box::new(resolve_table_refs_in_ast(cell, ctx)),
+            ref_site_id: Default::default(),
         },
         ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
             operand: Box::new(resolve_table_refs_in_ast(operand, ctx)),
@@ -1540,6 +1503,7 @@ fn resolve_single_table_ref(
                 } else {
                     table_name.to_string()
                 },
+                ref_site_id: Default::default(),
             };
         }
     };
@@ -1569,14 +1533,14 @@ fn resolve_single_table_ref(
                 make_range(None, table.start_row, table.start_col, table.start_row, table.end_col)
             } else {
                 // No header row — return error
-                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string() }
+                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::Totals => {
             if table.style_options.total_row {
                 make_range(None, table.end_row, table.start_col, table.end_row, table.end_col)
             } else {
-                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string() }
+                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::SpecialColumn(special_spec, col_name) => {
@@ -1644,6 +1608,7 @@ fn resolve_column_ref(
         }
         None => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_{}_{}", table.name, col_name),
+            ref_site_id: Default::default(),
         },
     }
 }
@@ -1665,10 +1630,12 @@ fn resolve_this_row_ref(
                 row: current_row + 1,
                 col_absolute: true,
                 row_absolute: true,
+                ref_site_id: Default::default(),
             }
         }
         None => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_{}_{}", table.name, col_name),
+            ref_site_id: Default::default(),
         },
     }
 }
@@ -1697,6 +1664,7 @@ fn resolve_column_range(
         }
         _ => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_{}_RANGE", table.name),
+            ref_site_id: Default::default(),
         },
     }
 }
@@ -1725,6 +1693,7 @@ fn resolve_this_row_range(
         }
         _ => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_{}_RANGE", table.name),
+            ref_site_id: Default::default(),
         },
     }
 }
@@ -1741,6 +1710,7 @@ fn resolve_special_column(
         None => {
             return ParserExpr::NamedRef {
                 name: format!("_UNRESOLVED_{}_{}", table.name, col_name),
+                ref_site_id: Default::default(),
             };
         }
     };
@@ -1751,14 +1721,14 @@ fn resolve_special_column(
             if table.style_options.header_row {
                 make_range(None, table.start_row, abs_col, table.start_row, abs_col)
             } else {
-                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string() }
+                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::Totals => {
             if table.style_options.total_row {
                 make_range(None, table.end_row, abs_col, table.end_row, abs_col)
             } else {
-                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string() }
+                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string(), ref_site_id: Default::default() }
             }
         }
         ParserTableSpecifier::AllRows => {
@@ -1769,6 +1739,7 @@ fn resolve_special_column(
         }
         _ => ParserExpr::NamedRef {
             name: format!("_UNRESOLVED_SPECIAL_{}", table.name),
+            ref_site_id: Default::default(),
         },
     }
 }
@@ -1793,6 +1764,7 @@ fn make_range(
             row: start_row + 1, // AST uses 1-indexed rows
             col_absolute: true,
             row_absolute: true,
+            ref_site_id: Default::default(),
         };
     }
 
@@ -1804,6 +1776,7 @@ fn make_range(
             row: start_row + 1, // AST uses 1-indexed rows
             col_absolute: true,
             row_absolute: true,
+            ref_site_id: Default::default(),
         }),
         end: Box::new(ParserExpr::CellRef {
             sheet: None,
@@ -1811,7 +1784,9 @@ fn make_range(
             row: end_row + 1,
             col_absolute: true,
             row_absolute: true,
+            ref_site_id: Default::default(),
         }),
+        ref_site_id: Default::default(),
     }
 }
 
@@ -1835,7 +1810,7 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             ParserValue::String(s) => format!("\"{}\"", s),
             ParserValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         },
-        ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute } => {
+        ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute, .. } => {
             let mut s = String::new();
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') || sheet_name.contains('\'') {
@@ -1850,7 +1825,7 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             s.push_str(&row.to_string());
             s
         }
-        ParserExpr::Range { sheet, start, end } => {
+        ParserExpr::Range { sheet, start, end, .. } => {
             let mut s = String::new();
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') || sheet_name.contains('\'') {
@@ -1865,7 +1840,7 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             s.push_str(&expression_to_formula_no_sheet(end));
             s
         }
-        ParserExpr::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute } => {
+        ParserExpr::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute, .. } => {
             let mut s = String::new();
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') || sheet_name.contains('\'') {
@@ -1881,7 +1856,7 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             s.push_str(end_col);
             s
         }
-        ParserExpr::RowRef { sheet, start_row, end_row, start_absolute, end_absolute } => {
+        ParserExpr::RowRef { sheet, start_row, end_row, start_absolute, end_absolute, .. } => {
             let mut s = String::new();
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') || sheet_name.contains('\'') {
@@ -1903,13 +1878,13 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
         ParserExpr::UnaryOp { op, operand } => {
             format!("{}{}", op, expression_to_formula(operand))
         }
-        ParserExpr::FunctionCall { func, args } => {
+        ParserExpr::FunctionCall { func, args, .. } => {
             let func_name = builtin_function_to_name(func);
             let arg_strs: Vec<String> = args.iter().map(|a| expression_to_formula(a)).collect();
             format!("{}({})", func_name, arg_strs.join(","))
         }
-        ParserExpr::NamedRef { name } => name.clone(),
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        ParserExpr::NamedRef { name, .. } => name.clone(),
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             let mut s = String::new();
             let combined = format!("{}:{}", start_sheet, end_sheet);
             // Quote if either sheet name contains spaces or special chars
@@ -1923,7 +1898,7 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             s.push_str(&expression_to_formula(reference));
             s
         }
-        ParserExpr::TableRef { table_name, specifier } => {
+        ParserExpr::TableRef { table_name, specifier, .. } => {
             // Should not appear after resolution, but handle gracefully.
             // table_specifier_to_string already wraps in brackets, e.g. [@sales] or [Column].
             let spec_str = table_specifier_to_string(specifier);
@@ -1946,7 +1921,7 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             }).collect();
             format!("{{{}}}", inner.join(", "))
         }
-        ParserExpr::SpillRef { cell } => {
+        ParserExpr::SpillRef { cell, .. } => {
             format!("{}#", expression_to_formula(cell))
         }
         ParserExpr::ImplicitIntersection { operand } => {
@@ -2262,7 +2237,7 @@ fn repair_3d_delete_recursive(
     sheet_names_after: &[String],
 ) -> (ParserExpr, bool) {
     match ast {
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             let del_upper = deleted_name.to_uppercase();
             let start_is_deleted = start_sheet.to_uppercase() == del_upper;
             let end_is_deleted = end_sheet.to_uppercase() == del_upper;
@@ -2296,6 +2271,7 @@ fn repair_3d_delete_recursive(
                         start_sheet: s,
                         end_sheet: e,
                         reference: Box::new(new_ref),
+                        ref_site_id: Default::default(),
                     }, false)
                 }
                 _ => (ast.clone(), true), // Can't find replacement — #REF!
@@ -2314,7 +2290,7 @@ fn repair_3d_delete_recursive(
             let (new_op, err) = repair_3d_delete_recursive(operand, deleted_name, sheet_names_after);
             (ParserExpr::UnaryOp { op: *op, operand: Box::new(new_op) }, err)
         }
-        ParserExpr::FunctionCall { func, args } => {
+        ParserExpr::FunctionCall { func, args, .. } => {
             let mut new_args = Vec::new();
             let mut any_err = false;
             for arg in args {
@@ -2322,15 +2298,16 @@ fn repair_3d_delete_recursive(
                 any_err = any_err || err;
                 new_args.push(new_arg);
             }
-            (ParserExpr::FunctionCall { func: func.clone(), args: new_args }, any_err)
+            (ParserExpr::FunctionCall { func: func.clone(), args: new_args, ref_site_id: Default::default() }, any_err)
         }
-        ParserExpr::Range { sheet, start, end } => {
+        ParserExpr::Range { sheet, start, end, .. } => {
             let (new_start, s_err) = repair_3d_delete_recursive(start, deleted_name, sheet_names_after);
             let (new_end, e_err) = repair_3d_delete_recursive(end, deleted_name, sheet_names_after);
             (ParserExpr::Range {
                 sheet: sheet.clone(),
                 start: Box::new(new_start),
                 end: Box::new(new_end),
+                ref_site_id: Default::default(),
             }, s_err || e_err)
         }
         // Leaf nodes — no 3D refs to repair
@@ -2391,7 +2368,7 @@ pub fn repair_3d_refs_on_rename(formula: &str, old_name: &str, new_name: &str) -
 fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) -> ParserExpr {
     let old_upper = old_name.to_uppercase();
     match ast {
-        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             let new_start = if start_sheet.to_uppercase() == old_upper {
                 new_name.to_string()
             } else {
@@ -2406,10 +2383,11 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
                 start_sheet: new_start,
                 end_sheet: new_end,
                 reference: Box::new(repair_3d_rename_recursive(reference, old_name, new_name)),
+                ref_site_id: Default::default(),
             }
         }
         // Also update regular cross-sheet refs (CellRef, Range, ColumnRef, RowRef with sheet=Some)
-        ParserExpr::CellRef { sheet: Some(s), col, row, col_absolute, row_absolute } => {
+        ParserExpr::CellRef { sheet: Some(s), col, row, col_absolute, row_absolute, .. } => {
             let new_sheet = if s.to_uppercase() == old_upper {
                 new_name.to_string()
             } else {
@@ -2421,9 +2399,10 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
                 row: *row,
                 col_absolute: *col_absolute,
                 row_absolute: *row_absolute,
+                ref_site_id: Default::default(),
             }
         }
-        ParserExpr::Range { sheet: Some(s), start, end } => {
+        ParserExpr::Range { sheet: Some(s), start, end, .. } => {
             let new_sheet = if s.to_uppercase() == old_upper {
                 new_name.to_string()
             } else {
@@ -2433,9 +2412,10 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
                 sheet: Some(new_sheet),
                 start: Box::new(repair_3d_rename_recursive(start, old_name, new_name)),
                 end: Box::new(repair_3d_rename_recursive(end, old_name, new_name)),
+                ref_site_id: Default::default(),
             }
         }
-        ParserExpr::ColumnRef { sheet: Some(s), start_col, end_col, start_absolute, end_absolute } => {
+        ParserExpr::ColumnRef { sheet: Some(s), start_col, end_col, start_absolute, end_absolute, .. } => {
             let new_sheet = if s.to_uppercase() == old_upper {
                 new_name.to_string()
             } else {
@@ -2447,9 +2427,10 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
                 end_col: end_col.clone(),
                 start_absolute: *start_absolute,
                 end_absolute: *end_absolute,
+                ref_site_id: Default::default(),
             }
         }
-        ParserExpr::RowRef { sheet: Some(s), start_row, end_row, start_absolute, end_absolute } => {
+        ParserExpr::RowRef { sheet: Some(s), start_row, end_row, start_absolute, end_absolute, .. } => {
             let new_sheet = if s.to_uppercase() == old_upper {
                 new_name.to_string()
             } else {
@@ -2461,6 +2442,7 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
                 end_row: *end_row,
                 start_absolute: *start_absolute,
                 end_absolute: *end_absolute,
+                ref_site_id: Default::default(),
             }
         }
         ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
@@ -2472,14 +2454,16 @@ fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) 
             op: *op,
             operand: Box::new(repair_3d_rename_recursive(operand, old_name, new_name)),
         },
-        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+        ParserExpr::FunctionCall { func, args, .. } => ParserExpr::FunctionCall {
             func: func.clone(),
             args: args.iter().map(|a| repair_3d_rename_recursive(a, old_name, new_name)).collect(),
+            ref_site_id: Default::default(),
         },
-        ParserExpr::Range { sheet: None, start, end } => ParserExpr::Range {
+        ParserExpr::Range { sheet: None, start, end, .. } => ParserExpr::Range {
             sheet: None,
             start: Box::new(repair_3d_rename_recursive(start, old_name, new_name)),
             end: Box::new(repair_3d_rename_recursive(end, old_name, new_name)),
+            ref_site_id: Default::default(),
         },
         // Leaf nodes — no changes
         _ => ast.clone(),
@@ -2495,7 +2479,7 @@ pub fn repair_all_formulas(
     for grid in grids.iter_mut() {
         let formula_cells: Vec<((u32, u32), String)> = grid.cells.iter()
             .filter_map(|((r, c), cell)| {
-                cell.formula.as_ref().map(|f| ((*r, *c), f.clone()))
+                cell.formula_string().map(|f| ((*r, *c), f))
             })
             .collect();
 
@@ -2504,9 +2488,7 @@ pub fn repair_all_formulas(
                 Some(new_formula) => {
                     if new_formula != formula {
                         if let Some(cell) = grid.cells.get_mut(&(row, col)) {
-                            cell.formula = Some(new_formula);
-                            // Clear cached AST since formula changed
-                            cell.cached_ast = None;
+                            cell.ast = parser::parse(&new_formula).ok().map(Box::new);
                         }
                     }
                 }
@@ -2514,7 +2496,7 @@ pub fn repair_all_formulas(
                     // Formula should become #REF!
                     if let Some(cell) = grid.cells.get_mut(&(row, col)) {
                         cell.value = CellValue::Error(CellError::Ref);
-                        cell.cached_ast = None;
+                        cell.ast = None;
                     }
                 }
             }
@@ -3805,17 +3787,7 @@ pub fn run() {
             mcp::mcp_stop,
             mcp::mcp_status,
             mcp::mcp_set_port,
-            // Linked Sheet commands
-            linked_sheets::publish_sheets,
-            linked_sheets::get_publish_info,
-            linked_sheets::unpublish_sheet,
-            linked_sheets::browse_published_sheets,
-            linked_sheets::link_published_sheets,
-            linked_sheets::refresh_linked_sheet,
-            linked_sheets::refresh_all_linked_sheets,
-            linked_sheets::unlink_sheet,
-            linked_sheets::get_linked_sheet_status,
-            linked_sheets::get_linked_sheets,
+            // Linked Sheet commands removed: replaced by .calp distribution system (Phase 2+)
             // Slicer commands
             slicer::create_slicer,
             slicer::delete_slicer,

@@ -1,6 +1,7 @@
 //! FILENAME: core/calcula-format/src/manifest.rs
 //! Manifest (manifest.json) — the root descriptor of a .cala file.
 
+use identity::SheetId;
 use serde::{Deserialize, Serialize};
 
 /// Root manifest for a .cala file.
@@ -47,10 +48,43 @@ pub struct SheetEntry {
     pub name: String,
     /// Folder name inside sheets/ (e.g., "0_Sales").
     pub folder: String,
+    /// Stable sheet identity (UUID v7). Optional for backward compat with old .cala files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_id: Option<SheetId>,
 }
 
 impl Manifest {
-    /// Create a manifest for a workbook with the given sheet names.
+    /// Create a manifest for a workbook with the given sheet names and IDs.
+    pub fn from_sheets(names: &[String], ids: &[SheetId], active_sheet: usize) -> Self {
+        let sheets = names
+            .iter()
+            .zip(ids.iter())
+            .enumerate()
+            .map(|(i, (name, id))| {
+                let folder = format!("{}_{}", i, sanitize_folder_name(name));
+                SheetEntry {
+                    index: i,
+                    name: name.clone(),
+                    folder,
+                    sheet_id: Some(*id),
+                }
+            })
+            .collect();
+
+        Manifest {
+            format_version: 1,
+            application: "Calcula".to_string(),
+            created: None,
+            modified: None,
+            sheets,
+            active_sheet,
+            features: Vec::new(),
+            default_row_height: 24.0,
+            default_column_width: 100.0,
+        }
+    }
+
+    /// Create a manifest for a workbook with the given sheet names (mints no IDs — for tests).
     pub fn from_sheet_names(names: &[String], active_sheet: usize) -> Self {
         let sheets = names
             .iter()
@@ -61,6 +95,7 @@ impl Manifest {
                     index: i,
                     name: name.clone(),
                     folder,
+                    sheet_id: None,
                 }
             })
             .collect();

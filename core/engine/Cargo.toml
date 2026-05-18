@@ -8,6 +8,8 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 # Parser crate — engine reuses AST types (Expression, BuiltinFunction, etc.)
 parser = { path = "../parser" }
+# Identity crate — ID types and registry for stable cell/ref identity
+identity = { path = "../identity" }
 
 [dev-dependencies]
 serde_json = "1.0"

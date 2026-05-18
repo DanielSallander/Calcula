@@ -1,5 +1,6 @@
 //! FILENAME: app/src-tauri/src/persistence.rs
 
+use identity::SheetId;
 use crate::api_types::CellData;
 use crate::tables::{
     Table, TableColumn, TableStyleOptions, TotalsRowFunction, TableStorage, TableNameRegistry,
@@ -33,11 +34,25 @@ pub struct UserFilesState {
 // Table <-> SavedTable conversion
 // ============================================================================
 
-fn table_to_saved(table: &Table) -> SavedTable {
+/// Map a sheet index to a SheetId using the provided slice.
+/// If the index is out of range, mints a fresh ID as a fallback.
+fn sheet_index_to_id(sheet_ids: &[SheetId], index: usize) -> SheetId {
+    sheet_ids.get(index).copied().unwrap_or_else(|| {
+        SheetId::from_bytes(identity::generate_uuid_v7())
+    })
+}
+
+/// Find the sheet index for a given SheetId by searching the workbook sheets.
+/// Falls back to 0 if not found.
+fn sheet_id_to_index(workbook: &persistence::Workbook, sheet_id: SheetId) -> usize {
+    workbook.sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0)
+}
+
+fn table_to_saved(table: &Table, sheet_ids: &[SheetId]) -> SavedTable {
     SavedTable {
         id: table.id,
         name: table.name.clone(),
-        sheet_index: table.sheet_index,
+        sheet_id: sheet_index_to_id(sheet_ids, table.sheet_index),
         start_row: table.start_row,
         start_col: table.start_col,
         end_row: table.end_row,
@@ -66,11 +81,11 @@ fn table_to_saved(table: &Table) -> SavedTable {
     }
 }
 
-fn saved_to_table(saved: &SavedTable) -> Table {
+fn saved_to_table(saved: &SavedTable, workbook: &persistence::Workbook) -> Table {
     Table {
         id: saved.id,
         name: saved.name.clone(),
-        sheet_index: saved.sheet_index,
+        sheet_index: sheet_id_to_index(workbook, saved.sheet_id),
         start_row: saved.start_row,
         start_col: saved.start_col,
         end_row: saved.end_row,
@@ -133,11 +148,12 @@ fn string_to_totals_fn(s: &str) -> TotalsRowFunction {
 /// Collect all tables from the AppState into SavedTable format.
 fn collect_tables_for_save(
     tables: &TableStorage,
+    sheet_ids: &[SheetId],
 ) -> Vec<SavedTable> {
     let mut saved = Vec::new();
     for sheet_tables in tables.values() {
         for table in sheet_tables.values() {
-            saved.push(table_to_saved(table));
+            saved.push(table_to_saved(table, sheet_ids));
         }
     }
     saved
@@ -146,13 +162,14 @@ fn collect_tables_for_save(
 /// Restore tables from SavedTable format into AppState structures.
 fn restore_tables(
     saved_tables: &[SavedTable],
+    workbook: &persistence::Workbook,
 ) -> (TableStorage, TableNameRegistry, u64) {
     let mut tables: TableStorage = HashMap::new();
     let mut table_names: TableNameRegistry = HashMap::new();
     let mut max_id: u64 = 0;
 
     for saved in saved_tables {
-        let table = saved_to_table(saved);
+        let table = saved_to_table(saved, workbook);
         if table.id > max_id {
             max_id = table.id;
         }
@@ -180,6 +197,7 @@ pub fn build_workbook_for_save(
     let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
 
     let dimensions = DimensionData {
         column_widths: col_widths.clone(),
@@ -187,9 +205,9 @@ pub fn build_workbook_for_save(
     };
 
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
-    workbook.tables = collect_tables_for_save(&tables);
-    workbook.charts = collect_charts_for_save(state);
-    workbook.sparklines = collect_sparklines_for_save(state);
+    workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
+    workbook.charts = collect_charts_for_save(state, &sheet_ids);
+    workbook.sparklines = collect_sparklines_for_save(state, &sheet_ids);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
@@ -211,7 +229,7 @@ pub fn build_workbook_for_save(
     }
 
     // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
-    enrich_workbook_metadata(&mut workbook, state);
+    enrich_workbook_metadata(&mut workbook, state, &sheet_ids);
 
     Ok(workbook)
 }
@@ -224,7 +242,8 @@ pub fn build_workbook_for_save_with_slicers(
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
 ) -> Result<Workbook, String> {
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
-    workbook.slicers = collect_slicers_for_save(slicer_state);
+    let sheet_ids_bwfs = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_bwfs);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     Ok(workbook)
@@ -233,7 +252,7 @@ pub fn build_workbook_for_save_with_slicers(
 /// Enrich a workbook with sheet-level metadata from AppState:
 /// merged regions, freeze panes, hidden rows/cols, tab colors,
 /// sheet visibility, notes, hyperlinks, page setup, and named ranges.
-fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState) {
+fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids: &[SheetId]) {
     // We only have one sheet in the workbook (from_grid creates a single sheet).
     // Populate it with data from the active sheet in AppState.
     if workbook.sheets.is_empty() {
@@ -380,7 +399,7 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState) {
             .map(|nr| SavedNamedRange {
                 name: nr.name.clone(),
                 refers_to: nr.refers_to.clone(),
-                sheet_index: nr.sheet_index,
+                sheet_id: nr.sheet_index.map(|idx| sheet_index_to_id(sheet_ids, idx)),
             })
             .collect();
     }
@@ -389,13 +408,14 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState) {
 /// Collect slicers from SlicerState into SavedSlicer format.
 fn collect_slicers_for_save(
     slicer_state: &State<crate::slicer::SlicerState>,
+    sheet_ids: &[SheetId],
 ) -> Vec<persistence::SavedSlicer> {
     let slicers = slicer_state.slicers.lock().unwrap();
     let computed_props = slicer_state.computed_properties.lock().unwrap();
     slicers
         .values()
         .map(|s| {
-            let mut saved = slicer_to_saved(s);
+            let mut saved = slicer_to_saved(s, sheet_ids);
             // Attach computed properties for this slicer
             if let Some(props) = computed_props.get(&s.id) {
                 saved.computed_properties = props
@@ -412,12 +432,12 @@ fn collect_slicers_for_save(
         .collect()
 }
 
-fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
+fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> persistence::SavedSlicer {
     persistence::SavedSlicer {
         id: slicer.id,
         name: slicer.name.clone(),
         header_text: slicer.header_text.clone(),
-        sheet_index: slicer.sheet_index,
+        sheet_id: sheet_index_to_id(sheet_ids, slicer.sheet_index),
         x: slicer.x,
         y: slicer.y,
         width: slicer.width,
@@ -467,12 +487,12 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
     }
 }
 
-fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
+fn saved_to_slicer(saved: &persistence::SavedSlicer, workbook: &persistence::Workbook) -> crate::slicer::Slicer {
     crate::slicer::Slicer {
         id: saved.id,
         name: saved.name.clone(),
         header_text: saved.header_text.clone(),
-        sheet_index: saved.sheet_index,
+        sheet_index: sheet_id_to_index(workbook, saved.sheet_id),
         x: saved.x,
         y: saved.y,
         width: saved.width,
@@ -525,6 +545,7 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
 fn restore_slicers(
     saved_slicers: &[persistence::SavedSlicer],
     slicer_state: &State<crate::slicer::SlicerState>,
+    workbook: &persistence::Workbook,
 ) {
     let mut slicers = slicer_state.slicers.lock().unwrap();
     let mut next_id = slicer_state.next_id.lock().unwrap();
@@ -537,7 +558,7 @@ fn restore_slicers(
     let mut max_cprop_id: u64 = 0;
 
     for saved in saved_slicers {
-        let slicer = saved_to_slicer(saved);
+        let slicer = saved_to_slicer(saved, workbook);
         if slicer.id > max_id {
             max_id = slicer.id;
         }
@@ -768,50 +789,50 @@ fn restore_ribbon_filters(
 // ============================================================================
 
 /// Collect charts from AppState into SavedChart format for persistence.
-fn collect_charts_for_save(state: &State<AppState>) -> Vec<persistence::SavedChart> {
+fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedChart> {
     let charts = state.charts.lock().unwrap();
     charts
         .iter()
         .map(|c| persistence::SavedChart {
             id: c.id,
-            sheet_index: c.sheet_index,
+            sheet_id: sheet_index_to_id(sheet_ids, c.sheet_index),
             spec_json: c.spec_json.clone(),
         })
         .collect()
 }
 
 /// Restore charts from SavedChart format into AppState.
-fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>) {
+fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>, workbook: &persistence::Workbook) {
     let mut charts = state.charts.lock().unwrap();
     charts.clear();
     for s in saved {
         charts.push(crate::api_types::ChartEntry {
             id: s.id,
-            sheet_index: s.sheet_index,
+            sheet_index: sheet_id_to_index(workbook, s.sheet_id),
             spec_json: s.spec_json.clone(),
         });
     }
 }
 
 /// Collect sparkline entries from AppState for saving to .cala.
-fn collect_sparklines_for_save(state: &State<AppState>) -> Vec<persistence::SavedSparkline> {
+fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedSparkline> {
     let sparklines = state.sparklines.lock().unwrap();
     sparklines
         .iter()
         .map(|s| persistence::SavedSparkline {
-            sheet_index: s.sheet_index,
+            sheet_id: sheet_index_to_id(sheet_ids, s.sheet_index),
             groups_json: s.groups_json.clone(),
         })
         .collect()
 }
 
 /// Restore sparklines from SavedSparkline format into AppState.
-fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppState>) {
+fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppState>, workbook: &persistence::Workbook) {
     let mut sparklines = state.sparklines.lock().unwrap();
     sparklines.clear();
     for s in saved {
         sparklines.push(crate::api_types::SparklineEntry {
-            sheet_index: s.sheet_index,
+            sheet_index: sheet_id_to_index(workbook, s.sheet_id),
             groups_json: s.groups_json.clone(),
         });
     }
@@ -849,6 +870,7 @@ pub fn save_file(
     let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let sheet_ids_save = state.sheet_ids.lock().map_err(|e| e.to_string())?;
 
     let dimensions = DimensionData {
         column_widths: col_widths.clone(),
@@ -856,14 +878,14 @@ pub fn save_file(
     };
 
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
-    workbook.tables = collect_tables_for_save(&tables);
-    workbook.slicers = collect_slicers_for_save(&slicer_state);
+    workbook.tables = collect_tables_for_save(&tables, &sheet_ids_save);
+    workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
-    workbook.charts = collect_charts_for_save(&state);
-    workbook.sparklines = collect_sparklines_for_save(&state);
+    workbook.charts = collect_charts_for_save(&state, &sheet_ids_save);
+    workbook.sparklines = collect_sparklines_for_save(&state, &sheet_ids_save);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
@@ -886,10 +908,7 @@ pub fn save_file(
     }
 
     // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
-    enrich_workbook_metadata(&mut workbook, &state);
-
-    // Save linked sheet metadata into user_files
-    save_linked_sheets_metadata(&state, &mut workbook)?;
+    enrich_workbook_metadata(&mut workbook, &state, &sheet_ids_save);
 
     let path_buf = PathBuf::from(&path);
 
@@ -942,7 +961,7 @@ pub fn open_file(
     let active_idx = workbook.active_sheet.min(workbook.sheets.len() - 1);
 
     // Restore tables from the workbook metadata
-    let (new_tables, new_table_names, next_id) = restore_tables(&workbook.tables);
+    let (new_tables, new_table_names, next_id) = restore_tables(&workbook.tables, &workbook);
 
     {
         // Build a single shared StyleRegistry from all sheets.
@@ -978,6 +997,10 @@ pub fn open_file(
         // Set sheet names
         let mut names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         *names = workbook.sheets.iter().map(|s| s.name.clone()).collect();
+
+        // Restore sheet IDs from the workbook
+        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        *sheet_ids = workbook.sheets.iter().map(|s| s.id).collect();
 
         // Set active sheet index
         *state.active_sheet.lock().map_err(|e| e.to_string())? = active_idx;
@@ -1174,7 +1197,7 @@ pub fn open_file(
     }
 
     // Restore slicers from workbook
-    restore_slicers(&workbook.slicers, &slicer_state);
+    restore_slicers(&workbook.slicers, &slicer_state, &workbook);
 
     // Restore ribbon filters from workbook
     restore_ribbon_filters(&workbook.ribbon_filters, &ribbon_filter_state);
@@ -1183,17 +1206,15 @@ pub fn open_file(
     *state.pivot_layouts.lock().unwrap() = workbook.pivot_layouts.clone();
 
     // Restore charts from workbook
-    restore_charts(&workbook.charts, &state);
+    restore_charts(&workbook.charts, &state, &workbook);
 
     // Restore sparklines from workbook
-    restore_sparklines(&workbook.sparklines, &state);
+    restore_sparklines(&workbook.sparklines, &state, &workbook);
 
     // Restore scripts and notebooks
     restore_scripts(&workbook.scripts, &script_state);
     restore_notebooks(&workbook.notebooks, &script_state);
 
-    // Restore user files from workbook (extract linked sheets metadata first)
-    restore_linked_sheets_metadata(&state, &mut workbook)?;
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
     // Restore document theme
@@ -1236,7 +1257,7 @@ pub fn open_file(
             CellData {
                 row: *row,
                 col: *col,
-                formula: cell.formula.clone(),
+                formula: cell.formula_string(),
                 display: format_cell_value(&cell.value, style, &locale),
                 display_color: None,
                 style_index: cell.style_index,
@@ -1430,9 +1451,6 @@ pub fn new_file(
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
-
-    // Clear linked sheets
-    state.linked_sheets.lock().map_err(|e| e.to_string())?.clear();
 
     // Reset workbook properties with defaults
     {
@@ -1821,53 +1839,6 @@ pub fn write_text_file(path: String, content: String, encoding: Option<String>) 
 }
 
 // ============================================================================
-// LINKED SHEETS METADATA (save/restore via user_files)
-// ============================================================================
-
-const LINKED_SHEETS_META_KEY: &str = "_meta/linked_sheets.json";
-
-/// Save linked sheet metadata into the workbook's user_files map.
-fn save_linked_sheets_metadata(
-    state: &State<AppState>,
-    workbook: &mut Workbook,
-) -> Result<(), String> {
-    let linked = state.linked_sheets.lock().map_err(|e| e.to_string())?;
-    if linked.is_empty() {
-        // Remove stale metadata if present
-        workbook.user_files.remove(LINKED_SHEETS_META_KEY);
-        return Ok(());
-    }
-
-    let json = serde_json::to_string_pretty(&*linked)
-        .map_err(|e| format!("Failed to serialize linked sheets: {}", e))?;
-    workbook
-        .user_files
-        .insert(LINKED_SHEETS_META_KEY.to_string(), json.into_bytes());
-    Ok(())
-}
-
-/// Restore linked sheet metadata from the workbook's user_files map.
-/// Removes the metadata key from user_files so it doesn't show as a virtual file.
-fn restore_linked_sheets_metadata(
-    state: &State<AppState>,
-    workbook: &mut Workbook,
-) -> Result<(), String> {
-    let mut linked = state.linked_sheets.lock().map_err(|e| e.to_string())?;
-    linked.clear();
-
-    if let Some(bytes) = workbook.user_files.remove(LINKED_SHEETS_META_KEY) {
-        let json = String::from_utf8(bytes)
-            .map_err(|e| format!("Invalid UTF-8 in linked sheets metadata: {}", e))?;
-        let infos: Vec<calcula_format::publish::linked::LinkedSheetInfo> =
-            serde_json::from_str(&json)
-                .map_err(|e| format!("Failed to parse linked sheets metadata: {}", e))?;
-        *linked = infos;
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // SCRIPTS & NOTEBOOKS (save/restore via .cala features)
 // ============================================================================
 
@@ -2015,6 +1986,7 @@ pub fn auto_recover_save(
     let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let sheet_ids_ar = state.sheet_ids.lock().map_err(|e| e.to_string())?;
 
     let dimensions = DimensionData {
         column_widths: col_widths.clone(),
@@ -2022,14 +1994,14 @@ pub fn auto_recover_save(
     };
 
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
-    workbook.tables = collect_tables_for_save(&tables);
-    workbook.slicers = collect_slicers_for_save(&slicer_state);
+    workbook.tables = collect_tables_for_save(&tables, &sheet_ids_ar);
+    workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_ar);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
-    workbook.charts = collect_charts_for_save(&state);
-    workbook.sparklines = collect_sparklines_for_save(&state);
+    workbook.charts = collect_charts_for_save(&state, &sheet_ids_ar);
+    workbook.sparklines = collect_sparklines_for_save(&state, &sheet_ids_ar);
     workbook.user_files = user_files_state
         .files
         .lock()
@@ -2040,10 +2012,7 @@ pub fn auto_recover_save(
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
 
     // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
-    enrich_workbook_metadata(&mut workbook, &state);
-
-    // Save linked sheet metadata
-    save_linked_sheets_metadata(&state, &mut workbook)?;
+    enrich_workbook_metadata(&mut workbook, &state, &sheet_ids_ar);
 
     // Save as .cala format to the recovery path
     calcula_format::save_calcula(&workbook, &recovery_path).map_err(|e| e.to_string())?;

@@ -65,11 +65,10 @@ pub fn register_cell_ops<'js>(
                         .map(|c| c.style_index)
                         .unwrap_or(0);
                     let cell = Cell {
-                        formula: None,
+                        ast: None,
                         value: cell_value,
                         style_index,
                         rich_text: None,
-                        cached_ast: None,
                     };
                     grid.set_cell(row as u32, col as u32, cell);
                     *ctx.cells_modified.borrow_mut() += 1;
@@ -146,11 +145,10 @@ pub fn register_cell_ops<'js>(
                             let style_index =
                                 grid.get_cell(r, c).map(|cell| cell.style_index).unwrap_or(0);
                             let cell = Cell {
-                                formula: None,
+                                ast: None,
                                 value: cell_value,
                                 style_index,
                                 rich_text: None,
-                                cached_ast: None,
                             };
                             grid.set_cell(r, c, cell);
                             modified_count += 1;
@@ -176,7 +174,7 @@ pub fn register_cell_ops<'js>(
                 let si = resolve_sheet(&ctx, sheet_index.0.unwrap_or(-1));
                 if let Some(grid) = ctx.grids.get(si) {
                     if let Some(cell) = grid.get_cell(row as u32, col as u32) {
-                        return cell.formula.clone().unwrap_or_default();
+                        return cell.formula_string().unwrap_or_default();
                     }
                 }
                 String::new()

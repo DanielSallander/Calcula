@@ -31,7 +31,6 @@ pub mod ai;
 pub use error::FormatError;
 pub use manifest::{Manifest, SheetEntry};
 
-pub mod publish;
 
 use persistence::Workbook;
 

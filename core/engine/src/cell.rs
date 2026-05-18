@@ -111,12 +111,15 @@ impl RichTextRun {
 
 /// The atomic unit of the spreadsheet.
 ///
-/// Cells can optionally cache their parsed formula AST to avoid re-parsing
-/// on every recalculation. The cache is populated on first evaluation and
-/// reused for subsequent evaluations until the formula changes.
+/// The AST is the canonical storage for formulas. String form is derived
+/// on demand via `formula_string()`. Plain data cells have `ast: None`.
+/// Reference-site IDs on AST nodes survive formula edits via structural
+/// alignment (see ast_alignment.rs).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Cell {
-    pub formula: Option<String>,
+    /// The formula AST. `None` for non-formula cells (numbers, text, etc.).
+    /// This is the canonical representation — the string form is derived.
+    pub ast: Option<Box<Expression>>,
     pub value: CellValue,
     pub style_index: usize,
     /// Rich text runs for partial formatting within the cell.
@@ -125,19 +128,15 @@ pub struct Cell {
     /// bold, italic, color, font, superscript, subscript, etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rich_text: Option<Vec<RichTextRun>>,
-    /// Cached parsed AST for formula cells. Not serialized - regenerated on load.
-    #[serde(skip)]
-    pub cached_ast: Option<Box<Expression>>,
 }
 
 impl Clone for Cell {
     fn clone(&self) -> Self {
         Cell {
-            formula: self.formula.clone(),
+            ast: self.ast.clone(),
             value: self.value.clone(),
             style_index: self.style_index,
             rich_text: self.rich_text.clone(),
-            cached_ast: self.cached_ast.clone(),
         }
     }
 }
@@ -145,80 +144,115 @@ impl Clone for Cell {
 impl Cell {
     pub fn new() -> Self {
         Cell {
-            formula: None,
+            ast: None,
             value: CellValue::Empty,
             style_index: 0,
             rich_text: None,
-            cached_ast: None,
         }
     }
 
     pub fn new_number(num: f64) -> Self {
         Cell {
-            formula: None,
+            ast: None,
             value: CellValue::Number(num),
             style_index: 0,
             rich_text: None,
-            cached_ast: None,
         }
     }
 
     pub fn new_text(text: String) -> Self {
         Cell {
-            formula: None,
+            ast: None,
             value: CellValue::Text(text),
             style_index: 0,
             rich_text: None,
-            cached_ast: None,
         }
     }
 
     pub fn new_formula(formula: String) -> Self {
-        Cell {
-            formula: Some(formula),
-            value: CellValue::Empty,
-            style_index: 0,
-            rich_text: None,
-            cached_ast: None, // Will be populated on first evaluation
+        // Parse the string to AST. If parsing fails, store as text.
+        match parser::parse(&formula) {
+            Ok(ast) => Cell {
+                ast: Some(Box::new(ast)),
+                value: CellValue::Empty,
+                style_index: 0,
+                rich_text: None,
+            },
+            Err(_) => Cell {
+                ast: None,
+                value: CellValue::Text(formula),
+                style_index: 0,
+                rich_text: None,
+            },
         }
     }
 
     /// Creates a new formula cell with a pre-parsed AST.
-    /// This is more efficient when the AST is already available.
-    pub fn new_formula_with_ast(formula: String, ast: Expression) -> Self {
+    pub fn new_formula_with_ast(ast: Expression) -> Self {
         Cell {
-            formula: Some(formula),
+            ast: Some(Box::new(ast)),
             value: CellValue::Empty,
             style_index: 0,
             rich_text: None,
-            cached_ast: Some(Box::new(ast)),
         }
     }
 
     pub fn new_boolean(value: bool) -> Self {
         Cell {
-            formula: None,
+            ast: None,
             value: CellValue::Boolean(value),
             style_index: 0,
             rich_text: None,
-            cached_ast: None,
         }
     }
 
-    /// Sets the cached AST for this cell.
-    /// Call this after parsing a formula to cache the AST for reuse.
+    /// Returns true if this cell contains a formula.
+    pub fn has_formula(&self) -> bool {
+        self.ast.is_some()
+    }
+
+    /// Returns the formula as a string, rendered from the AST.
+    /// Returns `None` for non-formula cells.
+    pub fn formula_string(&self) -> Option<String> {
+        self.ast.as_ref().map(|ast| crate::ast_render::render_formula(ast))
+    }
+
+    /// Returns a reference to the formula AST if this is a formula cell.
+    pub fn get_ast(&self) -> Option<&Expression> {
+        self.ast.as_ref().map(|b| b.as_ref())
+    }
+
+    /// Sets the formula AST for this cell.
+    pub fn set_ast(&mut self, ast: Expression) {
+        self.ast = Some(Box::new(ast));
+    }
+
+    /// Clears the formula (makes this a non-formula cell).
+    pub fn clear_ast(&mut self) {
+        self.ast = None;
+    }
+
+    // ---- Backward compatibility shims ----
+    // These exist to ease migration. Callers should move to the new API.
+
+    /// Legacy: returns the formula string. Use `formula_string()` instead.
+    pub fn formula(&self) -> Option<String> {
+        self.formula_string()
+    }
+
+    /// Legacy: sets the cached AST. Use `set_ast()` instead.
     pub fn set_cached_ast(&mut self, ast: Expression) {
-        self.cached_ast = Some(Box::new(ast));
+        self.set_ast(ast);
     }
 
-    /// Clears the cached AST. Call this when the formula changes.
+    /// Legacy: clears the cached AST. Use `clear_ast()` instead.
     pub fn clear_cached_ast(&mut self) {
-        self.cached_ast = None;
+        self.clear_ast();
     }
 
-    /// Returns a reference to the cached AST if available.
+    /// Legacy: returns the cached AST. Use `get_ast()` instead.
     pub fn get_cached_ast(&self) -> Option<&Expression> {
-        self.cached_ast.as_ref().map(|b| b.as_ref())
+        self.get_ast()
     }
 
     /// Returns the display value of the cell as a String.

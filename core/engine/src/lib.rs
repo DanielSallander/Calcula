@@ -2,6 +2,8 @@
 //! PURPOSE: Main library entry point for the spreadsheet engine.
 //! CONTEXT: Re-exports public types and modules for use by other crates.
 
+pub mod ast_alignment;
+pub mod ast_render;
 pub mod cell;
 pub mod coord;
 pub mod custom_format;
@@ -10,6 +12,7 @@ pub mod dependency_extractor;
 pub mod dependency_graph;
 pub mod evaluator;
 pub mod formula_locale;
+pub mod id_operations;
 pub mod grid;
 pub mod locale;
 pub mod number_format;
@@ -123,12 +126,18 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
         };
 
@@ -157,6 +166,9 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::GreaterThan,
             right: Box::new(Expression::Literal(Value::Number(50.0))),
@@ -167,6 +179,9 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Multiply,
             right: Box::new(Expression::Literal(Value::Number(2.0))),
@@ -177,6 +192,9 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Divide,
             right: Box::new(Expression::Literal(Value::Number(2.0))),
@@ -185,6 +203,7 @@ mod tests {
         let if_expr = Expression::FunctionCall {
             func: BuiltinFunction::If,
             args: vec![condition, true_expr, false_expr],
+            ref_site_id: Default::default(),
         };
 
         let evaluator = Evaluator::new(&grid);

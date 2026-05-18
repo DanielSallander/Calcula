@@ -86,7 +86,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::Range { sheet, start, end } => {
+        Expression::Range { sheet, start, end, .. } => {
             // Ranges are leaf nodes (consumed by parent function)
             let mut label = String::new();
             if let Some(s) = sheet {
@@ -184,7 +184,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             let fn_name = builtin_fn_name(func);
             let mut child_ids = Vec::new();
             for (i, arg) in args.iter().enumerate() {
@@ -211,7 +211,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             let mut child_path = current_path.to_vec();
             child_path.push(0);
             let child_id = assign_ids_recursive(reference, &child_path, nodes, path_to_id, counter);
@@ -228,7 +228,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::TableRef { table_name, specifier } => {
+        Expression::TableRef { table_name, specifier, .. } => {
             let label = format!("{}[{}]", table_name, table_specifier_to_display(specifier));
             nodes.push(NodeInfo {
                 id: id.clone(),
@@ -304,7 +304,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::NamedRef { name } => {
+        Expression::NamedRef { name, .. } => {
             nodes.push(NodeInfo {
                 id: id.clone(),
                 node_type: "named_ref".to_string(),
@@ -316,7 +316,7 @@ fn assign_ids_recursive(
             });
         }
 
-        Expression::SpillRef { cell } => {
+        Expression::SpillRef { cell, .. } => {
             let mut child_path = current_path.to_vec();
             child_path.push(0);
             let child_id = assign_ids_recursive(cell, &child_path, nodes, path_to_id, counter);
@@ -450,7 +450,7 @@ fn build_spans_recursive(
             output.push_str(&row.to_string());
         }
 
-        Expression::Range { sheet, start, end } => {
+        Expression::Range { sheet, start, end, .. } => {
             if let Some(sheet_name) = sheet {
                 if sheet_name.contains(' ') {
                     output.push_str(&format!("'{}'!", sheet_name));
@@ -505,7 +505,7 @@ fn build_spans_recursive(
             build_spans_recursive(operand, &child_path, output, spans);
         }
 
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             output.push_str(&builtin_fn_name(func));
             output.push('(');
             for (i, arg) in args.iter().enumerate() {
@@ -519,14 +519,14 @@ fn build_spans_recursive(
             output.push(')');
         }
 
-        Expression::TableRef { table_name, specifier } => {
+        Expression::TableRef { table_name, specifier, .. } => {
             output.push_str(table_name);
             output.push('[');
             output.push_str(&table_specifier_to_display(specifier));
             output.push(']');
         }
 
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             if start_sheet.contains(' ') || end_sheet.contains(' ') {
                 output.push_str(&format!("'{}:{}'!", start_sheet, end_sheet));
             } else {
@@ -578,11 +578,11 @@ fn build_spans_recursive(
             output.push('}');
         }
 
-        Expression::NamedRef { name } => {
+        Expression::NamedRef { name, .. } => {
             output.push_str(name);
         }
 
-        Expression::SpillRef { cell } => {
+        Expression::SpillRef { cell, .. } => {
             let mut child_path = current_path.to_vec();
             child_path.push(0);
             build_spans_recursive(cell, &child_path, output, spans);
@@ -759,7 +759,7 @@ fn estimate_cost(expr: &Expression) -> f64 {
         Expression::Range { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. } => 5.0,
         Expression::BinaryOp { .. } => 2.0,
         Expression::UnaryOp { .. } => 1.0,
-        Expression::FunctionCall { func, args } => {
+        Expression::FunctionCall { func, args, .. } => {
             let base = match func {
                 BuiltinFunction::XLookup | BuiltinFunction::XLookups |
                 BuiltinFunction::Index | BuiltinFunction::Match |
@@ -1031,8 +1031,8 @@ pub fn get_formula_eval_plan(
 
     // Get the cell's formula
     let formula = match grids[active_sheet].get_cell(row, col) {
-        Some(cell) => match &cell.formula {
-            Some(f) => f.clone(),
+        Some(cell) => match cell.formula_string() {
+            Some(f) => f,
             None => return Err("Cell does not contain a formula.".to_string()),
         },
         None => return Err("Cell is empty.".to_string()),

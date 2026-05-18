@@ -1228,36 +1228,7 @@ export type {
   IterationSettings,
 } from "./lib";
 
-// ============================================================================
-// Linked Sheets (Centralized Report Distribution)
-// ============================================================================
-
-export {
-  publishSheets,
-  getPublishInfo,
-  unpublishSheet,
-  browsePublishedSheets,
-  linkPublishedSheets,
-  refreshLinkedSheet,
-  refreshAllLinkedSheets,
-  unlinkSheet,
-  getLinkedSheetStatus,
-  getLinkedSheets,
-} from "./linkedSheets";
-
-export type {
-  PublishedSheetInfo,
-  PublishedConnection,
-  ConnectionParameter,
-  ConnectionInput,
-  PublishManifestInfo,
-  PublishSheetsResult,
-  LinkResult as LinkedLinkResult,
-  RefreshResult,
-  LinkState,
-  LinkedSheetStatus,
-  LinkedSheetInfo,
-} from "./linkedSheets";
+// Linked Sheets removed: replaced by .calp distribution system (Phase 2+)
 
 // ============================================================================
 // Scenario Manager

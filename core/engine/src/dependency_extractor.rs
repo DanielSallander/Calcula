@@ -240,7 +240,7 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
         Expression::NamedRef { .. } => {}
 
         // SpillRef: depend on the anchor cell (the spill range is dynamic)
-        Expression::SpillRef { cell } => {
+        Expression::SpillRef { cell, .. } => {
             extract_recursive(cell, deps, bounds);
         }
 
@@ -272,7 +272,7 @@ fn extract_recursive_with_sheets(
             });
         }
 
-        Expression::Range { sheet, start, end } => {
+        Expression::Range { sheet, start, end, .. } => {
             if let (
                 Expression::CellRef {
                     col: start_col,
@@ -361,7 +361,7 @@ fn extract_recursive_with_sheets(
 
         // 3D references: extract the inner reference's cells tagged with each sheet
         // in the range. Without sheet_order info, we tag with start and end sheets.
-        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             // Extract the inner reference's cells (without sheet prefix)
             let mut inner_deps = HashSet::new();
             extract_recursive(reference, &mut inner_deps, bounds);
@@ -411,7 +411,7 @@ fn extract_recursive_with_sheets(
         Expression::NamedRef { .. } => {}
 
         // SpillRef: depend on the anchor cell
-        Expression::SpillRef { cell } => {
+        Expression::SpillRef { cell, .. } => {
             extract_recursive_with_sheets(cell, deps, bounds);
         }
 
@@ -467,6 +467,9 @@ mod tests {
             sheet: None,
             col: "A".to_string(),
             row: 1,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies(&expr);
@@ -481,12 +484,18 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
                 row: 2,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
         };
 
@@ -505,13 +514,21 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
                     row: 3,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies(&expr);
@@ -527,7 +544,11 @@ mod tests {
                 sheet: None,
                 start_col: "A".to_string(),
                 end_col: "A".to_string(),
+                start_absolute: false,
+                end_absolute: false,
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
 
         let bounds = GridBounds {
@@ -552,7 +573,11 @@ mod tests {
                 sheet: None,
                 start_row: 1,
                 end_row: 1,
+                start_absolute: false,
+                end_absolute: false,
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
 
         let bounds = GridBounds {
@@ -579,13 +604,21 @@ mod tests {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "B".to_string(),
                     row: 2,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies(&expr);
@@ -604,13 +637,21 @@ mod tests {
                     sheet: None,
                     col: "B".to_string(),
                     row: 2,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
                     row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
                 }),
+                ref_site_id: Default::default(),
             }],
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies(&expr);
@@ -629,13 +670,21 @@ mod tests {
                         sheet: None,
                         col: "A".to_string(),
                         row: 1,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
                     }),
                     end: Box::new(Expression::CellRef {
                         sheet: None,
                         col: "A".to_string(),
                         row: 3,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
                     }),
+                    ref_site_id: Default::default(),
                 }],
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::FunctionCall {
@@ -645,13 +694,20 @@ mod tests {
                         sheet: None,
                         col: "B".to_string(),
                         row: 1,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
                     },
                     Expression::CellRef {
                         sheet: None,
                         col: "B".to_string(),
                         row: 2,
+                        col_absolute: false,
+                        row_absolute: false,
+                        ref_site_id: Default::default(),
                     },
                 ],
+                ref_site_id: Default::default(),
             }),
         };
 
@@ -682,6 +738,9 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
         };
 
@@ -696,6 +755,9 @@ mod tests {
             sheet: None,
             col: "AA".to_string(),
             row: 100,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies(&expr);
@@ -710,12 +772,18 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
         };
 
@@ -732,6 +800,9 @@ mod tests {
             sheet: Some("Sheet1".to_string()),
             col: "A".to_string(),
             row: 1,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies_with_sheets(&expr, GridBounds::default());
@@ -751,12 +822,19 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             end: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
                 row: 2,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies_with_sheets(&expr, GridBounds::default());
@@ -816,7 +894,11 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies(&expr);
@@ -834,7 +916,11 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_dependencies_with_sheets(&expr, GridBounds::default());
@@ -865,6 +951,9 @@ mod tests {
             sheet: None,
             col: "B".to_string(),
             row: 2,
+            col_absolute: false,
+            row_absolute: false,
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_3d_dependencies(
@@ -901,12 +990,19 @@ mod tests {
                 sheet: None,
                 col: "A".to_string(),
                 row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
             end: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
                 row: 2,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
             }),
+            ref_site_id: Default::default(),
         };
 
         let deps = extract_3d_dependencies(

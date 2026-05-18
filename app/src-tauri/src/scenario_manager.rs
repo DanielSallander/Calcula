@@ -46,7 +46,7 @@ fn build_cell_data(
         col: c,
         display,
         display_color: None,
-        formula: cell.formula.clone(),
+        formula: cell.formula_string(),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -256,9 +256,9 @@ pub fn scenario_show(
     // Re-evaluate all affected formula cells
     for &(r, c) in &all_affected {
         if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-            if let Some(formula) = &cell.formula {
+            if let Some(formula) = cell.formula_string() {
                 let new_value =
-                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, formula);
+                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
                 let mut updated = cell;
                 updated.value = new_value;
                 grids[sheet_idx].set_cell(r, c, updated.clone());
@@ -412,9 +412,9 @@ pub fn scenario_summary(
 
         for &(r, c) in &all_deps {
             if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-                if let Some(formula) = &cell.formula {
+                if let Some(formula) = cell.formula_string() {
                     let new_value =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, formula);
+                        evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
                     let mut updated = cell;
                     updated.value = new_value;
                     grids[sheet_idx].set_cell(r, c, updated);
@@ -460,9 +460,9 @@ pub fn scenario_summary(
         // Recalculate after restore
         for &(r, c) in &all_deps {
             if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
-                if let Some(formula) = &cell.formula {
+                if let Some(formula) = cell.formula_string() {
                     let new_value =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, formula);
+                        evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
                     let mut updated = cell;
                     updated.value = new_value;
                     grids[sheet_idx].set_cell(r, c, updated.clone());

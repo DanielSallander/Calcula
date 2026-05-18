@@ -63,11 +63,12 @@ pub fn parse_xlsx_charts(
             if let Some(spec_json) = parse_chart_xml(&chart_xml, &anchor) {
                 // Use the logical sheet index (0-based, from the caller's mapping)
                 let sheet_index = logical_idx.saturating_sub(1);
+                // SheetId will be assigned by the caller once sheets are built
                 results.push((
                     sheet_index,
                     SavedChart {
                         id: chart_id_counter,
-                        sheet_index,
+                        sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
                         spec_json,
                     },
                 ));
