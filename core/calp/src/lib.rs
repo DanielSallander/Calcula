@@ -4,6 +4,8 @@
 //! local-filesystem registry operations, version pinning and resolution,
 //! and the publish/pull workflows.
 
+pub mod channels;
+pub mod dev_mode;
 pub mod error;
 pub mod manifest;
 pub mod overrides;

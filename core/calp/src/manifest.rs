@@ -140,6 +140,13 @@ pub struct Subscription {
     pub resolved_version: String,
     pub resolved_at: String,
     pub sheets: Vec<SubscribedSheet>,
+    /// Named channel for this subscription (e.g., "dev", "test", "staging", "prod").
+    /// Empty string means the default/production channel.
+    /// Channels let teams maintain parallel subscription environments —
+    /// the same workbook can subscribe to different sources per channel,
+    /// and the active channel determines which source is used.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub channel: String,
 }
 
 /// Mapping from a package sheet to its local representation in the consumer's workbook.

@@ -209,3 +209,72 @@ export function refreshApply(registryPath: string): Promise<RefreshResult> {
 export function detach(): Promise<void> {
   return invokeBackend("calp_detach");
 }
+
+// ============================================================================
+// Phase 6: Author Workflow
+// ============================================================================
+
+export interface DevSubscribeParams {
+  /** Absolute path to a local .cala file. */
+  sourcePath: string;
+  /** Sheet names to pull; empty array means all sheets. */
+  sheetNames: string[];
+}
+
+/**
+ * Subscribe to a local .cala file in dev mode.
+ * Sheets are materialized into the workbook like a normal pull but resolve
+ * against the file directly instead of a registry version.
+ */
+export function devSubscribe(params: DevSubscribeParams): Promise<PullResponse> {
+  return invokeBackend("calp_dev_subscribe", { params });
+}
+
+/**
+ * Re-pull from the dev source, refreshing HEAD sheets in place.
+ * Finds the dev subscription automatically from the current workbook state.
+ */
+export function devRefresh(): Promise<PullResponse> {
+  return invokeBackend("calp_dev_refresh");
+}
+
+/**
+ * Rename a stable CellId (author-facing).
+ * Returns false if the old ID was not found.
+ * Currently deferred pending full IdRegistry integration into AppState.
+ */
+export function renameCellId(
+  sheetId: string,
+  oldCellId: string,
+  newCellId: string,
+): Promise<boolean> {
+  return invokeBackend("calp_rename_cell_id", { sheetId, oldCellId, newCellId });
+}
+
+/**
+ * Merge two stable CellIds (author-facing).
+ * The absorbed ID is consumed by the survivor.
+ * Currently deferred pending full IdRegistry integration into AppState.
+ */
+export function mergeCellIds(
+  sheetId: string,
+  survivorCellId: string,
+  absorbedCellId: string,
+): Promise<boolean> {
+  return invokeBackend("calp_merge_cell_ids", { sheetId, survivorCellId, absorbedCellId });
+}
+
+/**
+ * Suggest the next version string for a package given a bump level.
+ * @param registryPath - Absolute path to the local registry directory.
+ * @param packageName  - Package name inside the registry.
+ * @param bump         - One of "major", "minor", or "patch".
+ * @returns The suggested next version string, e.g. "1.3.0".
+ */
+export function nextVersion(
+  registryPath: string,
+  packageName: string,
+  bump: "major" | "minor" | "patch",
+): Promise<string> {
+  return invokeBackend("calp_next_version", { registryPath, packageName, bump });
+}

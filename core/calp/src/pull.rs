@@ -144,6 +144,7 @@ pub fn pull(
         resolved_version: version_str,
         resolved_at: request.now.clone(),
         sheets: subscribed_sheets,
+        channel: String::new(), // default/production channel
     };
 
     Ok(PullResult {

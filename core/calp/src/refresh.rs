@@ -405,6 +405,7 @@ mod tests {
                 local_sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
                 local_name: "Sheet1".to_string(),
             }],
+            channel: String::new(),
         };
 
         let layer = OverrideLayer::new();
@@ -427,6 +428,7 @@ mod tests {
             resolved_version: "1.1.0".to_string(), // already at latest matching
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
+            channel: String::new(),
         };
 
         let layer = OverrideLayer::new();
@@ -446,6 +448,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
+            channel: String::new(),
         };
 
         let payloads = pull_all_updates(&reg, &[sub]).unwrap();
@@ -465,6 +468,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
+            channel: String::new(),
         }];
 
         let payloads = pull_all_updates(&reg, &subs).unwrap();
@@ -485,6 +489,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: String::new(),
             sheets: Vec::new(),
+            channel: String::new(),
         }];
         let mut layer = OverrideLayer::new();
         let (s, c) = (

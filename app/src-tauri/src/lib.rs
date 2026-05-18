@@ -3885,6 +3885,11 @@ pub fn run() {
             calp_commands::calp_refresh_preview,
             calp_commands::calp_refresh_apply,
             calp_commands::calp_detach,
+            calp_commands::calp_dev_subscribe,
+            calp_commands::calp_dev_refresh,
+            calp_commands::calp_rename_cell_id,
+            calp_commands::calp_merge_cell_ids,
+            calp_commands::calp_next_version,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

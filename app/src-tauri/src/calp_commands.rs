@@ -459,3 +459,239 @@ pub fn calp_detach(state: State<AppState>) -> Result<(), String> {
 
     Ok(())
 }
+
+// ============================================================================
+// Phase 6: Author Workflow Commands
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevSubscribeParams {
+    /// Local .cala file path to subscribe to in dev mode.
+    pub source_path: String,
+    /// Sheet names to pull; empty means all sheets.
+    pub sheet_names: Vec<String>,
+}
+
+/// Subscribe to a local .cala file in dev mode.
+/// Materialize the sheets into the workbook exactly like `calp_pull`.
+#[tauri::command]
+pub fn calp_dev_subscribe(
+    state: State<AppState>,
+    params: DevSubscribeParams,
+) -> Result<PullResponse, String> {
+    let source = std::path::Path::new(&params.source_path);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let result = calp::dev_mode::pull_dev(source, &params.sheet_names)
+        .map_err(|e| e.to_string())?;
+
+    let sheets_pulled = result.sheets.len();
+    let tables_pulled = result.tables.len();
+
+    // Resolve the package name from the subscription that will be created.
+    let package_name = format!("dev:{}", params.source_path);
+
+    // Materialize pulled sheets into the workbook.
+    {
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+
+        for pulled in &result.sheets {
+            let (mut grid, local_styles) = pulled.sheet.to_grid();
+
+            let local_all = local_styles.all_styles();
+            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
+            for style in local_all {
+                remap.push(shared_styles.get_or_create(style.clone()));
+            }
+            for (_key, cell) in grid.cells.iter_mut() {
+                if cell.style_index < remap.len() {
+                    cell.style_index = remap[cell.style_index];
+                }
+            }
+
+            grids.push(grid);
+            sheet_names.push(pulled.name.clone());
+            sheet_ids.push(pulled.sheet.id);
+            all_cw.push(pulled.sheet.column_widths.clone());
+            all_rh.push(pulled.sheet.row_heights.clone());
+        }
+    }
+
+    // Store the dev subscription.
+    {
+        let subscription = calp::dev_mode::make_dev_subscription(
+            &params.source_path,
+            &result,
+            &now,
+        );
+        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions.push(subscription);
+    }
+
+    Ok(PullResponse {
+        package_name,
+        resolved_version: "dev".to_string(),
+        sheets_pulled,
+        tables_pulled,
+    })
+}
+
+/// Re-pull from the dev source, refreshing HEAD sheets in the workbook.
+#[tauri::command]
+pub fn calp_dev_refresh(state: State<AppState>) -> Result<PullResponse, String> {
+    // Find the dev subscription.
+    let (source_path, sub_index) = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let idx = subs.subscriptions.iter().position(calp::dev_mode::is_dev_subscription)
+            .ok_or_else(|| "No dev subscription found in current workbook".to_string())?;
+        // registry_url is "file://<path>"; strip the prefix to get the raw path.
+        let url = &subs.subscriptions[idx].registry_url;
+        let path = url.strip_prefix("file://").unwrap_or(url).to_string();
+        (path, idx)
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let source = std::path::Path::new(&source_path);
+
+    // Determine which sheet names were originally requested (empty = all).
+    let sheet_names: Vec<String> = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions[sub_index].sheets.iter()
+            .map(|s| s.local_name.clone())
+            .collect()
+    };
+
+    let result = calp::dev_mode::pull_dev(source, &sheet_names)
+        .map_err(|e| e.to_string())?;
+
+    let sheets_pulled = result.sheets.len();
+    let tables_pulled = result.tables.len();
+    let package_name = format!("dev:{}", source_path);
+
+    // Replace sheets already tracked by this subscription; append any new ones.
+    {
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut sheet_names_state = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let sub = &subs.subscriptions[sub_index];
+
+        let old_sheet_ids: Vec<_> = sub.sheets.iter()
+            .map(|s| s.local_sheet_id)
+            .collect();
+
+        for (i, pulled) in result.sheets.iter().enumerate() {
+            let (mut grid, local_styles) = pulled.sheet.to_grid();
+
+            let local_all = local_styles.all_styles();
+            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
+            for style in local_all {
+                remap.push(shared_styles.get_or_create(style.clone()));
+            }
+            for (_key, cell) in grid.cells.iter_mut() {
+                if cell.style_index < remap.len() {
+                    cell.style_index = remap[cell.style_index];
+                }
+            }
+
+            if let Some(local_sid) = old_sheet_ids.get(i).copied() {
+                // Replace the existing grid in-place.
+                if let Some(grid_idx) = sheet_ids.iter().position(|id| *id == local_sid) {
+                    grids[grid_idx] = grid;
+                    all_cw[grid_idx] = pulled.sheet.column_widths.clone();
+                    all_rh[grid_idx] = pulled.sheet.row_heights.clone();
+                }
+            } else {
+                // New sheet added since last pull — append.
+                grids.push(grid);
+                sheet_names_state.push(pulled.name.clone());
+                sheet_ids.push(pulled.sheet.id);
+                all_cw.push(pulled.sheet.column_widths.clone());
+                all_rh.push(pulled.sheet.row_heights.clone());
+            }
+        }
+    }
+
+    // Update the subscription timestamp.
+    {
+        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions[sub_index].resolved_at = now;
+    }
+
+    Ok(PullResponse {
+        package_name,
+        resolved_version: "dev".to_string(),
+        sheets_pulled,
+        tables_pulled,
+    })
+}
+
+/// Rename a stable CellId (author-facing operation).
+/// Returns an error until IdRegistry is fully integrated into AppState.
+#[tauri::command]
+pub fn calp_rename_cell_id(
+    _state: State<AppState>,
+    _sheet_id: String,
+    _old_cell_id: String,
+    _new_cell_id: String,
+) -> Result<bool, String> {
+    Err("IdRegistry not yet integrated into AppState — rename deferred to full integration".to_string())
+}
+
+/// Merge two stable CellIds (author-facing operation).
+/// Returns an error until IdRegistry is fully integrated into AppState.
+#[tauri::command]
+pub fn calp_merge_cell_ids(
+    _state: State<AppState>,
+    _sheet_id: String,
+    _survivor_cell_id: String,
+    _absorbed_cell_id: String,
+) -> Result<bool, String> {
+    Err("IdRegistry not yet integrated into AppState — merge deferred to full integration".to_string())
+}
+
+/// Suggest the next version for a package given a bump type ("major", "minor", "patch").
+#[tauri::command]
+pub fn calp_next_version(
+    registry_path: String,
+    package_name: String,
+    bump: String,
+) -> Result<String, String> {
+    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let manifest = registry.get_package_manifest(&package_name)
+        .map_err(|e| e.to_string())?;
+
+    // Parse all available versions and find the latest.
+    let mut versions: Vec<SemVer> = manifest.versions.iter()
+        .filter_map(|entry| SemVer::parse(&entry.version).ok())
+        .collect();
+
+    let next = if versions.is_empty() {
+        // No published versions yet — start at 1.0.0.
+        SemVer::new(1, 0, 0)
+    } else {
+        versions.sort();
+        let latest = versions.last().unwrap();
+        match bump.to_lowercase().as_str() {
+            "major" => SemVer::new(latest.major + 1, 0, 0),
+            "minor" => SemVer::new(latest.major, latest.minor + 1, 0),
+            "patch" => SemVer::new(latest.major, latest.minor, latest.patch + 1),
+            other => return Err(format!(
+                "Invalid bump type '{}'. Expected 'major', 'minor', or 'patch'.", other
+            )),
+        }
+    };
+
+    Ok(next.to_string())
+}
