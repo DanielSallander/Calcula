@@ -599,6 +599,41 @@ pub fn solver_solve(
         params.variable_cells.len()
     );
 
+    // Check writeback regions before acquiring other locks
+    {
+        let wb_index = state.writeback_index.lock().unwrap();
+        if !wb_index.is_empty() {
+            let sheet_ids = state.sheet_ids.lock().unwrap();
+            if let Some(&sid) = sheet_ids.get(params.sheet_index) {
+                let mut blocked_cells = Vec::new();
+                for var in &params.variable_cells {
+                    if wb_index.contains(sid, var.row, var.col) {
+                        blocked_cells.push(format!(
+                            "row {}, column {}",
+                            var.row + 1, var.col + 1,
+                        ));
+                    }
+                }
+                if !blocked_cells.is_empty() {
+                    let msg = format!(
+                        "Cannot solve: the following variable cells are in writeback regions: {}",
+                        blocked_cells.join(", "),
+                    );
+                    return SolverResult {
+                        found_solution: false,
+                        objective_value: f64::NAN,
+                        variable_values: Vec::new(),
+                        iterations: 0,
+                        status_message: msg.clone(),
+                        updated_cells: Vec::new(),
+                        original_values: Vec::new(),
+                        error: Some(msg),
+                    };
+                }
+            }
+        }
+    }
+
     // Acquire locks
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();

@@ -258,11 +258,14 @@ mod tests {
                 sheet_id,
                 name: "Dashboard".to_string(),
                 description: String::new(),
+                extra: std::collections::HashMap::new(),
             }],
             named_ranges: Vec::new(),
             tables: Vec::new(),
             locked_sheets: Vec::new(),
             locked_cells: Vec::new(),
+            writeback_regions: None,
+            extra: std::collections::HashMap::new(),
         };
 
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -288,10 +291,10 @@ mod tests {
         let (_dir, reg) = create_test_registry();
         let mut manifest = create_test_package(&reg, "pkg");
         manifest.versions = vec![
-            VersionEntry { version: "1.0.0".to_string(), published_at: "2026-01-01T00:00:00Z".to_string(), published_by: String::new() },
-            VersionEntry { version: "1.1.0".to_string(), published_at: "2026-01-02T00:00:00Z".to_string(), published_by: String::new() },
-            VersionEntry { version: "1.2.0".to_string(), published_at: "2026-01-03T00:00:00Z".to_string(), published_by: String::new() },
-            VersionEntry { version: "2.0.0".to_string(), published_at: "2026-01-04T00:00:00Z".to_string(), published_by: String::new() },
+            VersionEntry { version: "1.0.0".to_string(), published_at: "2026-01-01T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "1.1.0".to_string(), published_at: "2026-01-02T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "1.2.0".to_string(), published_at: "2026-01-03T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "2.0.0".to_string(), published_at: "2026-01-04T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
         ];
         reg.write_package_manifest(&manifest).unwrap();
 
@@ -330,6 +333,8 @@ mod tests {
             tables: Vec::new(),
             locked_sheets: Vec::new(),
             locked_cells: Vec::new(),
+            writeback_regions: None,
+            extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
 

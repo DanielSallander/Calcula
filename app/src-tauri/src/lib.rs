@@ -313,6 +313,9 @@ pub struct AppState {
     pub override_layer: Mutex<calp::OverrideLayer>,
     /// Audit log for subscription events (opt-in, stored in .cala as audit_log.json)
     pub audit_log: Mutex<calp::audit::AuditLog>,
+    /// Writeback index: positional lookup for cells in publisher-designated
+    /// writeback regions. Rebuilt on subscription pull/refresh/removal.
+    pub writeback_index: Mutex<calp::WritebackIndex>,
 }
 
 impl AppState {
@@ -433,6 +436,7 @@ pub fn create_app_state() -> AppState {
         subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
         override_layer: Mutex::new(calp::OverrideLayer::new()),
         audit_log: Mutex::new(calp::audit::AuditLog::new()),
+        writeback_index: Mutex::new(calp::WritebackIndex::default()),
     };
 
     // Populate built-in named styles
@@ -3896,6 +3900,7 @@ pub fn run() {
             calp_commands::calp_get_audit_log,
             calp_commands::calp_set_audit_enabled,
             calp_commands::calp_clear_audit_log,
+            calp_commands::calp_get_writeback_regions,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

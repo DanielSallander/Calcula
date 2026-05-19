@@ -18,6 +18,8 @@ pub struct PackageDependency {
     pub from_package: String,
     /// The package being referenced.
     pub to_package: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// Registry-side dependency graph across packages.
@@ -27,6 +29,8 @@ pub struct PackageDependency {
 pub struct PackageDependencyGraph {
     /// All declared inter-package dependencies.
     pub dependencies: Vec<PackageDependency>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl PackageDependencyGraph {
@@ -40,6 +44,7 @@ impl PackageDependencyGraph {
             self.dependencies.push(PackageDependency {
                 from_package: from.to_string(),
                 to_package: to.to_string(),
+                extra: HashMap::new(),
             });
         }
     }

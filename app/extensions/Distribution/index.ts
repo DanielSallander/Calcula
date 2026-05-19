@@ -1,8 +1,10 @@
 // FILENAME: app/extensions/Distribution/index.ts
 // PURPOSE: Distribution extension entry point — .calp publish, subscribe, refresh, overrides.
-// CONTEXT: Registers task pane, dialogs, menu items, and grid overlay badges.
+// CONTEXT: Registers task pane, dialogs, menu items, grid overlay badges,
+// writeback guards (Phase 9), and conditional style interceptor.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { AppEvents } from "@api/events";
 import { OverridesPane } from "./components/OverridesPane";
 import {
   DistributionManifest,
@@ -14,6 +16,15 @@ import {
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
 } from "./manifest";
+import {
+  isWritebackCell,
+  rangeOverlapsWriteback,
+  hasWritebackRegions,
+  refreshWritebackSnapshot,
+  resetWritebackSnapshot,
+  setActiveSheetIndex,
+  getActiveSheetIndex,
+} from "./lib/writebackStore";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -72,6 +83,104 @@ function activate(context: ExtensionContext): void {
     order: 903,
   });
 
+  // -----------------------------------------------------------------------
+  // Phase 9: Writeback readiness — guards, interceptor, event listeners
+  // -----------------------------------------------------------------------
+
+  // Track active sheet index for guard evaluation
+  const unsubSheetChanged = context.events.on(
+    AppEvents.SHEET_CHANGED,
+    (_data: unknown) => {
+      // The event payload contains the new sheet index
+      const payload = _data as { sheetIndex?: number } | undefined;
+      if (payload && typeof payload.sheetIndex === "number") {
+        setActiveSheetIndex(payload.sheetIndex);
+      }
+    },
+  );
+  cleanupFns.push(unsubSheetChanged);
+
+  // Load writeback snapshot on file open / new
+  const unsubAfterOpen = context.events.on(AppEvents.AFTER_OPEN, () => {
+    refreshAndUpdateInterceptor();
+  });
+  cleanupFns.push(unsubAfterOpen);
+
+  const unsubAfterNew = context.events.on(AppEvents.AFTER_NEW, () => {
+    refreshAndUpdateInterceptor();
+  });
+  cleanupFns.push(unsubAfterNew);
+
+  // Register edit guard: refuse edits on writeback cells
+  const unregEditGuard = context.grid.editGuards.register(
+    async (row: number, col: number) => {
+      if (!hasWritebackRegions()) return null;
+      const sheetIdx = getActiveSheetIndex();
+      if (isWritebackCell(sheetIdx, row, col)) {
+        return {
+          blocked: true,
+          message: "This cell is reserved for input in a future version.",
+        };
+      }
+      return null;
+    },
+  );
+  cleanupFns.push(unregEditGuard);
+
+  // Register range guard: refuse range operations that overlap writeback regions
+  const unregRangeGuard = context.grid.rangeGuards.register(
+    (startRow: number, startCol: number, endRow: number, endCol: number) => {
+      if (!hasWritebackRegions()) return null;
+      const sheetIdx = getActiveSheetIndex();
+      if (rangeOverlapsWriteback(sheetIdx, startRow, startCol, endRow, endCol)) {
+        return {
+          blocked: true,
+          message: "Some cells in this range are reserved for input in a future version.",
+        };
+      }
+      return null;
+    },
+  );
+  cleanupFns.push(unregRangeGuard);
+
+  // Writeback style interceptor management.
+  // Only registered when writeback regions exist, so per-cell render cost
+  // is zero in the common case (no writeback packages).
+  let unregStyleInterceptor: (() => void) | null = null;
+
+  function updateStyleInterceptor(): void {
+    if (hasWritebackRegions() && !unregStyleInterceptor) {
+      // TODO(v1.1): Return writeback visual treatment instead of null.
+      unregStyleInterceptor = context.grid.styleInterceptors.register(
+        "distribution:writeback",
+        (_cellValue, _baseStyle, _coords) => {
+          // v1.0: no visual treatment for writeback cells.
+          return null;
+        },
+        30, // priority: after tables (5) and conditional formatting (20+)
+      );
+    } else if (!hasWritebackRegions() && unregStyleInterceptor) {
+      unregStyleInterceptor();
+      unregStyleInterceptor = null;
+    }
+  }
+
+  // Wrap snapshot refresh to also update interceptor registration
+  async function refreshAndUpdateInterceptor(): Promise<void> {
+    await refreshWritebackSnapshot();
+    updateStyleInterceptor();
+  }
+
+  cleanupFns.push(() => {
+    if (unregStyleInterceptor) {
+      unregStyleInterceptor();
+      unregStyleInterceptor = null;
+    }
+  });
+
+  // Initial snapshot load (in case subscriptions already exist at startup)
+  refreshAndUpdateInterceptor();
+
   isActivated = true;
 }
 
@@ -81,6 +190,7 @@ function deactivate(): void {
     try { fn(); } catch {}
   }
   cleanupFns.length = 0;
+  resetWritebackSnapshot();
   isActivated = false;
 }
 

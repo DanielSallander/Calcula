@@ -1,6 +1,8 @@
 //! FILENAME: core/calp/src/manifest.rs
 //! PURPOSE: .calp manifest types — package-level and version-level.
 
+use std::collections::HashMap;
+
 use identity::{EntityId, SheetId};
 use serde::{Deserialize, Serialize};
 use crate::version::SemVer;
@@ -21,6 +23,9 @@ pub struct PackageManifest {
     pub author: String,
     pub created: String,
     pub versions: Vec<VersionEntry>,
+    /// Forward-compatibility: preserves unknown fields from future format versions.
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 fn default_kind() -> String { "report".to_string() }
@@ -33,6 +38,8 @@ pub struct VersionEntry {
     pub published_at: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub published_by: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl PackageManifest {
@@ -45,6 +52,7 @@ impl PackageManifest {
             author: author.to_string(),
             created: now.to_string(),
             versions: Vec::new(),
+            extra: HashMap::new(),
         }
     }
 
@@ -83,6 +91,13 @@ pub struct VersionManifest {
     pub locked_sheets: Vec<SheetId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locked_cells: Vec<LockedCell>,
+    /// Writeback region declarations. Present when the publisher designates
+    /// regions as subscriber-fillable. v1.0 parses and round-trips these but
+    /// does not interpret the semantic sub-fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// A sheet entry in the version manifest.
@@ -93,6 +108,8 @@ pub struct PublishedSheet {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// A named range included in the published package.
@@ -103,6 +120,8 @@ pub struct PublishedNamedRange {
     pub refers_to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_id: Option<SheetId>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// A cell marked as locked-no-override.
@@ -111,6 +130,8 @@ pub struct PublishedNamedRange {
 pub struct LockedCell {
     pub sheet_id: SheetId,
     pub cell_id: identity::CellId,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// Subscription metadata stored in a .cala file.
@@ -119,6 +140,8 @@ pub struct LockedCell {
 pub struct SubscriptionManifest {
     pub format_version: u32,
     pub subscriptions: Vec<Subscription>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl Default for SubscriptionManifest {
@@ -126,6 +149,7 @@ impl Default for SubscriptionManifest {
         Self {
             format_version: 1,
             subscriptions: Vec::new(),
+            extra: HashMap::new(),
         }
     }
 }
@@ -147,6 +171,8 @@ pub struct Subscription {
     /// and the active channel determines which source is used.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub channel: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// Mapping from a package sheet to its local representation in the consumer's workbook.
@@ -159,4 +185,129 @@ pub struct SubscribedSheet {
     pub local_sheet_id: SheetId,
     /// The sheet's name in the local workbook (may differ from package name).
     pub local_name: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_manifest_without_writeback_loads() {
+        // A manifest with no writeback_regions field — must load normally.
+        let json = serde_json::json!({
+            "formatVersion": 1,
+            "packageName": "test",
+            "version": "1.0.0",
+            "kind": "report",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "sheets": [],
+        });
+        let vm: VersionManifest = serde_json::from_value(json).unwrap();
+        assert!(vm.writeback_regions.is_none());
+        assert!(vm.extra.is_empty());
+    }
+
+    #[test]
+    fn version_manifest_with_writeback_roundtrips() {
+        let sid = SheetId::from_bytes(identity::generate_uuid_v7());
+        let json = serde_json::json!({
+            "formatVersion": 1,
+            "packageName": "test",
+            "version": "1.0.0",
+            "kind": "report",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "sheets": [],
+            "writebackRegions": [
+                {
+                    "id": "region-1",
+                    "selector": {
+                        "sheetId": sid.to_string(),
+                        "rowStart": 0,
+                        "rowEnd": 10,
+                        "colStart": 0,
+                        "colEnd": 5
+                    },
+                    "mode": "per_subscriber",
+                    "schema": {"type": "number"}
+                }
+            ]
+        });
+
+        let vm: VersionManifest = serde_json::from_value(json).unwrap();
+        assert!(vm.writeback_regions.is_some());
+        let regions = vm.writeback_regions.as_ref().unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].id, "region-1");
+
+        // Round-trip
+        let re_json = serde_json::to_value(&vm).unwrap();
+        let vm2: VersionManifest = serde_json::from_value(re_json).unwrap();
+        let regions2 = vm2.writeback_regions.unwrap();
+        assert_eq!(regions2[0].mode, Some(serde_json::json!("per_subscriber")));
+    }
+
+    #[test]
+    fn flatten_extras_preserve_unknown_fields() {
+        // Simulate a future format with extra fields on VersionManifest
+        let json = serde_json::json!({
+            "formatVersion": 1,
+            "packageName": "test",
+            "version": "1.0.0",
+            "kind": "report",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "sheets": [],
+            "futureField": "some-value",
+            "anotherFuture": 42
+        });
+        let vm: VersionManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(vm.extra.get("futureField").unwrap(), "some-value");
+
+        // Round-trip preserves
+        let re_json = serde_json::to_value(&vm).unwrap();
+        assert_eq!(re_json["futureField"], "some-value");
+        assert_eq!(re_json["anotherFuture"], 42);
+    }
+
+    #[test]
+    fn subscription_extras_roundtrip() {
+        let json = serde_json::json!({
+            "packageName": "pkg",
+            "registryUrl": "file:///reg",
+            "versionPin": "^1.0",
+            "resolvedVersion": "1.0.0",
+            "resolvedAt": "2026-01-01T00:00:00Z",
+            "sheets": [],
+            "newV11Field": {"nested": true}
+        });
+        let sub: Subscription = serde_json::from_value(json).unwrap();
+        assert!(sub.extra.contains_key("newV11Field"));
+
+        let re_json = serde_json::to_value(&sub).unwrap();
+        assert_eq!(re_json["newV11Field"]["nested"], true);
+    }
+
+    #[test]
+    fn cell_override_extras_roundtrip() {
+        let json = serde_json::json!({
+            "sheetId": SheetId::from_bytes(identity::generate_uuid_v7()).to_string(),
+            "cellId": identity::CellId::from_bytes(identity::generate_uuid_v7()).to_string(),
+            "position": [0, 0],
+            "baseline": {"type": "value", "display": "100"},
+            "current": {"type": "value", "display": "200"},
+            "createdAt": "2026-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "futureWritebackRef": "wb-region-1"
+        });
+        let ovr: crate::overrides::CellOverride = serde_json::from_value(json).unwrap();
+        assert!(ovr.extra.contains_key("futureWritebackRef"));
+
+        let re_json = serde_json::to_value(&ovr).unwrap();
+        assert_eq!(re_json["futureWritebackRef"], "wb-region-1");
+    }
 }

@@ -65,6 +65,7 @@ pub fn publish(
             sheet_id: sheet.id,
             name: sheet.name.clone(),
             description: String::new(),
+            extra: std::collections::HashMap::new(),
         }
     }).collect();
 
@@ -77,6 +78,7 @@ pub fn publish(
             name: nr.name.clone(),
             refers_to: nr.refers_to.clone(),
             sheet_id: nr.sheet_id,
+            extra: std::collections::HashMap::new(),
         })
         .collect();
 
@@ -97,6 +99,8 @@ pub fn publish(
         tables: table_ids,
         locked_sheets: Vec::new(),
         locked_cells: Vec::new(),
+        writeback_regions: None,
+        extra: std::collections::HashMap::new(),
     };
 
     registry.write_version_manifest(&request.package_name, &version_str, &version_manifest)?;
@@ -153,6 +157,7 @@ pub fn publish(
         version: version_str.clone(),
         published_at: request.now.clone(),
         published_by: request.published_by.clone(),
+        extra: std::collections::HashMap::new(),
     });
     registry.write_package_manifest(&pkg_manifest)?;
 

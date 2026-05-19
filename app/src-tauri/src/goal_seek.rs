@@ -127,6 +127,23 @@ pub fn goal_seek(
         params.target_row, params.target_col, params.target_value,
         params.variable_row, params.variable_col);
 
+    // Check writeback region before acquiring other locks
+    {
+        let wb_index = state.writeback_index.lock().unwrap();
+        if !wb_index.is_empty() {
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            let sheet_ids = state.sheet_ids.lock().unwrap();
+            if let Some(&sid) = sheet_ids.get(active_sheet) {
+                if wb_index.contains(sid, params.variable_row, params.variable_col) {
+                    return error_result(&format!(
+                        "Cell at row {}, column {} is in a writeback region and cannot be used as a Goal Seek changing cell.",
+                        params.variable_row + 1, params.variable_col + 1,
+                    ));
+                }
+            }
+        }
+    }
+
     // Acquire locks (same order as update_cell to avoid deadlocks)
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();

@@ -1514,6 +1514,38 @@ pub fn update_cells_batch(
         }
     }
 
+    // Filter out cells in writeback regions (partial-success semantics)
+    let (updates, skipped_writeback) = {
+        let wb_index = state.writeback_index.lock().unwrap();
+        if wb_index.is_empty() {
+            (updates, 0usize)
+        } else {
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            let sheet_ids = state.sheet_ids.lock().unwrap();
+            if let Some(&sid) = sheet_ids.get(active_sheet) {
+                let mut kept = Vec::with_capacity(updates.len());
+                let mut skipped = 0usize;
+                for u in updates {
+                    if wb_index.contains(sid, u.row, u.col) {
+                        skipped += 1;
+                    } else {
+                        kept.push(u);
+                    }
+                }
+                (kept, skipped)
+            } else {
+                (updates, 0usize)
+            }
+        }
+    };
+
+    // After writeback filtering, batch may be empty
+    if updates.is_empty() {
+        // TODO(v1.1): surface skipped_writeback in writeback side pane
+        let _ = skipped_writeback;
+        return Ok(Vec::new());
+    }
+
     // Acquire all locks once
     let sheet_names = state.sheet_names.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
@@ -3836,6 +3868,26 @@ pub fn fill_range(
     let perf_t0 = Instant::now();
 
     let user_files = user_files_state.files.lock().unwrap();
+
+    // Check if target range overlaps any writeback region
+    {
+        let wb_index = state.writeback_index.lock().unwrap();
+        if !wb_index.is_empty() {
+            let active = *state.active_sheet.lock().unwrap();
+            let sheet_ids = state.sheet_ids.lock().unwrap();
+            if let Some(&sid) = sheet_ids.get(active) {
+                let query = calp::writeback::PositionalRange {
+                    row_start: target_start_row,
+                    row_end: target_end_row,
+                    col_start: target_start_col,
+                    col_end: target_end_col,
+                };
+                if !wb_index.regions_overlapping(sid, &query).is_empty() {
+                    return Err("Fill target overlaps a writeback region. Those cells are reserved for input in a future version.".to_string());
+                }
+            }
+        }
+    }
 
     // Acquire all locks once
     let sheet_names = state.sheet_names.lock().unwrap();

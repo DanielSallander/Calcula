@@ -84,7 +84,7 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
         }}>
           <div style={{ fontWeight: 600 }}>{sp.packageName}</div>
           <div style={{ fontSize: "12px", color: "#666" }}>
-            {sp.currentVersion} -> {sp.newVersion}
+            {sp.currentVersion} {"->"}  {sp.newVersion}
           </div>
           {sp.sheetsAdded.length > 0 && (
             <div style={{ fontSize: "12px", color: "green" }}>

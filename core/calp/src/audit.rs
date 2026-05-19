@@ -4,6 +4,8 @@
 //! Policy is set per registry: a registry may require audit logging for
 //! packages it serves. Off by default.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Audit log stored in the .cala file (audit_log.json in user_files).
@@ -18,6 +20,8 @@ pub struct AuditLog {
     pub max_entries: usize,
     /// Audit entries, newest last.
     pub entries: Vec<AuditEntry>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// A single audit log entry.
@@ -33,6 +37,8 @@ pub struct AuditEntry {
     /// Who performed the action (if known).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// Types of auditable events.
@@ -68,6 +74,7 @@ impl AuditLog {
             enabled: false,
             max_entries: 0,
             entries: Vec::new(),
+            extra: HashMap::new(),
         }
     }
 
@@ -77,6 +84,7 @@ impl AuditLog {
             enabled: true,
             max_entries,
             entries: Vec::new(),
+            extra: HashMap::new(),
         }
     }
 
@@ -91,6 +99,7 @@ impl AuditLog {
             event,
             description: description.to_string(),
             user: user.to_string(),
+            extra: HashMap::new(),
         });
 
         // Trim to max_entries if set

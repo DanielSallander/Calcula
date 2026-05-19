@@ -59,6 +59,9 @@ pub struct CellOverride {
     /// If in conflict, what the new upstream value is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_new: Option<OverrideValue>,
+    /// Forward-compatibility: preserves unknown fields from future format versions.
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// The complete override layer for a workbook.
@@ -70,6 +73,8 @@ pub struct OverrideLayer {
     /// All overrides, keyed by (sheet_id, cell_id) for efficient lookup.
     /// The Vec form is used for serialization; the runtime uses the HashMap.
     pub overrides: Vec<CellOverride>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl OverrideLayer {
@@ -77,6 +82,7 @@ impl OverrideLayer {
         Self {
             format_version: 1,
             overrides: Vec::new(),
+            extra: HashMap::new(),
         }
     }
 
@@ -264,6 +270,8 @@ pub struct OverridePatch {
     pub overrides: Vec<CellOverride>,
     /// ISO 8601 timestamp of export.
     pub exported_at: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl OverridePatch {
@@ -280,6 +288,7 @@ impl OverridePatch {
             baseline_version: baseline_version.to_string(),
             overrides: layer.overrides.clone(),
             exported_at: now.to_string(),
+            extra: HashMap::new(),
         }
     }
 
@@ -319,6 +328,7 @@ mod tests {
             author: String::new(),
             conflict: false,
             upstream_new: None,
+            extra: HashMap::new(),
         }
     }
 

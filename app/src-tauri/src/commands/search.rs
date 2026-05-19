@@ -20,6 +20,9 @@ pub struct FindResult {
 pub struct ReplaceResult {
     pub updated_cells: Vec<CellData>,
     pub replacement_count: usize,
+    /// Number of cells skipped because they are in writeback regions.
+    #[serde(default)]
+    pub skipped_writeback: usize,
 }
 
 /// Find all cells matching the query.
@@ -68,14 +71,20 @@ pub fn replace_all(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let writeback_index = state.writeback_index.lock().unwrap();
+    let sheet_ids = state.sheet_ids.lock().unwrap();
+
+    // Resolve the active sheet's stable SheetId for writeback lookups
+    let active_sheet_id = sheet_ids.get(active_sheet).copied();
 
     // Find all matching cells first
     let matches = grid.find_all(&search, case_sensitive, match_entire_cell, false);
-    
+
     if matches.is_empty() {
         return Ok(ReplaceResult {
             updated_cells: Vec::new(),
             replacement_count: 0,
+            skipped_writeback: 0,
         });
     }
 
@@ -93,11 +102,20 @@ pub fn replace_all(
 
     let mut updated_cells = Vec::new();
     let mut replacement_count = 0;
+    let mut skipped_writeback = 0;
 
     for (row, col) in matches {
+        // Skip cells in writeback regions
+        if let Some(sid) = active_sheet_id {
+            if writeback_index.contains(sid, row, col) {
+                skipped_writeback += 1;
+                continue;
+            }
+        }
+
         // Record previous state for undo
         let previous_cell = grid.get_cell(row, col).cloned();
-        
+
         if let Some(cell) = grid.get_cell(row, col).cloned() {
             // Only replace in text values, not formulas
             if cell.has_formula() {
@@ -212,6 +230,7 @@ pub fn replace_all(
     Ok(ReplaceResult {
         updated_cells,
         replacement_count,
+        skipped_writeback,
     })
 }
 
@@ -253,6 +272,17 @@ pub fn replace_single(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+
+    // Skip cells in writeback regions
+    {
+        let writeback_index = state.writeback_index.lock().unwrap();
+        let sheet_ids = state.sheet_ids.lock().unwrap();
+        if let Some(&sid) = sheet_ids.get(active_sheet) {
+            if writeback_index.contains(sid, row, col) {
+                return Ok(None); // Silently skip — cell is writeback-protected
+            }
+        }
+    }
 
     let previous_cell = grid.get_cell(row, col).cloned();
     

@@ -69,7 +69,7 @@ function OverrideRow({
         <span>{formatValue(ovr.baseline)}</span>
         {ovr.conflict && ovr.upstreamNew && (
           <>
-            <span style={{ color: "var(--text-secondary, #888)" }}> -> </span>
+            <span style={{ color: "var(--text-secondary, #888)" }}>{" -> "}</span>
             <span style={{ color: "var(--conflict-text, #856404)" }}>{formatValue(ovr.upstreamNew)}</span>
           </>
         )}
@@ -190,7 +190,7 @@ export function OverridesPane() {
         {activeTab === "conflicts" && renderList(conflicts)}
         {activeTab === "pending" && (
           <div style={{ padding: "20px", textAlign: "center", color: "var(--text-secondary, #888)" }}>
-            Use Data > Refresh to check for updates
+            {"Use Data > Refresh to check for updates"}
           </div>
         )}
       </div>

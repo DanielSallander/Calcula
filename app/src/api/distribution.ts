@@ -315,3 +315,22 @@ export function setAuditEnabled(enabled: boolean, maxEntries: number): Promise<v
 export function clearAuditLog(): Promise<void> {
   return invokeBackend("calp_clear_audit_log");
 }
+
+// ============================================================================
+// Phase 9: Writeback Readiness
+// ============================================================================
+
+/** A writeback region entry from the backend index (flat format). */
+export interface WritebackRegionEntry {
+  sheetId: string;
+  sheetIndex: number;
+  rowStart: number;
+  rowEnd: number;
+  colStart: number;
+  colEnd: number;
+}
+
+/** Fetch the current writeback regions from the backend. */
+export function getWritebackRegions(): Promise<WritebackRegionEntry[]> {
+  return invokeBackend("calp_get_writeback_regions");
+}

@@ -916,6 +916,8 @@ export interface FindResult {
 export interface ReplaceResult {
   updatedCells: CellData[];
   replacementCount: number;
+  /** Number of cells skipped because they are in writeback regions. */
+  skippedWriteback?: number;
 }
 
 export interface FindOptions {

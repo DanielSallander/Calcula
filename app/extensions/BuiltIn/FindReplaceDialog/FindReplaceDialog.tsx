@@ -218,6 +218,11 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
 
       console.log(`[FindReplaceDialog] Replaced ${result.replacementCount} occurrences`);
 
+      // TODO(v1.1): Surface in writeback side pane instead of console log
+      if (result.skippedWriteback && result.skippedWriteback > 0) {
+        console.warn(`[FindReplaceDialog] Skipped ${result.skippedWriteback} cells in writeback regions`);
+      }
+
       // Emit refresh events
       for (const cell of result.updatedCells) {
         cellEvents.emit({

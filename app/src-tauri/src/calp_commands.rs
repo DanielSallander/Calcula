@@ -188,6 +188,9 @@ pub fn calp_pull(
         subs.subscriptions.push(result.subscription);
     }
 
+    // Rebuild writeback index from updated subscriptions
+    rebuild_writeback_index(&state, Some(&params.registry_path));
+
     Ok(PullResponse {
         package_name: result.package_name,
         resolved_version: result.resolved_version.to_string(),
@@ -445,6 +448,11 @@ pub fn calp_refresh_apply(
         &now,
     );
 
+    // Rebuild writeback index from updated subscriptions
+    drop(subs);
+    drop(layer);
+    rebuild_writeback_index(&state, Some(&registry_path));
+
     Ok(result)
 }
 
@@ -456,6 +464,13 @@ pub fn calp_detach(state: State<AppState>) -> Result<(), String> {
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
 
     calp::refresh::detach(&mut subs.subscriptions, &mut layer);
+
+    // Clear writeback index (no subscriptions remain)
+    drop(subs);
+    drop(layer);
+    if let Ok(mut idx) = state.writeback_index.lock() {
+        *idx = calp::WritebackIndex::default();
+    }
 
     Ok(())
 }
@@ -694,6 +709,66 @@ pub fn calp_clear_audit_log(
     let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
     log.clear();
     Ok(())
+}
+
+// ============================================================================
+// Phase 9: Writeback Readiness
+// ============================================================================
+
+/// Return the flat list of writeback regions for frontend guard evaluation.
+#[tauri::command]
+pub fn calp_get_writeback_regions(
+    state: State<AppState>,
+) -> Result<Vec<calp::WritebackRegionEntry>, String> {
+    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let id_to_index: std::collections::HashMap<identity::SheetId, usize> = sheet_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &sid)| (sid, i))
+        .collect();
+    Ok(index.to_flat_list(&id_to_index))
+}
+
+/// Rebuild the writeback index from the version manifests of all active subscriptions.
+/// Called internally after pull, refresh, and detach.
+fn rebuild_writeback_index(state: &AppState, registry_path: Option<&str>) {
+    let subs = match state.subscriptions.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let mut all_decls = Vec::new();
+
+    if let Some(path) = registry_path {
+        if let Ok(registry) = calp::registry::LocalRegistry::open(std::path::Path::new(path)) {
+            for sub in &subs.subscriptions {
+                // Skip dev and file-channel subscriptions (no writeback in those)
+                if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+                    continue;
+                }
+                if let Ok(ver_manifest) = registry.get_version_manifest(
+                    &sub.package_name, &sub.resolved_version,
+                ) {
+                    if let Some(ref wb_regions) = ver_manifest.writeback_regions {
+                        all_decls.extend(wb_regions.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
+    let new_index = match calp::WritebackIndex::from_declarations(&all_decls) {
+        Ok(idx) => idx,
+        Err(e) => {
+            crate::log_warn!("CALP", "Failed to build writeback index: {}", e);
+            calp::WritebackIndex::default()
+        }
+    };
+
+    if let Ok(mut idx) = state.writeback_index.lock() {
+        *idx = new_index;
+    }
 }
 
 /// Suggest the next version for a package given a bump type ("major", "minor", "patch").

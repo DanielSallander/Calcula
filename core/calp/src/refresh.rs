@@ -405,8 +405,10 @@ mod tests {
                 package_sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
                 local_sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
                 local_name: "Sheet1".to_string(),
+                extra: std::collections::HashMap::new(),
             }],
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         };
 
         let layer = OverrideLayer::new();
@@ -430,6 +432,7 @@ mod tests {
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         };
 
         let layer = OverrideLayer::new();
@@ -450,6 +453,7 @@ mod tests {
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         };
 
         let payloads = pull_all_updates(&reg, &[sub]).unwrap();
@@ -470,6 +474,7 @@ mod tests {
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         }];
 
         let payloads = pull_all_updates(&reg, &subs).unwrap();
@@ -491,6 +496,7 @@ mod tests {
             resolved_at: String::new(),
             sheets: Vec::new(),
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         }];
         let mut layer = OverrideLayer::new();
         let (s, c) = (
@@ -508,6 +514,7 @@ mod tests {
             author: String::new(),
             conflict: false,
             upstream_new: None,
+            extra: std::collections::HashMap::new(),
         });
 
         detach(&mut subs, &mut layer);

@@ -134,6 +134,7 @@ pub fn pull(
             package_sheet_id: ps.package_sheet_id,
             local_sheet_id: ps.sheet.id,
             local_name: ps.name.clone(),
+            extra: HashMap::new(),
         }
     }).collect();
 
@@ -145,6 +146,7 @@ pub fn pull(
         resolved_at: request.now.clone(),
         sheets: subscribed_sheets,
         channel: String::new(), // default/production channel
+        extra: HashMap::new(),
     };
 
     Ok(PullResult {

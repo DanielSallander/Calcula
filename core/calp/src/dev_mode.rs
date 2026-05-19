@@ -90,6 +90,7 @@ pub fn make_dev_subscription(
             package_sheet_id: ps.source_sheet_id,
             local_sheet_id: ps.sheet.id,
             local_name: ps.name.clone(),
+            extra: std::collections::HashMap::new(),
         }
     }).collect();
 
@@ -101,6 +102,7 @@ pub fn make_dev_subscription(
         resolved_at: now.to_string(),
         sheets,
         channel: "dev".to_string(),
+        extra: std::collections::HashMap::new(),
     }
 }
 
@@ -207,6 +209,7 @@ mod tests {
             resolved_at: String::new(),
             sheets: Vec::new(),
             channel: "dev".to_string(),
+            extra: std::collections::HashMap::new(),
         };
         assert!(is_dev_subscription(&sub));
 
@@ -218,6 +221,7 @@ mod tests {
             resolved_at: String::new(),
             sheets: Vec::new(),
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         };
         assert!(!is_dev_subscription(&normal_sub));
     }

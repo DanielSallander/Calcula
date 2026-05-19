@@ -205,6 +205,24 @@ pub fn scenario_show(
     };
     drop(scenarios);
 
+    // Check writeback regions: skip changing cells that fall in writeback regions
+    let writeback_skip: std::collections::HashSet<(u32, u32)> = {
+        let wb_index = state.writeback_index.lock().unwrap();
+        if wb_index.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            let sheet_ids = state.sheet_ids.lock().unwrap();
+            if let Some(&sid) = sheet_ids.get(params.sheet_index) {
+                scenario.changing_cells.iter()
+                    .filter(|cc| wb_index.contains(sid, cc.row, cc.col))
+                    .map(|cc| (cc.row, cc.col))
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            }
+        }
+    };
+
     // Acquire grid locks
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -220,8 +238,12 @@ pub fn scenario_show(
     let sheet_idx = params.sheet_index;
     let mut all_affected = Vec::new();
 
-    // Apply each changing cell value
+    // Apply each changing cell value (skip writeback-protected cells)
     for sc in &scenario.changing_cells {
+        if writeback_skip.contains(&(sc.row, sc.col)) {
+            continue;
+        }
+
         let style_index = grids[sheet_idx]
             .get_cell(sc.row, sc.col)
             .map_or(0, |c| c.style_index);

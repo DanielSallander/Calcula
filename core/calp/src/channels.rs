@@ -91,6 +91,7 @@ pub fn make_file_subscription(
             package_sheet_id: ps.source_sheet_id,
             local_sheet_id: ps.sheet.id,
             local_name: ps.name.clone(),
+            extra: std::collections::HashMap::new(),
         }
     }).collect();
 
@@ -102,6 +103,7 @@ pub fn make_file_subscription(
         resolved_at: now.to_string(),
         sheets,
         channel: channel.to_string(),
+        extra: std::collections::HashMap::new(),
     }
 }
 
@@ -204,6 +206,7 @@ mod tests {
             resolved_at: String::new(),
             sheets: Vec::new(),
             channel: String::new(),
+            extra: std::collections::HashMap::new(),
         };
         assert!(!is_file_channel(&registry_sub));
         assert_eq!(channel_name(&registry_sub), "");
@@ -216,16 +219,19 @@ mod tests {
                 package_name: "pkg".to_string(), registry_url: String::new(),
                 version_pin: "^1.0".to_string(), resolved_version: "1.0.0".to_string(),
                 resolved_at: String::new(), sheets: Vec::new(), channel: String::new(),
+                extra: std::collections::HashMap::new(),
             },
             Subscription {
                 package_name: "pkg".to_string(), registry_url: String::new(),
                 version_pin: "channel:dev".to_string(), resolved_version: "channel:dev".to_string(),
                 resolved_at: String::new(), sheets: Vec::new(), channel: "dev".to_string(),
+                extra: std::collections::HashMap::new(),
             },
             Subscription {
                 package_name: "pkg".to_string(), registry_url: String::new(),
                 version_pin: "channel:test".to_string(), resolved_version: "channel:test".to_string(),
                 resolved_at: String::new(), sheets: Vec::new(), channel: "test".to_string(),
+                extra: std::collections::HashMap::new(),
             },
         ];
 
