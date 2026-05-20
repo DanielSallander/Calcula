@@ -156,6 +156,100 @@ pub struct WritebackRegionDeclaration {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+impl ValueSchema {
+    /// Validate a submission value against this schema.
+    /// Returns Ok(()) if valid, Err(message) if invalid.
+    pub fn validate(&self, value: &SubmissionValue) -> Result<(), String> {
+        // Check required
+        if self.required {
+            if matches!(value, SubmissionValue::Empty) {
+                return Err("This field is required.".to_string());
+            }
+        }
+
+        // If empty and not required, that's fine
+        if matches!(value, SubmissionValue::Empty) {
+            return Ok(());
+        }
+
+        match self.value_type {
+            ValueType::Number | ValueType::Integer => {
+                let n = match value {
+                    SubmissionValue::Number { value } => *value,
+                    SubmissionValue::Text { value } => {
+                        value.parse::<f64>().map_err(|_| {
+                            format!("Expected a number, got '{}'.", value)
+                        })?
+                    }
+                    _ => return Err("Expected a number.".to_string()),
+                };
+                if self.value_type == ValueType::Integer && n.fract() != 0.0 {
+                    return Err(format!("Expected an integer, got {}.", n));
+                }
+                if let Some(min) = self.min {
+                    if n < min {
+                        return Err(format!("Value {} is below the minimum of {}.", n, min));
+                    }
+                }
+                if let Some(max) = self.max {
+                    if n > max {
+                        return Err(format!("Value {} exceeds the maximum of {}.", n, max));
+                    }
+                }
+            }
+            ValueType::Text => {
+                let text = match value {
+                    SubmissionValue::Text { value } => value.as_str(),
+                    _ => return Err("Expected text.".to_string()),
+                };
+                if let Some(max_len) = self.max_length {
+                    if text.len() > max_len {
+                        return Err(format!(
+                            "Text length {} exceeds maximum of {}.",
+                            text.len(), max_len,
+                        ));
+                    }
+                }
+                if let Some(ref pat) = self.pattern {
+                    // Simple contains check — full regex would need a dependency
+                    if !text.contains(pat.as_str()) {
+                        return Err(format!("Text does not match pattern '{}'.", pat));
+                    }
+                }
+            }
+            ValueType::Boolean => {
+                if !matches!(value, SubmissionValue::Boolean { .. }) {
+                    return Err("Expected a boolean (TRUE or FALSE).".to_string());
+                }
+            }
+            ValueType::Enum => {
+                let text = match value {
+                    SubmissionValue::Text { value } => value.as_str(),
+                    _ => return Err("Expected one of the allowed values.".to_string()),
+                };
+                if !self.enum_values.iter().any(|v| v.eq_ignore_ascii_case(text)) {
+                    return Err(format!(
+                        "Value '{}' is not in the allowed list: {}.",
+                        text,
+                        self.enum_values.join(", "),
+                    ));
+                }
+            }
+            ValueType::Date => {
+                // Accept text that looks like a date (basic check)
+                if let SubmissionValue::Text { value } = value {
+                    if value.len() < 8 {
+                        return Err("Expected a date value.".to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+}
+
 /// Positional region selector: a rectangular range on a specific sheet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1107,5 +1201,149 @@ mod tests {
         assert!(decl.version_binding.is_none());
         assert!(decl.lifecycle.is_none());
         assert!(decl.aggregation_hint.is_none());
+    }
+
+    // --- Schema validation tests ---
+
+    fn make_number_schema(required: bool, min: Option<f64>, max: Option<f64>) -> ValueSchema {
+        ValueSchema {
+            value_type: ValueType::Number,
+            required,
+            min,
+            max,
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn schema_validates_number_in_range() {
+        let schema = make_number_schema(true, Some(0.0), Some(100.0));
+        assert!(schema.validate(&SubmissionValue::Number { value: 50.0 }).is_ok());
+        assert!(schema.validate(&SubmissionValue::Number { value: 0.0 }).is_ok());
+        assert!(schema.validate(&SubmissionValue::Number { value: 100.0 }).is_ok());
+    }
+
+    #[test]
+    fn schema_rejects_number_out_of_range() {
+        let schema = make_number_schema(false, Some(0.0), Some(100.0));
+        let result = schema.validate(&SubmissionValue::Number { value: -1.0 });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("below the minimum"));
+
+        let result = schema.validate(&SubmissionValue::Number { value: 101.0 });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds the maximum"));
+    }
+
+    #[test]
+    fn schema_rejects_empty_when_required() {
+        let schema = make_number_schema(true, None, None);
+        let result = schema.validate(&SubmissionValue::Empty);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("required"));
+    }
+
+    #[test]
+    fn schema_allows_empty_when_not_required() {
+        let schema = make_number_schema(false, None, None);
+        assert!(schema.validate(&SubmissionValue::Empty).is_ok());
+    }
+
+    #[test]
+    fn schema_validates_enum() {
+        let schema = ValueSchema {
+            value_type: ValueType::Enum,
+            required: true,
+            min: None,
+            max: None,
+            enum_values: vec!["Low".to_string(), "Medium".to_string(), "High".to_string()],
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        };
+        assert!(schema.validate(&SubmissionValue::Text { value: "Low".to_string() }).is_ok());
+        assert!(schema.validate(&SubmissionValue::Text { value: "low".to_string() }).is_ok()); // case-insensitive
+
+        let result = schema.validate(&SubmissionValue::Text { value: "Critical".to_string() });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in the allowed list"));
+    }
+
+    #[test]
+    fn schema_validates_integer() {
+        let schema = ValueSchema {
+            value_type: ValueType::Integer,
+            required: false,
+            min: Some(1.0),
+            max: Some(10.0),
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        };
+        assert!(schema.validate(&SubmissionValue::Number { value: 5.0 }).is_ok());
+
+        let result = schema.validate(&SubmissionValue::Number { value: 5.5 });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("integer"));
+    }
+
+    #[test]
+    fn schema_validates_text_length() {
+        let schema = ValueSchema {
+            value_type: ValueType::Text,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: Vec::new(),
+            max_length: Some(10),
+            pattern: None,
+            extra: HashMap::new(),
+        };
+        assert!(schema.validate(&SubmissionValue::Text { value: "short".to_string() }).is_ok());
+
+        let result = schema.validate(&SubmissionValue::Text { value: "this is way too long".to_string() });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn schema_compatibility_same_type() {
+        let old = make_number_schema(false, Some(0.0), Some(100.0));
+        let new = make_number_schema(false, Some(0.0), Some(100.0));
+        assert!(old.is_compatible_with(&new));
+    }
+
+    #[test]
+    fn schema_compatibility_wider_bounds() {
+        let old = make_number_schema(false, Some(0.0), Some(100.0));
+        let new = make_number_schema(false, Some(-10.0), Some(200.0));
+        assert!(old.is_compatible_with(&new));
+    }
+
+    #[test]
+    fn schema_incompatible_narrower_bounds() {
+        let old = make_number_schema(false, Some(0.0), Some(100.0));
+        let new = make_number_schema(false, Some(10.0), Some(100.0)); // min tightened
+        assert!(!old.is_compatible_with(&new));
+    }
+
+    #[test]
+    fn schema_incompatible_type_change() {
+        let old = make_number_schema(false, None, None);
+        let new = ValueSchema {
+            value_type: ValueType::Text,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        };
+        assert!(!old.is_compatible_with(&new));
     }
 }

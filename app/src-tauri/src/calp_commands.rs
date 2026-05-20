@@ -788,6 +788,11 @@ fn rebuild_writeback_index(state: &AppState, registry_path: Option<&str>) {
     if let Ok(mut idx) = state.writeback_index.lock() {
         *idx = new_index;
     }
+
+    // Also store the full declarations for schema validation
+    if let Ok(mut decls) = state.writeback_declarations.lock() {
+        *decls = all_decls;
+    }
 }
 
 // ============================================================================
@@ -887,6 +892,18 @@ pub fn calp_save_writeback_draft(
         let wb_index = state.writeback_index.lock().map_err(|e| e.to_string())?;
         if !wb_index.contains(sid, row, col) {
             return Err(format!("Cell ({}, {}) is not in a writeback region", row, col));
+        }
+    }
+
+    // Validate value against the region's schema (if one is defined)
+    {
+        let decls = state.writeback_declarations.lock().map_err(|e| e.to_string())?;
+        if let Some(decl) = decls.iter().find(|d| d.id == region_id) {
+            if let Some(ref schema) = decl.schema {
+                schema.validate(&value).map_err(|msg| {
+                    format!("Schema validation failed: {}", msg)
+                })?;
+            }
         }
     }
 

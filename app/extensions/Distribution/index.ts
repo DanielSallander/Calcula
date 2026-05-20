@@ -191,12 +191,19 @@ function activate(context: ExtensionContext): void {
       submissionValue = { type: "text", value: trimmed };
     }
 
-    // Save as draft (async, but don't block the commit)
+    // Save as draft — if schema validation fails, keep the user in edit mode
     try {
       await saveWritebackDraft(region.regionId, region.sheetId, row, col, submissionValue);
       // Refresh the writeback snapshot to update visual state
       refreshAndUpdateInterceptor();
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("Schema validation failed")) {
+        // Show the validation error and let the user correct the value
+        console.warn("[Distribution] Writeback validation error:", msg);
+        context.ui.notifications.showToast(msg, { type: "warning", duration: 5000 });
+        return { action: "retry" as const };
+      }
       console.error("[Distribution] Failed to save writeback draft:", err);
     }
 

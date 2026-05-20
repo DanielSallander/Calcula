@@ -316,6 +316,8 @@ pub struct AppState {
     /// Writeback index: positional lookup for cells in publisher-designated
     /// writeback regions. Rebuilt on subscription pull/refresh/removal.
     pub writeback_index: Mutex<calp::WritebackIndex>,
+    /// Full writeback region declarations (for schema validation lookups).
+    pub writeback_declarations: Mutex<Vec<calp::WritebackRegionDeclaration>>,
     /// Subscriber identity for writeback submissions.
     pub subscriber_identity: Mutex<Option<calp::SubmitterIdentity>>,
     /// Central cell identity registry for stable CellId tracking.
@@ -446,6 +448,7 @@ pub fn create_app_state() -> AppState {
         override_layer: Mutex::new(calp::OverrideLayer::new()),
         audit_log: Mutex::new(calp::audit::AuditLog::new()),
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
+        writeback_declarations: Mutex::new(Vec::new()),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
         writeback_draft_regions: Mutex::new(Vec::new()),
