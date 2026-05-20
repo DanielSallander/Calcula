@@ -153,7 +153,7 @@ pub fn apply_named_style(
                 col,
                 display: fmt_result.text,
                 display_color: fmt_result.color,
-                formula: updated_cell.formula_string(),
+                formula: updated_cell.formula_string().map(|f| format!("={}", f)),
                 style_index,
                 row_span,
                 col_span,

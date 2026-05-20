@@ -15,7 +15,10 @@
     "test:coverage": "vitest run --coverage",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev:data": "cross-env VITE_LOAD_MOCK_DATA=true tauri dev"
+    "tauri:dev:data": "cross-env VITE_LOAD_MOCK_DATA=true tauri dev",
+    "e2e": "playwright test --config playwright.config.ts",
+    "e2e:manual": "cross-env E2E_MANUAL=1 playwright test --config playwright.config.ts",
+    "e2e:report": "playwright show-report"
   },
   "dependencies": {
     "@emotion/css": "^11.13.5",
@@ -31,6 +34,7 @@
     "zustand": "^5.0.9"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/cli": "^2.1.0",
     "@types/node": "^25.0.3",

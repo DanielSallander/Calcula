@@ -1417,7 +1417,7 @@ pub fn open_file(
             CellData {
                 row: *row,
                 col: *col,
-                formula: cell.formula_string(),
+                formula: cell.formula_string().map(|f| format!("={}", f)),
                 display: format_cell_value(&cell.value, style, &locale),
                 display_color: None,
                 style_index: cell.style_index,

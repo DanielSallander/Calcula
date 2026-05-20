@@ -28,6 +28,14 @@ use tauri::State;
 // Note: Assuming parser is available in the crate root based on usage context
 // If 'parser' is a module, ensure it is imported via `use crate::parser;` if needed.
 
+/// Returns the formula display string with "=" prefix for the frontend.
+/// `Cell::formula_string()` renders the AST without the leading "=";
+/// this helper adds it so the formula bar shows "=A1+B1" not "A1+B1".
+fn formula_display(cell: &engine::Cell, locale: &engine::LocaleSettings) -> Option<String> {
+    cell.formula_string()
+        .map(|f| format!("={}", engine::localize_formula(&f, locale)))
+}
+
 /// Check if any cell in the given range is a spilled value (not the spill origin).
 /// Returns Ok(()) if the range is safe to modify, or Err with a user-facing message
 /// identifying the origin formula cell.
@@ -171,7 +179,7 @@ pub fn get_viewport_cells(
                     symbol_before: a.symbol_before,
                     value: a.value,
                 });
-                (result.text, result.color, c.formula_string().map(|f| engine::localize_formula(&f, &locale)), c.style_index, rt, acct)
+                (result.text, result.color, formula_display(&c, &locale), c.style_index, rt, acct)
             } else {
                 (String::new(), None, None, 0, None, None)
             };
@@ -247,7 +255,7 @@ pub fn get_watch_cells(
                 col,
                 display: r.text,
                 display_color: r.color,
-                formula: c.formula_string().map(|f| engine::localize_formula(&f, locale)),
+                formula: formula_display(&c, locale),
                 style_index: c.style_index,
                 row_span: 1,
                 col_span: 1,
@@ -467,7 +475,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, lo
         col,
         display,
         display_color: None,
-        formula: cell.formula_string().map(|f| engine::localize_formula(&f, locale)),
+        formula: formula_display(&cell, locale),
         style_index: cell.style_index,
         row_span: 1,
         col_span: 1,
@@ -950,7 +958,7 @@ pub fn update_cell(
         col,
         display,
         display_color: None,
-        formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+        formula: formula_display(&cell, &locale),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -1175,7 +1183,7 @@ pub fn update_cell(
                         col: dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                        formula: formula_display(&updated_dep, &locale),
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -1284,7 +1292,7 @@ pub fn update_cell(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                                    formula: formula_display(&updated_dep, &locale),
                                     style_index: updated_dep.style_index,
                                     row_span: dep_row_span,
                                     col_span: dep_col_span,
@@ -1366,7 +1374,7 @@ pub fn update_cell(
                                     col: ss_dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                                    formula: formula_display(&updated_dep, &locale),
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -1950,7 +1958,7 @@ pub fn update_cells_batch(
             col,
             display,
             display_color: None,
-            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+            formula: formula_display(&cell, &locale),
             style_index: cell.style_index,
             row_span,
             col_span,
@@ -2069,7 +2077,7 @@ pub fn update_cells_batch(
                                 col: *dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: updated_with_ast.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                                formula: formula_display(&updated_with_ast, &locale),
                                 style_index: updated_with_ast.style_index,
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
@@ -2108,7 +2116,7 @@ pub fn update_cells_batch(
                         col: *dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                        formula: formula_display(&updated_dep, &locale),
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -2184,7 +2192,7 @@ pub fn update_cells_batch(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                                    formula: formula_display(&updated_dep, &locale),
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -2683,7 +2691,7 @@ pub fn clear_range_with_options(
                         col,
                         display,
                         display_color: None,
-                        formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                        formula: formula_display(&cell, &locale),
                         style_index: 0,
                         row_span,
                         col_span,
@@ -2729,7 +2737,7 @@ pub fn clear_range_with_options(
                             col,
                             display,
                             display_color: None,
-                            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                            formula: formula_display(&cell, &locale),
                             style_index: 0,
                             row_span,
                             col_span,
@@ -2898,7 +2906,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             col: target_col,
                             display,
                             display_color: None,
-                            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                            formula: formula_display(&cell, &locale),
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
@@ -3003,7 +3011,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             col: target_col,
                             display,
                             display_color: None,
-                            formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                            formula: formula_display(&cell, &locale),
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
@@ -3629,7 +3637,7 @@ pub fn remove_duplicates(
                     col: target_col,
                     display,
                     display_color: None,
-                    formula: cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                    formula: formula_display(&cell, &locale),
                     style_index: cell.style_index,
                     row_span: 1,
                     col_span: 1,
@@ -4147,7 +4155,7 @@ pub fn fill_range(
                     col: tc,
                     display,
                     display_color: None,
-                    formula: new_cell.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                    formula: formula_display(&new_cell, &locale),
                     style_index: new_cell.style_index,
                     row_span,
                     col_span,
@@ -4305,7 +4313,7 @@ pub fn fill_range(
                             updated_cells.push(CellData {
                                 row: *dep_row, col: *dep_col, display: dep_display,
                                 display_color: None,
-                                formula: updated_with_ast.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                                formula: formula_display(&updated_with_ast, &locale),
                                 style_index: updated_with_ast.style_index,
                                 row_span: drspan, col_span: dcspan,
                                 sheet_index: None, rich_text: None, accounting_layout: None,
@@ -4331,7 +4339,7 @@ pub fn fill_range(
                     updated_cells.push(CellData {
                         row: *dep_row, col: *dep_col, display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                        formula: formula_display(&updated_dep, &locale),
                         style_index: updated_dep.style_index,
                         row_span: drspan, col_span: dcspan,
                         sheet_index: None, rich_text: None, accounting_layout: None,
@@ -4381,7 +4389,7 @@ pub fn fill_range(
                                 updated_cells.push(CellData {
                                     row: *dep_row, col: *dep_col, display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula_string().map(|f| engine::localize_formula(&f, &locale)),
+                                    formula: formula_display(&updated_dep, &locale),
                                     style_index: updated_dep.style_index,
                                     row_span: 1, col_span: 1,
                                     sheet_index: Some(*dep_sheet_idx), rich_text: None, accounting_layout: None,

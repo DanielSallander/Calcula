@@ -157,7 +157,7 @@ fn build_cell_data(
         col,
         display,
         display_color: None,
-        formula: cell.formula_string(),
+        formula: cell.formula_string().map(|f| format!("={}", f)),
         style_index: cell.style_index,
         row_span,
         col_span,

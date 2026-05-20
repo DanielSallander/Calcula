@@ -162,6 +162,11 @@ $RECYCLE.BIN/
 # Force include the core directory
 !core/
 
+# Playwright E2E
+playwright-report/
+test-results/
+app/e2e/.tauri-pid
+
 # Other
 context_manager/
 general_stuff/
