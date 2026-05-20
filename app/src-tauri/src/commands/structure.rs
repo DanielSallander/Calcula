@@ -713,6 +713,16 @@ pub fn insert_rows(
         }
     }
     
+    // Update IdRegistry for the structural shift
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        if let Some(&sid) = sheet_ids.get(active) {
+            let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            id_reg.shift_rows_down(sid, row, count);
+        }
+    }
+
     // Mark workbook as dirty
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
@@ -872,6 +882,16 @@ pub fn insert_columns(
             if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c, &locale) {
                 result.push(cell_data);
             }
+        }
+    }
+
+    // Update IdRegistry for the structural shift
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        if let Some(&sid) = sheet_ids.get(active) {
+            let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            id_reg.shift_cols_right(sid, col, count);
         }
     }
 
@@ -1524,6 +1544,16 @@ pub fn delete_rows(
         }
     }
     
+    // Update IdRegistry for the structural shift
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        if let Some(&sid) = sheet_ids.get(active) {
+            let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            id_reg.shift_rows_up(sid, row, count);
+        }
+    }
+
     // Mark workbook as dirty
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
@@ -1734,6 +1764,16 @@ pub fn delete_columns(
             if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c, &locale) {
                 result.push(cell_data);
             }
+        }
+    }
+
+    // Update IdRegistry for the structural shift
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        if let Some(&sid) = sheet_ids.get(active) {
+            let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            id_reg.shift_cols_left(sid, col, count);
         }
     }
 

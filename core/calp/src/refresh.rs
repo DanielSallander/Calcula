@@ -384,6 +384,7 @@ mod tests {
                 sheet_indices: vec![0],
                 now: "2026-01-01T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
+                writeback_regions: None,
             };
             publish::publish(&reg, &request).unwrap();
         }

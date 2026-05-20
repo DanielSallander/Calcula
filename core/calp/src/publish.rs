@@ -23,6 +23,8 @@ pub struct PublishRequest<'a> {
     pub sheet_indices: Vec<usize>,
     pub now: String,
     pub published_by: String,
+    /// Writeback region declarations to include in the manifest.
+    pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
 }
 
 /// Result of a publish operation.
@@ -99,7 +101,7 @@ pub fn publish(
         tables: table_ids,
         locked_sheets: Vec::new(),
         locked_cells: Vec::new(),
-        writeback_regions: None,
+        writeback_regions: request.writeback_regions.clone(),
         extra: std::collections::HashMap::new(),
     };
 
@@ -209,6 +211,7 @@ mod tests {
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
+            writeback_regions: None,
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -247,6 +250,7 @@ mod tests {
             sheet_indices: vec![0], // Only Dashboard
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
+            writeback_regions: None,
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -271,6 +275,7 @@ mod tests {
             sheet_indices: vec![0],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
+            writeback_regions: None,
         };
 
         publish(&reg, &request).unwrap();
@@ -293,6 +298,7 @@ mod tests {
                 sheet_indices: vec![0],
                 now: "2026-05-18T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
+                writeback_regions: None,
             };
             publish(&reg, &request).unwrap();
         }

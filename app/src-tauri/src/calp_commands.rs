@@ -100,6 +100,12 @@ pub fn calp_publish(
     // Build a lightweight workbook snapshot for publishing
     let workbook = crate::persistence::build_workbook_snapshot(&state)?;
 
+    // Include any author-designated writeback regions in the publish
+    let writeback_regions = {
+        let drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+        if drafts.is_empty() { None } else { Some(drafts.clone()) }
+    };
+
     let request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
@@ -108,6 +114,7 @@ pub fn calp_publish(
         sheet_indices: params.sheet_indices,
         now,
         published_by: params.published_by,
+        writeback_regions,
     };
 
     let result = calp::publish::publish(&registry, &request)
@@ -651,27 +658,39 @@ pub fn calp_dev_refresh(state: State<AppState>) -> Result<PullResponse, String> 
 }
 
 /// Rename a stable CellId (author-facing operation).
-/// Returns an error until IdRegistry is fully integrated into AppState.
 #[tauri::command]
 pub fn calp_rename_cell_id(
-    _state: State<AppState>,
-    _sheet_id: String,
-    _old_cell_id: String,
-    _new_cell_id: String,
+    state: State<AppState>,
+    sheet_id: String,
+    old_cell_id: String,
+    new_cell_id: String,
 ) -> Result<bool, String> {
-    Err("IdRegistry not yet integrated into AppState — rename deferred to full integration".to_string())
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+    let old = CellId::parse(&old_cell_id)
+        .ok_or_else(|| format!("Invalid old_cell_id: {}", old_cell_id))?;
+    let new = CellId::parse(&new_cell_id)
+        .ok_or_else(|| format!("Invalid new_cell_id: {}", new_cell_id))?;
+    let mut reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+    Ok(reg.rename_cell(sid, old, new))
 }
 
 /// Merge two stable CellIds (author-facing operation).
-/// Returns an error until IdRegistry is fully integrated into AppState.
 #[tauri::command]
 pub fn calp_merge_cell_ids(
-    _state: State<AppState>,
-    _sheet_id: String,
-    _survivor_cell_id: String,
-    _absorbed_cell_id: String,
+    state: State<AppState>,
+    sheet_id: String,
+    survivor_cell_id: String,
+    absorbed_cell_id: String,
 ) -> Result<bool, String> {
-    Err("IdRegistry not yet integrated into AppState — merge deferred to full integration".to_string())
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+    let survivor = CellId::parse(&survivor_cell_id)
+        .ok_or_else(|| format!("Invalid survivor_cell_id: {}", survivor_cell_id))?;
+    let absorbed = CellId::parse(&absorbed_cell_id)
+        .ok_or_else(|| format!("Invalid absorbed_cell_id: {}", absorbed_cell_id))?;
+    let mut reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+    Ok(reg.merge_cells(sid, survivor, absorbed))
 }
 
 // ============================================================================
@@ -769,6 +788,272 @@ fn rebuild_writeback_index(state: &AppState, registry_path: Option<&str>) {
     if let Ok(mut idx) = state.writeback_index.lock() {
         *idx = new_index;
     }
+}
+
+// ============================================================================
+// Phase 12: Author UI — Writeback Region Designation
+// ============================================================================
+
+/// Get all draft writeback regions for the current workbook.
+#[tauri::command]
+pub fn calp_get_writeback_draft_regions(
+    state: State<AppState>,
+) -> Result<Vec<calp::WritebackRegionDeclaration>, String> {
+    let drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+    Ok(drafts.clone())
+}
+
+/// Add a new draft writeback region.
+#[tauri::command]
+pub fn calp_add_writeback_region(
+    state: State<AppState>,
+    region: calp::WritebackRegionDeclaration,
+) -> Result<(), String> {
+    // Validate the region
+    let test_decls = vec![region.clone()];
+    calp::WritebackIndex::from_declarations(&test_decls)
+        .map_err(|e| format!("Invalid region: {}", e))?;
+
+    let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+
+    // Check for ID collision
+    if drafts.iter().any(|r| r.id == region.id) {
+        return Err(format!("Region with ID '{}' already exists", region.id));
+    }
+
+    // Check for overlap with existing draft regions
+    let mut all = drafts.clone();
+    all.push(region.clone());
+    calp::WritebackIndex::from_declarations(&all)
+        .map_err(|e| format!("Region overlaps with existing draft: {}", e))?;
+
+    drafts.push(region);
+    Ok(())
+}
+
+/// Remove a draft writeback region by ID.
+#[tauri::command]
+pub fn calp_remove_writeback_region(
+    state: State<AppState>,
+    region_id: String,
+) -> Result<bool, String> {
+    let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+    let len_before = drafts.len();
+    drafts.retain(|r| r.id != region_id);
+    Ok(drafts.len() < len_before)
+}
+
+/// Update an existing draft writeback region (replace by ID).
+#[tauri::command]
+pub fn calp_update_writeback_region(
+    state: State<AppState>,
+    region: calp::WritebackRegionDeclaration,
+) -> Result<(), String> {
+    let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+
+    let pos = drafts.iter().position(|r| r.id == region.id)
+        .ok_or_else(|| format!("Region '{}' not found", region.id))?;
+
+    // Validate: build index with the updated region replacing the old one
+    let mut test = drafts.clone();
+    test[pos] = region.clone();
+    calp::WritebackIndex::from_declarations(&test)
+        .map_err(|e| format!("Invalid update: {}", e))?;
+
+    drafts[pos] = region;
+    Ok(())
+}
+
+// ============================================================================
+// Phase 14: Writeback Submission
+// ============================================================================
+
+/// Save a writeback draft for a cell in a writeback region.
+/// Auto-mints a CellId if the cell doesn't have one yet.
+#[tauri::command]
+pub fn calp_save_writeback_draft(
+    state: State<AppState>,
+    region_id: String,
+    sheet_id: String,
+    row: u32,
+    col: u32,
+    value: calp::writeback::SubmissionValue,
+) -> Result<(), String> {
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+
+    // Verify the cell is in a writeback region
+    {
+        let wb_index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        if !wb_index.contains(sid, row, col) {
+            return Err(format!("Cell ({}, {}) is not in a writeback region", row, col));
+        }
+    }
+
+    // Get or mint a CellId for this cell
+    let cell_id = {
+        let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+        id_reg.cell_id_at(sid, (row, col)).to_string()
+    };
+
+    // Get subscriber identity
+    let submitter = {
+        let cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
+        match cached.as_ref() {
+            Some(id) => id.clone(),
+            None => {
+                drop(cached);
+                let profile_dir = {
+                    let local_app_data = std::env::var("LOCALAPPDATA")
+                        .unwrap_or_else(|_| ".".to_string());
+                    std::path::PathBuf::from(local_app_data).join("Calcula")
+                };
+                let id = calp::identity_provider::load_or_create(&profile_dir)?;
+                let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
+                *cached = Some(id.clone());
+                id
+            }
+        }
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let submission_id = {
+        let bytes = identity::generate_uuid_v7();
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        )
+    };
+
+    let submission = calp::writeback::WritebackSubmission {
+        id: submission_id,
+        region_id,
+        cell_row: row,
+        cell_col: col,
+        cell_id: Some(cell_id),
+        submitter,
+        value,
+        state: calp::writeback::SubmissionState::Draft,
+        created_at: now.clone(),
+        updated_at: now,
+        submitted_at: None,
+        extra: std::collections::HashMap::new(),
+    };
+
+    let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+    wb_layer.set_draft(submission);
+
+    Ok(())
+}
+
+/// Get the writeback layer (all drafts) for the current workbook.
+#[tauri::command]
+pub fn calp_get_writeback_layer(
+    state: State<AppState>,
+) -> Result<calp::writeback::WritebackLayer, String> {
+    let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+    Ok(layer.clone())
+}
+
+/// Submit all drafts for a region to the registry.
+#[tauri::command]
+pub fn calp_submit_region(
+    state: State<AppState>,
+    region_id: String,
+    registry_path: String,
+) -> Result<usize, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Get the resolved version from subscriptions
+    let resolved_version = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions.first()
+            .map(|s| s.resolved_version.clone())
+            .ok_or_else(|| "No active subscription".to_string())?
+    };
+
+    let package_name = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions.first()
+            .map(|s| s.package_name.clone())
+            .ok_or_else(|| "No active subscription".to_string())?
+    };
+
+    // Advance drafts to submitted
+    let submitted = {
+        let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        wb_layer.submit_region(&region_id, &now)
+    };
+
+    if submitted.is_empty() {
+        return Ok(0);
+    }
+
+    // Write to registry
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    for sub in &submitted {
+        registry.save_submission(&package_name, &resolved_version, sub)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let count = submitted.len();
+
+    // Audit log
+    {
+        let mut audit = state.audit_log.lock().map_err(|e| e.to_string())?;
+        let user = state.subscriber_identity.lock()
+            .ok()
+            .and_then(|id| id.as_ref().map(|i| i.display_name.clone()))
+            .unwrap_or_default();
+        audit.record(
+            calp::audit::AuditEvent::Published, // Reuse Published for now
+            &format!("Submitted {} writeback values for region {}", count, region_id),
+            &user,
+            &now,
+        );
+    }
+
+    Ok(count)
+}
+
+/// Look up the CellId at a position without minting. Returns null if none exists.
+#[tauri::command]
+pub fn calp_get_cell_id(
+    state: State<AppState>,
+    sheet_id: String,
+    row: u32,
+    col: u32,
+) -> Result<Option<String>, String> {
+    let sid = SheetId::parse(&sheet_id)
+        .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
+    let reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+    Ok(reg.lookup_cell_id(sid, (row, col)).map(|id| id.to_string()))
+}
+
+/// Get the current subscriber identity (creates one on first call).
+#[tauri::command]
+pub fn calp_get_subscriber_identity(
+    state: State<AppState>,
+) -> Result<calp::SubmitterIdentity, String> {
+    let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
+    if let Some(ref identity) = *cached {
+        return Ok(identity.clone());
+    }
+
+    // Load or create from the user profile directory
+    let profile_dir = {
+        let local_app_data = std::env::var("LOCALAPPDATA")
+            .unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(local_app_data).join("Calcula")
+    };
+
+    let identity = calp::identity_provider::load_or_create(&profile_dir)?;
+    *cached = Some(identity.clone());
+    Ok(identity)
 }
 
 /// Suggest the next version for a package given a bump type ("major", "minor", "patch").

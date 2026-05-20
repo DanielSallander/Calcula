@@ -4,7 +4,12 @@
 // and caches it for fast guard evaluation. The cache is replaced atomically
 // on subscription state changes to avoid race windows.
 
-import { getWritebackRegions, type WritebackRegionEntry } from "@api/distribution";
+import {
+  getWritebackRegions,
+  getWritebackLayer,
+  type WritebackRegionEntry,
+  type WritebackSubmission,
+} from "@api/distribution";
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -18,6 +23,9 @@ let hasRegions = false;
 
 /** Current active sheet index — updated by the extension on sheet change events. */
 let activeSheetIndex = 0;
+
+/** Cached drafts for visual treatment lookup. Refreshed alongside the snapshot. */
+let drafts: WritebackSubmission[] = [];
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -72,11 +80,30 @@ export function hasWritebackRegions(): boolean {
  * Returns the new snapshot.
  */
 export async function refreshWritebackSnapshot(): Promise<WritebackRegionEntry[]> {
-  const regions = await getWritebackRegions();
+  const [regions, layer] = await Promise.all([
+    getWritebackRegions(),
+    getWritebackLayer().catch(() => ({ formatVersion: 1, drafts: [] })),
+  ]);
   // Atomic replacement — no intermediate empty state
   snapshot = regions;
   hasRegions = regions.length > 0;
+  drafts = layer.drafts;
   return regions;
+}
+
+/**
+ * Get the writeback state for a cell: "empty" | "draft" | "submitted".
+ * Returns null if the cell is not in a writeback region.
+ */
+export function getWritebackCellState(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): "empty" | "draft" | "submitted" | null {
+  if (!isWritebackCell(sheetIndex, row, col)) return null;
+  const draft = drafts.find((d) => d.cellRow === row && d.cellCol === col);
+  if (!draft) return "empty";
+  return draft.state === "draft" ? "draft" : "submitted";
 }
 
 /** Update the active sheet index (called on sheet change events). */
@@ -94,4 +121,5 @@ export function resetWritebackSnapshot(): void {
   snapshot = [];
   hasRegions = false;
   activeSheetIndex = 0;
+  drafts = [];
 }

@@ -9,13 +9,17 @@ import { OverridesPane } from "./components/OverridesPane";
 import {
   DistributionManifest,
   OVERRIDES_PANE_ID,
+  WRITEBACK_PANE_ID,
   PUBLISH_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
+  DESIGNATE_WRITEBACK_DIALOG_ID,
   PublishDialogDefinition,
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
+  DesignateWritebackDialogDefinition,
 } from "./manifest";
+import { WritebackPane } from "./components/WritebackPane";
 import {
   isWritebackCell,
   rangeOverlapsWriteback,
@@ -24,6 +28,7 @@ import {
   resetWritebackSnapshot,
   setActiveSheetIndex,
   getActiveSheetIndex,
+  getWritebackCellState,
 } from "./lib/writebackStore";
 
 let isActivated = false;
@@ -43,13 +48,26 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(OVERRIDES_PANE_ID));
 
+  // Register the Writeback task pane
+  context.ui.taskPanes.register({
+    id: WRITEBACK_PANE_ID,
+    title: "Writeback",
+    component: WritebackPane,
+    contextKeys: ["always"],
+    priority: 36,
+    closable: true,
+  });
+  cleanupFns.push(() => context.ui.taskPanes.unregister(WRITEBACK_PANE_ID));
+
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
   context.ui.dialogs.register(RefreshPreviewDialogDefinition);
+  context.ui.dialogs.register(DesignateWritebackDialogDefinition);
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIBE_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(REFRESH_PREVIEW_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
 
   // Register menu items under Data menu
   context.ui.menus.registerItem("data", {
@@ -81,6 +99,23 @@ function activate(context: ExtensionContext): void {
       context.ui.taskPanes.showContainer();
     },
     order: 903,
+  });
+
+  context.ui.menus.registerItem("data", {
+    id: "data:designateWriteback",
+    label: "Designate Writeback Region...",
+    action: () => context.ui.dialogs.open(DESIGNATE_WRITEBACK_DIALOG_ID),
+    order: 904,
+  });
+
+  context.ui.menus.registerItem("data", {
+    id: "data:showWritebackPane",
+    label: "Show Writeback Pane",
+    action: () => {
+      context.ui.taskPanes.open(WRITEBACK_PANE_ID);
+      context.ui.taskPanes.showContainer();
+    },
+    order: 905,
   });
 
   // -----------------------------------------------------------------------
@@ -150,12 +185,26 @@ function activate(context: ExtensionContext): void {
 
   function updateStyleInterceptor(): void {
     if (hasWritebackRegions() && !unregStyleInterceptor) {
-      // TODO(v1.1): Return writeback visual treatment instead of null.
       unregStyleInterceptor = context.grid.styleInterceptors.register(
         "distribution:writeback",
-        (_cellValue, _baseStyle, _coords) => {
-          // v1.0: no visual treatment for writeback cells.
-          return null;
+        (_cellValue, _baseStyle, coords) => {
+          const sheetIdx = getActiveSheetIndex();
+          const state = getWritebackCellState(sheetIdx, coords.row, coords.col);
+          if (!state) return null;
+
+          switch (state) {
+            case "empty":
+              // Subtle fillable background tint
+              return { backgroundColor: "#f0f7ff" };
+            case "draft":
+              // Draft: tinted background indicating unsaved work
+              return { backgroundColor: "#fff8e1" };
+            case "submitted":
+              // Submitted: tinted background indicating confirmed input
+              return { backgroundColor: "#e8f5e9" };
+            default:
+              return null;
+          }
         },
         30, // priority: after tables (5) and conditional formatting (20+)
       );

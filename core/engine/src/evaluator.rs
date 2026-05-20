@@ -1274,6 +1274,12 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::PivotBy => self.fn_pivotby(args),
             BuiltinFunction::GetPivotData => self.fn_getpivotdata(args),
 
+            // Writeback aggregation (GATHER family)
+            BuiltinFunction::Gather => self.fn_gather(args),
+            BuiltinFunction::GatherFrom => self.fn_gather_from(args),
+            BuiltinFunction::GatherCount => self.fn_gather_count(args),
+            BuiltinFunction::GatherSubmitters => self.fn_gather_submitters(args),
+
             // Collection functions (3D cells)
             BuiltinFunction::Collect => self.fn_collect(args),
             BuiltinFunction::DictFn => self.fn_dict(args),
@@ -6975,6 +6981,70 @@ impl<'a> Evaluator<'a> {
         }
 
         EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+    }
+
+    // ========================================================================
+    // Writeback aggregation (GATHER family)
+    // ========================================================================
+
+    /// GATHER(region_id) — returns all visible submissions for a writeback region.
+    /// In this version, looks up data from the pre-fetched gather_cache closure.
+    /// Returns a List of submission values, or an empty List if no data.
+    fn fn_gather(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let _region_id = match self.evaluate(&args[0]) {
+            EvalResult::Text(s) => s,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        // Pre-fetch cache lookup will be wired by the Tauri layer.
+        // For now, return an empty list (no submissions available).
+        EvalResult::List(Vec::new())
+    }
+
+    /// GATHER.FROM(region_id, submitter_id) — returns one submitter's value.
+    fn fn_gather_from(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let _region_id = match self.evaluate(&args[0]) {
+            EvalResult::Text(s) => s,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let _submitter_id = match self.evaluate(&args[1]) {
+            EvalResult::Text(s) => s,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        // Will be populated from gather_cache when wired.
+        // Return #N/A to indicate "no submission found" (same as VLOOKUP miss).
+        EvalResult::Error(CellError::NA)
+    }
+
+    /// GATHER.COUNT(region_id) — count of submissions for a region.
+    fn fn_gather_count(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let _region_id = match self.evaluate(&args[0]) {
+            EvalResult::Text(s) => s,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        // Will return actual count from gather_cache when wired.
+        EvalResult::Number(0.0)
+    }
+
+    /// GATHER.SUBMITTERS(region_id) — list of submitter identities.
+    fn fn_gather_submitters(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let _region_id = match self.evaluate(&args[0]) {
+            EvalResult::Text(s) => s,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        // Will return submitter list from gather_cache when wired.
+        EvalResult::List(Vec::new())
     }
 
     // ========================================================================

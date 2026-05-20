@@ -192,6 +192,7 @@ mod tests {
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
+            writeback_regions: None,
         };
         publish::publish(reg, &request).unwrap();
         wb
@@ -263,6 +264,7 @@ mod tests {
                 sheet_indices: vec![0],
                 now: "2026-05-18T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
+                writeback_regions: None,
             };
             publish::publish(&reg, &request).unwrap();
         }

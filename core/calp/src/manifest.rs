@@ -234,7 +234,7 @@ mod tests {
                         "colEnd": 5
                     },
                     "mode": "per_subscriber",
-                    "schema": {"type": "number"}
+                    "schema": {"valueType": "number"}
                 }
             ]
         });
@@ -249,7 +249,7 @@ mod tests {
         let re_json = serde_json::to_value(&vm).unwrap();
         let vm2: VersionManifest = serde_json::from_value(re_json).unwrap();
         let regions2 = vm2.writeback_regions.unwrap();
-        assert_eq!(regions2[0].mode, Some(serde_json::json!("per_subscriber")));
+        assert_eq!(regions2[0].mode, Some(crate::writeback::WritebackMode::PerSubscriber));
     }
 
     #[test]

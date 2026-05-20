@@ -424,6 +424,12 @@ pub enum BuiltinFunction {
     PivotBy,
     GetPivotData,
 
+    // Writeback aggregation (GATHER family)
+    Gather,
+    GatherFrom,
+    GatherCount,
+    GatherSubmitters,
+
     // Collection functions (3D cells)
     Collect,
     DictFn,
@@ -987,6 +993,12 @@ impl BuiltinFunction {
             "PIVOTBY" => BuiltinFunction::PivotBy,
             "GETPIVOTDATA" => BuiltinFunction::GetPivotData,
 
+            // Writeback aggregation (GATHER family)
+            "GATHER" => BuiltinFunction::Gather,
+            "GATHER.FROM" => BuiltinFunction::GatherFrom,
+            "GATHER.COUNT" => BuiltinFunction::GatherCount,
+            "GATHER.SUBMITTERS" => BuiltinFunction::GatherSubmitters,
+
             // Collection functions (3D cells)
             "COLLECT" => BuiltinFunction::Collect,
             "DICT" => BuiltinFunction::DictFn,
@@ -1522,6 +1534,10 @@ impl BuiltinFunction {
             BuiltinFunction::GroupBy => "GROUPBY",
             BuiltinFunction::PivotBy => "PIVOTBY",
             BuiltinFunction::GetPivotData => "GETPIVOTDATA",
+            BuiltinFunction::Gather => "GATHER",
+            BuiltinFunction::GatherFrom => "GATHER.FROM",
+            BuiltinFunction::GatherCount => "GATHER.COUNT",
+            BuiltinFunction::GatherSubmitters => "GATHER.SUBMITTERS",
             BuiltinFunction::Collect => "COLLECT",
             BuiltinFunction::DictFn => "DICT",
             BuiltinFunction::Keys => "KEYS",
@@ -2353,6 +2369,11 @@ impl BuiltinFunction {
             FunctionMeta::new("TOROW", "Dynamic Array", "TOROW(array, [ignore], [scan_by_column])", "Transforms an array into a single row"),
             FunctionMeta::new("WRAPCOLS", "Dynamic Array", "WRAPCOLS(vector, wrap_count, [pad_with])", "Wraps a row or column vector into columns"),
             FunctionMeta::new("WRAPROWS", "Dynamic Array", "WRAPROWS(vector, wrap_count, [pad_with])", "Wraps a row or column vector into rows"),
+            // Writeback aggregation
+            FunctionMeta::new("GATHER", "Writeback", "GATHER(region_id)", "Returns all visible writeback submissions for a region"),
+            FunctionMeta::new("GATHER.FROM", "Writeback", "GATHER.FROM(region_id, submitter_id)", "Returns one submitter's writeback value"),
+            FunctionMeta::new("GATHER.COUNT", "Writeback", "GATHER.COUNT(region_id)", "Counts writeback submissions for a region"),
+            FunctionMeta::new("GATHER.SUBMITTERS", "Writeback", "GATHER.SUBMITTERS(region_id)", "Lists submitter identities for a region"),
             // Collections
             FunctionMeta::new("COLLECT", "Dynamic Array", "COLLECT(value)", "Wraps an array result into a contained List cell"),
             FunctionMeta::new("DICT", "Dynamic Array", "DICT(key1, value1, [key2, value2], ...)", "Creates a Dict cell from alternating key-value pairs"),

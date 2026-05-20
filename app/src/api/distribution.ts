@@ -334,3 +334,130 @@ export interface WritebackRegionEntry {
 export function getWritebackRegions(): Promise<WritebackRegionEntry[]> {
   return invokeBackend("calp_get_writeback_regions");
 }
+
+/** Subscriber identity attached to writeback submissions. */
+export interface SubmitterIdentity {
+  displayName: string;
+  id: string;
+}
+
+/** Get the current subscriber identity (creates one on first call). */
+export function getSubscriberIdentity(): Promise<SubmitterIdentity> {
+  return invokeBackend("calp_get_subscriber_identity");
+}
+
+// ============================================================================
+// Phase 12: Author UI — Writeback Region Designation
+// ============================================================================
+
+/** A writeback region declaration (author-side draft or published). */
+export interface WritebackRegionDeclaration {
+  id: string;
+  selector: RegionSelector;
+  mode?: "per_subscriber" | "list_object";
+  schema?: ValueSchemaConfig;
+  visibility?: "own_only" | "own_plus_aggregate" | "transparent";
+  submissionPolicy?: "immediate" | "on_submit" | "on_approval";
+  versionBinding?: "strict" | "lenient";
+  lifecycle?: LifecyclePolicyConfig;
+  aggregationHint?: string;
+}
+
+export interface RegionSelector {
+  sheetId: string;
+  rowStart: number;
+  rowEnd: number;
+  colStart: number;
+  colEnd: number;
+}
+
+export interface ValueSchemaConfig {
+  valueType: "number" | "integer" | "text" | "date" | "boolean" | "enum";
+  required?: boolean;
+  min?: number;
+  max?: number;
+  enumValues?: string[];
+  maxLength?: number;
+  pattern?: string;
+}
+
+export interface LifecyclePolicyConfig {
+  policy: "always" | "until_deadline" | "never" | "requires_unlock";
+  deadline?: string;
+}
+
+/** Get all draft writeback regions for the current workbook (author mode). */
+export function getWritebackDraftRegions(): Promise<WritebackRegionDeclaration[]> {
+  return invokeBackend("calp_get_writeback_draft_regions");
+}
+
+/** Add a new draft writeback region. */
+export function addWritebackRegion(region: WritebackRegionDeclaration): Promise<void> {
+  return invokeBackend("calp_add_writeback_region", { region });
+}
+
+/** Remove a draft writeback region by ID. */
+export function removeWritebackRegion(regionId: string): Promise<boolean> {
+  return invokeBackend("calp_remove_writeback_region", { regionId });
+}
+
+/** Update an existing draft writeback region (replace by ID). */
+export function updateWritebackRegion(region: WritebackRegionDeclaration): Promise<void> {
+  return invokeBackend("calp_update_writeback_region", { region });
+}
+
+/** Look up the CellId at a position without minting. */
+export function getCellId(sheetId: string, row: number, col: number): Promise<string | null> {
+  return invokeBackend("calp_get_cell_id", { sheetId, row, col });
+}
+
+// ============================================================================
+// Phase 14: Writeback Submission
+// ============================================================================
+
+export type SubmissionState = "draft" | "submitted" | "approved" | "rejected";
+
+export interface SubmissionValue {
+  type: "number" | "text" | "boolean" | "empty";
+  value?: number | string | boolean;
+}
+
+export interface WritebackSubmission {
+  id: string;
+  regionId: string;
+  cellRow: number;
+  cellCol: number;
+  cellId?: string;
+  submitter: SubmitterIdentity;
+  value: SubmissionValue;
+  state: SubmissionState;
+  createdAt: string;
+  updatedAt: string;
+  submittedAt?: string;
+}
+
+export interface WritebackLayer {
+  formatVersion: number;
+  drafts: WritebackSubmission[];
+}
+
+/** Save a writeback draft for a cell. */
+export function saveWritebackDraft(
+  regionId: string,
+  sheetId: string,
+  row: number,
+  col: number,
+  value: SubmissionValue,
+): Promise<void> {
+  return invokeBackend("calp_save_writeback_draft", { regionId, sheetId, row, col, value });
+}
+
+/** Get the current writeback layer (all drafts). */
+export function getWritebackLayer(): Promise<WritebackLayer> {
+  return invokeBackend("calp_get_writeback_layer");
+}
+
+/** Submit all drafts for a region to the registry. Returns count submitted. */
+export function submitRegion(regionId: string, registryPath: string): Promise<number> {
+  return invokeBackend("calp_submit_region", { regionId, registryPath });
+}

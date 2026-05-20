@@ -173,6 +173,78 @@ impl LocalRegistry {
     }
 
     // -----------------------------------------------------------------------
+    // Submission storage (Phase 14)
+    // -----------------------------------------------------------------------
+
+    /// Save a submission to the registry (creates submitter directory if needed).
+    pub fn save_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &crate::writeback::WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id);
+        fs::create_dir_all(&sub_dir)?;
+
+        let path = sub_dir.join(format!("{}.json", submission.id));
+        let content = serde_json::to_string_pretty(submission)?;
+        fs::write(&path, content)?;
+        Ok(())
+    }
+
+    /// Load all submissions by a specific submitter for a package version.
+    pub fn load_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+        submitter_id: &str,
+    ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
+        let sub_dir = self.submissions_dir(package_name, version, submitter_id);
+        if !sub_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut submissions = Vec::new();
+        for entry in fs::read_dir(&sub_dir)? {
+            let entry = entry?;
+            if entry.path().extension().map_or(false, |ext| ext == "json") {
+                let content = fs::read_to_string(entry.path())?;
+                let sub: crate::writeback::WritebackSubmission = serde_json::from_str(&content)?;
+                submissions.push(sub);
+            }
+        }
+        Ok(submissions)
+    }
+
+    /// Load all submissions for a specific region across all submitters.
+    pub fn load_region_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+        region_id: &str,
+    ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
+        let base = self.version_dir(package_name, version).join("submissions");
+        if !base.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut all = Vec::new();
+        for entry in fs::read_dir(&base)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let submitter_id = entry.file_name().to_string_lossy().to_string();
+                let subs = self.load_submissions(package_name, version, &submitter_id)?;
+                for sub in subs {
+                    if sub.region_id == region_id {
+                        all.push(sub);
+                    }
+                }
+            }
+        }
+        Ok(all)
+    }
+
+    // -----------------------------------------------------------------------
     // Helper paths
     // -----------------------------------------------------------------------
 
@@ -182,6 +254,12 @@ impl LocalRegistry {
 
     fn version_dir(&self, package_name: &str, version: &str) -> PathBuf {
         self.package_dir(package_name).join(version)
+    }
+
+    fn submissions_dir(&self, package_name: &str, version: &str, submitter_id: &str) -> PathBuf {
+        self.version_dir(package_name, version)
+            .join("submissions")
+            .join(submitter_id)
     }
 }
 

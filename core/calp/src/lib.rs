@@ -9,6 +9,7 @@ pub mod channels;
 pub mod cross_package;
 pub mod dev_mode;
 pub mod error;
+pub mod identity_provider;
 pub mod manifest;
 pub mod overrides;
 pub mod package_kind;
@@ -20,6 +21,7 @@ pub mod pull;
 pub mod writeback;
 
 pub use error::CalpError;
+pub use identity_provider::SubmitterIdentity;
 pub use manifest::{PackageManifest, VersionEntry, VersionManifest, PublishedSheet};
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
