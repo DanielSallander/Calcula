@@ -55,6 +55,9 @@ export function GridProvider({ children, initialState }: GridProviderProps): Rea
   // Keep state ref up to date for non-React consumers
   gridStateRef = state;
 
+  // Expose grid state globally for E2E test helpers
+  (window as any).__CALCULA_GRID_STATE__ = state;
+
   const value: GridContextValue = {
     state,
     dispatch,

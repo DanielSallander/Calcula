@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
 import { useGridState, cellEvents } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 import { CommandRegistry, CoreCommands } from "@api/commands";
 import { DialogExtensions } from "@api/ui";
 import {
@@ -327,6 +328,15 @@ export function HomeTabComponent({
 
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Cache the last known non-null selection so ribbon button clicks
+  // (which steal focus and may clear gridState.selection) still work.
+  const lastSelectionRef = useRef(gridState.selection);
+  useEffect(() => {
+    if (gridState.selection) {
+      lastSelectionRef.current = gridState.selection;
+    }
+  }, [gridState.selection]);
+
   const groupDefs = useMemo(
     () =>
       layout.groups.map((g) => ({
@@ -364,7 +374,11 @@ export function HomeTabComponent({
 
   // Get the rows/cols arrays for current selection
   const getSelectionRange = useCallback(() => {
-    const sel = gridState.selection;
+    // Use getGridStateSnapshot() for the freshest selection — the React
+    // gridState.selection can be stale in the callback closure when a ribbon
+    // button click steals focus from the grid.
+    const snapshot = getGridStateSnapshot();
+    const sel = snapshot?.selection ?? lastSelectionRef.current;
     if (!sel) return null;
     const startRow = Math.min(sel.startRow, sel.endRow);
     const endRow = Math.max(sel.startRow, sel.endRow);
@@ -375,7 +389,7 @@ export function HomeTabComponent({
     for (let r = startRow; r <= endRow; r++) rows.push(r);
     for (let c = startCol; c <= endCol; c++) cols.push(c);
     return { rows, cols };
-  }, [gridState.selection]);
+  }, []);
 
   // Apply formatting and refresh
   const applyFormat = useCallback(
@@ -400,7 +414,8 @@ export function HomeTabComponent({
         window.dispatchEvent(new CustomEvent("styles:refresh"));
         window.dispatchEvent(new CustomEvent("grid:refresh"));
         // Reload current cell style
-        const sel = gridState.selection;
+        const freshSnapshot = getGridStateSnapshot();
+        const sel = freshSnapshot?.selection ?? lastSelectionRef.current;
         if (sel) {
           const cell = await getCell(sel.startRow, sel.startCol);
           if (cell) {
@@ -412,7 +427,7 @@ export function HomeTabComponent({
         console.error("[HomeTab] Failed to apply formatting:", err);
       }
     },
-    [getSelectionRange, gridState.selection]
+    [getSelectionRange]
   );
 
   // Handle item click
@@ -450,7 +465,7 @@ export function HomeTabComponent({
         // Superscript / Subscript (rich text operations)
         case "superscript":
         case "subscript": {
-          const sel = gridState.selection;
+          const sel = gridState.selection ?? lastSelectionRef.current;
           if (!sel) break;
           const isSuperscript = itemId === "superscript";
           const cellData = await getCell(sel.startRow, sel.startCol);
@@ -517,17 +532,25 @@ export function HomeTabComponent({
           break;
         case "increaseDecimal": {
           const fmt = currentStyle?.numberFormat ?? "General";
-          const decimals = (fmt.match(/0/g) || []).length;
-          const newFmt = decimals === 0 ? "0.0" : fmt.replace(/(0*)$/, "$10");
-          await applyFormat({ numberFormat: newFmt === fmt ? "0.0" : newFmt });
+          // Parse decimal count from descriptive format name or raw format code
+          const decMatch = fmt.match(/(\d+)\s*decimal/i);
+          const currentDecimals = decMatch ? parseInt(decMatch[1], 10) : 0;
+          const hasSep = fmt.includes("separator");
+          const newDecimals = currentDecimals + 1;
+          const decPart = newDecimals > 0 ? "." + "0".repeat(newDecimals) : "";
+          const newFmt = hasSep ? `#,##0${decPart}` : `0${decPart}`;
+          await applyFormat({ numberFormat: newFmt });
           break;
         }
         case "decreaseDecimal": {
           const fmt = currentStyle?.numberFormat ?? "General";
-          if (fmt.includes(".")) {
-            const parts = fmt.split(".");
-            const after = parts[1].replace(/0$/, "");
-            const newFmt = after ? `${parts[0]}.${after}` : parts[0] || "0";
+          const decMatch = fmt.match(/(\d+)\s*decimal/i);
+          const currentDecimals = decMatch ? parseInt(decMatch[1], 10) : 0;
+          if (currentDecimals > 0) {
+            const hasSep = fmt.includes("separator");
+            const newDecimals = currentDecimals - 1;
+            const decPart = newDecimals > 0 ? "." + "0".repeat(newDecimals) : "";
+            const newFmt = hasSep ? `#,##0${decPart}` : `0${decPart}`;
             await applyFormat({ numberFormat: newFmt });
           }
           break;

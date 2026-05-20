@@ -92,13 +92,41 @@ export class GridHelper {
     };
   }
 
+  /**
+   * Returns the cell centre in viewport-relative pixels, accounting for the
+   * current grid scroll offset.  Falls back to the no-scroll calculation if
+   * the global state is unavailable.
+   */
+  async cellCenterScrollAware(ref: string): Promise<{ x: number; y: number }> {
+    const { row, col } = parseCellRef(ref);
+    const scroll = await this.page.evaluate(() => {
+      const gs = (window as any).__CALCULA_GRID_STATE__;
+      return { scrollX: gs?.viewport?.scrollX ?? 0, scrollY: gs?.viewport?.scrollY ?? 0 };
+    });
+    return {
+      x: ROW_HEADER_WIDTH + col * DEFAULT_CELL_WIDTH + DEFAULT_CELL_WIDTH / 2 - scroll.scrollX,
+      y: COL_HEADER_HEIGHT + row * DEFAULT_CELL_HEIGHT + DEFAULT_CELL_HEIGHT / 2 - scroll.scrollY,
+    };
+  }
+
   // -------------------------------------------------------------------
   // High-level actions
   // -------------------------------------------------------------------
 
-  /** Single-click a cell to select it. */
+  /** Single-click a cell to select it. Scrolls to the cell first if off-screen. */
   async clickCell(ref: string) {
-    const { x, y } = this.cellCenter(ref);
+    // Get scroll-aware position
+    let { x, y } = await this.cellCenterScrollAware(ref);
+    const canvasBox = await this.canvas.boundingBox();
+
+    // If the cell is off-screen, scroll to it via Name Box
+    if (canvasBox && (y < COL_HEADER_HEIGHT || y > canvasBox.height - DEFAULT_CELL_HEIGHT
+                   || x < ROW_HEADER_WIDTH || x > canvasBox.width - DEFAULT_CELL_WIDTH)) {
+      await this.navigateTo(ref);
+      // After navigating, re-read scroll offset for the correct click position
+      ({ x, y } = await this.cellCenterScrollAware(ref));
+    }
+
     await this.canvas.click({ position: { x, y }, force: true });
     // Brief wait for selection to register
     await this.page.waitForTimeout(100);
@@ -106,7 +134,9 @@ export class GridHelper {
 
   /** Double-click a cell to enter edit mode. */
   async doubleClickCell(ref: string) {
-    const { x, y } = this.cellCenter(ref);
+    // Ensure cell is visible first
+    await this.clickCell(ref);
+    const { x, y } = await this.cellCenterScrollAware(ref);
     await this.canvas.dblclick({ position: { x, y }, force: true });
     await this.page.waitForTimeout(200);
   }
@@ -252,7 +282,7 @@ export class GridHelper {
   /** Select a range by clicking the start cell and shift-clicking the end. */
   async selectRange(startRef: string, endRef: string) {
     await this.clickCell(startRef);
-    const { x, y } = this.cellCenter(endRef);
+    const { x, y } = await this.cellCenterScrollAware(endRef);
     await this.canvas.click({
       position: { x, y },
       modifiers: ["Shift"],
@@ -351,6 +381,60 @@ export class GridHelper {
       { r: row, c: col, p: prop }
     );
     return result;
+  }
+
+  /**
+   * Read a cell's style property as a raw string from the Tauri backend.
+   * Useful for numberFormat, textColor, backgroundColor, etc.
+   */
+  async getCellStyleStringProp(ref: string, prop: string): Promise<string> {
+    const { row, col } = parseCellRef(ref);
+    return this.page.evaluate(
+      async ({ r, c, p }) => {
+        const tauri = (window as any).__TAURI__;
+        if (!tauri?.core?.invoke) throw new Error("Tauri API not available");
+        const cell = await tauri.core.invoke("get_cell", { row: r, col: c });
+        if (!cell) return "";
+        const style = await tauri.core.invoke("get_style", { index: cell.styleIndex });
+        if (!style) return "";
+        return String((style as any)[p] ?? "");
+      },
+      { r: row, c: col, p: prop }
+    );
+  }
+
+  /**
+   * Read the display value of a cell directly from the Tauri backend.
+   * Returns the formatted display string (e.g., "42.00%", "$1,234").
+   */
+  async getCellDisplayValue(ref: string): Promise<string> {
+    const { row, col } = parseCellRef(ref);
+    return this.page.evaluate(
+      async ({ r, c }) => {
+        const tauri = (window as any).__TAURI__;
+        if (!tauri?.core?.invoke) throw new Error("Tauri API not available");
+        const cell = await tauri.core.invoke("get_cell", { row: r, col: c });
+        return cell?.display ?? "";
+      },
+      { r: row, c: col }
+    );
+  }
+
+  /**
+   * Set a cell value directly via the Tauri API, bypassing keyboard input.
+   * This avoids locale-related input transformations (e.g., comma → dot in
+   * Swedish locale). The value string is sent as-is to the backend.
+   */
+  async setCellValueDirect(ref: string, value: string) {
+    const { row, col } = parseCellRef(ref);
+    await this.page.evaluate(
+      async ({ r, c, v }) => {
+        const tauri = (window as any).__TAURI__;
+        await tauri.core.invoke("update_cell", { row: r, col: c, value: v });
+      },
+      { r: row, c: col, v: value }
+    );
+    await this.page.waitForTimeout(200);
   }
 
   /**
