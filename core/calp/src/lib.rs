@@ -26,4 +26,4 @@ pub use manifest::{PackageManifest, VersionEntry, VersionManifest, PublishedShee
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
 pub use version::{VersionPin, SemVer};
-pub use writeback::{WritebackIndex, WritebackRegionDeclaration, WritebackRegionEntry};
+pub use writeback::{GatherCache, WritebackIndex, WritebackRegionDeclaration, WritebackRegionEntry};

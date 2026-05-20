@@ -441,6 +441,50 @@ pub fn check_region_compatibility(
 }
 
 // ---------------------------------------------------------------------------
+// Gather cache (pre-fetch for GATHER formula functions)
+// ---------------------------------------------------------------------------
+
+/// Pre-fetched submission data for GATHER formula evaluation.
+/// Built once per evaluation session from registry data.
+#[derive(Debug, Clone, Default)]
+pub struct GatherCache {
+    /// region_id -> list of submissions
+    pub data: HashMap<String, Vec<WritebackSubmission>>,
+}
+
+impl GatherCache {
+    pub fn new() -> Self {
+        Self { data: HashMap::new() }
+    }
+
+    /// Build a cache from the registry for all writeback regions in the manifest.
+    pub fn from_registry(
+        registry: &crate::registry::LocalRegistry,
+        package_name: &str,
+        version: &str,
+        regions: &[WritebackRegionDeclaration],
+    ) -> Self {
+        let mut data = HashMap::new();
+        for region in regions {
+            match registry.load_region_submissions(package_name, version, &region.id) {
+                Ok(subs) => {
+                    data.insert(region.id.clone(), subs);
+                }
+                Err(_) => {
+                    data.insert(region.id.clone(), Vec::new());
+                }
+            }
+        }
+        Self { data }
+    }
+
+    /// Get submissions for a region.
+    pub fn get(&self, region_id: &str) -> &[WritebackSubmission] {
+        self.data.get(region_id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Submission types (Phase 14)
 // ---------------------------------------------------------------------------
 

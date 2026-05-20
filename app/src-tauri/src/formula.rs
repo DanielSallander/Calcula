@@ -153,8 +153,16 @@ pub fn evaluate_expressions(
     let reader = |path: &str| -> Option<String> {
         user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     };
+
+    // Pre-fetch writeback submission data for GATHER functions
+    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
     evaluator.set_file_reader(&reader);
+    evaluator.set_gather_fn(&gather_fn);
 
     let results: Vec<String> = expressions
         .iter()

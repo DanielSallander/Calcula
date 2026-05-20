@@ -27,7 +27,7 @@ pub use coord::{a1_to_coord, col_to_index, coord_to_a1, index_to_col, CellCoord}
 pub use custom_format::{FormatColor, FormatResult, format_color_to_css};
 pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
 pub use dependency_graph::{CycleError, DependencyGraph};
-pub use evaluator::{EvalContext, EvalResult, Evaluator};
+pub use evaluator::{EvalContext, EvalResult, Evaluator, GatherRegionData, GatherSubmission};
 pub use grid::Grid;
 pub use formula_locale::{delocalize_formula, localize_formula};
 pub use locale::{LocaleCurrencyPosition, LocaleSettings};

@@ -1020,6 +1020,73 @@ pub fn calp_submit_region(
     Ok(count)
 }
 
+/// Build a GatherRegionData map from the current subscriptions for formula evaluation.
+/// This is the pre-fetch step: load all submission data from the registry once,
+/// so GATHER functions can look it up synchronously during evaluation.
+pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
+    let mut result = std::collections::HashMap::new();
+
+    let subs = match state.subscriptions.lock() {
+        Ok(s) => s,
+        Err(_) => return result,
+    };
+
+    for sub in &subs.subscriptions {
+        // Skip dev and file-channel subscriptions
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+
+        // Extract registry path from URL
+        let registry_path = sub.registry_url
+            .strip_prefix("file://")
+            .unwrap_or(&sub.registry_url);
+
+        let registry = match calp::registry::LocalRegistry::open(std::path::Path::new(registry_path)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        // Load the version manifest to get writeback regions
+        let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let regions = match &ver_manifest.writeback_regions {
+            Some(r) => r,
+            None => continue,
+        };
+
+        // Load submissions for each region
+        for region in regions {
+            let submissions = match registry.load_region_submissions(
+                &sub.package_name, &sub.resolved_version, &region.id,
+            ) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let gather_subs: Vec<engine::GatherSubmission> = submissions.iter().map(|s| {
+                engine::GatherSubmission {
+                    submitter_name: s.submitter.display_name.clone(),
+                    submitter_id: s.submitter.id.clone(),
+                    value: match &s.value {
+                        calp::writeback::SubmissionValue::Number { value } => engine::EvalResult::Number(*value),
+                        calp::writeback::SubmissionValue::Text { value } => engine::EvalResult::Text(value.clone()),
+                        calp::writeback::SubmissionValue::Boolean { value } => engine::EvalResult::Boolean(*value),
+                        calp::writeback::SubmissionValue::Empty => engine::EvalResult::Number(0.0),
+                    },
+                }
+            }).collect();
+
+            result.insert(region.id.clone(), engine::GatherRegionData { submissions: gather_subs });
+        }
+    }
+
+    result
+}
+
 /// Look up the CellId at a position without minting. Returns null if none exists.
 #[tauri::command]
 pub fn calp_get_cell_id(

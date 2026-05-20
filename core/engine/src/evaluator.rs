@@ -319,6 +319,21 @@ pub struct EvalContext {
     pub hidden_rows: Option<HashSet<u32>>,
 }
 
+/// Pre-fetched data for a single writeback region, used by GATHER functions.
+#[derive(Debug, Clone, Default)]
+pub struct GatherRegionData {
+    /// List of (submitter_display_name, submitter_id, value) tuples.
+    pub submissions: Vec<GatherSubmission>,
+}
+
+/// A single submission entry in the gather cache.
+#[derive(Debug, Clone)]
+pub struct GatherSubmission {
+    pub submitter_name: String,
+    pub submitter_id: String,
+    pub value: EvalResult,
+}
+
 /// The formula evaluator.
 /// Holds a reference to the grid for cell lookups.
 pub struct Evaluator<'a> {
@@ -336,6 +351,9 @@ pub struct Evaluator<'a> {
     /// Args: (data_field_name, pivot_cell_row, pivot_cell_col, field_item_pairs: Vec<(field_name, item_value)>)
     /// Returns: the aggregated value, or None if not found.
     pivot_data_fn: Option<&'a dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    /// Optional writeback data lookup for GATHER functions.
+    /// Takes a region_id and returns pre-fetched submission data.
+    gather_fn: Option<&'a dyn Fn(&str) -> GatherRegionData>,
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
@@ -352,6 +370,7 @@ impl<'a> Evaluator<'a> {
             styles: None,
             file_reader: None,
             pivot_data_fn: None,
+            gather_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -365,6 +384,7 @@ impl<'a> Evaluator<'a> {
             styles: None,
             file_reader: None,
             pivot_data_fn: None,
+            gather_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -378,6 +398,7 @@ impl<'a> Evaluator<'a> {
             styles: None,
             file_reader: None,
             pivot_data_fn: None,
+            gather_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -398,6 +419,15 @@ impl<'a> Evaluator<'a> {
         f: &'a dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>,
     ) {
         self.pivot_data_fn = Some(f);
+    }
+
+    /// Sets the GATHER data lookup closure for writeback aggregation functions.
+    /// The closure takes a region_id and returns pre-fetched submission data.
+    pub fn set_gather_fn(
+        &mut self,
+        f: &'a dyn Fn(&str) -> GatherRegionData,
+    ) {
+        self.gather_fn = Some(f);
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -6988,19 +7018,24 @@ impl<'a> Evaluator<'a> {
     // ========================================================================
 
     /// GATHER(region_id) — returns all visible submissions for a writeback region.
-    /// In this version, looks up data from the pre-fetched gather_cache closure.
+    /// Reads from the pre-fetched gather_fn closure.
     /// Returns a List of submission values, or an empty List if no data.
     fn fn_gather(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let _region_id = match self.evaluate(&args[0]) {
+        let region_id = match self.evaluate(&args[0]) {
             EvalResult::Text(s) => s,
             _ => return EvalResult::Error(CellError::Value),
         };
-        // Pre-fetch cache lookup will be wired by the Tauri layer.
-        // For now, return an empty list (no submissions available).
-        EvalResult::List(Vec::new())
+        let Some(gather_fn) = &self.gather_fn else {
+            return EvalResult::List(Vec::new());
+        };
+        let data = gather_fn(&region_id);
+        let values: Vec<EvalResult> = data.submissions.iter()
+            .map(|s| s.value.clone())
+            .collect();
+        EvalResult::List(values)
     }
 
     /// GATHER.FROM(region_id, submitter_id) — returns one submitter's value.
@@ -7008,16 +7043,23 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 {
             return EvalResult::Error(CellError::Value);
         }
-        let _region_id = match self.evaluate(&args[0]) {
+        let region_id = match self.evaluate(&args[0]) {
             EvalResult::Text(s) => s,
             _ => return EvalResult::Error(CellError::Value),
         };
-        let _submitter_id = match self.evaluate(&args[1]) {
+        let submitter_id = match self.evaluate(&args[1]) {
             EvalResult::Text(s) => s,
             _ => return EvalResult::Error(CellError::Value),
         };
-        // Will be populated from gather_cache when wired.
-        // Return #N/A to indicate "no submission found" (same as VLOOKUP miss).
+        let Some(gather_fn) = &self.gather_fn else {
+            return EvalResult::Error(CellError::NA);
+        };
+        let data = gather_fn(&region_id);
+        for sub in &data.submissions {
+            if sub.submitter_id == submitter_id {
+                return sub.value.clone();
+            }
+        }
         EvalResult::Error(CellError::NA)
     }
 
@@ -7026,25 +7068,34 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let _region_id = match self.evaluate(&args[0]) {
+        let region_id = match self.evaluate(&args[0]) {
             EvalResult::Text(s) => s,
             _ => return EvalResult::Error(CellError::Value),
         };
-        // Will return actual count from gather_cache when wired.
-        EvalResult::Number(0.0)
+        let Some(gather_fn) = &self.gather_fn else {
+            return EvalResult::Number(0.0);
+        };
+        let data = gather_fn(&region_id);
+        EvalResult::Number(data.submissions.len() as f64)
     }
 
-    /// GATHER.SUBMITTERS(region_id) — list of submitter identities.
+    /// GATHER.SUBMITTERS(region_id) — list of submitter display names.
     fn fn_gather_submitters(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let _region_id = match self.evaluate(&args[0]) {
+        let region_id = match self.evaluate(&args[0]) {
             EvalResult::Text(s) => s,
             _ => return EvalResult::Error(CellError::Value),
         };
-        // Will return submitter list from gather_cache when wired.
-        EvalResult::List(Vec::new())
+        let Some(gather_fn) = &self.gather_fn else {
+            return EvalResult::List(Vec::new());
+        };
+        let data = gather_fn(&region_id);
+        let names: Vec<EvalResult> = data.submissions.iter()
+            .map(|s| EvalResult::Text(s.submitter_name.clone()))
+            .collect();
+        EvalResult::List(names)
     }
 
     // ========================================================================
