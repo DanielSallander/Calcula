@@ -65,6 +65,10 @@ pub enum AuditEvent {
     Published,
     /// Changed active channel.
     ChannelChanged,
+    /// Submitted writeback values to the registry.
+    WritebackSubmitted,
+    /// Writeback drafts invalidated by refresh (removed/incompatible regions).
+    WritebackInvalidated,
 }
 
 impl AuditLog {

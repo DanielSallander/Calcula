@@ -996,6 +996,15 @@ pub fn save_file(
         }
     }
 
+    // Serialize writeback layer (drafts) into user_files
+    {
+        let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        if !wb_layer.drafts.is_empty() {
+            let json = serde_json::to_vec_pretty(&*wb_layer).map_err(|e| e.to_string())?;
+            workbook.user_files.insert("writeback_drafts.json".to_string(), json);
+        }
+    }
+
     // Save workbook properties (update last_modified timestamp)
     {
         let mut props = state.workbook_properties.lock().unwrap();
@@ -1354,6 +1363,18 @@ pub fn open_file(
         }
     }
 
+    // Restore writeback layer (drafts) from user_files (if present)
+    {
+        if let Some(json_bytes) = workbook.user_files.remove("writeback_drafts.json") {
+            if let Ok(layer) = serde_json::from_slice::<calp::writeback::WritebackLayer>(&json_bytes) {
+                *state.writeback_layer.lock().map_err(|e| e.to_string())? = layer;
+            }
+        } else {
+            *state.writeback_layer.lock().map_err(|e| e.to_string())? =
+                calp::writeback::WritebackLayer::new();
+        }
+    }
+
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
     // Restore document theme
@@ -1595,6 +1616,10 @@ pub fn new_file(
     // Reset audit log
     *state.audit_log.lock().map_err(|e| e.to_string())? =
         calp::audit::AuditLog::new();
+
+    // Reset writeback layer
+    *state.writeback_layer.lock().map_err(|e| e.to_string())? =
+        calp::writeback::WritebackLayer::new();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();

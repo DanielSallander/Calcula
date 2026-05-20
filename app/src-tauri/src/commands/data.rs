@@ -787,6 +787,7 @@ pub fn update_cell(
                     Some(&styles),
                     &user_files,
                     Some(&pivot_data_fn),
+                    None,
                 );
 
                 // Clear any previous spill range for this cell
@@ -1801,6 +1802,7 @@ pub fn update_cells_batch(
                         Some(&styles),
                         &user_files,
                         Some(&pivot_data_fn),
+                        None,
                     );
 
                     // Clear any previous spill range for this cell
@@ -4106,6 +4108,7 @@ pub fn fill_range(
                                 Some(&styles),
                                 &user_files,
                                 Some(&pivot_data_fn),
+                                None,
                             );
 
                             // For fill, we take the simple scalar result (no spill handling)

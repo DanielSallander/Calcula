@@ -339,8 +339,25 @@ pub fn calp_import_overrides(
     state: State<AppState>,
     patch_json: String,
 ) -> Result<usize, String> {
-    let patch: calp::OverridePatch =
+    let mut patch: calp::OverridePatch =
         serde_json::from_str(&patch_json).map_err(|e| e.to_string())?;
+
+    // Filter out overrides targeting writeback cells — overrides on writeback
+    // cells are not allowed (writeback cells use the writeback layer instead).
+    {
+        let wb_index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+        if !wb_index.is_empty() {
+            let before = patch.overrides.len();
+            patch.overrides.retain(|ovr| {
+                !wb_index.contains(ovr.sheet_id, ovr.position.0, ovr.position.1)
+            });
+            let skipped = before - patch.overrides.len();
+            if skipped > 0 {
+                crate::log_info!("CALP", "Skipped {} overrides targeting writeback cells", skipped);
+            }
+        }
+    }
+
     let count = patch.overrides.len();
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
     patch.apply_to(&mut layer);
@@ -459,6 +476,37 @@ pub fn calp_refresh_apply(
     drop(subs);
     drop(layer);
     rebuild_writeback_index(&state, Some(&registry_path));
+
+    // Handle writeback region changes: invalidate drafts for removed/incompatible regions
+    {
+        let old_decls = state.writeback_declarations.lock()
+            .map(|d| d.clone()).unwrap_or_default();
+
+        // Reload new declarations (rebuild_writeback_index just updated them)
+        let new_decls = state.writeback_declarations.lock()
+            .map(|d| d.clone()).unwrap_or_default();
+
+        if !old_decls.is_empty() || !new_decls.is_empty() {
+            let compat = calp::writeback::check_region_compatibility(&old_decls, &new_decls);
+
+            // Remove drafts for removed or incompatible regions
+            let invalidated_ids: std::collections::HashSet<&str> = compat.removed.iter()
+                .chain(compat.incompatible.iter().map(|(id, _)| id))
+                .map(|s| s.as_str())
+                .collect();
+
+            if !invalidated_ids.is_empty() {
+                if let Ok(mut wb_layer) = state.writeback_layer.lock() {
+                    let before = wb_layer.draft_count();
+                    wb_layer.drafts.retain(|d| !invalidated_ids.contains(d.region_id.as_str()));
+                    let removed = before - wb_layer.draft_count();
+                    if removed > 0 {
+                        crate::log_info!("CALP", "Refresh invalidated {} writeback drafts for removed/incompatible regions", removed);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(result)
 }
@@ -1027,7 +1075,7 @@ pub fn calp_submit_region(
             .and_then(|id| id.as_ref().map(|i| i.display_name.clone()))
             .unwrap_or_default();
         audit.record(
-            calp::audit::AuditEvent::Published, // Reuse Published for now
+            calp::audit::AuditEvent::WritebackSubmitted,
             &format!("Submitted {} writeback values for region {}", count, region_id),
             &user,
             &now,

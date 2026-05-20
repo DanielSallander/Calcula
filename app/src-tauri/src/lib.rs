@@ -2736,7 +2736,7 @@ pub fn evaluate_formula_raw_with_files(
 ) -> EvalResult {
     evaluate_formula_raw_with_files_and_pivot(
         grids, sheet_names, current_sheet_index, ast, eval_ctx,
-        style_registry, user_files, None,
+        style_registry, user_files, None, None,
     )
 }
 
@@ -2750,6 +2750,7 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
     pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
 ) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
@@ -2768,6 +2769,9 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     evaluator.set_file_reader(&reader);
     if let Some(pf) = pivot_data_fn {
         evaluator.set_pivot_data_fn(pf);
+    }
+    if let Some(gf) = gather_fn {
+        evaluator.set_gather_fn(gf);
     }
     evaluator.evaluate(ast)
 }
