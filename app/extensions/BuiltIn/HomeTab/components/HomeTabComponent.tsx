@@ -711,6 +711,8 @@ export function HomeTabComponent({
         key={item.id}
         className={`${btnBase} ${active ? btnActive : ""}`}
         title={item.tooltip}
+        data-testid={`fmt-${item.id}`}
+        data-active={active || undefined}
         onClick={() => handleItemClick(item)}
         style={
           item.id === "bold" ? { fontWeight: 700 } :

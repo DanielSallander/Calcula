@@ -216,21 +216,13 @@ export class GridHelper {
   // -------------------------------------------------------------------
 
   async undo() {
-    // The keyboard handler is gated on isFocused, which React updates via
-    // onFocus/onBlur. After the inline editor closes, focus may go to body,
-    // making isFocused=false. We need to focus the container and wait for
-    // React to re-render and re-attach the useEffect keyboard listener.
-    await this.spreadsheet.focus();
-    await this.page.waitForTimeout(500);
-    await this.page.keyboard.press("Control+z");
-    await this.page.waitForTimeout(500);
+    await this.dispatchKeyOnGrid("z", true);
+    await this.page.waitForTimeout(200);
   }
 
   async redo() {
-    await this.spreadsheet.focus();
-    await this.page.waitForTimeout(500);
-    await this.page.keyboard.press("Control+y");
-    await this.page.waitForTimeout(500);
+    await this.dispatchKeyOnGrid("y", true);
+    await this.page.waitForTimeout(200);
   }
 
   async copy() {
@@ -264,7 +256,145 @@ export class GridHelper {
     await this.canvas.click({
       position: { x, y },
       modifiers: ["Shift"],
+      force: true,
     });
     await this.page.waitForTimeout(100);
+  }
+
+  // -------------------------------------------------------------------
+  // Formatting
+  // -------------------------------------------------------------------
+
+  /**
+   * Dispatch a keyboard shortcut directly on the spreadsheet container DOM
+   * element. This bypasses WebView2's browser-level key interception (which
+   * swallows Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+Z, etc. before they reach the app).
+   */
+  private async dispatchKeyOnGrid(key: string, ctrlKey = false, shiftKey = false) {
+    await this.spreadsheet.focus();
+    await this.page.waitForTimeout(100);
+    await this.spreadsheet.evaluate(
+      (el, opts) => {
+        el.dispatchEvent(new KeyboardEvent("keydown", {
+          key: opts.key,
+          code: `Key${opts.key.toUpperCase()}`,
+          ctrlKey: opts.ctrlKey,
+          shiftKey: opts.shiftKey,
+          bubbles: true,
+          cancelable: true,
+        }));
+      },
+      { key, ctrlKey, shiftKey }
+    );
+    await this.page.waitForTimeout(300);
+  }
+
+  /**
+   * Toggle bold on the currently selected cell(s) via ribbon button.
+   * Waits for the ribbon to sync with the current cell's style before clicking.
+   */
+  async toggleBold() {
+    // Wait for the ribbon's async style fetch to complete so it reflects
+    // the CURRENT cell's bold state, not the previous cell's.
+    await this.page.waitForTimeout(500);
+    await this.clickFormatButton("bold");
+  }
+
+  /** Toggle italic on the currently selected cell(s) via ribbon button. */
+  async toggleItalic() {
+    await this.page.waitForTimeout(500);
+    await this.clickFormatButton("italic");
+  }
+
+  /** Toggle underline on the currently selected cell(s) via ribbon button. */
+  async toggleUnderline() {
+    await this.page.waitForTimeout(500);
+    await this.clickFormatButton("underline");
+  }
+
+  /**
+   * Check if a formatting toggle button is active in the ribbon.
+   * Button IDs: "bold", "italic", "underline", "strikethrough",
+   *             "superscript", "subscript", "alignLeft", "alignCenter",
+   *             "alignRight", "wrapText"
+   */
+  async isFormatActive(formatId: string): Promise<boolean> {
+    const btn = this.page.locator(`[data-testid="fmt-${formatId}"]`);
+    const attr = await btn.getAttribute("data-active", { timeout: 3000 });
+    return attr === "true";
+  }
+
+  /**
+   * Read a cell's style property directly from the Tauri backend.
+   * More reliable than checking ribbon button state since it bypasses
+   * the async ribbon style refresh entirely.
+   *
+   * For boolean properties (bold, italic, strikethrough): returns true/false.
+   * For string properties (underline): returns true if the value is truthy
+   * and not "none".
+   */
+  async getCellStyleProp(ref: string, prop: string): Promise<boolean> {
+    const { row, col } = parseCellRef(ref);
+    const result = await this.page.evaluate(
+      async ({ r, c, p }) => {
+        const tauri = (window as any).__TAURI__;
+        if (!tauri?.core?.invoke) throw new Error("Tauri API not available");
+        const cell = await tauri.core.invoke("get_cell", { row: r, col: c });
+        if (!cell) return false;
+        const style = await tauri.core.invoke("get_style", { index: cell.styleIndex });
+        if (!style) return false;
+        const value = (style as any)[p];
+        // underline is a string: "none" or "single"
+        if (typeof value === "string") return value !== "none" && value !== "";
+        return !!value;
+      },
+      { r: row, c: col, p: prop }
+    );
+    return result;
+  }
+
+  /**
+   * Select a cell and check if a specific format is active.
+   * First tries reading the style directly via Tauri API (most reliable),
+   * falls back to checking the ribbon button state.
+   */
+  async isCellFormatted(ref: string, formatId: string): Promise<boolean> {
+    const { row, col } = parseCellRef(ref);
+
+    // Try reading style data directly from the Tauri backend
+    try {
+      const result = await this.page.evaluate(
+        async ({ r, c, prop }) => {
+          const tauri = (window as any).__TAURI__;
+          if (!tauri?.core?.invoke) return null;
+          const cell = await tauri.core.invoke("get_cell", { row: r, col: c });
+          if (!cell) return null;
+          const style = await tauri.core.invoke("get_style", { index: cell.styleIndex });
+          if (!style) return null;
+          return (style as any)[prop] ?? false;
+        },
+        { r: row, c: col, prop: formatId }
+      );
+      if (result !== null) return !!result;
+    } catch {
+      // Tauri API not available, fall back to ribbon check
+    }
+
+    // Fallback: click cell and check ribbon button state
+    await this.clickCell(ref);
+    await this.page.waitForTimeout(1000);
+    return this.isFormatActive(formatId);
+  }
+
+  /**
+   * Click a formatting button in the ribbon by its testid.
+   * After clicking, waits for the Tauri round-trip and ribbon state update.
+   * Does NOT move focus back to the grid — call clickCell() if needed.
+   */
+  async clickFormatButton(formatId: string) {
+    const btn = this.page.locator(`[data-testid="fmt-${formatId}"]`);
+    await btn.click();
+    // Wait for the Tauri applyFormatting round-trip and React state update
+    await this.page.waitForTimeout(600);
   }
 }
