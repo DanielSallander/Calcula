@@ -1346,4 +1346,152 @@ mod tests {
         };
         assert!(!old.is_compatible_with(&new));
     }
+
+    // --- WritebackLayer tests ---
+
+    fn make_submitter(name: &str) -> crate::identity_provider::SubmitterIdentity {
+        crate::identity_provider::SubmitterIdentity {
+            display_name: name.to_string(),
+            id: format!("id-{}", name),
+            extra: HashMap::new(),
+        }
+    }
+
+    fn make_submission(region_id: &str, row: u32, col: u32, value: f64, submitter: &str) -> WritebackSubmission {
+        WritebackSubmission {
+            id: format!("sub-{}-{}-{}", region_id, row, col),
+            region_id: region_id.to_string(),
+            cell_row: row,
+            cell_col: col,
+            cell_id: None,
+            submitter: make_submitter(submitter),
+            value: SubmissionValue::Number { value },
+            state: SubmissionState::Draft,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            submitted_at: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn writeback_layer_crud() {
+        let mut layer = WritebackLayer::new();
+        assert_eq!(layer.draft_count(), 0);
+
+        layer.set_draft(make_submission("r1", 0, 0, 100.0, "alice"));
+        assert_eq!(layer.draft_count(), 1);
+        assert!(layer.get_draft("r1", 0, 0).is_some());
+
+        // Update existing draft
+        layer.set_draft(make_submission("r1", 0, 0, 200.0, "alice"));
+        assert_eq!(layer.draft_count(), 1);
+        if let SubmissionValue::Number { value } = &layer.get_draft("r1", 0, 0).unwrap().value {
+            assert_eq!(*value, 200.0);
+        } else {
+            panic!("Expected number value");
+        }
+
+        // Remove
+        assert!(layer.remove_draft("r1", 0, 0));
+        assert_eq!(layer.draft_count(), 0);
+        assert!(!layer.remove_draft("r1", 0, 0)); // double remove
+    }
+
+    #[test]
+    fn writeback_layer_drafts_for_region() {
+        let mut layer = WritebackLayer::new();
+        layer.set_draft(make_submission("r1", 0, 0, 1.0, "alice"));
+        layer.set_draft(make_submission("r1", 1, 0, 2.0, "alice"));
+        layer.set_draft(make_submission("r2", 0, 0, 3.0, "alice"));
+
+        assert_eq!(layer.drafts_for_region("r1").len(), 2);
+        assert_eq!(layer.drafts_for_region("r2").len(), 1);
+        assert_eq!(layer.drafts_for_region("r3").len(), 0);
+    }
+
+    #[test]
+    fn writeback_layer_submit_region() {
+        let mut layer = WritebackLayer::new();
+        layer.set_draft(make_submission("r1", 0, 0, 1.0, "alice"));
+        layer.set_draft(make_submission("r1", 1, 0, 2.0, "alice"));
+        layer.set_draft(make_submission("r2", 0, 0, 3.0, "alice"));
+
+        let submitted = layer.submit_region("r1", "2026-06-01T00:00:00Z");
+        assert_eq!(submitted.len(), 2);
+        for s in &submitted {
+            assert_eq!(s.state, SubmissionState::Submitted);
+            assert!(s.submitted_at.is_some());
+        }
+
+        // r2 draft unchanged
+        let r2_drafts = layer.drafts_for_region("r2");
+        assert_eq!(r2_drafts[0].state, SubmissionState::Draft);
+    }
+
+    #[test]
+    fn writeback_layer_serde_roundtrip() {
+        let mut layer = WritebackLayer::new();
+        layer.set_draft(make_submission("r1", 0, 0, 42.0, "alice"));
+        layer.set_draft(make_submission("r1", 1, 0, 99.0, "bob"));
+
+        let json = serde_json::to_string_pretty(&layer).unwrap();
+        let roundtripped: WritebackLayer = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.draft_count(), 2);
+    }
+
+    #[test]
+    fn submission_value_serde_roundtrip() {
+        for value in [
+            SubmissionValue::Number { value: 42.5 },
+            SubmissionValue::Text { value: "hello".to_string() },
+            SubmissionValue::Boolean { value: true },
+            SubmissionValue::Empty,
+        ] {
+            let json = serde_json::to_value(&value).unwrap();
+            let roundtripped: SubmissionValue = serde_json::from_value(json).unwrap();
+            assert_eq!(roundtripped, value);
+        }
+    }
+
+    // --- Region compatibility tests ---
+
+    #[test]
+    fn region_compatibility_all_unchanged() {
+        let s = make_sheet_id();
+        let regions = vec![make_decl("r1", s, 0, 5, 0, 3)];
+        let compat = check_region_compatibility(&regions, &regions);
+        assert_eq!(compat.compatible.len(), 1);
+        assert!(compat.added.is_empty());
+        assert!(compat.removed.is_empty());
+        assert!(compat.incompatible.is_empty());
+    }
+
+    #[test]
+    fn region_compatibility_added_and_removed() {
+        let s = make_sheet_id();
+        let old = vec![make_decl("r1", s, 0, 5, 0, 3)];
+        let new = vec![make_decl("r2", s, 10, 15, 0, 3)];
+        let compat = check_region_compatibility(&old, &new);
+        assert_eq!(compat.removed, vec!["r1"]);
+        assert_eq!(compat.added, vec!["r2"]);
+        assert!(compat.compatible.is_empty());
+    }
+
+    // --- GatherCache tests ---
+
+    #[test]
+    fn gather_cache_empty() {
+        let cache = GatherCache::new();
+        assert!(cache.get("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn gather_cache_stores_and_retrieves() {
+        let mut cache = GatherCache::new();
+        let sub = make_submission("r1", 0, 0, 42.0, "alice");
+        cache.data.insert("r1".to_string(), vec![sub]);
+        assert_eq!(cache.get("r1").len(), 1);
+        assert!(cache.get("r2").is_empty());
+    }
 }

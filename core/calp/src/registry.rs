@@ -418,4 +418,98 @@ mod tests {
 
         assert!(reg.version_exists("pkg", "1.0.0"));
     }
+
+    // --- Submission storage tests ---
+
+    fn make_test_submission(region_id: &str, submitter_name: &str) -> crate::writeback::WritebackSubmission {
+        crate::writeback::WritebackSubmission {
+            id: format!("sub-{}-{}", region_id, submitter_name),
+            region_id: region_id.to_string(),
+            cell_row: 0,
+            cell_col: 0,
+            cell_id: None,
+            submitter: crate::identity_provider::SubmitterIdentity {
+                display_name: submitter_name.to_string(),
+                id: format!("id-{}", submitter_name),
+                extra: std::collections::HashMap::new(),
+            },
+            value: crate::writeback::SubmissionValue::Number { value: 42.0 },
+            state: crate::writeback::SubmissionState::Submitted,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            submitted_at: Some("2026-01-01T00:00:00Z".to_string()),
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn submission_save_and_load() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        // Create a version directory
+        let ver_manifest = VersionManifest {
+            format_version: 1,
+            package_name: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            kind: "report".to_string(),
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+            published_by: String::new(),
+            sheets: Vec::new(),
+            named_ranges: Vec::new(),
+            tables: Vec::new(),
+            locked_sheets: Vec::new(),
+            locked_cells: Vec::new(),
+            writeback_regions: None,
+            extra: std::collections::HashMap::new(),
+        };
+        reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
+
+        let sub = make_test_submission("region-1", "alice");
+        reg.save_submission("pkg", "1.0.0", &sub).unwrap();
+
+        let loaded = reg.load_submissions("pkg", "1.0.0", "id-alice").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, sub.id);
+        assert_eq!(loaded[0].submitter.display_name, "alice");
+    }
+
+    #[test]
+    fn load_submissions_empty_when_none() {
+        let (_dir, reg) = create_test_registry();
+        let result = reg.load_submissions("pkg", "1.0.0", "nobody").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn load_region_submissions_across_submitters() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+        let ver_manifest = VersionManifest {
+            format_version: 1,
+            package_name: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+            kind: "report".to_string(),
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+            published_by: String::new(),
+            sheets: Vec::new(),
+            named_ranges: Vec::new(),
+            tables: Vec::new(),
+            locked_sheets: Vec::new(),
+            locked_cells: Vec::new(),
+            writeback_regions: None,
+            extra: std::collections::HashMap::new(),
+        };
+        reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
+
+        reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "alice")).unwrap();
+        reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "bob")).unwrap();
+        reg.save_submission("pkg", "1.0.0", &make_test_submission("r2", "alice")).unwrap();
+
+        let r1_subs = reg.load_region_submissions("pkg", "1.0.0", "r1").unwrap();
+        assert_eq!(r1_subs.len(), 2);
+
+        let r2_subs = reg.load_region_submissions("pkg", "1.0.0", "r2").unwrap();
+        assert_eq!(r2_subs.len(), 1);
+    }
 }
