@@ -324,6 +324,7 @@ export function clearAuditLog(): Promise<void> {
 export interface WritebackRegionEntry {
   sheetId: string;
   sheetIndex: number;
+  regionId: string;
   rowStart: number;
   rowEnd: number;
   colStart: number;

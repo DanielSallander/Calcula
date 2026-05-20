@@ -206,6 +206,8 @@ impl PositionalRange {
 pub struct WritebackIndex {
     /// Per-sheet list of positional ranges that are writeback-designated.
     regions_by_sheet: HashMap<SheetId, Vec<PositionalRange>>,
+    /// Region ID for each range, parallel to `regions_by_sheet` values.
+    region_ids_by_sheet: HashMap<SheetId, Vec<String>>,
 }
 
 impl WritebackIndex {
@@ -217,6 +219,7 @@ impl WritebackIndex {
         decls: &[WritebackRegionDeclaration],
     ) -> Result<Self, CalpError> {
         let mut regions_by_sheet: HashMap<SheetId, Vec<PositionalRange>> = HashMap::new();
+        let mut region_ids_by_sheet: HashMap<SheetId, Vec<String>> = HashMap::new();
 
         for decl in decls {
             let sel = &decl.selector;
@@ -254,14 +257,18 @@ impl WritebackIndex {
             }
 
             sheet_ranges.push(range);
+            region_ids_by_sheet.entry(sel.sheet_id).or_default().push(decl.id.clone());
         }
 
-        Ok(Self { regions_by_sheet })
+        Ok(Self { regions_by_sheet, region_ids_by_sheet })
     }
 
     /// Create an empty index (no writeback regions).
     pub fn empty() -> Self {
-        Self { regions_by_sheet: HashMap::new() }
+        Self {
+            regions_by_sheet: HashMap::new(),
+            region_ids_by_sheet: HashMap::new(),
+        }
     }
 
     /// Check if a cell is within any writeback region.
@@ -287,6 +294,20 @@ impl WritebackIndex {
         }
     }
 
+    /// Get the region_id for the region containing a cell, if any.
+    pub fn region_id_at(&self, sheet_id: SheetId, row: u32, col: u32) -> Option<&str> {
+        if let Some(ranges) = self.regions_by_sheet.get(&sheet_id) {
+            if let Some(ids) = self.region_ids_by_sheet.get(&sheet_id) {
+                for (i, r) in ranges.iter().enumerate() {
+                    if r.contains(row, col) {
+                        return ids.get(i).map(|s| s.as_str());
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Whether the index has any regions at all.
     pub fn is_empty(&self) -> bool {
         self.regions_by_sheet.values().all(|v| v.is_empty())
@@ -301,10 +322,15 @@ impl WritebackIndex {
         let mut entries = Vec::new();
         for (&sheet_id, ranges) in &self.regions_by_sheet {
             let sheet_index = sheet_id_to_index.get(&sheet_id).copied().unwrap_or(0);
-            for range in ranges {
+            let ids = self.region_ids_by_sheet.get(&sheet_id);
+            for (i, range) in ranges.iter().enumerate() {
+                let region_id = ids.and_then(|v| v.get(i))
+                    .cloned()
+                    .unwrap_or_default();
                 entries.push(WritebackRegionEntry {
                     sheet_id,
                     sheet_index,
+                    region_id,
                     row_start: range.row_start,
                     row_end: range.row_end,
                     col_start: range.col_start,
@@ -332,6 +358,8 @@ pub struct WritebackRegionEntry {
     /// The local sheet index in the workbook (set by the caller, not by the index).
     #[serde(default)]
     pub sheet_index: usize,
+    /// The writeback region declaration ID.
+    pub region_id: String,
     pub row_start: u32,
     pub row_end: u32,
     pub col_start: u32,

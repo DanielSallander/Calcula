@@ -92,6 +92,23 @@ export async function refreshWritebackSnapshot(): Promise<WritebackRegionEntry[]
 }
 
 /**
+ * Get the region entry covering a given cell, or null if not in a writeback region.
+ */
+export function getRegionForCell(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): WritebackRegionEntry | null {
+  if (!hasRegions) return null;
+  for (const r of snapshot) {
+    if (r.sheetIndex === sheetIndex && row >= r.rowStart && row <= r.rowEnd && col >= r.colStart && col <= r.colEnd) {
+      return r;
+    }
+  }
+  return null;
+}
+
+/**
  * Get the writeback state for a cell: "empty" | "draft" | "submitted".
  * Returns null if the cell is not in a writeback region.
  */

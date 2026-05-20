@@ -29,7 +29,10 @@ import {
   setActiveSheetIndex,
   getActiveSheetIndex,
   getWritebackCellState,
+  getRegionForCell,
 } from "./lib/writebackStore";
+import { registerCommitGuard } from "@api/commitGuards";
+import { saveWritebackDraft, type SubmissionValue } from "@api/distribution";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -146,21 +149,9 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubAfterNew);
 
-  // Register edit guard: refuse edits on writeback cells
-  const unregEditGuard = context.grid.editGuards.register(
-    async (row: number, col: number) => {
-      if (!hasWritebackRegions()) return null;
-      const sheetIdx = getActiveSheetIndex();
-      if (isWritebackCell(sheetIdx, row, col)) {
-        return {
-          blocked: true,
-          message: "This cell is reserved for input in a future version.",
-        };
-      }
-      return null;
-    },
-  );
-  cleanupFns.push(unregEditGuard);
+  // Edit guard: writeback cells ARE editable (subscriber fills them).
+  // No edit guard block needed — writeback cells allow editing.
+  // The commit guard (below) routes the value to the writeback draft layer.
 
   // Register range guard: refuse range operations that overlap writeback regions
   const unregRangeGuard = context.grid.rangeGuards.register(
@@ -177,6 +168,42 @@ function activate(context: ExtensionContext): void {
     },
   );
   cleanupFns.push(unregRangeGuard);
+
+  // Commit guard: when a writeback cell value is committed, save it as a draft.
+  // The normal cell update still proceeds (action = "allow"), so the cell displays
+  // the value. The writeback layer also stores it for later submission.
+  const unregCommitGuard = registerCommitGuard(async (row, col, value) => {
+    if (!hasWritebackRegions()) return null;
+    const sheetIdx = getActiveSheetIndex();
+    const region = getRegionForCell(sheetIdx, row, col);
+    if (!region) return null;
+
+    // Determine the submission value type
+    let submissionValue: SubmissionValue;
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      submissionValue = { type: "empty" };
+    } else if (!isNaN(Number(trimmed)) && trimmed !== "") {
+      submissionValue = { type: "number", value: Number(trimmed) };
+    } else if (trimmed.toLowerCase() === "true" || trimmed.toLowerCase() === "false") {
+      submissionValue = { type: "boolean", value: trimmed.toLowerCase() === "true" };
+    } else {
+      submissionValue = { type: "text", value: trimmed };
+    }
+
+    // Save as draft (async, but don't block the commit)
+    try {
+      await saveWritebackDraft(region.regionId, region.sheetId, row, col, submissionValue);
+      // Refresh the writeback snapshot to update visual state
+      refreshAndUpdateInterceptor();
+    } catch (err) {
+      console.error("[Distribution] Failed to save writeback draft:", err);
+    }
+
+    // Allow the normal commit to proceed so the cell displays the value
+    return { action: "allow" as const };
+  });
+  cleanupFns.push(unregCommitGuard);
 
   // Writeback style interceptor management.
   // Only registered when writeback regions exist, so per-cell render cost
