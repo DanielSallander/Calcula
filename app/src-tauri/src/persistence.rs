@@ -242,6 +242,7 @@ pub fn build_workbook_for_save_with_slicers(
     workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_bwfs);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
+    workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     Ok(workbook)
 }
 
@@ -960,6 +961,7 @@ pub fn save_file(
     workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
+    workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state, &sheet_ids_save);
@@ -1316,6 +1318,9 @@ pub fn open_file(
 
     // Restore pivot layouts from workbook
     *state.pivot_layouts.lock().unwrap() = workbook.pivot_layouts.clone();
+
+    // Restore object scripts (scriptable objects) from workbook
+    *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();
 
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state, &workbook);
@@ -2170,6 +2175,7 @@ pub fn auto_recover_save(
     workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_ar);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
+    workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state, &sheet_ids_ar);

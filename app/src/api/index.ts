@@ -1366,3 +1366,46 @@ export type {
 // ============================================================================
 
 export { CellRange } from "./range";
+
+// ============================================================================
+// Scriptable Objects API
+// ============================================================================
+
+export {
+  ObjectScriptManager,
+  resetObjectScriptManager,
+} from "./scriptableObjects";
+
+export type {
+  ScriptAccessLevel,
+  ScriptableObjectType,
+  ObjectScriptDefinition,
+  ObjectLifecycleStage,
+  BaseObjectContext,
+  WorkbookContext,
+  SheetContext,
+  CellContext,
+  RowContext,
+  ColumnContext,
+  SlicerContext,
+  ChartContext,
+  PivotContext,
+  ObjectContextMap,
+  ObjectScriptSetup,
+  IObjectScriptAPI,
+} from "./scriptableObjects";
+
+export {
+  getScaffoldTemplate,
+  getContextDocumentation,
+} from "./scriptableObjectScaffolds";
+
+export {
+  listObjectScripts,
+  getObjectScript,
+  getObjectScriptByTarget,
+  saveObjectScript,
+  deleteObjectScript,
+  deleteObjectScriptsForInstance,
+  loadAllObjectScripts,
+} from "./objectScriptBackend";

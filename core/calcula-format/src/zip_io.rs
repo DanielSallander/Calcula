@@ -20,7 +20,8 @@ use crate::sheet_styles::{
 
 use engine::theme::ThemeDefinition;
 use identity::SheetId;
-use persistence::{SavedChart, SavedNotebook, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
+use crate::features::object_scripts::ObjectScriptDef;
+use persistence::{SavedChart, SavedNotebook, SavedObjectScript, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -58,6 +59,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     }
     if !workbook.pivot_layouts.is_empty() {
         manifest.features.push("pivot_layouts".to_string());
+    }
+    if !workbook.object_scripts.is_empty() {
+        manifest.features.push("object_scripts".to_string());
     }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
@@ -155,6 +159,17 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(filter_json.as_bytes())?;
+    }
+
+    // Write object scripts (scriptable objects)
+    for obj_script in &workbook.object_scripts {
+        let obj_script_def = ObjectScriptDef::from(obj_script);
+        let obj_script_json = serde_json::to_string_pretty(&obj_script_def)?;
+        zip.start_file(
+            format!("object_scripts/script_{}.json", obj_script.id),
+            options.clone(),
+        )?;
+        zip.write_all(obj_script_json.as_bytes())?;
     }
 
     // Write scripts
@@ -364,6 +379,28 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read object scripts (scriptable objects)
+    let mut object_scripts: Vec<SavedObjectScript> = Vec::new();
+    if manifest.features.contains(&"object_scripts".to_string()) {
+        let obj_script_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("object_scripts/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for obj_script_name in obj_script_names {
+            if let Some(obj_script_def) = read_optional_json::<ObjectScriptDef>(&mut archive, &obj_script_name)? {
+                object_scripts.push(SavedObjectScript::from(&obj_script_def));
+            }
+        }
+    }
+
     // Read ribbon filters
     let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
     if manifest.features.contains(&"ribbon_filters".to_string()) {
@@ -490,6 +527,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         sparklines,
         named_ranges: Vec::new(),
         pivot_layouts,
+        object_scripts,
     })
 }
 
@@ -619,6 +657,7 @@ mod tests {
             sparklines: Vec::new(),
             named_ranges: Vec::new(),
             pivot_layouts: Vec::new(),
+            object_scripts: Vec::new(),
         }
     }
 

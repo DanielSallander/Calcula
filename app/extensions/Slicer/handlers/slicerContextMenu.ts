@@ -13,6 +13,7 @@ import {
 } from "../lib/slicerStore";
 import { getGridStateSnapshot } from "@api/state";
 import { showDialog } from "@api";
+import { emitAppEvent } from "@api/events";
 import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID, SLICER_CONNECTIONS_DIALOG_ID } from "../manifest";
 
 // ============================================================================
@@ -188,6 +189,17 @@ function showContextMenu(clientX: number, clientY: number, slicerId: number): vo
         showDialog(SLICER_COMPUTED_PROPS_DIALOG_ID, { slicerId });
       },
     },
+    {
+      label: "Edit Script...",
+      onClick: () => {
+        emitAppEvent("scriptable-objects:edit-script", {
+          objectType: "slicer",
+          instanceId: String(slicerId),
+          objectName: slicer.name,
+        });
+      },
+    },
+    { label: "", separator: true },
     {
       label: "Remove Slicer",
       onClick: () => {

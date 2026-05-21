@@ -67,6 +67,7 @@ import GroupingExtension from "./Grouping";
 import PrintExtension from "./Print";
 import ScriptEditorExtension from "./ScriptEditor";
 import ScriptNotebookExtension from "./ScriptNotebook";
+import ScriptableObjectsExtension from "./ScriptableObjects";
 
 // Batch 4: Complex extensions (migrated from Path B)
 import ChartExtension from "./Charts";
@@ -177,6 +178,7 @@ export const builtInExtensions: ExtensionModule[] = [
   PrintExtension,
   ScriptEditorExtension,
   ScriptNotebookExtension,
+  ScriptableObjectsExtension,
   // Complex extensions
   ChartExtension,
   PivotExtension,

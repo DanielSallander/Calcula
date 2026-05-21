@@ -10,3 +10,4 @@ mod ribbon_filter_tests;
 pub mod scripts;
 pub mod notebooks;
 pub mod pivot_layouts;
+pub mod object_scripts;

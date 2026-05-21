@@ -305,6 +305,8 @@ pub struct AppState {
     pub reference_style: Mutex<String>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
+    /// Object scripts for scriptable objects (primitive + component scripts)
+    pub object_scripts: Mutex<Vec<::persistence::SavedObjectScript>>,
     /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
     pub sheet_ids: Mutex<Vec<identity::SheetId>>,
     /// Subscription metadata for .calp packages linked to this workbook
@@ -443,6 +445,7 @@ pub fn create_app_state() -> AppState {
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: Mutex::new(Vec::new()),
+        object_scripts: Mutex::new(Vec::new()),
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
         override_layer: Mutex::new(calp::OverrideLayer::new()),
@@ -3801,6 +3804,13 @@ pub fn run() {
             scripting::notebook_rewind,
             scripting::notebook_run_from,
             scripting::notebook_reset_runtime,
+            // Object script commands (scriptable objects)
+            scripting::list_object_scripts,
+            scripting::get_object_script,
+            scripting::get_object_script_by_target,
+            scripting::save_object_script,
+            scripting::delete_object_script,
+            scripting::delete_object_scripts_for_instance,
             // Control metadata commands
             controls::get_control_metadata,
             controls::set_control_property,

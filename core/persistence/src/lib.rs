@@ -67,6 +67,8 @@ pub struct Workbook {
     pub ribbon_filters: Vec<SavedRibbonFilter>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: Vec<SavedPivotLayout>,
+    /// Object scripts (scriptable objects — primitive + component scripts)
+    pub object_scripts: Vec<SavedObjectScript>,
 }
 
 /// Workbook-level document properties.
@@ -220,6 +222,7 @@ impl Workbook {
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pivot_layouts: Vec::new(),
+            object_scripts: Vec::new(),
         }
     }
 
@@ -241,6 +244,7 @@ impl Workbook {
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pivot_layouts: Vec::new(),
+            object_scripts: Vec::new(),
         }
     }
 }
@@ -864,6 +868,59 @@ pub struct SavedNotebookCell {
     pub cells_modified: u32,
     pub duration_ms: u64,
     pub execution_index: Option<u32>,
+}
+
+// ============================================================================
+// Object Scripts (Scriptable Objects)
+// ============================================================================
+
+/// The type of scriptable object a script is attached to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ScriptableObjectType {
+    Workbook,
+    Sheet,
+    Cell,
+    Row,
+    Column,
+    Slicer,
+    Chart,
+    Pivot,
+    Button,
+    Textbox,
+    Timeline,
+}
+
+/// Access level for object scripts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ScriptAccessLevel {
+    Restricted,
+    Unlocked,
+}
+
+impl Default for ScriptAccessLevel {
+    fn default() -> Self {
+        ScriptAccessLevel::Restricted
+    }
+}
+
+/// A script attached to a scriptable object (primitive or component).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedObjectScript {
+    pub id: String,
+    pub name: String,
+    /// The object type this script targets.
+    pub object_type: ScriptableObjectType,
+    /// For component objects: the instance ID. None for primitive objects.
+    pub instance_id: Option<String>,
+    /// The script source code.
+    pub source: String,
+    /// Access level: restricted (default) or unlocked.
+    #[serde(default)]
+    pub access_level: ScriptAccessLevel,
+    /// Optional description.
+    pub description: Option<String>,
 }
 
 // ============================================================================
