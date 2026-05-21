@@ -481,4 +481,146 @@ export class GridHelper {
     // Wait for the Tauri applyFormatting round-trip and React state update
     await this.page.waitForTimeout(600);
   }
+
+  // -------------------------------------------------------------------
+  // Menu bar interaction
+  // -------------------------------------------------------------------
+
+  /**
+   * Open a top-level menu by clicking its button text.
+   * Menu names: "File", "Edit", "View", "Format", "Insert", "Data",
+   *             "Formulas", "Review", "Developer"
+   */
+  async openMenu(menuName: string) {
+    const menuBtn = this.page.locator("button").filter({ hasText: new RegExp(`^${menuName}$`) }).first();
+    await menuBtn.click();
+    await this.page.waitForTimeout(300);
+  }
+
+  /**
+   * Click a menu item by its label text.
+   * Call openMenu() first, then clickMenuItem().
+   * For submenus, hover the parent first.
+   */
+  async clickMenuItem(itemLabel: string) {
+    const item = this.page.locator("button").filter({ hasText: new RegExp(`^${itemLabel}$`) }).first();
+    await item.click();
+    await this.page.waitForTimeout(400);
+  }
+
+  /**
+   * Hover a menu item (for opening submenus).
+   */
+  async hoverMenuItem(itemLabel: string) {
+    const item = this.page.locator("button").filter({ hasText: new RegExp(`^${itemLabel}$`) }).first();
+    await item.hover();
+    await this.page.waitForTimeout(300);
+  }
+
+  /**
+   * Open a menu and click an item in one step.
+   * Handles the common pattern of menu → item click.
+   */
+  async menuAction(menuName: string, itemLabel: string) {
+    await this.openMenu(menuName);
+    await this.clickMenuItem(itemLabel);
+  }
+
+  /**
+   * Close any open menu by pressing Escape or clicking outside.
+   */
+  async closeMenu() {
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(200);
+  }
+
+  // -------------------------------------------------------------------
+  // Keyboard-driven workflows
+  // -------------------------------------------------------------------
+
+  /**
+   * Press an arrow key N times. Useful for keyboard navigation tests.
+   */
+  async pressArrow(direction: "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight", times = 1) {
+    for (let i = 0; i < times; i++) {
+      await this.page.keyboard.press(direction);
+      await this.page.waitForTimeout(50);
+    }
+    await this.page.waitForTimeout(100);
+  }
+
+  /**
+   * Select a range using Shift+Arrow keys from the current cell.
+   * @param down Number of rows to extend down (negative for up)
+   * @param right Number of columns to extend right (negative for left)
+   */
+  async shiftArrowSelect(down: number, right: number) {
+    if (down > 0) {
+      for (let i = 0; i < down; i++) {
+        await this.page.keyboard.press("Shift+ArrowDown");
+        await this.page.waitForTimeout(50);
+      }
+    } else if (down < 0) {
+      for (let i = 0; i < -down; i++) {
+        await this.page.keyboard.press("Shift+ArrowUp");
+        await this.page.waitForTimeout(50);
+      }
+    }
+    if (right > 0) {
+      for (let i = 0; i < right; i++) {
+        await this.page.keyboard.press("Shift+ArrowRight");
+        await this.page.waitForTimeout(50);
+      }
+    } else if (right < 0) {
+      for (let i = 0; i < -right; i++) {
+        await this.page.keyboard.press("Shift+ArrowLeft");
+        await this.page.waitForTimeout(50);
+      }
+    }
+    await this.page.waitForTimeout(100);
+  }
+
+  /**
+   * Enter a value by typing and pressing Enter, without clicking a cell first.
+   * Useful for keyboard-only data entry workflows.
+   */
+  async typeAndEnter(value: string) {
+    await this.page.keyboard.type(value, { delay: 20 });
+    await this.page.keyboard.press("Enter");
+    await this.page.waitForTimeout(300);
+  }
+
+  /**
+   * Enter a value by typing and pressing Tab (moves right after commit).
+   */
+  async typeAndTab(value: string) {
+    await this.page.keyboard.type(value, { delay: 20 });
+    await this.page.keyboard.press("Tab");
+    await this.page.waitForTimeout(300);
+  }
+
+  /**
+   * Press F2 to enter edit mode, type a value, and press Enter.
+   * Useful for editing an existing cell via keyboard.
+   */
+  async editCellViaF2(value: string) {
+    await this.page.keyboard.press("F2");
+    await this.page.waitForTimeout(200);
+    // Select all existing content and replace
+    await this.page.keyboard.press("Control+a");
+    await this.page.waitForTimeout(50);
+    await this.page.keyboard.type(value, { delay: 20 });
+    await this.page.keyboard.press("Enter");
+    await this.page.waitForTimeout(300);
+  }
+
+  /**
+   * Scroll the grid using mouse wheel.
+   * @param deltaY Positive = scroll down, negative = scroll up
+   */
+  async scrollWheel(deltaY: number) {
+    await this.canvas.hover();
+    await this.page.mouse.wheel(0, deltaY);
+    await this.page.waitForTimeout(300);
+  }
 }

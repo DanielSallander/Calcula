@@ -83,7 +83,10 @@ export function useSpreadsheetEditing({
   // it will reclaim focus via its own setTimeout(0) handler, so this is safe in all cases.
   useEffect(() => {
     const handleFocusRestoreForEditing = () => {
-      if (isEditing) {
+      if (isEditing && isOnDifferentSheet) {
+        // Only grab container focus during cross-sheet formula editing.
+        // When InlineEditor is rendered (same sheet), stealing focus causes
+        // a blur that can prematurely commit the edit.
         focusContainerRef.current?.focus();
       }
     };
@@ -94,7 +97,7 @@ export function useSpreadsheetEditing({
       window.removeEventListener("formula:referenceInserted", handleFocusRestoreForEditing);
       window.removeEventListener("sheet:formulaModeSwitch", handleFocusRestoreForEditing);
     };
-  }, [isEditing, focusContainerRef]);
+  }, [isEditing, isOnDifferentSheet, focusContainerRef]);
 
   // FIX: Listen for formula bar commit events from FormulaInput (shell layer)
   // FormulaInput can't directly call moveActiveCell since it's in the shell layer,

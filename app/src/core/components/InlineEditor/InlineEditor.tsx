@@ -536,6 +536,17 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         return;
       }
 
+      // FIX: Don't commit if we're in arrow reference navigation mode.
+      // When navigating cell references with arrow keys, dispatchReferenceInsertedEvent()
+      // causes the container to grab focus (for cross-sheet support), which blurs the
+      // InlineEditor. On the second arrow press, the DOM value no longer ends with an
+      // operator (e.g., "=VLOOKUP(B2"), so isFormulaExpectingReference returns false.
+      // But arrowRefCursor being non-null means we're actively navigating references.
+      if (getArrowRefCursor() !== null) {
+        console.log("[InlineEditor] Blur prevented - arrow reference navigation active");
+        return;
+      }
+
       // FIX: Check BOTH the DOM input value AND the synchronous global state.
       // The DOM value may be stale if React hasn't re-rendered this controlled input yet
       // (e.g., user typed a comma in the formula bar but InlineEditor hasn't re-rendered).
