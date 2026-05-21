@@ -1,0 +1,218 @@
+// Auto-generated type declarations for Object Script contexts.
+// These types are loaded into Monaco's TypeScript language service
+// for IntelliSense in the Code Editor dialog.
+//
+// To regenerate: keep in sync with app/src/api/scriptableObjects.ts
+
+// ============================================================================
+// Base
+// ============================================================================
+
+/** Extended API surface available only in "unlocked" access mode. */
+declare interface UnlockedAPI {
+  /** Read a cell value by row/col (active sheet). */
+  getCellValue(row: number, col: number): Promise<string>;
+  /** Write a cell value by row/col (active sheet). */
+  setCellValue(row: number, col: number, value: string): Promise<void>;
+  /** Batch-update multiple cells. */
+  updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void>;
+  /** Get all sheet names. */
+  getSheetNames(): Promise<string[]>;
+  /** Get the active sheet index. */
+  getActiveSheet(): Promise<number>;
+  /** Set the active sheet. */
+  setActiveSheet(index: number): Promise<void>;
+  /** Emit a custom event on the global event bus. */
+  emitEvent(name: string, detail?: unknown): void;
+  /** Listen for a global event. Returns unsubscribe function. */
+  onEvent(name: string, handler: (detail: unknown) => void): () => void;
+  /** Execute a registered command by ID. */
+  executeCommand(commandId: string, ...args: unknown[]): void;
+}
+
+/** Base context available to all scriptable objects. */
+declare interface BaseObjectContext {
+  /** The object type. */
+  readonly objectType: string;
+  /** The script access level: "restricted" or "unlocked". */
+  readonly accessLevel: string;
+  /**
+   * Expose a custom method that other scripts or extensions can call.
+   * @returns Cleanup function to unregister.
+   */
+  expose(name: string, handler: (...args: any[]) => any): () => void;
+  /** Log to the script console (visible in the Code tab output panel). */
+  log(...args: any[]): void;
+  /** Show a toast notification to the user. */
+  notify(message: string, type?: "info" | "success" | "warning" | "error"): void;
+  /**
+   * Full extension API access (only available in "unlocked" mode).
+   * In "restricted" mode, this is null.
+   */
+  readonly api: UnlockedAPI | null;
+}
+
+// ============================================================================
+// Primitive Contexts (workbook-scoped)
+// ============================================================================
+
+/** Context for Workbook-level scripts. */
+declare interface WorkbookContext extends BaseObjectContext {
+  /** Called when the workbook is opened. */
+  onOpen(handler: () => void): () => void;
+  /** Called before the workbook is saved. */
+  onBeforeSave(handler: () => void): () => void;
+  /** Called after the workbook is saved. */
+  onAfterSave(handler: () => void): () => void;
+  /** Called before the workbook is closed. */
+  onBeforeClose(handler: () => void): () => void;
+  /** Called when the active sheet changes. */
+  onSheetChange(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
+  /** Called when the theme changes. */
+  onThemeChange(handler: () => void): () => void;
+  /** Access workbook properties. */
+  readonly properties: {
+    readonly title: string;
+    readonly author: string;
+    readonly sheetCount: number;
+    getSheetNames(): string[];
+  };
+}
+
+/** Context for Sheet-level scripts (applies to all sheets). */
+declare interface SheetContext extends BaseObjectContext {
+  /** Called when any sheet is activated (switched to). */
+  onActivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
+  /** Called when any sheet is deactivated (switched away from). */
+  onDeactivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
+  /** Called when the selection changes on any sheet. */
+  onSelectionChange(handler: (detail: { sheetIndex: number; row: number; col: number; endRow: number; endCol: number }) => void): () => void;
+  /** Called when data changes on any sheet. */
+  onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; oldValue?: string; newValue: string }> }) => void): () => void;
+  /** Read a cell value from the specified (or active) sheet. */
+  getCellValue(row: number, col: number, sheetIndex?: number): Promise<string>;
+  /** Write a cell value. */
+  setCellValue(row: number, col: number, value: string, sheetIndex?: number): Promise<void>;
+}
+
+/** Context for Cell-level scripts (applies to all cells). */
+declare interface CellContext extends BaseObjectContext {
+  /** Called when any cell is edited (value committed). */
+  onEdit(handler: (detail: { row: number; col: number; sheetIndex: number; oldValue?: string; newValue: string; formula?: string | null }) => void): () => void;
+  /** Called when a cell is selected. */
+  onSelect(handler: (detail: { row: number; col: number; sheetIndex: number }) => void): () => void;
+  /** Called when editing starts on a cell. */
+  onEditStart(handler: (detail: { row: number; col: number; sheetIndex: number }) => void): () => void;
+  /** Called when editing ends (commit or cancel). */
+  onEditEnd(handler: (detail: { row: number; col: number; sheetIndex: number; committed: boolean }) => void): () => void;
+  /**
+   * Register a custom cell renderer that runs for every visible cell.
+   * Return a style override object to modify appearance, or null to use default.
+   */
+  onRender(handler: (cell: { row: number; col: number; sheetIndex: number; value: string; formula?: string | null }) => { textColor?: string; backgroundColor?: string; bold?: boolean; italic?: boolean } | null): () => void;
+}
+
+/** Context for Row-level scripts (applies to all rows). */
+declare interface RowContext extends BaseObjectContext {
+  /** Called when rows are inserted. */
+  onInsert(handler: (detail: { sheetIndex: number; startRow: number; count: number }) => void): () => void;
+  /** Called when rows are deleted. */
+  onDelete(handler: (detail: { sheetIndex: number; startRow: number; count: number }) => void): () => void;
+  /** Called when a row height changes. */
+  onResize(handler: (detail: { sheetIndex: number; row: number; height: number }) => void): () => void;
+}
+
+/** Context for Column-level scripts (applies to all columns). */
+declare interface ColumnContext extends BaseObjectContext {
+  /** Called when columns are inserted. */
+  onInsert(handler: (detail: { sheetIndex: number; startCol: number; count: number }) => void): () => void;
+  /** Called when columns are deleted. */
+  onDelete(handler: (detail: { sheetIndex: number; startCol: number; count: number }) => void): () => void;
+  /** Called when a column width changes. */
+  onResize(handler: (detail: { sheetIndex: number; col: number; width: number }) => void): () => void;
+}
+
+// ============================================================================
+// Component Contexts (per-instance)
+// ============================================================================
+
+/** Context for Slicer instances. */
+declare interface SlicerContext extends BaseObjectContext {
+  /** The slicer instance ID. */
+  readonly instanceId: string;
+  /** The slicer name. */
+  readonly name: string;
+  /** Called when slicer selection changes (items are selected/deselected). */
+  onSelectionChange(handler: (detail: { selectedItems: string[] }) => void): () => void;
+  /** Called when the slicer's underlying data is refreshed. */
+  onDataRefresh(handler: (detail: { items: string[] }) => void): () => void;
+  /** Called when the slicer is moved or resized. */
+  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
+  /** Get the currently selected items. */
+  getSelectedItems(): string[];
+  /** Set the selected items programmatically. */
+  setSelectedItems(items: string[]): Promise<void>;
+  /** Clear all selections. */
+  clearSelection(): Promise<void>;
+  /** Select all items. */
+  selectAll(): Promise<void>;
+  /** Style customization namespace. */
+  style: {
+    /** Override the item renderer for custom appearance. */
+    itemRenderer(renderer: (
+      item: { text: string; selected: boolean; hasData: boolean; index: number },
+      ctx: CanvasRenderingContext2D,
+      bounds: { x: number; y: number; width: number; height: number },
+    ) => void): () => void;
+    /**
+     * Set a canvas-style property on the slicer.
+     * Supported: backgroundColor, headerBackgroundColor, headerTextColor,
+     *            itemBackgroundColor, itemTextColor, selectedBackgroundColor,
+     *            selectedTextColor, borderColor, borderRadius, opacity.
+     */
+    setProperty(name: string, value: string): void;
+  };
+  /** Slicer properties (read-only). */
+  readonly properties: {
+    readonly fieldName: string;
+    readonly sourceType: string;
+    readonly columns: number;
+  };
+}
+
+/** Context for Chart instances. */
+declare interface ChartContext extends BaseObjectContext {
+  /** The chart instance ID. */
+  readonly instanceId: string;
+  /** Called when the chart's source data changes. */
+  onDataChange(handler: () => void): () => void;
+  /** Called when the chart is clicked. */
+  onClick(handler: (detail: { x: number; y: number }) => void): () => void;
+  /** Called when the chart is moved or resized. */
+  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
+  /** Get the chart specification (JSON object). */
+  getSpec(): Record<string, unknown>;
+  /** Update the chart specification (merge patch). */
+  updateSpec(patch: Record<string, unknown>): Promise<void>;
+  /** Style customization. */
+  style: {
+    /** Set a canvas-style property override (stored in chart spec). */
+    setProperty(name: string, value: string): void;
+  };
+}
+
+/** Context for Pivot Table instances. */
+declare interface PivotContext extends BaseObjectContext {
+  /** The pivot instance ID. */
+  readonly instanceId: string;
+  /** Called when the pivot is refreshed (recalculated). */
+  onRefresh(handler: () => void): () => void;
+  /** Called when pivot field layout changes. */
+  onLayoutChange(handler: (detail: { rows: string[]; columns: string[]; values: string[]; filters: string[] }) => void): () => void;
+  /** Called when the pivot is moved or resized. */
+  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
+  /** Get current pivot field configuration. */
+  getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
+  /** Refresh the pivot table data. */
+  refresh(): Promise<void>;
+}

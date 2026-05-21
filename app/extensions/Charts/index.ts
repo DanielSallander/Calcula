@@ -188,6 +188,10 @@ function activate(context: ExtensionContext): void {
     updateChartSpec(chartId: number, specUpdates: Record<string, unknown>) {
       updateChartSpec(chartId, specUpdates as Partial<import("./types").ChartSpec>);
     },
+    setStyleProperty(chartId: number, name: string, value: string) {
+      // Canvas-style override stored in chart spec as custom properties
+      updateChartSpec(chartId, { [`_style_${name}`]: value } as Partial<import("./types").ChartSpec>);
+    },
   });
 
   // Register add-in manifest

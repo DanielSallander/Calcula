@@ -1088,12 +1088,20 @@ function buildSlicerContext(
     },
 
     style: {
-      itemRenderer(_renderer) {
-        // Custom renderer registration — will be wired when slicer rendering supports it
+      itemRenderer(renderer) {
+        const store = getSlicerStoreService();
+        if (store) {
+          const unsub = store.setItemRenderer(Number(instanceId), renderer);
+          cleanupFns.push(unsub);
+          return unsub;
+        }
         return () => {};
       },
-      setProperty(_name, _value) {
-        // CSS property override — will be wired when slicer DOM elements are accessible
+      setProperty(name, value) {
+        const store = getSlicerStoreService();
+        if (store) {
+          store.setStyleProperty(Number(instanceId), name, value);
+        }
       },
     },
 
@@ -1171,8 +1179,11 @@ function buildChartContext(
     },
 
     style: {
-      setProperty(_name, _value) {
-        // CSS property override — will be wired when chart DOM elements are accessible
+      setProperty(name, value) {
+        const store = getChartStoreService();
+        if (store) {
+          store.setStyleProperty(Number(instanceId), name, value);
+        }
       },
     },
   };

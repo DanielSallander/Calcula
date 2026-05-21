@@ -14,6 +14,7 @@ import { getSlicerById, getCachedItems } from "../lib/slicerStore";
 import { isSlicerSelected } from "../handlers/selectionHandler";
 import { SLICER_STYLES_BY_ID } from "../components/SlicerStylesGallery";
 import type { Slicer, SlicerItem } from "../lib/slicerTypes";
+import { getSlicerItemRenderer, getSlicerStyleOverrides } from "./customRenderers";
 
 // ============================================================================
 // Style Constants
@@ -336,37 +337,60 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
       if (iy > itemAreaTop + itemAreaH) break;
     }
 
+    // Check for custom item renderer
+    const customRenderer = getSlicerItemRenderer(slicer.id);
+    const styleOvr = getSlicerStyleOverrides(slicer.id);
+
+    // Apply style overrides to colors
+    const effColors = styleOvr ? {
+      ...colors,
+      ...(styleOvr.itemBackgroundColor && { itemBg: styleOvr.itemBackgroundColor }),
+      ...(styleOvr.itemTextColor && { itemFg: styleOvr.itemTextColor }),
+      ...(styleOvr.selectedBackgroundColor && { selectedBg: styleOvr.selectedBackgroundColor }),
+      ...(styleOvr.selectedTextColor && { selectedFg: styleOvr.selectedTextColor }),
+    } : colors;
+
     if (isSelectAll) {
       // "Select all" row
       const allSelected = slicer.selectedItems === null;
-      c.fillStyle = allSelected ? colors.selectedBg : colors.itemBg;
+      c.fillStyle = allSelected ? effColors.selectedBg : effColors.itemBg;
       c.beginPath();
       c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
       c.fill();
-      c.fillStyle = allSelected ? colors.selectedFg : colors.itemFg;
+      c.fillStyle = allSelected ? effColors.selectedFg : effColors.itemFg;
       c.fillText(SELECT_ALL_LABEL, ix + 8, iy + cellH / 2, cellW - 16);
     } else if (item) {
-      const showAsNoData = !item.hasData && slicer.indicateNoData;
-
-      if (item.selected && !showAsNoData) {
-        c.fillStyle = colors.selectedBg;
-        c.beginPath();
-        c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
-        c.fill();
-        c.fillStyle = colors.selectedFg;
+      // Use custom renderer if registered
+      if (customRenderer) {
+        customRenderer(
+          { text: item.value, selected: item.selected, hasData: item.hasData, index: vi - selectAllOffset },
+          c,
+          { x: ix, y: iy + 1, width: cellW, height: cellH - 2 },
+        );
       } else {
-        c.fillStyle = showAsNoData ? "#E8E8E8" : colors.itemBg;
-        c.beginPath();
-        c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
-        c.fill();
-        c.fillStyle = showAsNoData
-          ? "#BBBBBB"
-          : item.selected
-            ? colors.selectedFg
-            : colors.itemFg;
-      }
+        // Default rendering
+        const showAsNoData = !item.hasData && slicer.indicateNoData;
 
-      c.fillText(item.value, ix + 8, iy + cellH / 2, cellW - 16);
+        if (item.selected && !showAsNoData) {
+          c.fillStyle = effColors.selectedBg;
+          c.beginPath();
+          c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
+          c.fill();
+          c.fillStyle = effColors.selectedFg;
+        } else {
+          c.fillStyle = showAsNoData ? "#E8E8E8" : effColors.itemBg;
+          c.beginPath();
+          c.roundRect(ix, iy + 1, cellW, cellH - 2, btnR);
+          c.fill();
+          c.fillStyle = showAsNoData
+            ? "#BBBBBB"
+            : item.selected
+              ? effColors.selectedFg
+              : effColors.itemFg;
+        }
+
+        c.fillText(item.value, ix + 8, iy + cellH / 2, cellW - 16);
+      }
     }
   }
 

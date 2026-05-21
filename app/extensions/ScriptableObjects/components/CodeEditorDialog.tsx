@@ -10,6 +10,8 @@ import type { editor as monacoEditor } from "monaco-editor";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+// Vite ?raw import: loads .d.ts as a plain string for Monaco type registration
+import objectContextsDts from "../objectContexts.d.ts?raw";
 
 import {
   ObjectScriptManager,
@@ -28,6 +30,8 @@ import {
   deleteTemplate,
 } from "../lib/templateManager";
 import type { TemplateSummary } from "../lib/templateManager";
+import { validateScript } from "../lib/scriptWorker";
+import { getBreakpoints, toggleBreakpoint, clearBreakpoints, instrumentSource } from "../lib/debugger";
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 
 // ============================================================================
@@ -49,101 +53,29 @@ self.MonacoEnvironment = {
 
 loader.config({ monaco });
 
+// Inject CSS for breakpoint glyph markers
+(function injectBreakpointStyles() {
+  const style = document.createElement("style");
+  style.textContent = `
+    .breakpoint-glyph {
+      background: #E51400;
+      border-radius: 50%;
+      width: 10px !important;
+      height: 10px !important;
+      margin-left: 4px;
+      margin-top: 5px;
+    }
+    .breakpoint-line-decoration {
+      background: rgba(229, 20, 0, 0.1);
+    }
+  `;
+  document.head.appendChild(style);
+})();
+
 // Register object context type definitions for IntelliSense
 (function registerObjectScriptTypes() {
-  // We provide a simplified .d.ts for object script contexts
-  const contextDts = `
-declare interface BaseObjectContext {
-  readonly objectType: string;
-  readonly accessLevel: string;
-  expose(name: string, handler: (...args: any[]) => any): () => void;
-  log(...args: any[]): void;
-  notify(message: string, type?: "info" | "success" | "warning" | "error"): void;
-}
-
-declare interface WorkbookContext extends BaseObjectContext {
-  onOpen(handler: () => void): () => void;
-  onBeforeSave(handler: () => void): () => void;
-  onAfterSave(handler: () => void): () => void;
-  onBeforeClose(handler: () => void): () => void;
-  onSheetChange(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
-  onThemeChange(handler: () => void): () => void;
-  readonly properties: {
-    readonly title: string;
-    readonly author: string;
-    readonly sheetCount: number;
-    getSheetNames(): string[];
-  };
-}
-
-declare interface SheetContext extends BaseObjectContext {
-  onActivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
-  onDeactivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
-  onSelectionChange(handler: (detail: { sheetIndex: number; row: number; col: number; endRow: number; endCol: number }) => void): () => void;
-  onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; oldValue?: string; newValue: string }> }) => void): () => void;
-  getCellValue(row: number, col: number, sheetIndex?: number): string;
-  setCellValue(row: number, col: number, value: string, sheetIndex?: number): void;
-}
-
-declare interface CellContext extends BaseObjectContext {
-  onEdit(handler: (detail: { row: number; col: number; sheetIndex: number; oldValue?: string; newValue: string; formula?: string | null }) => void): () => void;
-  onSelect(handler: (detail: { row: number; col: number; sheetIndex: number }) => void): () => void;
-  onEditStart(handler: (detail: { row: number; col: number; sheetIndex: number }) => void): () => void;
-  onEditEnd(handler: (detail: { row: number; col: number; sheetIndex: number; committed: boolean }) => void): () => void;
-  onRender(handler: (cell: { row: number; col: number; sheetIndex: number; value: string; formula?: string | null }) => { textColor?: string; backgroundColor?: string; bold?: boolean; italic?: boolean } | null): () => void;
-}
-
-declare interface RowContext extends BaseObjectContext {
-  onInsert(handler: (detail: { sheetIndex: number; startRow: number; count: number }) => void): () => void;
-  onDelete(handler: (detail: { sheetIndex: number; startRow: number; count: number }) => void): () => void;
-  onResize(handler: (detail: { sheetIndex: number; row: number; height: number }) => void): () => void;
-}
-
-declare interface ColumnContext extends BaseObjectContext {
-  onInsert(handler: (detail: { sheetIndex: number; startCol: number; count: number }) => void): () => void;
-  onDelete(handler: (detail: { sheetIndex: number; startCol: number; count: number }) => void): () => void;
-  onResize(handler: (detail: { sheetIndex: number; col: number; width: number }) => void): () => void;
-}
-
-declare interface SlicerContext extends BaseObjectContext {
-  readonly instanceId: string;
-  readonly name: string;
-  onSelectionChange(handler: (detail: { selectedItems: string[] }) => void): () => void;
-  onDataRefresh(handler: (detail: { items: string[] }) => void): () => void;
-  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
-  getSelectedItems(): string[];
-  setSelectedItems(items: string[]): void;
-  clearSelection(): void;
-  selectAll(): void;
-  style: {
-    itemRenderer(renderer: (item: { text: string; selected: boolean; hasData: boolean; index: number }, ctx: CanvasRenderingContext2D, bounds: { x: number; y: number; width: number; height: number }) => void): () => void;
-    setProperty(name: string, value: string): void;
-  };
-  readonly properties: { readonly fieldName: string; readonly sourceType: string; readonly columns: number; };
-}
-
-declare interface ChartContext extends BaseObjectContext {
-  readonly instanceId: string;
-  onDataChange(handler: () => void): () => void;
-  onClick(handler: (detail: { x: number; y: number }) => void): () => void;
-  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
-  getSpec(): Record<string, unknown>;
-  updateSpec(patch: Record<string, unknown>): void;
-  style: { setProperty(name: string, value: string): void; };
-}
-
-declare interface PivotContext extends BaseObjectContext {
-  readonly instanceId: string;
-  onRefresh(handler: () => void): () => void;
-  onLayoutChange(handler: (detail: { rows: string[]; columns: string[]; values: string[]; filters: string[] }) => void): () => void;
-  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
-  getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
-  refresh(): void;
-}
-`;
-
   monaco.languages.typescript.javascriptDefaults.addExtraLib(
-    contextDts,
+    objectContextsDts,
     "objectContexts.d.ts",
   );
 
@@ -445,14 +377,46 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
   // Save
   const handleSave = useCallback(async () => {
     if (!activeScript) return;
+
+    // Validate script in Web Worker before mounting
+    const validation = await validateScript(activeScript.id, source);
+    if (!validation.valid) {
+      setConsoleEntries((prev) => [
+        ...prev,
+        {
+          id: ++consoleIdRef.current,
+          level: "error",
+          message: `Compilation error: ${validation.error}${validation.stack ? "\n" + validation.stack : ""}`,
+          scriptId: activeScript.id,
+          timestamp: Date.now(),
+        },
+      ]);
+      setShowConsole(true);
+      showToast("Script has errors. Check the console.", { type: "error" });
+      // Still save the source (so user doesn't lose edits)
+      const updated = { ...activeScript, source };
+      ObjectScriptManager.registerScript(updated);
+      try { await saveObjectScript(updated); } catch { /* ignore */ }
+      setIsDirty(false);
+      return;
+    }
+
+    // Save the original source
     const updated = { ...activeScript, source };
     ObjectScriptManager.registerScript(updated);
 
-    // Remount script to apply changes
+    // If breakpoints are set, instrument the source for execution
+    const instrumentedSource = instrumentSource(activeScript.id, source);
+    const execution = { ...updated, source: instrumentedSource };
+
+    // Remount script to apply changes (using instrumented source if breakpoints exist)
     if (ObjectScriptManager.isScriptMounted(updated.id)) {
       ObjectScriptManager.unmountScript(updated.id);
     }
+    // Temporarily register with instrumented source for mounting, then restore original
+    ObjectScriptManager.registerScript(execution);
     await ObjectScriptManager.mountScript(updated.id);
+    ObjectScriptManager.registerScript(updated); // Restore original for persistence
 
     try {
       await saveObjectScript(updated);
@@ -499,6 +463,27 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
     setIsDirty(false);
   }, []);
 
+  // Breakpoint state
+  const [breakpointLines, setBreakpointLines] = useState<number[]>([]);
+  const breakpointDecorationsRef = useRef<string[]>([]);
+
+  // Update breakpoint decorations in the editor
+  const updateBreakpointDecorations = useCallback((ed: monacoEditor.IStandaloneCodeEditor, lines: number[]) => {
+    const decorations = lines.map((line) => ({
+      range: new monaco.Range(line, 1, line, 1),
+      options: {
+        isWholeLine: true,
+        glyphMarginClassName: "breakpoint-glyph",
+        glyphMarginHoverMessage: { value: `Breakpoint at line ${line}` },
+        linesDecorationsClassName: "breakpoint-line-decoration",
+      },
+    }));
+    breakpointDecorationsRef.current = ed.deltaDecorations(
+      breakpointDecorationsRef.current,
+      decorations,
+    );
+  }, []);
+
   // Monaco mount
   const handleMount: OnMount = useCallback((ed) => {
     editorRef.current = ed;
@@ -508,7 +493,28 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
       run: () => handleSave(),
     });
-  }, [handleSave]);
+
+    // Toggle breakpoints on gutter click
+    ed.onMouseDown((e) => {
+      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && activeScriptId) {
+        const line = e.target.position?.lineNumber;
+        if (line) {
+          const bps = toggleBreakpoint(activeScriptId, line);
+          const lines = bps.filter((bp) => bp.enabled).map((bp) => bp.line);
+          setBreakpointLines(lines);
+          updateBreakpointDecorations(ed, lines);
+        }
+      }
+    });
+
+    // Load existing breakpoints
+    if (activeScriptId) {
+      const bps = getBreakpoints(activeScriptId);
+      const lines = bps.filter((bp) => bp.enabled).map((bp) => bp.line);
+      setBreakpointLines(lines);
+      updateBreakpointDecorations(ed, lines);
+    }
+  }, [handleSave, activeScriptId, updateBreakpointDecorations]);
 
   // Source change
   const handleChange = useCallback((val: string | undefined) => {
@@ -702,7 +708,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
                 fontSize: 13,
                 fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
                 lineNumbers: "on",
-                glyphMargin: false,
+                glyphMargin: true,
                 folding: true,
                 minimap: { enabled: false },
                 scrollBeyondLastLine: false,

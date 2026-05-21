@@ -13,6 +13,14 @@ export interface ISlicerStoreService {
   getSelectedItems(slicerId: number): string[];
   setSelectedItems(slicerId: number, items: string[] | null): Promise<void>;
   getCachedItems(slicerId: number): Array<{ text: string; hasData: boolean }> | undefined;
+  /** Register a custom item renderer for a slicer. Returns cleanup function. */
+  setItemRenderer(slicerId: number, renderer: ((
+    item: { text: string; selected: boolean; hasData: boolean; index: number },
+    ctx: CanvasRenderingContext2D,
+    bounds: { x: number; y: number; width: number; height: number },
+  ) => void) | null): () => void;
+  /** Set a canvas-style property override on a slicer. */
+  setStyleProperty(slicerId: number, name: string, value: string): void;
 }
 
 // ============================================================================
@@ -22,6 +30,8 @@ export interface ISlicerStoreService {
 export interface IChartStoreService {
   getChartById(id: number): { specJson: string } | null;
   updateChartSpec(chartId: number, specUpdates: Record<string, unknown>): void;
+  /** Set a canvas-style property override on a chart. */
+  setStyleProperty(chartId: number, name: string, value: string): void;
 }
 
 // ============================================================================

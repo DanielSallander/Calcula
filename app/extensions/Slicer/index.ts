@@ -10,6 +10,10 @@ import {
   registerSlicerStoreService,
 } from "@api";
 import {
+  setSlicerItemRenderer,
+  setSlicerStyleOverride,
+} from "./rendering/customRenderers";
+import {
   requestOverlayRedraw,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
@@ -115,6 +119,12 @@ function activate(context: ExtensionContext): void {
     getCachedItems(slicerId: number) {
       const items = getCachedItems(slicerId);
       return items?.map((item) => ({ text: item.value, hasData: item.hasData }));
+    },
+    setItemRenderer(slicerId, renderer) {
+      return setSlicerItemRenderer(slicerId, renderer);
+    },
+    setStyleProperty(slicerId, name, value) {
+      setSlicerStyleOverride(slicerId, name, value);
     },
   });
 

@@ -13,7 +13,9 @@ import {
   saveObjectScript,
   deleteObjectScript,
   getScaffoldTemplate,
+  showToast,
 } from "@api";
+import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 
@@ -86,10 +88,17 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
-  // ---- Clear scripts on workbook close / new ----
+  // ---- Script-aware workbook close: warn if scripts have unsaved changes ----
   cleanupFunctions.push(
     onAppEvent(AppEvents.BEFORE_CLOSE, () => {
-      resetObjectScriptManager();
+      // Check for any mounted scripts (they'll lose state on close)
+      const allScripts = ObjectScriptManager.getAllScripts();
+      const mountedCount = allScripts.filter((s) => ObjectScriptManager.isScriptMounted(s.id)).length;
+      if (mountedCount > 0) {
+        // Scripts are persisted in the workbook, so close is safe.
+        // Unmount all running scripts cleanly before the workbook goes away.
+        resetObjectScriptManager();
+      }
     }),
   );
   cleanupFunctions.push(
@@ -108,12 +117,46 @@ async function activate(context: ExtensionContext): Promise<void> {
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.code-editor"));
 
+  // ---- Register the Template Manager dialog ----
+  context.ui.dialogs.register({
+    id: "scriptable-objects.template-manager",
+    title: "Script Templates",
+    component: () => import("./components/TemplateManagerDialog"),
+    width: 600,
+    height: 450,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.template-manager"));
+
+  // ---- Register the Marketplace dialog ----
+  context.ui.dialogs.register({
+    id: "scriptable-objects.marketplace",
+    title: "Script Marketplace",
+    component: () => import("./components/ScriptMarketplace"),
+    width: 550,
+    height: 500,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.marketplace"));
+
   // ---- Register Developer menu items ----
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.manage",
     label: "Object Scripts...",
     action: () => {
       context.ui.dialogs.show("scriptable-objects.code-editor");
+    },
+  });
+  context.ui.menus.registerItem("developer", {
+    id: "scriptable-objects.templates",
+    label: "Script Templates...",
+    action: () => {
+      context.ui.dialogs.show("scriptable-objects.template-manager");
+    },
+  });
+  context.ui.menus.registerItem("developer", {
+    id: "scriptable-objects.marketplace",
+    label: "Script Marketplace...",
+    action: () => {
+      context.ui.dialogs.show("scriptable-objects.marketplace");
     },
   });
 
@@ -166,13 +209,46 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
-  // ---- Auto-persist script changes ----
-  cleanupFunctions.push(
-    onAppEvent(AppEvents.BEFORE_SAVE, () => {
-      // All scripts are already persisted on save via the persistence layer
-      // (AppState.object_scripts is written to the .cala file)
-    }),
-  );
+  // ---- Auto-mount on component creation ----
+  // When a slicer, chart, or pivot is created, check if a matching template exists
+  // and offer to apply it.
+  const componentCreationEvents = [
+    "slicer:created",
+    "chart:created",
+    "pivot:created",
+  ];
+  for (const eventName of componentCreationEvents) {
+    cleanupFunctions.push(
+      onAppEvent(eventName, async (detail) => {
+        const d = detail as { id?: number; slicerId?: number; chartId?: number; pivotId?: number; name?: string };
+        const instanceId = String(d.id ?? d.slicerId ?? d.chartId ?? d.pivotId ?? "");
+        const objectType = eventName.split(":")[0] as ScriptableObjectType;
+        const objectName = d.name || `${objectType} ${instanceId}`;
+
+        // Check if there are any templates for this object type
+        try {
+          const templates = await listTemplates();
+          const matching = templates.filter((t) => t.objectType === objectType);
+          if (matching.length === 1) {
+            // Single matching template — auto-apply
+            const template = await loadTemplate(matching[0].id);
+            if (template) {
+              const stamped = stampFromTemplate(template, instanceId, objectName);
+              ObjectScriptManager.registerScript(stamped);
+              await saveObjectScript(stamped);
+              await ObjectScriptManager.mountScript(stamped.id);
+              showToast(`Applied template "${template.name}" to ${objectName}`, { type: "info" });
+            }
+          } else if (matching.length > 1) {
+            // Multiple templates — notify the user they can edit the script
+            showToast(`${matching.length} script templates available for ${objectType}s. Right-click to edit script.`, { type: "info" });
+          }
+        } catch {
+          // Templates not loaded yet, skip
+        }
+      }),
+    );
+  }
 }
 
 // ============================================================================
