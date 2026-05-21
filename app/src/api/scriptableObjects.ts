@@ -54,6 +54,8 @@ export interface ObjectScriptDefinition {
   provenance?: ScriptProvenance;
   /** For distributed scripts: the package name it came from. */
   packageName?: string;
+  /** Minimum required API version (semver). Checked on mount. */
+  requiredApiVersion?: string;
 }
 
 // ============================================================================
@@ -103,6 +105,19 @@ export interface BaseObjectContext {
   notify(message: string, type?: "info" | "success" | "warning" | "error"): void;
 
   /**
+   * Call a method exposed by another object's script.
+   * @param targetType The object type (e.g., "slicer", "workbook").
+   * @param targetInstanceId The instance ID (null for primitives).
+   * @param methodName The method name registered via expose().
+   * @param args Arguments to pass.
+   * @returns The return value, or undefined if the method is not found.
+   */
+  callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: unknown[]): unknown;
+
+  /** The current script API version. Scripts can check this for compatibility. */
+  readonly apiVersion: string;
+
+  /**
    * Full extension API access (only available in "unlocked" mode).
    * In "restricted" mode, this is null.
    */
@@ -129,6 +144,109 @@ export interface UnlockedAPI {
   onEvent(name: string, handler: (detail: unknown) => void): CleanupFn;
   /** Execute a registered command by ID. */
   executeCommand(commandId: string, ...args: unknown[]): void;
+
+  // ---- Batch Transaction Support ----
+
+  /**
+   * Begin an undo transaction. All cell changes until commitBatch() are
+   * grouped as a single undo entry.
+   * @param description Human-readable description shown in the Undo menu.
+   */
+  beginBatch(description: string): Promise<void>;
+  /** Commit the current batch, finalizing it as a single undo entry. */
+  commitBatch(): Promise<void>;
+  /** Cancel the current batch, discarding all changes since beginBatch(). */
+  cancelBatch(): Promise<void>;
+}
+
+// ============================================================================
+// Inter-Script Communication
+// ============================================================================
+
+/**
+ * Global registry of methods exposed by object scripts.
+ * Keyed by "{objectType}:{instanceId}:{methodName}" for components,
+ * or "{objectType}:::{methodName}" for primitives.
+ */
+const globalExposedMethods = new Map<string, (...args: unknown[]) => unknown>();
+
+function exposedMethodKey(objectType: string, instanceId: string | null, methodName: string): string {
+  return `${objectType}:${instanceId || ""}:${methodName}`;
+}
+
+/** Register a method in the global exposed methods registry. */
+function registerExposedMethod(
+  objectType: string,
+  instanceId: string | null,
+  methodName: string,
+  handler: (...args: unknown[]) => unknown,
+): CleanupFn {
+  const key = exposedMethodKey(objectType, instanceId, methodName);
+  globalExposedMethods.set(key, handler);
+  return () => globalExposedMethods.delete(key);
+}
+
+/**
+ * Call an exposed method on another script.
+ * @param targetType The object type of the target script.
+ * @param targetInstanceId The instance ID (null for primitives).
+ * @param methodName The method name registered via expose().
+ * @param args Arguments to pass to the method.
+ * @returns The return value of the method, or undefined if not found.
+ */
+export function callExposedMethod(
+  targetType: string,
+  targetInstanceId: string | null,
+  methodName: string,
+  ...args: unknown[]
+): unknown {
+  const key = exposedMethodKey(targetType, targetInstanceId, methodName);
+  const handler = globalExposedMethods.get(key);
+  if (!handler) {
+    console.warn(`[ObjectScriptManager] Method not found: ${key}`);
+    return undefined;
+  }
+  return handler(...args);
+}
+
+/** List all exposed methods (for debugging/inspection). */
+export function listExposedMethods(): Array<{ objectType: string; instanceId: string | null; methodName: string }> {
+  const result: Array<{ objectType: string; instanceId: string | null; methodName: string }> = [];
+  for (const key of globalExposedMethods.keys()) {
+    const parts = key.split(":");
+    result.push({
+      objectType: parts[0],
+      instanceId: parts[1] || null,
+      methodName: parts.slice(2).join(":"),
+    });
+  }
+  return result;
+}
+
+// ============================================================================
+// Script API Versioning
+// ============================================================================
+
+/**
+ * Current version of the object script context API.
+ * Follows semantic versioning. Scripts can declare a minimum required version.
+ */
+export const SCRIPT_API_VERSION = "1.0.0";
+
+/** Parse a semver string into [major, minor, patch]. */
+function parseSemVer(v: string): [number, number, number] {
+  const parts = v.split(".").map(Number);
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+/** Check if an API version is compatible (same major, >= minor.patch). */
+export function isApiVersionCompatible(required: string): boolean {
+  const [reqMajor, reqMinor, reqPatch] = parseSemVer(required);
+  const [curMajor, curMinor, curPatch] = parseSemVer(SCRIPT_API_VERSION);
+  if (reqMajor !== curMajor) return false;
+  if (reqMinor > curMinor) return false;
+  if (reqMinor === curMinor && reqPatch > curPatch) return false;
+  return true;
 }
 
 // ============================================================================
@@ -524,6 +642,15 @@ export const ObjectScriptManager: IObjectScriptAPI = {
     };
 
     try {
+      // Check API version compatibility
+      if (definition.requiredApiVersion && !isApiVersionCompatible(definition.requiredApiVersion)) {
+        throw new Error(
+          `Script "${definition.name}" requires API version ${definition.requiredApiVersion} ` +
+          `but the current version is ${SCRIPT_API_VERSION}. ` +
+          `Please update Calcula to run this script.`
+        );
+      }
+
       // Build the context for this object type
       const context = buildObjectContext(definition, mounted.cleanupFns);
 
@@ -703,6 +830,19 @@ function buildUnlockedAPI(cleanupFns: CleanupFn[]): UnlockedAPI {
         mod.CommandRegistry.execute(commandId, ...args);
       });
     },
+
+    async beginBatch(description: string): Promise<void> {
+      const lib = await getLib();
+      await lib.beginUndoTransaction(description);
+    },
+    async commitBatch(): Promise<void> {
+      const lib = await getLib();
+      await lib.commitUndoTransaction();
+    },
+    async cancelBatch(): Promise<void> {
+      const lib = await getLib();
+      await lib.cancelUndoTransaction();
+    },
   };
 }
 
@@ -714,8 +854,6 @@ function buildObjectContext(
   definition: ObjectScriptDefinition,
   cleanupFns: CleanupFn[],
 ): BaseObjectContext {
-  const exposedMethods = new Map<string, (...args: unknown[]) => unknown>();
-
   // Build unlocked API if access level permits
   const unlockedApi: UnlockedAPI | null = definition.accessLevel === "unlocked"
     ? buildUnlockedAPI(cleanupFns)
@@ -725,10 +863,22 @@ function buildObjectContext(
   const base: BaseObjectContext = {
     objectType: definition.objectType,
     accessLevel: definition.accessLevel,
+    apiVersion: SCRIPT_API_VERSION,
 
     expose(name: string, handler: (...args: unknown[]) => unknown): CleanupFn {
-      exposedMethods.set(name, handler);
-      return () => exposedMethods.delete(name);
+      // Register in both local and global registries
+      const globalCleanup = registerExposedMethod(
+        definition.objectType,
+        definition.instanceId,
+        name,
+        handler,
+      );
+      cleanupFns.push(globalCleanup);
+      return globalCleanup;
+    },
+
+    callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: unknown[]): unknown {
+      return callExposedMethod(targetType, targetInstanceId, methodName, ...args);
     },
 
     log(...args: unknown[]): void {
@@ -1263,4 +1413,5 @@ export function resetObjectScriptManager(): void {
   registeredScripts.clear();
   mountedScripts.clear();
   changeListeners.clear();
+  globalExposedMethods.clear();
 }

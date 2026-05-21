@@ -28,6 +28,16 @@ declare interface UnlockedAPI {
   onEvent(name: string, handler: (detail: unknown) => void): () => void;
   /** Execute a registered command by ID. */
   executeCommand(commandId: string, ...args: unknown[]): void;
+  /**
+   * Begin an undo transaction. All cell changes until commitBatch() are
+   * grouped as a single undo entry.
+   * @param description Human-readable description shown in the Undo menu.
+   */
+  beginBatch(description: string): Promise<void>;
+  /** Commit the current batch, finalizing it as a single undo entry. */
+  commitBatch(): Promise<void>;
+  /** Cancel the current batch, discarding all changes since beginBatch(). */
+  cancelBatch(): Promise<void>;
 }
 
 /** Base context available to all scriptable objects. */
@@ -36,11 +46,23 @@ declare interface BaseObjectContext {
   readonly objectType: string;
   /** The script access level: "restricted" or "unlocked". */
   readonly accessLevel: string;
+  /** The current script API version (semver). */
+  readonly apiVersion: string;
   /**
    * Expose a custom method that other scripts or extensions can call.
+   * The method becomes callable from other scripts via callMethod().
    * @returns Cleanup function to unregister.
    */
   expose(name: string, handler: (...args: any[]) => any): () => void;
+  /**
+   * Call a method exposed by another object's script.
+   * @param targetType The object type (e.g., "slicer", "workbook").
+   * @param targetInstanceId The instance ID (null for primitives).
+   * @param methodName The method name registered via expose().
+   * @param args Arguments to pass.
+   * @returns The return value, or undefined if the method is not found.
+   */
+  callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: any[]): any;
   /** Log to the script console (visible in the Code tab output panel). */
   log(...args: any[]): void;
   /** Show a toast notification to the user. */

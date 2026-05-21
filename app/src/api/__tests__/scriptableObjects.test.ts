@@ -313,4 +313,138 @@ describe("ObjectScriptManager", () => {
       delete (globalThis as Record<string, unknown>).__testImportStripped;
     });
   });
+
+  // ---------- Inter-Script Communication ----------
+
+  describe("inter-script communication", () => {
+    it("allows scripts to expose and call methods across objects", async () => {
+      (globalThis as Record<string, unknown>).__testCallResult = { value: "" };
+
+      // Script 1: workbook script that exposes a "greet" method
+      const s1 = makeScript("workbook", `
+        function setup(ctx) {
+          ctx.expose("greet", (name) => "Hello " + name);
+        }
+      `);
+
+      // Script 2: cell script that calls the workbook's greet method
+      const s2 = makeScript("cell", `
+        function setup(ctx) {
+          const result = ctx.callMethod("workbook", null, "greet", "World");
+          globalThis.__testCallResult.value = result;
+        }
+      `);
+
+      ObjectScriptManager.registerScript(s1);
+      ObjectScriptManager.registerScript(s2);
+      await ObjectScriptManager.mountScript(s1.id);
+      await ObjectScriptManager.mountScript(s2.id);
+
+      expect((globalThis as Record<string, unknown>).__testCallResult).toEqual({ value: "Hello World" });
+      delete (globalThis as Record<string, unknown>).__testCallResult;
+    });
+
+    it("returns undefined for non-existent methods", async () => {
+      (globalThis as Record<string, unknown>).__testMissing = { value: "not-set" };
+
+      const script = makeScript("workbook", `
+        function setup(ctx) {
+          const result = ctx.callMethod("slicer", "999", "nonExistent");
+          globalThis.__testMissing.value = result;
+        }
+      `);
+      ObjectScriptManager.registerScript(script);
+      await ObjectScriptManager.mountScript(script.id);
+
+      expect((globalThis as Record<string, unknown>).__testMissing).toEqual({ value: undefined });
+      delete (globalThis as Record<string, unknown>).__testMissing;
+    });
+
+    it("cleans up exposed methods on unmount", async () => {
+      const script = makeScript("workbook", `
+        function setup(ctx) {
+          ctx.expose("myMethod", () => 42);
+        }
+      `);
+      ObjectScriptManager.registerScript(script);
+      await ObjectScriptManager.mountScript(script.id);
+
+      // Method should be callable
+      const { callExposedMethod } = await import("../scriptableObjects");
+      expect(callExposedMethod("workbook", null, "myMethod")).toBe(42);
+
+      // After unmount, method should be gone
+      ObjectScriptManager.unmountScript(script.id);
+      expect(callExposedMethod("workbook", null, "myMethod")).toBeUndefined();
+    });
+  });
+
+  // ---------- API Versioning ----------
+
+  describe("API versioning", () => {
+    it("provides apiVersion on context", async () => {
+      (globalThis as Record<string, unknown>).__testVersion = { value: "" };
+
+      const script = makeScript("workbook", `
+        function setup(ctx) {
+          globalThis.__testVersion.value = ctx.apiVersion;
+        }
+      `);
+      ObjectScriptManager.registerScript(script);
+      await ObjectScriptManager.mountScript(script.id);
+
+      const { SCRIPT_API_VERSION } = await import("../scriptableObjects");
+      expect((globalThis as Record<string, unknown>).__testVersion).toEqual({ value: SCRIPT_API_VERSION });
+      delete (globalThis as Record<string, unknown>).__testVersion;
+    });
+
+    it("rejects scripts with incompatible API version", async () => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const script = makeScript("workbook", "function setup(ctx) {}", {
+        requiredApiVersion: "99.0.0",
+      });
+      ObjectScriptManager.registerScript(script);
+      await ObjectScriptManager.mountScript(script.id);
+
+      // Should not mount due to version mismatch
+      expect(ObjectScriptManager.isScriptMounted(script.id)).toBe(false);
+      consoleError.mockRestore();
+    });
+
+    it("accepts scripts with compatible API version", async () => {
+      const { SCRIPT_API_VERSION } = await import("../scriptableObjects");
+      const script = makeScript("workbook", "function setup(ctx) {}", {
+        requiredApiVersion: SCRIPT_API_VERSION,
+      });
+      ObjectScriptManager.registerScript(script);
+      await ObjectScriptManager.mountScript(script.id);
+
+      expect(ObjectScriptManager.isScriptMounted(script.id)).toBe(true);
+    });
+  });
+
+  // ---------- Batch Transactions ----------
+
+  describe("batch transactions", () => {
+    it("provides batch methods in unlocked mode", async () => {
+      (globalThis as Record<string, unknown>).__testBatch = { hasBegin: false, hasCommit: false, hasCancel: false };
+
+      const script = makeScript("workbook", `
+        function setup(ctx) {
+          globalThis.__testBatch.hasBegin = typeof ctx.api.beginBatch === "function";
+          globalThis.__testBatch.hasCommit = typeof ctx.api.commitBatch === "function";
+          globalThis.__testBatch.hasCancel = typeof ctx.api.cancelBatch === "function";
+        }
+      `, { accessLevel: "unlocked" });
+      ObjectScriptManager.registerScript(script);
+      await ObjectScriptManager.mountScript(script.id);
+
+      expect((globalThis as Record<string, unknown>).__testBatch).toEqual({
+        hasBegin: true,
+        hasCommit: true,
+        hasCancel: true,
+      });
+      delete (globalThis as Record<string, unknown>).__testBatch;
+    });
+  });
 });

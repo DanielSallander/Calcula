@@ -1374,6 +1374,10 @@ export { CellRange } from "./range";
 export {
   ObjectScriptManager,
   resetObjectScriptManager,
+  callExposedMethod,
+  listExposedMethods,
+  SCRIPT_API_VERSION,
+  isApiVersionCompatible,
 } from "./scriptableObjects";
 
 export type {
@@ -1393,6 +1397,8 @@ export type {
   ObjectContextMap,
   ObjectScriptSetup,
   IObjectScriptAPI,
+  UnlockedAPI,
+  ScriptProvenance,
 } from "./scriptableObjects";
 
 export {
