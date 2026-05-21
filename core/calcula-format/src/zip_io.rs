@@ -760,6 +760,53 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_with_object_scripts() {
+        let mut workbook = make_test_workbook();
+        workbook.object_scripts.push(persistence::SavedObjectScript {
+            id: "os-1".to_string(),
+            name: "Cell Script".to_string(),
+            object_type: persistence::ScriptableObjectType::Cell,
+            instance_id: None,
+            source: "function setup(cell) { cell.onEdit(() => {}); }".to_string(),
+            access_level: persistence::ScriptAccessLevel::Restricted,
+            description: Some("Test cell script".to_string()),
+        });
+        workbook.object_scripts.push(persistence::SavedObjectScript {
+            id: "os-2".to_string(),
+            name: "Slicer Script".to_string(),
+            object_type: persistence::ScriptableObjectType::Slicer,
+            instance_id: Some("slicer-42".to_string()),
+            source: "function setup(slicer) { slicer.onSelectionChange(() => {}); }".to_string(),
+            access_level: persistence::ScriptAccessLevel::Unlocked,
+            description: None,
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_object_scripts.cala");
+
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.object_scripts.len(), 2);
+
+        // Verify primitive script
+        let cell_script = loaded.object_scripts.iter().find(|s| s.id == "os-1").unwrap();
+        assert_eq!(cell_script.name, "Cell Script");
+        assert_eq!(cell_script.object_type, persistence::ScriptableObjectType::Cell);
+        assert!(cell_script.instance_id.is_none());
+        assert_eq!(cell_script.access_level, persistence::ScriptAccessLevel::Restricted);
+        assert!(cell_script.source.contains("cell.onEdit"));
+        assert_eq!(cell_script.description, Some("Test cell script".to_string()));
+
+        // Verify component script
+        let slicer_script = loaded.object_scripts.iter().find(|s| s.id == "os-2").unwrap();
+        assert_eq!(slicer_script.name, "Slicer Script");
+        assert_eq!(slicer_script.object_type, persistence::ScriptableObjectType::Slicer);
+        assert_eq!(slicer_script.instance_id, Some("slicer-42".to_string()));
+        assert_eq!(slicer_script.access_level, persistence::ScriptAccessLevel::Unlocked);
+    }
+
+    #[test]
     fn test_empty_workbook() {
         let workbook = Workbook::new();
         let dir = tempfile::tempdir().unwrap();

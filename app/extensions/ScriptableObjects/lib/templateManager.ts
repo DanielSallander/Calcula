@@ -48,53 +48,29 @@ const TEMPLATES_DIR = "templates";
 
 /** List all saved templates. */
 export async function listTemplates(): Promise<TemplateSummary[]> {
-  try {
-    const templates = await invoke<ObjectTemplate[]>("list_object_templates");
-    return templates.map((t) => ({
-      id: t.id,
-      name: t.name,
-      objectType: t.objectType,
-      description: t.description,
-      createdAt: t.createdAt,
-    }));
-  } catch {
-    // Template commands not yet implemented in backend — return empty
-    return [];
-  }
+  const templates = await invoke<ObjectTemplate[]>("list_object_templates");
+  return templates.map((t) => ({
+    id: t.id,
+    name: t.name,
+    objectType: t.objectType,
+    description: t.description,
+    createdAt: t.createdAt,
+  }));
 }
 
 /** Save a template. */
 export async function saveTemplate(template: ObjectTemplate): Promise<void> {
-  try {
-    await invoke<void>("save_object_template", { template });
-  } catch {
-    // Fallback: store in localStorage for now
-    const key = `calcula.template.${template.id}`;
-    localStorage.setItem(key, JSON.stringify(template));
-  }
+  await invoke<void>("save_object_template", { template });
 }
 
 /** Load a template by ID. */
 export async function loadTemplate(id: string): Promise<ObjectTemplate | null> {
-  try {
-    return await invoke<ObjectTemplate>("load_object_template", { id });
-  } catch {
-    // Fallback: check localStorage
-    const key = `calcula.template.${id}`;
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      return JSON.parse(raw) as ObjectTemplate;
-    }
-    return null;
-  }
+  return invoke<ObjectTemplate>("load_object_template", { id });
 }
 
 /** Delete a template by ID. */
 export async function deleteTemplate(id: string): Promise<void> {
-  try {
-    await invoke<void>("delete_object_template", { id });
-  } catch {
-    // Fallback: remove from localStorage
+  await invoke<void>("delete_object_template", { id });
     localStorage.removeItem(`calcula.template.${id}`);
   }
 }

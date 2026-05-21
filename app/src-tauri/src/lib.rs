@@ -3811,6 +3811,11 @@ pub fn run() {
             scripting::save_object_script,
             scripting::delete_object_script,
             scripting::delete_object_scripts_for_instance,
+            // Object template commands (scriptable objects templates)
+            scripting::list_object_templates,
+            scripting::save_object_template,
+            scripting::load_object_template,
+            scripting::delete_object_template,
             // Control metadata commands
             controls::get_control_metadata,
             controls::set_control_property,

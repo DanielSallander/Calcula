@@ -94,6 +94,34 @@ export interface BaseObjectContext {
    * Show a toast notification to the user.
    */
   notify(message: string, type?: "info" | "success" | "warning" | "error"): void;
+
+  /**
+   * Full extension API access (only available in "unlocked" mode).
+   * In "restricted" mode, this is null.
+   */
+  readonly api: UnlockedAPI | null;
+}
+
+/** Extended API surface available only in "unlocked" access mode. */
+export interface UnlockedAPI {
+  /** Read a cell value by row/col (active sheet). */
+  getCellValue(row: number, col: number): Promise<string>;
+  /** Write a cell value by row/col (active sheet). */
+  setCellValue(row: number, col: number, value: string): Promise<void>;
+  /** Batch-update multiple cells. */
+  updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void>;
+  /** Get all sheet names. */
+  getSheetNames(): Promise<string[]>;
+  /** Get the active sheet index. */
+  getActiveSheet(): Promise<number>;
+  /** Set the active sheet. */
+  setActiveSheet(index: number): Promise<void>;
+  /** Emit a custom event on the global event bus. */
+  emitEvent(name: string, detail?: unknown): void;
+  /** Listen for a global event. Returns unsubscribe function. */
+  onEvent(name: string, handler: (detail: unknown) => void): CleanupFn;
+  /** Execute a registered command by ID. */
+  executeCommand(commandId: string, ...args: unknown[]): void;
 }
 
 // ============================================================================
@@ -501,7 +529,15 @@ export const ObjectScriptManager: IObjectScriptAPI = {
 
       mountedScripts.set(scriptId, mounted);
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
       console.error(`[ObjectScriptManager] Failed to mount script "${definition.name}":`, error);
+      emitAppEvent("objectscript:error", {
+        scriptId: definition.id,
+        scriptName: definition.name,
+        error: errorMsg,
+        stack: errorStack,
+      });
       // Clean up any handlers that were registered before the error
       for (const fn of mounted.cleanupFns) {
         try { fn(); } catch { /* ignore */ }
@@ -616,6 +652,54 @@ async function getBackend() {
 }
 
 /**
+ * Build the unlocked API — full extension-level access to cells, sheets, events, commands.
+ * Only constructed when accessLevel === "unlocked".
+ */
+function buildUnlockedAPI(cleanupFns: CleanupFn[]): UnlockedAPI {
+  return {
+    async getCellValue(row: number, col: number): Promise<string> {
+      const lib = await getLib();
+      const cell = await lib.getCell(row, col);
+      return cell?.display ?? "";
+    },
+    async setCellValue(row: number, col: number, value: string): Promise<void> {
+      const lib = await getLib();
+      await lib.updateCell(row, col, value);
+    },
+    async updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void> {
+      const lib = await getLib();
+      await lib.updateCellsBatch(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+    },
+    async getSheetNames(): Promise<string[]> {
+      const lib = await getLib();
+      const result = await lib.getSheets();
+      return result.sheets.map((s: { name: string }) => s.name);
+    },
+    async getActiveSheet(): Promise<number> {
+      const lib = await getLib();
+      return lib.getActiveSheet();
+    },
+    async setActiveSheet(index: number): Promise<void> {
+      const lib = await getLib();
+      await lib.setActiveSheet(index);
+    },
+    emitEvent(name: string, detail?: unknown): void {
+      emitAppEvent(name, detail);
+    },
+    onEvent(name: string, handler: (detail: unknown) => void): CleanupFn {
+      const unsub = onAppEvent(name, handler);
+      cleanupFns.push(unsub);
+      return unsub;
+    },
+    executeCommand(commandId: string, ...args: unknown[]): void {
+      import("./commands").then((mod) => {
+        mod.CommandRegistry.execute(commandId, ...args);
+      });
+    },
+  };
+}
+
+/**
  * Build the appropriate context object for a script definition.
  * Each context type gets its own set of lifecycle hooks and API surface.
  */
@@ -624,6 +708,11 @@ function buildObjectContext(
   cleanupFns: CleanupFn[],
 ): BaseObjectContext {
   const exposedMethods = new Map<string, (...args: unknown[]) => unknown>();
+
+  // Build unlocked API if access level permits
+  const unlockedApi: UnlockedAPI | null = definition.accessLevel === "unlocked"
+    ? buildUnlockedAPI(cleanupFns)
+    : null;
 
   // Base context (shared by all types)
   const base: BaseObjectContext = {
@@ -647,6 +736,8 @@ function buildObjectContext(
     notify(message: string, type?: "info" | "success" | "warning" | "error"): void {
       showToast(message, { type: type || "info" });
     },
+
+    api: unlockedApi,
   };
 
   // Build type-specific context
@@ -898,9 +989,9 @@ function buildRowContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): RowC
       }));
     },
     onResize(handler) {
-      // TODO: wire to row resize events when available
-      void handler;
-      return () => {};
+      return tracked(cleanupFns, onAppEvent(AppEvents.ROW_RESIZED, (detail) => {
+        handler(detail as { sheetIndex: number; row: number; height: number });
+      }));
     },
   };
 }
@@ -923,9 +1014,9 @@ function buildColumnContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): C
       }));
     },
     onResize(handler) {
-      // TODO: wire to column resize events when available
-      void handler;
-      return () => {};
+      return tracked(cleanupFns, onAppEvent(AppEvents.COLUMN_RESIZED, (detail) => {
+        handler(detail as { sheetIndex: number; col: number; width: number });
+      }));
     },
   };
 }

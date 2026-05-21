@@ -115,6 +115,10 @@ export const AppEvents = {
 
   // Chart selection events
   CHART_SELECTION_CHANGED: "app:chart-selection-changed",
+
+  // Dimension events (row/column resize)
+  ROW_RESIZED: "app:row-resized",
+  COLUMN_RESIZED: "app:column-resized",
 } as const;
 
 /** A single cell value change within a CELL_VALUES_CHANGED event. */

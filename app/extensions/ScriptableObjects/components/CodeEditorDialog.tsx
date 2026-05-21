@@ -18,6 +18,16 @@ import {
   getContextDocumentation,
   showToast,
 } from "@api";
+import { onAppEvent } from "@api/events";
+import {
+  listTemplates,
+  saveTemplate,
+  createTemplateFromScript,
+  stampFromTemplate,
+  loadTemplate,
+  deleteTemplate,
+} from "../lib/templateManager";
+import type { TemplateSummary } from "../lib/templateManager";
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 
 // ============================================================================
@@ -182,6 +192,8 @@ const mainStyle: React.CSSProperties = {
 const editorPaneStyle: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
+  display: "flex",
+  flexDirection: "column",
 };
 
 const sidebarStyle: React.CSSProperties = {
@@ -252,6 +264,74 @@ const selectStyle: React.CSSProperties = {
   backgroundColor: "#FFF",
 };
 
+// Console styles
+const consolePanelStyle: React.CSSProperties = {
+  height: 150,
+  minHeight: 60,
+  display: "flex",
+  flexDirection: "column",
+  borderTop: "1px solid #E0E0E0",
+  flexShrink: 0,
+};
+
+const consoleHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  padding: "3px 10px",
+  backgroundColor: "#F5F5F5",
+  borderBottom: "1px solid #E8E8E8",
+  fontSize: 11,
+  color: "#666",
+  flexShrink: 0,
+};
+
+const consoleOutputStyle: React.CSSProperties = {
+  flex: 1,
+  overflow: "auto",
+  padding: "4px 10px",
+  fontFamily: "'Cascadia Code', Consolas, monospace",
+  fontSize: 11,
+  lineHeight: "1.5",
+  backgroundColor: "#1E1E1E",
+  color: "#D4D4D4",
+};
+
+const consoleEntryStyle: React.CSSProperties = {
+  marginBottom: 1,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-all",
+};
+
+const consoleErrorStyle: React.CSSProperties = {
+  ...consoleEntryStyle,
+  color: "#F48771",
+};
+
+const consoleWarnStyle: React.CSSProperties = {
+  ...consoleEntryStyle,
+  color: "#CCA700",
+};
+
+const consoleClearBtnStyle: React.CSSProperties = {
+  padding: "1px 6px",
+  fontSize: 10,
+  border: "1px solid #CCC",
+  borderRadius: 2,
+  backgroundColor: "transparent",
+  color: "#666",
+  cursor: "pointer",
+};
+
+// Console entry type
+interface ConsoleEntry {
+  id: number;
+  level: "log" | "warn" | "error" | "info";
+  message: string;
+  scriptId?: string;
+  timestamp: number;
+}
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -273,6 +353,52 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
   const [source, setSource] = useState("");
   const [isDirty, setIsDirty] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [showConsole, setShowConsole] = useState(true);
+  const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
+  const consoleEndRef = useRef<HTMLDivElement>(null);
+  const consoleIdRef = useRef(0);
+
+  // Listen for console output and errors from object scripts
+  useEffect(() => {
+    const unsubConsole = onAppEvent("objectscript:console", (detail) => {
+      const d = detail as { scriptId: string; level: string; args: unknown[] };
+      const message = d.args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+      setConsoleEntries((prev) => [
+        ...prev,
+        {
+          id: ++consoleIdRef.current,
+          level: (d.level as ConsoleEntry["level"]) || "log",
+          message,
+          scriptId: d.scriptId,
+          timestamp: Date.now(),
+        },
+      ]);
+    });
+
+    const unsubError = onAppEvent("objectscript:error", (detail) => {
+      const d = detail as { scriptId: string; scriptName: string; error: string; stack?: string };
+      const message = `[${d.scriptName}] Error: ${d.error}${d.stack ? "\n" + d.stack : ""}`;
+      setConsoleEntries((prev) => [
+        ...prev,
+        {
+          id: ++consoleIdRef.current,
+          level: "error",
+          message,
+          scriptId: d.scriptId,
+          timestamp: Date.now(),
+        },
+      ]);
+      // Auto-show console on error
+      setShowConsole(true);
+    });
+
+    return () => { unsubConsole(); unsubError(); };
+  }, []);
+
+  // Auto-scroll console to bottom
+  useEffect(() => {
+    consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [consoleEntries]);
 
   // Load scripts
   useEffect(() => {
@@ -408,6 +534,50 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
     }
   }, []);
 
+  // Template state
+  const [templates, setTemplates] = useState<TemplateSummary[]>([]);
+
+  useEffect(() => {
+    listTemplates().then(setTemplates).catch(() => {});
+  }, []);
+
+  // Save current script as template
+  const handleSaveAsTemplate = useCallback(async () => {
+    if (!activeScript) return;
+    const name = prompt("Template name:", `${activeScript.name} Template`);
+    if (!name) return;
+
+    const template = createTemplateFromScript(
+      { ...activeScript, source },
+      name,
+    );
+    await saveTemplate(template);
+    setTemplates(await listTemplates());
+    showToast(`Saved template "${name}"`, { type: "success" });
+  }, [activeScript, source]);
+
+  // Create script from template
+  const handleNewFromTemplate = useCallback(async (templateId: string) => {
+    const template = await loadTemplate(templateId);
+    if (!template) return;
+
+    const instanceId = activeScript?.instanceId || null;
+    const stamped = stampFromTemplate(template, instanceId || crypto.randomUUID());
+    ObjectScriptManager.registerScript(stamped);
+    await saveObjectScript(stamped);
+    setActiveScriptId(stamped.id);
+    setSource(stamped.source);
+    setIsDirty(false);
+    showToast(`Created from template "${template.name}"`, { type: "success" });
+  }, [activeScript]);
+
+  // Delete template
+  const handleDeleteTemplate = useCallback(async (templateId: string) => {
+    await deleteTemplate(templateId);
+    setTemplates(await listTemplates());
+    showToast("Template deleted", { type: "info" });
+  }, []);
+
   const primitiveTypes: ScriptableObjectType[] = ["workbook", "sheet", "cell", "row", "column"];
 
   return (
@@ -447,6 +617,37 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
 
         <div style={{ flex: 1 }} />
 
+        {/* Template controls */}
+        {templates.length > 0 && (
+          <select
+            style={selectStyle}
+            value=""
+            onChange={(e) => {
+              if (e.target.value) {
+                handleNewFromTemplate(e.target.value);
+                e.target.value = "";
+              }
+            }}
+          >
+            <option value="">From Template...</option>
+            {templates.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name} ({t.objectType})
+              </option>
+            ))}
+          </select>
+        )}
+
+        {activeScript && (
+          <button
+            style={btnStyle}
+            onClick={handleSaveAsTemplate}
+            title="Save current script as a reusable template"
+          >
+            Save as Template
+          </button>
+        )}
+
         {activeScript && (
           <button
             style={btnStyle}
@@ -456,6 +657,17 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
             {activeScript.accessLevel === "restricted" ? "Restricted" : "Unlocked"}
           </button>
         )}
+
+        <button
+          style={{
+            ...btnStyle,
+            ...(consoleEntries.some((e) => e.level === "error") ? { color: "#D13438", borderColor: "#D13438" } : {}),
+          }}
+          onClick={() => setShowConsole(!showConsole)}
+        >
+          {showConsole ? "Hide Console" : "Show Console"}
+          {!showConsole && consoleEntries.some((e) => e.level === "error") && " (!)"}
+        </button>
 
         <button
           style={btnStyle}
@@ -475,34 +687,82 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
 
       {/* Main area: editor + sidebar */}
       <div style={mainStyle}>
-        {/* Monaco Editor */}
+        {/* Editor + Console (vertical split) */}
         <div style={editorPaneStyle}>
-          <Editor
-            height="100%"
-            language="javascript"
-            theme="vs"
-            value={source}
-            onChange={handleChange}
-            onMount={handleMount}
-            options={{
-              fontSize: 13,
-              fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
-              lineNumbers: "on",
-              glyphMargin: false,
-              folding: true,
-              minimap: { enabled: false },
-              scrollBeyondLastLine: false,
-              automaticLayout: true,
-              tabSize: 2,
-              wordWrap: "on",
-              quickSuggestions: true,
-              suggestOnTriggerCharacters: true,
-              parameterHints: { enabled: true },
-              hover: { enabled: true },
-              fixedOverflowWidgets: true,
-              matchBrackets: "always",
-            }}
-          />
+          {/* Monaco Editor */}
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <Editor
+              height="100%"
+              language="javascript"
+              theme="vs"
+              value={source}
+              onChange={handleChange}
+              onMount={handleMount}
+              options={{
+                fontSize: 13,
+                fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+                lineNumbers: "on",
+                glyphMargin: false,
+                folding: true,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: "on",
+                quickSuggestions: true,
+                suggestOnTriggerCharacters: true,
+                parameterHints: { enabled: true },
+                hover: { enabled: true },
+                fixedOverflowWidgets: true,
+                matchBrackets: "always",
+              }}
+            />
+          </div>
+
+          {/* Console Output Panel */}
+          {showConsole && (
+            <div style={consolePanelStyle}>
+              <div style={consoleHeaderStyle}>
+                <span>
+                  Console
+                  {consoleEntries.filter((e) => e.level === "error").length > 0 && (
+                    <span style={{ color: "#D13438", marginLeft: 6 }}>
+                      {consoleEntries.filter((e) => e.level === "error").length} error(s)
+                    </span>
+                  )}
+                </span>
+                <button
+                  style={consoleClearBtnStyle}
+                  onClick={() => setConsoleEntries([])}
+                >
+                  Clear
+                </button>
+              </div>
+              <div style={consoleOutputStyle}>
+                {consoleEntries.length === 0 && (
+                  <div style={{ color: "#666", fontStyle: "italic" }}>
+                    Script output will appear here...
+                  </div>
+                )}
+                {consoleEntries.map((entry) => (
+                  <div
+                    key={entry.id}
+                    style={
+                      entry.level === "error" ? consoleErrorStyle
+                      : entry.level === "warn" ? consoleWarnStyle
+                      : consoleEntryStyle
+                    }
+                  >
+                    <span style={{ color: "#666", marginRight: 6 }}>
+                      {new Date(entry.timestamp).toLocaleTimeString()}
+                    </span>
+                    {entry.message}
+                  </div>
+                ))}
+                <div ref={consoleEndRef} />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Documentation sidebar */}
@@ -550,8 +810,13 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
             : "No script selected"
           }
         </span>
-        <span>
-          {isDirty ? "Modified" : "Saved"}
+        <span style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          {consoleEntries.filter((e) => e.level === "error").length > 0 && (
+            <span style={{ color: "#D13438" }}>
+              {consoleEntries.filter((e) => e.level === "error").length} error(s)
+            </span>
+          )}
+          <span>{isDirty ? "Modified" : "Saved"}</span>
         </span>
       </div>
     </div>

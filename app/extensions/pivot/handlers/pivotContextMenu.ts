@@ -15,6 +15,7 @@ import {
   type GridContextMenuItem,
   type GridMenuContext,
 } from "@api";
+import { emitAppEvent } from "@api/events";
 
 import {
   isInPivotRegion,
@@ -74,6 +75,7 @@ const CONTEXT_ITEM_IDS = [
   "pivot:fieldSettings",
   "pivot:pivotOptions",
   "pivot:hideFieldList",
+  "pivot:editScript",
 ];
 
 // ============================================================================
@@ -764,6 +766,26 @@ export function registerPivotContextMenuItems(): () => void {
           // Hide the field list
           closeTaskPane(PIVOT_PANE_ID);
           markTaskPaneManuallyClosed(PIVOT_PANE_ID);
+        }
+      },
+    },
+    // ------------------------------------------------------------------
+    // 16. Edit Script
+    // ------------------------------------------------------------------
+    {
+      id: "pivot:editScript",
+      label: "Edit Script...",
+      group: "pivot",
+      order: 160,
+      visible: isInPivotRegion,
+      onClick: (ctx) => {
+        const pivotId = getPivotIdFromContext(ctx);
+        if (pivotId !== null) {
+          emitAppEvent("scriptable-objects:edit-script", {
+            objectType: "pivot",
+            instanceId: String(pivotId),
+            objectName: `Pivot ${pivotId}`,
+          });
         }
       },
     },

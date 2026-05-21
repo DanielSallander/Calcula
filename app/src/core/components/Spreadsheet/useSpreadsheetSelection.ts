@@ -247,6 +247,7 @@ export function useSpreadsheetSelection({
         console.error("Failed to persist column width:", err);
       });
       canvasRef.current?.redraw();
+      emitAppEvent(AppEvents.COLUMN_RESIZED, { sheetIndex: 0, col, width });
     },
     [dispatch, canvasRef]
   );
@@ -258,6 +259,7 @@ export function useSpreadsheetSelection({
         console.error("Failed to persist row height:", err);
       });
       canvasRef.current?.redraw();
+      emitAppEvent(AppEvents.ROW_RESIZED, { sheetIndex: 0, row, height });
     },
     [dispatch, canvasRef]
   );

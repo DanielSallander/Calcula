@@ -705,19 +705,53 @@ function activate(context: ExtensionContext): void {
 
   const handleContextMenu = (e: MouseEvent) => {
     const hover = getHoverState();
-    if (!hover || hover.hitResult.type !== "axis") return;
+    if (!hover) return;
 
-    e.preventDefault();
-    e.stopPropagation();
+    // Axis-specific context menu
+    if (hover.hitResult.type === "axis") {
+      e.preventDefault();
+      e.stopPropagation();
 
-    showOverlay(AXIS_CONTEXT_MENU_ID, {
-      data: {
-        chartId: hover.chartId,
-        axisType: hover.hitResult.axisType,
-        screenX: e.clientX,
-        screenY: e.clientY,
-      },
-    });
+      showOverlay(AXIS_CONTEXT_MENU_ID, {
+        data: {
+          chartId: hover.chartId,
+          axisType: hover.hitResult.axisType,
+          screenX: e.clientX,
+          screenY: e.clientY,
+        },
+      });
+      return;
+    }
+
+    // General chart context menu (body, title, legend, etc.)
+    if (hover.hitResult.type === "body" || hover.hitResult.type === "title" || hover.hitResult.type === "legend") {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Create a simple DOM context menu with "Edit Script..." option
+      const menu = document.createElement("div");
+      menu.style.cssText = `position:fixed;z-index:10000;background:#fff;border:1px solid #d0d0d0;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.15);padding:4px 0;min-width:180px;font-family:"Segoe UI",sans-serif;font-size:12px;`;
+      const item = document.createElement("div");
+      item.textContent = "Edit Script...";
+      item.style.cssText = `padding:6px 16px;cursor:pointer;`;
+      item.addEventListener("mouseenter", () => { item.style.background = "#e8f0fe"; });
+      item.addEventListener("mouseleave", () => { item.style.background = "transparent"; });
+      item.addEventListener("click", () => {
+        menu.remove();
+        const chart = getChartById(hover.chartId);
+        emitAppEvent("scriptable-objects:edit-script", {
+          objectType: "chart",
+          instanceId: String(hover.chartId),
+          objectName: chart?.spec?.title?.text ?? `Chart ${hover.chartId}`,
+        });
+      });
+      menu.appendChild(item);
+      document.body.appendChild(menu);
+      menu.style.left = `${Math.min(e.clientX, window.innerWidth - 200)}px`;
+      menu.style.top = `${Math.min(e.clientY, window.innerHeight - 40)}px`;
+      const close = () => { menu.remove(); document.removeEventListener("mousedown", close); };
+      setTimeout(() => document.addEventListener("mousedown", close), 0);
+    }
   };
   window.addEventListener("contextmenu", handleContextMenu, true);
   cleanupFunctions.push(() => {
