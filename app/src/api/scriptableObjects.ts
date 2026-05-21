@@ -31,6 +31,9 @@ export type ScriptableObjectType =
   | "textbox"
   | "timeline";
 
+/** Where a script came from — local (user-created) or distributed (from a .calp package). */
+export type ScriptProvenance = "local" | "distributed";
+
 /** Stored script definition for a scriptable object. */
 export interface ObjectScriptDefinition {
   /** Unique script ID */
@@ -47,6 +50,10 @@ export interface ObjectScriptDefinition {
   accessLevel: ScriptAccessLevel;
   /** Optional description */
   description?: string;
+  /** Where the script came from. Distributed scripts are read-only. */
+  provenance?: ScriptProvenance;
+  /** For distributed scripts: the package name it came from. */
+  packageName?: string;
 }
 
 // ============================================================================

@@ -96,8 +96,31 @@ pub struct VersionManifest {
     /// does not interpret the semantic sub-fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
+    /// Object scripts bundled with the package. Scripts travel with the package
+    /// and are loaded on the subscriber side. Subscribers cannot edit these
+    /// scripts but can add their own script layers on top.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_scripts: Vec<PublishedObjectScript>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// An object script bundled with a .calp package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedObjectScript {
+    /// Script ID (stable across versions).
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Object type: "workbook", "sheet", "cell", "slicer", etc.
+    pub object_type: String,
+    /// For component objects: the instance ID. None for primitive objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// Script description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A sheet entry in the version manifest.

@@ -142,6 +142,11 @@ impl LocalRegistry {
         self.version_dir(package_name, version).join("tables")
     }
 
+    /// Get the object scripts directory for a version.
+    pub fn scripts_dir(&self, package_name: &str, version: &str) -> PathBuf {
+        self.version_dir(package_name, version).join("object_scripts")
+    }
+
     /// Resolve a version pin to the best matching version.
     pub fn resolve_version(
         &self,
@@ -343,6 +348,7 @@ mod tests {
             locked_sheets: Vec::new(),
             locked_cells: Vec::new(),
             writeback_regions: None,
+            object_scripts: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -412,6 +418,7 @@ mod tests {
             locked_sheets: Vec::new(),
             locked_cells: Vec::new(),
             writeback_regions: None,
+            object_scripts: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -461,6 +468,7 @@ mod tests {
             locked_sheets: Vec::new(),
             locked_cells: Vec::new(),
             writeback_regions: None,
+            object_scripts: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -498,6 +506,7 @@ mod tests {
             locked_sheets: Vec::new(),
             locked_cells: Vec::new(),
             writeback_regions: None,
+            object_scripts: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();

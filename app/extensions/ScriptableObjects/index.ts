@@ -47,24 +47,72 @@ export const ScriptableObjectEvents = {
   SCRIPTS_LOADED: "scriptable-objects:scripts-loaded",
   /** Emitted when a script is saved. */
   SCRIPT_SAVED: "scriptable-objects:script-saved",
+  /** Emitted when distributed scripts need user consent to run. */
+  SCRIPT_CONSENT_NEEDED: "scriptable-objects:consent-needed",
 } as const;
 
 // ============================================================================
 // Activation
 // ============================================================================
 
+/** Track which packages have been consented to run scripts. */
+const consentedPackages = new Set<string>();
+
+/**
+ * Load, register, and mount all scripts. For distributed scripts,
+ * check if the user has consented to run them.
+ */
+async function loadAndMountScripts(): Promise<void> {
+  const scripts = await loadAllObjectScripts();
+  const localScripts = scripts.filter((s) => !s.provenance || s.provenance === "local");
+  const distributedScripts = scripts.filter((s) => s.provenance === "distributed");
+
+  // Register and mount all local scripts immediately
+  for (const script of localScripts) {
+    ObjectScriptManager.registerScript(script);
+  }
+  for (const script of localScripts) {
+    await ObjectScriptManager.mountScript(script.id);
+  }
+
+  // For distributed scripts, group by package and check consent
+  if (distributedScripts.length > 0) {
+    const byPackage = new Map<string, typeof distributedScripts>();
+    for (const script of distributedScripts) {
+      const pkg = script.packageName || "unknown";
+      if (!byPackage.has(pkg)) byPackage.set(pkg, []);
+      byPackage.get(pkg)!.push(script);
+    }
+
+    for (const [pkg, pkgScripts] of byPackage) {
+      // Register all distributed scripts (so they appear in the UI)
+      for (const script of pkgScripts) {
+        ObjectScriptManager.registerScript(script);
+      }
+
+      // Only mount if user has consented (or auto-consent for this session)
+      if (consentedPackages.has(pkg)) {
+        for (const script of pkgScripts) {
+          await ObjectScriptManager.mountScript(script.id);
+        }
+      } else {
+        // Emit consent request event — the UI will show a prompt
+        emitAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, {
+          packageName: pkg,
+          scriptCount: pkgScripts.length,
+          scriptNames: pkgScripts.map((s) => s.name),
+        });
+      }
+    }
+  }
+
+  emitAppEvent(ScriptableObjectEvents.SCRIPTS_LOADED, { count: scripts.length });
+}
+
 async function activate(context: ExtensionContext): Promise<void> {
   // ---- Load object scripts from backend on startup ----
   try {
-    const scripts = await loadAllObjectScripts();
-    for (const script of scripts) {
-      ObjectScriptManager.registerScript(script);
-    }
-    // Mount all scripts
-    for (const script of scripts) {
-      await ObjectScriptManager.mountScript(script.id);
-    }
-    emitAppEvent(ScriptableObjectEvents.SCRIPTS_LOADED, { count: scripts.length });
+    await loadAndMountScripts();
   } catch (e) {
     console.warn("[ScriptableObjects] Failed to load object scripts:", e);
   }
@@ -73,18 +121,36 @@ async function activate(context: ExtensionContext): Promise<void> {
   cleanupFunctions.push(
     onAppEvent(AppEvents.AFTER_OPEN, async () => {
       resetObjectScriptManager();
+      consentedPackages.clear();
       try {
-        const scripts = await loadAllObjectScripts();
-        for (const script of scripts) {
-          ObjectScriptManager.registerScript(script);
-        }
-        for (const script of scripts) {
-          await ObjectScriptManager.mountScript(script.id);
-        }
-        emitAppEvent(ScriptableObjectEvents.SCRIPTS_LOADED, { count: scripts.length });
+        await loadAndMountScripts();
       } catch (e) {
         console.warn("[ScriptableObjects] Failed to reload object scripts:", e);
       }
+    }),
+  );
+
+  // ---- Handle consent responses ----
+  cleanupFunctions.push(
+    onAppEvent("scriptable-objects:consent-granted", async (detail) => {
+      const { packageName } = detail as { packageName: string };
+      consentedPackages.add(packageName);
+      // Mount the distributed scripts for this package
+      const scripts = ObjectScriptManager.getAllScripts()
+        .filter((s) => s.provenance === "distributed" && s.packageName === packageName);
+      for (const script of scripts) {
+        if (!ObjectScriptManager.isScriptMounted(script.id)) {
+          await ObjectScriptManager.mountScript(script.id);
+        }
+      }
+      showToast(`Scripts from "${packageName}" enabled.`, { type: "success" });
+    }),
+  );
+
+  cleanupFunctions.push(
+    onAppEvent("scriptable-objects:consent-denied", (detail) => {
+      const { packageName } = detail as { packageName: string };
+      showToast(`Scripts from "${packageName}" blocked. Objects will use default behavior.`, { type: "info" });
     }),
   );
 
@@ -104,6 +170,23 @@ async function activate(context: ExtensionContext): Promise<void> {
   cleanupFunctions.push(
     onAppEvent(AppEvents.AFTER_NEW, () => {
       resetObjectScriptManager();
+    }),
+  );
+
+  // ---- Register consent dialog ----
+  context.ui.dialogs.register({
+    id: "scriptable-objects.consent",
+    title: "Script Security",
+    component: () => import("./components/ScriptConsentDialog"),
+    width: 460,
+    height: 400,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.consent"));
+
+  // Show consent dialog when distributed scripts need approval
+  cleanupFunctions.push(
+    onAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, (detail) => {
+      context.ui.dialogs.show("scriptable-objects.consent", detail as Record<string, unknown>);
     }),
   );
 

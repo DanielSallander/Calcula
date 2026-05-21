@@ -6,7 +6,7 @@
 use std::fs;
 
 use identity::EntityId;
-use persistence::{SavedTable, Workbook};
+use persistence::{SavedTable, SavedObjectScript, Workbook};
 
 use crate::error::CalpError;
 use crate::manifest::*;
@@ -25,6 +25,9 @@ pub struct PublishRequest<'a> {
     pub published_by: String,
     /// Writeback region declarations to include in the manifest.
     pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
+    /// Object scripts to include in the package.
+    /// If None, all workbook object scripts are published.
+    pub object_scripts: Option<Vec<SavedObjectScript>>,
 }
 
 /// Result of a publish operation.
@@ -34,6 +37,7 @@ pub struct PublishResult {
     pub sheets_published: usize,
     pub tables_published: usize,
     pub named_ranges_published: usize,
+    pub scripts_published: usize,
 }
 
 /// Publish selected sheets from a workbook to a local registry.
@@ -89,6 +93,22 @@ pub fn publish(
         .collect();
     let table_ids: Vec<EntityId> = published_tables.iter().map(|t| t.id).collect();
 
+    // Collect object scripts to publish
+    let scripts_to_publish: Vec<&SavedObjectScript> = match &request.object_scripts {
+        Some(scripts) => scripts.iter().collect(),
+        None => request.workbook.object_scripts.iter().collect(),
+    };
+
+    let published_scripts: Vec<PublishedObjectScript> = scripts_to_publish.iter().map(|s| {
+        PublishedObjectScript {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            object_type: format!("{:?}", s.object_type).to_lowercase(),
+            instance_id: s.instance_id.clone(),
+            description: s.description.clone(),
+        }
+    }).collect();
+
     let version_manifest = VersionManifest {
         format_version: 1,
         package_name: request.package_name.clone(),
@@ -102,6 +122,7 @@ pub fn publish(
         locked_sheets: Vec::new(),
         locked_cells: Vec::new(),
         writeback_regions: request.writeback_regions.clone(),
+        object_scripts: published_scripts,
         extra: std::collections::HashMap::new(),
     };
 
@@ -149,6 +170,19 @@ pub fn publish(
         )?;
     }
 
+    // Write object scripts
+    if !scripts_to_publish.is_empty() {
+        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str);
+        fs::create_dir_all(&scripts_dir)?;
+        for script in &scripts_to_publish {
+            let def = calcula_format::features::object_scripts::ObjectScriptDef::from(*script);
+            fs::write(
+                scripts_dir.join(format!("{}.json", script.id)),
+                serde_json::to_string_pretty(&def)?,
+            )?;
+        }
+    }
+
     // Update package manifest
     let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
         .unwrap_or_else(|_| PackageManifest::new(
@@ -169,6 +203,7 @@ pub fn publish(
         sheets_published: request.sheet_indices.len(),
         tables_published: published_tables.len(),
         named_ranges_published: named_ranges.len(),
+        scripts_published: scripts_to_publish.len(),
     })
 }
 
@@ -212,6 +247,7 @@ mod tests {
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
             writeback_regions: None,
+            object_scripts: None,
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -251,6 +287,7 @@ mod tests {
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
             writeback_regions: None,
+            object_scripts: None,
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -276,6 +313,7 @@ mod tests {
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
             writeback_regions: None,
+            object_scripts: None,
         };
 
         publish(&reg, &request).unwrap();

@@ -6,7 +6,7 @@ use std::fs;
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript};
 
 use crate::error::CalpError;
 use crate::manifest::*;
@@ -28,6 +28,9 @@ pub struct PullResult {
     pub sheets: Vec<PulledSheet>,
     pub tables: Vec<SavedTable>,
     pub subscription: Subscription,
+    /// Object scripts bundled with the package.
+    /// These should be loaded in restricted mode and marked as read-only.
+    pub object_scripts: Vec<SavedObjectScript>,
 }
 
 /// A sheet pulled from a package, ready to be inserted into a workbook.
@@ -128,6 +131,23 @@ pub fn pull(
         }
     }
 
+    // Read object scripts
+    let mut pulled_scripts: Vec<SavedObjectScript> = Vec::new();
+    for pub_script in &ver_manifest.object_scripts {
+        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str);
+        let path = scripts_dir.join(format!("{}.json", pub_script.id));
+        if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            let def: calcula_format::features::object_scripts::ObjectScriptDef =
+                serde_json::from_str(&content)?;
+            let mut script = SavedObjectScript::from(&def);
+            // SECURITY: Force all distributed scripts to restricted mode.
+            // Subscribers control their own access level.
+            script.access_level = persistence::ScriptAccessLevel::Restricted;
+            pulled_scripts.push(script);
+        }
+    }
+
     // Build subscription metadata
     let subscribed_sheets: Vec<SubscribedSheet> = pulled_sheets.iter().map(|ps| {
         SubscribedSheet {
@@ -155,6 +175,7 @@ pub fn pull(
         sheets: pulled_sheets,
         tables: pulled_tables,
         subscription,
+        object_scripts: pulled_scripts,
     })
 }
 
@@ -193,6 +214,7 @@ mod tests {
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
             writeback_regions: None,
+            object_scripts: None,
         };
         publish::publish(reg, &request).unwrap();
         wb
@@ -265,6 +287,7 @@ mod tests {
                 now: "2026-05-18T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
                 writeback_regions: None,
+                object_scripts: None,
             };
             publish::publish(&reg, &request).unwrap();
         }

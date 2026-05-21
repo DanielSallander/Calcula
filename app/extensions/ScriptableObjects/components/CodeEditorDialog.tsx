@@ -355,6 +355,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
   }, [data?.scriptId]);
 
   const activeScript = scripts.find((s) => s.id === activeScriptId) ?? null;
+  const isReadOnly = activeScript?.provenance === "distributed";
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
   // Switch active script
@@ -685,9 +686,10 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
         <button
           style={btnPrimaryStyle}
           onClick={handleSave}
-          disabled={!isDirty}
+          disabled={!isDirty || isReadOnly}
+          title={isReadOnly ? "Distributed scripts are read-only" : "Save and apply the script"}
         >
-          Save & Apply
+          {isReadOnly ? "Read Only" : "Save & Apply"}
         </button>
       </div>
 
@@ -721,6 +723,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
                 hover: { enabled: true },
                 fixedOverflowWidgets: true,
                 matchBrackets: "always",
+                readOnly: isReadOnly,
               }}
             />
           </div>
@@ -812,7 +815,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
       <div style={statusBarStyle}>
         <span>
           {activeScript
-            ? `${activeScript.objectType} | ${activeScript.accessLevel} mode`
+            ? `${activeScript.objectType} | ${activeScript.accessLevel} mode${isReadOnly ? " | distributed (read-only)" : ""}${activeScript.packageName ? ` | from "${activeScript.packageName}"` : ""}`
             : "No script selected"
           }
         </span>

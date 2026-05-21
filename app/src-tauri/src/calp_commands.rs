@@ -34,6 +34,7 @@ pub struct PublishResponse {
     pub sheets_published: usize,
     pub tables_published: usize,
     pub named_ranges_published: usize,
+    pub scripts_published: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +52,7 @@ pub struct PullResponse {
     pub resolved_version: String,
     pub sheets_pulled: usize,
     pub tables_pulled: usize,
+    pub scripts_pulled: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +108,12 @@ pub fn calp_publish(
         if drafts.is_empty() { None } else { Some(drafts.clone()) }
     };
 
+    // Include object scripts in the publish
+    let object_scripts = {
+        let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+        if scripts.is_empty() { None } else { Some(scripts.clone()) }
+    };
+
     let request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
@@ -115,6 +123,7 @@ pub fn calp_publish(
         now,
         published_by: params.published_by,
         writeback_regions,
+        object_scripts,
     };
 
     let result = calp::publish::publish(&registry, &request)
@@ -126,6 +135,7 @@ pub fn calp_publish(
         sheets_published: result.sheets_published,
         tables_published: result.tables_published,
         named_ranges_published: result.named_ranges_published,
+        scripts_published: result.scripts_published,
     })
 }
 
@@ -195,6 +205,18 @@ pub fn calp_pull(
         subs.subscriptions.push(result.subscription);
     }
 
+    // Materialize pulled object scripts (forced to restricted mode by the calp layer)
+    let scripts_pulled = result.object_scripts.len();
+    if !result.object_scripts.is_empty() {
+        let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+        for script in result.object_scripts {
+            // Don't overwrite existing scripts with the same ID (subscriber may have modified)
+            if !scripts.iter().any(|s| s.id == script.id) {
+                scripts.push(script);
+            }
+        }
+    }
+
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(&state, Some(&params.registry_path));
 
@@ -203,6 +225,7 @@ pub fn calp_pull(
         resolved_version: result.resolved_version.to_string(),
         sheets_pulled,
         tables_pulled: result.tables.len(),
+        scripts_pulled,
     })
 }
 
@@ -609,6 +632,7 @@ pub fn calp_dev_subscribe(
         resolved_version: "dev".to_string(),
         sheets_pulled,
         tables_pulled,
+        scripts_pulled: 0,
     })
 }
 
@@ -702,6 +726,7 @@ pub fn calp_dev_refresh(state: State<AppState>) -> Result<PullResponse, String> 
         resolved_version: "dev".to_string(),
         sheets_pulled,
         tables_pulled,
+        scripts_pulled: 0,
     })
 }
 

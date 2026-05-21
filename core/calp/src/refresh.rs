@@ -385,6 +385,7 @@ mod tests {
                 now: "2026-01-01T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
                 writeback_regions: None,
+                object_scripts: None,
             };
             publish::publish(&reg, &request).unwrap();
         }
