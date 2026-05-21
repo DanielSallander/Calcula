@@ -9,6 +9,7 @@ import {
   ExtensionRegistry,
   AppEvents,
   columnToLetter,
+  registerChartStoreService,
 } from "@api";
 import { getActiveSheet } from "@api/lib";
 import {
@@ -176,6 +177,18 @@ async function emitChartSelectionEvent(): Promise<void> {
 
 function activate(context: ExtensionContext): void {
   console.log("[Chart Extension] Registering...");
+
+  // Register chart store service for scriptable objects
+  registerChartStoreService({
+    getChartById(id: number) {
+      const chart = getChartById(id);
+      if (!chart) return null;
+      return { specJson: JSON.stringify(chart.spec) };
+    },
+    updateChartSpec(chartId: number, specUpdates: Record<string, unknown>) {
+      updateChartSpec(chartId, specUpdates as Partial<import("./types").ChartSpec>);
+    },
+  });
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(ChartManifest);

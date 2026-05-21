@@ -157,10 +157,10 @@ export interface SheetContext extends BaseObjectContext {
   }>): CleanupFn;
 
   /** Read a cell value from the specified (or active) sheet. */
-  getCellValue(row: number, col: number, sheetIndex?: number): string;
+  getCellValue(row: number, col: number, sheetIndex?: number): Promise<string>;
 
   /** Write a cell value. */
-  setCellValue(row: number, col: number, value: string, sheetIndex?: number): void;
+  setCellValue(row: number, col: number, value: string, sheetIndex?: number): Promise<void>;
 }
 
 /** Context for Cell-level scripts (applies to all cells). */
@@ -267,13 +267,13 @@ export interface SlicerContext extends BaseObjectContext {
   getSelectedItems(): string[];
 
   /** Set the selected items programmatically. */
-  setSelectedItems(items: string[]): void;
+  setSelectedItems(items: string[]): Promise<void>;
 
   /** Clear all selections. */
-  clearSelection(): void;
+  clearSelection(): Promise<void>;
 
   /** Select all items. */
-  selectAll(): void;
+  selectAll(): Promise<void>;
 
   /** Style customization namespace. */
   style: {
@@ -317,7 +317,7 @@ export interface ChartContext extends BaseObjectContext {
   getSpec(): Record<string, unknown>;
 
   /** Update the chart specification. */
-  updateSpec(patch: Record<string, unknown>): void;
+  updateSpec(patch: Record<string, unknown>): Promise<void>;
 
   /** Style customization. */
   style: {
@@ -350,7 +350,7 @@ export interface PivotContext extends BaseObjectContext {
   getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
 
   /** Refresh the pivot table data. */
-  refresh(): void;
+  refresh(): Promise<void>;
 }
 
 // ============================================================================
@@ -596,6 +596,24 @@ import { emitAppEvent, onAppEvent, AppEvents } from "./events";
 import { ExtensionRegistry } from "./extensionRegistry";
 import { showToast } from "./notifications";
 import { registerStyleInterceptor } from "./styleInterceptors";
+import { getSlicerStoreService, getChartStoreService, getPivotStoreService } from "./componentStoreRegistry";
+
+// Lazy imports for backend APIs (avoid circular deps at module load)
+let _libModule: typeof import("./lib") | null = null;
+async function getLib() {
+  if (!_libModule) {
+    _libModule = await import("./lib");
+  }
+  return _libModule;
+}
+
+let _backendModule: typeof import("./backend") | null = null;
+async function getBackend() {
+  if (!_backendModule) {
+    _backendModule = await import("./backend");
+  }
+  return _backendModule;
+}
 
 /**
  * Build the appropriate context object for a script definition.
@@ -663,6 +681,27 @@ function tracked(cleanupFns: CleanupFn[], unsub: CleanupFn): CleanupFn {
 // ---- Workbook Context ----
 
 function buildWorkbookContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): WorkbookContext {
+  // Cache workbook properties (refreshed on open/save)
+  let cachedProps: { title: string; author: string } = { title: "", author: "" };
+  let cachedSheets: { count: number; names: string[] } = { count: 0, names: [] };
+
+  // Load properties eagerly
+  (async () => {
+    try {
+      const backend = await getBackend();
+      const props = await backend.getWorkbookProperties();
+      cachedProps = { title: props.title, author: props.author };
+    } catch { /* ignore on startup */ }
+    try {
+      const lib = await getLib();
+      const sheetsResult = await lib.getSheets();
+      cachedSheets = {
+        count: sheetsResult.sheets.length,
+        names: sheetsResult.sheets.map((s: { name: string }) => s.name),
+      };
+    } catch { /* ignore */ }
+  })();
+
   return {
     ...base,
     objectType: "workbook" as const,
@@ -680,17 +719,29 @@ function buildWorkbookContext(base: BaseObjectContext, cleanupFns: CleanupFn[]):
       return tracked(cleanupFns, onAppEvent(AppEvents.BEFORE_CLOSE, handler));
     },
     onSheetChange(handler) {
-      return tracked(cleanupFns, onAppEvent(AppEvents.SHEET_CHANGED, handler));
+      // Also refresh cached sheet data on sheet change
+      const unsub = onAppEvent(AppEvents.SHEET_CHANGED, async (detail) => {
+        try {
+          const lib = await getLib();
+          const sheetsResult = await lib.getSheets();
+          cachedSheets = {
+            count: sheetsResult.sheets.length,
+            names: sheetsResult.sheets.map((s: { name: string }) => s.name),
+          };
+        } catch { /* ignore */ }
+        handler(detail as { sheetIndex: number; sheetName: string });
+      });
+      return tracked(cleanupFns, unsub);
     },
     onThemeChange(handler) {
       return tracked(cleanupFns, onAppEvent(AppEvents.THEME_CHANGED, handler));
     },
 
     properties: {
-      get title() { return ""; /* TODO: wire to actual workbook properties */ },
-      get author() { return ""; },
-      get sheetCount() { return 0; },
-      getSheetNames() { return []; },
+      get title() { return cachedProps.title; },
+      get author() { return cachedProps.author; },
+      get sheetCount() { return cachedSheets.count; },
+      getSheetNames() { return [...cachedSheets.names]; },
     },
   };
 }
@@ -738,12 +789,22 @@ function buildSheetContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Sh
       }));
     },
 
-    getCellValue(_row, _col, _sheetIndex?) {
-      // TODO: wire to backend getCellValue
-      return "";
+    async getCellValue(row, col, _sheetIndex?) {
+      try {
+        const lib = await getLib();
+        const cellData = await lib.getCell(row, col);
+        return cellData?.display ?? "";
+      } catch {
+        return "";
+      }
     },
-    setCellValue(_row, _col, _value, _sheetIndex?) {
-      // TODO: wire to backend setCellValue
+    async setCellValue(row, col, value, _sheetIndex?) {
+      try {
+        const lib = await getLib();
+        await lib.updateCell(row, col, value);
+      } catch (e) {
+        console.error("[SheetContext] setCellValue failed:", e);
+      }
     },
   };
 }
@@ -910,33 +971,57 @@ function buildSlicerContext(
     },
 
     getSelectedItems() {
-      // TODO: wire to slicer store
+      const store = getSlicerStoreService();
+      if (store) {
+        return store.getSelectedItems(Number(instanceId));
+      }
       return [];
     },
-    setSelectedItems(_items) {
-      // TODO: wire to slicer store
+    async setSelectedItems(items) {
+      const store = getSlicerStoreService();
+      if (store) {
+        await store.setSelectedItems(Number(instanceId), items);
+      }
     },
-    clearSelection() {
-      // TODO: wire to slicer store
+    async clearSelection() {
+      const store = getSlicerStoreService();
+      if (store) {
+        await store.setSelectedItems(Number(instanceId), null);
+      }
     },
-    selectAll() {
-      // TODO: wire to slicer store
+    async selectAll() {
+      const store = getSlicerStoreService();
+      if (store) {
+        await store.setSelectedItems(Number(instanceId), null);
+      }
     },
 
     style: {
       itemRenderer(_renderer) {
-        // TODO: wire custom renderer into slicer rendering pipeline
+        // Custom renderer registration — will be wired when slicer rendering supports it
         return () => {};
       },
       setProperty(_name, _value) {
-        // TODO: wire to slicer DOM element styling
+        // CSS property override — will be wired when slicer DOM elements are accessible
       },
     },
 
     properties: {
-      get fieldName() { return ""; },
-      get sourceType() { return ""; },
-      get columns() { return 1; },
+      get fieldName() {
+        const store = getSlicerStoreService();
+        const slicer = store?.getSlicerById(Number(instanceId));
+        return slicer?.fieldName ?? "";
+      },
+      get sourceType() {
+        const store = getSlicerStoreService();
+        const slicer = store?.getSlicerById(Number(instanceId));
+        return slicer?.sourceType ?? "";
+      },
+      get columns() {
+        const store = getSlicerStoreService();
+        const slicer = store?.getSlicerById(Number(instanceId));
+        return slicer?.columns ?? 1;
+      },
     },
   };
 }
@@ -976,16 +1061,27 @@ function buildChartContext(
     },
 
     getSpec() {
-      // TODO: wire to chart store
+      const store = getChartStoreService();
+      if (store) {
+        const chart = store.getChartById(Number(instanceId));
+        if (chart) {
+          try {
+            return JSON.parse(chart.specJson);
+          } catch { /* ignore parse errors */ }
+        }
+      }
       return {};
     },
-    updateSpec(_patch) {
-      // TODO: wire to chart store
+    async updateSpec(patch) {
+      const store = getChartStoreService();
+      if (store) {
+        store.updateChartSpec(Number(instanceId), patch);
+      }
     },
 
     style: {
       setProperty(_name, _value) {
-        // TODO: wire to chart DOM element
+        // CSS property override — will be wired when chart DOM elements are accessible
       },
     },
   };
@@ -1031,11 +1127,17 @@ function buildPivotContext(
     },
 
     getFields() {
-      // TODO: wire to pivot state
+      const store = getPivotStoreService();
+      if (store) {
+        return store.getPivotFields(Number(instanceId));
+      }
       return { rows: [], columns: [], values: [], filters: [] };
     },
-    refresh() {
-      // TODO: wire to pivot refresh
+    async refresh() {
+      const store = getPivotStoreService();
+      if (store) {
+        await store.refreshPivot(Number(instanceId));
+      }
     },
   };
 }

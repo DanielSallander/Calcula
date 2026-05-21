@@ -7,6 +7,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
+  registerSlicerStoreService,
 } from "@api";
 import {
   requestOverlayRedraw,
@@ -90,6 +91,32 @@ let dragStartPositions: Map<number, { x: number; y: number }> | null = null;
 
 function activate(context: ExtensionContext): void {
   console.log("[Slicer Extension] Registering...");
+
+  // Register slicer store service for scriptable objects
+  registerSlicerStoreService({
+    getSlicerById(id: number) {
+      const s = getSlicerById(id);
+      if (!s) return undefined;
+      return {
+        name: s.name,
+        selectedItems: s.selectedItems,
+        fieldName: s.fieldName,
+        sourceType: s.sourceType,
+        columns: s.columns,
+      };
+    },
+    getSelectedItems(slicerId: number) {
+      const s = getSlicerById(slicerId);
+      return s?.selectedItems ?? [];
+    },
+    async setSelectedItems(slicerId: number, items: string[] | null) {
+      await updateSlicerSelectionAsync(slicerId, items);
+    },
+    getCachedItems(slicerId: number) {
+      const items = getCachedItems(slicerId);
+      return items?.map((item) => ({ text: item.value, hasData: item.hasData }));
+    },
+  });
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(SlicerManifest);

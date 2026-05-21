@@ -13,6 +13,7 @@ import {
   registerMenuItem,
   notifyMenusChanged,
   columnToLetter,
+  registerPivotStoreService,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 
@@ -71,7 +72,7 @@ import {
   shiftCachedRegionsForRowDelete,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -971,6 +972,9 @@ function shiftPivotRegionsForRowDelete(row: number, count: number): void {
 // Cleanup functions for event listeners
 let cleanupFunctions: Array<() => void> = [];
 
+/** Cache for pivot field names (used by scriptable objects store service). */
+const pivotFieldsCache = new Map<number, { rows: string[]; columns: string[]; values: string[]; filters: string[] }>();
+
 import { isGenerateGetPivotDataEnabled, setGenerateGetPivotData } from "./lib/getPivotDataToggle";
 import { getLocaleSettings } from "@api/locale";
 
@@ -980,6 +984,32 @@ import { getLocaleSettings } from "@api/locale";
 
 function activate(context: ExtensionContext): void {
   console.log("[Pivot Extension] Registering...");
+
+  // Register pivot store service for scriptable objects
+  registerPivotStoreService({
+    getPivotFields(pivotId: number) {
+      // Use getPivotHierarchies which returns field info async, but
+      // since the interface expects sync, we return a cached/empty default
+      // and the actual data is fetched when scripts call getFields()
+      const empty = { rows: [] as string[], columns: [] as string[], values: [] as string[], filters: [] as string[] };
+      // Fire async fetch — result will be available on next call
+      getPivotHierarchies(pivotId)
+        .then((info) => {
+          // Cache in a module-level map if needed
+          pivotFieldsCache.set(pivotId, {
+            rows: (info as { rowFields?: Array<{ name: string }> }).rowFields?.map((f) => f.name) ?? [],
+            columns: (info as { columnFields?: Array<{ name: string }> }).columnFields?.map((f) => f.name) ?? [],
+            values: (info as { dataFields?: Array<{ name: string }> }).dataFields?.map((f) => f.name) ?? [],
+            filters: (info as { filterFields?: Array<{ name: string }> }).filterFields?.map((f) => f.name) ?? [],
+          });
+        })
+        .catch(() => {});
+      return pivotFieldsCache.get(pivotId) ?? empty;
+    },
+    async refreshPivot(pivotId: number) {
+      await refreshPivotCache(pivotId);
+    },
+  });
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(PivotManifest);

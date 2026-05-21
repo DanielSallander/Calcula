@@ -1400,6 +1400,22 @@ export {
   getContextDocumentation,
 } from "./scriptableObjectScaffolds";
 
+// ============================================================================
+// Component Store Registry (IoC for Slicer/Chart/Pivot stores)
+// ============================================================================
+
+export {
+  registerSlicerStoreService,
+  registerChartStoreService,
+  registerPivotStoreService,
+} from "./componentStoreRegistry";
+
+export type {
+  ISlicerStoreService,
+  IChartStoreService,
+  IPivotStoreService,
+} from "./componentStoreRegistry";
+
 export {
   listObjectScripts,
   getObjectScript,
