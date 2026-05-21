@@ -644,18 +644,39 @@ impl<'a> Evaluator<'a> {
         let max_col = start_col_idx.max(end_col_idx);
 
         // Collect all values in the range
-        let mut values = Vec::new();
-        for r in min_row..=max_row {
-            for c in min_col..=max_col {
-                let result = match grid.get_cell(r, c) {
-                    Some(cell) => self.cell_value_to_result(&cell.value),
-                    None => EvalResult::Number(0.0),
-                };
-                values.push(result);
-            }
-        }
+        let num_rows = max_row - min_row + 1;
+        let num_cols = max_col - min_col + 1;
 
-        EvalResult::Array(values)
+        if num_rows > 1 && num_cols > 1 {
+            // Multi-row, multi-column range → 2D array (array of row arrays)
+            // This is needed for VLOOKUP/HLOOKUP/INDEX to work correctly
+            let mut rows = Vec::with_capacity(num_rows as usize);
+            for r in min_row..=max_row {
+                let mut row = Vec::with_capacity(num_cols as usize);
+                for c in min_col..=max_col {
+                    let result = match grid.get_cell(r, c) {
+                        Some(cell) => self.cell_value_to_result(&cell.value),
+                        None => EvalResult::Number(0.0),
+                    };
+                    row.push(result);
+                }
+                rows.push(EvalResult::Array(row));
+            }
+            EvalResult::Array(rows)
+        } else {
+            // Single-row or single-column range → flat 1D array
+            let mut values = Vec::new();
+            for r in min_row..=max_row {
+                for c in min_col..=max_col {
+                    let result = match grid.get_cell(r, c) {
+                        Some(cell) => self.cell_value_to_result(&cell.value),
+                        None => EvalResult::Number(0.0),
+                    };
+                    values.push(result);
+                }
+            }
+            EvalResult::Array(values)
+        }
     }
 
     /// Evaluates a column reference and returns an array of values.

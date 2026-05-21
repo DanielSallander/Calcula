@@ -12,7 +12,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
-const STARTUP_TIMEOUT_MS = 180_000; // 3 min — first build can be slow
+const STARTUP_TIMEOUT_MS = 300_000; // 5 min — Rust rebuild after engine changes can be slow
 const PID_FILE = path.join(__dirname, ".tauri-pid");
 
 /** Poll http://localhost:<CDP_PORT>/json/version until it responds. */

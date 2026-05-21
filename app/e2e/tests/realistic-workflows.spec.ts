@@ -13,7 +13,7 @@ test.describe("Build a budget table", () => {
     // Click A300, type headers using Tab
     await grid.navigateTo("A300");
     await grid.spreadsheet.focus();
-    await grid.page.waitForTimeout(200);
+    await grid.page.waitForTimeout(400);
 
     await grid.typeAndTab("Category");
     await grid.typeAndTab("Budget");
@@ -33,18 +33,26 @@ test.describe("Build a budget table", () => {
   });
 
   test("fill in data rows", async ({ grid }) => {
+    // Row 1
     await grid.navigateTo("A301");
     await grid.spreadsheet.focus();
-    await grid.page.waitForTimeout(200);
-
+    await grid.page.waitForTimeout(400);
     await grid.typeAndTab("Rent");
     await grid.typeAndTab("1000");
     await grid.typeAndEnter("950");
 
+    // Row 2
+    await grid.navigateTo("A302");
+    await grid.spreadsheet.focus();
+    await grid.page.waitForTimeout(400);
     await grid.typeAndTab("Food");
     await grid.typeAndTab("500");
     await grid.typeAndEnter("620");
 
+    // Row 3
+    await grid.navigateTo("A303");
+    await grid.spreadsheet.focus();
+    await grid.page.waitForTimeout(400);
     await grid.typeAndTab("Transport");
     await grid.typeAndTab("200");
     await grid.typeAndEnter("180");

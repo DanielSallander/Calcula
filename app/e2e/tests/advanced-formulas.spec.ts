@@ -10,10 +10,7 @@
 import { test, expect } from "../fixtures";
 
 test.describe("Lookup functions", () => {
-  // BUG: VLOOKUP returns #NA — MATCH works on same data, so the issue is
-  // likely in extract_2d_rows() which may return a flat array instead of
-  // a 2D array for multi-column ranges.
-  test.fixme("VLOOKUP finds value in table", async ({ grid }) => {
+  test("VLOOKUP finds value in table", async ({ grid }) => {
     // Set up a simple lookup table
     await grid.setCellValueDirect("G10", "1");
     await grid.setCellValueDirect("H10", "Alice");
@@ -45,7 +42,7 @@ test.describe("Lookup functions", () => {
     expect(result).toBe("Bob");
   });
 
-  test.fixme("INDEX/MATCH combination", async ({ grid }) => {
+  test("INDEX/MATCH combination", async ({ grid }) => {
     await grid.setCellValueDirect("J11", "=INDEX(H10:H12;MATCH(3;G10:G12;0))");
     const result = await grid.getCellDisplayValue("J11");
     expect(result).toBe("Charlie");

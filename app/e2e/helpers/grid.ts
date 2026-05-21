@@ -406,6 +406,10 @@ export class GridHelper {
   /**
    * Read the display value of a cell directly from the Tauri backend.
    * Returns the formatted display string (e.g., "42.00%", "$1,234").
+   *
+   * Note: After changing a source cell, dependent cells may have stale
+   * `display` fields in the backend. Use `getCellFormulaBarText()` for
+   * the most up-to-date value after edits that trigger recalculation.
    */
   async getCellDisplayValue(ref: string): Promise<string> {
     const { row, col } = parseCellRef(ref);
@@ -421,6 +425,18 @@ export class GridHelper {
   }
 
   /**
+   * Read a cell's current computed value by clicking it and reading the
+   * formula bar. This always shows the latest recalculated value, even
+   * for dependent cells after a source cell change. Slower but more
+   * reliable than getCellDisplayValue() after recalculation.
+   */
+  async getCellLiveValue(ref: string): Promise<string> {
+    await this.clickCell(ref);
+    await this.page.waitForTimeout(200);
+    return this.getFormulaBarValue();
+  }
+
+  /**
    * Set a cell value directly via the Tauri API, bypassing keyboard input.
    * This avoids locale-related input transformations (e.g., comma → dot in
    * Swedish locale). The value string is sent as-is to the backend.
@@ -430,7 +446,16 @@ export class GridHelper {
     await this.page.evaluate(
       async ({ r, c, v }) => {
         const tauri = (window as any).__TAURI__;
-        await tauri.core.invoke("update_cell", { row: r, col: c, value: v });
+        const result = await tauri.core.invoke("update_cell", { row: r, col: c, value: v });
+        // Emit cell change events so dependent formulas and the grid refresh
+        if (result?.cells) {
+          for (const cell of result.cells) {
+            window.dispatchEvent(new CustomEvent("cell:updated", {
+              detail: { row: cell.row, col: cell.col },
+            }));
+          }
+        }
+        window.dispatchEvent(new Event("grid:refresh"));
       },
       { r: row, c: col, v: value }
     );
@@ -498,12 +523,13 @@ export class GridHelper {
   }
 
   /**
-   * Click a menu item by its label text.
+   * Click a menu item by its label text (partial match).
+   * Menu items often include shortcut hints like "Undo Ctrl+Z",
+   * so we match the start of the text.
    * Call openMenu() first, then clickMenuItem().
-   * For submenus, hover the parent first.
    */
   async clickMenuItem(itemLabel: string) {
-    const item = this.page.locator("button").filter({ hasText: new RegExp(`^${itemLabel}$`) }).first();
+    const item = this.page.locator("button").filter({ hasText: new RegExp(itemLabel) }).first();
     await item.click();
     await this.page.waitForTimeout(400);
   }
@@ -512,7 +538,7 @@ export class GridHelper {
    * Hover a menu item (for opening submenus).
    */
   async hoverMenuItem(itemLabel: string) {
-    const item = this.page.locator("button").filter({ hasText: new RegExp(`^${itemLabel}$`) }).first();
+    const item = this.page.locator("button").filter({ hasText: new RegExp(itemLabel) }).first();
     await item.hover();
     await this.page.waitForTimeout(300);
   }
@@ -585,7 +611,9 @@ export class GridHelper {
    * Useful for keyboard-only data entry workflows.
    */
   async typeAndEnter(value: string) {
-    await this.page.keyboard.type(value, { delay: 20 });
+    // Small delay before typing to ensure the grid is ready to receive input
+    await this.page.waitForTimeout(100);
+    await this.page.keyboard.type(value, { delay: 30 });
     await this.page.keyboard.press("Enter");
     await this.page.waitForTimeout(300);
   }
@@ -594,7 +622,8 @@ export class GridHelper {
    * Enter a value by typing and pressing Tab (moves right after commit).
    */
   async typeAndTab(value: string) {
-    await this.page.keyboard.type(value, { delay: 20 });
+    await this.page.waitForTimeout(100);
+    await this.page.keyboard.type(value, { delay: 30 });
     await this.page.keyboard.press("Tab");
     await this.page.waitForTimeout(300);
   }

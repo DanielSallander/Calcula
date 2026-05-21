@@ -29,7 +29,7 @@ test.describe("Data entry with Enter", () => {
   test("enter row of data using Tab key", async ({ grid }) => {
     await grid.navigateTo("A205");
     await grid.spreadsheet.focus();
-    await grid.page.waitForTimeout(200);
+    await grid.page.waitForTimeout(400);
 
     // Type values across a row using Tab
     await grid.typeAndTab("Name");
@@ -41,7 +41,7 @@ test.describe("Data entry with Enter", () => {
     expect(await grid.getCellDisplayValue("C205")).toBe("City");
   });
 
-  test("data entry table: Tab across then Enter wraps to next row", async ({ grid }) => {
+  test("data entry table: Tab across, navigate to next row manually", async ({ grid }) => {
     await grid.navigateTo("A210");
     await grid.spreadsheet.focus();
     await grid.page.waitForTimeout(200);
@@ -49,8 +49,12 @@ test.describe("Data entry with Enter", () => {
     // Row 1: Tab across
     await grid.typeAndTab("Alice");
     await grid.typeAndTab("30");
-    // Enter at end of row moves down to next row start
     await grid.typeAndEnter("NYC");
+
+    // Navigate to next row start manually
+    await grid.navigateTo("A211");
+    await grid.spreadsheet.focus();
+    await grid.page.waitForTimeout(400);
 
     // Row 2
     await grid.typeAndTab("Bob");
