@@ -18,6 +18,20 @@ import {
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
+import React, { Suspense } from "react";
+import ObjectScriptManagerPane from "./components/ObjectScriptManagerPane";
+import ScriptConsentDialog from "./components/ScriptConsentDialog";
+import TemplateManagerDialog from "./components/TemplateManagerDialog";
+import ScriptMarketplace from "./components/ScriptMarketplace";
+import type { DialogProps } from "@api/uiTypes";
+
+// Lazy-load CodeEditorDialog — Monaco has heavy module-level side effects
+// that must not block extension activation.
+const LazyCodeEditorDialog = React.lazy(() => import("./components/CodeEditorDialog"));
+function CodeEditorDialog(props: DialogProps): React.ReactElement {
+  return React.createElement(Suspense, { fallback: null },
+    React.createElement(LazyCodeEditorDialog, props));
+}
 
 // ============================================================================
 // Manifest
@@ -177,7 +191,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.dialogs.register({
     id: "scriptable-objects.consent",
     title: "Script Security",
-    component: () => import("./components/ScriptConsentDialog"),
+    component: ScriptConsentDialog,
     width: 460,
     height: 400,
   });
@@ -194,7 +208,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.dialogs.register({
     id: "scriptable-objects.code-editor",
     title: "Object Script Editor",
-    component: () => import("./components/CodeEditorDialog"),
+    component: CodeEditorDialog,
     width: 800,
     height: 600,
   });
@@ -204,7 +218,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.dialogs.register({
     id: "scriptable-objects.template-manager",
     title: "Script Templates",
-    component: () => import("./components/TemplateManagerDialog"),
+    component: TemplateManagerDialog,
     width: 600,
     height: 450,
   });
@@ -214,7 +228,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.dialogs.register({
     id: "scriptable-objects.marketplace",
     title: "Script Marketplace",
-    component: () => import("./components/ScriptMarketplace"),
+    component: ScriptMarketplace,
     width: 550,
     height: 500,
   });
@@ -245,10 +259,12 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   // ---- Register task pane for script management ----
   context.ui.taskPanes.register({
-    viewId: "scriptable-objects.manager",
+    id: "scriptable-objects.manager",
     title: "Object Scripts",
-    component: () => import("./components/ObjectScriptManagerPane"),
+    component: ObjectScriptManagerPane,
     icon: "code",
+    contextKeys: ["always"],
+    closable: true,
   });
   cleanupFunctions.push(() => context.ui.taskPanes.unregister("scriptable-objects.manager"));
 

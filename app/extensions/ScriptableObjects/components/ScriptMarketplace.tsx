@@ -19,13 +19,30 @@ import type { ObjectTemplate } from "../lib/templateManager";
 // Styles
 // ============================================================================
 
+const dialogOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: "rgba(0,0,0,0.4)",
+  zIndex: 9000,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
 const containerStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  height: "100%",
+  width: 550,
+  maxHeight: "80vh",
   fontFamily: "'Segoe UI', Tahoma, sans-serif",
   fontSize: 12,
   backgroundColor: "#FAFAFA",
+  borderRadius: 4,
+  overflow: "hidden",
+  boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
 };
 
 const headerStyle: React.CSSProperties = {
@@ -115,7 +132,9 @@ const previewStyle: React.CSSProperties = {
 // Component
 // ============================================================================
 
-export default function ScriptMarketplace(): React.ReactElement {
+import type { DialogProps } from "@api/uiTypes";
+
+export default function ScriptMarketplace({ onClose }: DialogProps): React.ReactElement {
   const [isDragging, setIsDragging] = useState(false);
   const [importedTemplate, setImportedTemplate] = useState<ObjectTemplate | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -175,7 +194,8 @@ export default function ScriptMarketplace(): React.ReactElement {
   }, []);
 
   return (
-    <div style={containerStyle}>
+    <div style={dialogOverlayStyle} onClick={onClose}>
+    <div style={containerStyle} onClick={(e) => e.stopPropagation()}>
       <div style={headerStyle}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
           Script Marketplace
@@ -256,6 +276,7 @@ export default function ScriptMarketplace(): React.ReactElement {
           </div>
         </div>
       </div>
+    </div>
     </div>
   );
 }

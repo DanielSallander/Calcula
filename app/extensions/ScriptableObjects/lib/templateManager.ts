@@ -71,8 +71,7 @@ export async function loadTemplate(id: string): Promise<ObjectTemplate | null> {
 /** Delete a template by ID. */
 export async function deleteTemplate(id: string): Promise<void> {
   await invoke<void>("delete_object_template", { id });
-    localStorage.removeItem(`calcula.template.${id}`);
-  }
+  localStorage.removeItem(`calcula.template.${id}`);
 }
 
 // ============================================================================

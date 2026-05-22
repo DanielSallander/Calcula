@@ -73,8 +73,15 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         page = await context.waitForEvent("page", { timeout: 10_000 });
       }
 
+      // Dismiss any dialogs left over from prior workers (all share the same app).
+      for (let i = 0; i < 3; i++) {
+        await page.keyboard.press("Escape");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
       // Wait for the app to be fully loaded.
       await page.waitForSelector("[data-focus-container='spreadsheet']", {
+        state: "visible",
         timeout: 30_000,
       });
 
@@ -85,6 +92,13 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
   // ---- Test-scoped: lightweight reset per test ----
   appPage: async ({ sharedPage }, use) => {
+    // Close any open dialogs/menus left over from a prior test by pressing
+    // Escape multiple times (DialogContainer listens on capture phase).
+    for (let i = 0; i < 3; i++) {
+      await sharedPage.keyboard.press("Escape");
+      await sharedPage.waitForTimeout(50);
+    }
+
     // Ensure the spreadsheet has focus at the start of each test.
     const container = sharedPage.locator("[data-focus-container='spreadsheet']");
     await container.focus();

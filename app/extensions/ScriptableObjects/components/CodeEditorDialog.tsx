@@ -96,13 +96,30 @@ loader.config({ monaco });
 // Styles
 // ============================================================================
 
+const overlayStyle: React.CSSProperties = {
+  position: "fixed",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: "rgba(0,0,0,0.4)",
+  zIndex: 9000,
+  display: "flex",
+  alignItems: "stretch",
+  justifyContent: "stretch",
+};
+
 const dialogStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  height: "100%",
+  flex: 1,
+  margin: 24,
   fontFamily: "'Segoe UI', Tahoma, sans-serif",
   fontSize: 12,
   backgroundColor: "#FAFAFA",
+  borderRadius: 4,
+  overflow: "hidden",
+  boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
 };
 
 const toolbarStyle: React.CSSProperties = {
@@ -268,20 +285,15 @@ interface ConsoleEntry {
 // Component
 // ============================================================================
 
-interface CodeEditorDialogProps {
-  data?: {
-    scriptId?: string;
-    objectType?: ScriptableObjectType;
-    instanceId?: string | null;
-  };
-}
+import type { DialogProps } from "@api/uiTypes";
 
-export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React.ReactElement {
+export default function CodeEditorDialog({ onClose, data }: DialogProps): React.ReactElement {
+  const initScriptId = data?.scriptId as string | undefined;
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
 
   // Script list and current script
   const [scripts, setScripts] = useState<ObjectScriptDefinition[]>([]);
-  const [activeScriptId, setActiveScriptId] = useState<string | null>(data?.scriptId ?? null);
+  const [activeScriptId, setActiveScriptId] = useState<string | null>(initScriptId ?? null);
   const [source, setSource] = useState("");
   const [isDirty, setIsDirty] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
@@ -337,8 +349,8 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
     const allScripts = ObjectScriptManager.getAllScripts();
     setScripts(allScripts);
 
-    if (data?.scriptId) {
-      const script = allScripts.find((s) => s.id === data.scriptId);
+    if (initScriptId) {
+      const script = allScripts.find((s) => s.id === initScriptId);
       if (script) {
         setSource(script.source);
         setActiveScriptId(script.id);
@@ -352,7 +364,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
       setScripts(ObjectScriptManager.getAllScripts());
     });
     return unsub;
-  }, [data?.scriptId]);
+  }, [initScriptId]);
 
   const activeScript = scripts.find((s) => s.id === activeScriptId) ?? null;
   const isReadOnly = activeScript?.provenance === "distributed";
@@ -588,6 +600,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
   const primitiveTypes: ScriptableObjectType[] = ["workbook", "sheet", "cell", "row", "column"];
 
   return (
+    <div style={overlayStyle}>
     <div style={dialogStyle}>
       {/* Toolbar */}
       <div style={toolbarStyle}>
@@ -690,6 +703,14 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
           title={isReadOnly ? "Distributed scripts are read-only" : "Save and apply the script"}
         >
           {isReadOnly ? "Read Only" : "Save & Apply"}
+        </button>
+
+        <button
+          style={{ ...btnStyle, fontWeight: 600, fontSize: 14, padding: "2px 8px" }}
+          onClick={onClose}
+          title="Close editor"
+        >
+          X
         </button>
       </div>
 
@@ -828,6 +849,7 @@ export default function CodeEditorDialog({ data }: CodeEditorDialogProps): React
           <span>{isDirty ? "Modified" : "Saved"}</span>
         </span>
       </div>
+    </div>
     </div>
   );
 }

@@ -17,13 +17,30 @@ import type { TemplateSummary, ObjectTemplate } from "../lib/templateManager";
 // Styles
 // ============================================================================
 
+const dialogOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: "rgba(0,0,0,0.4)",
+  zIndex: 9000,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
 const containerStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  height: "100%",
+  width: 600,
+  maxHeight: "80vh",
   fontFamily: "'Segoe UI', Tahoma, sans-serif",
   fontSize: 12,
   backgroundColor: "#FAFAFA",
+  borderRadius: 4,
+  overflow: "hidden",
+  boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
 };
 
 const headerStyle: React.CSSProperties = {
@@ -112,7 +129,9 @@ const footerStyle: React.CSSProperties = {
 // Component
 // ============================================================================
 
-export default function TemplateManagerDialog(): React.ReactElement {
+import type { DialogProps } from "@api/uiTypes";
+
+export default function TemplateManagerDialog({ onClose }: DialogProps): React.ReactElement {
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -179,7 +198,8 @@ export default function TemplateManagerDialog(): React.ReactElement {
   }, [refresh]);
 
   return (
-    <div style={containerStyle}>
+    <div style={dialogOverlayStyle} onClick={onClose}>
+    <div style={containerStyle} onClick={(e) => e.stopPropagation()}>
       <div style={headerStyle}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>Script Templates</span>
         <span style={{ fontSize: 11, color: "#999" }}>
@@ -292,6 +312,7 @@ export default function TemplateManagerDialog(): React.ReactElement {
           Templates are stored in %APPDATA%/Calcula/templates/
         </span>
       </div>
+    </div>
     </div>
   );
 }

@@ -3,7 +3,7 @@
 // CONTEXT: This component subscribes to the dialog registry and renders
 // dialog components dynamically, removing the need for hardcoded dialog imports.
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { DialogExtensions } from "../api/ui";
 import type { DialogDefinition } from "../api/uiTypes";
 
@@ -22,6 +22,21 @@ export function DialogContainer(): React.ReactElement {
   }, []);
 
   const activeDialogs = DialogExtensions.getVisibleDialogs();
+
+  // Close the topmost dialog on Escape (capture phase so Monaco can't swallow it)
+  const handleEscape = useCallback((e: KeyboardEvent) => {
+    if (e.key === "Escape" && activeDialogs.length > 0) {
+      const top = activeDialogs[activeDialogs.length - 1];
+      DialogExtensions.closeDialog(top.definition.id);
+      e.stopPropagation();
+    }
+  }, [activeDialogs]);
+
+  useEffect(() => {
+    if (activeDialogs.length === 0) return;
+    window.addEventListener("keydown", handleEscape, true);
+    return () => window.removeEventListener("keydown", handleEscape, true);
+  }, [activeDialogs.length, handleEscape]);
 
   return (
     <>

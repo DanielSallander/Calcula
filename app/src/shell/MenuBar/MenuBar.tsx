@@ -180,6 +180,19 @@ export function MenuBar(): React.ReactElement {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [closeAll]);
 
+  // 2b. Handle Escape to close menu
+  useEffect(() => {
+    if (!openMenu) return;
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeMenu();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [openMenu, closeMenu]);
+
   // 3. Dynamic Keyboard Shortcuts (recursive search through all nesting depths)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

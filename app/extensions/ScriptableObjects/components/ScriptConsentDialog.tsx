@@ -115,19 +115,15 @@ const btnDangerStyle: React.CSSProperties = {
 // Component
 // ============================================================================
 
-interface ScriptConsentDialogProps {
-  packageName: string;
-  scriptCount: number;
-  scriptNames: string[];
-  onClose: () => void;
-}
+import type { DialogProps } from "@api/uiTypes";
 
 export default function ScriptConsentDialog({
-  packageName,
-  scriptCount,
-  scriptNames,
   onClose,
-}: ScriptConsentDialogProps): React.ReactElement {
+  data,
+}: DialogProps): React.ReactElement {
+  const packageName = (data?.packageName as string) ?? "Unknown";
+  const scriptCount = (data?.scriptCount as number) ?? 0;
+  const scriptNames = (data?.scriptNames as string[]) ?? [];
   const [inspecting, setInspecting] = useState(false);
 
   const handleAllow = useCallback(() => {
