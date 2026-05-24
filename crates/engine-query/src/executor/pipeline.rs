@@ -357,6 +357,34 @@ impl QueryExecutor {
         // Then remaining connector fetches.
         all_fetch_results.extend(main_fetch_results);
 
+        // Register fetched data in DataFusion, optimizing for memory efficiency.
+        // Collect optimization stats per table for plan reporting.
+        let opt_config = engine_core::optimize::OptimizerConfig::default();
+        let mut opt_stats_by_table: Vec<(String, engine_core::optimize::OptimizationStats)> =
+            Vec::new();
+        for (table_name, batches, _, _) in &all_fetch_results {
+            if batches.is_empty() {
+                continue;
+            }
+
+            let schema = batches[0].schema();
+            let combined = concat_batches(&schema, batches)?;
+
+            // Optimize the batch (narrow integers, dictionary-encode strings,
+            // convert midnight timestamps to Date32) to reduce memory pressure
+            // during local joins and aggregation.
+            let (optimized, stats) =
+                engine_core::optimize::optimize_batch(&combined, &opt_config)?;
+
+            if stats.any_applied() {
+                opt_stats_by_table.push((table_name.clone(), stats));
+            }
+
+            // Register with lowercase name (DataFusion normalizes to lowercase).
+            let df_name = table_name.to_lowercase();
+            ctx.register_batch(&df_name, optimized)?;
+        }
+
         // Build fetch plan nodes if collecting plan data.
         if let Some(ref mut plan_node) = plan.as_deref_mut() {
             for (table_name, _, row_count, elapsed) in &all_fetch_results {
@@ -401,22 +429,44 @@ impl QueryExecutor {
                     }
                 }
 
+                // Report optimization stats for this table.
+                if let Some((_, stats)) = opt_stats_by_table.iter().find(|(n, _)| n == table_name) {
+                    let mut details = Vec::new();
+                    if stats.integers_narrowed > 0 {
+                        details.push(format!(
+                            "{} int col(s) narrowed",
+                            stats.integers_narrowed
+                        ));
+                    }
+                    if stats.strings_dictionarized > 0 {
+                        details.push(format!(
+                            "{} string col(s) dictionary-encoded",
+                            stats.strings_dictionarized
+                        ));
+                    }
+                    if stats.timestamps_to_date > 0 {
+                        details.push(format!(
+                            "{} timestamp col(s) → Date32",
+                            stats.timestamps_to_date
+                        ));
+                    }
+                    fetch_node.add_property("optimization", PlanValue::List(details));
+                    fetch_node.add_property(
+                        "optimization_savings_pct",
+                        PlanValue::Number((stats.savings_ratio() * 100.0).round()),
+                    );
+                    fetch_node.add_property(
+                        "original_size_bytes",
+                        PlanValue::Number(stats.original_size_bytes as f64),
+                    );
+                    fetch_node.add_property(
+                        "optimized_size_bytes",
+                        PlanValue::Number(stats.optimized_size_bytes as f64),
+                    );
+                }
+
                 plan_node.add_child(fetch_node);
             }
-        }
-
-        // Register fetched data in DataFusion.
-        for (table_name, batches, _, _) in all_fetch_results {
-            if batches.is_empty() {
-                continue;
-            }
-
-            let schema = batches[0].schema();
-            let combined = concat_batches(&schema, &batches)?;
-
-            // Register with lowercase name (DataFusion normalizes to lowercase).
-            let df_name = table_name.to_lowercase();
-            ctx.register_batch(&df_name, combined)?;
         }
 
         // Separate QUERY-in-VAR measures from normal measures.

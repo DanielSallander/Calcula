@@ -70,6 +70,7 @@ pub use engine_core::model::{
     DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator,
     RefreshStrategy, Relationship, StorageMode, Table, TableVariable,
 };
+pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};
 
@@ -106,6 +107,8 @@ pub struct Engine {
     /// Maximum number of IN-filter values to inline in SQL before switching
     /// to a temp-table strategy. Default: 1000.
     max_inline_in_values: usize,
+    /// Configuration for automatic batch optimization on ingest.
+    optimizer_config: OptimizerConfig,
 }
 
 impl Engine {
@@ -118,6 +121,7 @@ impl Engine {
             registry: SourceRegistry::new(),
             cache: InMemoryCache::new(),
             max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
+            optimizer_config: OptimizerConfig::default(),
         }
     }
 
@@ -128,7 +132,22 @@ impl Engine {
             registry: SourceRegistry::new(),
             cache: InMemoryCache::with_budget(budget_bytes),
             max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
+            optimizer_config: OptimizerConfig::default(),
         }
+    }
+
+    /// Set a custom optimizer configuration for batch ingest.
+    ///
+    /// The optimizer runs automatically when tables are refreshed into
+    /// the in-memory cache, applying type narrowing, dictionary encoding,
+    /// and timestamp-to-date conversion.
+    pub fn set_optimizer_config(&mut self, config: OptimizerConfig) {
+        self.optimizer_config = config;
+    }
+
+    /// Returns the current optimizer configuration.
+    pub fn optimizer_config(&self) -> &OptimizerConfig {
+        &self.optimizer_config
     }
 
     /// Set the maximum number of IN-filter values to inline in SQL.
@@ -272,6 +291,25 @@ impl Engine {
     /// has no registered source, or if the fetched data would exceed the memory
     /// budget.
     pub async fn refresh_table(&mut self, table_name: &str) -> EngineResult<()> {
+        self.refresh_table_inner(table_name).await.map(|_| ())
+    }
+
+    /// Refresh an in-memory table and return optimization statistics.
+    ///
+    /// Like [`refresh_table`](Self::refresh_table), but also returns details
+    /// about what the batch optimizer did (columns narrowed, dictionary-encoded,
+    /// bytes saved). Useful for diagnostics and monitoring.
+    pub async fn refresh_table_explained(
+        &mut self,
+        table_name: &str,
+    ) -> EngineResult<OptimizationStats> {
+        self.refresh_table_inner(table_name).await
+    }
+
+    async fn refresh_table_inner(
+        &mut self,
+        table_name: &str,
+    ) -> EngineResult<OptimizationStats> {
         let table = self.model.table(table_name)?;
         if !table.is_in_memory() {
             return Err(EngineError::TableNotInMemory(table_name.to_string()));
@@ -299,12 +337,24 @@ impl Engine {
             let schema = std::sync::Arc::new(table.to_arrow_schema());
             let batch = RecordBatch::new_empty(schema);
             self.cache.store(table_name, batch)?;
+            Ok(OptimizationStats::default())
         } else {
             let schema = batches[0].schema();
             let combined = arrow::compute::concat_batches(&schema, &batches)?;
-            self.cache.store(table_name, combined)?;
+            let (optimized, stats) =
+                engine_core::optimize::optimize_batch(&combined, &self.optimizer_config)?;
+            // Sort by the table's primary join key for better join/filter locality.
+            let sorted = if let Some(sort_col) = engine_core::optimize::infer_sort_column(
+                table_name,
+                self.model.relationships(),
+            ) {
+                engine_core::optimize::sort_batch_by_column(&optimized, sort_col)?
+            } else {
+                optimized
+            };
+            self.cache.store(table_name, sorted)?;
+            Ok(stats)
         }
-        Ok(())
     }
 
     /// Refresh all tables configured for in-memory storage.
