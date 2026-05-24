@@ -1242,6 +1242,14 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
         Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
             args.iter().any(has_unpushable_ops)
         }
+        // Block with QUERY bindings requires two-stage evaluation — not pushable.
+        Expression::Block { bindings, .. }
+            if bindings
+                .iter()
+                .any(|(_, e)| matches!(e, Expression::Query { .. })) =>
+        {
+            true
+        }
         Expression::Block { bindings, result } => {
             bindings.iter().any(|(_, e)| has_unpushable_ops(e)) || has_unpushable_ops(result)
         }
@@ -1272,14 +1280,6 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
         | Expression::Window { .. }
         | Expression::RankWindow { .. }
         | Expression::Query { .. } => true,
-        // Block: check if any binding is a QUERY (two-stage evaluation).
-        Expression::Block { bindings, .. }
-            if bindings
-                .iter()
-                .any(|(_, e)| matches!(e, Expression::Query { .. })) =>
-        {
-            true
-        }
         _ => false,
     }
 }
@@ -1597,9 +1597,8 @@ fn expression_to_source_sql(
             ))
         }
         // FirstValue: first value by sort order
-        Expression::FirstValue { column, order_by } => {
+        Expression::FirstValue { column, order_by: _ } => {
             let col_sql = expression_to_source_sql(column, model, registry)?;
-            let order_sql = expression_to_source_sql(order_by, model, registry)?;
             // Use subquery or MIN with ORDER BY — simplified as MIN for pushdown
             Ok(format!("MIN({col_sql})"))
         }

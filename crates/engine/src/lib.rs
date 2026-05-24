@@ -44,6 +44,7 @@ use arrow::record_batch::RecordBatch;
 
 // --- Re-exports from engine-core ---
 
+pub use engine_core::catalog::{function_catalog, FunctionInfo};
 pub use engine_core::compute::aggregate::AggregateOp;
 pub use engine_core::compute::context::{
     ContextResolver, EvaluationContext, FilterSource, ResolvedFilter, ResolvedInFilter,

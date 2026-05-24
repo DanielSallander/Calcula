@@ -969,21 +969,6 @@ mod pg_dialect {
                 Ok(format!("NULLIF({i}, {v})"))
             }
             Expression::TableRef(_) => Ok(String::new()),
-            // GREATEST / LEAST
-            Expression::Greatest(args) => {
-                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(format!("GREATEST({})", parts.join(", ")))
-            }
-            Expression::Least(args) => {
-                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(format!("LEAST({})", parts.join(", ")))
-            }
-            // NULLIF
-            Expression::NullIf { expr: inner, value } => {
-                let i = expr_to_sql(inner, table_map)?;
-                let v = expr_to_sql(value, table_map)?;
-                Ok(format!("NULLIF({i}, {v})"))
-            }
             // COUNT_IF(condition) → SUM(CASE WHEN condition THEN 1 ELSE 0 END)
             Expression::CountIf { condition } => {
                 let c = expr_to_sql(condition, table_map)?;

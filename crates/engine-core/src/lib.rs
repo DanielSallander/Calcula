@@ -29,6 +29,7 @@
 //! assert_eq!(batch.num_rows(), 2);
 //! ```
 
+pub mod catalog;
 pub mod compute;
 pub mod error;
 pub mod model;
