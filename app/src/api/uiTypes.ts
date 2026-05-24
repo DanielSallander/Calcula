@@ -238,4 +238,7 @@ export interface ActivityViewDefinition {
   priority?: number;
   /** Whether the view appears in the bottom section of the Activity Bar (like VS Code's settings gear) */
   bottom?: boolean;
+  /** If true, the view is registered but not shown in the Activity Bar icon strip.
+   *  It can still be opened programmatically (e.g., from a menu item). */
+  hidden?: boolean;
 }

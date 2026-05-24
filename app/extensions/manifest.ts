@@ -65,7 +65,6 @@ import CheckboxExtension from "./Checkbox";
 import SparklinesExtension from "./Sparklines";
 import GroupingExtension from "./Grouping";
 import PrintExtension from "./Print";
-import ScriptEditorExtension from "./ScriptEditor";
 import ScriptNotebookExtension from "./ScriptNotebook";
 import ScriptableObjectsExtension from "./ScriptableObjects";
 
@@ -176,7 +175,6 @@ export const builtInExtensions: ExtensionModule[] = [
   SparklinesExtension,
   GroupingExtension,
   PrintExtension,
-  ScriptEditorExtension,
   ScriptNotebookExtension,
   ScriptableObjectsExtension,
   // Complex extensions

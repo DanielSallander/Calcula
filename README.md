@@ -78,6 +78,14 @@ In traditional spreadsheets, data flows one way: someone builds a model, distrib
 
 This turns a spreadsheet from a read-only report into a two-way data collection tool, without giving up control of the model.
 
+### Unified Filter Ribbon
+
+Excel scatters filtering across individual tables and pivot tables, each with its own disconnected filter state. Calcula introduces a dedicated **Filter ribbon tab** where filters live as first-class objects that can target multiple data sources at once:
+
+- A single filter can drive multiple pivot tables, tables, and charts simultaneously
+- Filters are visible and manageable from one central place, not buried inside individual objects
+- Combined with slicers and timeline slicers, this creates a dashboard-style filtering experience without leaving the spreadsheet
+
 ### Scriptable Objects
 
 Every object in Calcula (charts, slicers, pivot tables) can carry its own TypeScript code:

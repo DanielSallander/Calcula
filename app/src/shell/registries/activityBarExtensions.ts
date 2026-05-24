@@ -76,14 +76,14 @@ export const ActivityBarExtensions = {
    * Get views for the top section (bottom !== true).
    */
   getTopViews(): ActivityViewDefinition[] {
-    return this.getAllViews().filter((v) => !v.bottom);
+    return this.getAllViews().filter((v) => !v.bottom && !v.hidden);
   },
 
   /**
    * Get views for the bottom section (bottom === true).
    */
   getBottomViews(): ActivityViewDefinition[] {
-    return this.getAllViews().filter((v) => v.bottom);
+    return this.getAllViews().filter((v) => v.bottom && !v.hidden);
   },
 
   /**

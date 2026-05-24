@@ -13,6 +13,7 @@ import {
   registerMenuItem,
   registerActivityView,
   unregisterActivityView,
+  toggleActivityView,
 } from "@api/ui";
 import { CommandRegistry } from "@api/commands";
 import { JsonEditorPane } from "./components/JsonEditorPane";
@@ -63,15 +64,25 @@ function activate(): void {
   });
   cleanupFns.push(() => unregisterDialog(DIALOG_ID));
 
-  // Register ActivityBar view (Workbook Explorer tree — Phase B)
+  // Register ActivityBar view (hidden from bar — opened via Developer menu)
   registerActivityView({
     id: ACTIVITY_VIEW_ID,
     title: "Workbook Explorer",
     icon: JsonIcon,
     component: WorkbookExplorerPanel,
     priority: 5,
+    hidden: true,
   });
   cleanupFns.push(() => unregisterActivityView(ACTIVITY_VIEW_ID));
+
+  // Register menu item under Developer menu
+  registerMenuItem("developer", {
+    id: "developer:workbookExplorer",
+    label: "Workbook Explorer",
+    action: () => {
+      toggleActivityView(ACTIVITY_VIEW_ID);
+    },
+  });
 
   // Register menu item under View menu
   registerMenuItem("view", {

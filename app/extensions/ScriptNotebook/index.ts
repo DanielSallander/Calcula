@@ -6,7 +6,10 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { scrollToCell, setSelection } from "@api/grid";
+import { dispatchGridAction } from "@api/gridDispatch";
 import { NotebookPanel } from "./components/NotebookPanel";
+import type { DeferredAction } from "./types";
 
 // ============================================================================
 // Constants
@@ -77,13 +80,20 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.activityBar.unregister(VIEW_ID));
 
-  // 2. Register Developer menu item
-  context.ui.menus.registerItem("developer", {
-    id: "developer:notebook",
-    label: "Notebook",
-    action: () => {
-      context.ui.activityBar.toggle(VIEW_ID);
-    },
+  // 2. Register the Developer menu (previously owned by ScriptEditor)
+  context.ui.menus.register({
+    id: "developer",
+    label: "Developer",
+    order: 90,
+    items: [
+      {
+        id: "developer:notebook",
+        label: "Notebook",
+        action: () => {
+          context.ui.activityBar.toggle(VIEW_ID);
+        },
+      },
+    ],
   });
 
   // 3. Keyboard shortcut: Ctrl+Shift+N to toggle notebook
@@ -97,6 +107,33 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() =>
     window.removeEventListener("keydown", handleKeyDown, true),
   );
+
+  // 4. Listen for deferred actions from script execution (goto, calculate, statusBar).
+  //    Scripts emit these via CustomEvent; we translate them into grid actions.
+  const handleDeferredActions = (e: Event) => {
+    const actions = (e as CustomEvent).detail as DeferredAction[];
+    if (!Array.isArray(actions)) return;
+    for (const action of actions) {
+      switch (action.action) {
+        case "goto":
+          if (action.select !== false) {
+            dispatchGridAction(setSelection(action.row, action.col, action.row, action.col));
+          }
+          dispatchGridAction(scrollToCell(action.row, action.col, false));
+          break;
+        case "calculate":
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+          break;
+        case "setStatusBar":
+          window.dispatchEvent(
+            new CustomEvent("script:status-bar", { detail: action.message })
+          );
+          break;
+      }
+    }
+  };
+  window.addEventListener("script:deferred-actions", handleDeferredActions);
+  cleanupFns.push(() => window.removeEventListener("script:deferred-actions", handleDeferredActions));
 
   isActivated = true;
   console.log("[ScriptNotebook] Activated successfully.");

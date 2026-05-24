@@ -24,6 +24,16 @@ import ScriptConsentDialog from "./components/ScriptConsentDialog";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
 import type { DialogProps } from "@api/uiTypes";
+import { openObjectScriptEditor } from "./lib/openObjectScriptWindow";
+import {
+  onSaveAndApply,
+  onRegisterScript,
+  onToggleAccess,
+  onEditorClosed,
+  emitConsoleOutput,
+  emitScriptError,
+  emitScriptsChanged,
+} from "./lib/crossWindowEvents";
 
 // Lazy-load CodeEditorDialog — Monaco has heavy module-level side effects
 // that must not block extension activation.
@@ -239,7 +249,7 @@ async function activate(context: ExtensionContext): Promise<void> {
     id: "scriptable-objects.manage",
     label: "Object Scripts...",
     action: () => {
-      context.ui.dialogs.show("scriptable-objects.code-editor");
+      openObjectScriptEditor();
     },
   });
   context.ui.menus.registerItem("developer", {
@@ -267,6 +277,57 @@ async function activate(context: ExtensionContext): Promise<void> {
     closable: true,
   });
   cleanupFunctions.push(() => context.ui.taskPanes.unregister("scriptable-objects.manager"));
+
+  // ---- Cross-window event bridge: Object Script Editor separate window ----
+
+  // Handle save-and-apply requests from the editor window
+  onSaveAndApply(async (payload) => {
+    const script = payload.script;
+    ObjectScriptManager.registerScript(script);
+
+    // Remount to apply changes
+    if (ObjectScriptManager.isScriptMounted(script.id)) {
+      ObjectScriptManager.unmountScript(script.id);
+    }
+    await ObjectScriptManager.mountScript(script.id);
+
+    // Restore original source (the payload may contain instrumented source)
+    // The editor window already persisted the original source to backend
+    showToast("Script saved and applied.", { type: "success" });
+  }).then((fn) => cleanupFunctions.push(fn));
+
+  // Handle register-script requests from the editor window
+  onRegisterScript((payload) => {
+    ObjectScriptManager.registerScript(payload.script);
+  }).then((fn) => cleanupFunctions.push(fn));
+
+  // Handle toggle-access requests from the editor window
+  onToggleAccess((payload) => {
+    ObjectScriptManager.registerScript(payload.script);
+  }).then((fn) => cleanupFunctions.push(fn));
+
+  // Forward console output to the editor window
+  cleanupFunctions.push(
+    onAppEvent("objectscript:console", (detail) => {
+      const d = detail as { scriptId: string; level: string; args: unknown[] };
+      emitConsoleOutput({ scriptId: d.scriptId, level: d.level, args: d.args });
+    }),
+  );
+
+  cleanupFunctions.push(
+    onAppEvent("objectscript:error", (detail) => {
+      const d = detail as { scriptId: string; scriptName: string; error: string; stack?: string };
+      emitScriptError({ scriptId: d.scriptId, scriptName: d.scriptName, error: d.error, stack: d.stack });
+    }),
+  );
+
+  // Notify editor window when scripts change externally
+  cleanupFunctions.push(
+    ObjectScriptManager.onScriptChange(() => {
+      const scripts = ObjectScriptManager.getAllScripts();
+      emitScriptsChanged(scripts);
+    }),
+  );
 
   // ---- Listen for edit-script requests (from context menus or property panels) ----
   cleanupFunctions.push(
@@ -299,12 +360,8 @@ async function activate(context: ExtensionContext): Promise<void> {
         });
       }
 
-      // Open the code editor dialog with this script
-      context.ui.dialogs.show("scriptable-objects.code-editor", {
-        scriptId: script.id,
-        objectType,
-        instanceId,
-      });
+      // Open the code editor in a separate window with this script
+      openObjectScriptEditor(script.id);
     }),
   );
 
