@@ -196,6 +196,24 @@ export function isMouseOverAnyChevronButton(clientX: number, clientY: number): b
   return false;
 }
 
+/**
+ * getCursor callback for the overlay registration.
+ * Returns "pointer" when hovering over a chevron button, null otherwise.
+ */
+export function getFilterChevronCursor(ctx: OverlayHitTestContext): string | null {
+  for (const bounds of chevronBoundsMap.values()) {
+    if (
+      ctx.canvasX >= bounds.x &&
+      ctx.canvasX <= bounds.x + bounds.width &&
+      ctx.canvasY >= bounds.y &&
+      ctx.canvasY <= bounds.y + bounds.height
+    ) {
+      return "pointer";
+    }
+  }
+  return null;
+}
+
 /** Get the cached canvas element (for cursor management). */
 export function getFilterChevronCanvas(): HTMLCanvasElement | null {
   return cachedCanvas;

@@ -99,7 +99,17 @@ pub fn get_default_dimensions(state: State<AppState>) -> DefaultDimensions {
 #[tauri::command]
 pub fn set_default_row_height(state: State<AppState>, file_state: State<FileState>, height: f64) -> DefaultDimensions {
     let clamped = if height < 1.0 { 1.0 } else { height };
-    *state.default_row_height.lock().unwrap() = clamped;
+    let mut h = state.default_row_height.lock().unwrap();
+    let previous = *h;
+    *h = clamped;
+    drop(h);
+
+    // Record undo
+    let data = serde_json::to_vec(&previous).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.record_custom_restore("default_row_height".to_string(), data, "Change default row height");
+    drop(undo_stack);
+
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     let col_w = *state.default_column_width.lock().unwrap();
     DefaultDimensions {
@@ -112,7 +122,17 @@ pub fn set_default_row_height(state: State<AppState>, file_state: State<FileStat
 #[tauri::command]
 pub fn set_default_column_width(state: State<AppState>, file_state: State<FileState>, width: f64) -> DefaultDimensions {
     let clamped = if width < 1.0 { 1.0 } else { width };
-    *state.default_column_width.lock().unwrap() = clamped;
+    let mut w = state.default_column_width.lock().unwrap();
+    let previous = *w;
+    *w = clamped;
+    drop(w);
+
+    // Record undo
+    let data = serde_json::to_vec(&previous).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.record_custom_restore("default_column_width".to_string(), data, "Change default column width");
+    drop(undo_stack);
+
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     let row_h = *state.default_row_height.lock().unwrap();
     DefaultDimensions {

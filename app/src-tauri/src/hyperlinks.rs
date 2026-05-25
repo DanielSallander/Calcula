@@ -7,6 +7,20 @@ use tauri::State;
 
 use crate::AppState;
 
+/// Record a hyperlink change to the undo stack.
+fn record_hyperlink_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Hyperlink>, description: &str) {
+    #[derive(Serialize)]
+    struct HyperlinkSnapshot {
+        sheet_index: usize,
+        row: u32,
+        col: u32,
+        previous: Option<Hyperlink>,
+    }
+    let data = serde_json::to_vec(&HyperlinkSnapshot { sheet_index, row, col, previous }).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.record_custom_restore("hyperlink".to_string(), data, description);
+}
+
 // ============================================================================
 // HYPERLINK TYPES
 // ============================================================================
@@ -311,7 +325,12 @@ pub fn add_hyperlink(
 
     // Store the hyperlink
     let sheet_hyperlinks = hyperlinks.entry(active_sheet).or_insert_with(HashMap::new);
-    sheet_hyperlinks.insert((params.row, params.col), hyperlink.clone());
+    let row = params.row;
+    let col = params.col;
+    sheet_hyperlinks.insert((row, col), hyperlink.clone());
+    drop(hyperlinks);
+
+    record_hyperlink_undo(&state, active_sheet, row, col, None, "Add hyperlink");
 
     HyperlinkResult::ok(hyperlink)
 }
@@ -335,6 +354,8 @@ pub fn update_hyperlink(
         None => return HyperlinkResult::err("No hyperlink at this cell"),
     };
 
+    let previous = hyperlink.clone();
+
     // Update fields if provided
     if let Some(target) = params.target {
         hyperlink.target = target;
@@ -346,7 +367,12 @@ pub fn update_hyperlink(
         hyperlink.tooltip = params.tooltip;
     }
 
-    HyperlinkResult::ok(hyperlink.clone())
+    let result = hyperlink.clone();
+    let (row, col) = (params.row, params.col);
+    drop(hyperlinks);
+    record_hyperlink_undo(&state, active_sheet, row, col, Some(previous), "Edit hyperlink");
+
+    HyperlinkResult::ok(result)
 }
 
 /// Remove a hyperlink from a cell
@@ -365,7 +391,12 @@ pub fn remove_hyperlink(
     };
 
     match sheet_hyperlinks.remove(&(row, col)) {
-        Some(removed) => HyperlinkResult::ok(removed),
+        Some(removed) => {
+            let previous = Some(removed.clone());
+            drop(hyperlinks);
+            record_hyperlink_undo(&state, active_sheet, row, col, previous, "Remove hyperlink");
+            HyperlinkResult::ok(removed)
+        }
         None => HyperlinkResult::err("No hyperlink at this cell"),
     }
 }

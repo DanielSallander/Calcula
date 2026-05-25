@@ -37,6 +37,8 @@ import {
   getViewportCells,
   getStyle,
   setColumnCustomFilter,
+  beginUndoTransaction,
+  commitUndoTransaction,
 } from "@api/lib";
 import { FilterEvents } from "./filterEvents";
 
@@ -304,6 +306,7 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
   if (!state.autoFilterInfo) return;
   const info = state.autoFilterInfo;
   try {
+    await beginUndoTransaction("Sort by column");
     const result = await sortRangeByColumn<{ success: boolean; error?: string }>(
       info.startRow,
       info.startCol,
@@ -313,6 +316,7 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
       ascending,
       true, // hasHeaders
     );
+    await commitUndoTransaction();
     if (result.success) {
       // Use "grid:refresh" (not "app:grid-refresh") to re-fetch cell data from backend
       window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -336,6 +340,7 @@ export async function sortByColor(
   if (!state.autoFilterInfo) return;
   const info = state.autoFilterInfo;
   try {
+    await beginUndoTransaction("Sort by color");
     const result = await sortRange<{ success: boolean; error?: string }>(
       info.startRow,
       info.startCol,
@@ -349,6 +354,7 @@ export async function sortByColor(
       }],
       { hasHeaders: true },
     );
+    await commitUndoTransaction();
     if (result.success) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
       await reapplyFilter();

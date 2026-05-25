@@ -13,7 +13,7 @@ import {
   type OverlayRegistration,
 } from "@api";
 import { emitAppEvent } from "@api/events";
-import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, isMouseOverAnyChevronButton, getFilterChevronCanvas } from "./rendering/filterChevronRenderer";
+import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas } from "./rendering/filterChevronRenderer";
 import {
   refreshFilterState,
   setCurrentSelection,
@@ -72,6 +72,7 @@ function activate(context: ExtensionContext): void {
     type: REGION_TYPE,
     render: renderFilterChevrons,
     hitTest: hitTestFilterChevron,
+    getCursor: getFilterChevronCursor,
     priority: 20, // Above tables and pivots
   } as OverlayRegistration);
   cleanupFns.push(unregOverlay);
@@ -146,31 +147,7 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
-  // 6. Mousemove handler for pointer cursor on chevron hover
-  let chevronCursorOverride = false;
-  const handleChevronMouseMove = (event: MouseEvent) => {
-    const canvas = getFilterChevronCanvas();
-    if (!canvas) return;
-
-    const isTarget = event.target === canvas || canvas.contains(event.target as Node);
-    if (isTarget && isMouseOverAnyChevronButton(event.clientX, event.clientY)) {
-      if (!chevronCursorOverride) {
-        canvas.style.cursor = "pointer";
-        chevronCursorOverride = true;
-      }
-    } else if (chevronCursorOverride) {
-      canvas.style.cursor = "";
-      chevronCursorOverride = false;
-    }
-  };
-  document.addEventListener("mousemove", handleChevronMouseMove);
-  cleanupFns.push(() => {
-    document.removeEventListener("mousemove", handleChevronMouseMove);
-    if (chevronCursorOverride) {
-      const canvas = getFilterChevronCanvas();
-      if (canvas) canvas.style.cursor = "";
-    }
-  });
+  // 6. Cursor change on chevron hover is handled by getCursor in the overlay registration
 
   // 6b. Listen for filter button clicks from the column header area
   // (dispatched by the Table extension when the table header row is scrolled out of view)

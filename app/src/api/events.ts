@@ -58,6 +58,7 @@ export const AppEvents = {
   COLUMNS_INSERTED: "app:columns-inserted",
   ROWS_DELETED: "app:rows-deleted",
   COLUMNS_DELETED: "app:columns-deleted",
+  STRUCTURAL_UNDO: "app:structural-undo",
 
   // Navigation events
   NAVIGATE_TO_CELL: "app:navigate-to-cell",

@@ -10,6 +10,20 @@ use crate::AppState;
 use chrono::Utc;
 use uuid::Uuid;
 
+/// Record a note change to the undo stack.
+fn record_note_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Note>, description: &str) {
+    #[derive(Serialize)]
+    struct NoteSnapshot {
+        sheet_index: usize,
+        row: u32,
+        col: u32,
+        previous: Option<Note>,
+    }
+    let data = serde_json::to_vec(&NoteSnapshot { sheet_index, row, col, previous }).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.record_custom_restore("note".to_string(), data, description);
+}
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -245,6 +259,9 @@ pub fn add_note(
 
     let result = note.clone();
     sheet_notes.insert(key, note);
+    drop(notes);
+
+    record_note_undo(&state, active_sheet, params.row, params.col, None, "Add note");
 
     NoteResult {
         success: true,
@@ -275,14 +292,19 @@ pub fn update_note(
 
     for note in sheet_notes.values_mut() {
         if note.id == params.note_id {
+            let previous = note.clone();
+            let (row, col) = (note.row, note.col);
             if let Some(rich_content) = params.rich_content {
                 note.update_content_with_rich(params.content, rich_content);
             } else {
                 note.update_content(params.content);
             }
+            let result = note.clone();
+            drop(notes);
+            record_note_undo(&state, active_sheet, row, col, Some(previous), "Edit note");
             return NoteResult {
                 success: true,
-                note: Some(note.clone()),
+                note: Some(result),
                 error: None,
             };
         }
@@ -325,6 +347,10 @@ pub fn delete_note(
 
     if let Some(key) = key_to_remove {
         let removed = sheet_notes.remove(&key);
+        let (row, col) = key;
+        let previous = removed.clone();
+        drop(notes);
+        record_note_undo(&state, active_sheet, row, col, previous, "Delete note");
         return NoteResult {
             success: true,
             note: removed,

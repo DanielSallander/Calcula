@@ -58,6 +58,10 @@ pub enum CellChange {
     /// Full grid snapshot for structural changes (insert/delete rows/columns).
     /// Undo = restore the snapshot, Redo = restore the other snapshot.
     RestoreSnapshot(GridSnapshot),
+    /// Application-level custom undo data (comments, notes, hyperlinks, etc.).
+    /// `kind` identifies the subsystem; `data` is the serialized previous state.
+    /// The engine stores this opaquely; the app layer handles serialization.
+    CustomRestore { kind: String, data: Vec<u8> },
 }
 
 /// A transaction groups multiple changes into one undoable action.
@@ -211,6 +215,30 @@ impl UndoStack {
             transaction.add_change(change);
             self.push_transaction(transaction);
         }
+    }
+
+    /// Record a custom restore change (for app-level metadata like comments, notes, etc.).
+    /// If no transaction is open, creates a standalone transaction with the given description.
+    pub fn record_custom_restore(&mut self, kind: String, data: Vec<u8>, description: &str) {
+        let change = CellChange::CustomRestore { kind, data };
+        if let Some(ref mut transaction) = self.current_transaction {
+            transaction.add_change(change);
+        } else {
+            let mut transaction = Transaction::new(description);
+            transaction.add_change(change);
+            self.push_transaction(transaction);
+        }
+    }
+
+    /// Get a mutable reference to the current open transaction (if any).
+    pub fn current_transaction_mut(&mut self) -> Option<&mut Transaction> {
+        self.current_transaction.as_mut()
+    }
+
+    /// Push a completed transaction directly (used when auto-creating single-change transactions).
+    /// Clears the redo stack.
+    pub fn push_transaction_direct(&mut self, transaction: Transaction) {
+        self.push_transaction(transaction);
     }
 
     /// Record a full grid snapshot for structural changes.

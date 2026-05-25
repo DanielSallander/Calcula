@@ -10,6 +10,20 @@ use crate::AppState;
 use chrono::Utc;
 use uuid::Uuid;
 
+/// Record a comment change to the undo stack.
+fn record_comment_undo(state: &AppState, sheet_index: usize, row: u32, col: u32, previous: Option<Comment>, description: &str) {
+    #[derive(Serialize)]
+    struct CommentSnapshot {
+        sheet_index: usize,
+        row: u32,
+        col: u32,
+        previous: Option<Comment>,
+    }
+    let data = serde_json::to_vec(&CommentSnapshot { sheet_index, row, col, previous }).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.record_custom_restore("comment".to_string(), data, description);
+}
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -384,6 +398,10 @@ pub fn add_comment(
 
     let result = comment.clone();
     sheet_comments.insert(key, comment);
+    drop(comments);
+
+    // Record undo (previous state was None - no comment existed)
+    record_comment_undo(&state, active_sheet, params.row, params.col, None, "Add comment");
 
     CommentResult {
         success: true,
@@ -415,14 +433,19 @@ pub fn update_comment(
     // Find the comment by ID
     for comment in sheet_comments.values_mut() {
         if comment.id == params.comment_id {
+            let previous = comment.clone();
+            let (row, col) = (comment.row, comment.col);
             if let (Some(rich_content), Some(mentions)) = (params.rich_content, params.mentions) {
                 comment.update_content_with_mentions(params.content, rich_content, mentions);
             } else {
                 comment.update_content(params.content);
             }
+            let result = comment.clone();
+            drop(comments);
+            record_comment_undo(&state, active_sheet, row, col, Some(previous), "Edit comment");
             return CommentResult {
                 success: true,
-                comment: Some(comment.clone()),
+                comment: Some(result),
                 error: None,
             };
         }
@@ -466,6 +489,10 @@ pub fn delete_comment(
 
     if let Some(key) = key_to_remove {
         let removed = sheet_comments.remove(&key);
+        let (row, col) = key;
+        let previous = removed.clone();
+        drop(comments);
+        record_comment_undo(&state, active_sheet, row, col, previous, "Delete comment");
         return CommentResult {
             success: true,
             comment: removed,

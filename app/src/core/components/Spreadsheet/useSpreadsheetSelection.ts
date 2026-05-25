@@ -33,6 +33,9 @@ import {
   commitUndoTransaction,
   fillRange,
   calculateNow,
+  getAllColumnWidths,
+  getAllRowHeights,
+  getDefaultDimensions,
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
@@ -40,10 +43,10 @@ import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
-import { setColumnWidth, setRowHeight, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
+import { setColumnWidth, setRowHeight, setAllDimensions, updateConfig, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
-import { CommandRegistry } from "../../../api/commands";
+import { CommandRegistry, CoreCommands } from "../../../api/commands";
 import { emitAppEvent, AppEvents } from "../../../api/events";
 import type { GridCanvasHandle } from "../Grid";
 
@@ -497,16 +500,44 @@ export function useSpreadsheetSelection({
     }
   }, [selection]);
 
+  // Shared helper: refresh dimensions from backend and update Redux store.
+  // Must be awaited before refreshing the canvas to avoid stale rendering.
+  const refreshDimensionsFromBackend = useCallback(async () => {
+    try {
+      const [colWidths, rowHeights, defaults] = await Promise.all([
+        getAllColumnWidths(),
+        getAllRowHeights(),
+        getDefaultDimensions(),
+      ]);
+      const columnWidthsMap = new Map<number, number>();
+      for (const item of colWidths) {
+        columnWidthsMap.set(item.index, item.size);
+      }
+      const rowHeightsMap = new Map<number, number>();
+      for (const item of rowHeights) {
+        rowHeightsMap.set(item.index, item.size);
+      }
+      dispatch(setAllDimensions(columnWidthsMap, rowHeightsMap));
+      dispatch(updateConfig({
+        defaultCellWidth: defaults.defaultColumnWidth,
+        defaultCellHeight: defaults.defaultRowHeight,
+      }));
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] refreshDimensionsFromBackend failed:", error);
+    }
+  }, [dispatch]);
+
   // Handle Undo (Ctrl+Z)
   const handleUndo = useCallback(async () => {
     console.log("[useSpreadsheetSelection] Undo requested");
     try {
       const result = await undoApi();
-      console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated`);
+      console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
 
       // For structural restores (insert/delete rows/cols undo), refresh dimensions
+      // IMPORTANT: await before refreshing cells so canvas renders with correct dimensions
       if (result.structuralRestore || result.mergeChanged) {
-        window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+        await refreshDimensionsFromBackend();
       }
 
       // Trigger canvas refresh
@@ -518,6 +549,11 @@ export function useSpreadsheetSelection({
 
       // Refresh style cache (undo may revert formatting changes)
       window.dispatchEvent(new CustomEvent("styles:refresh"));
+
+      // Notify extensions about structural change so they can update their state
+      if (result.structuralRestore) {
+        emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
+      }
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
@@ -533,18 +569,19 @@ export function useSpreadsheetSelection({
     } catch (error) {
       console.error("[useSpreadsheetSelection] Undo failed:", error);
     }
-  }, [canvasRef]);
+  }, [canvasRef, refreshDimensionsFromBackend]);
 
   // Handle Redo (Ctrl+Y or Ctrl+Shift+Z)
   const handleRedo = useCallback(async () => {
     console.log("[useSpreadsheetSelection] Redo requested");
     try {
       const result = await redoApi();
-      console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated`);
+      console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated, structural=${result.structuralRestore}`);
 
       // For structural restores, refresh dimensions
+      // IMPORTANT: await before refreshing cells so canvas renders with correct dimensions
       if (result.structuralRestore || result.mergeChanged) {
-        window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+        await refreshDimensionsFromBackend();
       }
 
       // Trigger canvas refresh
@@ -556,6 +593,11 @@ export function useSpreadsheetSelection({
 
       // Refresh style cache (redo may re-apply formatting changes)
       window.dispatchEvent(new CustomEvent("styles:refresh"));
+
+      // Notify extensions about structural change so they can update their state
+      if (result.structuralRestore) {
+        emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
+      }
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
@@ -571,7 +613,7 @@ export function useSpreadsheetSelection({
     } catch (error) {
       console.error("[useSpreadsheetSelection] Redo failed:", error);
     }
-  }, [canvasRef]);
+  }, [canvasRef, refreshDimensionsFromBackend]);
 
   // FIX: Wrapper for extendTo that uses merge expansion during drag
   // This is passed to useMouseSelection for drag operations
@@ -1000,6 +1042,19 @@ export function useSpreadsheetSelection({
       gridCommands.unregister("fillLeft");
     };
   }, [handleFillDown, handleFillRight, handleFillUp, handleFillLeft]);
+
+  // Register undo/redo with CommandRegistry so keybindings and menu items work.
+  // The keybindings system (capture phase) routes Ctrl+Z/Y to CommandRegistry,
+  // so these handlers MUST be registered here for undo/redo to function.
+  useEffect(() => {
+    CommandRegistry.register(CoreCommands.UNDO, handleUndo);
+    CommandRegistry.register(CoreCommands.REDO, handleRedo);
+
+    return () => {
+      CommandRegistry.unregister(CoreCommands.UNDO);
+      CommandRegistry.unregister(CoreCommands.REDO);
+    };
+  }, [handleUndo, handleRedo]);
 
   /**
    * Handle inserting current date into the active cell.

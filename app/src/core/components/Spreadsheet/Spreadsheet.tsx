@@ -29,6 +29,8 @@ import {
   getDefaultDimensions,
   mergeCells,
   unmergeCells,
+  beginUndoTransaction,
+  commitUndoTransaction,
   setSplitWindow as backendSetSplitWindow,
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
@@ -531,9 +533,11 @@ function SpreadsheetContent({
     const maxCol = Math.max(selection.startCol, selection.endCol);
 
     try {
+      await beginUndoTransaction("Clear all");
       await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "all");
       await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
       await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
+      await commitUndoTransaction();
       cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null }, "clear");
     } catch (error) {
       console.error("[Spreadsheet] Failed to clear all:", error);
