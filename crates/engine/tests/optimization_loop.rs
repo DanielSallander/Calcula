@@ -3167,7 +3167,7 @@ async fn optimization_loop() {
         println!("│  Group By: {:?}", q.group_by);
         println!("└{}", "─".repeat(78));
 
-        let engine = setup_engine(q.measures.clone()).await;
+        let mut engine = setup_engine(q.measures.clone()).await;
 
         let request = QueryRequest {
             measures: q.measures.iter().map(|(n, _)| n.to_string()).collect(),

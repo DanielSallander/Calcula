@@ -218,7 +218,7 @@ async fn make_pool() -> sqlx::PgPool {
 // ---------------------------------------------------------------------------
 
 async fn compare_grand_total(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     sql: &str,
@@ -248,7 +248,7 @@ async fn compare_grand_total(
 }
 
 async fn compare_grouped(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     group_table: &str,
@@ -484,7 +484,7 @@ async fn validate_01_to_05_query_with_named_context() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -513,7 +513,7 @@ async fn validate_01_to_05_query_with_named_context() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 1, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -556,7 +556,7 @@ async fn validate_06_to_10_query_with_dax_functions() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -585,7 +585,7 @@ async fn validate_06_to_10_query_with_dax_functions() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 6, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -633,13 +633,13 @@ async fn validate_11_to_15_query_context_cross_dimension() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 11: AvgMonthlyBikesRev BY year — year is in QUERY's GROUP BY
     println!("  Running Test11: AvgMonthlyBikesRev BY year...");
     compare_grouped(
-        &engine, &pool, "AvgMonthlyBikesRev", "dim_date", "year",
+        &mut engine, &pool, "AvgMonthlyBikesRev", "dim_date", "year",
         r#"SELECT sub.year, AVG(sub.revenue) FROM (SELECT d.year, d.month, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname = 'Bikes' GROUP BY d.year, d.month) sub GROUP BY sub.year ORDER BY sub.year"#,
         GROUPED_TOLERANCE, "Test11: AvgMonthlyBikesRev BY year",
     ).await;
@@ -648,7 +648,7 @@ async fn validate_11_to_15_query_context_cross_dimension() {
     // 12: AvgMonthly2014RevByCat BY categoryname — category injected
     println!("  Running Test12: AvgMonthly2014RevByCat BY category...");
     compare_grouped(
-        &engine, &pool, "AvgMonthly2014RevByCat", "dim_product", "categoryname",
+        &mut engine, &pool, "AvgMonthly2014RevByCat", "dim_product", "categoryname",
         r#"SELECT sub.categoryname, AVG(sub.revenue) FROM (SELECT p.categoryname, d.month, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE d.year = 2014 AND p.categoryname IS NOT NULL GROUP BY p.categoryname, d.month) sub GROUP BY sub.categoryname ORDER BY sub.categoryname"#,
         GROUPED_TOLERANCE, "Test12: AvgMonthly2014RevByCat BY category",
     ).await;
@@ -657,7 +657,7 @@ async fn validate_11_to_15_query_context_cross_dimension() {
     // 13: MaxQtrBikesRevByYear BY year — year is in QUERY's GROUP BY
     println!("  Running Test13: MaxQtrBikesRevByYear BY year...");
     compare_grouped(
-        &engine, &pool, "MaxQtrBikesRevByYear", "dim_date", "year",
+        &mut engine, &pool, "MaxQtrBikesRevByYear", "dim_date", "year",
         r#"SELECT sub.year, MAX(sub.revenue) FROM (SELECT d.year, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname = 'Bikes' GROUP BY d.year, d.quarter) sub GROUP BY sub.year ORDER BY sub.year"#,
         GROUPED_TOLERANCE, "Test13: MaxQtrBikesRevByYear BY year",
     ).await;
@@ -666,7 +666,7 @@ async fn validate_11_to_15_query_context_cross_dimension() {
     // 14: USMonthCountByYear BY year — year is in QUERY's GROUP BY
     println!("  Running Test14: USMonthCountByYear BY year...");
     compare_grouped(
-        &engine, &pool, "USMonthCountByYear", "dim_date", "year",
+        &mut engine, &pool, "USMonthCountByYear", "dim_date", "year",
         r#"SELECT sub.year, COUNT(*)::numeric FROM (SELECT d.year, d.month, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_customer c ON f.customerid = c.customerid WHERE c.country = 'United States' GROUP BY d.year, d.month) sub GROUP BY sub.year ORDER BY sub.year"#,
         GROUPED_TOLERANCE, "Test14: USMonthCountByYear BY year",
     ).await;
@@ -675,7 +675,7 @@ async fn validate_11_to_15_query_context_cross_dimension() {
     // 15: AvgYearlyAccByTerr BY territorygroup — territory injected
     println!("  Running Test15: AvgYearlyAccByTerr BY territorygroup...");
     compare_grouped(
-        &engine, &pool, "AvgYearlyAccByTerr", "dim_territory", "territorygroup",
+        &mut engine, &pool, "AvgYearlyAccByTerr", "dim_territory", "territorygroup",
         r#"SELECT sub.territorygroup, AVG(sub.revenue) FROM (SELECT t.territorygroup, d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE p.categoryname = 'Accessories' AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup, d.year) sub GROUP BY sub.territorygroup ORDER BY sub.territorygroup"#,
         GROUPED_TOLERANCE, "Test15: AvgYearlyAccByTerr BY territorygroup",
     ).await;
@@ -722,13 +722,13 @@ async fn validate_16_to_20_mixed_var_query_keep_dax() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 16: Q1AvgMonthlyRev — KEEP quarter=1, then AVG, ROUND
     println!("  Running Test16: Q1AvgMonthlyRev...");
     compare_grand_total(
-        &engine, &pool, "Q1AvgMonthlyRev",
+        &mut engine, &pool, "Q1AvgMonthlyRev",
         r#"SELECT ROUND(AVG(revenue), 0) FROM (SELECT d.year, d.month, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year, d.month, d.quarter) sub WHERE sub.quarter = 1"#,
         GRAND_TOTAL_TOLERANCE, "Test16: Q1AvgMonthlyRev",
     ).await;
@@ -737,7 +737,7 @@ async fn validate_16_to_20_mixed_var_query_keep_dax() {
     // 17: AvgQ1MonthlyBikesRev — bikes only, Q1 months only, avg monthly revenue
     println!("  Running Test17: AvgQ1MonthlyBikesRev...");
     compare_grand_total(
-        &engine, &pool, "AvgQ1MonthlyBikesRev",
+        &mut engine, &pool, "AvgQ1MonthlyBikesRev",
         r#"SELECT AVG(revenue) FROM (SELECT d.year, d.month, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname = 'Bikes' GROUP BY d.year, d.month, d.quarter) sub WHERE sub.quarter = 1"#,
         GRAND_TOTAL_TOLERANCE, "Test17: AvgQ1MonthlyBikesRev",
     ).await;
@@ -746,7 +746,7 @@ async fn validate_16_to_20_mixed_var_query_keep_dax() {
     // 18: RoundedAvgYearlyAcc — accessories avg yearly revenue, rounded
     println!("  Running Test18: RoundedAvgYearlyAcc...");
     compare_grand_total(
-        &engine, &pool, "RoundedAvgYearlyAcc",
+        &mut engine, &pool, "RoundedAvgYearlyAcc",
         r#"SELECT ROUND(AVG(revenue), 0) FROM (SELECT d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname = 'Accessories' GROUP BY d.year) sub"#,
         GRAND_TOTAL_TOLERANCE, "Test18: RoundedAvgYearlyAcc",
     ).await;
@@ -755,7 +755,7 @@ async fn validate_16_to_20_mixed_var_query_keep_dax() {
     // 19: Q2AvgMonthlyRevByCat — KEEP quarter=2, grouped by category (cross-dimension)
     println!("  Running Test19: Q2AvgMonthlyRevByCat BY category...");
     compare_grouped(
-        &engine, &pool, "Q2AvgMonthlyRevByCat", "dim_product", "categoryname",
+        &mut engine, &pool, "Q2AvgMonthlyRevByCat", "dim_product", "categoryname",
         r#"SELECT sub.categoryname, AVG(sub.revenue) FROM (SELECT p.categoryname, d.year, d.month, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL GROUP BY p.categoryname, d.year, d.month, d.quarter) sub WHERE sub.quarter = 2 GROUP BY sub.categoryname ORDER BY sub.categoryname"#,
         GROUPED_TOLERANCE, "Test19: Q2AvgMonthlyRevByCat BY category",
     ).await;
@@ -764,7 +764,7 @@ async fn validate_16_to_20_mixed_var_query_keep_dax() {
     // 20: Bikes2013FromQuery — bikes revenue in 2013 via QUERY + KEEP
     println!("  Running Test20: Bikes2013FromQuery...");
     compare_grand_total(
-        &engine, &pool, "Bikes2013FromQuery",
+        &mut engine, &pool, "Bikes2013FromQuery",
         r#"SELECT SUM(revenue) FROM (SELECT d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname = 'Bikes' GROUP BY d.year) sub WHERE sub.year = 2013"#,
         GRAND_TOTAL_TOLERANCE, "Test20: Bikes2013FromQuery",
     ).await;

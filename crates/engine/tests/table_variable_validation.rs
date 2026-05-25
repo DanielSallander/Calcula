@@ -250,7 +250,7 @@ async fn make_pool() -> sqlx::PgPool {
 // ---------------------------------------------------------------------------
 
 async fn compare_grand_total(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     sql: &str,
@@ -280,7 +280,7 @@ async fn compare_grand_total(
 }
 
 async fn compare_grouped(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     group_table: &str,
@@ -525,7 +525,7 @@ async fn validate_var_01_to_05_single_variable_grand_totals() {
         ("BikeQty", "SUM(fact_sales[orderqty], bikes)"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, String)> = vec![
@@ -564,7 +564,7 @@ async fn validate_var_01_to_05_single_variable_grand_totals() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 1, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -590,7 +590,7 @@ async fn validate_var_06_to_10_composable_variables() {
         ("RoadBikeAvgPrice", "DIVIDE(SUM(fact_sales[unitprice], road_bikes), COUNT(fact_sales[salesorderdetailid], road_bikes))"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, String)> = vec![
@@ -629,7 +629,7 @@ async fn validate_var_06_to_10_composable_variables() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 6, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -667,7 +667,7 @@ async fn validate_var_11_to_15_two_variables_product_territory() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, String)> = vec![
@@ -706,7 +706,7 @@ async fn validate_var_11_to_15_two_variables_product_territory() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 11, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -747,7 +747,7 @@ async fn validate_var_16_to_20_two_variables_product_year() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, String)> = vec![
@@ -786,7 +786,7 @@ async fn validate_var_16_to_20_two_variables_product_year() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 16, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -827,7 +827,7 @@ async fn validate_var_21_to_25_three_variables() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, String)> = vec![
@@ -866,7 +866,7 @@ async fn validate_var_21_to_25_three_variables() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 21, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -907,7 +907,7 @@ async fn validate_var_26_to_30_mixed_variable_and_keep() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, String)> = vec![
@@ -946,7 +946,7 @@ async fn validate_var_26_to_30_mixed_variable_and_keep() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 26, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -972,7 +972,7 @@ async fn validate_var_31_to_35_variables_with_dax_functions() {
         ("RoadBikeShare", "DIVIDE(SUM(fact_sales[linetotal], road_bikes), SUM(fact_sales[linetotal], bikes))"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let f = r#"FROM "BI".fact_sales f"#;
@@ -1005,7 +1005,7 @@ async fn validate_var_31_to_35_variables_with_dax_functions() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 31, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -1034,13 +1034,13 @@ async fn validate_var_36_to_40_single_variable_grouped() {
         ("Rev2014", "SUM(fact_sales[linetotal], year_2014)"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // T36: bikes grouped by territory group
     println!("  Running Test36: BikeRevenue BY territorygroup...");
     compare_grouped(
-        &engine, &pool, "BikeRevenue", "dim_territory", "territorygroup",
+        &mut engine, &pool, "BikeRevenue", "dim_territory", "territorygroup",
         &format!(r#"SELECT t.territorygroup, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_TERRITORY} WHERE {BIKES_FILTER} AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#),
         GROUPED_TOLERANCE, "Test36: BikeRevenue BY territorygroup",
     ).await;
@@ -1049,7 +1049,7 @@ async fn validate_var_36_to_40_single_variable_grouped() {
     // T37: accessories grouped by year
     println!("  Running Test37: AccRevenue BY year...");
     compare_grouped(
-        &engine, &pool, "AccRevenue", "dim_date", "year",
+        &mut engine, &pool, "AccRevenue", "dim_date", "year",
         &format!(r#"SELECT d.year, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_DATE} WHERE {ACC_FILTER} AND d.year IS NOT NULL GROUP BY d.year ORDER BY d.year"#),
         GROUPED_TOLERANCE, "Test37: AccRevenue BY year",
     ).await;
@@ -1058,7 +1058,7 @@ async fn validate_var_36_to_40_single_variable_grouped() {
     // T38: clothing orders grouped by country
     println!("  Running Test38: ClothOrders BY country...");
     compare_grouped(
-        &engine, &pool, "ClothOrders", "dim_customer", "country",
+        &mut engine, &pool, "ClothOrders", "dim_customer", "country",
         &format!(r#"SELECT c.country, COUNT(f.salesorderdetailid)::numeric FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_CUSTOMER} WHERE {CLOTH_FILTER} AND c.country IS NOT NULL GROUP BY c.country ORDER BY c.country"#),
         GROUPED_TOLERANCE, "Test38: ClothOrders BY country",
     ).await;
@@ -1067,7 +1067,7 @@ async fn validate_var_36_to_40_single_variable_grouped() {
     // T39: north_america revenue grouped by category
     println!("  Running Test39: NARevenue BY categoryname...");
     compare_grouped(
-        &engine, &pool, "NARevenue", "dim_product", "categoryname",
+        &mut engine, &pool, "NARevenue", "dim_product", "categoryname",
         &format!(r#"SELECT p.categoryname, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_TERRITORY} {JOIN_PRODUCT} WHERE {NA_FILTER} AND p.categoryname IS NOT NULL GROUP BY p.categoryname ORDER BY p.categoryname"#),
         GROUPED_TOLERANCE, "Test39: NARevenue BY categoryname",
     ).await;
@@ -1076,7 +1076,7 @@ async fn validate_var_36_to_40_single_variable_grouped() {
     // T40: year_2014 revenue grouped by category
     println!("  Running Test40: Rev2014 BY categoryname...");
     compare_grouped(
-        &engine, &pool, "Rev2014", "dim_product", "categoryname",
+        &mut engine, &pool, "Rev2014", "dim_product", "categoryname",
         &format!(r#"SELECT p.categoryname, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_DATE} {JOIN_PRODUCT} WHERE {Y2014_FILTER} AND p.categoryname IS NOT NULL GROUP BY p.categoryname ORDER BY p.categoryname"#),
         GROUPED_TOLERANCE, "Test40: Rev2014 BY categoryname",
     ).await;
@@ -1119,13 +1119,13 @@ async fn validate_var_41_to_45_two_variables_grouped() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // T41: bikes + NA grouped by year
     println!("  Running Test41...");
     compare_grouped(
-        &engine, &pool, "BikeRevNA", "dim_date", "year",
+        &mut engine, &pool, "BikeRevNA", "dim_date", "year",
         &format!(r#"SELECT d.year, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_TERRITORY} {JOIN_DATE} WHERE {BIKES_FILTER} AND {NA_FILTER} AND d.year IS NOT NULL GROUP BY d.year ORDER BY d.year"#),
         GROUPED_TOLERANCE, "Test41: BikeRevNA BY year",
     ).await;
@@ -1134,7 +1134,7 @@ async fn validate_var_41_to_45_two_variables_grouped() {
     // T42: bikes + 2014 grouped by territory group
     println!("  Running Test42...");
     compare_grouped(
-        &engine, &pool, "BikeRev2014", "dim_territory", "territorygroup",
+        &mut engine, &pool, "BikeRev2014", "dim_territory", "territorygroup",
         &format!(r#"SELECT t.territorygroup, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_DATE} {JOIN_TERRITORY} WHERE {BIKES_FILTER} AND {Y2014_FILTER} AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#),
         GROUPED_TOLERANCE, "Test42: BikeRev2014 BY territorygroup",
     ).await;
@@ -1143,7 +1143,7 @@ async fn validate_var_41_to_45_two_variables_grouped() {
     // T43: accessories + europe grouped by year
     println!("  Running Test43...");
     compare_grouped(
-        &engine, &pool, "AccRevEU", "dim_date", "year",
+        &mut engine, &pool, "AccRevEU", "dim_date", "year",
         &format!(r#"SELECT d.year, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_TERRITORY} {JOIN_DATE} WHERE {ACC_FILTER} AND {EU_FILTER} AND d.year IS NOT NULL GROUP BY d.year ORDER BY d.year"#),
         GROUPED_TOLERANCE, "Test43: AccRevEU BY year",
     ).await;
@@ -1152,7 +1152,7 @@ async fn validate_var_41_to_45_two_variables_grouped() {
     // T44: bikes + us_customers grouped by year
     println!("  Running Test44...");
     compare_grouped(
-        &engine, &pool, "USBikeOrders", "dim_date", "year",
+        &mut engine, &pool, "USBikeOrders", "dim_date", "year",
         &format!(r#"SELECT d.year, COUNT(f.salesorderdetailid)::numeric FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_CUSTOMER} {JOIN_DATE} WHERE {BIKES_FILTER} AND {US_FILTER} AND d.year IS NOT NULL GROUP BY d.year ORDER BY d.year"#),
         GROUPED_TOLERANCE, "Test44: USBikeOrders BY year",
     ).await;
@@ -1161,7 +1161,7 @@ async fn validate_var_41_to_45_two_variables_grouped() {
     // T45: road_bikes + 2014 grouped by territory group
     println!("  Running Test45...");
     compare_grouped(
-        &engine, &pool, "RoadRev2014", "dim_territory", "territorygroup",
+        &mut engine, &pool, "RoadRev2014", "dim_territory", "territorygroup",
         &format!(r#"SELECT t.territorygroup, SUM(f.linetotal) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_DATE} {JOIN_TERRITORY} WHERE {ROAD_BIKES_FILTER} AND {Y2014_FILTER} AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#),
         GROUPED_TOLERANCE, "Test45: RoadRev2014 BY territorygroup",
     ).await;
@@ -1189,13 +1189,13 @@ async fn validate_var_46_to_50_complex_combinations_grouped() {
         ("BikeAvg2014", r#"DIVIDE(SUM(fact_sales[linetotal], bikes, KEEP(dim_date, dim_date[year] = 2014)), COUNT(fact_sales[salesorderdetailid], bikes, KEEP(dim_date, dim_date[year] = 2014)))"#),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // T46: DIVIDE(bikes) grouped by year
     println!("  Running Test46...");
     compare_grouped(
-        &engine, &pool, "BikeAvgOrder", "dim_date", "year",
+        &mut engine, &pool, "BikeAvgOrder", "dim_date", "year",
         &format!(r#"SELECT d.year, CASE WHEN COUNT(f.salesorderdetailid) = 0 THEN 0::numeric ELSE SUM(f.linetotal) / COUNT(f.salesorderdetailid) END FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_DATE} WHERE {BIKES_FILTER} AND d.year IS NOT NULL GROUP BY d.year ORDER BY d.year"#),
         GROUPED_TOLERANCE, "Test46: BikeAvgOrder BY year",
     ).await;
@@ -1204,7 +1204,7 @@ async fn validate_var_46_to_50_complex_combinations_grouped() {
     // T47: ROUND(DIVIDE(NA)) grouped by category
     println!("  Running Test47...");
     compare_grouped(
-        &engine, &pool, "NAAvgRound", "dim_product", "categoryname",
+        &mut engine, &pool, "NAAvgRound", "dim_product", "categoryname",
         &format!(r#"SELECT p.categoryname, ROUND(CASE WHEN COUNT(f.salesorderdetailid) = 0 THEN NULL ELSE SUM(f.linetotal) / COUNT(f.salesorderdetailid) END, 2) FROM "BI".fact_sales f {JOIN_TERRITORY} {JOIN_PRODUCT} WHERE {NA_FILTER} AND p.categoryname IS NOT NULL GROUP BY p.categoryname ORDER BY p.categoryname"#),
         GROUPED_TOLERANCE, "Test47: NAAvgRound BY categoryname",
     ).await;
@@ -1213,7 +1213,7 @@ async fn validate_var_46_to_50_complex_combinations_grouped() {
     // T48: Road bike share grouped by year
     println!("  Running Test48...");
     compare_grouped(
-        &engine,
+        &mut engine,
         &pool,
         "RoadBikeShare",
         "dim_date",
@@ -1240,7 +1240,7 @@ async fn validate_var_46_to_50_complex_combinations_grouped() {
     // T49: COALESCE(bikes) grouped by territory group
     println!("  Running Test49...");
     compare_grouped(
-        &engine, &pool, "BikeRevSafe", "dim_territory", "territorygroup",
+        &mut engine, &pool, "BikeRevSafe", "dim_territory", "territorygroup",
         &format!(r#"SELECT t.territorygroup, COALESCE(SUM(f.linetotal), 0) FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_TERRITORY} WHERE {BIKES_FILTER} AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#),
         GROUPED_TOLERANCE, "Test49: BikeRevSafe BY territorygroup",
     ).await;
@@ -1249,7 +1249,7 @@ async fn validate_var_46_to_50_complex_combinations_grouped() {
     // T50: DIVIDE(bikes + KEEP year=2014) grouped by territory group
     println!("  Running Test50...");
     compare_grouped(
-        &engine, &pool, "BikeAvg2014", "dim_territory", "territorygroup",
+        &mut engine, &pool, "BikeAvg2014", "dim_territory", "territorygroup",
         &format!(r#"SELECT t.territorygroup, CASE WHEN COUNT(f.salesorderdetailid) = 0 THEN 0::numeric ELSE SUM(f.linetotal) / COUNT(f.salesorderdetailid) END FROM "BI".fact_sales f {JOIN_PRODUCT} {JOIN_TERRITORY} {JOIN_DATE} WHERE {BIKES_FILTER} AND {Y2014_FILTER} AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#),
         GROUPED_TOLERANCE, "Test50: BikeAvg2014 BY territorygroup",
     ).await;

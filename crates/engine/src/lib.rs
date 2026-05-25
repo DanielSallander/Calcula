@@ -37,10 +37,15 @@
 //! # }
 //! ```
 
+mod query_cache;
+
+use std::collections::HashSet;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
+
+pub use query_cache::{QueryCacheConfig, QueryCacheStats};
 
 // --- Re-exports from engine-core ---
 
@@ -93,6 +98,50 @@ pub use engine_query::{LookupSpec, PushdownPlanner, QueryExecutor, QueryPlan};
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Auto-tier configuration and state
+// ---------------------------------------------------------------------------
+
+/// Configuration for automatic dimension table caching.
+///
+/// When enabled, the engine automatically caches dimension tables (the "one"
+/// side of many-to-one relationships) that are below a configurable row count
+/// threshold. This happens lazily on first query, and remaining eligible
+/// tables are pre-warmed in the background after the query returns.
+///
+/// Tables with explicit [`StorageMode::InMemory`] or [`StorageMode::DirectQuery`]
+/// set by the user are never affected by auto-tiering.
+#[derive(Debug, Clone)]
+pub struct AutoTierConfig {
+    /// Enable or disable auto-tiering entirely. Default: `false`.
+    pub enabled: bool,
+    /// Maximum row count for a table to qualify for auto-tiering. Default: 100,000.
+    pub max_rows: usize,
+    /// TTL in seconds before auto-tiered data is considered stale and
+    /// re-fetched. Default: 3600 (1 hour).
+    pub default_ttl_secs: u64,
+}
+
+impl Default for AutoTierConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_rows: 100_000,
+            default_ttl_secs: 3600,
+        }
+    }
+}
+
+/// Tracks auto-tier state for the engine.
+#[derive(Debug, Default)]
+struct AutoTierState {
+    /// Tables that have been auto-tiered (successfully cached).
+    cached: HashSet<String>,
+    /// Tables that were checked and rejected (too large). Not re-checked
+    /// until the engine is restarted or the model changes.
+    rejected: HashSet<String>,
+}
+
 /// High-level engine facade coordinating model, sources, and queries.
 ///
 /// The `Engine` owns a [`DataModel`], a [`SourceRegistry`], and an
@@ -109,6 +158,12 @@ pub struct Engine {
     max_inline_in_values: usize,
     /// Configuration for automatic batch optimization on ingest.
     optimizer_config: OptimizerConfig,
+    /// Configuration for automatic dimension caching.
+    auto_tier_config: AutoTierConfig,
+    /// Runtime state for auto-tiering (which tables are cached/rejected).
+    auto_tier_state: AutoTierState,
+    /// LRU cache for query results.
+    query_cache: query_cache::QueryCache,
 }
 
 impl Engine {
@@ -122,6 +177,9 @@ impl Engine {
             cache: InMemoryCache::new(),
             max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
             optimizer_config: OptimizerConfig::default(),
+            auto_tier_config: AutoTierConfig::default(),
+            auto_tier_state: AutoTierState::default(),
+            query_cache: query_cache::QueryCache::new(QueryCacheConfig::default()),
         }
     }
 
@@ -133,6 +191,9 @@ impl Engine {
             cache: InMemoryCache::with_budget(budget_bytes),
             max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
             optimizer_config: OptimizerConfig::default(),
+            auto_tier_config: AutoTierConfig::default(),
+            auto_tier_state: AutoTierState::default(),
+            query_cache: query_cache::QueryCache::new(QueryCacheConfig::default()),
         }
     }
 
@@ -162,6 +223,66 @@ impl Engine {
     /// Returns the current maximum inline IN-filter values threshold.
     pub fn max_inline_in_values(&self) -> usize {
         self.max_inline_in_values
+    }
+
+    /// Set the auto-tier configuration for automatic dimension caching.
+    ///
+    /// When enabled, dimension tables (the "one" side of many-to-one
+    /// relationships) are automatically cached when first needed by a query,
+    /// provided they are below the configured row threshold. Remaining
+    /// eligible tables are pre-warmed in the background after the query
+    /// completes.
+    pub fn set_auto_tier_config(&mut self, config: AutoTierConfig) {
+        self.auto_tier_config = config;
+    }
+
+    /// Returns the current auto-tier configuration.
+    pub fn auto_tier_config(&self) -> &AutoTierConfig {
+        &self.auto_tier_config
+    }
+
+    /// Returns the names of tables that have been auto-tiered (cached
+    /// automatically as dimension tables).
+    pub fn auto_tiered_tables(&self) -> Vec<&str> {
+        self.auto_tier_state
+            .cached
+            .iter()
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    /// Returns the names of tables that were evaluated for auto-tiering
+    /// but rejected (too many rows).
+    pub fn auto_tier_rejected_tables(&self) -> Vec<&str> {
+        self.auto_tier_state
+            .rejected
+            .iter()
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    /// Set the query-result cache configuration.
+    ///
+    /// When enabled, query results are cached and served from memory
+    /// when the same query is re-executed within the TTL. The cache is
+    /// invalidated on model changes and data refreshes.
+    pub fn set_query_cache_config(&mut self, config: QueryCacheConfig) {
+        self.query_cache.set_config(config);
+    }
+
+    /// Returns the current query cache configuration.
+    pub fn query_cache_config(&self) -> &QueryCacheConfig {
+        self.query_cache.config()
+    }
+
+    /// Returns query cache statistics (hits, misses, entries, memory usage).
+    pub fn query_cache_stats(&self) -> QueryCacheStats {
+        self.query_cache.stats()
+    }
+
+    /// Clear all cached query results.
+    pub fn clear_query_cache(&mut self) {
+        self.query_cache.invalidate_all();
     }
 
     /// Register a PostgreSQL data source and return its connector index.
@@ -196,16 +317,27 @@ impl Engine {
     ///
     /// The query planner decides what to push down and what to compute locally.
     /// Tables configured for in-memory storage are served from the cache.
-    pub async fn query(&self, request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
+    /// If query caching is enabled, repeated identical queries are served
+    /// from the result cache.
+    pub async fn query(&mut self, request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
+        // Check the query cache first.
+        let cache_key = query_cache::query_cache_key(&request, self.query_cache.model_version());
+        if let Some(cached) = self.query_cache.get(cache_key) {
+            return Ok(cached);
+        }
+
         let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
-        QueryExecutor::execute(
+        let batches = QueryExecutor::execute(
             &plan,
             &self.model,
             &self.registry,
             Some(&self.cache),
             Some(self.max_inline_in_values),
         )
-        .await
+        .await?;
+
+        self.query_cache.put(cache_key, batches.clone());
+        Ok(batches)
     }
 
     /// Execute a query, automatically refreshing any stale in-memory tables first.
@@ -223,6 +355,14 @@ impl Engine {
             .refresh_stale()
             .await
             .map_err(crate::QueryError::Engine)?;
+
+        // Check query cache (after refresh — stale data was already invalidated).
+        let cache_key =
+            query_cache::query_cache_key(&request, self.query_cache.model_version());
+        if let Some(cached) = self.query_cache.get(cache_key) {
+            return Ok((cached, refreshed));
+        }
+
         let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
         let batches = QueryExecutor::execute(
             &plan,
@@ -232,6 +372,8 @@ impl Engine {
             Some(self.max_inline_in_values),
         )
         .await?;
+
+        self.query_cache.put(cache_key, batches.clone());
         Ok((batches, refreshed))
     }
 
@@ -337,6 +479,7 @@ impl Engine {
             let schema = std::sync::Arc::new(table.to_arrow_schema());
             let batch = RecordBatch::new_empty(schema);
             self.cache.store(table_name, batch)?;
+            self.query_cache.invalidate_all();
             Ok(OptimizationStats::default())
         } else {
             let schema = batches[0].schema();
@@ -353,6 +496,7 @@ impl Engine {
                 optimized
             };
             self.cache.store(table_name, sorted)?;
+            self.query_cache.invalidate_all();
             Ok(stats)
         }
     }
@@ -469,6 +613,265 @@ impl Engine {
         let value = arrow::util::display::array_value_to_string(col, 0)
             .map_err(|e| EngineError::InvalidData(format!("poll result conversion failed: {e}")))?;
         Ok(value)
+    }
+
+    // --- Auto-tier implementation ---
+
+    /// Identify dimension tables eligible for auto-tiering.
+    ///
+    /// A table is eligible if:
+    /// - It appears as the "to" (one/dimension) side of a `ManyToOne` relationship
+    /// - It does NOT have an explicit `StorageMode::InMemory` (already cached)
+    /// - It has not been rejected previously (too many rows)
+    /// - It has not already been auto-tiered
+    /// - It has a registered source binding
+    fn auto_tier_candidates(&self) -> Vec<String> {
+        if !self.auto_tier_config.enabled {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+        let mut dimension_tables: HashSet<&str> = HashSet::new();
+
+        // Find all "to" tables in ManyToOne relationships.
+        for rel in self.model.relationships() {
+            if rel.cardinality() == Cardinality::ManyToOne {
+                dimension_tables.insert(rel.to_table());
+            }
+        }
+
+        for dim_name in dimension_tables {
+            // Skip if already explicitly InMemory.
+            if let Ok(table) = self.model.table(dim_name) {
+                if table.is_in_memory() {
+                    continue;
+                }
+            }
+            // Skip if already auto-tiered or rejected.
+            if self.auto_tier_state.cached.contains(dim_name) {
+                continue;
+            }
+            if self.auto_tier_state.rejected.contains(dim_name) {
+                continue;
+            }
+            // Skip if no source binding registered.
+            if self.registry.binding_for(dim_name).is_err() {
+                continue;
+            }
+            candidates.push(dim_name.to_string());
+        }
+
+        candidates
+    }
+
+    /// Try to auto-tier a single table: fetch it, check row count, cache if eligible.
+    ///
+    /// Returns `true` if the table was cached, `false` if rejected (too many rows).
+    async fn try_auto_tier_table(&mut self, table_name: &str) -> EngineResult<bool> {
+        let binding = self
+            .registry
+            .binding_for(table_name)
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+        let request = FetchRequest {
+            schema: Some(binding.schema.clone()),
+            table: binding.table.clone(),
+            limit: Some(self.auto_tier_config.max_rows + 1),
+            ..Default::default()
+        };
+        let connector = self
+            .registry
+            .connector_for(table_name)
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+        let batches = connector
+            .fetch_data(&request)
+            .await
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        if total_rows > self.auto_tier_config.max_rows {
+            self.auto_tier_state.rejected.insert(table_name.to_string());
+            return Ok(false);
+        }
+
+        // Table qualifies — optimize, sort, and cache it.
+        if batches.is_empty() {
+            let table = self.model.table(table_name)?;
+            let schema = std::sync::Arc::new(table.to_arrow_schema());
+            let batch = RecordBatch::new_empty(schema);
+            self.cache.store(table_name, batch)?;
+        } else {
+            let schema = batches[0].schema();
+            let combined = arrow::compute::concat_batches(&schema, &batches)?;
+            let (optimized, _) =
+                engine_core::optimize::optimize_batch(&combined, &self.optimizer_config)?;
+            let sorted = if let Some(sort_col) = engine_core::optimize::infer_sort_column(
+                table_name,
+                self.model.relationships(),
+            ) {
+                engine_core::optimize::sort_batch_by_column(&optimized, sort_col)?
+            } else {
+                optimized
+            };
+            self.cache.store(table_name, sorted)?;
+        }
+
+        self.auto_tier_state.cached.insert(table_name.to_string());
+        self.query_cache.invalidate_all();
+        Ok(true)
+    }
+
+    /// Auto-tier tables that are needed by a specific query.
+    ///
+    /// Identifies which dimension tables in the query's group_by or filter
+    /// context are auto-tier candidates, and caches them before execution.
+    /// Returns the names of tables that were auto-tiered.
+    async fn auto_tier_for_query(
+        &mut self,
+        request: &QueryRequest,
+    ) -> EngineResult<Vec<String>> {
+        if !self.auto_tier_config.enabled {
+            return Ok(Vec::new());
+        }
+
+        let candidates = self.auto_tier_candidates();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Determine which candidates are touched by this query.
+        let query_tables: HashSet<&str> = request
+            .group_by
+            .iter()
+            .map(|col| col.table.as_str())
+            .collect();
+
+        let mut tiered = Vec::new();
+        for candidate in &candidates {
+            if query_tables.contains(candidate.as_str())
+                && self.try_auto_tier_table(candidate).await?
+            {
+                tiered.push(candidate.clone());
+            }
+        }
+        Ok(tiered)
+    }
+
+    /// Cache all remaining eligible dimension tables.
+    ///
+    /// Call this after the first query returns to pre-warm the cache in the
+    /// background. The host app can spawn this as a background task:
+    ///
+    /// ```rust,ignore
+    /// let results = engine.query_auto_tier(request).await?;
+    /// // Fire-and-forget background pre-warm:
+    /// tokio::spawn(async move { engine.auto_tier_remaining().await });
+    /// ```
+    ///
+    /// Returns the names of tables that were successfully cached.
+    pub async fn auto_tier_remaining(&mut self) -> EngineResult<Vec<String>> {
+        if !self.auto_tier_config.enabled {
+            return Ok(Vec::new());
+        }
+
+        let candidates = self.auto_tier_candidates();
+        let mut tiered = Vec::new();
+        for candidate in candidates {
+            match self.try_auto_tier_table(&candidate).await {
+                Ok(true) => tiered.push(candidate),
+                Ok(false) => {} // Rejected (too large).
+                Err(_) => {}    // Fetch failed — skip, will retry next time.
+            }
+        }
+        Ok(tiered)
+    }
+
+    /// Execute a query with automatic dimension caching.
+    ///
+    /// Before executing the query, checks if any dimension tables needed by the
+    /// query are eligible for auto-tiering and caches them. After the query
+    /// completes, remaining eligible dimensions are pre-warmed in the background.
+    ///
+    /// Returns the query results and the list of tables that were auto-tiered
+    /// (both during the query and in the background pre-warm).
+    pub async fn query_auto_tier(
+        &mut self,
+        request: QueryRequest,
+    ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
+        // Phase 1: Auto-tier tables needed by this specific query.
+        let mut tiered = self
+            .auto_tier_for_query(&request)
+            .await
+            .map_err(QueryError::Engine)?;
+
+        // Also refresh stale auto-tiered tables.
+        self.refresh_stale_auto_tiered()
+            .await
+            .map_err(QueryError::Engine)?;
+
+        // Check query cache.
+        let cache_key =
+            query_cache::query_cache_key(&request, self.query_cache.model_version());
+        if let Some(cached) = self.query_cache.get(cache_key) {
+            // Still pre-warm remaining in background.
+            if let Ok(more) = self.auto_tier_remaining().await {
+                tiered.extend(more);
+            }
+            return Ok((cached, tiered));
+        }
+
+        // Execute the query — tell the planner that auto-tiered tables are local.
+        let plan = PushdownPlanner::plan_with_cached(
+            &request,
+            &self.model,
+            &self.registry,
+            &self.auto_tier_state.cached,
+        )?;
+        let batches = QueryExecutor::execute(
+            &plan,
+            &self.model,
+            &self.registry,
+            Some(&self.cache),
+            Some(self.max_inline_in_values),
+        )
+        .await?;
+
+        self.query_cache.put(cache_key, batches.clone());
+
+        // Phase 2: Pre-warm remaining candidates.
+        if let Ok(more) = self.auto_tier_remaining().await {
+            tiered.extend(more);
+        }
+
+        Ok((batches, tiered))
+    }
+
+    /// Refresh auto-tiered tables that have exceeded their TTL.
+    async fn refresh_stale_auto_tiered(&mut self) -> EngineResult<()> {
+        let ttl = Duration::from_secs(self.auto_tier_config.default_ttl_secs);
+        let stale: Vec<String> = self
+            .auto_tier_state
+            .cached
+            .iter()
+            .filter(|name| self.cache.is_stale(name, ttl))
+            .cloned()
+            .collect();
+
+        for name in stale {
+            // Re-fetch and re-cache. If it fails or is now too large, remove from auto-tier.
+            match self.try_auto_tier_table(&name).await {
+                Ok(true) => {} // Still cached.
+                Ok(false) => {
+                    // Grew beyond threshold — evict and reject.
+                    self.cache.evict(&name);
+                    self.auto_tier_state.cached.remove(&name);
+                }
+                Err(_) => {
+                    // Fetch failed — leave stale data in cache for now.
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns when the table was last refreshed, if it is cached.
@@ -698,6 +1101,7 @@ impl Engine {
     /// the same table names. Cached in-memory tables are preserved.
     pub fn set_model(&mut self, model: DataModel) {
         self.model = model;
+        self.query_cache.invalidate_all();
     }
 
     /// Returns a reference to the data model.
@@ -1025,5 +1429,228 @@ mod tests {
         assert!(!dir.join("Direct.arrow").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Auto-tier tests --
+
+    fn make_star_schema_model() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "fact_sales",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("product_id", DataType::Int64),
+                        Column::new("customer_id", DataType::Int64),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_products",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("name", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_customers",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("name", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "sales_products",
+                "fact_sales",
+                "product_id",
+                "dim_products",
+                "id",
+            ))
+            .add_relationship(Relationship::many_to_one(
+                "sales_customers",
+                "fact_sales",
+                "customer_id",
+                "dim_customers",
+                "id",
+            ))
+            .add_measure(sum_measure("Revenue", "fact_sales", "amount"))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn auto_tier_candidates_disabled_returns_empty() {
+        let model = make_star_schema_model();
+        let engine = Engine::new(model);
+        // Disabled by default.
+        assert!(engine.auto_tier_candidates().is_empty());
+    }
+
+    #[test]
+    fn auto_tier_candidates_finds_dimension_tables() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            max_rows: 100_000,
+            default_ttl_secs: 3600,
+        });
+        // No bindings registered → no candidates (need source binding).
+        assert!(engine.auto_tier_candidates().is_empty());
+
+        // Register bindings for dims.
+        engine.registry.bind(
+            "dim_products",
+            0,
+            SourceBinding::new("public", "products"),
+        );
+        engine.registry.bind(
+            "dim_customers",
+            0,
+            SourceBinding::new("public", "customers"),
+        );
+
+        let mut candidates = engine.auto_tier_candidates();
+        candidates.sort();
+        assert_eq!(candidates, vec!["dim_customers", "dim_products"]);
+    }
+
+    #[test]
+    fn auto_tier_candidates_skips_explicit_inmemory() {
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "fact_sales",
+                    vec![
+                        Column::new("product_id", DataType::Int64),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_products",
+                    vec![Column::new("id", DataType::Int64)],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "sales_products",
+                "fact_sales",
+                "product_id",
+                "dim_products",
+                "id",
+            ))
+            .add_measure(sum_measure("Revenue", "fact_sales", "amount"))
+            .build()
+            .unwrap();
+
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine.registry.bind(
+            "dim_products",
+            0,
+            SourceBinding::new("public", "products"),
+        );
+
+        // Already InMemory → not a candidate.
+        assert!(engine.auto_tier_candidates().is_empty());
+    }
+
+    #[test]
+    fn auto_tier_candidates_skips_rejected() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine.registry.bind(
+            "dim_products",
+            0,
+            SourceBinding::new("public", "products"),
+        );
+
+        // Mark as rejected.
+        engine
+            .auto_tier_state
+            .rejected
+            .insert("dim_products".to_string());
+
+        assert!(engine.auto_tier_candidates().is_empty());
+    }
+
+    #[test]
+    fn auto_tier_candidates_skips_already_cached() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine.registry.bind(
+            "dim_products",
+            0,
+            SourceBinding::new("public", "products"),
+        );
+
+        // Mark as already cached.
+        engine
+            .auto_tier_state
+            .cached
+            .insert("dim_products".to_string());
+
+        assert!(engine.auto_tier_candidates().is_empty());
+    }
+
+    #[test]
+    fn auto_tiered_tables_returns_cached_set() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+
+        assert!(engine.auto_tiered_tables().is_empty());
+
+        engine
+            .auto_tier_state
+            .cached
+            .insert("dim_products".to_string());
+        assert_eq!(engine.auto_tiered_tables(), vec!["dim_products"]);
+    }
+
+    #[test]
+    fn auto_tier_rejected_tables_returns_rejected_set() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+
+        engine
+            .auto_tier_state
+            .rejected
+            .insert("big_table".to_string());
+        assert_eq!(engine.auto_tier_rejected_tables(), vec!["big_table"]);
+    }
+
+    #[test]
+    fn auto_tier_config_defaults() {
+        let config = AutoTierConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_rows, 100_000);
+        assert_eq!(config.default_ttl_secs, 3600);
     }
 }

@@ -190,7 +190,7 @@ async fn make_pool() -> sqlx::PgPool {
 // ---------------------------------------------------------------------------
 
 async fn compare_grand_total(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     sql: &str,
@@ -220,7 +220,7 @@ async fn compare_grand_total(
 }
 
 async fn compare_grouped(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     group_table: &str,
@@ -452,7 +452,7 @@ async fn validate_01_to_05_query_in_var_grand_totals() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -481,7 +481,7 @@ async fn validate_01_to_05_query_in_var_grand_totals() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 1, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -522,7 +522,7 @@ async fn validate_06_to_10_query_cross_table_and_multi_agg() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -551,7 +551,7 @@ async fn validate_06_to_10_query_cross_table_and_multi_agg() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 6, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -592,7 +592,7 @@ async fn validate_11_to_15_query_arithmetic_and_multi_binding() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -621,7 +621,7 @@ async fn validate_11_to_15_query_arithmetic_and_multi_binding() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 11, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -663,13 +663,13 @@ async fn validate_16_to_20_keep_on_intermediate() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 16: Revenue for 2014 only — same as direct KEEP on dim_date
     println!("  Running Test16: Rev2014FromYearly...");
     compare_grand_total(
-        &engine, &pool, "Rev2014FromYearly",
+        &mut engine, &pool, "Rev2014FromYearly",
         r#"SELECT SUM(revenue) FROM (SELECT d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year) sub WHERE sub.year = 2014"#,
         GRAND_TOTAL_TOLERANCE, "Test16: Rev2014FromYearly",
     ).await;
@@ -678,7 +678,7 @@ async fn validate_16_to_20_keep_on_intermediate() {
     // 17: Revenue for 2013
     println!("  Running Test17: Rev2013FromYearly...");
     compare_grand_total(
-        &engine, &pool, "Rev2013FromYearly",
+        &mut engine, &pool, "Rev2013FromYearly",
         r#"SELECT SUM(revenue) FROM (SELECT d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year) sub WHERE sub.year = 2013"#,
         GRAND_TOTAL_TOLERANCE, "Test17: Rev2013FromYearly",
     ).await;
@@ -687,7 +687,7 @@ async fn validate_16_to_20_keep_on_intermediate() {
     // 18: Q1 quarterly revenue sum
     println!("  Running Test18: Q1QuarterlyRev...");
     compare_grand_total(
-        &engine, &pool, "Q1QuarterlyRev",
+        &mut engine, &pool, "Q1QuarterlyRev",
         r#"SELECT SUM(revenue) FROM (SELECT d.year, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year, d.quarter) sub WHERE sub.quarter = 1"#,
         GRAND_TOTAL_TOLERANCE, "Test18: Q1QuarterlyRev",
     ).await;
@@ -696,7 +696,7 @@ async fn validate_16_to_20_keep_on_intermediate() {
     // 19: Count of distinct years
     println!("  Running Test19: YearCount...");
     compare_grand_total(
-        &engine, &pool, "YearCount",
+        &mut engine, &pool, "YearCount",
         r#"SELECT COUNT(*)::numeric FROM (SELECT d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year) sub"#,
         GRAND_TOTAL_TOLERANCE, "Test19: YearCount",
     ).await;
@@ -705,7 +705,7 @@ async fn validate_16_to_20_keep_on_intermediate() {
     // 20: Average category revenue
     println!("  Running Test20: AvgCatRevKeep...");
     compare_grand_total(
-        &engine, &pool, "AvgCatRevKeep",
+        &mut engine, &pool, "AvgCatRevKeep",
         r#"SELECT AVG(revenue) FROM (SELECT p.categoryname, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL GROUP BY p.categoryname) sub"#,
         GRAND_TOTAL_TOLERANCE, "Test20: AvgCatRevKeep",
     ).await;
@@ -748,13 +748,13 @@ async fn validate_21_to_25_query_grouped_and_advanced() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 21: Average monthly revenue grouped by year
     println!("  Running Test21: AvgMonthlyRev BY year...");
     compare_grouped(
-        &engine, &pool, "AvgMonthlyRev", "dim_date", "year",
+        &mut engine, &pool, "AvgMonthlyRev", "dim_date", "year",
         r#"SELECT d2.year, AVG(monthly_rev) FROM (SELECT d.year, d.month, SUM(f.linetotal) AS monthly_rev FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year, d.month) sub JOIN (SELECT DISTINCT year FROM "BI".dim_date) d2 ON sub.year = d2.year GROUP BY d2.year ORDER BY d2.year"#,
         GROUPED_TOLERANCE, "Test21: AvgMonthlyRev BY year",
     ).await;
@@ -763,7 +763,7 @@ async fn validate_21_to_25_query_grouped_and_advanced() {
     // 22: Q4 quarterly revenue
     println!("  Running Test22: Q4QuarterlyRev...");
     compare_grand_total(
-        &engine, &pool, "Q4QuarterlyRev",
+        &mut engine, &pool, "Q4QuarterlyRev",
         r#"SELECT SUM(revenue) FROM (SELECT d.year, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year, d.quarter) sub WHERE sub.quarter = 4"#,
         GRAND_TOTAL_TOLERANCE, "Test22: Q4QuarterlyRev",
     ).await;
@@ -772,7 +772,7 @@ async fn validate_21_to_25_query_grouped_and_advanced() {
     // 23: Average subcategory revenue
     println!("  Running Test23: AvgSubcatRev...");
     compare_grand_total(
-        &engine, &pool, "AvgSubcatRev",
+        &mut engine, &pool, "AvgSubcatRev",
         r#"SELECT AVG(subcat_rev) FROM (SELECT p.subcategoryname, SUM(f.linetotal) AS subcat_rev FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.subcategoryname IS NOT NULL GROUP BY p.subcategoryname) sub"#,
         GRAND_TOTAL_TOLERANCE, "Test23: AvgSubcatRev",
     ).await;
@@ -781,7 +781,7 @@ async fn validate_21_to_25_query_grouped_and_advanced() {
     // 24: Max territory revenue
     println!("  Running Test24: MaxTerritoryRev...");
     compare_grand_total(
-        &engine, &pool, "MaxTerritoryRev",
+        &mut engine, &pool, "MaxTerritoryRev",
         r#"SELECT MAX(terr_rev) FROM (SELECT t.territoryname, SUM(f.linetotal) AS terr_rev FROM "BI".fact_sales f JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE t.territoryname IS NOT NULL GROUP BY t.territoryname) sub"#,
         GRAND_TOTAL_TOLERANCE, "Test24: MaxTerritoryRev",
     ).await;
@@ -790,7 +790,7 @@ async fn validate_21_to_25_query_grouped_and_advanced() {
     // 25: Yearly qty for 2014 via KEEP on intermediate
     println!("  Running Test25: Qty2014FromYearly...");
     compare_grand_total(
-        &engine, &pool, "Qty2014FromYearly",
+        &mut engine, &pool, "Qty2014FromYearly",
         r#"SELECT SUM(total_qty) FROM (SELECT d.year, SUM(f.orderqty::numeric) AS total_qty FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.year) sub WHERE sub.year = 2014"#,
         GRAND_TOTAL_TOLERANCE, "Test25: Qty2014FromYearly",
     ).await;
@@ -838,14 +838,14 @@ async fn validate_26_to_30_cross_dimension_group_by() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 26: AvgMonthlyRevByCat BY categoryname
     // SQL equivalent: for each category, compute monthly SUM then AVG over months
     println!("  Running Test26: AvgMonthlyRevByCat BY category...");
     compare_grouped(
-        &engine, &pool, "AvgMonthlyRevByCat", "dim_product", "categoryname",
+        &mut engine, &pool, "AvgMonthlyRevByCat", "dim_product", "categoryname",
         r#"SELECT sub.categoryname, AVG(sub.revenue) FROM (SELECT p.categoryname, d.year, d.month, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL GROUP BY p.categoryname, d.year, d.month) sub GROUP BY sub.categoryname ORDER BY sub.categoryname"#,
         GROUPED_TOLERANCE, "Test26: AvgMonthlyRevByCat BY category",
     ).await;
@@ -854,7 +854,7 @@ async fn validate_26_to_30_cross_dimension_group_by() {
     // 27: MaxMonthlyRevByCountry BY country
     println!("  Running Test27: MaxMonthlyRevByCountry BY country...");
     compare_grouped(
-        &engine, &pool, "MaxMonthlyRevByCountry", "dim_customer", "country",
+        &mut engine, &pool, "MaxMonthlyRevByCountry", "dim_customer", "country",
         r#"SELECT sub.country, MAX(sub.revenue) FROM (SELECT c.country, d.year, d.month, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_customer c ON f.customerid = c.customerid WHERE c.country IS NOT NULL GROUP BY c.country, d.year, d.month) sub GROUP BY sub.country ORDER BY sub.country"#,
         GROUPED_TOLERANCE, "Test27: MaxMonthlyRevByCountry BY country",
     ).await;
@@ -863,7 +863,7 @@ async fn validate_26_to_30_cross_dimension_group_by() {
     // 28: AvgYearlyRevByCat BY categoryname
     println!("  Running Test28: AvgYearlyRevByCat BY category...");
     compare_grouped(
-        &engine, &pool, "AvgYearlyRevByCat", "dim_product", "categoryname",
+        &mut engine, &pool, "AvgYearlyRevByCat", "dim_product", "categoryname",
         r#"SELECT sub.categoryname, AVG(sub.revenue) FROM (SELECT p.categoryname, d.year, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL GROUP BY p.categoryname, d.year) sub GROUP BY sub.categoryname ORDER BY sub.categoryname"#,
         GROUPED_TOLERANCE, "Test28: AvgYearlyRevByCat BY category",
     ).await;
@@ -872,7 +872,7 @@ async fn validate_26_to_30_cross_dimension_group_by() {
     // 29: MonthCountByTerrGroup BY territorygroup
     println!("  Running Test29: MonthCountByTerrGroup BY territorygroup...");
     compare_grouped(
-        &engine, &pool, "MonthCountByTerrGroup", "dim_territory", "territorygroup",
+        &mut engine, &pool, "MonthCountByTerrGroup", "dim_territory", "territorygroup",
         r#"SELECT sub.territorygroup, COUNT(*)::numeric FROM (SELECT t.territorygroup, d.year, d.month, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE t.territorygroup IS NOT NULL GROUP BY t.territorygroup, d.year, d.month) sub GROUP BY sub.territorygroup ORDER BY sub.territorygroup"#,
         GROUPED_TOLERANCE, "Test29: MonthCountByTerrGroup BY territorygroup",
     ).await;
@@ -881,7 +881,7 @@ async fn validate_26_to_30_cross_dimension_group_by() {
     // 30: AvgQtrRevByCat BY categoryname
     println!("  Running Test30: AvgQtrRevByCat BY category...");
     compare_grouped(
-        &engine, &pool, "AvgQtrRevByCat", "dim_product", "categoryname",
+        &mut engine, &pool, "AvgQtrRevByCat", "dim_product", "categoryname",
         r#"SELECT sub.categoryname, AVG(sub.revenue) FROM (SELECT p.categoryname, d.year, d.quarter, SUM(f.linetotal) AS revenue FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL GROUP BY p.categoryname, d.year, d.quarter) sub GROUP BY sub.categoryname ORDER BY sub.categoryname"#,
         GROUPED_TOLERANCE, "Test30: AvgQtrRevByCat BY category",
     ).await;

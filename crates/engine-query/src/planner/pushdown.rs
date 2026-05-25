@@ -75,6 +75,18 @@ impl PushdownPlanner {
         model: &DataModel,
         registry: &SourceRegistry,
     ) -> QueryResult<QueryPlan> {
+        Self::plan_with_cached(request, model, registry, &std::collections::HashSet::new())
+    }
+
+    /// Analyze a query request and produce a plan, treating tables in
+    /// `cached_tables` as locally cached (same as in-memory tables for
+    /// pushdown decisions).
+    pub fn plan_with_cached(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+        cached_tables: &std::collections::HashSet<String>,
+    ) -> QueryResult<QueryPlan> {
         if request.measures.is_empty() {
             return Err(QueryError::InvalidQuery(
                 "at least one measure is required".into(),
@@ -162,10 +174,11 @@ impl PushdownPlanner {
         // Resolve lookup columns (if any).
         let lookup_specs = resolve_lookups(&request.lookups, &request.group_by, model)?;
 
-        // In-memory tables are already local — never push aggregates to a source.
-        let any_in_memory = all_tables
-            .iter()
-            .any(|t| model.table(t).is_ok_and(|tbl| tbl.is_in_memory()));
+        // In-memory or auto-tiered tables are already local — never push aggregates to a source.
+        let any_in_memory = all_tables.iter().any(|t| {
+            model.table(t).is_ok_and(|tbl| tbl.is_in_memory())
+                || cached_tables.contains(*t)
+        });
 
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
         let all_pushable = measures.iter().all(|m| {

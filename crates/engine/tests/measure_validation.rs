@@ -199,7 +199,7 @@ async fn make_pool() -> sqlx::PgPool {
 
 /// Compare a single engine grand-total result against a SQL scalar.
 async fn compare_grand_total(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     sql: &str,
@@ -231,7 +231,7 @@ async fn compare_grand_total(
 /// Compare engine grouped results against SQL grouped results.
 /// Skips NULL group keys from both sides.
 async fn compare_grouped(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     group_table: &str,
@@ -449,7 +449,7 @@ async fn validate_measures_01_to_10_basic_aggregates() {
         ("MaxOrderQty", "MAX(fact_sales[orderqty])"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // NOTE: MIN/MAX on Decimal columns lose fractional parts due to DataFusion
@@ -497,7 +497,7 @@ async fn validate_measures_01_to_10_basic_aggregates() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 1, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -526,7 +526,7 @@ async fn validate_measures_11_to_15_arithmetic() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -555,7 +555,7 @@ async fn validate_measures_11_to_15_arithmetic() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 11, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, ARITHMETIC_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, ARITHMETIC_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -574,7 +574,7 @@ async fn validate_measures_16_to_22_grouped_by_category() {
         ("MinOrderQty", "MIN(fact_sales[orderqty])"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // SQL excludes NULL categories to match engine's non-null group keys
@@ -613,7 +613,7 @@ async fn validate_measures_16_to_22_grouped_by_category() {
         let label = format!("Test{}: {} BY category", i + 16, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_product",
@@ -642,7 +642,7 @@ async fn validate_measures_23_to_27_grouped_by_country() {
         ("DistinctProducts", "DISTINCTCOUNT(fact_sales[productid])"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -672,7 +672,7 @@ async fn validate_measures_23_to_27_grouped_by_country() {
         let label = format!("Test{}: {} BY country", i + 23, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_customer",
@@ -698,7 +698,7 @@ async fn validate_measures_28_to_32_grouped_by_year() {
         ("MaxLineTotal", "MAX(fact_sales[linetotal])"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -728,7 +728,7 @@ async fn validate_measures_28_to_32_grouped_by_year() {
         let label = format!("Test{}: {} BY year", i + 28, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_date",
@@ -769,7 +769,7 @@ async fn validate_measures_33_to_37_keep_context() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -798,7 +798,7 @@ async fn validate_measures_33_to_37_keep_context() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 33, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -830,13 +830,13 @@ async fn validate_measures_38_to_42_keep_context_grouped() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 38: Revenue2014 grouped by category
     println!("  Running Test38: Revenue2014 BY category...");
     compare_grouped(
-        &engine, &pool, "Revenue2014", "dim_product", "categoryname",
+        &mut engine, &pool, "Revenue2014", "dim_product", "categoryname",
         r#"SELECT p.categoryname, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE d.year = 2014 AND p.categoryname IS NOT NULL GROUP BY p.categoryname ORDER BY p.categoryname"#,
         GROUPED_TOLERANCE, "Test38: Revenue2014 BY category",
     ).await;
@@ -845,7 +845,7 @@ async fn validate_measures_38_to_42_keep_context_grouped() {
     // 39: Revenue2013 grouped by category
     println!("  Running Test39: Revenue2013 BY category...");
     compare_grouped(
-        &engine, &pool, "Revenue2013", "dim_product", "categoryname",
+        &mut engine, &pool, "Revenue2013", "dim_product", "categoryname",
         r#"SELECT p.categoryname, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE d.year = 2013 AND p.categoryname IS NOT NULL GROUP BY p.categoryname ORDER BY p.categoryname"#,
         GROUPED_TOLERANCE, "Test39: Revenue2013 BY category",
     ).await;
@@ -854,7 +854,7 @@ async fn validate_measures_38_to_42_keep_context_grouped() {
     // 40: BikesRevenue grouped by year
     println!("  Running Test40: BikesRevenue BY year...");
     compare_grouped(
-        &engine, &pool, "BikesRevenue", "dim_date", "year",
+        &mut engine, &pool, "BikesRevenue", "dim_date", "year",
         r#"SELECT d.year, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE p.categoryname = 'Bikes' GROUP BY d.year ORDER BY d.year"#,
         GROUPED_TOLERANCE, "Test40: BikesRevenue BY year",
     ).await;
@@ -863,7 +863,7 @@ async fn validate_measures_38_to_42_keep_context_grouped() {
     // 41: AccessoriesRevenue grouped by country
     println!("  Running Test41: AccessoriesRevenue BY country...");
     compare_grouped(
-        &engine, &pool, "AccessoriesRevenue", "dim_customer", "country",
+        &mut engine, &pool, "AccessoriesRevenue", "dim_customer", "country",
         r#"SELECT c.country, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid JOIN "BI".dim_customer c ON f.customerid = c.customerid WHERE p.categoryname = 'Accessories' AND c.country IS NOT NULL GROUP BY c.country ORDER BY c.country"#,
         GROUPED_TOLERANCE, "Test41: AccessoriesRevenue BY country",
     ).await;
@@ -872,7 +872,7 @@ async fn validate_measures_38_to_42_keep_context_grouped() {
     // 42: USRevenue grouped by year
     println!("  Running Test42: USRevenue BY year...");
     compare_grouped(
-        &engine, &pool, "USRevenue", "dim_date", "year",
+        &mut engine, &pool, "USRevenue", "dim_date", "year",
         r#"SELECT d.year, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_customer c ON f.customerid = c.customerid JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE c.country = 'United States' GROUP BY d.year ORDER BY d.year"#,
         GROUPED_TOLERANCE, "Test42: USRevenue BY year",
     ).await;
@@ -891,13 +891,13 @@ async fn validate_measures_43_to_47_more_dimensions() {
         ("DistinctProducts", "DISTINCTCOUNT(fact_sales[productid])"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 43: Revenue BY territory group
     println!("  Running Test43: Revenue BY territorygroup...");
     compare_grouped(
-        &engine, &pool, "Revenue", "dim_territory", "territorygroup",
+        &mut engine, &pool, "Revenue", "dim_territory", "territorygroup",
         r#"SELECT t.territorygroup, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#,
         GROUPED_TOLERANCE, "Test43: Revenue BY territorygroup",
     ).await;
@@ -906,7 +906,7 @@ async fn validate_measures_43_to_47_more_dimensions() {
     // 44: TotalQty BY territory group
     println!("  Running Test44: TotalQty BY territorygroup...");
     compare_grouped(
-        &engine, &pool, "TotalQty", "dim_territory", "territorygroup",
+        &mut engine, &pool, "TotalQty", "dim_territory", "territorygroup",
         r#"SELECT t.territorygroup, SUM(f.orderqty::numeric) FROM "BI".fact_sales f JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#,
         GROUPED_TOLERANCE, "Test44: TotalQty BY territorygroup",
     ).await;
@@ -915,7 +915,7 @@ async fn validate_measures_43_to_47_more_dimensions() {
     // 45: Revenue BY color (fewer groups, no NULL issues)
     println!("  Running Test45: Revenue BY color...");
     compare_grouped(
-        &engine, &pool, "Revenue", "dim_product", "color",
+        &mut engine, &pool, "Revenue", "dim_product", "color",
         r#"SELECT p.color, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.color IS NOT NULL GROUP BY p.color ORDER BY p.color"#,
         GROUPED_TOLERANCE, "Test45: Revenue BY color",
     ).await;
@@ -924,7 +924,7 @@ async fn validate_measures_43_to_47_more_dimensions() {
     // 46: OrderCount BY quarter
     println!("  Running Test46: OrderCount BY quarter...");
     compare_grouped(
-        &engine, &pool, "OrderCount", "dim_date", "quarter",
+        &mut engine, &pool, "OrderCount", "dim_date", "quarter",
         r#"SELECT d.quarter, COUNT(f.salesorderdetailid)::numeric FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey GROUP BY d.quarter ORDER BY d.quarter"#,
         GROUPED_TOLERANCE, "Test46: OrderCount BY quarter",
     ).await;
@@ -933,7 +933,7 @@ async fn validate_measures_43_to_47_more_dimensions() {
     // 47: DistinctProducts BY territoryname
     println!("  Running Test47: DistinctProducts BY territoryname...");
     compare_grouped(
-        &engine, &pool, "DistinctProducts", "dim_territory", "territoryname",
+        &mut engine, &pool, "DistinctProducts", "dim_territory", "territoryname",
         r#"SELECT t.territoryname, COUNT(DISTINCT f.productid)::numeric FROM "BI".fact_sales f JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE t.territoryname IS NOT NULL GROUP BY t.territoryname ORDER BY t.territoryname"#,
         GROUPED_TOLERANCE, "Test47: DistinctProducts BY territoryname",
     ).await;
@@ -959,13 +959,13 @@ async fn validate_measures_48_to_50_advanced() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // 48: Q1Revenue (quarter = 1) - grand total
     println!("  Running Test48: Q1Revenue...");
     compare_grand_total(
-        &engine, &pool, "Q1Revenue",
+        &mut engine, &pool, "Q1Revenue",
         r#"SELECT SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE d.quarter = 1"#,
         GRAND_TOTAL_TOLERANCE, "Test48: Q1Revenue",
     ).await;
@@ -974,7 +974,7 @@ async fn validate_measures_48_to_50_advanced() {
     // 49: Q4Revenue (quarter = 4) - grand total
     println!("  Running Test49: Q4Revenue...");
     compare_grand_total(
-        &engine, &pool, "Q4Revenue",
+        &mut engine, &pool, "Q4Revenue",
         r#"SELECT SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE d.quarter = 4"#,
         GRAND_TOTAL_TOLERANCE, "Test49: Q4Revenue",
     ).await;
@@ -983,7 +983,7 @@ async fn validate_measures_48_to_50_advanced() {
     // 50: Revenue2014 grouped by territory group (KEEP on date, grouped by territory)
     println!("  Running Test50: Revenue2014 BY territorygroup...");
     compare_grouped(
-        &engine, &pool, "Revenue2014", "dim_territory", "territorygroup",
+        &mut engine, &pool, "Revenue2014", "dim_territory", "territorygroup",
         r#"SELECT t.territorygroup, SUM(f.linetotal) FROM "BI".fact_sales f JOIN "BI".dim_territory t ON f.territoryid = t.territoryid JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE d.year = 2014 AND t.territorygroup IS NOT NULL GROUP BY t.territorygroup ORDER BY t.territorygroup"#,
         GROUPED_TOLERANCE, "Test50: Revenue2014 BY territorygroup",
     ).await;

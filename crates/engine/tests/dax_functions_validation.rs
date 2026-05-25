@@ -190,7 +190,7 @@ async fn make_pool() -> sqlx::PgPool {
 // ---------------------------------------------------------------------------
 
 async fn compare_grand_total(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     sql: &str,
@@ -220,7 +220,7 @@ async fn compare_grand_total(
 }
 
 async fn compare_grouped(
-    engine: &Engine,
+    engine: &mut Engine,
     pool: &sqlx::PgPool,
     measure_name: &str,
     group_table: &str,
@@ -455,7 +455,7 @@ async fn validate_dax_01_to_05_divide_grand_totals() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -484,7 +484,7 @@ async fn validate_dax_01_to_05_divide_grand_totals() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 1, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -516,7 +516,7 @@ async fn validate_dax_06_to_10_divide_grouped() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let base_join = r#"FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL"#;
@@ -533,7 +533,7 @@ async fn validate_dax_06_to_10_divide_grouped() {
         let label = format!("Test{}: {} BY category", i + 6, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_product",
@@ -571,7 +571,7 @@ async fn validate_dax_11_to_15_countrows() {
         ),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     // Grand total tests
@@ -597,7 +597,7 @@ async fn validate_dax_11_to_15_countrows() {
     for (i, (measure, sql)) in grand_cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 11, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 
@@ -605,7 +605,7 @@ async fn validate_dax_11_to_15_countrows() {
     let label = "Test15: RowCount BY country";
     println!("  Running {label}...");
     compare_grouped(
-        &engine, &pool, "RowCount", "dim_customer", "country",
+        &mut engine, &pool, "RowCount", "dim_customer", "country",
         r#"SELECT c.country, COUNT(*)::numeric FROM "BI".fact_sales f JOIN "BI".dim_customer c ON f.customerid = c.customerid WHERE c.country IS NOT NULL GROUP BY c.country ORDER BY c.country"#,
         GROUPED_TOLERANCE, label,
     ).await;
@@ -633,7 +633,7 @@ async fn validate_dax_16_to_20_coalesce() {
         ("SafeRatio", "COALESCE(DIVIDE(SUM(fact_sales[orderqty]), SUM(fact_sales[linetotal])), 0)"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -662,7 +662,7 @@ async fn validate_dax_16_to_20_coalesce() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 16, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -694,7 +694,7 @@ async fn validate_dax_21_to_25_scalar_math() {
         ("SqrtCount", "SQRT(COUNT(fact_sales[salesorderdetailid]))"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -723,7 +723,7 @@ async fn validate_dax_21_to_25_scalar_math() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 21, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -749,7 +749,7 @@ async fn validate_dax_26_to_30_more_math() {
         ("RoundSqrt", "ROUND(SQRT(SUM(fact_sales[orderqty])), 2)"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -778,7 +778,7 @@ async fn validate_dax_26_to_30_more_math() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 26, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -802,7 +802,7 @@ async fn validate_dax_31_to_35_math_grouped() {
         ("IntRevenue", "INT(SUM(fact_sales[linetotal]))"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let base_join = r#"FROM "BI".fact_sales f JOIN "BI".dim_territory t ON f.territoryid = t.territoryid WHERE t.territorygroup IS NOT NULL"#;
@@ -819,7 +819,7 @@ async fn validate_dax_31_to_35_math_grouped() {
         let label = format!("Test{}: {} BY territorygroup", i + 31, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_territory",
@@ -849,7 +849,7 @@ async fn validate_dax_36_to_40_divide_coalesce_grouped() {
         ("DivideRoundByYear", "ROUND(DIVIDE(SUM(fact_sales[linetotal]), COUNTROWS(fact_sales)), 2)"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let base_join = r#"FROM "BI".fact_sales f JOIN "BI".dim_date d ON f.orderdate = d.datekey WHERE d.year IS NOT NULL"#;
@@ -866,7 +866,7 @@ async fn validate_dax_36_to_40_divide_coalesce_grouped() {
         let label = format!("Test{}: {} BY year", i + 36, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_date",
@@ -901,7 +901,7 @@ async fn validate_dax_41_to_45_nested_combinations() {
         ("SqrtAbsDiff", "SQRT(ABS(SUM(fact_sales[linetotal]) - SUM(fact_sales[orderqty])))"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let cases: Vec<(&str, &str)> = vec![
@@ -930,7 +930,7 @@ async fn validate_dax_41_to_45_nested_combinations() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 41, measure);
         println!("  Running {label}...");
-        compare_grand_total(&engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
         println!("  {label} OK");
     }
 }
@@ -956,7 +956,7 @@ async fn validate_dax_46_to_50_nested_grouped() {
         ("CRAvg", "DIVIDE(SUM(fact_sales[linetotal]), COUNTROWS(fact_sales))"),
     ];
 
-    let engine = setup_engine(measures).await;
+    let mut engine = setup_engine(measures).await;
     let pool = make_pool().await;
 
     let base_join = r#"FROM "BI".fact_sales f JOIN "BI".dim_product p ON f.productid = p.productid WHERE p.categoryname IS NOT NULL"#;
@@ -973,7 +973,7 @@ async fn validate_dax_46_to_50_nested_grouped() {
         let label = format!("Test{}: {} BY category", i + 46, measure);
         println!("  Running {label}...");
         compare_grouped(
-            &engine,
+            &mut engine,
             &pool,
             measure,
             "dim_product",

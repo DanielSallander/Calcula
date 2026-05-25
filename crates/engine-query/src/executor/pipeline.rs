@@ -133,7 +133,8 @@ impl QueryExecutor {
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             let is_in_memory = model.table(table_name).is_ok_and(|t| t.is_in_memory());
-            if is_in_memory {
+            let is_cached = cache.is_some_and(|c| c.contains(table_name));
+            if is_in_memory || is_cached {
                 let batch = cache.and_then(|c| c.get(table_name)).ok_or_else(|| {
                     crate::error::QueryError::Engine(EngineError::TableNotCached(
                         table_name.clone(),
@@ -388,7 +389,8 @@ impl QueryExecutor {
         // Build fetch plan nodes if collecting plan data.
         if let Some(ref mut plan_node) = plan.as_deref_mut() {
             for (table_name, _, row_count, elapsed) in &all_fetch_results {
-                let is_cached = model.table(table_name).is_ok_and(|t| t.is_in_memory());
+                let is_cached = model.table(table_name).is_ok_and(|t| t.is_in_memory())
+                    || cache.is_some_and(|c| c.contains(table_name));
                 let label = if is_cached {
                     format!("Cache: {table_name}")
                 } else {
