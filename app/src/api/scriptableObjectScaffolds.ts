@@ -275,6 +275,64 @@ function setup(timeline) {
 }
 `;
 
+    case "shape":
+      return `// Shape: "${name}"
+// Access level: restricted (unlock full API via access level setting)
+//
+// This script runs when the shape is mounted.
+// Use it to customize rendering, add interactivity, and declare custom properties.
+
+function setup(shape) {
+  // == Events ==
+  // shape.onClick(({ x, y }) => {
+  //   shape.log("Shape clicked at:", x, y);
+  // });
+
+  // shape.onResize(({ width, height }) => {
+  //   shape.log("Shape resized:", width, "x", height);
+  // });
+
+  // shape.onPropertyChange(({ key, oldValue, newValue }) => {
+  //   shape.log("Property changed:", key, oldValue, "->", newValue);
+  // });
+
+  // == Property Access ==
+  // const fill = shape.getProperty("fill");
+  // shape.setProperty("fill", "#ff0000");
+
+  // == Custom Canvas Rendering ==
+  // shape.render.canvasRenderer((ctx, bounds) => {
+  //   ctx.fillStyle = shape.getProperty("fill") || "#4472C4";
+  //   ctx.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+  //   ctx.fillStyle = "#fff";
+  //   ctx.font = "14px sans-serif";
+  //   ctx.textAlign = "center";
+  //   ctx.fillText("Custom!", bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  // });
+
+  // == HTML Rendering ==
+  // shape.render.setHtmlContent(\`
+  //   <div style="padding: 12px; font-family: sans-serif; height: 100%; box-sizing: border-box;">
+  //     <h3 style="margin: 0 0 8px 0;">My Widget</h3>
+  //     <p style="margin: 0; color: #666;">Custom HTML content inside a shape</p>
+  //   </div>
+  // \`);
+
+  // == Declare Custom Properties (appear in Properties pane) ==
+  // shape.render.declareProperties([
+  //   { key: "dataSource", label: "Data Source", type: "text", defaultValue: "" },
+  //   { key: "refreshInterval", label: "Refresh (sec)", type: "number", defaultValue: "30" },
+  //   { key: "accentColor", label: "Accent Color", type: "color", defaultValue: "#0078d4" },
+  // ]);
+
+  // == Expose Custom Methods (callable from other scripts) ==
+  // shape.expose("refresh", () => {
+  //   shape.log("Refreshing shape data...");
+  //   shape.notify("Shape refreshed!", "success");
+  // });
+}
+`;
+
     default:
       return `// ${name} Script
 // Access level: restricted
@@ -371,6 +429,34 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
           methods: [
             { name: "style.itemRenderer", signature: "style.itemRenderer(renderer)", description: "Custom item rendering" },
             { name: "style.setProperty", signature: "style.setProperty(name, value)", description: "Set CSS property" },
+          ],
+        },
+      ];
+
+    case "shape":
+      return [
+        common,
+        {
+          category: "Events",
+          methods: [
+            { name: "onClick", signature: "onClick(handler)", description: "Called when shape is clicked" },
+            { name: "onResize", signature: "onResize(handler)", description: "Called when shape is resized" },
+            { name: "onPropertyChange", signature: "onPropertyChange(handler)", description: "Called when a property changes" },
+          ],
+        },
+        {
+          category: "Properties",
+          methods: [
+            { name: "getProperty", signature: "getProperty(key)", description: "Get a property value by key" },
+            { name: "setProperty", signature: "setProperty(key, value)", description: "Set a property value" },
+          ],
+        },
+        {
+          category: "Rendering",
+          methods: [
+            { name: "render.setHtmlContent", signature: "render.setHtmlContent(html)", description: "Replace canvas rendering with HTML overlay" },
+            { name: "render.canvasRenderer", signature: "render.canvasRenderer(fn)", description: "Provide a custom canvas render function" },
+            { name: "render.declareProperties", signature: "render.declareProperties(props)", description: "Declare custom properties for the Properties pane" },
           ],
         },
       ];

@@ -7,6 +7,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import type { ControlPropertyValue, PropertyDefinition } from "../lib/types";
 import { FormulaPropertyInput } from "./FormulaPropertyInput";
 import { CodePropertyInput } from "./CodePropertyInput";
+import { ToggleSwitch } from "./ToggleSwitch";
+import { SliderInput } from "./SliderInput";
 
 // ============================================================================
 // Styles
@@ -16,8 +18,12 @@ const rowStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   padding: "5px 12px",
-  borderBottom: "1px solid #f0f0f0",
   gap: 3,
+  transition: "background-color 0.1s",
+};
+
+const rowHoverStyle: React.CSSProperties = {
+  backgroundColor: "#f5f7fa",
 };
 
 const labelRowStyle: React.CSSProperties = {
@@ -44,36 +50,34 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
   boxSizing: "border-box",
   backgroundColor: "#ffffff",
-  transition: "border-color 0.15s",
+  transition: "border-color 0.15s, box-shadow 0.15s",
+};
+
+const inputFocusStyle: React.CSSProperties = {
+  borderColor: "#0078d4",
+  boxShadow: "0 0 0 1px rgba(0,120,212,0.3)",
 };
 
 const colorInputContainerStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 4,
+  gap: 6,
 };
 
 const colorSwatchStyle: React.CSSProperties = {
-  width: 22,
-  height: 22,
+  width: 24,
+  height: 24,
   border: "1px solid #ccc",
-  borderRadius: 3,
+  borderRadius: 4,
   cursor: "pointer",
   flexShrink: 0,
+  padding: 0,
 };
 
 const scriptSelectStyle: React.CSSProperties = {
   ...inputStyle,
   cursor: "pointer",
   backgroundColor: "#ffffff",
-};
-
-const checkboxContainerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  fontSize: 12,
-  cursor: "pointer",
 };
 
 // ============================================================================
@@ -95,9 +99,9 @@ function toDisplayValue(val: ControlPropertyValue | undefined, defaultValue: str
 
 /**
  * Determine valueType and stored value from the user's display input.
- * - "'..." → static, value = rest after "'"
- * - "=..." → formula
- * - anything else → static
+ * - "'..." -> static, value = rest after "'"
+ * - "=..." -> formula
+ * - anything else -> static
  */
 function fromDisplayValue(
   displayValue: string,
@@ -135,6 +139,8 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
 }) => {
   const displayValue = toDisplayValue(value, definition.defaultValue);
   const [localValue, setLocalValue] = useState(displayValue);
+  const [hovered, setHovered] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
 
   // Sync local state when external value changes
   useEffect(() => {
@@ -162,6 +168,7 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   );
 
   const handleInputBlur = useCallback(() => {
+    setInputFocused(false);
     handleCommit(localValue);
   }, [localValue, handleCommit]);
 
@@ -182,6 +189,24 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
     // that auto-activates autocomplete and Point mode when value starts with "=".
     if (definition.supportsFormula) {
       const isFormulaLike = localValue.startsWith("=") || localValue.startsWith("'");
+
+      // Slider for number properties with min/max when not in formula mode
+      if (definition.inputType === "number" && definition.min !== undefined && definition.max !== undefined && !isFormulaLike) {
+        return (
+          <SliderInput
+            value={parseFloat(localValue) || 0}
+            min={definition.min}
+            max={definition.max}
+            step={definition.step ?? 1}
+            onChange={(v) => setLocalValue(String(v))}
+            onCommit={(v) => {
+              const s = String(v);
+              setLocalValue(s);
+              handleCommit(s);
+            }}
+          />
+        );
+      }
 
       // Color properties: show the color swatch alongside when not in formula mode
       if (definition.inputType === "color" && !isFormulaLike) {
@@ -240,10 +265,15 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
             />
             <input
               type="text"
-              style={{ ...inputStyle, flex: 1 }}
+              style={{
+                ...inputStyle,
+                flex: 1,
+                ...(inputFocused ? inputFocusStyle : {}),
+              }}
               value={localValue}
               onChange={handleInputChange}
               onBlur={handleInputBlur}
+              onFocus={() => setInputFocused(true)}
               onKeyDown={handleKeyDown}
               placeholder="#000000"
             />
@@ -251,33 +281,49 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
         );
 
       case "number":
+        // Use slider when min/max are defined
+        if (definition.min !== undefined && definition.max !== undefined) {
+          return (
+            <SliderInput
+              value={parseFloat(localValue) || 0}
+              min={definition.min}
+              max={definition.max}
+              step={definition.step ?? 1}
+              onChange={(v) => setLocalValue(String(v))}
+              onCommit={(v) => {
+                const s = String(v);
+                setLocalValue(s);
+                handleCommit(s);
+              }}
+            />
+          );
+        }
         return (
           <input
             type="number"
-            style={inputStyle}
+            style={{
+              ...inputStyle,
+              ...(inputFocused ? inputFocusStyle : {}),
+            }}
             value={localValue}
             onChange={handleInputChange}
             onBlur={handleInputBlur}
+            onFocus={() => setInputFocused(true)}
             onKeyDown={handleKeyDown}
-            min={1}
-            max={72}
           />
         );
 
       case "boolean":
         return (
-          <label style={checkboxContainerStyle}>
-            <input
-              type="checkbox"
-              checked={localValue === "true"}
-              onChange={(e) => {
-                const newVal = e.target.checked ? "true" : "false";
-                setLocalValue(newVal);
-                onChange(definition.key, "static", newVal);
-              }}
-            />
-            {localValue === "true" ? "Yes" : "No"}
-          </label>
+          <ToggleSwitch
+            checked={localValue === "true"}
+            onChange={(checked) => {
+              const newVal = checked ? "true" : "false";
+              setLocalValue(newVal);
+              onChange(definition.key, "static", newVal);
+            }}
+            label={localValue === "true" ? "Yes" : "No"}
+          />
         );
 
       case "code":
@@ -317,10 +363,14 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
         return (
           <input
             type="text"
-            style={inputStyle}
+            style={{
+              ...inputStyle,
+              ...(inputFocused ? inputFocusStyle : {}),
+            }}
             value={localValue}
             onChange={handleInputChange}
             onBlur={handleInputBlur}
+            onFocus={() => setInputFocused(true)}
             onKeyDown={handleKeyDown}
           />
         );
@@ -328,7 +378,11 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   };
 
   return (
-    <div style={rowStyle}>
+    <div
+      style={{ ...rowStyle, ...(hovered ? rowHoverStyle : {}) }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       <div style={labelRowStyle}>
         <span style={labelStyle}>{definition.label}</span>
       </div>

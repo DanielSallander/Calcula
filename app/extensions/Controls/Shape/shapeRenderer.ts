@@ -48,6 +48,126 @@ const pendingFetches = new Set<string>();
  */
 const staleEntries = new Set<string>();
 
+// ============================================================================
+// Custom Renderers (from shape scripts)
+// ============================================================================
+
+type CustomCanvasRenderer = (ctx: CanvasRenderingContext2D, bounds: { x: number; y: number; width: number; height: number }) => void;
+
+/** Map of controlId -> custom canvas renderer provided by a shape script. */
+const customCanvasRenderers = new Map<string, CustomCanvasRenderer>();
+
+/** Map of controlId -> HTML content string provided by a shape script. */
+const customHtmlContent = new Map<string, string>();
+
+/** Map of controlId -> DOM overlay element for HTML-rendered shapes. */
+const htmlOverlayElements = new Map<string, HTMLDivElement>();
+
+/** Register a custom canvas renderer for a shape. */
+export function setCustomCanvasRenderer(instanceId: string, renderer: CustomCanvasRenderer): void {
+  customCanvasRenderers.set(instanceId, renderer);
+}
+
+/** Remove a custom canvas renderer for a shape. */
+export function removeCustomCanvasRenderer(instanceId: string): void {
+  customCanvasRenderers.delete(instanceId);
+}
+
+/** Set HTML content for a shape (will skip canvas rendering). */
+export function setShapeHtmlContent(instanceId: string, html: string): void {
+  customHtmlContent.set(instanceId, html);
+  // Update existing overlay element if present
+  const el = htmlOverlayElements.get(instanceId);
+  if (el) {
+    el.innerHTML = html;
+  }
+}
+
+/** Get HTML content for a shape. */
+export function getShapeHtmlContent(instanceId: string): string | undefined {
+  return customHtmlContent.get(instanceId);
+}
+
+/** Check if a shape has custom HTML content. */
+export function hasShapeHtmlContent(instanceId: string): boolean {
+  return customHtmlContent.has(instanceId);
+}
+
+/** Remove the HTML overlay DOM element for a shape (cleanup on deletion). */
+export function removeShapeHtmlOverlay(instanceId: string): void {
+  const el = htmlOverlayElements.get(instanceId);
+  if (el) {
+    el.remove();
+    htmlOverlayElements.delete(instanceId);
+  }
+  customHtmlContent.delete(instanceId);
+}
+
+/**
+ * Create or update the positioned HTML overlay element for a shape.
+ * Called from the render loop with current viewport info.
+ */
+function updateHtmlOverlay(
+  controlId: string,
+  html: string,
+  canvasX: number,
+  canvasY: number,
+  width: number,
+  height: number,
+  rowHeaderWidth: number,
+  colHeaderHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  canvasParent: HTMLElement,
+): void {
+  let el = htmlOverlayElements.get(controlId);
+
+  // Create element if it doesn't exist
+  if (!el) {
+    el = document.createElement("div");
+    el.dataset.shapeOverlay = controlId;
+    el.style.position = "absolute";
+    el.style.overflow = "hidden";
+    el.style.boxSizing = "border-box";
+    el.style.pointerEvents = "none";
+    el.style.zIndex = "5";
+    el.style.fontFamily = "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
+    el.style.fontSize = "12px";
+    el.innerHTML = html;
+    canvasParent.appendChild(el);
+    htmlOverlayElements.set(controlId, el);
+  }
+
+  // Check visibility: hide if off-screen or behind headers
+  const endX = canvasX + width;
+  const endY = canvasY + height;
+  const isVisible = endX > rowHeaderWidth && endY > colHeaderHeight &&
+                    canvasX < canvasWidth && canvasY < canvasHeight;
+
+  if (!isVisible) {
+    el.style.display = "none";
+    return;
+  }
+
+  el.style.display = "block";
+
+  // Clip to visible area (don't overlap headers)
+  const clippedLeft = Math.max(canvasX, rowHeaderWidth);
+  const clippedTop = Math.max(canvasY, colHeaderHeight);
+  const clippedRight = Math.min(endX, canvasWidth);
+  const clippedBottom = Math.min(endY, canvasHeight);
+
+  el.style.left = `${clippedLeft}px`;
+  el.style.top = `${clippedTop}px`;
+  el.style.width = `${clippedRight - clippedLeft}px`;
+  el.style.height = `${clippedBottom - clippedTop}px`;
+
+  // Update content if changed
+  if (el.innerHTML !== html) {
+    el.innerHTML = html;
+  }
+}
+
 /** Invalidate cached data for a specific shape control. */
 export function invalidateShapeCache(controlId: string): void {
   staleEntries.add(controlId);
@@ -60,6 +180,34 @@ export function invalidateAllShapeCaches(): void {
     staleEntries.add(key);
   }
   pendingFetches.clear();
+}
+
+// ============================================================================
+// Selection Indicator Helper
+// ============================================================================
+
+/**
+ * Draw selection border and resize handles for a shape control.
+ * Used by both default and custom renderers.
+ */
+function drawSelectionIndicators(
+  ctx: CanvasRenderingContext2D,
+  controlId: string,
+  canvasX: number,
+  canvasY: number,
+  shapeWidth: number,
+  shapeHeight: number,
+  _overlayCtx: OverlayRenderContext,
+): void {
+  if (!getDesignMode()) return;
+  const selected = isFloatingControlSelected(controlId);
+  if (!selected) return;
+
+  ctx.strokeStyle = "#0e639c";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.strokeRect(canvasX + 1, canvasY + 1, shapeWidth - 2, shapeHeight - 2);
+  drawResizeHandles(ctx, canvasX, canvasY, shapeWidth, shapeHeight);
 }
 
 // ============================================================================
@@ -185,6 +333,59 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
       flipH: false,
       flipV: false,
     };
+  }
+
+  // Check for custom canvas renderer from shape script
+  const customRenderer = customCanvasRenderers.get(controlId);
+  if (customRenderer) {
+    try {
+      customRenderer(ctx, { x: canvasX, y: canvasY, width: shapeWidth, height: shapeHeight });
+    } catch (err) {
+      console.error("[ShapeRenderer] Custom renderer error:", err);
+    }
+    // Still draw selection indicators if in design mode
+    drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
+    ctx.restore();
+    return;
+  }
+
+  // If shape has HTML content, render via DOM overlay instead of canvas
+  const htmlContent = customHtmlContent.get(controlId);
+  if (htmlContent !== undefined) {
+    const canvasParent = ctx.canvas.parentElement;
+    if (canvasParent) {
+      updateHtmlOverlay(
+        controlId,
+        htmlContent,
+        canvasX,
+        canvasY,
+        shapeWidth,
+        shapeHeight,
+        rowHeaderWidth,
+        colHeaderHeight,
+        overlayCtx.canvasWidth,
+        overlayCtx.canvasHeight,
+        canvasParent,
+      );
+    }
+    // Draw a subtle border on canvas so the shape is still visible in design mode
+    if (getDesignMode()) {
+      ctx.strokeStyle = "#ddd";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeRect(canvasX, canvasY, shapeWidth, shapeHeight);
+      ctx.setLineDash([]);
+    }
+    drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
+    ctx.restore();
+    return;
+  } else {
+    // No HTML content — remove any leftover overlay element
+    const existingOverlay = htmlOverlayElements.get(controlId);
+    if (existingOverlay) {
+      existingOverlay.remove();
+      htmlOverlayElements.delete(controlId);
+    }
   }
 
   const shapeDef = getShapeDefinition(data.shapeType);

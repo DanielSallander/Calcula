@@ -2,7 +2,7 @@
 // PURPOSE: TypeScript type definitions for the Controls extension.
 // CONTEXT: Mirrors Rust controls.rs types for frontend use.
 
-import { SHAPE_PROPERTIES } from "../Shape/shapeProperties";
+import { SHAPE_PROPERTIES, getShapePropertiesWithDeclared } from "../Shape/shapeProperties";
 import { IMAGE_PROPERTIES } from "../Image/imageProperties";
 
 // ============================================================================
@@ -49,6 +49,16 @@ export interface PropertyDefinition {
   defaultValue: string;
   /** Whether this property supports formula mode */
   supportsFormula: boolean;
+  /** Named section group (e.g., "Fill & Outline", "Text") */
+  group?: string;
+  /** Slider minimum (for number inputs) */
+  min?: number;
+  /** Slider maximum */
+  max?: number;
+  /** Slider step increment */
+  step?: number;
+  /** Render side-by-side with next inline property */
+  inline?: boolean;
 }
 
 /** All property definitions for a Button control. */
@@ -59,6 +69,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "text",
     defaultValue: "Button",
     supportsFormula: true,
+    group: "Appearance",
   },
   {
     key: "fill",
@@ -66,6 +77,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "color",
     defaultValue: "#e0e0e0",
     supportsFormula: true,
+    group: "Appearance",
   },
   {
     key: "color",
@@ -73,6 +85,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "color",
     defaultValue: "#000000",
     supportsFormula: true,
+    group: "Appearance",
   },
   {
     key: "borderColor",
@@ -80,6 +93,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "color",
     defaultValue: "#999999",
     supportsFormula: true,
+    group: "Appearance",
   },
   {
     key: "fontSize",
@@ -87,6 +101,10 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "number",
     defaultValue: "11",
     supportsFormula: true,
+    group: "Appearance",
+    min: 6,
+    max: 72,
+    step: 1,
   },
   {
     key: "width",
@@ -94,6 +112,8 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "number",
     defaultValue: "80",
     supportsFormula: true,
+    group: "Size",
+    inline: true,
   },
   {
     key: "height",
@@ -101,6 +121,8 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "number",
     defaultValue: "28",
     supportsFormula: true,
+    group: "Size",
+    inline: true,
   },
   {
     key: "embedded",
@@ -108,6 +130,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "boolean",
     defaultValue: "false",
     supportsFormula: false,
+    group: "Layout",
   },
   {
     key: "onSelect",
@@ -115,6 +138,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "code",
     defaultValue: "",
     supportsFormula: false,
+    group: "Actions",
   },
   {
     key: "tooltip",
@@ -122,16 +146,17 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     inputType: "text",
     defaultValue: "",
     supportsFormula: true,
+    group: "Appearance",
   },
 ];
 
 /** Get property definitions for a given control type. */
-export function getPropertyDefinitions(controlType: string): PropertyDefinition[] {
+export function getPropertyDefinitions(controlType: string, instanceId?: string): PropertyDefinition[] {
   switch (controlType) {
     case "button":
       return BUTTON_PROPERTIES;
     case "shape":
-      return SHAPE_PROPERTIES;
+      return getShapePropertiesWithDeclared(instanceId);
     case "image":
       return IMAGE_PROPERTIES;
     default:

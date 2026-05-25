@@ -29,7 +29,8 @@ export type ScriptableObjectType =
   | "pivot"
   | "button"
   | "textbox"
-  | "timeline";
+  | "timeline"
+  | "shape";
 
 /** Where a script came from — local (user-created) or distributed (from a .calp package). */
 export type ScriptProvenance = "local" | "distributed";
@@ -507,6 +508,66 @@ export interface PivotContext extends BaseObjectContext {
 }
 
 // ============================================================================
+// Shape Context
+// ============================================================================
+
+/** A custom property declared by a shape script via render.declareProperties(). */
+export interface DeclaredProperty {
+  /** Property key for storage */
+  key: string;
+  /** Display label in the Properties pane */
+  label: string;
+  /** Input type */
+  type: "text" | "color" | "number" | "boolean";
+  /** Default value */
+  defaultValue?: string;
+}
+
+/** Rendering bounds passed to custom canvas renderers. */
+export interface ShapeRenderBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Context for Shape control instances. */
+export interface ShapeContext extends BaseObjectContext {
+  readonly objectType: "shape";
+  /** Unique instance ID (e.g., "control-0-195-2") */
+  readonly instanceId: string;
+  /** Shape type identifier (e.g., "rectangle", "snipSingleCorner") */
+  readonly shapeType: string;
+
+  // -- Events --
+
+  /** Called when the shape is clicked. */
+  onClick(handler: EventHandler<{ x: number; y: number }>): CleanupFn;
+  /** Called when the shape is resized. */
+  onResize(handler: EventHandler<{ width: number; height: number }>): CleanupFn;
+  /** Called when a property changes. */
+  onPropertyChange(handler: EventHandler<{ key: string; oldValue: string; newValue: string }>): CleanupFn;
+
+  // -- Property Access --
+
+  /** Get the current resolved value of a shape property. */
+  getProperty(key: string): string;
+  /** Set a shape property value. */
+  setProperty(key: string, value: string): Promise<void>;
+
+  // -- Rendering --
+
+  render: {
+    /** Replace canvas rendering with an HTML overlay. */
+    setHtmlContent(html: string): void;
+    /** Provide a custom canvas render function (replaces default shape path rendering). */
+    canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): CleanupFn;
+    /** Declare custom properties that appear in the Properties pane. */
+    declareProperties(props: DeclaredProperty[]): void;
+  };
+}
+
+// ============================================================================
 // Context Type Map (for generic access)
 // ============================================================================
 
@@ -523,6 +584,7 @@ export interface ObjectContextMap {
   button: BaseObjectContext;
   textbox: BaseObjectContext;
   timeline: BaseObjectContext;
+  shape: ShapeContext;
 }
 
 // ============================================================================
@@ -915,6 +977,8 @@ function buildObjectContext(
       return buildChartContext(base, definition, cleanupFns);
     case "pivot":
       return buildPivotContext(base, definition, cleanupFns);
+    case "shape":
+      return buildShapeContext(base, definition, cleanupFns);
     default:
       return base;
   }
@@ -1397,6 +1461,119 @@ function buildPivotContext(
       if (store) {
         await store.refreshPivot(Number(instanceId));
       }
+    },
+  };
+}
+
+// ---- Shape Context ----
+
+function buildShapeContext(
+  base: BaseObjectContext,
+  definition: ObjectScriptDefinition,
+  cleanupFns: CleanupFn[],
+): ShapeContext {
+  const instanceId = definition.instanceId || "";
+
+  // Cache for resolved properties
+  const propertyCache = new Map<string, string>();
+
+  // Eagerly fetch resolved properties from backend (same pattern as buildWorkbookContext)
+  (async () => {
+    try {
+      // Parse instanceId: "control-{sheet}-{row}-{col}"
+      const parts = instanceId.replace("control-", "").split("-");
+      if (parts.length < 3) return;
+      const sheetIndex = parseInt(parts[0], 10);
+      const row = parseInt(parts[1], 10);
+      const col = parseInt(parts[2], 10);
+      if (isNaN(sheetIndex) || isNaN(row) || isNaN(col)) return;
+
+      const { invokeBackend } = await import("./backend");
+      const resolved = await invokeBackend<Record<string, string>>(
+        "resolve_control_properties",
+        { sheetIndex, row, col },
+      );
+      if (resolved) {
+        for (const [key, value] of Object.entries(resolved)) {
+          propertyCache.set(key, value);
+        }
+      }
+    } catch {
+      // Ignore errors during eager load — properties will be empty until set
+    }
+  })();
+
+  return {
+    ...base,
+    objectType: "shape" as const,
+    instanceId,
+
+    get shapeType(): string {
+      return propertyCache.get("shapeType") || "rectangle";
+    },
+
+    // -- Events --
+
+    onClick(handler) {
+      return tracked(cleanupFns, onAppEvent("shape:clicked", (detail) => {
+        const d = detail as { instanceId: string; x: number; y: number };
+        if (d.instanceId === instanceId) {
+          handler({ x: d.x, y: d.y });
+        }
+      }));
+    },
+
+    onResize(handler) {
+      return tracked(cleanupFns, onAppEvent("shape:resized", (detail) => {
+        const d = detail as { instanceId: string; width: number; height: number };
+        if (d.instanceId === instanceId) {
+          handler({ width: d.width, height: d.height });
+        }
+      }));
+    },
+
+    onPropertyChange(handler) {
+      return tracked(cleanupFns, onAppEvent("shape:propertyChanged", (detail) => {
+        const d = detail as { instanceId: string; key: string; oldValue: string; newValue: string };
+        if (d.instanceId === instanceId) {
+          // Update local cache
+          propertyCache.set(d.key, d.newValue);
+          handler({ key: d.key, oldValue: d.oldValue, newValue: d.newValue });
+        }
+      }));
+    },
+
+    // -- Property Access --
+
+    getProperty(key: string): string {
+      return propertyCache.get(key) || "";
+    },
+
+    async setProperty(key: string, value: string): Promise<void> {
+      const oldValue = propertyCache.get(key) || "";
+      propertyCache.set(key, value);
+      emitAppEvent("shape:setProperty", { instanceId, key, value, oldValue });
+    },
+
+    // -- Rendering --
+
+    render: {
+      setHtmlContent(html: string): void {
+        emitAppEvent("shape:setHtmlContent", { instanceId, html });
+      },
+
+      canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): CleanupFn {
+        emitAppEvent("shape:setCanvasRenderer", { instanceId, renderer });
+        const cleanup = () => {
+          emitAppEvent("shape:removeCanvasRenderer", { instanceId });
+        };
+        cleanupFns.push(cleanup);
+        return cleanup;
+      },
+
+      declareProperties(props: DeclaredProperty[]): void {
+        emitAppEvent("shape:declareProperties", { instanceId, props });
+      },
     },
   };
 }

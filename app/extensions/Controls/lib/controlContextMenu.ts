@@ -61,6 +61,7 @@ const ITEM_IDS = [
   "controls.order.sendToBack",
   "controls.flipH",
   "controls.flipV",
+  "controls.editScript",
   "controls.delete",
 ];
 
@@ -337,6 +338,32 @@ export function registerControlContextMenu(): () => void {
       visible: () => isFlippableControlSelected(),
       separatorAfter: true,
       onClick: () => toggleFlip("flipV"),
+    },
+
+    // -- Edit Script --
+    {
+      id: "controls.editScript",
+      label: "Edit Script...",
+      group: "controls",
+      order: 25,
+      visible: () => {
+        const id = getSelectedFloatingControl();
+        if (!id) return false;
+        const ctrl = getFloatingControl(id);
+        return ctrl?.controlType === "shape";
+      },
+      separatorAfter: true,
+      onClick: () => {
+        const id = getSelectedFloatingControl();
+        if (!id) return;
+        const ctrl = getFloatingControl(id);
+        if (!ctrl) return;
+        emitAppEvent("scriptable-objects:edit-script", {
+          objectType: "shape",
+          instanceId: id,
+          objectName: `Shape (${ctrl.row}, ${ctrl.col})`,
+        });
+      },
     },
 
     // -- Delete --

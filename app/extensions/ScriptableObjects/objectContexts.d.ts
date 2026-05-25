@@ -238,3 +238,53 @@ declare interface PivotContext extends BaseObjectContext {
   /** Refresh the pivot table data. */
   refresh(): Promise<void>;
 }
+
+// ============================================================================
+// Shape Context
+// ============================================================================
+
+/** A custom property declared by a shape script. */
+declare interface DeclaredProperty {
+  key: string;
+  label: string;
+  type: "text" | "color" | "number" | "boolean";
+  defaultValue?: string;
+}
+
+/** Rendering bounds passed to custom canvas renderers. */
+declare interface ShapeRenderBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Context for Shape control instances. */
+declare interface ShapeContext extends BaseObjectContext {
+  /** Unique instance ID (e.g., "control-0-195-2"). */
+  readonly instanceId: string;
+  /** Shape type identifier (e.g., "rectangle", "snipSingleCorner"). */
+  readonly shapeType: string;
+
+  /** Called when the shape is clicked. */
+  onClick(handler: (detail: { x: number; y: number }) => void): () => void;
+  /** Called when the shape is resized. */
+  onResize(handler: (detail: { width: number; height: number }) => void): () => void;
+  /** Called when a property value changes. */
+  onPropertyChange(handler: (detail: { key: string; oldValue: string; newValue: string }) => void): () => void;
+
+  /** Get the current resolved value of a shape property. */
+  getProperty(key: string): string;
+  /** Set a shape property value. */
+  setProperty(key: string, value: string): Promise<void>;
+
+  /** Rendering methods. */
+  render: {
+    /** Replace canvas rendering with an HTML overlay. */
+    setHtmlContent(html: string): void;
+    /** Provide a custom canvas render function (replaces default shape path rendering). */
+    canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): () => void;
+    /** Declare custom properties that appear in the Properties pane. */
+    declareProperties(props: DeclaredProperty[]): void;
+  };
+}

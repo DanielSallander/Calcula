@@ -4,11 +4,14 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
+import { emitAppEvent } from "@api/events";
 import { PropertyRow } from "./PropertyRow";
+import { CollapsibleSection } from "./CollapsibleSection";
 import {
   getPropertyDefinitions,
   type ControlPropertyValue,
   type ControlMetadata,
+  type PropertyDefinition,
 } from "../lib/types";
 import {
   getControlMetadata,
@@ -16,6 +19,7 @@ import {
 } from "../lib/controlApi";
 import { listScripts } from "../../ScriptEditor/lib/scriptApi";
 import { getShapeDefinition } from "../Shape/shapeCatalog";
+import { getShapeHtmlContent } from "../Shape/shapeRenderer";
 
 // ============================================================================
 // Styles
@@ -33,10 +37,21 @@ const containerStyle: React.CSSProperties = {
 const headerStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  justifyContent: "space-between",
-  padding: "10px 12px",
+  gap: 10,
+  padding: "12px 14px",
   borderBottom: "1px solid #e0e0e0",
   backgroundColor: "#ffffff",
+  flexShrink: 0,
+};
+
+const headerIconStyle: React.CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: 6,
+  backgroundColor: "#e8edf3",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
   flexShrink: 0,
 };
 
@@ -49,7 +64,7 @@ const titleStyle: React.CSSProperties = {
 
 const subtitleStyle: React.CSSProperties = {
   fontSize: 11,
-  color: "#999",
+  color: "#888",
   marginTop: 1,
 };
 
@@ -70,17 +85,147 @@ const emptyStateStyle: React.CSSProperties = {
   lineHeight: 1.5,
 };
 
-const sectionHeaderStyle: React.CSSProperties = {
-  padding: "6px 12px",
-  fontSize: 11,
-  fontWeight: 600,
-  color: "#555",
-  backgroundColor: "#f0f1f3",
-  borderBottom: "1px solid #e0e0e0",
-  borderTop: "1px solid #e0e0e0",
-  letterSpacing: "0.02em",
-  textTransform: "capitalize" as const,
+const inlineRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 4,
 };
+
+const inlineItemStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+};
+
+const tabBarStyle: React.CSSProperties = {
+  display: "flex",
+  borderBottom: "1px solid #e0e0e0",
+  backgroundColor: "#ffffff",
+  flexShrink: 0,
+};
+
+const tabBaseStyle: React.CSSProperties = {
+  flex: 1,
+  padding: "8px 12px",
+  fontSize: 11,
+  fontWeight: 500,
+  textAlign: "center",
+  cursor: "pointer",
+  border: "none",
+  background: "transparent",
+  color: "#666",
+  transition: "color 0.15s, border-color 0.15s",
+  borderBottom: "2px solid transparent",
+  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+};
+
+const tabActiveStyle: React.CSSProperties = {
+  color: "#0078d4",
+  fontWeight: 600,
+  borderBottomColor: "#0078d4",
+};
+
+const codeTabContentStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 24,
+  gap: 12,
+  flex: 1,
+};
+
+const openEditorButtonStyle: React.CSSProperties = {
+  padding: "8px 20px",
+  backgroundColor: "#0078d4",
+  color: "#ffffff",
+  border: "none",
+  borderRadius: 4,
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  transition: "background-color 0.15s",
+};
+
+const previewFrameStyle: React.CSSProperties = {
+  flex: 1,
+  border: "none",
+  width: "100%",
+  backgroundColor: "#ffffff",
+};
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Groups property definitions by their `group` field, preserving definition order.
+ * Properties without a group are placed in "General".
+ */
+function groupProperties(defs: PropertyDefinition[]): Map<string, PropertyDefinition[]> {
+  const groups = new Map<string, PropertyDefinition[]>();
+  for (const def of defs) {
+    const groupName = def.group || "General";
+    if (!groups.has(groupName)) groups.set(groupName, []);
+    groups.get(groupName)!.push(def);
+  }
+  return groups;
+}
+
+/**
+ * Renders a list of property definitions within a group, handling inline pairing.
+ */
+function renderGroupProperties(
+  defs: PropertyDefinition[],
+  metadata: ControlMetadata | null,
+  scripts: Array<{ id: string; name: string }>,
+  handlePropertyChange: (key: string, valueType: "static" | "formula", value: string) => void,
+): React.ReactNode[] {
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < defs.length) {
+    const def = defs[i];
+
+    // Check for consecutive inline properties to pair them side-by-side
+    if (def.inline && i + 1 < defs.length && defs[i + 1].inline) {
+      const nextDef = defs[i + 1];
+      elements.push(
+        <div key={`inline-${def.key}-${nextDef.key}`} style={inlineRowStyle}>
+          <div style={inlineItemStyle}>
+            <PropertyRow
+              definition={def}
+              value={metadata?.properties[def.key]}
+              scripts={scripts}
+              onChange={handlePropertyChange}
+            />
+          </div>
+          <div style={inlineItemStyle}>
+            <PropertyRow
+              definition={nextDef}
+              value={metadata?.properties[nextDef.key]}
+              scripts={scripts}
+              onChange={handlePropertyChange}
+            />
+          </div>
+        </div>,
+      );
+      i += 2;
+    } else {
+      elements.push(
+        <PropertyRow
+          key={def.key}
+          definition={def}
+          value={metadata?.properties[def.key]}
+          scripts={scripts}
+          onChange={handlePropertyChange}
+        />,
+      );
+      i += 1;
+    }
+  }
+
+  return elements;
+}
 
 // ============================================================================
 // Component
@@ -148,6 +293,9 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     async (key: string, valueType: "static" | "formula", value: string) => {
       if (row < 0 || col < 0) return;
 
+      // Capture old value before the change (for shape script notifications)
+      const oldValue = metadata?.properties[key]?.value ?? "";
+
       try {
         const updatedMeta = await setControlProperty(
           sheetIndex,
@@ -185,15 +333,28 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
             detail: { sheetIndex, row, col, embedded: value === "true" },
           }));
         }
+
+        // Notify shape scripts of property changes
+        if (controlType === "shape") {
+          emitAppEvent("shape:propertyChanged", {
+            instanceId: `control-${sheetIndex}-${row}-${col}`,
+            key,
+            oldValue,
+            newValue: value,
+          });
+        }
       } catch (err) {
         console.error("[Controls] Failed to set property:", err);
       }
     },
-    [row, col, sheetIndex, controlType],
+    [row, col, sheetIndex, controlType, metadata],
   );
 
-  // Get property definitions for this control type
-  const propDefs = getPropertyDefinitions(controlType || metadata?.controlType || "");
+  // Compute control instance ID for script-declared properties
+  const instanceId = row >= 0 && col >= 0 ? `control-${sheetIndex}-${row}-${col}` : undefined;
+
+  // Get property definitions for this control type (includes script-declared properties)
+  const propDefs = getPropertyDefinitions(controlType || metadata?.controlType || "", instanceId);
 
   if (row < 0 || col < 0) {
     return (
@@ -227,10 +388,40 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     return controlType || metadata?.controlType || "Control";
   })();
 
+  // Tab state (only used for shapes)
+  const [activeTab, setActiveTab] = useState<"properties" | "code" | "preview">("properties");
+  const isShape = controlType === "shape";
+
+  // Group properties by their group field
+  const groups = groupProperties(propDefs);
+
+  // HTML preview content (for shapes with setHtmlContent)
+  const htmlContent = instanceId ? getShapeHtmlContent(instanceId) : undefined;
+
+  const handleOpenScriptEditor = useCallback(() => {
+    if (!instanceId) return;
+    emitAppEvent("scriptable-objects:edit-script", {
+      objectType: "shape",
+      instanceId,
+      objectName: `Shape (${row}, ${col})`,
+    });
+  }, [instanceId, row, col]);
+
   return (
     <div style={containerStyle}>
       {/* Header */}
       <div style={headerStyle}>
+        <div style={headerIconStyle}>
+          <svg width={16} height={16} viewBox="0 0 16 16" fill="none">
+            {controlType === "shape" ? (
+              <path d="M3 3h10v10H3z" stroke="#4472C4" strokeWidth={1.5} fill="#4472C4" fillOpacity={0.15} rx={1} />
+            ) : controlType === "image" ? (
+              <path d="M2 4h12v8H2zM5 7a1 1 0 110-2 1 1 0 010 2zM2 12l3-4 2 2 3-3 4 5" stroke="#666" strokeWidth={1.2} fill="none" />
+            ) : (
+              <rect x={3} y={5} width={10} height={6} rx={2} stroke="#666" strokeWidth={1.2} fill="none" />
+            )}
+          </svg>
+        </div>
         <div>
           <div style={titleStyle}>{typeLabel} Properties</div>
           <div style={subtitleStyle}>
@@ -239,64 +430,83 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         </div>
       </div>
 
-      {/* Properties list */}
-      <div style={propertiesListStyle}>
-        {propDefs.length === 0 ? (
-          <div style={emptyStateStyle}>No properties available for this control type.</div>
-        ) : (
-          <>
-            {/* Visual properties */}
-            <div style={sectionHeaderStyle}>Appearance</div>
-            {propDefs
-              .filter((d) => d.inputType !== "script" && d.inputType !== "code" && d.inputType !== "boolean")
-              .map((def) => (
-                <PropertyRow
-                  key={def.key}
-                  definition={def}
-                  value={metadata?.properties[def.key]}
-                  scripts={scripts}
-                  onChange={handlePropertyChange}
-                />
-              ))}
+      {/* Tab bar (shapes only) */}
+      {isShape && (
+        <div style={tabBarStyle}>
+          <button
+            style={{ ...tabBaseStyle, ...(activeTab === "properties" ? tabActiveStyle : {}) }}
+            onClick={() => setActiveTab("properties")}
+          >
+            Properties
+          </button>
+          <button
+            style={{ ...tabBaseStyle, ...(activeTab === "code" ? tabActiveStyle : {}) }}
+            onClick={() => setActiveTab("code")}
+          >
+            Code
+          </button>
+          <button
+            style={{ ...tabBaseStyle, ...(activeTab === "preview" ? tabActiveStyle : {}) }}
+            onClick={() => setActiveTab("preview")}
+          >
+            Preview
+          </button>
+        </div>
+      )}
 
-            {/* Layout properties */}
-            {propDefs.some((d) => d.inputType === "boolean") && (
-              <>
-                <div style={sectionHeaderStyle}>Layout</div>
-                {propDefs
-                  .filter((d) => d.inputType === "boolean")
-                  .map((def) => (
-                    <PropertyRow
-                      key={def.key}
-                      definition={def}
-                      value={metadata?.properties[def.key]}
-                      scripts={scripts}
-                      onChange={handlePropertyChange}
-                    />
-                  ))}
-              </>
-            )}
+      {/* Tab content */}
+      {(!isShape || activeTab === "properties") && (
+        <div style={propertiesListStyle}>
+          {propDefs.length === 0 ? (
+            <div style={emptyStateStyle}>No properties available for this control type.</div>
+          ) : (
+            Array.from(groups.entries()).map(([groupName, defs]) => (
+              <CollapsibleSection key={groupName} title={groupName} defaultExpanded>
+                {renderGroupProperties(defs, metadata, scripts, handlePropertyChange)}
+              </CollapsibleSection>
+            ))
+          )}
+        </div>
+      )}
 
-            {/* Action properties */}
-            {propDefs.some((d) => d.inputType === "script" || d.inputType === "code") && (
-              <>
-                <div style={sectionHeaderStyle}>Actions</div>
-                {propDefs
-                  .filter((d) => d.inputType === "script" || d.inputType === "code")
-                  .map((def) => (
-                    <PropertyRow
-                      key={def.key}
-                      definition={def}
-                      value={metadata?.properties[def.key]}
-                      scripts={scripts}
-                      onChange={handlePropertyChange}
-                    />
-                  ))}
-              </>
-            )}
-          </>
-        )}
-      </div>
+      {isShape && activeTab === "code" && (
+        <div style={codeTabContentStyle}>
+          <svg width={48} height={48} viewBox="0 0 48 48" fill="none">
+            <rect x={4} y={6} width={40} height={36} rx={4} stroke="#ccc" strokeWidth={2} fill="none" />
+            <path d="M18 18l-6 6 6 6M30 18l6 6-6 6" stroke="#0078d4" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M26 16l-4 16" stroke="#999" strokeWidth={1.5} strokeLinecap="round" />
+          </svg>
+          <div style={{ fontSize: 13, color: "#444", fontWeight: 500 }}>Shape Script</div>
+          <div style={{ fontSize: 11, color: "#888", textAlign: "center", lineHeight: 1.5 }}>
+            Write TypeScript to customize this shape's behavior, rendering, and properties.
+          </div>
+          <button
+            style={openEditorButtonStyle}
+            onClick={handleOpenScriptEditor}
+            onMouseEnter={(e) => { (e.target as HTMLButtonElement).style.backgroundColor = "#006cbd"; }}
+            onMouseLeave={(e) => { (e.target as HTMLButtonElement).style.backgroundColor = "#0078d4"; }}
+          >
+            Open Script Editor
+          </button>
+        </div>
+      )}
+
+      {isShape && activeTab === "preview" && (
+        <div style={propertiesListStyle}>
+          {htmlContent ? (
+            <iframe
+              style={previewFrameStyle}
+              srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;font-family:'Segoe UI',sans-serif;font-size:12px;}</style></head><body>${htmlContent}</body></html>`}
+              sandbox="allow-same-origin"
+              title="Shape HTML Preview"
+            />
+          ) : (
+            <div style={emptyStateStyle}>
+              No HTML content. Use <code style={{ fontSize: 11 }}>shape.render.setHtmlContent(html)</code> in the shape script to add HTML rendering.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

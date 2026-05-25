@@ -13,15 +13,20 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     inputType: "text",
     defaultValue: "",
     supportsFormula: false,
+    group: "Image",
   },
 
-  // -- Layout --
+  // -- Transform --
   {
     key: "opacity",
     label: "Opacity",
     inputType: "number",
     defaultValue: "1",
     supportsFormula: true,
+    group: "Transform",
+    min: 0,
+    max: 1,
+    step: 0.01,
   },
   {
     key: "rotation",
@@ -29,6 +34,10 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     inputType: "number",
     defaultValue: "0",
     supportsFormula: true,
+    group: "Transform",
+    min: 0,
+    max: 360,
+    step: 1,
   },
   {
     key: "flipH",
@@ -36,6 +45,8 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     inputType: "boolean",
     defaultValue: "false",
     supportsFormula: false,
+    group: "Transform",
+    inline: true,
   },
   {
     key: "flipV",
@@ -43,14 +54,19 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     inputType: "boolean",
     defaultValue: "false",
     supportsFormula: false,
+    group: "Transform",
+    inline: true,
   },
 
+  // -- Size --
   {
     key: "width",
     label: "Width",
     inputType: "number",
     defaultValue: "200",
     supportsFormula: true,
+    group: "Size",
+    inline: true,
   },
   {
     key: "height",
@@ -58,5 +74,7 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     inputType: "number",
     defaultValue: "150",
     supportsFormula: true,
+    group: "Size",
+    inline: true,
   },
 ];

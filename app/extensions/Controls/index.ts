@@ -9,7 +9,7 @@ import {
   ExtensionRegistry,
   AppEvents,
 } from "@api";
-import { emitAppEvent } from "@api/events";
+import { emitAppEvent, onAppEvent } from "@api/events";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
 import {
   overlayGetRowHeaderWidth,
@@ -37,7 +37,12 @@ import {
   hitTestFloatingShape,
   invalidateShapeCache,
   invalidateAllShapeCaches,
+  setCustomCanvasRenderer,
+  removeCustomCanvasRenderer,
+  setShapeHtmlContent,
+  removeShapeHtmlOverlay,
 } from "./Shape/shapeRenderer";
+import { setDeclaredProperties, clearDeclaredProperties } from "./Shape/shapeProperties";
 import {
   renderFloatingImage,
   hitTestFloatingImage,
@@ -483,6 +488,16 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail) {
       updateFloatingBoundsFromMetadata(detail.sheetIndex, detail.row, detail.col);
+      // Emit shape:resized for scriptable objects
+      const controlId = makeFloatingControlId(detail.sheetIndex, detail.row, detail.col);
+      const ctrl = getFloatingControl(controlId);
+      if (ctrl && ctrl.controlType === "shape") {
+        emitAppEvent("shape:resized", {
+          instanceId: controlId,
+          width: ctrl.width,
+          height: ctrl.height,
+        });
+      }
     }
   };
   window.addEventListener("controls:bounds-changed", handleBoundsChanged);
@@ -587,6 +602,76 @@ function activate(context: ExtensionContext): void {
   };
   window.addEventListener("controls:delete-selected", handleDeleteSelected);
   cleanupFns.push(() => window.removeEventListener("controls:delete-selected", handleDeleteSelected));
+
+  // -----------------------------------------------------------------------
+  // 23. Shape scripting event wiring
+  // -----------------------------------------------------------------------
+
+  // Handle shape:setProperty from scripts (script calls shape.setProperty)
+  const unsubSetProperty = onAppEvent("shape:setProperty", async (detail) => {
+    const d = detail as { instanceId: string; key: string; value: string; oldValue: string };
+    // Parse instanceId to extract sheet/row/col
+    const parts = d.instanceId.replace("control-", "").split("-");
+    if (parts.length < 3) return;
+    const si = parseInt(parts[0], 10);
+    const r = parseInt(parts[1], 10);
+    const c = parseInt(parts[2], 10);
+    await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
+    // Invalidate cache and redraw
+    window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
+      detail: { sheetIndex: si, row: r, col: c },
+    }));
+    window.dispatchEvent(new CustomEvent("styles:refresh"));
+    // Emit property changed event for script listeners
+    emitAppEvent("shape:propertyChanged", {
+      instanceId: d.instanceId,
+      key: d.key,
+      oldValue: d.oldValue,
+      newValue: d.value,
+    });
+  });
+  cleanupFns.push(unsubSetProperty);
+
+  // Handle shape:setCanvasRenderer from scripts
+  const unsubSetRenderer = onAppEvent("shape:setCanvasRenderer", (detail) => {
+    const d = detail as { instanceId: string; renderer: (ctx: CanvasRenderingContext2D, bounds: { x: number; y: number; width: number; height: number }) => void };
+    setCustomCanvasRenderer(d.instanceId, d.renderer);
+    invalidateShapeCache(d.instanceId);
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  });
+  cleanupFns.push(unsubSetRenderer);
+
+  // Handle shape:removeCanvasRenderer from scripts
+  const unsubRemoveRenderer = onAppEvent("shape:removeCanvasRenderer", (detail) => {
+    const d = detail as { instanceId: string };
+    removeCustomCanvasRenderer(d.instanceId);
+    invalidateShapeCache(d.instanceId);
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  });
+  cleanupFns.push(unsubRemoveRenderer);
+
+  // Handle shape:setHtmlContent from scripts
+  const unsubSetHtml = onAppEvent("shape:setHtmlContent", (detail) => {
+    const d = detail as { instanceId: string; html: string };
+    setShapeHtmlContent(d.instanceId, d.html);
+    invalidateShapeCache(d.instanceId);
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  });
+  cleanupFns.push(unsubSetHtml);
+
+  // Handle shape:declareProperties from scripts
+  const unsubDeclareProps = onAppEvent("shape:declareProperties", (detail) => {
+    const d = detail as { instanceId: string; props: Array<{ key: string; label: string; type: string; defaultValue?: string }> };
+    setDeclaredProperties(d.instanceId, d.props);
+    // Refresh the properties pane if it's open for this shape
+    const parts = d.instanceId.replace("control-", "").split("-");
+    if (parts.length >= 3) {
+      window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
+        detail: { row: parseInt(parts[1], 10), col: parseInt(parts[2], 10) },
+      }));
+    }
+  });
+  cleanupFns.push(unsubDeclareProps);
 
   isActivated = true;
   console.log("[Controls] Activated successfully.");
@@ -937,6 +1022,19 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
 
   const { removeControlMetadata } = await import("./lib/controlApi");
 
+  // Shape-specific cleanup: scripts, declared properties, custom renderers, HTML overlays
+  if (ctrl.controlType === "shape") {
+    try {
+      const { deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
+      await deleteObjectScriptsForInstance(controlId);
+    } catch {
+      // Ignore errors — script may not exist
+    }
+    clearDeclaredProperties(controlId);
+    removeCustomCanvasRenderer(controlId);
+    removeShapeHtmlOverlay(controlId);
+  }
+
   // Remove backend metadata
   await removeControlMetadata(ctrl.sheetIndex, ctrl.row, ctrl.col);
 
@@ -1074,10 +1172,18 @@ function setupFloatingObjectEvents(): void {
         });
       });
       emitAppEvent(AppEvents.GRID_REFRESH);
+      // Emit shape click event for scriptable objects
+      if (ctrlType === "shape") {
+        emitAppEvent("shape:clicked", { instanceId: controlId, x: 0, y: 0 });
+      }
     } else {
       // Run mode: only buttons execute scripts
       if (ctrlType === "button") {
         executeFloatingButtonAction(controlSheet, controlRow, controlCol);
+      }
+      // Emit shape click event for scriptable objects (run mode too)
+      if (ctrlType === "shape") {
+        emitAppEvent("shape:clicked", { instanceId: controlId, x: 0, y: 0 });
       }
     }
   };
