@@ -919,10 +919,16 @@ impl Engine {
     ///
     /// The `dir` must already exist; the method creates files inside it.
     pub fn save_cache_to_disk(&self, dir: &Path) -> EngineResult<()> {
-        use arrow::ipc::writer::FileWriter;
+        use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
+        use arrow::ipc::CompressionType;
         use serde_json::{json, Map};
 
         let mut tables_meta = Map::new();
+
+        // Use Zstd compression for disk cache files.
+        let write_options = IpcWriteOptions::default()
+            .try_with_compression(Some(CompressionType::ZSTD))
+            .map_err(|e| EngineError::InvalidData(format!("IPC compression init failed: {e}")))?;
 
         for table_name in self.cache.table_names() {
             // Only persist tables that are in the model and marked InMemory.
@@ -936,7 +942,7 @@ impl Engine {
                 None => continue,
             };
 
-            // Write Arrow IPC file.
+            // Write Zstd-compressed Arrow IPC file.
             let file_path = dir.join(format!("{table_name}.arrow"));
             let file = std::fs::File::create(&file_path).map_err(|e| {
                 EngineError::InvalidData(format!(
@@ -944,7 +950,12 @@ impl Engine {
                     file_path.display()
                 ))
             })?;
-            let mut writer = FileWriter::try_new(file, &batch.schema()).map_err(|e| {
+            let mut writer = FileWriter::try_new_with_options(
+                file,
+                &batch.schema(),
+                write_options.clone(),
+            )
+            .map_err(|e| {
                 EngineError::InvalidData(format!("Arrow IPC writer init failed: {e}"))
             })?;
             writer
