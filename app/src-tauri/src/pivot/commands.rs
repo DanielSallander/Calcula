@@ -3878,7 +3878,7 @@ pub async fn update_bi_pivot_fields(
     }
 
     let query_result = {
-        let engine = engine_arc.lock().await;
+        let mut engine = engine_arc.lock().await;
         engine.query(query_request).await
     };
     let batches = match query_result {

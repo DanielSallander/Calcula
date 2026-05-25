@@ -291,7 +291,25 @@ pub async fn bi_create_connection(
     let model_key = ModelKey::from_model_path(&request.model_path);
 
     // Get or create shared engine via the registry
-    let engine = bi_engine::Engine::new(model);
+    let mut engine = bi_engine::Engine::new(model);
+
+    // Enable auto-tier dimension caching — dimension tables are automatically cached
+    // on first use so repeated queries don't re-fetch the same data.
+    engine.set_auto_tier_config(bi_engine::AutoTierConfig {
+        enabled: true,
+        max_rows: 100_000,
+        default_ttl_secs: 3600,
+    });
+
+    // Enable query-result caching — navigating away and back, or switching tabs
+    // with shared queries, returns results instantly from cache.
+    engine.set_query_cache_config(bi_engine::QueryCacheConfig {
+        enabled: true,
+        max_entries: 256,
+        max_memory_bytes: 64 * 1024 * 1024, // 64 MB
+        ttl_secs: 300,
+    });
+
     let (engine_arc, was_existing, cache_dir) =
         bi_state.engine_registry.get_or_create(&model_key, engine);
 
@@ -1028,6 +1046,12 @@ pub async fn bi_refresh_connection(
     let mut any_refreshed = false;
     let mut results = Vec::new();
 
+    // Clear query cache so refreshed queries hit the database for fresh data
+    {
+        let mut engine = engine_arc.lock().await;
+        engine.clear_query_cache();
+    }
+
     for active_query in &active_queries {
         let query_request = build_engine_query(&active_query.request);
 
@@ -1228,6 +1252,7 @@ pub async fn bi_refresh_all_in_memory(
 
     {
         let mut engine = engine_arc.lock().await;
+        engine.clear_query_cache();
         engine.refresh_all_in_memory().await
             .map_err(|e| format!("Refresh failed: {}", e))?;
     }
