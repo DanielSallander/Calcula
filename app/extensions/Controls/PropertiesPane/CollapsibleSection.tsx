@@ -5,11 +5,13 @@
 import React, { useState, useRef, useEffect } from "react";
 
 // ============================================================================
-// Styles
+// Styles (theme-aware via CSS variables)
 // ============================================================================
 
+const v = (token: string) => `var(${token})`;
+
 const sectionStyle: React.CSSProperties = {
-  borderBottom: "1px solid #e0e0e0",
+  borderBottom: `1px solid ${v("--border-default")}`,
 };
 
 const headerStyle: React.CSSProperties = {
@@ -19,8 +21,8 @@ const headerStyle: React.CSSProperties = {
   padding: "7px 12px",
   fontSize: 11,
   fontWeight: 600,
-  color: "#444",
-  backgroundColor: "#f4f5f7",
+  color: v("--text-primary"),
+  backgroundColor: v("--panel-bg"),
   cursor: "pointer",
   userSelect: "none",
   letterSpacing: "0.01em",
@@ -28,7 +30,7 @@ const headerStyle: React.CSSProperties = {
 };
 
 const headerHoverStyle: React.CSSProperties = {
-  backgroundColor: "#ecedf0",
+  backgroundColor: v("--border-default"),
 };
 
 const contentWrapperStyle: React.CSSProperties = {
@@ -99,7 +101,7 @@ export const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
           viewBox="0 0 10 10"
           style={chevronStyle}
         >
-          <path d="M3 1 L7 5 L3 9" stroke="#666" fill="none" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M3 1 L7 5 L3 9" stroke="currentColor" fill="none" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <span>{title}</span>
       </div>

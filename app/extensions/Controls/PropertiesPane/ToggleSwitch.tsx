@@ -5,8 +5,10 @@
 import React, { useState } from "react";
 
 // ============================================================================
-// Styles
+// Styles (theme-aware via CSS variables)
 // ============================================================================
+
+const v = (token: string) => `var(${token})`;
 
 const containerStyle: React.CSSProperties = {
   display: "flex",
@@ -31,14 +33,14 @@ const knobBaseStyle: React.CSSProperties = {
   width: 14,
   height: 14,
   borderRadius: "50%",
-  backgroundColor: "#ffffff",
+  backgroundColor: v("--bg-surface"),
   boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
   transition: "transform 0.2s ease",
 };
 
 const labelTextStyle: React.CSSProperties = {
   fontSize: 12,
-  color: "#555",
+  color: v("--text-secondary"),
 };
 
 // ============================================================================
@@ -64,7 +66,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
 
   const trackStyle: React.CSSProperties = {
     ...trackBaseStyle,
-    backgroundColor: checked ? "#0078d4" : (hovered ? "#b0b0b0" : "#c0c0c0"),
+    backgroundColor: checked ? v("--accent-color") : (hovered ? v("--text-disabled") : v("--border-default")),
   };
 
   const knobStyle: React.CSSProperties = {

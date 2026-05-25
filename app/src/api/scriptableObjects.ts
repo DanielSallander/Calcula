@@ -558,8 +558,12 @@ export interface ShapeContext extends BaseObjectContext {
   // -- Rendering --
 
   render: {
-    /** Replace canvas rendering with an HTML overlay. */
+    /** Replace canvas rendering with an interactive HTML iframe overlay. */
     setHtmlContent(html: string): void;
+    /** Send a message to the shape's HTML iframe. Use `window.addEventListener('shape-message', ...)` inside the iframe to receive. */
+    sendMessage(type: string, data?: unknown): void;
+    /** Listen for messages from the shape's HTML iframe. Inside the iframe, call `calcula.sendMessage(type, data)` to send. */
+    onMessage(handler: EventHandler<{ type: string; data: unknown }>): CleanupFn;
     /** Provide a custom canvas render function (replaces default shape path rendering). */
     canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): CleanupFn;
     /** Declare custom properties that appear in the Properties pane. */
@@ -1560,6 +1564,19 @@ function buildShapeContext(
     render: {
       setHtmlContent(html: string): void {
         emitAppEvent("shape:setHtmlContent", { instanceId, html });
+      },
+
+      sendMessage(type: string, data?: unknown): void {
+        emitAppEvent("shape:sendMessage", { instanceId, type, data });
+      },
+
+      onMessage(handler: EventHandler<{ type: string; data: unknown }>): CleanupFn {
+        return tracked(cleanupFns, onAppEvent("shape:htmlMessage", (detail) => {
+          const d = detail as { instanceId: string; type: string; data: unknown };
+          if (d.instanceId === instanceId) {
+            handler({ type: d.type, data: d.data });
+          }
+        }));
       },
 
       canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): CleanupFn {

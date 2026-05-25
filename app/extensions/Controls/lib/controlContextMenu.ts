@@ -62,6 +62,7 @@ const ITEM_IDS = [
   "controls.flipH",
   "controls.flipV",
   "controls.editScript",
+  "controls.applyTemplate",
   "controls.delete",
 ];
 
@@ -363,6 +364,26 @@ export function registerControlContextMenu(): () => void {
           instanceId: id,
           objectName: `Shape (${ctrl.row}, ${ctrl.col})`,
         });
+      },
+    },
+
+    // -- Apply Template --
+    {
+      id: "controls.applyTemplate",
+      label: "Apply Template...",
+      group: "controls",
+      order: 26,
+      visible: () => {
+        const id = getSelectedFloatingControl();
+        if (!id) return false;
+        const ctrl = getFloatingControl(id);
+        return ctrl?.controlType === "shape";
+      },
+      separatorAfter: true,
+      onClick: () => {
+        const id = getSelectedFloatingControl();
+        if (!id) return;
+        emitAppEvent("shape:openTemplateGallery", { instanceId: id });
       },
     },
 

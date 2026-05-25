@@ -11,8 +11,10 @@ import { ToggleSwitch } from "./ToggleSwitch";
 import { SliderInput } from "./SliderInput";
 
 // ============================================================================
-// Styles
+// Styles (theme-aware via CSS variables)
 // ============================================================================
+
+const v = (token: string) => `var(${token})`;
 
 const rowStyle: React.CSSProperties = {
   display: "flex",
@@ -23,7 +25,7 @@ const rowStyle: React.CSSProperties = {
 };
 
 const rowHoverStyle: React.CSSProperties = {
-  backgroundColor: "#f5f7fa",
+  backgroundColor: v("--panel-bg"),
 };
 
 const labelRowStyle: React.CSSProperties = {
@@ -31,31 +33,32 @@ const labelRowStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   fontSize: 11,
-  color: "#666",
+  color: v("--text-secondary"),
 };
 
 const labelStyle: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 11,
-  color: "#555",
+  color: v("--text-secondary"),
 };
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
   padding: "4px 7px",
-  border: "1px solid #d0d0d0",
+  border: `1px solid ${v("--border-default")}`,
   borderRadius: 3,
   fontSize: 12,
-  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  fontFamily: v("--font-family-sans"),
   outline: "none",
   boxSizing: "border-box",
-  backgroundColor: "#ffffff",
+  backgroundColor: v("--bg-surface"),
+  color: v("--text-primary"),
   transition: "border-color 0.15s, box-shadow 0.15s",
 };
 
 const inputFocusStyle: React.CSSProperties = {
-  borderColor: "#0078d4",
-  boxShadow: "0 0 0 1px rgba(0,120,212,0.3)",
+  borderColor: v("--accent-color"),
+  boxShadow: `0 0 0 1px ${v("--accent-color")}`,
 };
 
 const colorInputContainerStyle: React.CSSProperties = {
@@ -67,7 +70,7 @@ const colorInputContainerStyle: React.CSSProperties = {
 const colorSwatchStyle: React.CSSProperties = {
   width: 24,
   height: 24,
-  border: "1px solid #ccc",
+  border: `1px solid ${v("--border-default")}`,
   borderRadius: 4,
   cursor: "pointer",
   flexShrink: 0,
@@ -77,7 +80,6 @@ const colorSwatchStyle: React.CSSProperties = {
 const scriptSelectStyle: React.CSSProperties = {
   ...inputStyle,
   cursor: "pointer",
-  backgroundColor: "#ffffff",
 };
 
 // ============================================================================

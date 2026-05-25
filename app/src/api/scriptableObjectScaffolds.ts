@@ -310,13 +310,24 @@ function setup(shape) {
   //   ctx.fillText("Custom!", bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   // });
 
-  // == HTML Rendering ==
+  // == Interactive HTML Rendering ==
   // shape.render.setHtmlContent(\`
   //   <div style="padding: 12px; font-family: sans-serif; height: 100%; box-sizing: border-box;">
   //     <h3 style="margin: 0 0 8px 0;">My Widget</h3>
-  //     <p style="margin: 0; color: #666;">Custom HTML content inside a shape</p>
+  //     <p style="margin: 0; color: #666;">Interactive HTML inside a shape</p>
+  //     <button onclick="calcula.sendMessage('click', { button: 'ok' })">Click Me</button>
   //   </div>
   // \`);
+
+  // == Receive Messages from HTML ==
+  // shape.render.onMessage(({ type, data }) => {
+  //   shape.log("Message from HTML:", type, data);
+  //   shape.notify("Got message: " + type, "info");
+  // });
+
+  // == Send Messages to HTML ==
+  // shape.render.sendMessage("update", { value: 42 });
+  // (Inside iframe: window.addEventListener('shape-message', (e) => { ... }));
 
   // == Declare Custom Properties (appear in Properties pane) ==
   // shape.render.declareProperties([
@@ -454,7 +465,9 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
         {
           category: "Rendering",
           methods: [
-            { name: "render.setHtmlContent", signature: "render.setHtmlContent(html)", description: "Replace canvas rendering with HTML overlay" },
+            { name: "render.setHtmlContent", signature: "render.setHtmlContent(html)", description: "Replace canvas rendering with interactive HTML iframe" },
+            { name: "render.sendMessage", signature: "render.sendMessage(type, data?)", description: "Send a message to the shape's HTML iframe" },
+            { name: "render.onMessage", signature: "render.onMessage(handler)", description: "Listen for messages from the shape's HTML (via calcula.sendMessage)" },
             { name: "render.canvasRenderer", signature: "render.canvasRenderer(fn)", description: "Provide a custom canvas render function" },
             { name: "render.declareProperties", signature: "render.declareProperties(props)", description: "Declare custom properties for the Properties pane" },
           ],

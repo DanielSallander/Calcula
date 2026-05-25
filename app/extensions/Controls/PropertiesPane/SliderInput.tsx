@@ -5,8 +5,10 @@
 import React, { useState, useCallback, useEffect } from "react";
 
 // ============================================================================
-// Styles
+// Styles (theme-aware via CSS variables)
 // ============================================================================
+
+const v = (token: string) => `var(${token})`;
 
 const containerStyle: React.CSSProperties = {
   display: "flex",
@@ -19,30 +21,30 @@ const rangeStyle: React.CSSProperties = {
   height: 4,
   appearance: "none",
   WebkitAppearance: "none",
-  background: "linear-gradient(to right, #0078d4 var(--fill-pct, 0%), #ddd var(--fill-pct, 0%))",
   borderRadius: 2,
   outline: "none",
   cursor: "pointer",
-  accentColor: "#0078d4",
+  accentColor: v("--accent-color"),
 };
 
 const numberInputStyle: React.CSSProperties = {
   width: 52,
   padding: "3px 6px",
-  border: "1px solid #d0d0d0",
+  border: `1px solid ${v("--border-default")}`,
   borderRadius: 3,
   fontSize: 12,
-  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  fontFamily: v("--font-family-sans"),
   outline: "none",
   textAlign: "right",
-  backgroundColor: "#ffffff",
+  backgroundColor: v("--bg-surface"),
+  color: v("--text-primary"),
   transition: "border-color 0.15s",
   boxSizing: "border-box",
 };
 
 const numberInputFocusStyle: React.CSSProperties = {
-  borderColor: "#0078d4",
-  boxShadow: "0 0 0 1px #0078d4",
+  borderColor: v("--accent-color"),
+  boxShadow: `0 0 0 1px ${v("--accent-color")}`,
 };
 
 // ============================================================================

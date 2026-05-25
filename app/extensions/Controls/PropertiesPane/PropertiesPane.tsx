@@ -19,19 +19,23 @@ import {
 } from "../lib/controlApi";
 import { listScripts } from "../../ScriptEditor/lib/scriptApi";
 import { getShapeDefinition } from "../Shape/shapeCatalog";
-import { getShapeHtmlContent } from "../Shape/shapeRenderer";
+import { getShapeHtmlContent, shapeHasScript } from "../Shape/shapeRenderer";
+import { getTemplateCategories, type ShapeTemplate } from "../Shape/shapeTemplateCatalog";
 
 // ============================================================================
-// Styles
+// Styles (theme-aware via CSS variables)
 // ============================================================================
+
+const v = (token: string) => `var(${token})`;
 
 const containerStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   height: "100%",
-  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  fontFamily: v("--font-family-sans"),
   fontSize: 12,
-  backgroundColor: "#f8f9fa",
+  backgroundColor: v("--panel-bg"),
+  color: v("--text-primary"),
 };
 
 const headerStyle: React.CSSProperties = {
@@ -39,8 +43,8 @@ const headerStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   padding: "12px 14px",
-  borderBottom: "1px solid #e0e0e0",
-  backgroundColor: "#ffffff",
+  borderBottom: `1px solid ${v("--border-default")}`,
+  backgroundColor: v("--bg-surface"),
   flexShrink: 0,
 };
 
@@ -48,7 +52,7 @@ const headerIconStyle: React.CSSProperties = {
   width: 28,
   height: 28,
   borderRadius: 6,
-  backgroundColor: "#e8edf3",
+  backgroundColor: v("--panel-bg"),
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -58,13 +62,13 @@ const headerIconStyle: React.CSSProperties = {
 const titleStyle: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 13,
-  color: "#1a1a1a",
+  color: v("--text-primary"),
   letterSpacing: "-0.01em",
 };
 
 const subtitleStyle: React.CSSProperties = {
   fontSize: 11,
-  color: "#888",
+  color: v("--text-tertiary"),
   marginTop: 1,
 };
 
@@ -78,7 +82,7 @@ const emptyStateStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   height: "100%",
-  color: "#aaa",
+  color: v("--text-disabled"),
   fontSize: 12,
   padding: 24,
   textAlign: "center",
@@ -97,8 +101,8 @@ const inlineItemStyle: React.CSSProperties = {
 
 const tabBarStyle: React.CSSProperties = {
   display: "flex",
-  borderBottom: "1px solid #e0e0e0",
-  backgroundColor: "#ffffff",
+  borderBottom: `1px solid ${v("--border-default")}`,
+  backgroundColor: v("--bg-surface"),
   flexShrink: 0,
 };
 
@@ -111,16 +115,16 @@ const tabBaseStyle: React.CSSProperties = {
   cursor: "pointer",
   border: "none",
   background: "transparent",
-  color: "#666",
+  color: v("--text-secondary"),
   transition: "color 0.15s, border-color 0.15s",
   borderBottom: "2px solid transparent",
-  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  fontFamily: v("--font-family-sans"),
 };
 
 const tabActiveStyle: React.CSSProperties = {
-  color: "#0078d4",
+  color: v("--accent-color"),
   fontWeight: 600,
-  borderBottomColor: "#0078d4",
+  borderBottomColor: v("--accent-color"),
 };
 
 const codeTabContentStyle: React.CSSProperties = {
@@ -135,14 +139,14 @@ const codeTabContentStyle: React.CSSProperties = {
 
 const openEditorButtonStyle: React.CSSProperties = {
   padding: "8px 20px",
-  backgroundColor: "#0078d4",
+  backgroundColor: v("--accent-color"),
   color: "#ffffff",
   border: "none",
   borderRadius: 4,
   fontSize: 12,
   fontWeight: 600,
   cursor: "pointer",
-  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  fontFamily: v("--font-family-sans"),
   transition: "background-color 0.15s",
 };
 
@@ -150,7 +154,7 @@ const previewFrameStyle: React.CSSProperties = {
   flex: 1,
   border: "none",
   width: "100%",
-  backgroundColor: "#ffffff",
+  backgroundColor: v("--bg-surface"),
 };
 
 // ============================================================================
@@ -226,6 +230,51 @@ function renderGroupProperties(
 
   return elements;
 }
+
+// ============================================================================
+// Template Card (inline sub-component for Code tab)
+// ============================================================================
+
+const TemplateCard: React.FC<{ template: ShapeTemplate; onApply: () => void }> = ({ template, onApply }) => {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "6px 14px",
+        cursor: "pointer",
+        transition: "background-color 0.1s",
+        backgroundColor: hovered ? v("--panel-bg") : "transparent",
+      }}
+      onClick={onApply}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 48,
+        height: 32,
+        borderRadius: 3,
+        border: `1px solid ${v("--border-default")}`,
+        overflow: "hidden",
+        flexShrink: 0,
+        backgroundColor: "#fff",
+      }}>
+        <iframe
+          srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;overflow:hidden;transform:scale(0.48);transform-origin:top left;width:208%;height:208%;}</style></head><body>${template.previewHtml}</body></html>`}
+          sandbox="allow-same-origin"
+          style={{ width: "100%", height: "100%", border: "none", pointerEvents: "none" }}
+          title={template.name}
+        />
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: v("--text-primary") }}>{template.name}</div>
+        <div style={{ fontSize: 10, color: v("--text-tertiary"), lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{template.description}</div>
+      </div>
+    </div>
+  );
+};
 
 // ============================================================================
 // Component
@@ -422,8 +471,24 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
             )}
           </svg>
         </div>
-        <div>
-          <div style={titleStyle}>{typeLabel} Properties</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={titleStyle}>{typeLabel} Properties</span>
+            {isShape && instanceId && shapeHasScript(instanceId) && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 600,
+                color: v("--accent-color"),
+                backgroundColor: v("--panel-bg"),
+                border: `1px solid ${v("--accent-color")}`,
+                borderRadius: 3,
+                padding: "1px 5px",
+                letterSpacing: "0.03em",
+              }}>
+                JS
+              </span>
+            )}
+          </div>
           <div style={subtitleStyle}>
             Cell ({row}, {col})
           </div>
@@ -470,24 +535,47 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
       )}
 
       {isShape && activeTab === "code" && (
-        <div style={codeTabContentStyle}>
-          <svg width={48} height={48} viewBox="0 0 48 48" fill="none">
-            <rect x={4} y={6} width={40} height={36} rx={4} stroke="#ccc" strokeWidth={2} fill="none" />
-            <path d="M18 18l-6 6 6 6M30 18l6 6-6 6" stroke="#0078d4" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M26 16l-4 16" stroke="#999" strokeWidth={1.5} strokeLinecap="round" />
-          </svg>
-          <div style={{ fontSize: 13, color: "#444", fontWeight: 500 }}>Shape Script</div>
-          <div style={{ fontSize: 11, color: "#888", textAlign: "center", lineHeight: 1.5 }}>
-            Write TypeScript to customize this shape's behavior, rendering, and properties.
+        <div style={{ flex: 1, overflow: "auto" }}>
+          {/* Script editor link */}
+          <div style={codeTabContentStyle}>
+            <svg width={40} height={40} viewBox="0 0 48 48" fill="none">
+              <rect x={4} y={6} width={40} height={36} rx={4} stroke={v("--border-default")} strokeWidth={2} fill="none" />
+              <path d="M18 18l-6 6 6 6M30 18l6 6-6 6" stroke={v("--accent-color")} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M26 16l-4 16" stroke={v("--text-disabled")} strokeWidth={1.5} strokeLinecap="round" />
+            </svg>
+            <div style={{ fontSize: 12, color: v("--text-tertiary"), textAlign: "center", lineHeight: 1.5 }}>
+              Write custom script or pick a template below
+            </div>
+            <button
+              style={openEditorButtonStyle}
+              onClick={handleOpenScriptEditor}
+            >
+              Open Script Editor
+            </button>
           </div>
-          <button
-            style={openEditorButtonStyle}
-            onClick={handleOpenScriptEditor}
-            onMouseEnter={(e) => { (e.target as HTMLButtonElement).style.backgroundColor = "#006cbd"; }}
-            onMouseLeave={(e) => { (e.target as HTMLButtonElement).style.backgroundColor = "#0078d4"; }}
-          >
-            Open Script Editor
-          </button>
+
+          {/* Template gallery inline */}
+          <div style={{ borderTop: `1px solid ${v("--border-default")}`, padding: "0" }}>
+            <div style={{ padding: "8px 14px 4px", fontSize: 11, fontWeight: 600, color: v("--text-secondary"), textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>
+              Templates
+            </div>
+            {getTemplateCategories().map(({ category, templates }) => (
+              <div key={category}>
+                <div style={{ padding: "6px 14px 2px", fontSize: 10, color: v("--text-tertiary"), fontWeight: 500 }}>{category}</div>
+                {templates.map((tpl) => (
+                  <TemplateCard
+                    key={tpl.id}
+                    template={tpl}
+                    onApply={() => {
+                      if (instanceId) {
+                        emitAppEvent("shape:applyTemplate", { instanceId, templateId: tpl.id });
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -496,8 +584,8 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           {htmlContent ? (
             <iframe
               style={previewFrameStyle}
-              srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;font-family:'Segoe UI',sans-serif;font-size:12px;}</style></head><body>${htmlContent}</body></html>`}
-              sandbox="allow-same-origin"
+              srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;font-family:'Segoe UI Variable','Segoe UI',sans-serif;font-size:12px;}</style></head><body>${htmlContent}</body></html>`}
+              sandbox="allow-scripts allow-same-origin"
               title="Shape HTML Preview"
             />
           ) : (

@@ -280,8 +280,12 @@ declare interface ShapeContext extends BaseObjectContext {
 
   /** Rendering methods. */
   render: {
-    /** Replace canvas rendering with an HTML overlay. */
+    /** Replace canvas rendering with an interactive HTML iframe overlay. */
     setHtmlContent(html: string): void;
+    /** Send a message to the shape's HTML iframe. Inside the iframe, listen via `window.addEventListener('shape-message', (e) => { e.detail.type, e.detail.data })`. */
+    sendMessage(type: string, data?: unknown): void;
+    /** Listen for messages sent from the shape's HTML iframe via `calcula.sendMessage(type, data)`. */
+    onMessage(handler: (detail: { type: string; data: unknown }) => void): () => void;
     /** Provide a custom canvas render function (replaces default shape path rendering). */
     canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): () => void;
     /** Declare custom properties that appear in the Properties pane. */

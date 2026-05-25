@@ -41,8 +41,12 @@ import {
   removeCustomCanvasRenderer,
   setShapeHtmlContent,
   removeShapeHtmlOverlay,
+  markShapeHasScript,
+  unmarkShapeHasScript,
+  getShapeOverlayFrame,
 } from "./Shape/shapeRenderer";
 import { setDeclaredProperties, clearDeclaredProperties } from "./Shape/shapeProperties";
+import { getShapeTemplate } from "./Shape/shapeTemplateCatalog";
 import {
   renderFloatingImage,
   hitTestFloatingImage,
@@ -659,6 +663,19 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSetHtml);
 
+  // Handle shape:sendMessage from scripts (forward to iframe)
+  const unsubSendMsg = onAppEvent("shape:sendMessage", (detail) => {
+    const d = detail as { instanceId: string; type: string; data: unknown };
+    const frame = getShapeOverlayFrame(d.instanceId);
+    if (frame?.contentWindow) {
+      frame.contentWindow.postMessage(
+        { target: "shape-html", instanceId: d.instanceId, type: d.type, data: d.data },
+        "*",
+      );
+    }
+  });
+  cleanupFns.push(unsubSendMsg);
+
   // Handle shape:declareProperties from scripts
   const unsubDeclareProps = onAppEvent("shape:declareProperties", (detail) => {
     const d = detail as { instanceId: string; props: Array<{ key: string; label: string; type: string; defaultValue?: string }> };
@@ -672,6 +689,121 @@ function activate(context: ExtensionContext): void {
     }
   });
   cleanupFns.push(unsubDeclareProps);
+
+  // Track shape script status for badge indicator
+  // When a script is created/saved for a shape, mark it; when edit-script fires, check & mark
+  const unsubScriptEdit = onAppEvent("scriptable-objects:edit-script", (detail) => {
+    const d = detail as { objectType: string; instanceId: string };
+    if (d.objectType === "shape" && d.instanceId) {
+      markShapeHasScript(d.instanceId);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  });
+  cleanupFns.push(unsubScriptEdit);
+
+  // Scan for existing shape scripts on activation
+  (async () => {
+    try {
+      const { listObjectScripts } = await import("../../src/api/objectScriptBackend");
+      const scripts = await listObjectScripts();
+      for (const script of scripts) {
+        if (script.objectType === "shape" && script.instanceId) {
+          markShapeHasScript(script.instanceId);
+        }
+      }
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    } catch {
+      // Ignore errors during initial scan
+    }
+  })();
+
+  // Handle shape:applyTemplate — apply a built-in template to a shape
+  const unsubApplyTemplate = onAppEvent("shape:applyTemplate", async (detail) => {
+    const d = detail as { instanceId: string; templateId: string };
+    const template = getShapeTemplate(d.templateId);
+    if (!template) return;
+
+    try {
+      const { saveObjectScript } = await import("../../src/api/objectScriptBackend");
+
+      // Parse instanceId for shape location
+      const parts = d.instanceId.replace("control-", "").split("-");
+      if (parts.length < 3) return;
+      const si = parseInt(parts[0], 10);
+      const r = parseInt(parts[1], 10);
+      const c = parseInt(parts[2], 10);
+
+      // Save the template script as an object script
+      const scriptId = crypto.randomUUID();
+      await saveObjectScript({
+        id: scriptId,
+        name: template.name,
+        objectType: "shape",
+        instanceId: d.instanceId,
+        source: template.scriptSource,
+        accessLevel: "restricted",
+        description: template.description,
+      });
+
+      // Resize shape to template defaults if different
+      const ctrl = getFloatingControl(d.instanceId);
+      if (ctrl && (ctrl.width !== template.defaultWidth || ctrl.height !== template.defaultHeight)) {
+        resizeFloatingControl(d.instanceId, ctrl.x, ctrl.y, template.defaultWidth, template.defaultHeight);
+        await setControlProperty(si, r, c, "shape", "width", "static", String(template.defaultWidth));
+        await setControlProperty(si, r, c, "shape", "height", "static", String(template.defaultHeight));
+        syncFloatingControlRegions();
+      }
+
+      // Mark script badge
+      markShapeHasScript(d.instanceId);
+
+      // Mount the script via ScriptableObjects
+      emitAppEvent("scriptable-objects:edit-script", {
+        objectType: "shape",
+        instanceId: d.instanceId,
+        objectName: template.name,
+      });
+
+      invalidateShapeCache(d.instanceId);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+
+      // Refresh properties pane
+      window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
+        detail: { row: r, col: c },
+      }));
+    } catch (err) {
+      console.error("[Controls] Failed to apply template:", err);
+    }
+  });
+  cleanupFns.push(unsubApplyTemplate);
+
+  // Handle shape:openTemplateGallery — open the template gallery overlay
+  const unsubOpenGallery = onAppEvent("shape:openTemplateGallery", (detail) => {
+    const d = detail as { instanceId: string };
+    // Render the gallery as a React portal
+    import("react-dom/client").then(({ createRoot }) => {
+      import("react").then((React) => {
+        import("./Shape/ShapeTemplateGallery").then(({ ShapeTemplateGallery }) => {
+          const container = document.createElement("div");
+          document.body.appendChild(container);
+          const root = createRoot(container);
+          const handleClose = () => {
+            root.unmount();
+            container.remove();
+          };
+          root.render(
+            React.createElement(ShapeTemplateGallery, {
+              onSelect: (tpl: { id: string }) => {
+                emitAppEvent("shape:applyTemplate", { instanceId: d.instanceId, templateId: tpl.id });
+              },
+              onClose: handleClose,
+            }),
+          );
+        });
+      });
+    });
+  });
+  cleanupFns.push(unsubOpenGallery);
 
   isActivated = true;
   console.log("[Controls] Activated successfully.");
@@ -1033,6 +1165,7 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
     clearDeclaredProperties(controlId);
     removeCustomCanvasRenderer(controlId);
     removeShapeHtmlOverlay(controlId);
+    unmarkShapeHasScript(controlId);
   }
 
   // Remove backend metadata

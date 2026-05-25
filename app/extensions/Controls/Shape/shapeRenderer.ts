@@ -12,10 +12,22 @@ import {
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
 } from "@api/gridOverlays";
+import { emitAppEvent } from "@api/events";
 import { getDesignMode } from "../lib/designMode";
 import { resolveControlProperties } from "../lib/controlApi";
 import { isFloatingControlSelected, getSelectedFloatingControls } from "../Button/floatingSelection";
 import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./shapeCatalog";
+
+// ============================================================================
+// Global postMessage listener (receives messages from shape iframes)
+// ============================================================================
+
+window.addEventListener("message", (e) => {
+  if (e.data?.source === "shape-html") {
+    const { instanceId, type, data } = e.data;
+    emitAppEvent("shape:htmlMessage", { instanceId, type, data });
+  }
+});
 
 // ============================================================================
 // Cached Metadata (async fetch with sync render)
@@ -60,8 +72,11 @@ const customCanvasRenderers = new Map<string, CustomCanvasRenderer>();
 /** Map of controlId -> HTML content string provided by a shape script. */
 const customHtmlContent = new Map<string, string>();
 
-/** Map of controlId -> DOM overlay element for HTML-rendered shapes. */
-const htmlOverlayElements = new Map<string, HTMLDivElement>();
+/** Map of controlId -> iframe overlay element for interactive HTML shapes. */
+const htmlOverlayElements = new Map<string, HTMLIFrameElement>();
+
+/** Track content hash per controlId to avoid unnecessary iframe reloads. */
+const overlayContentHash = new Map<string, string>();
 
 /** Register a custom canvas renderer for a shape. */
 export function setCustomCanvasRenderer(instanceId: string, renderer: CustomCanvasRenderer): void {
@@ -76,11 +91,8 @@ export function removeCustomCanvasRenderer(instanceId: string): void {
 /** Set HTML content for a shape (will skip canvas rendering). */
 export function setShapeHtmlContent(instanceId: string, html: string): void {
   customHtmlContent.set(instanceId, html);
-  // Update existing overlay element if present
-  const el = htmlOverlayElements.get(instanceId);
-  if (el) {
-    el.innerHTML = html;
-  }
+  // Mark hash as stale so the iframe reloads on next render
+  overlayContentHash.delete(instanceId);
 }
 
 /** Get HTML content for a shape. */
@@ -93,7 +105,12 @@ export function hasShapeHtmlContent(instanceId: string): boolean {
   return customHtmlContent.has(instanceId);
 }
 
-/** Remove the HTML overlay DOM element for a shape (cleanup on deletion). */
+/** Get the iframe overlay element for a shape (for sending messages). */
+export function getShapeOverlayFrame(instanceId: string): HTMLIFrameElement | null {
+  return htmlOverlayElements.get(instanceId) ?? null;
+}
+
+/** Remove the HTML overlay iframe element for a shape (cleanup on deletion). */
 export function removeShapeHtmlOverlay(instanceId: string): void {
   const el = htmlOverlayElements.get(instanceId);
   if (el) {
@@ -101,10 +118,39 @@ export function removeShapeHtmlOverlay(instanceId: string): void {
     htmlOverlayElements.delete(instanceId);
   }
   customHtmlContent.delete(instanceId);
+  overlayContentHash.delete(instanceId);
 }
 
 /**
- * Create or update the positioned HTML overlay element for a shape.
+ * Build the full srcdoc HTML for the iframe, injecting the postMessage bridge.
+ */
+function buildIframeSrcDoc(controlId: string, userHtml: string): string {
+  const escapedId = controlId.replace(/'/g, "\\'");
+  return `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 12px; overflow: hidden; }
+  * { box-sizing: border-box; }
+</style>
+<script>
+  var SHAPE_ID = '${escapedId}';
+  window.calcula = {
+    sendMessage: function(type, data) {
+      parent.postMessage({ source: 'shape-html', instanceId: SHAPE_ID, type: type, data: data }, '*');
+    }
+  };
+  window.addEventListener('message', function(e) {
+    if (e.data && e.data.target === 'shape-html' && e.data.instanceId === SHAPE_ID) {
+      window.dispatchEvent(new CustomEvent('shape-message', { detail: e.data }));
+    }
+  });
+</script>
+</head><body>${userHtml}</body></html>`;
+}
+
+/**
+ * Create or update the positioned iframe overlay element for a shape.
  * Called from the render loop with current viewport info.
  */
 function updateHtmlOverlay(
@@ -122,18 +168,20 @@ function updateHtmlOverlay(
 ): void {
   let el = htmlOverlayElements.get(controlId);
 
-  // Create element if it doesn't exist
+  // Create iframe if it doesn't exist
   if (!el) {
-    el = document.createElement("div");
+    el = document.createElement("iframe");
     el.dataset.shapeOverlay = controlId;
+    el.sandbox.add("allow-scripts", "allow-same-origin");
     el.style.position = "absolute";
     el.style.overflow = "hidden";
     el.style.boxSizing = "border-box";
-    el.style.pointerEvents = "none";
+    el.style.border = "none";
+    el.style.background = "transparent";
+    el.style.pointerEvents = "auto";
     el.style.zIndex = "5";
-    el.style.fontFamily = "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
-    el.style.fontSize = "12px";
-    el.innerHTML = html;
+    el.srcdoc = buildIframeSrcDoc(controlId, html);
+    overlayContentHash.set(controlId, html);
     canvasParent.appendChild(el);
     htmlOverlayElements.set(controlId, el);
   }
@@ -162,10 +210,34 @@ function updateHtmlOverlay(
   el.style.width = `${clippedRight - clippedLeft}px`;
   el.style.height = `${clippedBottom - clippedTop}px`;
 
-  // Update content if changed
-  if (el.innerHTML !== html) {
-    el.innerHTML = html;
+  // Update content only if changed (avoid iframe reload on every render)
+  const prevHash = overlayContentHash.get(controlId);
+  if (prevHash !== html) {
+    el.srcdoc = buildIframeSrcDoc(controlId, html);
+    overlayContentHash.set(controlId, html);
   }
+}
+
+// ============================================================================
+// Script Status Tracking
+// ============================================================================
+
+/** Set of controlIds that have a script attached. */
+const shapesWithScripts = new Set<string>();
+
+/** Mark a shape as having a script attached. */
+export function markShapeHasScript(instanceId: string): void {
+  shapesWithScripts.add(instanceId);
+}
+
+/** Mark a shape as no longer having a script. */
+export function unmarkShapeHasScript(instanceId: string): void {
+  shapesWithScripts.delete(instanceId);
+}
+
+/** Check if a shape has a script attached. */
+export function shapeHasScript(instanceId: string): boolean {
+  return shapesWithScripts.has(instanceId);
 }
 
 /** Invalidate cached data for a specific shape control. */
@@ -483,6 +555,11 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     }
   }
 
+  // 6. Script badge indicator (design mode only)
+  if (getDesignMode() && shapesWithScripts.has(controlId)) {
+    drawScriptBadge(ctx, canvasX, canvasY, shapeWidth);
+  }
+
   ctx.restore();
 }
 
@@ -654,4 +731,57 @@ function drawConnectionPoints(
     ctx.fillStyle = "#4CAF50";
     ctx.fill();
   }
+}
+
+/**
+ * Draw a small script badge icon in the top-right corner of a shape.
+ * Shows a code bracket icon on a rounded pill to indicate a script is attached.
+ */
+function drawScriptBadge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+): void {
+  const badgeSize = 16;
+  const badgeX = x + w - badgeSize - 3;
+  const badgeY = y + 3;
+  const radius = 4;
+
+  // Badge background (rounded rect)
+  ctx.beginPath();
+  ctx.moveTo(badgeX + radius, badgeY);
+  ctx.lineTo(badgeX + badgeSize - radius, badgeY);
+  ctx.arcTo(badgeX + badgeSize, badgeY, badgeX + badgeSize, badgeY + radius, radius);
+  ctx.lineTo(badgeX + badgeSize, badgeY + badgeSize - radius);
+  ctx.arcTo(badgeX + badgeSize, badgeY + badgeSize, badgeX + badgeSize - radius, badgeY + badgeSize, radius);
+  ctx.lineTo(badgeX + radius, badgeY + badgeSize);
+  ctx.arcTo(badgeX, badgeY + badgeSize, badgeX, badgeY + badgeSize - radius, radius);
+  ctx.lineTo(badgeX, badgeY + radius);
+  ctx.arcTo(badgeX, badgeY, badgeX + radius, badgeY, radius);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(0, 120, 212, 0.85)";
+  ctx.fill();
+
+  // Code brackets icon: < >
+  const cx = badgeX + badgeSize / 2;
+  const cy = badgeY + badgeSize / 2;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  // Left bracket <
+  ctx.beginPath();
+  ctx.moveTo(cx - 2, cy - 3);
+  ctx.lineTo(cx - 5, cy);
+  ctx.lineTo(cx - 2, cy + 3);
+  ctx.stroke();
+
+  // Right bracket >
+  ctx.beginPath();
+  ctx.moveTo(cx + 2, cy - 3);
+  ctx.lineTo(cx + 5, cy);
+  ctx.lineTo(cx + 2, cy + 3);
+  ctx.stroke();
 }
