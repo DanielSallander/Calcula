@@ -278,6 +278,11 @@ declare interface ShapeContext extends BaseObjectContext {
   /** Set a shape property value. */
   setProperty(key: string, value: string): Promise<void>;
 
+  /** Read a cell value by reference (e.g., "A1", "B5"). Returns the display value. */
+  getCellValue(cellRef: string): Promise<string>;
+  /** Called when any cell value changes. Use to re-render when source data updates. */
+  onCellChange(handler: (detail: { changes: Array<{ row: number; col: number; newValue: string }> }) => void): () => void;
+
   /** Rendering methods. */
   render: {
     /** Replace canvas rendering with an interactive HTML iframe overlay. */

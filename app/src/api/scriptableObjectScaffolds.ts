@@ -300,6 +300,13 @@ function setup(shape) {
   // const fill = shape.getProperty("fill");
   // shape.setProperty("fill", "#ff0000");
 
+  // == Live Cell Data Binding ==
+  // const value = await shape.getCellValue("A1");
+  // shape.onCellChange(() => {
+  //   // Re-render when any cell changes
+  //   render();
+  // });
+
   // == Custom Canvas Rendering ==
   // shape.render.canvasRenderer((ctx, bounds) => {
   //   ctx.fillStyle = shape.getProperty("fill") || "#4472C4";
@@ -460,6 +467,8 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
           methods: [
             { name: "getProperty", signature: "getProperty(key)", description: "Get a property value by key" },
             { name: "setProperty", signature: "setProperty(key, value)", description: "Set a property value" },
+            { name: "getCellValue", signature: "getCellValue(cellRef)", description: "Read a cell value by reference (e.g., 'A1')" },
+            { name: "onCellChange", signature: "onCellChange(handler)", description: "Called when any cell value changes" },
           ],
         },
         {

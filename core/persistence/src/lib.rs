@@ -889,6 +889,7 @@ pub enum ScriptableObjectType {
     Button,
     Textbox,
     Timeline,
+    Shape,
 }
 
 /// Access level for object scripts.

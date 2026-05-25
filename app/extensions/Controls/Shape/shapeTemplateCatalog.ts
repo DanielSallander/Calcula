@@ -35,7 +35,7 @@ const KPI_CARD: ShapeTemplate = {
     <div style="font-size:11px;color:#10b981;">+12.5%</div>
   </div>`,
   scriptSource: `// KPI Card — displays a metric value with title and delta
-// Configure via Properties pane: Title, Value Cell, Delta Cell, Color
+// Set "Value Cell" and "Delta Cell" to cell references like "A1"
 
 function setup(shape) {
   shape.render.declareProperties([
@@ -45,11 +45,15 @@ function setup(shape) {
     { key: "accentColor", label: "Accent Color", type: "color", defaultValue: "#10b981" },
   ]);
 
-  function render() {
+  async function render() {
     var title = shape.getProperty("title") || "Metric";
-    var value = shape.getProperty("valueCell") || "--";
-    var delta = shape.getProperty("deltaCell") || "";
+    var valueCellRef = shape.getProperty("valueCell");
+    var deltaCellRef = shape.getProperty("deltaCell");
     var accent = shape.getProperty("accentColor") || "#10b981";
+
+    var value = valueCellRef ? await shape.getCellValue(valueCellRef) : "--";
+    var delta = deltaCellRef ? await shape.getCellValue(deltaCellRef) : "";
+    if (!value) value = "--";
 
     shape.render.setHtmlContent(
       '<div style="padding:12px;font-family:' + "'Segoe UI Variable',sans-serif" + ';height:100%;display:flex;flex-direction:column;justify-content:center;background:#fff;">' +
@@ -61,7 +65,8 @@ function setup(shape) {
   }
 
   render();
-  shape.onPropertyChange(render);
+  shape.onPropertyChange(function() { render(); });
+  shape.onCellChange(function() { render(); });
 }
 `,
 };
@@ -78,7 +83,7 @@ const PROGRESS_BAR: ShapeTemplate = {
     <div style="height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;"><div style="width:72%;height:100%;background:linear-gradient(90deg,#f59e0b,#10b981);border-radius:4px;"></div></div>
   </div>`,
   scriptSource: `// Progress Bar — horizontal bar bound to a cell value (0-100)
-// Color transitions from red (0%) through yellow (50%) to green (100%)
+// Set "Value Cell" to a cell reference like "A1" containing a number
 
 function setup(shape) {
   shape.render.declareProperties([
@@ -88,17 +93,20 @@ function setup(shape) {
   ]);
 
   function getColor(pct) {
+    var r, g, b;
     if (pct < 50) {
-      var r = 239, g = Math.round(68 + (158 - 68) * (pct / 50)), b = 68;
+      r = 239; g = Math.round(68 + (158 - 68) * (pct / 50)); b = 68;
     } else {
-      var r = Math.round(245 - (245 - 16) * ((pct - 50) / 50)), g = Math.round(158 + (185 - 158) * ((pct - 50) / 50)), b = Math.round(11 + (129 - 11) * ((pct - 50) / 50));
+      r = Math.round(245 - (245 - 16) * ((pct - 50) / 50)); g = Math.round(158 + (185 - 158) * ((pct - 50) / 50)); b = Math.round(11 + (129 - 11) * ((pct - 50) / 50));
     }
     return "rgb(" + r + "," + g + "," + b + ")";
   }
 
-  function render() {
+  async function render() {
     var label = shape.getProperty("label") || "Progress";
-    var raw = parseFloat(shape.getProperty("valueCell")) || 0;
+    var cellRef = shape.getProperty("valueCell");
+    var rawStr = cellRef ? await shape.getCellValue(cellRef) : "0";
+    var raw = parseFloat(rawStr) || 0;
     var pct = Math.max(0, Math.min(100, raw));
     var barH = parseInt(shape.getProperty("barHeight")) || 8;
     var color = getColor(pct);
@@ -114,7 +122,8 @@ function setup(shape) {
   }
 
   render();
-  shape.onPropertyChange(render);
+  shape.onPropertyChange(function() { render(); });
+  shape.onCellChange(function() { render(); });
 }
 `,
 };
@@ -131,8 +140,7 @@ const STATUS_INDICATOR: ShapeTemplate = {
     <div><div style="font-size:12px;font-weight:600;color:#1a1a1a;">System Status</div><div style="font-size:10px;color:#888;">Operational</div></div>
   </div>`,
   scriptSource: `// Status Indicator — traffic light with label
-// Bind to a cell: "ok" / "warn" / "error", or a number (0-100)
-// Thresholds: <30 = error, 30-70 = warn, >70 = ok
+// Set "Value Cell" to a cell containing "ok"/"warn"/"error" or a number (0-100)
 
 function setup(shape) {
   shape.render.declareProperties([
@@ -147,7 +155,7 @@ function setup(shape) {
   };
 
   function resolveStatus(val) {
-    if (!val || val === "--") return STATUS_MAP.ok;
+    if (!val || val === "--" || val === "") return STATUS_MAP.ok;
     var lower = String(val).toLowerCase().trim();
     if (STATUS_MAP[lower]) return STATUS_MAP[lower];
     var num = parseFloat(val);
@@ -159,9 +167,10 @@ function setup(shape) {
     return STATUS_MAP.ok;
   }
 
-  function render() {
+  async function render() {
     var label = shape.getProperty("label") || "Status";
-    var val = shape.getProperty("valueCell") || "";
+    var cellRef = shape.getProperty("valueCell");
+    var val = cellRef ? await shape.getCellValue(cellRef) : "";
     var s = resolveStatus(val);
 
     shape.render.setHtmlContent(
@@ -176,7 +185,8 @@ function setup(shape) {
   }
 
   render();
-  shape.onPropertyChange(render);
+  shape.onPropertyChange(function() { render(); });
+  shape.onCellChange(function() { render(); });
 }
 `,
 };
@@ -193,7 +203,7 @@ const METRIC_TILE: ShapeTemplate = {
     <div style="font-size:10px;color:#888;margin-top:2px;">Active Users</div>
   </div>`,
   scriptSource: `// Metric Tile — large number with subtitle
-// Bind the value to a cell for live data
+// Set "Value Cell" to a cell reference like "A1" for live data
 
 function setup(shape) {
   shape.render.declareProperties([
@@ -202,8 +212,10 @@ function setup(shape) {
     { key: "valueColor", label: "Value Color", type: "color", defaultValue: "#1a5fb4" },
   ]);
 
-  function render() {
-    var value = shape.getProperty("valueCell") || "--";
+  async function render() {
+    var cellRef = shape.getProperty("valueCell");
+    var value = cellRef ? await shape.getCellValue(cellRef) : "--";
+    if (!value) value = "--";
     var subtitle = shape.getProperty("subtitle") || "Metric";
     var color = shape.getProperty("valueColor") || "#1a5fb4";
 
@@ -216,7 +228,8 @@ function setup(shape) {
   }
 
   render();
-  shape.onPropertyChange(render);
+  shape.onPropertyChange(function() { render(); });
+  shape.onCellChange(function() { render(); });
 }
 `,
 };

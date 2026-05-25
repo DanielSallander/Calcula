@@ -36,6 +36,7 @@ pub enum ObjectScriptObjectTypeDef {
     Button,
     Textbox,
     Timeline,
+    Shape,
 }
 
 /// Access level in the .cala JSON format.
@@ -70,6 +71,7 @@ impl From<&ScriptableObjectType> for ObjectScriptObjectTypeDef {
             ScriptableObjectType::Button => ObjectScriptObjectTypeDef::Button,
             ScriptableObjectType::Textbox => ObjectScriptObjectTypeDef::Textbox,
             ScriptableObjectType::Timeline => ObjectScriptObjectTypeDef::Timeline,
+            ScriptableObjectType::Shape => ObjectScriptObjectTypeDef::Shape,
         }
     }
 }
@@ -88,6 +90,7 @@ impl From<&ObjectScriptObjectTypeDef> for ScriptableObjectType {
             ObjectScriptObjectTypeDef::Button => ScriptableObjectType::Button,
             ObjectScriptObjectTypeDef::Textbox => ScriptableObjectType::Textbox,
             ObjectScriptObjectTypeDef::Timeline => ScriptableObjectType::Timeline,
+            ObjectScriptObjectTypeDef::Shape => ScriptableObjectType::Shape,
         }
     }
 }

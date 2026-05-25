@@ -555,6 +555,13 @@ export interface ShapeContext extends BaseObjectContext {
   /** Set a shape property value. */
   setProperty(key: string, value: string): Promise<void>;
 
+  // -- Cell Data Binding --
+
+  /** Read a cell value by reference (e.g., "A1", "B5"). Returns the display value. */
+  getCellValue(cellRef: string): Promise<string>;
+  /** Called when any cell value changes. Use to re-render when source data updates. */
+  onCellChange(handler: EventHandler<{ changes: Array<{ row: number; col: number; newValue: string }> }>): CleanupFn;
+
   // -- Rendering --
 
   render: {
@@ -1471,6 +1478,24 @@ function buildPivotContext(
 
 // ---- Shape Context ----
 
+/**
+ * Parse a cell reference like "A1" or "AB123" into {row, col} (0-based).
+ * Returns null if the reference is invalid.
+ */
+function parseCellRef(ref: string): { row: number; col: number } | null {
+  const trimmed = ref.trim().toUpperCase();
+  const match = trimmed.match(/^([A-Z]{1,3})(\d+)$/);
+  if (!match) return null;
+  const letters = match[1];
+  const rowNum = parseInt(match[2], 10);
+  if (isNaN(rowNum) || rowNum < 1) return null;
+  let col = 0;
+  for (let i = 0; i < letters.length; i++) {
+    col = col * 26 + (letters.charCodeAt(i) - 64);
+  }
+  return { row: rowNum - 1, col: col - 1 };
+}
+
 function buildShapeContext(
   base: BaseObjectContext,
   definition: ObjectScriptDefinition,
@@ -1557,6 +1582,27 @@ function buildShapeContext(
       const oldValue = propertyCache.get(key) || "";
       propertyCache.set(key, value);
       emitAppEvent("shape:setProperty", { instanceId, key, value, oldValue });
+    },
+
+    // -- Cell Data Binding --
+
+    async getCellValue(cellRef: string): Promise<string> {
+      const parsed = parseCellRef(cellRef);
+      if (!parsed) return "";
+      try {
+        const lib = await getLib();
+        const cell = await lib.getCell(parsed.row, parsed.col);
+        return cell?.display ?? "";
+      } catch {
+        return "";
+      }
+    },
+
+    onCellChange(handler) {
+      return tracked(cleanupFns, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
+        const d = detail as { changes: Array<{ row: number; col: number; newValue: string }> };
+        handler({ changes: d.changes });
+      }));
     },
 
     // -- Rendering --

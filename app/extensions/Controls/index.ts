@@ -620,7 +620,18 @@ function activate(context: ExtensionContext): void {
     const si = parseInt(parts[0], 10);
     const r = parseInt(parts[1], 10);
     const c = parseInt(parts[2], 10);
-    await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
+
+    // Wrap in undo transaction so changes are reversible
+    try {
+      const { beginUndoTransaction, commitUndoTransaction } = await import("../../src/core/lib/tauri-api");
+      await beginUndoTransaction("Shape property: " + d.key);
+      await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
+      await commitUndoTransaction();
+    } catch {
+      // Fallback without undo if transaction API unavailable
+      await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
+    }
+
     // Invalidate cache and redraw
     window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
       detail: { sheetIndex: si, row: r, col: c },
