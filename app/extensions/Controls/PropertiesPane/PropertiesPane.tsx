@@ -124,7 +124,7 @@ const tabBaseStyle: React.CSSProperties = {
 const tabActiveStyle: React.CSSProperties = {
   color: v("--accent-color"),
   fontWeight: 600,
-  borderBottomColor: v("--accent-color"),
+  borderBottom: `2px solid ${v("--accent-color")}`,
 };
 
 const codeTabContentStyle: React.CSSProperties = {
@@ -237,8 +237,16 @@ function renderGroupProperties(
 
 const TemplateCard: React.FC<{ template: ShapeTemplate; onApply: () => void }> = ({ template, onApply }) => {
   const [hovered, setHovered] = useState(false);
+
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    onApply();
+  }, [onApply]);
+
   return (
-    <div
+    <button
+      type="button"
       style={{
         display: "flex",
         alignItems: "center",
@@ -247,12 +255,17 @@ const TemplateCard: React.FC<{ template: ShapeTemplate; onApply: () => void }> =
         cursor: "pointer",
         transition: "background-color 0.1s",
         backgroundColor: hovered ? v("--panel-bg") : "transparent",
+        border: "none",
+        width: "100%",
+        textAlign: "left",
+        fontFamily: v("--font-family-sans"),
       }}
-      onClick={onApply}
+      onClick={handleClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
       <div style={{
+        position: "relative",
         width: 48,
         height: 32,
         borderRadius: 3,
@@ -261,18 +274,22 @@ const TemplateCard: React.FC<{ template: ShapeTemplate; onApply: () => void }> =
         flexShrink: 0,
         backgroundColor: "#fff",
       }}>
-        <iframe
-          srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;overflow:hidden;transform:scale(0.48);transform-origin:top left;width:208%;height:208%;}</style></head><body>${template.previewHtml}</body></html>`}
-          sandbox="allow-same-origin"
-          style={{ width: "100%", height: "100%", border: "none", pointerEvents: "none" }}
-          title={template.name}
+        <div
+          dangerouslySetInnerHTML={{ __html: template.previewHtml }}
+          style={{
+            transform: "scale(0.48)",
+            transformOrigin: "top left",
+            width: "208%",
+            height: "208%",
+            pointerEvents: "none",
+          }}
         />
       </div>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: v("--text-primary") }}>{template.name}</div>
         <div style={{ fontSize: 10, color: v("--text-tertiary"), lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{template.description}</div>
       </div>
-    </div>
+    </button>
   );
 };
 
@@ -294,6 +311,9 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
 
   // Re-read trigger: incremented when external changes (e.g., drag resize) update metadata
   const [reloadTrigger, setReloadTrigger] = useState(0);
+
+  // Tab state (used for shapes — must be declared before any early returns per Rules of Hooks)
+  const [activeTab, setActiveTab] = useState<"properties" | "code" | "preview">("properties");
 
   // Listen for external metadata refreshes (e.g., after drag-resize persists new bounds)
   useEffect(() => {
@@ -405,6 +425,16 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   // Get property definitions for this control type (includes script-declared properties)
   const propDefs = getPropertyDefinitions(controlType || metadata?.controlType || "", instanceId);
 
+  // Must be before early returns (Rules of Hooks)
+  const handleOpenScriptEditor = useCallback(() => {
+    if (!instanceId) return;
+    emitAppEvent("scriptable-objects:edit-script", {
+      objectType: "shape",
+      instanceId,
+      objectName: `Shape (${row}, ${col})`,
+    });
+  }, [instanceId, row, col]);
+
   if (row < 0 || col < 0) {
     return (
       <div style={containerStyle}>
@@ -437,8 +467,6 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     return controlType || metadata?.controlType || "Control";
   })();
 
-  // Tab state (only used for shapes)
-  const [activeTab, setActiveTab] = useState<"properties" | "code" | "preview">("properties");
   const isShape = controlType === "shape";
 
   // Group properties by their group field
@@ -446,15 +474,6 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
 
   // HTML preview content (for shapes with setHtmlContent)
   const htmlContent = instanceId ? getShapeHtmlContent(instanceId) : undefined;
-
-  const handleOpenScriptEditor = useCallback(() => {
-    if (!instanceId) return;
-    emitAppEvent("scriptable-objects:edit-script", {
-      objectType: "shape",
-      instanceId,
-      objectName: `Shape (${row}, ${col})`,
-    });
-  }, [instanceId, row, col]);
 
   return (
     <div style={containerStyle}>

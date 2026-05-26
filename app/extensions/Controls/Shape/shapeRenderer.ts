@@ -176,9 +176,11 @@ function updateHtmlOverlay(
     el.style.position = "absolute";
     el.style.overflow = "hidden";
     el.style.boxSizing = "border-box";
-    el.style.border = "none";
-    el.style.background = "transparent";
-    el.style.pointerEvents = "auto";
+    el.style.border = "1px solid #d0d0d0";
+    el.style.borderRadius = "4px";
+    el.style.background = "#ffffff";
+    el.style.boxShadow = "0 2px 8px rgba(0,0,0,0.12)";
+    el.style.pointerEvents = "none";  // Always none; interactive only via design mode toggle
     el.style.zIndex = "5";
     el.srcdoc = buildIframeSrcDoc(controlId, html);
     overlayContentHash.set(controlId, html);
@@ -421,10 +423,12 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     return;
   }
 
-  // If shape has HTML content, render via DOM overlay instead of canvas
+  // If shape has HTML content, render via DOM overlay (run mode) or canvas preview (design mode)
   const htmlContent = customHtmlContent.get(controlId);
   if (htmlContent !== undefined) {
     const canvasParent = ctx.canvas.parentElement;
+
+    // Always show the iframe overlay (pointer-events: none allows click-through)
     if (canvasParent) {
       updateHtmlOverlay(
         controlId,
@@ -440,14 +444,8 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
         canvasParent,
       );
     }
-    // Draw a subtle border on canvas so the shape is still visible in design mode
-    if (getDesignMode()) {
-      ctx.strokeStyle = "#ddd";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.strokeRect(canvasX, canvasY, shapeWidth, shapeHeight);
-      ctx.setLineDash([]);
-    }
+
+    // Draw selection indicators on top of the iframe when selected
     drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
     ctx.restore();
     return;

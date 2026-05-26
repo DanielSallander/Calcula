@@ -180,11 +180,9 @@ export const ShapeTemplateGallery: React.FC<ShapeTemplateGalleryProps> = ({
                   onMouseLeave={() => setHoveredId(null)}
                 >
                   <div style={thumbnailContainerStyle}>
-                    <iframe
-                      srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;overflow:hidden;}</style></head><body>${tpl.previewHtml}</body></html>`}
-                      sandbox="allow-same-origin"
-                      style={{ width: "100%", height: "100%", border: "none", pointerEvents: "none" }}
-                      title={tpl.name}
+                    <div
+                      dangerouslySetInnerHTML={{ __html: tpl.previewHtml }}
+                      style={{ width: "100%", height: "100%", pointerEvents: "none" }}
                     />
                   </div>
                   <div style={cardInfoStyle}>

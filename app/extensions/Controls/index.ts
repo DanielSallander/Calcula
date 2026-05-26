@@ -86,7 +86,7 @@ import {
   toggleDesignMode,
   onDesignModeChange,
 } from "./lib/designMode";
-import { setControlMetadata, getControlMetadata, getAllControls } from "./lib/controlApi";
+import { setControlMetadata, getControlMetadata, getAllControls, setControlProperty } from "./lib/controlApi";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
 import {
@@ -729,13 +729,22 @@ function activate(context: ExtensionContext): void {
   })();
 
   // Handle shape:applyTemplate — apply a built-in template to a shape
+  const applyingTemplates = new Set<string>();
   const unsubApplyTemplate = onAppEvent("shape:applyTemplate", async (detail) => {
     const d = detail as { instanceId: string; templateId: string };
+    // Guard against double-click / rapid re-entry
+    if (applyingTemplates.has(d.instanceId)) return;
+    applyingTemplates.add(d.instanceId);
+
     const template = getShapeTemplate(d.templateId);
-    if (!template) return;
+    if (!template) {
+      applyingTemplates.delete(d.instanceId);
+      return;
+    }
 
     try {
-      const { saveObjectScript } = await import("../../src/api/objectScriptBackend");
+      const { saveObjectScript, deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
+      const { ObjectScriptManager } = await import("../../src/api/scriptableObjects");
 
       // Parse instanceId for shape location
       const parts = d.instanceId.replace("control-", "").split("-");
@@ -744,17 +753,31 @@ function activate(context: ExtensionContext): void {
       const r = parseInt(parts[1], 10);
       const c = parseInt(parts[2], 10);
 
+      // Clean up any existing script and overlay for this shape
+      const existingScript = ObjectScriptManager.getScript("shape", d.instanceId);
+      if (existingScript) {
+        ObjectScriptManager.removeScript(existingScript.id);
+      }
+      await deleteObjectScriptsForInstance(d.instanceId);
+      removeShapeHtmlOverlay(d.instanceId);
+      removeCustomCanvasRenderer(d.instanceId);
+
       // Save the template script as an object script
       const scriptId = crypto.randomUUID();
-      await saveObjectScript({
+      const scriptDef = {
         id: scriptId,
         name: template.name,
-        objectType: "shape",
+        objectType: "shape" as const,
         instanceId: d.instanceId,
         source: template.scriptSource,
-        accessLevel: "restricted",
+        accessLevel: "restricted" as const,
         description: template.description,
-      });
+      };
+      await saveObjectScript(scriptDef);
+
+      // Register and mount the script so it executes immediately
+      ObjectScriptManager.registerScript(scriptDef);
+      await ObjectScriptManager.mountScript(scriptId);
 
       // Resize shape to template defaults if different
       const ctrl = getFloatingControl(d.instanceId);
@@ -768,13 +791,6 @@ function activate(context: ExtensionContext): void {
       // Mark script badge
       markShapeHasScript(d.instanceId);
 
-      // Mount the script via ScriptableObjects
-      emitAppEvent("scriptable-objects:edit-script", {
-        objectType: "shape",
-        instanceId: d.instanceId,
-        objectName: template.name,
-      });
-
       invalidateShapeCache(d.instanceId);
       emitAppEvent(AppEvents.GRID_REFRESH);
 
@@ -784,6 +800,8 @@ function activate(context: ExtensionContext): void {
       }));
     } catch (err) {
       console.error("[Controls] Failed to apply template:", err);
+    } finally {
+      applyingTemplates.delete(d.instanceId);
     }
   });
   cleanupFns.push(unsubApplyTemplate);

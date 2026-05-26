@@ -348,8 +348,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     };
   }, [scripts]);
 
-  // When activeScriptId changes, load its source
+  // When activeScriptId or scripts change, load source.
+  // If no script is selected but scripts exist, auto-select the first one.
   useEffect(() => {
+    if (!activeScriptId && scripts.length > 0) {
+      setActiveScriptId(scripts[0].id);
+      setSource(scripts[0].source);
+      setIsDirty(false);
+      return;
+    }
     if (!activeScriptId) return;
     const script = scripts.find((s) => s.id === activeScriptId);
     if (script) {
