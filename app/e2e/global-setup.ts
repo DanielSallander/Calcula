@@ -101,7 +101,7 @@ export default async function globalSetup() {
   // Also wait for the Vite dev server to be ready.
   // Without this, WebView2 may load before Vite is serving, showing an error page.
   const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
-  await waitForHTTP(VITE_PORT, 60_000);
+  await waitForHTTP(VITE_PORT, 120_000);
 }
 
 /** Poll http://localhost:<port>/ until it responds with a 2xx/3xx status. */
@@ -109,7 +109,7 @@ function waitForHTTP(port: number, timeoutMs: number): Promise<void> {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const poll = () => {
-      const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
+      const req = http.get(`http://localhost:${port}/`, (res) => {
         if (res.statusCode && res.statusCode < 400) {
           console.log(`[e2e] Vite dev server ready on port ${port}`);
           res.resume(); // drain the response
