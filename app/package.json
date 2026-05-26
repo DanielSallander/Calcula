@@ -16,9 +16,18 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev:data": "cross-env VITE_LOAD_MOCK_DATA=true tauri dev",
-    "e2e": "playwright test --config playwright.config.ts",
-    "e2e:manual": "cross-env E2E_MANUAL=1 playwright test --config playwright.config.ts",
-    "e2e:report": "playwright show-report"
+    "e2e": "playwright test --project=functional",
+    "e2e:visual": "playwright test --project=visual",
+    "e2e:all": "playwright test",
+    "e2e:manual": "cross-env E2E_MANUAL=1 playwright test --project=functional",
+    "e2e:manual:all": "cross-env E2E_MANUAL=1 playwright test",
+    "e2e:visual:update": "playwright test --project=visual --update-snapshots",
+    "e2e:visual:baseline": "playwright test --project=visual --update-snapshots && node ../tests/regression/validate-baselines.mjs",
+    "e2e:visual:baseline:auto": "playwright test --project=visual --update-snapshots && node ../tests/regression/validate-baselines.mjs --auto-fix",
+    "e2e:visual:review": "node ../tests/regression/validate-baselines.mjs",
+    "e2e:report": "playwright show-report",
+    "nightly": "node ../tests/regression/nightly-runner.mjs",
+    "nightly:auto": "node ../tests/regression/nightly-runner.mjs --mode=auto --max-iterations=5"
   },
   "dependencies": {
     "@emotion/css": "^11.13.5",

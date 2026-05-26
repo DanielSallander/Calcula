@@ -1,0 +1,1062 @@
+{
+  "$schema": "./registry-schema.json",
+  "version": "1.0.0",
+  "lastUpdated": "2026-05-26",
+  "tiers": {
+    "1": "Core Foundations - breaks everything if broken",
+    "2": "High-Use Features - daily user workflows",
+    "3": "Feature Extensions - important but less frequent",
+    "4": "Specialized - niche or advanced features"
+  },
+  "coverageStatus": {
+    "full": "Comprehensive tests covering happy path, edge cases, and visual regression",
+    "partial": "Some test coverage but gaps remain",
+    "visual-only": "Only screenshot comparison, no functional assertions",
+    "unit-only": "Unit tests exist but no E2E or visual coverage",
+    "none": "No automated test coverage"
+  },
+  "features": [
+    {
+      "id": "core.grid-rendering",
+      "name": "Grid Rendering & Canvas",
+      "tier": 1,
+      "category": "Core",
+      "description": "Canvas-based grid rendering, cell painting, gridlines, headers",
+      "coverage": "unit-only",
+      "unitTests": [
+        "src/core/lib/gridRenderer/rendering/cells.test.ts",
+        "src/core/lib/gridRenderer/rendering/cells.deep.test.ts",
+        "src/core/lib/gridRenderer/rendering/cells.advanced.test.ts",
+        "src/core/lib/gridRenderer/rendering/grid.deep.test.ts",
+        "src/core/lib/gridRenderer/rendering/grid-merge.test.ts"
+      ],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Unit tests mock CanvasRenderingContext2D. Visual regression needed."
+    },
+    {
+      "id": "core.scrolling",
+      "name": "Scrolling & Virtualization",
+      "tier": 1,
+      "category": "Core",
+      "description": "Viewport scrolling, virtualized rendering, scroll-to-cell",
+      "coverage": "unit-only",
+      "unitTests": [
+        "src/core/lib/gridRenderer/layout/viewport.test.ts",
+        "src/core/lib/gridRenderer/layout/viewport.deep.test.ts",
+        "src/core/lib/__tests__/scroll-mega.test.ts",
+        "src/core/lib/__tests__/scroll-ultra.test.ts",
+        "src/core/lib/__tests__/scroll-hyper.test.ts",
+        "src/core/lib/__tests__/scroll-titan.test.ts"
+      ],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Extensive parameterized unit tests but no E2E scroll verification."
+    },
+    {
+      "id": "core.selection",
+      "name": "Selection & Cursor",
+      "tier": 1,
+      "category": "Core",
+      "description": "Cell selection, range selection, multi-select, active cell",
+      "coverage": "partial",
+      "unitTests": [
+        "src/core/state/__tests__/gridReducer.test.ts",
+        "src/core/state/__tests__/gridActions.test.ts"
+      ],
+      "e2eTests": [
+        "e2e/tests/navigation.spec.ts",
+        "e2e/tests/mouse-interactions.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers navigation but no visual verification of selection highlight."
+    },
+    {
+      "id": "core.editing",
+      "name": "Cell Editing & Input",
+      "tier": 1,
+      "category": "Core",
+      "description": "Inline editor, formula bar input, commit/cancel, F2 edit mode",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/editing.spec.ts",
+        "e2e/tests/keyboard-workflows.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Good E2E coverage of editing workflows. No visual regression."
+    },
+    {
+      "id": "core.formulas",
+      "name": "Formula Parsing & Evaluation",
+      "tier": 1,
+      "category": "Core",
+      "description": "Formula entry, parsing, evaluation, dependency graph, recalculation",
+      "coverage": "partial",
+      "unitTests": [
+        "src/core/lib/formulaRefParser.test.ts",
+        "src/core/lib/formulaRefParser-edge.test.ts",
+        "src/core/lib/__tests__/formula-integration.test.ts",
+        "src/core/lib/__tests__/formula-exhaustive.test.ts",
+        "src/core/lib/__tests__/real-world-formulas.test.ts",
+        "src/core/lib/__tests__/unicode-formulas.test.ts"
+      ],
+      "rustTests": [
+        "core/engine/src/evaluator.rs (131 tests)",
+        "core/parser/src/tests.rs (94 tests)",
+        "core/engine/src/dependency_graph.rs (12 tests)",
+        "core/engine/src/dependency_extractor.rs (20 tests)"
+      ],
+      "e2eTests": [
+        "e2e/tests/formula.spec.ts",
+        "e2e/tests/advanced-formulas.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Strong unit + Rust test coverage. E2E verifies basic formula round-trips."
+    },
+    {
+      "id": "core.undo-redo",
+      "name": "Undo/Redo Stack",
+      "tier": 1,
+      "category": "Core",
+      "description": "Transaction-based undo/redo for all operations",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/undo-redo.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic undo/redo. No testing of undo across feature interactions."
+    },
+    {
+      "id": "core.sheets",
+      "name": "Sheet Management",
+      "tier": 1,
+      "category": "Core",
+      "description": "Add/delete/rename/reorder sheets, sheet tabs, sheet navigation",
+      "coverage": "partial",
+      "unitTests": [
+        "src/core/state/__tests__/sheetGrouping.test.ts"
+      ],
+      "e2eTests": [
+        "e2e/tests/sheets.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Basic E2E coverage. No visual verification of sheet tabs."
+    },
+    {
+      "id": "core.persistence",
+      "name": "File Save/Load (.cala)",
+      "tier": 1,
+      "category": "Core",
+      "description": "Save workbook to .cala format, open .cala files, roundtrip integrity",
+      "coverage": "partial",
+      "unitTests": [
+        "core/calcula-format/src/cell_ref.rs",
+        "core/calcula-format/src/sheet_data.rs",
+        "core/calcula-format/src/sheet_layout.rs",
+        "core/calcula-format/src/sheet_styles.rs",
+        "core/calcula-format/src/manifest.rs",
+        "core/calcula-format/src/zip_io.rs"
+      ],
+      "e2eTests": [
+        "e2e/tests/file-operations.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Rust tests cover serialization. E2E covers save/open. Roundtrip integrity could be more thorough."
+    },
+    {
+      "id": "core.dimensions",
+      "name": "Column Width & Row Height",
+      "tier": 1,
+      "category": "Core",
+      "description": "Resize columns/rows, auto-fit, default dimensions",
+      "coverage": "unit-only",
+      "unitTests": [
+        "src/core/lib/gridRenderer/layout/dimensions.test.ts",
+        "src/core/lib/gridRenderer/layout/dimensions-scale.test.ts"
+      ],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No E2E or visual regression for column/row resize."
+    },
+    {
+      "id": "core.clipboard",
+      "name": "Copy/Paste/Cut",
+      "tier": 1,
+      "category": "Core",
+      "description": "Internal clipboard, copy/paste cell values and formulas, cut",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/clipboard.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic copy/paste. No paste-special E2E coverage."
+    },
+    {
+      "id": "core.merge",
+      "name": "Merge Cells",
+      "tier": 1,
+      "category": "Core",
+      "description": "Merge/unmerge cells, merged cell rendering",
+      "coverage": "partial",
+      "unitTests": [
+        "src/core/lib/gridRenderer/rendering/grid-merge.test.ts"
+      ],
+      "e2eTests": [
+        "e2e/tests/merge.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Unit and E2E coverage. No visual regression for merged cell appearance."
+    },
+    {
+      "id": "core.freeze-split",
+      "name": "Freeze Panes & Split",
+      "tier": 1,
+      "category": "Core",
+      "description": "Freeze rows/columns, split window",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/freeze-panes.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic freeze. No visual verification."
+    },
+    {
+      "id": "feat.formatting",
+      "name": "Cell Formatting",
+      "tier": 2,
+      "category": "Formatting",
+      "description": "Bold, italic, underline, font, color, borders, alignment, number formats",
+      "coverage": "partial",
+      "unitTests": [
+        "src/core/lib/gridRenderer/styles/cellFormatting.test.ts",
+        "src/core/lib/gridRenderer/styles/cellFormatting.deep.test.ts",
+        "core/engine/src/number_format.rs (14 tests)",
+        "core/engine/src/custom_format.rs (65 tests)"
+      ],
+      "e2eTests": [
+        "e2e/tests/formatting.spec.ts",
+        "e2e/tests/number-formatting.spec.ts",
+        "e2e/tests/alignment.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E verifies via Tauri API. No visual verification that formatting renders correctly on canvas."
+    },
+    {
+      "id": "feat.autofilter",
+      "name": "AutoFilter & Filtering",
+      "tier": 2,
+      "category": "Data",
+      "description": "AutoFilter toggle, column filters, filter UI, hidden rows",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/AutoFilter/__tests__/"
+      ],
+      "e2eTests": [
+        "e2e/tests/sort-filter.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Unit tests for filter store. E2E covers basic sort/filter toggle."
+    },
+    {
+      "id": "feat.sorting",
+      "name": "Sorting",
+      "tier": 2,
+      "category": "Data",
+      "description": "Single and multi-level sorting, sort dialog",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/Sorting/__tests__/"
+      ],
+      "e2eTests": [
+        "e2e/tests/sort-filter.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Combined with filter in E2E. Sort dialog not tested visually."
+    },
+    {
+      "id": "feat.pivot",
+      "name": "Pivot Tables",
+      "tier": 2,
+      "category": "Data Analysis",
+      "description": "Create/update/delete pivot tables, field settings, grouping, filtering, drill-through",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/Pivot/__tests__/ (~53 files)",
+        "extensions/Pivot/dsl/ (DSL compiler, lexer, parser)"
+      ],
+      "rustTests": [
+        "core/pivot-engine/src/calculated.rs",
+        "core/pivot-engine/src/engine.rs"
+      ],
+      "e2eTests": [
+        "e2e/tests/pivot.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Strong unit coverage. E2E covers basic pivot creation. Complex interactions untested."
+    },
+    {
+      "id": "feat.charts",
+      "name": "Charts",
+      "tier": 2,
+      "category": "Visualization",
+      "description": "Create/edit charts, chart types, data point formatting, axis formatting",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/Charts/__tests__/ (~91 files)"
+      ],
+      "e2eTests": [
+        "e2e/tests/charts.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Extensive unit tests for chart rendering. E2E covers creation. No visual regression."
+    },
+    {
+      "id": "feat.tables",
+      "name": "Structured Tables",
+      "tier": 2,
+      "category": "Data",
+      "description": "Create/delete/rename tables, totals row, structured references, table styles",
+      "coverage": "unit-only",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No dedicated E2E tests. May be partially covered by workflow specs."
+    },
+    {
+      "id": "feat.find-replace",
+      "name": "Find & Replace",
+      "tier": 2,
+      "category": "Editing",
+      "description": "Find dialog, replace dialog, find all, match options",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/find-replace.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic find/replace."
+    },
+    {
+      "id": "feat.column-row-ops",
+      "name": "Insert/Delete Rows & Columns",
+      "tier": 2,
+      "category": "Structure",
+      "description": "Insert/delete rows and columns, formula reference adjustment",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/column-row-ops.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic insert/delete."
+    },
+    {
+      "id": "feat.named-ranges",
+      "name": "Named Ranges",
+      "tier": 2,
+      "category": "Formulas",
+      "description": "Name Manager, define/edit/delete names, navigate by name",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/named-ranges.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic named range CRUD."
+    },
+    {
+      "id": "feat.paste-special",
+      "name": "Paste Special",
+      "tier": 2,
+      "category": "Editing",
+      "description": "Paste values, formulas, formatting, link, transpose",
+      "coverage": "unit-only",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No E2E coverage for paste special dialog."
+    },
+    {
+      "id": "feat.fill-handle",
+      "name": "Fill Handle & Auto-Fill",
+      "tier": 2,
+      "category": "Editing",
+      "description": "Drag fill handle, auto-fill series, fill down/right",
+      "coverage": "partial",
+      "unitTests": [
+        "src/core/lib/fillLists.test.ts",
+        "src/core/lib/fillLists-sequences.test.ts"
+      ],
+      "e2eTests": [
+        "e2e/tests/fill-handle.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Good coverage of fill logic and E2E drag."
+    },
+    {
+      "id": "feat.zoom",
+      "name": "Zoom",
+      "tier": 2,
+      "category": "View",
+      "description": "Zoom slider, zoom presets, zoom to selection",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/zoom-view.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers zoom controls."
+    },
+    {
+      "id": "feat.conditional-formatting",
+      "name": "Conditional Formatting",
+      "tier": 3,
+      "category": "Formatting",
+      "description": "CF rules, data bars, color scales, icon sets, rule manager",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/ConditionalFormatting/__tests__/"
+      ],
+      "e2eTests": [
+        "e2e/tests/conditional-formatting.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers basic CF rule creation."
+    },
+    {
+      "id": "feat.data-validation",
+      "name": "Data Validation",
+      "tier": 3,
+      "category": "Data",
+      "description": "Validation rules, dropdown lists, error alerts, circle invalid",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/DataValidation/__tests__/"
+      ],
+      "e2eTests": [
+        "e2e/tests/data-validation.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers validation dialog and basic rules."
+    },
+    {
+      "id": "feat.grouping",
+      "name": "Row/Column Grouping",
+      "tier": 3,
+      "category": "Data",
+      "description": "Group/ungroup, collapse/expand, outline levels",
+      "coverage": "unit-only",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No E2E coverage."
+    },
+    {
+      "id": "feat.comments",
+      "name": "Comments & Notes",
+      "tier": 3,
+      "category": "Review",
+      "description": "Add/edit/delete comments, replies, resolve, notes, indicators",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.hyperlinks",
+      "name": "Hyperlinks",
+      "tier": 3,
+      "category": "Editing",
+      "description": "Insert/edit/remove hyperlinks, click-to-follow",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.protection",
+      "name": "Sheet/Workbook Protection",
+      "tier": 3,
+      "category": "Security",
+      "description": "Protect/unprotect sheets, cell protection, edit ranges",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.sparklines",
+      "name": "Sparklines",
+      "tier": 3,
+      "category": "Visualization",
+      "description": "In-cell sparkline charts, sparkline design tab",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.slicers",
+      "name": "Slicers",
+      "tier": 3,
+      "category": "Data Analysis",
+      "description": "Slicer widgets, cross-filter, slicer options",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.print",
+      "name": "Print & Page Setup",
+      "tier": 3,
+      "category": "Output",
+      "description": "Print preview, page setup, page breaks, PDF export",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/print.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers print preview."
+    },
+    {
+      "id": "feat.format-cells-dialog",
+      "name": "Format Cells Dialog",
+      "tier": 3,
+      "category": "Formatting",
+      "description": "Number, alignment, font, border, fill, protection tabs",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No E2E coverage for the full dialog."
+    },
+    {
+      "id": "feat.subtotals",
+      "name": "Subtotals",
+      "tier": 3,
+      "category": "Data",
+      "description": "Group-by aggregation with outline levels",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.menus",
+      "name": "Menu Bar & Context Menus",
+      "tier": 2,
+      "category": "UI",
+      "description": "File/Edit/Insert/Format/Data/Review/View menus, right-click context menu",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/menu-interactions.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E covers menu navigation. No visual regression."
+    },
+    {
+      "id": "feat.ribbon",
+      "name": "Ribbon & Home Tab",
+      "tier": 2,
+      "category": "UI",
+      "description": "Home ribbon tab, formatting buttons, contextual tabs",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Ribbon used in formatting E2E but not directly tested. No visual regression."
+    },
+    {
+      "id": "feat.formula-bar",
+      "name": "Formula Bar & Name Box",
+      "tier": 1,
+      "category": "Core",
+      "description": "Formula bar display/editing, name box navigation",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/navigation.spec.ts",
+        "e2e/tests/formula.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Used as assertion point in many E2E tests but not directly tested for visual correctness."
+    },
+    {
+      "id": "feat.advanced-filter",
+      "name": "Advanced Filter",
+      "tier": 3,
+      "category": "Data",
+      "description": "Filter by criteria range, copy results",
+      "coverage": "unit-only",
+      "unitTests": [
+        "extensions/AdvancedFilter/__tests__/"
+      ],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Unit tests for filter engine."
+    },
+    {
+      "id": "feat.flash-fill",
+      "name": "Flash Fill",
+      "tier": 3,
+      "category": "Data",
+      "description": "Pattern detection and auto-fill",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.goal-seek",
+      "name": "Goal Seek",
+      "tier": 4,
+      "category": "What-If",
+      "description": "Goal seek dialog and solver",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.solver",
+      "name": "Solver",
+      "tier": 4,
+      "category": "What-If",
+      "description": "Linear/non-linear optimization",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.scenarios",
+      "name": "Scenario Manager",
+      "tier": 4,
+      "category": "What-If",
+      "description": "Add/edit/delete/show scenarios, scenario summary",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.bi",
+      "name": "Business Intelligence",
+      "tier": 4,
+      "category": "BI",
+      "description": "PostgreSQL connections, in-memory model, BI pivots",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Requires external database. Not suitable for basic nightly tests."
+    },
+    {
+      "id": "feat.distribution",
+      "name": "Distribution (.calp)",
+      "tier": 4,
+      "category": "Collaboration",
+      "description": "Publish/subscribe, overrides, writeback, audit log",
+      "coverage": "unit-only",
+      "unitTests": [
+        "core/calp/src/audit.rs",
+        "core/calp/src/channels.rs",
+        "core/calp/src/overrides.rs",
+        "core/calp/src/writeback.rs (38 tests)"
+      ],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Rust unit tests only."
+    },
+    {
+      "id": "feat.scripting",
+      "name": "Scripting & Script Editor",
+      "tier": 4,
+      "category": "Developer",
+      "description": "Script editor, notebook, object scripts, templates",
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/ScriptEditor/__tests__/",
+        "extensions/ScriptNotebook/__tests__/"
+      ],
+      "e2eTests": [
+        "e2e/tests/scriptable-objects.spec.ts",
+        "e2e/tests/scriptable-shapes.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E tests for scriptable objects and shapes."
+    },
+    {
+      "id": "feat.csv-import-export",
+      "name": "CSV Import/Export",
+      "tier": 3,
+      "category": "File",
+      "description": "CSV import and export dialogs",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.consolidate",
+      "name": "Consolidate",
+      "tier": 4,
+      "category": "Data",
+      "description": "Data consolidation across ranges/sheets",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.data-tables",
+      "name": "Data Tables (What-If)",
+      "tier": 4,
+      "category": "What-If",
+      "description": "One-variable and two-variable data tables",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.remove-duplicates",
+      "name": "Remove Duplicates",
+      "tier": 3,
+      "category": "Data",
+      "description": "Remove duplicate rows dialog",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.text-to-columns",
+      "name": "Text to Columns",
+      "tier": 3,
+      "category": "Data",
+      "description": "Text to columns wizard dialog",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.tracing",
+      "name": "Formula Tracing",
+      "tier": 3,
+      "category": "Formulas",
+      "description": "Trace precedents/dependents arrows overlay",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.evaluate-formula",
+      "name": "Evaluate Formula",
+      "tier": 3,
+      "category": "Formulas",
+      "description": "Step-by-step formula evaluator dialog",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.error-checking",
+      "name": "Error Checking",
+      "tier": 3,
+      "category": "Formulas",
+      "description": "Green triangle error indicators",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage. Visual-only feature — perfect candidate for screenshot testing."
+    },
+    {
+      "id": "feat.watch-window",
+      "name": "Watch Window",
+      "tier": 4,
+      "category": "Formulas",
+      "description": "Floating dialog for monitoring cell values",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.format-painter",
+      "name": "Format Painter",
+      "tier": 3,
+      "category": "Formatting",
+      "description": "Single-click and lock modes for format copying",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.formula-autocomplete",
+      "name": "Formula Autocomplete",
+      "tier": 2,
+      "category": "Editing",
+      "description": "Function autocomplete dropdown and tooltip",
+      "coverage": "unit-only",
+      "unitTests": [
+        "src/core/lib/formulaCompletion.test.ts"
+      ],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Unit tests for completion logic. No visual test for dropdown overlay."
+    },
+    {
+      "id": "feat.status-bar",
+      "name": "Status Bar & Aggregations",
+      "tier": 2,
+      "category": "UI",
+      "description": "Status bar aggregation (SUM, AVG, COUNT), zoom slider",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage. Easy visual regression candidate."
+    },
+    {
+      "id": "feat.checkbox",
+      "name": "Checkbox Controls",
+      "tier": 3,
+      "category": "Controls",
+      "description": "In-cell checkbox rendering and click toggling",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.controls",
+      "name": "Shape/Form Controls",
+      "tier": 3,
+      "category": "Controls",
+      "description": "Buttons, dropdowns, spinners, properties pane",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/scriptable-objects.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "Covered via scriptable objects E2E."
+    },
+    {
+      "id": "feat.timeline-slicer",
+      "name": "Timeline Slicer",
+      "tier": 4,
+      "category": "Data Analysis",
+      "description": "Date-based timeline slicer widget",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.auto-recover",
+      "name": "Auto-Recover",
+      "tier": 3,
+      "category": "File",
+      "description": "Auto-save at configurable intervals",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.ai-chat",
+      "name": "AI Chat",
+      "tier": 4,
+      "category": "AI",
+      "description": "AI assistant sidebar with Claude API",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Requires API key. Not suitable for automated nightly."
+    },
+    {
+      "id": "feat.custom-fill-lists",
+      "name": "Custom Fill Lists",
+      "tier": 4,
+      "category": "Editing",
+      "description": "Custom fill series lists dialog",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.data-form",
+      "name": "Data Form",
+      "tier": 4,
+      "category": "Data",
+      "description": "Row-by-row data entry dialog",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.go-to-special",
+      "name": "Go To Special",
+      "tier": 3,
+      "category": "Navigation",
+      "description": "Go To Special dialog (blanks, constants, formulas, etc.)",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.document-theme",
+      "name": "Document Theme",
+      "tier": 3,
+      "category": "Formatting",
+      "description": "Page Layout tab, theme colors and fonts",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage. Good visual regression candidate."
+    },
+    {
+      "id": "feat.search",
+      "name": "Search Panel",
+      "tier": 3,
+      "category": "Navigation",
+      "description": "Search activity bar view with find/replace",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No E2E coverage. Find/replace dialog is separately tested."
+    },
+    {
+      "id": "feat.settings",
+      "name": "Settings Panel",
+      "tier": 4,
+      "category": "UI",
+      "description": "Application settings activity bar view",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.file-explorer",
+      "name": "File Explorer",
+      "tier": 3,
+      "category": "UI",
+      "description": "Workbook structure tree view, virtual files",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.json-view",
+      "name": "JSON View",
+      "tier": 4,
+      "category": "Developer",
+      "description": "JSON editor for structured cell values",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.defined-functions",
+      "name": "Defined Functions (Custom)",
+      "tier": 3,
+      "category": "Formulas",
+      "description": "Define Function dialog for user-defined formulas",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.bookmarks",
+      "name": "Cell Bookmarks",
+      "tier": 4,
+      "category": "Navigation",
+      "description": "Add/remove/navigate bookmarks, highlight, bookmark pane",
+      "coverage": "none",
+      "unitTests": [],
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage."
+    },
+    {
+      "id": "feat.scriptable-objects",
+      "name": "Scriptable Objects",
+      "tier": 3,
+      "category": "Controls",
+      "description": "User-scriptable objects with TypeScript, templates, marketplace",
+      "coverage": "partial",
+      "unitTests": [],
+      "e2eTests": [
+        "e2e/tests/scriptable-objects.spec.ts",
+        "e2e/tests/scriptable-shapes.spec.ts"
+      ],
+      "screenshots": [],
+      "notes": "E2E coverage exists."
+    }
+  ],
+  "summary": {
+    "totalFeatures": 68,
+    "tier1": 13,
+    "tier2": 16,
+    "tier3": 24,
+    "tier4": 15,
+    "coverageFull": 0,
+    "coveragePartial": 26,
+    "coverageUnitOnly": 5,
+    "coverageVisualOnly": 0,
+    "coverageNone": 37
+  }
+}

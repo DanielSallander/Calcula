@@ -1,0 +1,199 @@
+# Calcula Regression Testing System
+
+Unified testing infrastructure — all test layers orchestrated into one system.
+Runs unattended overnight with optional Claude Code auto-fix feedback loop.
+
+## Quick Reference — Commands
+
+All commands run from `app/`:
+
+### Individual Test Layers
+
+| Command | What it does |
+|---------|-------------|
+| `yarn test` | Vitest unit tests (~443 files) |
+| `yarn e2e` | Functional E2E tests (auto-launches app) |
+| `yarn e2e:visual` | Visual regression screenshot tests |
+| `yarn e2e:all` | Both functional + visual E2E |
+| `yarn e2e:manual` | Functional E2E against already-running app |
+| `yarn e2e:manual:all` | All E2E against already-running app |
+| `yarn e2e:report` | Open last HTML report |
+
+### Visual Baselines
+
+| Command | What it does |
+|---------|-------------|
+| `yarn e2e:visual:update` | Regenerate golden screenshots (no review) |
+| `yarn e2e:visual:baseline` | Regenerate + Claude Code reviews for correctness |
+| `yarn e2e:visual:baseline:auto` | Regenerate + Claude Code reviews + auto-fixes issues |
+| `yarn e2e:visual:review` | Review existing baselines (no regeneration) |
+
+### Nightly Suite
+
+| Command | What it does |
+|---------|-------------|
+| `yarn nightly` | Full suite (Rust + Unit + E2E + Visual), report only |
+| `yarn nightly:auto` | Full suite with Claude Code auto-fix loop (max 5 iterations) |
+
+### Nightly Runner Options
+
+```bash
+node tests/regression/nightly-runner.mjs [options]
+
+  --mode=manual|auto       Manual = report only. Auto = Claude Code fixes failures.
+  --max-iterations=N       Max fix/re-test cycles in auto mode (default: 5)
+  --skip-rust              Skip cargo test phase
+  --only=rust|unit|e2e|visual   Run only one layer
+  --max-files=N            Max files Claude Code can modify per iteration (default: 10)
+```
+
+## Workflow: First-Time Setup
+
+1. **Start the app** with CDP enabled (or let the runner do it automatically):
+   ```bash
+   # Option A: Let the test runner handle it
+   yarn e2e:visual:baseline
+
+   # Option B: Manual - start app first, then run tests
+   powershell e2e/launch-with-cdp.ps1
+   yarn e2e:visual:update    # generate screenshots
+   yarn e2e:visual:review    # Claude Code reviews them
+   ```
+
+2. **Review the generated baselines** in `e2e/visual/__screenshots__/`
+   Claude Code will flag any screenshots that look wrong.
+
+3. **Commit the baselines** — they are now the visual "ground truth".
+
+## Workflow: Daily Development
+
+Just develop as normal. When you want to check for regressions:
+
+```bash
+yarn e2e:manual:all     # quick check against running app
+```
+
+## Workflow: Overnight Run
+
+**Manual mode** — review report in the morning:
+```bash
+yarn nightly
+# Report at: app/e2e/results/nightly-report.html
+```
+
+**Auto mode** — Claude Code fixes failures while you sleep:
+```bash
+yarn nightly:auto
+# In the morning:
+#   1. Open app/e2e/results/nightly-report.html
+#   2. If fixes look good:  merge nightly-fixes branch in VSCode
+#   3. If fixes are wrong:  git branch -D nightly-fixes
+```
+
+## Workflow: After All Tests Pass
+
+When all tests are green, the nightly runner automatically:
+1. Reads `registry.json` for uncovered features
+2. Asks Claude Code to suggest test scenarios for the gaps
+3. Writes suggestions to **`tests/regression/suggested-scenarios.md`**
+
+**To work with suggestions:**
+1. Open `tests/regression/suggested-scenarios.md`
+2. Edit, reorder, or delete scenarios as you see fit
+3. Add `<!-- user-edited -->` anywhere to prevent overwrite on next run
+4. When ready, ask Claude Code: *"Implement the scenarios in suggested-scenarios.md"*
+5. After implementing, update `registry.json` coverage fields
+
+## Workflow: Intentional UI Changes
+
+When you change the UI on purpose (new layout, theme, etc.):
+```bash
+yarn e2e:visual:update          # regenerate baselines
+# or with Claude Code review:
+yarn e2e:visual:baseline:auto   # regenerate + review + auto-fix
+```
+
+Commit the updated screenshots.
+
+## Safety Guards (Auto Mode)
+
+- Changes go to `nightly-fixes` branch, never directly to `main`
+- Max iteration cap (default 5) prevents runaway changes
+- Max files per iteration (default 10) limits blast radius
+- Claude Code only gets Edit, Read, Grep, Glob, Bash tools
+- Original branch is restored after the run
+- You merge the branch manually (or discard it)
+
+## File Layout
+
+```
+tests/regression/
+  registry.json              68 features, 4 priority tiers, coverage tracking
+  suggested-scenarios.md     Claude-suggested new tests (edit this!)
+  nightly-runner.mjs         Orchestrator: Rust -> Unit -> E2E -> Visual -> Report
+  validate-baselines.mjs     Feeds screenshots to Claude Code for review
+  README.md                  This guide
+
+app/e2e/
+  tests/                     36 functional E2E specs (existing, unchanged)
+  visual/                    Visual regression specs
+    core-visual.spec.ts        Grid, formatting, selection, menus
+    workflow-visual.spec.ts    Cross-cutting user scenarios
+  helpers/
+    grid.ts                  Grid interaction helper (existing, unchanged)
+    screenshots.ts           Screenshot comparison utilities
+  results/                   Generated reports, Claude Code logs (gitignored)
+```
+
+## Test Layers Detail
+
+| Layer | Framework | Count | What it catches |
+|-------|-----------|-------|----------------|
+| Rust backend | `cargo test` | ~400+ tests | Engine, parser, persistence logic |
+| Vitest unit | Vitest + jsdom | 443 files | TS state, API contracts, rendering logic |
+| Functional E2E | Playwright + CDP | 36 specs | Broken user workflows, interactions |
+| Visual regression | Playwright screenshots | 2 specs | UI rendering changes, layout shifts |
+
+## Feature Coverage Registry
+
+`registry.json` tracks every feature with:
+- **tier**: 1 (core), 2 (high-use), 3 (extensions), 4 (specialized)
+- **coverage**: `full`, `partial`, `unit-only`, `visual-only`, `none`
+- Test file references per layer
+
+Current: 68 features — 26 partial, 5 unit-only, 37 uncovered.
+
+## Adding Tests
+
+### Visual checkpoint in a test
+
+```typescript
+import { takeGridScreenshot, takeDialogScreenshot } from "../helpers/screenshots";
+
+await takeGridScreenshot(page, "my-feature-state");
+await takeDialogScreenshot(page, "my-dialog", ".dialog-selector");
+```
+
+### New feature in the registry
+
+Add to `features` array in `registry.json`:
+```json
+{
+  "id": "feat.my-feature",
+  "name": "My Feature",
+  "tier": 2,
+  "category": "Data",
+  "description": "What it does",
+  "coverage": "none",
+  "unitTests": [],
+  "e2eTests": [],
+  "screenshots": [],
+  "notes": "Not yet tested"
+}
+```
+
+## Prerequisites
+
+- **E2E tests**: App must be running with CDP (auto-handled by test runner, or use `e2e/launch-with-cdp.ps1`)
+- **Auto mode**: `claude` CLI must be in PATH
+- **Rust tests**: Toolchain via `core/setup-rust-env.ps1`

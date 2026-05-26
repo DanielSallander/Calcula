@@ -11,20 +11,38 @@ import { defineConfig } from "@playwright/test";
  *   3. A global-teardown script kills the Tauri process.
  *
  * Usage:
- *   npm run e2e           -- full automatic run (launches app, tests, teardown)
- *   npm run e2e:headed    -- same but keeps the app visible (it already is, but
- *                            Playwright traces are collected)
- *   npm run e2e:manual    -- skip auto-launch; connect to an already-running
- *                            Calcula instance that was started with CDP enabled
+ *   yarn e2e              -- functional E2E tests only
+ *   yarn e2e:visual       -- visual regression tests only
+ *   yarn e2e:all          -- both functional and visual tests
+ *   yarn e2e:manual       -- skip auto-launch; connect to already-running app
+ *   yarn e2e:report       -- open the HTML report from last run
+ *
+ * Update visual baselines:
+ *   yarn e2e:visual:update -- regenerate golden screenshots
  */
 export default defineConfig({
-  testDir: "./e2e/tests",
+  testDir: "./e2e",
   timeout: 30_000,
-  expect: { timeout: 10_000 },
+  expect: {
+    timeout: 10_000,
+    toHaveScreenshot: {
+      // Store golden baselines alongside the test files
+      maxDiffPixelRatio: 0.005,
+      threshold: 0.2,
+      animations: "disabled",
+    },
+  },
   fullyParallel: false,          // serial — single app instance
   retries: 0,
   workers: 1,                    // one worker — single CDP connection
-  reporter: [["list"], ["html", { open: "never" }]],
+  reporter: [
+    ["list"],
+    ["html", { open: "never" }],
+    ["json", { outputFile: "./e2e/results/results.json" }],
+  ],
+
+  // Snapshot paths: baselines stored next to test files in __screenshots__/
+  snapshotPathTemplate: "{testDir}/{testFileDir}/__screenshots__/{testFileName}/{arg}{ext}",
 
   globalSetup: "./e2e/global-setup.ts",
   globalTeardown: "./e2e/global-teardown.ts",
@@ -34,4 +52,17 @@ export default defineConfig({
     screenshot: "only-on-failure",
     video: "retain-on-failure",
   },
+
+  projects: [
+    {
+      name: "functional",
+      testDir: "./e2e/tests",
+      testMatch: "**/*.spec.ts",
+    },
+    {
+      name: "visual",
+      testDir: "./e2e/visual",
+      testMatch: "**/*.spec.ts",
+    },
+  ],
 });

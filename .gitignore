@@ -166,6 +166,7 @@ $RECYCLE.BIN/
 playwright-report/
 test-results/
 app/e2e/.tauri-pid
+app/e2e/results/
 
 # Other
 context_manager/
