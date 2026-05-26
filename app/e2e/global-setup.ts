@@ -68,6 +68,27 @@ export default async function globalSetup() {
     fs.unlinkSync(PID_FILE);
   }
 
+  // Kill any process occupying the Vite port so `cargo tauri dev` can start cleanly.
+  const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
+  try {
+    const netstatOut = execSync(`netstat -ano | findstr :${VITE_PORT} | findstr LISTENING`, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const pids = new Set(
+      netstatOut
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/).pop())
+        .filter((pid): pid is string => !!pid && /^\d+$/.test(pid))
+    );
+    for (const pid of pids) {
+      console.log(`[e2e] Killing process ${pid} occupying port ${VITE_PORT}`);
+      try {
+        execSync(`taskkill /F /T /PID ${pid}`, { stdio: "ignore" });
+      } catch { /* already gone */ }
+    }
+  } catch { /* no process on port — good */ }
+
   console.log("[e2e] Launching cargo tauri dev with CDP on port", CDP_PORT, "...");
 
   const child: ChildProcess = spawn("yarn", ["tauri", "dev"], {
@@ -100,7 +121,6 @@ export default async function globalSetup() {
 
   // Also wait for the Vite dev server to be ready.
   // Without this, WebView2 may load before Vite is serving, showing an error page.
-  const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
   await waitForHTTP(VITE_PORT, 120_000);
 }
 
