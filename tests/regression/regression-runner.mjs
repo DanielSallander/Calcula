@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Calcula Nightly Regression Runner
+ * Calcula Regression Runner
  *
  * Orchestrates all test layers (Rust, Vitest, Playwright E2E, Visual Regression)
  * into a single automated run. Supports two modes:
@@ -10,13 +10,13 @@
  *                   re-run. Repeats up to --max-iterations times.
  *
  * Usage:
- *   node tests/regression/nightly-runner.mjs                          # manual mode
- *   node tests/regression/nightly-runner.mjs --mode=auto              # auto-fix mode
- *   node tests/regression/nightly-runner.mjs --mode=auto --max-iterations=3
- *   node tests/regression/nightly-runner.mjs --skip-rust              # skip cargo test
- *   node tests/regression/nightly-runner.mjs --only=visual            # only visual tests
- *   node tests/regression/nightly-runner.mjs --only=e2e               # only functional E2E
- *   node tests/regression/nightly-runner.mjs --only=unit              # only Vitest unit tests
+ *   node tests/regression/regression-runner.mjs                          # manual mode
+ *   node tests/regression/regression-runner.mjs --mode=auto              # auto-fix mode
+ *   node tests/regression/regression-runner.mjs --mode=auto --max-iterations=3
+ *   node tests/regression/regression-runner.mjs --skip-rust              # skip cargo test
+ *   node tests/regression/regression-runner.mjs --only=visual            # only visual tests
+ *   node tests/regression/regression-runner.mjs --only=e2e               # only functional E2E
+ *   node tests/regression/regression-runner.mjs --only=unit              # only Vitest unit tests
  *
  * Environment:
  *   CLAUDE_CMD    - Path to Claude Code CLI (default: "claude")
@@ -32,7 +32,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const APP_DIR = path.join(PROJECT_ROOT, "app");
 const RESULTS_DIR = path.join(APP_DIR, "e2e", "results");
-const REPORT_FILE = path.join(RESULTS_DIR, "nightly-report.html");
+const REPORT_FILE = path.join(RESULTS_DIR, "regression-report.html");
 const CLAUDE_CMD = process.env.CLAUDE_CMD || "claude";
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ const args = Object.fromEntries(
 );
 
 const MODE = args.mode || "manual";
-const MAX_ITERATIONS = parseInt(args["max-iterations"] || "5", 10);
+const MAX_ITERATIONS = parseInt(args["max-iterations"] || "15", 10);
 const SKIP_RUST = args["skip-rust"] === "true";
 const ONLY = args.only || null; // "visual", "e2e", "unit", or null for all
 const MAX_FILES_PER_ITERATION = parseInt(args["max-files"] || "10", 10);
@@ -94,7 +94,7 @@ function ensureDir(dir) {
 function runRustTests() {
   log("Phase 1: Rust backend tests (cargo test)");
   const result = exec("cargo test --workspace 2>&1", {
-    cwd: PROJECT_ROOT,
+    cwd: path.join(PROJECT_ROOT, "core"),
     timeout: 300_000, // 5 min
   });
   log(result.success ? "  [PASS] Rust tests passed" : "  [FAIL] Rust tests failed");
@@ -118,8 +118,9 @@ function runUnitTests() {
 }
 
 function runFunctionalE2E() {
-  log("Phase 3: Functional E2E tests (yarn e2e:manual)");
-  const result = exec("yarn e2e:manual 2>&1", { timeout: 600_000 });
+  log("Phase 3: Functional E2E tests");
+  // Use non-manual mode: Playwright's global-setup launches the app via CDP
+  const result = exec("yarn playwright test --project=functional 2>&1", { timeout: 600_000 });
   log(result.success ? "  [PASS] Functional E2E passed" : "  [FAIL] Functional E2E failed");
   return {
     phase: "e2e-functional",
@@ -129,14 +130,28 @@ function runFunctionalE2E() {
 }
 
 function runVisualRegression() {
-  log("Phase 4: Visual regression tests (yarn e2e:manual:all --project=visual)");
-  const result = exec(
-    "cross-env E2E_MANUAL=1 yarn playwright test --project=visual 2>&1",
-    { timeout: 600_000 }
-  );
+  log("Phase 4: Visual regression tests");
+  // Use non-manual mode: Playwright's global-setup launches the app via CDP
+  const result = exec("yarn playwright test --project=visual 2>&1", { timeout: 600_000 });
   log(result.success ? "  [PASS] Visual regression passed" : "  [FAIL] Visual regression failed");
   return {
     phase: "visual",
+    success: result.success,
+    output: result.output,
+  };
+}
+
+/**
+ * Run all E2E tests (functional + visual) in a single Playwright run.
+ * This is more efficient than running them separately since the app only
+ * needs to be launched once via global-setup.
+ */
+function runAllE2E() {
+  log("Phase 3+4: All E2E tests (functional + visual)");
+  const result = exec("yarn playwright test 2>&1", { timeout: 600_000 });
+  log(result.success ? "  [PASS] All E2E passed" : "  [FAIL] E2E tests failed");
+  return {
+    phase: "e2e-all",
     success: result.success,
     output: result.output,
   };
@@ -150,7 +165,7 @@ function collectFailures(results) {
   const failures = results.filter((r) => !r.success);
   if (failures.length === 0) return null;
 
-  let report = "# Nightly Test Failures\n\n";
+  let report = "# Regression Test Failures\n\n";
 
   for (const f of failures) {
     report += `## Phase: ${f.phase}\n\n`;
@@ -234,7 +249,7 @@ function invokeClaudeCodeFix(failureReport, iteration) {
     "Calcula is an open-source Excel alternative (Tauri + Rust backend + React/Canvas frontend).",
     "The project is at: " + PROJECT_ROOT,
     "",
-    "Here are the test failures from the nightly regression run:",
+    "Here are the test failures from the regression run:",
     "",
     failureReport,
     "",
@@ -274,7 +289,7 @@ function invokeClaudeCodeFix(failureReport, iteration) {
 
   const result = exec(claudeCmd, {
     cwd: PROJECT_ROOT,
-    timeout: 600_000, // 10 min for Claude to work
+    timeout: 1_800_000, // 30 min for Claude to work
   });
 
   if (result.success) {
@@ -296,7 +311,7 @@ function invokeClaudeCodeFix(failureReport, iteration) {
 }
 
 function commitFixes(iteration) {
-  log("  Committing fixes to nightly-fixes branch...");
+  log("  Committing fixes to regression-fixes branch...");
 
   // Check if there are any changes
   const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
@@ -305,15 +320,15 @@ function commitFixes(iteration) {
     return false;
   }
 
-  // Create/switch to nightly-fixes branch if needed
+  // Create/switch to regression-fixes branch if needed
   const currentBranch = exec("git branch --show-current", { cwd: PROJECT_ROOT }).output.trim();
-  if (currentBranch !== "nightly-fixes") {
-    exec("git checkout -B nightly-fixes", { cwd: PROJECT_ROOT });
+  if (currentBranch !== "regression-fixes") {
+    exec("git checkout -B regression-fixes", { cwd: PROJECT_ROOT });
   }
 
   exec("git add -A", { cwd: PROJECT_ROOT });
   exec(
-    `git commit -m "nightly: auto-fix iteration ${iteration} [${timestamp()}]"`,
+    `git commit -m "regression: auto-fix iteration ${iteration} [${timestamp()}]"`,
     { cwd: PROJECT_ROOT }
   );
 
@@ -426,7 +441,7 @@ the feature is to daily spreadsheet use).`;
 > 2. Edit any scenario you want to adjust (change steps, rename, etc.)
 > 3. Delete scenarios you don't want
 > 4. Add \`<!-- user-edited -->\` anywhere in this file to prevent it being overwritten
->    on the next nightly run (new suggestions will go to suggested-scenarios-new.md instead)
+>    on the next regression run (new suggestions will go to suggested-scenarios-new.md instead)
 > 5. When ready, ask Claude Code: "Implement the scenarios in suggested-scenarios.md"
 >    or implement them yourself in app/e2e/tests/ or app/e2e/visual/
 > 6. After implementing, update registry.json to reflect the new coverage
@@ -475,7 +490,7 @@ function generateReport(allIterations) {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Calcula Nightly Regression Report</title>
+  <title>Calcula Regression Report</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 2em; background: #f5f5f5; }
     h1 { color: #333; }
@@ -499,7 +514,7 @@ function generateReport(allIterations) {
   </style>
 </head>
 <body>
-  <h1>Calcula Nightly Regression Report</h1>
+  <h1>Calcula Regression Report</h1>
   <p class="meta">Generated: ${timestamp()} | Mode: ${MODE} | Iterations: ${allIterations.length}</p>
 
   <div class="summary">
@@ -576,20 +591,20 @@ function escapeHtml(str) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  log("=== Calcula Nightly Regression Runner ===");
+  log("=== Calcula Regression Runner ===");
   log(`Mode: ${MODE} | Max iterations: ${MAX_ITERATIONS}`);
   log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"}`);
 
   ensureDir(RESULTS_DIR);
 
-  // In auto mode, create the nightly-fixes branch from current HEAD
+  // In auto mode, create the regression-fixes branch from current HEAD
   if (MODE === "auto") {
     const currentBranch = exec("git branch --show-current", { cwd: PROJECT_ROOT }).output.trim();
     log(`Current branch: ${currentBranch}`);
     // Save the original branch so we can note it in the report
     fs.writeFileSync(path.join(RESULTS_DIR, "original-branch.txt"), currentBranch);
-    exec("git checkout -B nightly-fixes", { cwd: PROJECT_ROOT });
-    log("Created nightly-fixes branch");
+    exec("git checkout -B regression-fixes", { cwd: PROJECT_ROOT });
+    log("Created regression-fixes branch");
   }
 
   const allIterations = [];
@@ -609,13 +624,13 @@ async function main() {
       results.push(runUnitTests());
     }
 
-    // Phase 3: Functional E2E (requires running app)
-    if (!ONLY || ONLY === "e2e" || ONLY === "all-e2e") {
+    // Phase 3+4: E2E tests (Playwright launches/kills the app automatically)
+    if (!ONLY) {
+      // Run all E2E in one Playwright run (single app launch)
+      results.push(runAllE2E());
+    } else if (ONLY === "e2e") {
       results.push(runFunctionalE2E());
-    }
-
-    // Phase 4: Visual regression (requires running app)
-    if (!ONLY || ONLY === "visual" || ONLY === "all-e2e") {
+    } else if (ONLY === "visual") {
       results.push(runVisualRegression());
     }
 

@@ -623,7 +623,7 @@ function activate(context: ExtensionContext): void {
 
     // Wrap in undo transaction so changes are reversible
     try {
-      const { beginUndoTransaction, commitUndoTransaction } = await import("../../src/core/lib/tauri-api");
+      const { beginUndoTransaction, commitUndoTransaction } = await import("@api/lib");
       await beginUndoTransaction("Shape property: " + d.key);
       await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
       await commitUndoTransaction();

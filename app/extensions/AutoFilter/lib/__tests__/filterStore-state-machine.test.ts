@@ -30,6 +30,8 @@ vi.mock('@api/lib', () => ({
   getViewportCells: vi.fn().mockResolvedValue([]),
   getStyle: vi.fn().mockResolvedValue({}),
   setColumnCustomFilter: vi.fn(),
+  beginUndoTransaction: vi.fn().mockResolvedValue(undefined),
+  commitUndoTransaction: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../lib/filterEvents', () => ({

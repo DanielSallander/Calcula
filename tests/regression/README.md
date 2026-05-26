@@ -1,7 +1,7 @@
 # Calcula Regression Testing System
 
 Unified testing infrastructure — all test layers orchestrated into one system.
-Runs unattended overnight with optional Claude Code auto-fix feedback loop.
+Runs on demand or unattended with optional Claude Code auto-fix feedback loop.
 
 ## Quick Reference — Commands
 
@@ -28,17 +28,17 @@ All commands run from `app/`:
 | `yarn e2e:visual:baseline:auto` | Regenerate + Claude Code reviews + auto-fixes issues |
 | `yarn e2e:visual:review` | Review existing baselines (no regeneration) |
 
-### Nightly Suite
+### Full Regression Suite
 
 | Command | What it does |
 |---------|-------------|
-| `yarn nightly` | Full suite (Rust + Unit + E2E + Visual), report only |
-| `yarn nightly:auto` | Full suite with Claude Code auto-fix loop (max 5 iterations) |
+| `yarn regression` | Full suite (Rust + Unit + E2E + Visual), report only |
+| `yarn regression:auto` | Full suite with Claude Code auto-fix loop (max 5 iterations) |
 
-### Nightly Runner Options
+### Regression Runner Options
 
 ```bash
-node tests/regression/nightly-runner.mjs [options]
+node tests/regression/regression-runner.mjs [options]
 
   --mode=manual|auto       Manual = report only. Auto = Claude Code fixes failures.
   --max-iterations=N       Max fix/re-test cycles in auto mode (default: 5)
@@ -73,26 +73,26 @@ Just develop as normal. When you want to check for regressions:
 yarn e2e:manual:all     # quick check against running app
 ```
 
-## Workflow: Overnight Run
+## Workflow: Full Regression Run
 
-**Manual mode** — review report in the morning:
+**Manual mode** — run all tests, review report:
 ```bash
-yarn nightly
-# Report at: app/e2e/results/nightly-report.html
+yarn regression
+# Report at: app/e2e/results/regression-report.html
 ```
 
-**Auto mode** — Claude Code fixes failures while you sleep:
+**Auto mode** — Claude Code fixes failures automatically:
 ```bash
-yarn nightly:auto
-# In the morning:
-#   1. Open app/e2e/results/nightly-report.html
-#   2. If fixes look good:  merge nightly-fixes branch in VSCode
-#   3. If fixes are wrong:  git branch -D nightly-fixes
+yarn regression:auto
+# Afterwards:
+#   1. Open app/e2e/results/regression-report.html
+#   2. If fixes look good:  merge regression-fixes branch in VSCode
+#   3. If fixes are wrong:  git branch -D regression-fixes
 ```
 
 ## Workflow: After All Tests Pass
 
-When all tests are green, the nightly runner automatically:
+When all tests are green, the regression runner automatically:
 1. Reads `registry.json` for uncovered features
 2. Asks Claude Code to suggest test scenarios for the gaps
 3. Writes suggestions to **`tests/regression/suggested-scenarios.md`**
@@ -117,7 +117,7 @@ Commit the updated screenshots.
 
 ## Safety Guards (Auto Mode)
 
-- Changes go to `nightly-fixes` branch, never directly to `main`
+- Changes go to `regression-fixes` branch, never directly to `main`
 - Max iteration cap (default 5) prevents runaway changes
 - Max files per iteration (default 10) limits blast radius
 - Claude Code only gets Edit, Read, Grep, Glob, Bash tools
@@ -130,7 +130,7 @@ Commit the updated screenshots.
 tests/regression/
   registry.json              68 features, 4 priority tiers, coverage tracking
   suggested-scenarios.md     Claude-suggested new tests (edit this!)
-  nightly-runner.mjs         Orchestrator: Rust -> Unit -> E2E -> Visual -> Report
+  regression-runner.mjs      Orchestrator: Rust -> Unit -> E2E -> Visual -> Report
   validate-baselines.mjs     Feeds screenshots to Claude Code for review
   README.md                  This guide
 
@@ -191,6 +191,28 @@ Add to `features` array in `registry.json`:
   "notes": "Not yet tested"
 }
 ```
+
+## Coverage Gap Analysis & Suggested Scenarios
+
+When all tests pass, the regression runner automatically:
+
+1. Reads `registry.json` to find features with `none` or `unit-only` coverage
+2. Asks Claude Code to suggest concrete E2E test scenarios for those gaps
+3. Writes the suggestions to **`tests/regression/suggested-scenarios.md`**
+
+This is the file you edit to shape the test suite:
+
+- **Review** each suggestion - does the scenario make sense?
+- **Edit** the steps if you want to adjust what the test does
+- **Delete** scenarios you don't want
+- **When ready**, ask Claude Code: *"Implement the scenarios in suggested-scenarios.md"*
+  or build them yourself in `app/e2e/tests/` or `app/e2e/visual/`
+- **After implementing**, update `registry.json` to reflect the new coverage
+
+The file is regenerated each regression run (when green), but only overwrites if you
+haven't modified it since the last generation. If you've edited it, the new
+suggestions are written to `suggested-scenarios-new.md` instead so your edits
+are preserved.
 
 ## Prerequisites
 

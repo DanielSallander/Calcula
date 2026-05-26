@@ -54,6 +54,8 @@ vi.mock("@api/lib", () => ({
   getViewportCells: (...args: unknown[]) => mockGetViewportCells(...args),
   getStyle: (...args: unknown[]) => mockGetStyle(...args),
   setColumnCustomFilter: (...args: unknown[]) => mockSetColumnCustomFilter(...args),
+  beginUndoTransaction: vi.fn().mockResolvedValue(undefined),
+  commitUndoTransaction: vi.fn().mockResolvedValue(undefined),
 }));
 
 import {

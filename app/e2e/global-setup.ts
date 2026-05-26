@@ -97,4 +97,43 @@ export default async function globalSetup() {
 
   // Wait for the CDP endpoint to appear.
   await waitForCDP(CDP_PORT, STARTUP_TIMEOUT_MS);
+
+  // Also wait for the Vite dev server to be ready.
+  // Without this, WebView2 may load before Vite is serving, showing an error page.
+  const VITE_PORT = Number(process.env.VITE_PORT ?? 1420);
+  await waitForHTTP(VITE_PORT, 60_000);
+}
+
+/** Poll http://localhost:<port>/ until it responds with a 2xx/3xx status. */
+function waitForHTTP(port: number, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const poll = () => {
+      const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
+        if (res.statusCode && res.statusCode < 400) {
+          console.log(`[e2e] Vite dev server ready on port ${port}`);
+          res.resume(); // drain the response
+          resolve();
+        } else {
+          res.resume();
+          retry();
+        }
+      });
+      req.on("error", () => retry());
+      req.setTimeout(2000, () => {
+        req.destroy();
+        retry();
+      });
+    };
+
+    const retry = () => {
+      if (Date.now() - start > timeoutMs) {
+        reject(new Error(`Vite dev server on port ${port} did not become ready within ${timeoutMs / 1000}s`));
+        return;
+      }
+      setTimeout(poll, 1000);
+    };
+
+    poll();
+  });
 }

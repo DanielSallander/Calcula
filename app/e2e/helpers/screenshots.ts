@@ -12,7 +12,7 @@
  *   await takeGridScreenshot(page, "after-data-entry");
  *   await takeDialogScreenshot(page, "format-cells-dialog", ".dialog-container");
  */
-import { type Page, expect } from "@playwright/test";
+import { type Page, type Locator, expect } from "@playwright/test";
 
 // Default comparison options - tuned for Canvas rendering which can have
 // minor anti-aliasing differences between runs.
@@ -24,6 +24,53 @@ const DEFAULT_SCREENSHOT_OPTIONS = {
   // Animation settling time
   animations: "disabled" as const,
 };
+
+/**
+ * Clear the grid by selecting all cells and deleting content + formatting.
+ * Use this at the start of workflow tests to avoid stale data from prior tests
+ * (all tests share the same app instance).
+ */
+export async function resetGrid(page: Page): Promise<void> {
+  // Dismiss any open dialogs/menus
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(50);
+  }
+
+  // Focus the spreadsheet
+  const container = page.locator("[data-focus-container='spreadsheet']");
+  await container.focus();
+  await page.waitForTimeout(100);
+
+  // Select all cells (Ctrl+A) and delete content
+  await page.keyboard.press("Control+a");
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(300);
+
+  // Clear all contents and formatting via Tauri API
+  await page.evaluate(async () => {
+    const tauri = (window as any).__TAURI__;
+    if (tauri?.core?.invoke) {
+      try {
+        await tauri.core.invoke("clear_range_with_options", {
+          params: {
+            startRow: 0, startCol: 0, endRow: 999, endCol: 25,
+            applyTo: "All",
+          },
+        });
+        window.dispatchEvent(new Event("grid:refresh"));
+      } catch {
+        // Fallback: command may not exist, content Delete already ran
+      }
+    }
+  });
+  await page.waitForTimeout(300);
+
+  // Navigate to A1
+  await page.keyboard.press("Control+Home");
+  await page.waitForTimeout(300);
+}
 
 /**
  * Wait for the grid to be fully rendered and stable.

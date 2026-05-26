@@ -26,8 +26,8 @@
     "e2e:visual:baseline:auto": "playwright test --project=visual --update-snapshots && node ../tests/regression/validate-baselines.mjs --auto-fix",
     "e2e:visual:review": "node ../tests/regression/validate-baselines.mjs",
     "e2e:report": "playwright show-report",
-    "nightly": "node ../tests/regression/nightly-runner.mjs",
-    "nightly:auto": "node ../tests/regression/nightly-runner.mjs --mode=auto --max-iterations=5"
+    "regression": "node ../tests/regression/regression-runner.mjs",
+    "regression:auto": "node ../tests/regression/regression-runner.mjs --mode=auto --max-iterations=15"
   },
   "dependencies": {
     "@emotion/css": "^11.13.5",
