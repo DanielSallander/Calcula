@@ -297,8 +297,8 @@ function setup(shape) {
   // });
 
   // == Property Access ==
-  // const fill = shape.getProperty("fill");
-  // shape.setProperty("fill", "#ff0000");
+  // const fill = shape.getProperty("fill");  // read current value
+  // await shape.setProperty("fill", "#ff0000");  // set once (user can override in panel)
 
   // == Live Cell Data Binding ==
   // const value = await shape.getCellValue("A1");

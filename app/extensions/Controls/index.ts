@@ -637,6 +637,10 @@ function activate(context: ExtensionContext): void {
       detail: { sheetIndex: si, row: r, col: c },
     }));
     window.dispatchEvent(new CustomEvent("styles:refresh"));
+    // Refresh Properties pane so it shows the updated value
+    window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
+      detail: { row: r, col: c },
+    }));
     // Emit property changed event for script listeners
     emitAppEvent("shape:propertyChanged", {
       instanceId: d.instanceId,
