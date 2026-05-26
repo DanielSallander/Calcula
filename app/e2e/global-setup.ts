@@ -100,7 +100,7 @@ export default async function globalSetup() {
 
   // Also wait for the Vite dev server to be ready.
   // Without this, WebView2 may load before Vite is serving, showing an error page.
-  const VITE_PORT = Number(process.env.VITE_PORT ?? 1420);
+  const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
   await waitForHTTP(VITE_PORT, 60_000);
 }
 
