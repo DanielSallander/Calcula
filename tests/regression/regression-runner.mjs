@@ -51,6 +51,8 @@ const SKIP_RUST = args["skip-rust"] === "true";
 const ONLY = args.only || null; // "visual", "e2e", "unit", or null for all
 const MAX_FILES_PER_ITERATION = parseInt(args["max-files"] || "10", 10);
 const E2E_MANUAL = args["e2e-manual"] === "true"; // use already-running app for E2E
+const EXPAND_COVERAGE = args["expand"] !== "false"; // auto-create new scenarios when green (default: true)
+const EXPAND_ITERATIONS = parseInt(args["expand-iterations"] || "5", 10);
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -389,33 +391,26 @@ function checkForChanges(iteration) {
 const REGISTRY_FILE = path.join(PROJECT_ROOT, "tests", "regression", "registry.json");
 const SUGGESTIONS_FILE = path.join(PROJECT_ROOT, "tests", "regression", "suggested-scenarios.md");
 
-function generateCoverageGapReport() {
-  log("All green — analyzing coverage gaps...");
-
-  if (!fs.existsSync(REGISTRY_FILE)) {
-    log("  Registry not found, skipping gap analysis");
-    return;
-  }
-
+/**
+ * Get coverage gaps from the registry.
+ */
+function getCoverageGaps() {
+  if (!fs.existsSync(REGISTRY_FILE)) return { gaps: {}, total: 0 };
   const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
-  const features = registry.features;
-
-  // Group uncovered/undercovered features by tier
   const gaps = { 1: [], 2: [], 3: [], 4: [] };
-  for (const f of features) {
+  for (const f of registry.features) {
     if (f.coverage === "none" || f.coverage === "unit-only") {
       gaps[f.tier].push(f);
     }
   }
+  return { gaps, total: Object.values(gaps).flat().length, registry };
+}
 
-  const totalGaps = Object.values(gaps).flat().length;
-  if (totalGaps === 0) {
-    log("  No coverage gaps found!");
-    return;
-  }
-
-  // Build prompt for Claude Code to suggest scenarios
-  const gapSummary = Object.entries(gaps)
+/**
+ * Build a gap summary string for prompts.
+ */
+function buildGapSummary(gaps, registry) {
+  return Object.entries(gaps)
     .filter(([, list]) => list.length > 0)
     .map(([tier, list]) => {
       const items = list
@@ -424,100 +419,198 @@ function generateCoverageGapReport() {
       return `### Tier ${tier}: ${registry.tiers[tier]}\n${items}`;
     })
     .join("\n\n");
+}
 
-  const prompt = `You are analyzing test coverage gaps for the Calcula spreadsheet application.
-Calcula is an open-source Excel alternative (Tauri + Rust backend + React/Canvas frontend).
+/**
+ * Coverage expansion phase: when all tests pass, auto-create new test scenarios.
+ *
+ * Runs up to EXPAND_ITERATIONS loops:
+ *   1. Pick the highest-priority uncovered features
+ *   2. Ask Claude Code to IMPLEMENT test specs (not just suggest)
+ *   3. Run the new tests
+ *   4. If they pass, update registry.json and loop
+ *   5. If they fail, ask Claude Code to fix, then re-run
+ *
+ * Also writes a summary to suggested-scenarios.md for tracking.
+ */
+function expandCoverage() {
+  log("\n=== Coverage Expansion Phase ===");
 
-The following features have insufficient automated test coverage:
+  const { gaps, total, registry } = getCoverageGaps();
+  if (total === 0) {
+    log("  No coverage gaps — full coverage achieved!");
+    return;
+  }
 
-${gapSummary}
+  log(`  ${total} features with coverage gaps`);
+  const gapSummary = buildGapSummary(gaps, registry);
 
-For each feature, suggest ONE concrete E2E test scenario that would provide the most
-regression protection. Focus on Tier 1 and Tier 2 first — these are the highest priority.
+  const scenarioLog = []; // track what was created
 
-Write your suggestions in this exact markdown format (this file will be edited by the developer):
+  for (let expandIter = 1; expandIter <= EXPAND_ITERATIONS; expandIter++) {
+    log(`\n--- Expansion iteration ${expandIter} of ${EXPAND_ITERATIONS} ---`);
 
-## Suggested Test Scenarios
-
-### [feature-id] Feature Name
-**Priority:** Tier N
-**Current coverage:** none/unit-only
-**Suggested scenario:**
-> Step-by-step description of what the test should do
-
-**What it would catch:**
-> What kinds of regressions this test would prevent
-
-**Estimated complexity:** Simple / Medium / Complex
-
----
-
-Keep scenarios practical and focused. Each should be implementable as a single Playwright
-spec that takes under 30 seconds to run. Prefer scenarios that exercise multiple sub-features
-of the same feature area.
-
-Limit to the top 15 most impactful suggestions (prioritize by tier, then by how fundamental
-the feature is to daily spreadsheet use).`;
-
-  // Write prompt to temp file
-  const tempFile = path.join(RESULTS_DIR, "coverage-gap-prompt.txt");
-  ensureDir(RESULTS_DIR);
-  fs.writeFileSync(tempFile, prompt);
-
-  log("  Invoking Claude Code for scenario suggestions...");
-
-  try {
-    const output = execSync(
-      `${CLAUDE_CMD} --print --allowedTools "Read,Grep,Glob" -p "${tempFile}"`,
-      {
-        cwd: PROJECT_ROOT,
-        timeout: 300_000,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }
-    );
-
-    // Write suggestions file — this is the file the developer edits
-    const header = `# Suggested Test Scenarios
-
-> Generated: ${timestamp()}
-> Based on coverage gaps in tests/regression/registry.json
->
-> **How to use this file:**
-> 1. Review the suggestions below
-> 2. Edit any scenario you want to adjust (change steps, rename, etc.)
-> 3. Delete scenarios you don't want
-> 4. Add \`<!-- user-edited -->\` anywhere in this file to prevent it being overwritten
->    on the next regression run (new suggestions will go to suggested-scenarios-new.md instead)
-> 5. When ready, ask Claude Code: "Implement the scenarios in suggested-scenarios.md"
->    or implement them yourself in app/e2e/tests/ or app/e2e/visual/
-> 6. After implementing, update registry.json to reflect the new coverage
-
----
-
-`;
-
-    // Preserve user edits: if the file exists and has been modified by the user
-    // (contains edits beyond the generated header), write to a -new file instead.
-    let targetFile = SUGGESTIONS_FILE;
-    if (fs.existsSync(SUGGESTIONS_FILE)) {
-      const existing = fs.readFileSync(SUGGESTIONS_FILE, "utf-8");
-      // Check if user has edited it (added lines not starting with > or #, or changed content)
-      const hasUserEdits = existing.includes("<!-- user-edited -->");
-      if (hasUserEdits) {
-        targetFile = SUGGESTIONS_FILE.replace(".md", "-new.md");
-        log("  Existing file has user edits, writing to suggested-scenarios-new.md");
-      }
+    // Re-read gaps (registry may have been updated)
+    const current = getCoverageGaps();
+    if (current.total === 0) {
+      log("  All gaps covered!");
+      break;
     }
 
-    fs.writeFileSync(targetFile, header + output);
-    log(`  Suggestions written to: ${targetFile}`);
-    log(`  ${totalGaps} features with coverage gaps analyzed`);
-  } catch (err) {
-    log("  Claude Code scenario generation failed");
-    const errOutput = (err.stdout?.toString() || "") + "\n" + (err.stderr?.toString() || "");
-    fs.writeFileSync(path.join(RESULTS_DIR, "coverage-gap-error.txt"), errOutput);
+    const currentSummary = buildGapSummary(current.gaps, current.registry);
+
+    // Collect existing test file names to tell Claude what already exists
+    const existingTests = exec("ls app/e2e/tests/*.spec.ts app/e2e/visual/*.spec.ts 2>/dev/null", {
+      cwd: PROJECT_ROOT,
+    }).output.trim().split("\n").filter(Boolean).map((f) => f.trim());
+
+    const existingTestList = existingTests.map((f) => `  - ${path.basename(f)}`).join("\n");
+
+    // Ask Claude Code to implement 3 test scenarios
+    const prompt = `You are expanding test coverage for the Calcula spreadsheet application.
+Calcula is an open-source Excel alternative (Tauri + Rust backend + React/Canvas frontend).
+The project is at: ${PROJECT_ROOT}
+
+## Existing Test Coverage
+
+These E2E test specs ALREADY EXIST — do NOT recreate or duplicate their coverage:
+
+${existingTestList}
+
+BEFORE creating any new test, you MUST:
+1. Read tests/regression/registry.json to see what features are already covered
+2. Read the existing spec files listed above to understand what scenarios they test
+3. Only create tests for features/scenarios that are NOT already covered
+
+## Coverage Gaps
+
+The following features need E2E test coverage:
+
+${currentSummary}
+
+## Your Task
+
+Implement exactly 3 new E2E Playwright test specs for the highest-priority
+uncovered features (Tier 1 first, then Tier 2, then Tier 3).
+
+Each spec MUST test something genuinely new — a feature or use case not exercised
+by any existing spec. Do not create a "tables.spec.ts" if table testing is already
+partially covered in another spec. Instead, focus on the specific untested aspects.
+
+## Implementation Rules
+
+1. Create new test files in app/e2e/tests/ following the existing patterns
+2. Import fixtures from "../fixtures" (NOT from "@playwright/test")
+3. Use the GridHelper methods from "../helpers/grid" (see app/e2e/helpers/grid.ts)
+4. Each test file should have 2-5 focused test cases
+5. Tests must work against an already-running Calcula instance (CDP on port 9222)
+6. After creating the test files, update tests/regression/registry.json:
+   - Set coverage to "partial" for features you covered
+   - Add the new test file paths to the e2eTests arrays
+7. Keep tests practical — avoid testing features that require complex setup
+   that the GridHelper doesn't support yet
+8. Do NOT modify existing test files — only create new ones and update registry.json`;
+
+    const tempFile = path.join(RESULTS_DIR, `expand-prompt-iter${expandIter}.txt`);
+    ensureDir(RESULTS_DIR);
+    fs.writeFileSync(tempFile, prompt);
+
+    log("  Asking Claude Code to implement new test scenarios...");
+
+    const result = exec(
+      `${CLAUDE_CMD} --print --allowedTools "Edit,Read,Grep,Glob,Bash,Write" -p "${tempFile}"`,
+      { cwd: PROJECT_ROOT, timeout: 1_800_000 }
+    );
+
+    if (!result.success) {
+      log("  Claude Code failed to create scenarios");
+      fs.writeFileSync(path.join(RESULTS_DIR, `expand-error-iter${expandIter}.txt`), result.output);
+      break;
+    }
+
+    fs.writeFileSync(path.join(RESULTS_DIR, `expand-response-iter${expandIter}.md`), result.output);
+
+    // Check if files were actually created
+    const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
+    const newFiles = status.output.split("\n").filter((l) => l.startsWith("??") || l.startsWith(" A") || l.startsWith("A "));
+    const modifiedFiles = status.output.split("\n").filter((l) => l.trim().startsWith("M "));
+
+    if (newFiles.length === 0 && modifiedFiles.length === 0) {
+      log("  No new files created — stopping expansion");
+      break;
+    }
+
+    log(`  Created/modified ${newFiles.length + modifiedFiles.length} file(s)`);
+    for (const f of [...newFiles, ...modifiedFiles].slice(0, 10)) {
+      log(`    ${f.trim()}`);
+    }
+
+    // Run the E2E tests to verify the new scenarios work
+    log("  Running E2E tests to verify new scenarios...");
+    const e2eResult = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
+
+    if (e2eResult.success) {
+      log("  [PASS] New scenarios pass!");
+
+      // Track what was created
+      const createdSpecs = newFiles
+        .map((l) => l.trim().replace(/^\?\?\s*/, ""))
+        .filter((f) => f.endsWith(".spec.ts"));
+      scenarioLog.push({
+        iteration: expandIter,
+        specs: createdSpecs,
+        status: "pass",
+      });
+    } else {
+      log("  [FAIL] New scenarios have failures — asking Claude Code to fix...");
+
+      // One fix attempt for the new tests
+      const failureReport = collectFailures([{
+        phase: "e2e-expansion",
+        success: false,
+        output: e2eResult.output,
+      }]);
+
+      if (failureReport) {
+        invokeClaudeCodeFix(failureReport, `expand-${expandIter}`);
+
+        // Re-run to verify fix
+        log("  Re-running E2E after fix...");
+        const retryResult = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
+        if (retryResult.success) {
+          log("  [PASS] Fixed — new scenarios pass!");
+          scenarioLog.push({ iteration: expandIter, specs: [], status: "pass-after-fix" });
+        } else {
+          log("  [FAIL] Still failing — stopping expansion to avoid breaking the suite");
+          scenarioLog.push({ iteration: expandIter, specs: [], status: "fail" });
+          break;
+        }
+      } else {
+        scenarioLog.push({ iteration: expandIter, specs: [], status: "infra-fail" });
+        break;
+      }
+    }
   }
+
+  // Write expansion summary
+  const summary = `# Coverage Expansion Summary
+
+> Generated: ${timestamp()}
+> Expansion iterations: ${scenarioLog.length} of ${EXPAND_ITERATIONS}
+
+## Scenarios Created
+
+${scenarioLog.map((s) => `- **Iteration ${s.iteration}:** ${s.status}${s.specs.length ? "\n  " + s.specs.join("\n  ") : ""}`).join("\n")}
+
+## Remaining Gaps
+
+${(() => { const c = getCoverageGaps(); return `${c.total} features still need coverage.`; })()}
+
+Check \`tests/regression/registry.json\` for the full coverage matrix.
+`;
+
+  fs.writeFileSync(SUGGESTIONS_FILE, summary);
+  log(`  Expansion summary written to: ${SUGGESTIONS_FILE}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,8 +781,16 @@ async function main() {
     if (allPassed) {
       log("\n[OK] All tests passed!");
       allIterations.push(iterationData);
-      // When green, analyze coverage gaps and suggest new scenarios
-      generateCoverageGapReport();
+      // When green and in auto mode, expand coverage with new scenarios
+      if (MODE === "auto" && EXPAND_COVERAGE) {
+        expandCoverage();
+      } else {
+        // Manual mode — just report the gaps
+        const { total } = getCoverageGaps();
+        if (total > 0) {
+          log(`  ${total} features still need coverage (run with --mode=auto to auto-expand)`);
+        }
+      }
       break;
     }
 

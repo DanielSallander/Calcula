@@ -33,18 +33,23 @@ All commands run from `app/`:
 | Command | What it does |
 |---------|-------------|
 | `yarn regression` | Full suite (Rust + Unit + E2E + Visual), report only |
-| `yarn regression:auto` | Full suite with Claude Code auto-fix loop (max 5 iterations) |
+| `yarn regression:auto` | Full suite with auto-fix + coverage expansion |
+| `yarn regression:auto --expand-iterations=10` | More expansion cycles |
+| `yarn regression:auto --expand=false` | Fix only, no new scenarios |
 
 ### Regression Runner Options
 
 ```bash
 node tests/regression/regression-runner.mjs [options]
 
-  --mode=manual|auto       Manual = report only. Auto = Claude Code fixes failures.
-  --max-iterations=N       Max fix/re-test cycles in auto mode (default: 5)
+  --mode=manual|auto       Manual = report only. Auto = Claude Code fixes + expands.
+  --max-iterations=N       Max fix/re-test cycles in auto mode (default: 15)
   --skip-rust              Skip cargo test phase
   --only=rust|unit|e2e|visual   Run only one layer
   --max-files=N            Max files Claude Code can modify per iteration (default: 10)
+  --e2e-manual             Use already-running app for E2E (default for yarn regression)
+  --expand=false           Disable coverage expansion after green (default: true)
+  --expand-iterations=N    Max scenario creation cycles (default: 5)
 ```
 
 ## Workflow: First-Time Setup
@@ -91,19 +96,23 @@ yarn regression:auto
 #   4. If fixes are wrong:  discard them (git checkout .)
 ```
 
-## Workflow: After All Tests Pass
+## Workflow: After All Tests Pass (Coverage Expansion)
 
-When all tests are green, the regression runner automatically:
-1. Reads `registry.json` for uncovered features
-2. Asks Claude Code to suggest test scenarios for the gaps
-3. Writes suggestions to **`tests/regression/suggested-scenarios.md`**
+When all tests are green in auto mode, the runner enters the **coverage expansion phase**:
 
-**To work with suggestions:**
-1. Open `tests/regression/suggested-scenarios.md`
-2. Edit, reorder, or delete scenarios as you see fit
-3. Add `<!-- user-edited -->` anywhere to prevent overwrite on next run
-4. When ready, ask Claude Code: *"Implement the scenarios in suggested-scenarios.md"*
-5. After implementing, update `registry.json` coverage fields
+1. Reads `registry.json` for uncovered features (prioritized by tier)
+2. Asks Claude Code to **implement** 3 new E2E test specs per iteration
+3. Runs the new tests to verify they pass
+4. If they fail, asks Claude Code to fix them (one attempt)
+5. Updates `registry.json` with the new coverage
+6. Repeats up to 5 iterations (configurable with `--expand-iterations=N`)
+
+This automatically grows the test suite over time. Each run:
+- Creates ~3-15 new test specs
+- Tracks everything in `registry.json`
+- Writes a summary to `tests/regression/suggested-scenarios.md`
+
+Disable with `--expand=false` if you only want regression checking.
 
 ## Workflow: Intentional UI Changes
 
