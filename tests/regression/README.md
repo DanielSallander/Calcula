@@ -86,8 +86,9 @@ yarn regression
 yarn regression:auto
 # Afterwards:
 #   1. Open app/e2e/results/regression-report.html
-#   2. If fixes look good:  merge regression-fixes branch in VSCode
-#   3. If fixes are wrong:  git branch -D regression-fixes
+#   2. Check VSCode Source Control for uncommitted changes
+#   3. If fixes look good:  commit them
+#   4. If fixes are wrong:  discard them (git checkout .)
 ```
 
 ## Workflow: After All Tests Pass
@@ -117,12 +118,12 @@ Commit the updated screenshots.
 
 ## Safety Guards (Auto Mode)
 
-- Changes go to `regression-fixes` branch, never directly to `main`
-- Max iteration cap (default 5) prevents runaway changes
+- Changes are left as uncommitted modifications — you commit or discard
+- Stops automatically after 3 consecutive iterations with no changes
+- Stops when failures are infrastructure issues (timeouts, app not starting)
+- Max iteration cap (default 15) prevents runaway changes
 - Max files per iteration (default 10) limits blast radius
 - Claude Code only gets Edit, Read, Grep, Glob, Bash tools
-- Original branch is restored after the run
-- You merge the branch manually (or discard it)
 
 ## File Layout
 

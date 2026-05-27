@@ -161,9 +161,34 @@ function runAllE2E() {
 // Failure collection for Claude Code
 // ---------------------------------------------------------------------------
 
+/**
+ * Check if a failure is an infrastructure/timeout issue rather than a code bug.
+ * These shouldn't be sent to Claude Code since they can't be fixed in application code.
+ */
+function isInfrastructureFailure(result) {
+  const output = result.output || "";
+  return (
+    output.includes("did not become ready within") ||
+    output.includes("CDP on port") ||
+    output.includes("ETIMEDOUT") ||
+    output.includes("ECONNREFUSED") ||
+    (result.code === null && output.includes("killed")) // process killed by timeout
+  );
+}
+
 function collectFailures(results) {
   const failures = results.filter((r) => !r.success);
   if (failures.length === 0) return null;
+
+  // Check if all failures are infrastructure issues
+  const infraFailures = failures.filter(isInfrastructureFailure);
+  if (infraFailures.length === failures.length) {
+    log("  All failures are infrastructure/timeout issues — skipping Claude Code");
+    for (const f of infraFailures) {
+      log(`    ${f.phase}: infrastructure failure (app didn't start in time)`);
+    }
+    return null;
+  }
 
   let report = "# Regression Test Failures\n\n";
 
@@ -310,27 +335,21 @@ function invokeClaudeCodeFix(failureReport, iteration) {
   return result.success;
 }
 
-function commitFixes(iteration) {
-  log("  Committing fixes to regression-fixes branch...");
-
-  // Check if there are any changes
+function checkForChanges(iteration) {
+  // Check if Claude Code made any changes
   const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
   if (!status.output.trim()) {
-    log("  No changes to commit");
+    log("  No changes made");
     return false;
   }
 
-  // Create/switch to regression-fixes branch if needed
-  const currentBranch = exec("git branch --show-current", { cwd: PROJECT_ROOT }).output.trim();
-  if (currentBranch !== "regression-fixes") {
-    exec("git checkout -B regression-fixes", { cwd: PROJECT_ROOT });
+  // Log what was changed but do NOT commit — leave as uncommitted working changes
+  // for the user to review and commit themselves.
+  const changedFiles = status.output.trim().split("\n").map((l) => l.trim());
+  log(`  Claude Code modified ${changedFiles.length} file(s):`);
+  for (const f of changedFiles) {
+    log(`    ${f}`);
   }
-
-  exec("git add -A", { cwd: PROJECT_ROOT });
-  exec(
-    `git commit -m "regression: auto-fix iteration ${iteration} [${timestamp()}]"`,
-    { cwd: PROJECT_ROOT }
-  );
 
   return true;
 }
@@ -597,17 +616,14 @@ async function main() {
 
   ensureDir(RESULTS_DIR);
 
-  // In auto mode, create the regression-fixes branch from current HEAD
   if (MODE === "auto") {
     const currentBranch = exec("git branch --show-current", { cwd: PROJECT_ROOT }).output.trim();
     log(`Current branch: ${currentBranch}`);
-    // Save the original branch so we can note it in the report
-    fs.writeFileSync(path.join(RESULTS_DIR, "original-branch.txt"), currentBranch);
-    exec("git checkout -B regression-fixes", { cwd: PROJECT_ROOT });
-    log("Created regression-fixes branch");
+    log("Auto mode: fixes will be left as uncommitted changes for you to review");
   }
 
   const allIterations = [];
+  let noChangeCount = 0;
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     log(`\n--- Iteration ${iteration} of ${MAX_ITERATIONS} ---`);
@@ -654,16 +670,29 @@ async function main() {
     if (MODE === "auto" && iteration < MAX_ITERATIONS) {
       // Collect failures and feed to Claude Code
       const failureReport = collectFailures(results);
-      if (failureReport) {
-        const fixApplied = invokeClaudeCodeFix(failureReport, iteration);
-        if (fixApplied) {
-          const committed = commitFixes(iteration);
-          if (committed) {
-            // Read Claude's response for the report
-            const responseFile = path.join(RESULTS_DIR, `claude-response-iter${iteration}.md`);
-            if (fs.existsSync(responseFile)) {
-              iterationData.claudeResponse = fs.readFileSync(responseFile, "utf-8");
-            }
+      if (!failureReport) {
+        // All failures are infrastructure issues — no point retrying with Claude
+        log("  Stopping: failures are infrastructure issues, not fixable by code changes");
+        allIterations.push(iterationData);
+        break;
+      }
+
+      const fixApplied = invokeClaudeCodeFix(failureReport, iteration);
+      if (fixApplied) {
+        const hasChanges = checkForChanges(iteration);
+        if (hasChanges) {
+          // Read Claude's response for the report
+          const responseFile = path.join(RESULTS_DIR, `claude-response-iter${iteration}.md`);
+          if (fs.existsSync(responseFile)) {
+            iterationData.claudeResponse = fs.readFileSync(responseFile, "utf-8");
+          }
+          noChangeCount = 0;
+        } else {
+          noChangeCount++;
+          if (noChangeCount >= 3) {
+            log("  Stopping: 3 consecutive iterations with no code changes");
+            allIterations.push(iterationData);
+            break;
           }
         }
       }
@@ -675,13 +704,12 @@ async function main() {
     allIterations.push(iterationData);
   }
 
-  // Switch back to original branch if in auto mode
+  // In auto mode, remind the user about uncommitted changes
   if (MODE === "auto") {
-    const origBranchFile = path.join(RESULTS_DIR, "original-branch.txt");
-    if (fs.existsSync(origBranchFile)) {
-      const origBranch = fs.readFileSync(origBranchFile, "utf-8").trim();
-      log(`Switching back to original branch: ${origBranch}`);
-      exec(`git checkout ${origBranch}`, { cwd: PROJECT_ROOT });
+    const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
+    if (status.output.trim()) {
+      log("\nAuto-fix changes are left as uncommitted modifications.");
+      log("Review them in VSCode Source Control, then commit or discard.");
     }
   }
 

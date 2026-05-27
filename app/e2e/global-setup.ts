@@ -121,7 +121,9 @@ export default async function globalSetup() {
 
   // Also wait for the Vite dev server to be ready.
   // Without this, WebView2 may load before Vite is serving, showing an error page.
-  await waitForHTTP(VITE_PORT, 120_000);
+  // On cold builds, Rust compiles first (3-5 min) before Vite starts, so use
+  // the same generous timeout as CDP.
+  await waitForHTTP(VITE_PORT, STARTUP_TIMEOUT_MS);
 }
 
 /** Poll http://localhost:<port>/ until it responds with a 2xx/3xx status. */
