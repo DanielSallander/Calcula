@@ -43,6 +43,14 @@ test.describe("Lookup functions", () => {
   });
 
   test("INDEX/MATCH combination", async ({ grid }) => {
+    // Set up lookup table (each test is independent)
+    await grid.setCellValueDirect("G10", "1");
+    await grid.setCellValueDirect("H10", "Alice");
+    await grid.setCellValueDirect("G11", "2");
+    await grid.setCellValueDirect("H11", "Bob");
+    await grid.setCellValueDirect("G12", "3");
+    await grid.setCellValueDirect("H12", "Charlie");
+
     await grid.setCellValueDirect("J11", "=INDEX(H10:H12;MATCH(3;G10:G12;0))");
     const result = await grid.getCellDisplayValue("J11");
     expect(result).toBe("Charlie");
@@ -64,6 +72,11 @@ test.describe("Conditional functions", () => {
   });
 
   test("COUNTIF counts matching cells", async ({ grid }) => {
+    // Set up data (each test is independent)
+    await grid.setCellValueDirect("G14", "Cat");
+    await grid.setCellValueDirect("G15", "Dog");
+    await grid.setCellValueDirect("G16", "Cat");
+
     await grid.setCellValueDirect("J15", '=COUNTIF(G14:G16;"Cat")');
     const result = await grid.getCellDisplayValue("J15");
     expect(result).toBe("2");
@@ -108,6 +121,11 @@ test.describe("Math functions", () => {
   });
 
   test("AVERAGE function", async ({ grid }) => {
+    // Set up data (each test is independent)
+    await grid.setCellValueDirect("G20", "5");
+    await grid.setCellValueDirect("H20", "10");
+    await grid.setCellValueDirect("I20", "3");
+
     await grid.setCellValueDirect("L20", "=AVERAGE(G20:I20)");
     const display = await grid.getCellDisplayValue("L20");
     expect(display).toBe("6");

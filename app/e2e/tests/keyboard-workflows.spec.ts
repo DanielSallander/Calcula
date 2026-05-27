@@ -216,7 +216,11 @@ test.describe("Formula entry via keyboard", () => {
   });
 
   test("edit formula with F2 and modify", async ({ grid }) => {
-    // A232 has =A230+A231 from previous test
+    // Set up formula (each test is independent)
+    await grid.setCellValueDirect("A230", "10");
+    await grid.setCellValueDirect("A231", "20");
+    await grid.setCellValueDirect("A232", "=A230+A231");
+
     await grid.navigateTo("A232");
     await grid.spreadsheet.focus();
     await grid.page.waitForTimeout(200);

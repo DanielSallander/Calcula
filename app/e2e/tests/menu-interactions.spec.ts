@@ -67,6 +67,18 @@ test.describe("Edit menu operations", () => {
   });
 
   test("Edit > Redo re-applies undone change", async ({ grid }) => {
+    // Set up: write values then undo (each test is independent)
+    await grid.setCellValueDirect("A240", "Original");
+    await grid.page.waitForTimeout(200);
+    await grid.setCellValueDirect("A240", "Changed");
+    await grid.page.waitForTimeout(200);
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("undo");
+    });
+    await grid.page.waitForTimeout(300);
+
+    // Now redo
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("redo");

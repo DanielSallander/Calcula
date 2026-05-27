@@ -14,6 +14,8 @@
 import { test, expect } from "../fixtures";
 
 test.describe("Sales dashboard workflow", () => {
+  test.describe.configure({ mode: "serial" });
+
   test("step 1: enter sales data table", async ({ grid }) => {
     // Headers
     await grid.setCellValueDirect("A470", "Region");
@@ -49,7 +51,7 @@ test.describe("Sales dashboard workflow", () => {
     expect(await grid.getCellDisplayValue("A476")).toBe("East");
   });
 
-  test("step 2: add summary statistics", async ({ grid }) => {
+  test("step 2: add summary statistics", async ({ gridPersistent: grid }) => {
     await grid.setCellValueDirect("A478", "Total Sales:");
     await grid.setCellValueDirect("C478", "=SUM(C471:C476)");
     await grid.setCellValueDirect("D478", "=SUM(D471:D476)");
@@ -76,7 +78,7 @@ test.describe("Sales dashboard workflow", () => {
     expect(parseFloat(grandTotal.replace(",", "."))).toBe(11600);
   });
 
-  test("step 3: apply number formatting", async ({ grid }) => {
+  test("step 3: apply number formatting", async ({ gridPersistent: grid }) => {
     await grid.selectRange("C471", "E480");
     await grid.clickFormatButton("commaFormat");
 
@@ -84,7 +86,7 @@ test.describe("Sales dashboard workflow", () => {
     expect(fmt).toContain("separator");
   });
 
-  test("step 4: add data validation for region input", async ({ grid }) => {
+  test("step 4: add data validation for region input", async ({ gridPersistent: grid }) => {
     // Add list validation on the region column
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -108,7 +110,7 @@ test.describe("Sales dashboard workflow", () => {
     expect(values).toContain("West");
   });
 
-  test("step 5: add conditional formatting for high sales", async ({ grid }) => {
+  test("step 5: add conditional formatting for high sales", async ({ gridPersistent: grid }) => {
     // Highlight cells > 1000 in green
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -129,7 +131,7 @@ test.describe("Sales dashboard workflow", () => {
     expect(rules.length).toBeGreaterThan(0);
   });
 
-  test("step 6: create pivot table from sales data", async ({ grid }) => {
+  test("step 6: create pivot table from sales data", async ({ gridPersistent: grid }) => {
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("create_pivot_table", {
@@ -173,7 +175,7 @@ test.describe("Sales dashboard workflow", () => {
     }, result.pivotId);
   });
 
-  test("step 7: create chart from sales data", async ({ grid }) => {
+  test("step 7: create chart from sales data", async ({ gridPersistent: grid }) => {
     const chartId = await grid.page.evaluate(() => crypto.randomUUID());
     await grid.page.evaluate(async (id: string) => {
       const tauri = (window as any).__TAURI__;
@@ -209,7 +211,7 @@ test.describe("Sales dashboard workflow", () => {
     }, chartId);
   });
 
-  test.fixme("step 8: modify data and verify all dependent features update", async ({ grid }) => {
+  test.fixme("step 8: modify data and verify all dependent features update", async ({ gridPersistent: grid }) => {
     // Change North Widgets Q1 from 1200 to 2000
     await grid.setCellValueDirect("C471", "2000");
     await grid.page.waitForTimeout(300);

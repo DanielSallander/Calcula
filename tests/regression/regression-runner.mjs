@@ -50,6 +50,7 @@ const MAX_ITERATIONS = parseInt(args["max-iterations"] || "15", 10);
 const SKIP_RUST = args["skip-rust"] === "true";
 const ONLY = args.only || null; // "visual", "e2e", "unit", or null for all
 const MAX_FILES_PER_ITERATION = parseInt(args["max-files"] || "10", 10);
+const E2E_MANUAL = args["e2e-manual"] === "true"; // use already-running app for E2E
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -117,10 +118,36 @@ function runUnitTests() {
   };
 }
 
+// E2E timeout: 30 min — app startup (~5 min) + 338+ tests (~15 min) + buffer
+const E2E_TIMEOUT = 1_800_000;
+
+/**
+ * Pre-build the Rust backend so that `cargo tauri dev` starts fast.
+ * Without this, each E2E iteration waits for a full Rust compile.
+ */
+function preBuildRust() {
+  log("  Pre-building Rust backend (cargo build)...");
+  const result = exec("cargo build 2>&1", {
+    cwd: path.join(APP_DIR, "src-tauri"),
+    timeout: 600_000, // 10 min for build
+  });
+  if (result.success) {
+    log("  Rust build cache warm");
+  } else {
+    log("  Rust pre-build failed (E2E may still work if already built)");
+  }
+  return result.success;
+}
+
+/** Build the E2E command with optional manual mode (skip app launch) */
+function e2eCmd(extraArgs = "") {
+  const manual = E2E_MANUAL ? "cross-env E2E_MANUAL=1 " : "";
+  return `${manual}yarn playwright test ${extraArgs} 2>&1`;
+}
+
 function runFunctionalE2E() {
-  log("Phase 3: Functional E2E tests");
-  // Use non-manual mode: Playwright's global-setup launches the app via CDP
-  const result = exec("yarn playwright test --project=functional 2>&1", { timeout: 600_000 });
+  log(`Phase 3: Functional E2E tests${E2E_MANUAL ? " (manual — using running app)" : ""}`);
+  const result = exec(e2eCmd("--project=functional"), { timeout: E2E_TIMEOUT });
   log(result.success ? "  [PASS] Functional E2E passed" : "  [FAIL] Functional E2E failed");
   return {
     phase: "e2e-functional",
@@ -130,9 +157,8 @@ function runFunctionalE2E() {
 }
 
 function runVisualRegression() {
-  log("Phase 4: Visual regression tests");
-  // Use non-manual mode: Playwright's global-setup launches the app via CDP
-  const result = exec("yarn playwright test --project=visual 2>&1", { timeout: 600_000 });
+  log(`Phase 4: Visual regression tests${E2E_MANUAL ? " (manual — using running app)" : ""}`);
+  const result = exec(e2eCmd("--project=visual"), { timeout: E2E_TIMEOUT });
   log(result.success ? "  [PASS] Visual regression passed" : "  [FAIL] Visual regression failed");
   return {
     phase: "visual",
@@ -143,12 +169,10 @@ function runVisualRegression() {
 
 /**
  * Run all E2E tests (functional + visual) in a single Playwright run.
- * This is more efficient than running them separately since the app only
- * needs to be launched once via global-setup.
  */
 function runAllE2E() {
-  log("Phase 3+4: All E2E tests (functional + visual)");
-  const result = exec("yarn playwright test 2>&1", { timeout: 600_000 });
+  log(`Phase 3+4: All E2E tests${E2E_MANUAL ? " (manual — using running app)" : ""}`);
+  const result = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
   log(result.success ? "  [PASS] All E2E passed" : "  [FAIL] E2E tests failed");
   return {
     phase: "e2e-all",
@@ -167,11 +191,15 @@ function runAllE2E() {
  */
 function isInfrastructureFailure(result) {
   const output = result.output || "";
+  // Only match specific global-setup/teardown failures, not general test output.
+  // Check if tests actually ran by looking for test result counts.
+  const hasTestResults = /\d+ passed/.test(output) || /\d+ failed/.test(output);
+  if (hasTestResults) return false; // tests ran — real failures, not infrastructure
+
   return (
     output.includes("did not become ready within") ||
     output.includes("CDP on port") ||
     output.includes("ETIMEDOUT") ||
-    output.includes("ECONNREFUSED") ||
     (result.code === null && output.includes("killed")) // process killed by timeout
   );
 }
@@ -269,7 +297,7 @@ function invokeClaudeCodeFix(failureReport, iteration) {
   fs.writeFileSync(promptFile, failureReport);
 
   // Build the prompt for Claude Code
-  const prompt = [
+  let prompt = [
     "You are fixing automated test failures in the Calcula spreadsheet application.",
     "Calcula is an open-source Excel alternative (Tauri + Rust backend + React/Canvas frontend).",
     "The project is at: " + PROJECT_ROOT,
@@ -612,7 +640,7 @@ function escapeHtml(str) {
 async function main() {
   log("=== Calcula Regression Runner ===");
   log(`Mode: ${MODE} | Max iterations: ${MAX_ITERATIONS}`);
-  log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"}`);
+  log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"} | E2E manual: ${E2E_MANUAL}`);
 
   ensureDir(RESULTS_DIR);
 
@@ -642,6 +670,8 @@ async function main() {
 
     // Phase 3+4: E2E tests (Playwright launches/kills the app automatically)
     if (!ONLY) {
+      // Pre-build Rust so cargo tauri dev starts fast (skip in manual mode)
+      if (!E2E_MANUAL) preBuildRust();
       // Run all E2E in one Playwright run (single app launch)
       results.push(runAllE2E());
     } else if (ONLY === "e2e") {

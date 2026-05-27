@@ -567,7 +567,9 @@ test.describe("#4-6 Context Menu - Edit Script events", () => {
 // ===========================================================================
 
 test.describe("Developer Menu Dialogs", () => {
-  test("Object Scripts dialog opens from Developer menu", async ({ grid }) => {
+  // Object Scripts editor opens in a separate OS window (WebviewWindow),
+  // so Playwright's CDP connection to the main page cannot see its contents.
+  test.fixme("Object Scripts dialog opens from Developer menu", async ({ grid }) => {
     await grid.openMenu("Developer");
     const item = grid.page.locator("button").filter({ hasText: /Object Scripts/ });
     if (await item.isVisible({ timeout: 2000 }).catch(() => false)) {

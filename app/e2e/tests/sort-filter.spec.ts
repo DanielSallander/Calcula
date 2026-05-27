@@ -38,6 +38,16 @@ test.describe("Sort", () => {
   });
 
   test("sort descending by numeric column", async ({ grid }) => {
+    // Set up data (each test is independent)
+    await grid.setCellValueDirect("M1", "Name");
+    await grid.setCellValueDirect("N1", "Score");
+    await grid.setCellValueDirect("M2", "Charlie");
+    await grid.setCellValueDirect("N2", "30");
+    await grid.setCellValueDirect("M3", "Alice");
+    await grid.setCellValueDirect("N3", "10");
+    await grid.setCellValueDirect("M4", "Bob");
+    await grid.setCellValueDirect("N4", "20");
+
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("sort_range", {
@@ -56,7 +66,26 @@ test.describe("Sort", () => {
   });
 
   test("sort preserves row data integrity", async ({ grid }) => {
-    // After descending sort by N, verify each name matches its score
+    // Set up data and sort descending by score (each test is independent)
+    await grid.setCellValueDirect("M2", "Charlie");
+    await grid.setCellValueDirect("N2", "30");
+    await grid.setCellValueDirect("M3", "Alice");
+    await grid.setCellValueDirect("N3", "10");
+    await grid.setCellValueDirect("M4", "Bob");
+    await grid.setCellValueDirect("N4", "20");
+
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("sort_range", {
+        params: {
+          startRow: 1, startCol: 12, endRow: 3, endCol: 13,
+          fields: [{ key: 1, ascending: false }],
+          matchCase: false, hasHeaders: false, orientation: "rows",
+        },
+      });
+    });
+    await grid.page.waitForTimeout(300);
+
     const m2 = await grid.getCellDisplayValue("M2");
     const n2 = await grid.getCellDisplayValue("N2");
     expect(n2).toBe("30");
@@ -91,6 +120,24 @@ test.describe("AutoFilter", () => {
   });
 
   test("filter by specific values hides non-matching rows", async ({ grid }) => {
+    // Set up data and apply auto filter (each test is independent)
+    await grid.setCellValueDirect("O1", "Color");
+    await grid.setCellValueDirect("O2", "Red");
+    await grid.setCellValueDirect("O3", "Blue");
+    await grid.setCellValueDirect("O4", "Red");
+    await grid.setCellValueDirect("O5", "Green");
+    await grid.setCellValueDirect("O6", "Blue");
+
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("apply_auto_filter", {
+        params: {
+          startRow: 0, startCol: 14, endRow: 5, endCol: 14,
+        },
+      });
+    });
+    await grid.page.waitForTimeout(300);
+
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("set_column_filter_values", {

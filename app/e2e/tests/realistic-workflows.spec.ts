@@ -62,6 +62,14 @@ test.describe("Build a budget table", () => {
   });
 
   test("add SUM formulas at bottom", async ({ grid }) => {
+    // Set up data rows (each test is independent)
+    await grid.setCellValueDirect("B301", "1000");
+    await grid.setCellValueDirect("C301", "950");
+    await grid.setCellValueDirect("B302", "500");
+    await grid.setCellValueDirect("C302", "620");
+    await grid.setCellValueDirect("B303", "200");
+    await grid.setCellValueDirect("C303", "180");
+
     await grid.setCellValueDirect("A304", "Total");
     await grid.setCellValueDirect("B304", "=SUM(B301:B303)");
     await grid.setCellValueDirect("C304", "=SUM(C301:C303)");

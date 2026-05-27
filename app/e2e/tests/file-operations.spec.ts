@@ -39,6 +39,14 @@ test.describe("File operations", () => {
   });
 
   test("get current file path after save", async ({ grid }) => {
+    // Set up: save a file first (each test is independent)
+    await grid.setCellValueDirect("AV1", "PathTest");
+    await grid.page.evaluate(async (filePath: string) => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("save_file", { path: filePath });
+    }, TEMP_FILE);
+    await grid.page.waitForTimeout(500);
+
     const filePath = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("get_current_file_path");

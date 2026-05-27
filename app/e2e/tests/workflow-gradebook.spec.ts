@@ -13,6 +13,8 @@
 import { test, expect } from "../fixtures";
 
 test.describe("Grade book workflow", () => {
+  test.describe.configure({ mode: "serial" });
+
   test("step 1: set up headers and student data", async ({ grid }) => {
     // Headers
     await grid.setCellValueDirect("A440", "Student");
@@ -49,7 +51,7 @@ test.describe("Grade book workflow", () => {
     expect(await grid.getCellDisplayValue("D443")).toBe("95");
   });
 
-  test("step 2: add per-student formulas (average, min, max)", async ({ grid }) => {
+  test("step 2: add per-student formulas (average, min, max)", async ({ gridPersistent: grid }) => {
     for (let i = 0; i < 5; i++) {
       const row = 441 + i;
       // Use semicolons for locale-aware formulas
@@ -66,7 +68,7 @@ test.describe("Grade book workflow", () => {
     expect(await grid.getCellDisplayValue("G443")).toBe("95");
   });
 
-  test("step 3: add pass/fail status with IF formula", async ({ grid }) => {
+  test("step 3: add pass/fail status with IF formula", async ({ gridPersistent: grid }) => {
     for (let i = 0; i < 5; i++) {
       const row = 441 + i;
       // Pass if average >= 60
@@ -80,7 +82,7 @@ test.describe("Grade book workflow", () => {
     expect(await grid.getCellDisplayValue("H445")).toBe("Fail"); // Sofia: 38.33
   });
 
-  test("step 4: add class statistics row", async ({ grid }) => {
+  test("step 4: add class statistics row", async ({ gridPersistent: grid }) => {
     await grid.setCellValueDirect("A447", "Class Avg:");
     await grid.setCellValueDirect("B447", "=AVERAGE(B441:B445)");
     await grid.setCellValueDirect("C447", "=AVERAGE(C441:C445)");
@@ -96,7 +98,7 @@ test.describe("Grade book workflow", () => {
     expect(parseFloat(classAvg.replace(",", "."))).toBeCloseTo(66.2, 1);
   });
 
-  test("step 5: sort students by average descending", async ({ grid }) => {
+  test("step 5: sort students by average descending", async ({ gridPersistent: grid }) => {
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("sort_range", {
@@ -115,7 +117,7 @@ test.describe("Grade book workflow", () => {
     expect(await grid.getCellDisplayValue("A445")).toBe("Sofia Nilsson");
   });
 
-  test("step 6: apply conditional formatting to fail cells", async ({ grid }) => {
+  test("step 6: apply conditional formatting to fail cells", async ({ gridPersistent: grid }) => {
     // Add red background to cells that say "Fail"
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -139,7 +141,7 @@ test.describe("Grade book workflow", () => {
     expect(evalResult).toBeDefined();
   });
 
-  test.fixme("step 7: update a score and verify cascade", async ({ grid }) => {
+  test.fixme("step 7: update a score and verify cascade", async ({ gridPersistent: grid }) => {
     // Change Erik's Test 1 from 45 to 75
     // After sort, Erik is at row index... let's find him
     const erik442 = await grid.getCellDisplayValue("A442");

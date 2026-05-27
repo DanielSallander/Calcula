@@ -10,7 +10,7 @@ import { test, expect } from "../fixtures";
 
 test.describe("Copy and paste", () => {
   test("copy a cell and paste to another cell", async ({ grid }) => {
-    await grid.setCellValue("A50", "CopyMe");
+    await grid.setCellValueDirect("A50", "CopyMe");
     await grid.clickCell("A50");
     await grid.clickFormatButton("copy");
 

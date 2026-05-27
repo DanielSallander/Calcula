@@ -34,6 +34,8 @@ type TestFixtures = {
   appPage: Page;
   /** Helper for interacting with the canvas-based grid. */
   grid: GridHelper;
+  /** Grid helper that does NOT reset the workbook (for workflow step 2+). */
+  gridPersistent: GridHelper;
 };
 
 async function connectWithRetry(): Promise<Browser> {
@@ -99,6 +101,18 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       await sharedPage.waitForTimeout(50);
     }
 
+    // Reset workbook to a clean empty state so tests don't see stale data
+    // from prior tests (extra sheets, cell values, formulas, etc.).
+    await sharedPage.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("new_file");
+      // Emit events so frontend components (grid, sheet tabs, extensions) refresh
+      window.dispatchEvent(new CustomEvent("app:after-new"));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      window.dispatchEvent(new CustomEvent("app:sheet-changed"));
+    });
+    await sharedPage.waitForTimeout(500);
+
     // Ensure the spreadsheet has focus at the start of each test.
     const container = sharedPage.locator("[data-focus-container='spreadsheet']");
     await container.focus();
@@ -108,6 +122,24 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
   grid: async ({ appPage }, use) => {
     const helper = new GridHelper(appPage);
+    await use(helper);
+  },
+
+  /**
+   * Grid helper that does NOT reset the workbook.
+   * Use for workflow tests where step 2+ depends on data from step 1.
+   * Step 1 should use `grid` (which resets), subsequent steps use `gridPersistent`.
+   */
+  gridPersistent: async ({ sharedPage }, use) => {
+    // Close any lingering dialogs/menus but do NOT call new_file
+    for (let i = 0; i < 3; i++) {
+      await sharedPage.keyboard.press("Escape");
+      await sharedPage.waitForTimeout(50);
+    }
+    const container = sharedPage.locator("[data-focus-container='spreadsheet']");
+    await container.focus();
+    await sharedPage.waitForTimeout(200);
+    const helper = new GridHelper(sharedPage);
     await use(helper);
   },
 });

@@ -49,6 +49,17 @@ test.describe("Large batch operations", () => {
   });
 
   test("AVERAGE, COUNT, MIN, MAX over 100 cells", async ({ grid }) => {
+    // Set up data (each test is independent)
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      const updates = [];
+      for (let i = 0; i < 100; i++) {
+        updates.push({ row: 560 + i, col: 0, value: String(i + 1) });
+      }
+      await tauri.core.invoke("update_cells_batch", { updates });
+    });
+    await grid.page.waitForTimeout(300);
+
     await grid.setCellValueDirect("C560", "=AVERAGE(A561:A660)");
     await grid.setCellValueDirect("D560", "=COUNT(A561:A660)");
     await grid.setCellValueDirect("E560", "=MIN(A561:A660)");

@@ -29,10 +29,21 @@ test.describe("Undo/Redo via Tauri API", () => {
   });
 
   test("redo re-applies undone edit", async ({ grid }) => {
-    // After the undo above, redo should bring back the value
-    const result = await grid.page.evaluate(async () => {
+    // Set up: write value then undo (each test is independent)
+    await grid.setCellValueDirect("AU1", "");
+    await grid.page.waitForTimeout(200);
+    await grid.setCellValueDirect("AU1", "BeforeUndo");
+    await grid.page.waitForTimeout(200);
+    await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
-      return tauri.core.invoke("redo");
+      await tauri.core.invoke("undo");
+    });
+    await grid.page.waitForTimeout(300);
+
+    // Now redo should bring back the value
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("redo");
     });
     await grid.page.waitForTimeout(300);
 

@@ -13,6 +13,8 @@
 import { test, expect } from "../fixtures";
 
 test.describe("Invoice builder workflow", () => {
+  test.describe.configure({ mode: "serial" });
+
   test("step 1: create invoice header", async ({ grid }) => {
     // Company name — bold, large
     await grid.setCellValueDirect("A400", "ACME Corporation");
@@ -37,7 +39,7 @@ test.describe("Invoice builder workflow", () => {
     expect(await grid.getCellDisplayValue("B403")).toBe("Nordiska AB");
   });
 
-  test("step 2: create line items table with headers", async ({ grid }) => {
+  test("step 2: create line items table with headers", async ({ gridPersistent: grid }) => {
     // Table headers
     const headers = ["Item", "Description", "Qty", "Unit Price", "Amount"];
     const cols = ["A", "B", "C", "D", "E"];
@@ -55,7 +57,7 @@ test.describe("Invoice builder workflow", () => {
     expect(await grid.getCellDisplayValue("C405")).toBe("Qty");
   });
 
-  test("step 3: enter line item data with amount formulas", async ({ grid }) => {
+  test("step 3: enter line item data with amount formulas", async ({ gridPersistent: grid }) => {
     // Line item 1
     await grid.setCellValueDirect("A406", "Widget A");
     await grid.setCellValueDirect("B406", "Premium widget");
@@ -83,7 +85,7 @@ test.describe("Invoice builder workflow", () => {
     expect(await grid.getCellDisplayValue("E408")).toBe("100");
   });
 
-  test("step 4: add subtotal, tax, and grand total", async ({ grid }) => {
+  test("step 4: add subtotal, tax, and grand total", async ({ gridPersistent: grid }) => {
     // Subtotal
     await grid.setCellValueDirect("D410", "Subtotal:");
     await grid.setCellValueDirect("E410", "=SUM(E406:E408)");
@@ -116,7 +118,7 @@ test.describe("Invoice builder workflow", () => {
     expect(parseFloat(total.replace(",", "."))).toBeCloseTo(531.25, 2);
   });
 
-  test("step 5: apply number formatting to currency columns", async ({ grid }) => {
+  test("step 5: apply number formatting to currency columns", async ({ gridPersistent: grid }) => {
     // Apply comma format to price and amount columns
     await grid.selectRange("D406", "E412");
     await grid.clickFormatButton("commaFormat");
@@ -127,7 +129,7 @@ test.describe("Invoice builder workflow", () => {
 
   // Cascade recalc works correctly (verified by diagnostic) but this test is
   // sensitive to data contamination from earlier tests sharing the same app instance.
-  test.fixme("step 6: update quantity and verify cascade recalculation", async ({ grid }) => {
+  test.fixme("step 6: update quantity and verify cascade recalculation", async ({ gridPersistent: grid }) => {
     // Change Widget A quantity from 10 to 20
     await grid.setCellValueDirect("C406", "20");
     await grid.page.waitForTimeout(1000);
@@ -149,7 +151,7 @@ test.describe("Invoice builder workflow", () => {
     expect(parseFloat(total.replace(/[^\d.,]/g, "").replace(",", "."))).toBeCloseTo(843.75, 2);
   });
 
-  test("step 7: sort line items by amount descending", async ({ grid }) => {
+  test("step 7: sort line items by amount descending", async ({ gridPersistent: grid }) => {
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       await tauri.core.invoke("sort_range", {

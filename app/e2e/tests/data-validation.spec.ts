@@ -31,6 +31,21 @@ test.describe("List validation", () => {
   });
 
   test("dropdown returns list values", async ({ grid }) => {
+    // Set up validation (each test is independent)
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("set_data_validation", {
+        startRow: 0, startCol: 21, endRow: 0, endCol: 21,
+        validation: {
+          rule: { list: { source: { values: ["Apple", "Banana", "Cherry"] }, inCellDropdown: true } },
+          errorAlert: { title: "Invalid", message: "Pick from list", style: "stop", showAlert: true },
+          prompt: { title: "Choose", message: "Select a fruit", showPrompt: true },
+          ignoreBlanks: true,
+        },
+      });
+    });
+    await grid.page.waitForTimeout(300);
+
     const values = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("get_validation_list_values", { row: 0, col: 21 });
@@ -41,6 +56,21 @@ test.describe("List validation", () => {
   });
 
   test("has in-cell dropdown", async ({ grid }) => {
+    // Set up validation (each test is independent)
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("set_data_validation", {
+        startRow: 0, startCol: 21, endRow: 0, endCol: 21,
+        validation: {
+          rule: { list: { source: { values: ["Apple", "Banana", "Cherry"] }, inCellDropdown: true } },
+          errorAlert: { title: "Invalid", message: "Pick from list", style: "stop", showAlert: true },
+          prompt: { title: "Choose", message: "Select a fruit", showPrompt: true },
+          ignoreBlanks: true,
+        },
+      });
+    });
+    await grid.page.waitForTimeout(300);
+
     const hasDropdown = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("has_in_cell_dropdown", { row: 0, col: 21 });
@@ -49,6 +79,21 @@ test.describe("List validation", () => {
   });
 
   test("valid value passes validation", async ({ grid }) => {
+    // Set up validation (each test is independent)
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("set_data_validation", {
+        startRow: 0, startCol: 21, endRow: 0, endCol: 21,
+        validation: {
+          rule: { list: { source: { values: ["Apple", "Banana", "Cherry"] }, inCellDropdown: true } },
+          errorAlert: { title: "Invalid", message: "Pick from list", style: "stop", showAlert: true },
+          prompt: { title: "Choose", message: "Select a fruit", showPrompt: true },
+          ignoreBlanks: true,
+        },
+      });
+    });
+    await grid.page.waitForTimeout(300);
+
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("validate_pending_value", {
@@ -59,6 +104,21 @@ test.describe("List validation", () => {
   });
 
   test("invalid value fails validation", async ({ grid }) => {
+    // Set up validation (each test is independent)
+    await grid.page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("set_data_validation", {
+        startRow: 0, startCol: 21, endRow: 0, endCol: 21,
+        validation: {
+          rule: { list: { source: { values: ["Apple", "Banana", "Cherry"] }, inCellDropdown: true } },
+          errorAlert: { title: "Invalid", message: "Pick from list", style: "stop", showAlert: true },
+          prompt: { title: "Choose", message: "Select a fruit", showPrompt: true },
+          ignoreBlanks: true,
+        },
+      });
+    });
+    await grid.page.waitForTimeout(300);
+
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("validate_pending_value", {
