@@ -398,11 +398,17 @@
       "tier": 2,
       "category": "Editing",
       "description": "Paste values, formulas, formatting, link, transpose",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No E2E coverage for paste special dialog."
+      "e2eTests": [
+        "e2e/tests/paste-special.spec.ts"
+      ],
+      "screenshots": [
+        "paste-special-values-result",
+        "paste-special-formatting-result",
+        "paste-special-dialog-open"
+      ],
+      "notes": "E2E covers paste values, paste formatting, and dialog open/close."
     },
     {
       "id": "feat.fill-handle",
@@ -597,11 +603,20 @@
       "tier": 2,
       "category": "UI",
       "description": "Home ribbon tab, formatting buttons, contextual tabs",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Ribbon used in formatting E2E but not directly tested. No visual regression."
+      "e2eTests": [
+        "e2e/tests/ribbon-tabs.spec.ts"
+      ],
+      "screenshots": [
+        "home-tab-default",
+        "home-tab-buttons",
+        "ribbon-before-minimize",
+        "ribbon-minimized",
+        "ribbon-after-expand",
+        "ribbon-format-state"
+      ],
+      "notes": "E2E covers tab navigation, formatting buttons, minimize/expand, and format state reflection."
     },
     {
       "id": "feat.formula-bar",
@@ -867,11 +882,17 @@
       "tier": 2,
       "category": "UI",
       "description": "Status bar aggregation (SUM, AVG, COUNT), zoom slider",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage. Easy visual regression candidate."
+      "e2eTests": [
+        "e2e/tests/status-bar.spec.ts"
+      ],
+      "screenshots": [
+        "aggregation-sum-avg-count",
+        "aggregation-updated",
+        "statusbar-text-range"
+      ],
+      "notes": "E2E covers numeric aggregations (sum/avg/count), single-cell hiding, data update refresh, and text-only count."
     },
     {
       "id": "feat.checkbox",

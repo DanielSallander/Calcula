@@ -36,17 +36,41 @@ async function createScriptDirect(
   await page.evaluate(
     async (args: any) => {
       const tauri = (window as any).__TAURI__;
-      await tauri.core.invoke("save_object_script", {
-        script: {
-          id: args.id,
-          name: args.name || `Test ${args.objectType} script`,
-          objectType: args.objectType,
-          instanceId: args.instanceId ?? null,
-          source: args.source,
-          accessLevel: args.accessLevel || "restricted",
-          provenance: "local",
-        },
-      });
+      const script = {
+        id: args.id,
+        name: args.name || `Test ${args.objectType} script`,
+        objectType: args.objectType,
+        instanceId: args.instanceId ?? null,
+        source: args.source,
+        accessLevel: args.accessLevel || "restricted",
+      };
+      // Under WebView2 the Tauri IPC response for an invoke is occasionally
+      // dropped, leaving the promise pending forever (the test then hits the
+      // 30s timeout). Race each attempt against a short timeout and re-issue —
+      // save_object_script is idempotent (keyed by id, update-or-insert), so
+      // retrying is safe and recovers a lost response.
+      // The drop is intermittent, so each retry issues a fresh invoke that has
+      // an independent chance of completing. Use a shorter per-attempt timeout
+      // with more attempts: save_object_script is a trivial in-memory mutex
+      // insert on the backend, so a healthy round-trip returns in well under a
+      // second — a long timeout only delays failover to the next attempt. The
+      // total budget (5 x 4s = 20s) stays comfortably under the 30s test cap,
+      // leaving room for the follow-up get/delete calls.
+      let lastErr: any;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await Promise.race([
+            tauri.core.invoke("save_object_script", { script }),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("save_object_script IPC timeout")), 4000)
+            ),
+          ]);
+          return;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr;
     },
     { id, objectType, source, ...opts }
   );
@@ -165,7 +189,9 @@ test.describe("#1 Object Script CRUD", () => {
 
 test.describe("#2 Console Output", () => {
   test("2a: script console event creates entry", async ({ grid }) => {
-    // Emit a console event as if a script logged something
+    // Emit a console event as if a script logged something.
+    // NOTE: Do NOT open the Object Scripts editor window here — it spawns a
+    // separate OS window whose background Tauri calls interfere with later tests.
     await grid.page.evaluate(() => {
       window.dispatchEvent(
         new CustomEvent("objectscript:console", {
@@ -174,22 +200,7 @@ test.describe("#2 Console Output", () => {
       );
     });
     await grid.page.waitForTimeout(200);
-
-    // The console output would be visible in the Code Editor dialog
-    // but since we didn't open it, this tests the event dispatch path
-    // Open the dialog to check
-    await openObjectScriptsDialog(grid.page);
-    await grid.page.waitForTimeout(500);
-
-    // Look for console entries — they might be in a panel
-    const consoleText = grid.page.locator("text=Hello from test");
-    const visible = await consoleText.isVisible({ timeout: 2000 }).catch(() => false);
-    // Close dialog
-    await grid.page.keyboard.press("Escape");
-    await grid.page.waitForTimeout(300);
-
-    // This is a soft assertion — console may not persist across dialog opens
-    // The important thing is no crash
+    // No crash = success for event dispatch
   });
 
   test("2b: error event creates red entry", async ({ grid }) => {
@@ -282,13 +293,18 @@ test.describe("#7 Tiered Access", () => {
       accessLevel: "restricted",
     });
 
-    // Update to unlocked
-    await grid.page.evaluate(async (scriptId: string) => {
+    // Get the script
+    const script = await grid.page.evaluate(async (scriptId: string) => {
       const tauri = (window as any).__TAURI__;
-      const script = await tauri.core.invoke("get_object_script", { id: scriptId });
-      script.accessLevel = "unlocked";
-      await tauri.core.invoke("save_object_script", { script });
+      return tauri.core.invoke("get_object_script", { id: scriptId });
     }, id);
+
+    // Update to unlocked (separate evaluate to avoid nested invoke contention)
+    script.accessLevel = "unlocked";
+    await grid.page.evaluate(async (s: any) => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("save_object_script", { script: s });
+    }, script);
 
     const updated = await grid.page.evaluate(async (scriptId: string) => {
       const tauri = (window as any).__TAURI__;

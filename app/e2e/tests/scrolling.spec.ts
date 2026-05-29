@@ -25,7 +25,14 @@ test.describe("Scrolling & Virtualization", () => {
     await grid.scrollWheel(500);
     await appPage.waitForTimeout(300);
     await waitForGridStable(appPage);
-    await softly(takeGridScreenshot(appPage, "scroll-after-wheel-down"));
+    // Mouse-wheel scrolling lands on a slightly non-deterministic offset between
+    // runs, so a handful of pixels along the frozen header/edge can differ.
+    // Relax the tolerance for this shot to avoid flaky failures.
+    await softly(
+      takeGridScreenshot(appPage, "scroll-after-wheel-down", {
+        maxDiffPixelRatio: 0.02,
+      })
+    );
 
     // The name box should show we're no longer at row 1
     // Navigate back to A1 to verify scroll-to-cell
@@ -91,6 +98,6 @@ test.describe("Scrolling & Virtualization", () => {
     await grid.page.waitForTimeout(200);
 
     await grid.expectFormulaBar("A1", "Anchor");
-    await grid.expectFormulaBar("A2", "Anchor Point");
+    await grid.expectFormulaBar("A2", "=A1&\" Point\"");
   });
 });

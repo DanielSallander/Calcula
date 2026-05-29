@@ -8,12 +8,22 @@ import { test, expect } from "../fixtures";
 import {
   takeGridScreenshot,
   takeCheckpoint,
-  resetGrid,
+  resetToNewWorkbook,
   waitForGridStable,
   softly,
 } from "../helpers/screenshots";
 
 test.describe("Grid rendering visual regression", () => {
+  // All tests in this file capture grid screenshots and compare them against
+  // golden baselines. Because every test shares one app instance (serial,
+  // workers:1), data left behind by earlier test files pollutes the grid and
+  // makes these visual comparisons non-deterministic (e.g. the "empty grid"
+  // baseline is only empty if nothing leaked in). Start each test from a
+  // brand-new, empty workbook so the screenshots are stable and reproducible.
+  test.beforeEach(async ({ appPage }) => {
+    await resetToNewWorkbook(appPage);
+  });
+
   test("empty grid renders correctly with headers and gridlines", async ({
     appPage,
     grid,

@@ -10,10 +10,10 @@ import { test, expect } from "../fixtures";
 
 test.describe("Find", () => {
   test("find_all returns matching cells", async ({ grid }) => {
-    await grid.setCellValue("A75", "apple");
-    await grid.setCellValue("B75", "banana");
-    await grid.setCellValue("C75", "apple pie");
-    await grid.setCellValue("D75", "grape");
+    await grid.setCellValueDirect("A75", "apple");
+    await grid.setCellValueDirect("B75", "banana");
+    await grid.setCellValueDirect("C75", "apple pie");
+    await grid.setCellValueDirect("D75", "grape");
 
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -32,9 +32,9 @@ test.describe("Find", () => {
   });
 
   test("case-sensitive find", async ({ grid }) => {
-    await grid.setCellValue("A76", "Apple");
-    await grid.setCellValue("B76", "apple");
-    await grid.setCellValue("C76", "APPLE");
+    await grid.setCellValueDirect("A76", "Apple");
+    await grid.setCellValueDirect("B76", "apple");
+    await grid.setCellValueDirect("C76", "APPLE");
 
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -52,9 +52,9 @@ test.describe("Find", () => {
   });
 
   test("match entire cell find", async ({ grid }) => {
-    await grid.setCellValue("A77", "test");
-    await grid.setCellValue("B77", "testing");
-    await grid.setCellValue("C77", "test");
+    await grid.setCellValueDirect("A77", "test");
+    await grid.setCellValueDirect("B77", "testing");
+    await grid.setCellValueDirect("C77", "test");
 
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -89,9 +89,9 @@ test.describe("Find", () => {
 
 test.describe("Replace", () => {
   test("replace_all replaces all occurrences", async ({ grid }) => {
-    await grid.setCellValue("A78", "old");
-    await grid.setCellValue("B78", "old value");
-    await grid.setCellValue("C78", "keep");
+    await grid.setCellValueDirect("A78", "old");
+    await grid.setCellValueDirect("B78", "old value");
+    await grid.setCellValueDirect("C78", "keep");
 
     const result = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
@@ -119,8 +119,8 @@ test.describe("Replace", () => {
   });
 
   test("replace_single replaces one cell", async ({ grid }) => {
-    await grid.setCellValue("A79", "foo");
-    await grid.setCellValue("B79", "foo");
+    await grid.setCellValueDirect("A79", "foo");
+    await grid.setCellValueDirect("B79", "foo");
 
     await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;

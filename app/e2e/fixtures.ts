@@ -120,10 +120,35 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       } catch { /* store not available */ }
     });
 
+    // Restore the ribbon to its expanded state. The ribbon minimize/expand
+    // state (Ctrl+F1) is local React state shared by the single app instance,
+    // so a prior test that left the ribbon minimized would shift every
+    // subsequent screenshot down by ~92px AND hide the ribbon's formatting
+    // buttons (fmt-copy, fmt-bold, ...), breaking unrelated functional tests.
+    // If the ribbon content is hidden, dispatch the toggle event to re-expand.
+    await sharedPage.evaluate(() => {
+      const content = document.querySelector("[data-ribbon-content]");
+      if (content && window.getComputedStyle(content).display === "none") {
+        window.dispatchEvent(new CustomEvent("app:ribbon-toggle-minimize"));
+      }
+    });
+    await sharedPage.waitForTimeout(100);
+
     // Navigate to A1 and ensure the spreadsheet has focus
     await sharedPage.keyboard.press("Escape");
     await sharedPage.waitForTimeout(50);
     const container = sharedPage.locator("[data-focus-container='spreadsheet']");
+
+    // Always reset selection/scroll to A1 — prior tests may leave the grid
+    // scrolled elsewhere. Control+Home is unreliable here because WebView2
+    // swallows the combo before it reaches the grid's key handler, leaving the
+    // grid scrolled to the bottom. Use the Name Box (a real DOM input) which
+    // reliably selects A1 and scrolls it to the top-left of the viewport.
+    const nameBox = sharedPage.locator('input[aria-label="Name Box"]');
+    await nameBox.click();
+    await nameBox.fill("A1");
+    await sharedPage.keyboard.press("Enter");
+    await sharedPage.waitForTimeout(150);
     await container.focus();
     await sharedPage.waitForTimeout(100);
 

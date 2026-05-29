@@ -270,7 +270,7 @@ export async function executePasteLink(
         const formula = buildAbsoluteRef(srcRow, srcCol);
 
         try {
-          const updatedCells = await updateCell(destRow, destCol, formula);
+          const { cells: updatedCells } = await updateCell(destRow, destCol, formula);
           for (const cell of updatedCells) {
             if (cell.sheetIndex !== undefined) continue;
             cellEvents.emit({
@@ -376,7 +376,7 @@ async function pasteAll(
       sourceCell?.display ??
       "";
 
-    const updatedCells = await updateCell(destRow, destCol, value);
+    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
     if (sourceCell) {
       await setCellStyle(destRow, destCol, sourceCell.styleIndex);
     }
@@ -415,7 +415,7 @@ async function pasteFormulas(
       sourceCell?.display ??
       "";
 
-    const updatedCells = await updateCell(destRow, destCol, value);
+    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
     // Do NOT set style - keep target formatting
 
     for (const cell of updatedCells) {
@@ -456,7 +456,7 @@ async function pasteValues(
       }
     }
 
-    const updatedCells = await updateCell(destRow, destCol, value);
+    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
     // Do NOT set style - keep target formatting
 
     for (const cell of updatedCells) {
@@ -519,7 +519,7 @@ async function pasteWithOperation(
 
   // Write the computed result as a plain value
   const resultStr = isNaN(result) ? "#DIV/0!" : String(result);
-  const updatedCells = await updateCell(destRow, destCol, resultStr);
+  const { cells: updatedCells } = await updateCell(destRow, destCol, resultStr);
 
   for (const cell of updatedCells) {
     if (cell.sheetIndex !== undefined) continue;
@@ -554,7 +554,7 @@ async function pasteAllExceptBorders(
       sourceCell?.display ??
       "";
 
-    const updatedCells = await updateCell(destRow, destCol, value);
+    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
 
     for (const cell of updatedCells) {
       if (cell.sheetIndex !== undefined) continue;
@@ -613,7 +613,7 @@ async function pasteFormulasAndNumberFormats(
       sourceCell?.display ??
       "";
 
-    const updatedCells = await updateCell(destRow, destCol, value);
+    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
 
     for (const cell of updatedCells) {
       if (cell.sheetIndex !== undefined) continue;
@@ -659,7 +659,7 @@ async function pasteValuesAndNumberFormats(
       }
     }
 
-    const updatedCells = await updateCell(destRow, destCol, value);
+    const { cells: updatedCells } = await updateCell(destRow, destCol, value);
 
     for (const cell of updatedCells) {
       if (cell.sheetIndex !== undefined) continue;
