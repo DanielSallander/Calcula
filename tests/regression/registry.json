@@ -22,7 +22,7 @@
       "tier": 1,
       "category": "Core",
       "description": "Canvas-based grid rendering, cell painting, gridlines, headers",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [
         "src/core/lib/gridRenderer/rendering/cells.test.ts",
         "src/core/lib/gridRenderer/rendering/cells.deep.test.ts",
@@ -30,9 +30,17 @@
         "src/core/lib/gridRenderer/rendering/grid.deep.test.ts",
         "src/core/lib/gridRenderer/rendering/grid-merge.test.ts"
       ],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Unit tests mock CanvasRenderingContext2D. Visual regression needed."
+      "e2eTests": [
+        "e2e/tests/grid-rendering.spec.ts"
+      ],
+      "screenshots": [
+        "empty-grid-default",
+        "cells-with-text",
+        "formatted-cells-bold-italic",
+        "before-clear",
+        "after-clear-b1"
+      ],
+      "notes": "E2E covers empty grid, text rendering, formatting, and cell clearing with visual regression."
     },
     {
       "id": "core.scrolling",
@@ -40,7 +48,7 @@
       "tier": 1,
       "category": "Core",
       "description": "Viewport scrolling, virtualized rendering, scroll-to-cell",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [
         "src/core/lib/gridRenderer/layout/viewport.test.ts",
         "src/core/lib/gridRenderer/layout/viewport.deep.test.ts",
@@ -49,9 +57,16 @@
         "src/core/lib/__tests__/scroll-hyper.test.ts",
         "src/core/lib/__tests__/scroll-titan.test.ts"
       ],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Extensive parameterized unit tests but no E2E scroll verification."
+      "e2eTests": [
+        "e2e/tests/scrolling.spec.ts"
+      ],
+      "screenshots": [
+        "scroll-before",
+        "scroll-after-wheel-down",
+        "scroll-distant-cell-z100",
+        "scroll-row-5000"
+      ],
+      "notes": "E2E covers mouse wheel scroll, distant cell navigation, virtualization at row 5000, and data persistence after scrolling."
     },
     {
       "id": "core.selection",
@@ -171,14 +186,23 @@
       "tier": 1,
       "category": "Core",
       "description": "Resize columns/rows, auto-fit, default dimensions",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [
         "src/core/lib/gridRenderer/layout/dimensions.test.ts",
         "src/core/lib/gridRenderer/layout/dimensions-scale.test.ts"
       ],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No E2E or visual regression for column/row resize."
+      "e2eTests": [
+        "e2e/tests/dimensions.spec.ts"
+      ],
+      "screenshots": [
+        "dimensions-before-autofit",
+        "dimensions-after-autofit-col",
+        "dimensions-before-row-height",
+        "dimensions-after-row-height",
+        "dimensions-after-col-width",
+        "dimensions-mixed-widths"
+      ],
+      "notes": "E2E covers auto-fit, row height, column width via Format menu, and mixed widths with visual regression."
     },
     {
       "id": "core.clipboard",

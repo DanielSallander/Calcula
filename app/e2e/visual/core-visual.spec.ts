@@ -9,6 +9,7 @@
  */
 import { test, expect } from "../fixtures";
 import {
+  resetToNewWorkbook,
   takeCheckpoint,
   takeGridScreenshot,
   takeRibbonScreenshot,
@@ -17,6 +18,8 @@ import {
 
 test.describe("Core Visual Regression", () => {
   test("empty grid - default state", async ({ appPage }) => {
+    // Reset to a clean workbook — prior functional tests leave data behind
+    await resetToNewWorkbook(appPage);
     // Navigate to A1 to ensure consistent starting position
     await appPage.keyboard.press("Control+Home");
     await appPage.waitForTimeout(500);
@@ -190,7 +193,11 @@ test.describe("Sheet Tab Visual Regression", () => {
 });
 
 test.describe("Menu Visual Regression", () => {
-  test("file menu open", async ({ grid, appPage }) => {
+  test("file menu open visual", async ({ grid, appPage }) => {
+    await resetToNewWorkbook(appPage);
+    await appPage.keyboard.press("Control+Home");
+    await appPage.waitForTimeout(300);
+
     await grid.openMenu("File");
     await appPage.waitForTimeout(500);
 
@@ -200,6 +207,10 @@ test.describe("Menu Visual Regression", () => {
   });
 
   test("edit menu open", async ({ grid, appPage }) => {
+    await resetToNewWorkbook(appPage);
+    await appPage.keyboard.press("Control+Home");
+    await appPage.waitForTimeout(300);
+
     await grid.openMenu("Edit");
     await appPage.waitForTimeout(500);
 
@@ -208,7 +219,11 @@ test.describe("Menu Visual Regression", () => {
     await grid.closeMenu();
   });
 
-  test("data menu open", async ({ grid, appPage }) => {
+  test("data menu open visual", async ({ grid, appPage }) => {
+    await resetToNewWorkbook(appPage);
+    await appPage.keyboard.press("Control+Home");
+    await appPage.waitForTimeout(300);
+
     await grid.openMenu("Data");
     await appPage.waitForTimeout(500);
 

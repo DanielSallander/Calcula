@@ -26,6 +26,34 @@ const DEFAULT_SCREENSHOT_OPTIONS = {
 };
 
 /**
+ * Reset the app to a brand-new empty workbook via the Tauri `new_file` command.
+ * This clears all sheets, data, and formatting — equivalent to File > New.
+ * Use at the start of test groups that need a guaranteed clean slate.
+ */
+export async function resetToNewWorkbook(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const tauri = (window as any).__TAURI__;
+    if (tauri?.core?.invoke) {
+      await tauri.core.invoke("new_file", {});
+      window.dispatchEvent(new Event("grid:refresh"));
+    }
+  });
+  // Wait for the UI to fully re-render after the reset
+  await page.waitForTimeout(1000);
+  // Dismiss any dialogs that might appear
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(50);
+  }
+  // Focus the spreadsheet and navigate to A1
+  const container = page.locator("[data-focus-container='spreadsheet']");
+  await container.focus();
+  await page.waitForTimeout(100);
+  await page.keyboard.press("Control+Home");
+  await page.waitForTimeout(300);
+}
+
+/**
  * Clear the grid by selecting all cells and deleting content + formatting.
  * Use this at the start of workflow tests to avoid stale data from prior tests
  * (all tests share the same app instance).
@@ -167,6 +195,26 @@ export async function takeDialogScreenshot(
     ...DEFAULT_SCREENSHOT_OPTIONS,
     ...options,
   });
+}
+
+/**
+ * Wrap a screenshot assertion so that a missing baseline (first run) logs a
+ * warning instead of failing the test.  Real pixel-diff failures still throw.
+ *
+ * Usage:
+ *   await softly(takeGridScreenshot(page, "my-shot"));
+ */
+export async function softly(promise: Promise<void>): Promise<void> {
+  try {
+    await promise;
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (msg.includes("snapshot doesn't exist")) {
+      console.log(`[screenshot] baseline missing, actual written: ${msg.split("\n")[0]}`);
+      return;
+    }
+    throw e;
+  }
 }
 
 /**

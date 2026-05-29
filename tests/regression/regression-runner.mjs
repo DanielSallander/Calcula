@@ -120,61 +120,133 @@ function runUnitTests() {
   };
 }
 
-// E2E timeout: 30 min — app startup (~5 min) + 338+ tests (~15 min) + buffer
-const E2E_TIMEOUT = 1_800_000;
+// E2E timeout: 60 min — 338+ serial tests with waitForTimeout calls take 30-40 min + startup
+const E2E_TIMEOUT = 3_600_000;
+const CDP_PORT = Number(process.env.CDP_PORT ?? 9222);
+const SETUP_RUST_ENV = path.join(PROJECT_ROOT, "core", "setup-rust-env.ps1");
 
 /**
- * Pre-build the Rust backend so that `cargo tauri dev` starts fast.
- * Without this, each E2E iteration waits for a full Rust compile.
+ * Launch the Calcula app with CDP enabled for E2E testing.
+ * Uses PowerShell to source setup-rust-env.ps1 (MSVC environment),
+ * then runs `yarn tauri dev` with CDP remote debugging.
+ *
+ * Returns the PID of the PowerShell process (for cleanup).
  */
-function preBuildRust() {
-  log("  Pre-building Rust backend (cargo build)...");
-  const result = exec("cargo build 2>&1", {
-    cwd: path.join(APP_DIR, "src-tauri"),
-    timeout: 600_000, // 10 min for build
+function launchApp() {
+  log("  Launching Calcula with CDP on port " + CDP_PORT + "...");
+
+  // Kill any leftover processes on the CDP port
+  try {
+    execSync(`powershell -Command "Get-NetTCPConnection -LocalPort ${CDP_PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`, { stdio: "ignore" });
+  } catch { /* no process on port */ }
+
+  // Launch via PowerShell so MSVC env vars are properly set
+  const psScript = `
+    & '${SETUP_RUST_ENV}'
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=${CDP_PORT}'
+    Set-Location '${APP_DIR}'
+    yarn tauri dev
+  `;
+
+  const child = spawn("powershell", ["-NoProfile", "-Command", psScript], {
+    cwd: APP_DIR,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+    shell: false,
   });
-  if (result.success) {
-    log("  Rust build cache warm");
-  } else {
-    log("  Rust pre-build failed (E2E may still work if already built)");
+
+  // Only log key build milestones (not every line)
+  const logMilestone = (data) => {
+    const line = data.toString();
+    if (line.includes("Compiling") || line.includes("Finished") ||
+        line.includes("Running") || line.includes("VITE") ||
+        line.includes("ready in") || line.includes("error")) {
+      process.stdout.write(`  [tauri] ${line.trim()}\n`);
+    }
+  };
+  child.stdout?.on("data", logMilestone);
+  child.stderr?.on("data", logMilestone);
+
+  child.on("error", (err) => {
+    log("  Failed to start Tauri: " + err.message);
+  });
+
+  return child;
+}
+
+/**
+ * Wait for CDP to become available on the given port.
+ * Uses Node's http module (not PowerShell) for reliable async polling.
+ */
+async function waitForCDP(port, timeoutMs) {
+  const http = await import("http");
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const ready = await new Promise((resolve) => {
+      const req = http.get(`http://localhost:${port}/json/version`, (res) => {
+        let body = "";
+        res.on("data", (d) => (body += d.toString()));
+        res.on("end", () => resolve(res.statusCode === 200));
+      });
+      req.on("error", () => resolve(false));
+      req.setTimeout(3000, () => { req.destroy(); resolve(false); });
+    });
+
+    if (ready) {
+      log(`  CDP ready on port ${port} (took ${Math.round((Date.now() - start) / 1000)}s)`);
+      return true;
+    }
+
+    await new Promise((r) => setTimeout(r, 2000));
   }
-  return result.success;
+
+  log(`  CDP not ready after ${Math.round(timeoutMs / 1000)}s`);
+  return false;
 }
 
-/** Build the E2E command with optional manual mode (skip app launch) */
-function e2eCmd(extraArgs = "") {
+/**
+ * Kill the app process tree, orphaned app.exe processes, and anything on the CDP port.
+ */
+function killApp(child) {
+  // Kill the spawned process tree
+  if (child && child.pid) {
+    log("  Stopping Calcula (PID " + child.pid + ")...");
+    try {
+      execSync(`taskkill /F /T /PID ${child.pid}`, { stdio: "ignore" });
+    } catch { /* already gone */ }
+  }
+  // Kill ALL app.exe processes (the Tauri binary) — catches orphans from prior runs
+  try {
+    execSync(`taskkill /F /IM app.exe`, { stdio: "ignore" });
+  } catch { /* none running */ }
+  // Also kill anything still on the CDP port
+  try {
+    execSync(`powershell -Command "Get-NetTCPConnection -LocalPort ${CDP_PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`, { stdio: "ignore" });
+  } catch { /* nothing on port */ }
+}
+
+/**
+ * Build the E2E command.
+ * @param extraArgs - Additional Playwright args
+ * @param lastFailedOnly - If true, only re-run tests that failed last time (--last-failed)
+ */
+function e2eCmd(extraArgs = "", lastFailedOnly = false) {
   const manual = E2E_MANUAL ? "cross-env E2E_MANUAL=1 " : "";
-  return `${manual}yarn playwright test ${extraArgs} 2>&1`;
-}
-
-function runFunctionalE2E() {
-  log(`Phase 3: Functional E2E tests${E2E_MANUAL ? " (manual — using running app)" : ""}`);
-  const result = exec(e2eCmd("--project=functional"), { timeout: E2E_TIMEOUT });
-  log(result.success ? "  [PASS] Functional E2E passed" : "  [FAIL] Functional E2E failed");
-  return {
-    phase: "e2e-functional",
-    success: result.success,
-    output: result.output,
-  };
-}
-
-function runVisualRegression() {
-  log(`Phase 4: Visual regression tests${E2E_MANUAL ? " (manual — using running app)" : ""}`);
-  const result = exec(e2eCmd("--project=visual"), { timeout: E2E_TIMEOUT });
-  log(result.success ? "  [PASS] Visual regression passed" : "  [FAIL] Visual regression failed");
-  return {
-    phase: "visual",
-    success: result.success,
-    output: result.output,
-  };
+  const lastFailed = lastFailedOnly ? "--last-failed " : "";
+  return `${manual}yarn playwright test ${lastFailed}${extraArgs} 2>&1`;
 }
 
 /**
  * Run all E2E tests (functional + visual) in a single Playwright run.
+ * @param lastFailedOnly - If true, only re-run tests that failed in the previous run.
+ *   This dramatically speeds up fix iterations (from ~40 min to ~2-5 min).
  */
-function runAllE2E() {
-  log(`Phase 3+4: All E2E tests${E2E_MANUAL ? " (manual — using running app)" : ""}`);
-  const result = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
+function runAllE2E(lastFailedOnly = false) {
+  const mode = lastFailedOnly ? "re-running failed tests only" : "full sweep";
+  const manualNote = E2E_MANUAL ? " (manual)" : "";
+  log(`Phase 3+4: E2E tests — ${mode}${manualNote}`);
+  const result = exec(e2eCmd("", lastFailedOnly), { timeout: E2E_TIMEOUT });
   log(result.success ? "  [PASS] All E2E passed" : "  [FAIL] E2E tests failed");
   return {
     phase: "e2e-all",
@@ -193,16 +265,20 @@ function runAllE2E() {
  */
 function isInfrastructureFailure(result) {
   const output = result.output || "";
-  // Only match specific global-setup/teardown failures, not general test output.
   // Check if tests actually ran by looking for test result counts.
   const hasTestResults = /\d+ passed/.test(output) || /\d+ failed/.test(output);
   if (hasTestResults) return false; // tests ran — real failures, not infrastructure
 
+  // Check for signs that the app was actually running (Tauri log lines)
+  const appWasRunning = output.includes("|CMD|") || output.includes("|ACTION|") ||
+    output.includes("[tauri]") || output.includes("Calcula");
+  if (appWasRunning) return false; // app ran, this is a timeout not infra failure
+
+  // Only classify as infrastructure if the app genuinely didn't start
   return (
     output.includes("did not become ready within") ||
-    output.includes("CDP on port") ||
-    output.includes("ETIMEDOUT") ||
-    (result.code === null && output.includes("killed")) // process killed by timeout
+    (output.includes("CDP on port") && output.includes("did not become ready")) ||
+    output.includes("ETIMEDOUT")
   );
 }
 
@@ -316,11 +392,24 @@ function invokeClaudeCodeFix(failureReport, iteration) {
     "",
     "Instructions:",
     "1. Analyze each failure to determine the root cause",
-    "2. Fix the code (NOT the tests) unless the test itself is clearly wrong",
+    "2. Fix the TEST code to match the application's actual behavior",
     "3. Only modify files that are directly related to the failures",
     "4. Do not modify more than " + MAX_FILES_PER_ITERATION + " files",
     "5. Do not add new features or refactor unrelated code",
     "6. After fixing, briefly explain what you changed and why",
+    "",
+    "CRITICAL SAFETY RULES (MANDATORY — VIOLATION WILL CAUSE REGRESSIONS):",
+    "- FORBIDDEN: Do NOT modify ANY file in app/src/ (core, shell, api — all forbidden)",
+    "- FORBIDDEN: Do NOT modify ANY file in core/ (Rust source)",
+    "- FORBIDDEN: Do NOT modify app/package.json",
+    "- FORBIDDEN: Do NOT modify tests/regression/regression-runner.mjs",
+    "- ALLOWED: app/e2e/tests/*.spec.ts (test specs)",
+    "- ALLOWED: app/e2e/visual/*.spec.ts (visual test specs)",
+    "- ALLOWED: app/e2e/fixtures.ts (test fixtures)",
+    "- ALLOWED: app/e2e/helpers/*.ts (test helpers)",
+    "- ALLOWED: app/extensions/**/__tests__/*.test.ts (unit tests)",
+    "- ALLOWED: tests/regression/registry.json (coverage tracking)",
+    "- If a test fails due to an application bug, SKIP the test with test.skip() and note why",
   ].join("\n");
 
   // Include screenshot diff images as Read instructions in the prompt
@@ -433,7 +522,7 @@ function buildGapSummary(gaps, registry) {
  *
  * Also writes a summary to suggested-scenarios.md for tracking.
  */
-function expandCoverage() {
+async function expandCoverage() {
   log("\n=== Coverage Expansion Phase ===");
 
   const { gaps, total, registry } = getCoverageGaps();
@@ -509,7 +598,28 @@ partially covered in another spec. Instead, focus on the specific untested aspec
    - Add the new test file paths to the e2eTests arrays
 7. Keep tests practical — avoid testing features that require complex setup
    that the GridHelper doesn't support yet
-8. Do NOT modify existing test files — only create new ones and update registry.json`;
+8. Do NOT modify existing test files — only create new ones and update registry.json
+
+## Visual Regression Screenshots
+
+IMPORTANT: Every new test spec MUST include visual regression screenshots at key
+checkpoints. This catches rendering regressions that functional assertions miss.
+
+Import the screenshot helpers:
+  import { takeGridScreenshot, takeCheckpoint, takeDialogScreenshot } from "../helpers/screenshots";
+
+Add screenshots at these points:
+- After setting up data (to capture the grid state)
+- After applying formatting or visual changes
+- When a dialog or overlay is open
+- At the end of each test to capture the final state
+
+Example:
+  await grid.setCellValue("A1", "Hello");
+  await takeGridScreenshot(appPage, "my-feature-after-data");
+
+See app/e2e/helpers/screenshots.ts for all available screenshot functions.
+The first run creates golden baselines automatically.`;
 
     const tempFile = path.join(RESULTS_DIR, `expand-prompt-iter${expandIter}.txt`);
     ensureDir(RESULTS_DIR);
@@ -545,12 +655,28 @@ partially covered in another spec. Instead, focus on the specific untested aspec
       log(`    ${f.trim()}`);
     }
 
+    // Launch app fresh to test the new scenarios
+    let expandApp = null;
+    if (!E2E_MANUAL) {
+      expandApp = launchApp();
+      log("  Waiting for CDP...");
+      const cdpOk = await waitForCDP(CDP_PORT, 900_000);
+      if (!cdpOk) {
+        log("  [FAIL] App did not start for expansion test");
+        killApp(expandApp);
+        scenarioLog.push({ iteration: expandIter, specs: [], status: "infra-fail" });
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+
     // Run the E2E tests to verify the new scenarios work
     log("  Running E2E tests to verify new scenarios...");
     const e2eResult = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
 
     if (e2eResult.success) {
       log("  [PASS] New scenarios pass!");
+      if (expandApp) killApp(expandApp);
 
       // Track what was created
       const createdSpecs = newFiles
@@ -563,6 +689,7 @@ partially covered in another spec. Instead, focus on the specific untested aspec
       });
     } else {
       log("  [FAIL] New scenarios have failures — asking Claude Code to fix...");
+      if (expandApp) killApp(expandApp);
 
       // One fix attempt for the new tests
       const failureReport = collectFailures([{
@@ -574,9 +701,19 @@ partially covered in another spec. Instead, focus on the specific untested aspec
       if (failureReport) {
         invokeClaudeCodeFix(failureReport, `expand-${expandIter}`);
 
+        // Launch fresh again for retry
+        let retryApp = null;
+        if (!E2E_MANUAL) {
+          retryApp = launchApp();
+          const cdpOk2 = await waitForCDP(CDP_PORT, 900_000);
+          if (!cdpOk2) { killApp(retryApp); scenarioLog.push({ iteration: expandIter, specs: [], status: "infra-fail" }); break; }
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+
         // Re-run to verify fix
         log("  Re-running E2E after fix...");
         const retryResult = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
+        if (retryApp) killApp(retryApp);
         if (retryResult.success) {
           log("  [PASS] Fixed — new scenarios pass!");
           scenarioLog.push({ iteration: expandIter, specs: [], status: "pass-after-fix" });
@@ -732,8 +869,9 @@ function escapeHtml(str) {
 
 async function main() {
   log("=== Calcula Regression Runner ===");
-  log(`Mode: ${MODE} | Max iterations: ${MAX_ITERATIONS}`);
+  log(`Mode: ${MODE} | Max iterations: ${MAX_ITERATIONS} | Expand: ${EXPAND_ITERATIONS} iterations`);
   log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"} | E2E manual: ${E2E_MANUAL}`);
+  log(`Strategy: Full sweep on iteration 1, then --last-failed on fix iterations`);
 
   ensureDir(RESULTS_DIR);
 
@@ -745,6 +883,7 @@ async function main() {
 
   const allIterations = [];
   let noChangeCount = 0;
+  let hadE2EFailures = false;
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     log(`\n--- Iteration ${iteration} of ${MAX_ITERATIONS} ---`);
@@ -761,17 +900,47 @@ async function main() {
       results.push(runUnitTests());
     }
 
-    // Phase 3+4: E2E tests (Playwright launches/kills the app automatically)
+    // Phase 3+4: E2E tests
+    // Sweep 1 = full run (all tests). Fix iterations 2+ = only re-run failures.
+    // This cuts fix iterations from ~40 min to ~2-5 min.
+    const isFixIteration = iteration > 1 && hadE2EFailures;
     if (!ONLY) {
-      // Pre-build Rust so cargo tauri dev starts fast (skip in manual mode)
-      if (!E2E_MANUAL) preBuildRust();
-      // Run all E2E in one Playwright run (single app launch)
-      results.push(runAllE2E());
+      // Kill any orphaned instances before launching fresh
+      if (!E2E_MANUAL) killApp(null);
+
+      let appProcess = null;
+      if (!E2E_MANUAL) {
+        appProcess = launchApp();
+        log("  Waiting for CDP...");
+        const cdpReady = await waitForCDP(CDP_PORT, 900_000); // 15 min (cold Rust build can take 10 min)
+        if (!cdpReady) {
+          log("  [FAIL] App did not start (CDP not ready after 5 min)");
+          killApp(appProcess);
+          results.push({ phase: "e2e-all", success: false, output: "CDP not ready after 5 min" });
+          const iterationData2 = { iteration, results, claudeResponse: null };
+          allIterations.push(iterationData2);
+          break;
+        }
+        log("  App running, CDP ready");
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+
+      // Run E2E: full sweep on iteration 1, --last-failed on fix iterations
+      results.push(runAllE2E(isFixIteration));
+
+      // Kill the app after tests
+      if (appProcess) {
+        killApp(appProcess);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
     } else if (ONLY === "e2e") {
-      results.push(runFunctionalE2E());
+      results.push(runAllE2E(isFixIteration));
     } else if (ONLY === "visual") {
-      results.push(runVisualRegression());
+      results.push(runAllE2E(false)); // visual always runs all
     }
+
+    // Track whether this iteration had E2E failures (for --last-failed next time)
+    hadE2EFailures = results.some((r) => r.phase === "e2e-all" && !r.success);
 
     const iterationData = { iteration, results, claudeResponse: null };
 
@@ -783,7 +952,7 @@ async function main() {
       allIterations.push(iterationData);
       // When green and in auto mode, expand coverage with new scenarios
       if (MODE === "auto" && EXPAND_COVERAGE) {
-        expandCoverage();
+        await expandCoverage();
       } else {
         // Manual mode — just report the gaps
         const { total } = getCoverageGaps();

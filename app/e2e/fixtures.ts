@@ -34,7 +34,7 @@ type TestFixtures = {
   appPage: Page;
   /** Helper for interacting with the canvas-based grid. */
   grid: GridHelper;
-  /** Grid helper that does NOT reset the workbook (for workflow step 2+). */
+  /** GridHelper that skips per-test cleanup — for serial workflow tests. */
   gridPersistent: GridHelper;
 };
 
@@ -96,27 +96,37 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   appPage: async ({ sharedPage }, use) => {
     // Close any open dialogs/menus left over from a prior test by pressing
     // Escape multiple times (DialogContainer listens on capture phase).
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       await sharedPage.keyboard.press("Escape");
       await sharedPage.waitForTimeout(50);
     }
 
-    // Reset workbook to a clean empty state so tests don't see stale data
-    // from prior tests (extra sheets, cell values, formulas, etc.).
-    await sharedPage.evaluate(async () => {
-      const tauri = (window as any).__TAURI__;
-      await tauri.core.invoke("new_file");
-      // Emit events so frontend components (grid, sheet tabs, extensions) refresh
-      window.dispatchEvent(new CustomEvent("app:after-new"));
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
-      window.dispatchEvent(new CustomEvent("app:sheet-changed"));
-    });
-    await sharedPage.waitForTimeout(500);
+    // Close any visible dialog close/cancel buttons (handles Script Editor, etc.)
+    try {
+      const closeBtn = sharedPage.locator(
+        '[data-testid="dialog-close"], .dialog-close, [aria-label="Close"]'
+      ).first();
+      if (await closeBtn.isVisible({ timeout: 200 })) {
+        await closeBtn.click({ timeout: 500 });
+        await sharedPage.waitForTimeout(100);
+      }
+    } catch { /* no dialog open */ }
 
-    // Ensure the spreadsheet has focus at the start of each test.
+    // Close any open task panes via store reset
+    await sharedPage.evaluate(() => {
+      try {
+        const store = (window as any).__CALCULA_TASKPANE_STORE__;
+        if (store) store.getState().reset();
+      } catch { /* store not available */ }
+    });
+
+    // Navigate to A1 and ensure the spreadsheet has focus
+    await sharedPage.keyboard.press("Escape");
+    await sharedPage.waitForTimeout(50);
     const container = sharedPage.locator("[data-focus-container='spreadsheet']");
     await container.focus();
-    await sharedPage.waitForTimeout(200);
+    await sharedPage.waitForTimeout(100);
+
     await use(sharedPage);
   },
 
@@ -125,20 +135,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     await use(helper);
   },
 
-  /**
-   * Grid helper that does NOT reset the workbook.
-   * Use for workflow tests where step 2+ depends on data from step 1.
-   * Step 1 should use `grid` (which resets), subsequent steps use `gridPersistent`.
-   */
   gridPersistent: async ({ sharedPage }, use) => {
-    // Close any lingering dialogs/menus but do NOT call new_file
-    for (let i = 0; i < 3; i++) {
-      await sharedPage.keyboard.press("Escape");
-      await sharedPage.waitForTimeout(50);
-    }
-    const container = sharedPage.locator("[data-focus-container='spreadsheet']");
-    await container.focus();
-    await sharedPage.waitForTimeout(200);
     const helper = new GridHelper(sharedPage);
     await use(helper);
   },

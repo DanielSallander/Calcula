@@ -32,10 +32,12 @@ All commands run from `app/`:
 
 | Command | What it does |
 |---------|-------------|
-| `yarn regression` | Full suite (Rust + Unit + E2E + Visual), report only |
-| `yarn regression:auto` | Full suite with auto-fix + coverage expansion |
+| `yarn regression` | Full suite — auto-launches app per iteration |
+| `yarn regression:auto` | Auto-fix + coverage expansion |
 | `yarn regression:auto --expand-iterations=10` | More expansion cycles |
 | `yarn regression:auto --expand=false` | Fix only, no new scenarios |
+| `yarn regression:manual` | Full suite against already-running app |
+| `yarn regression:manual:auto` | Auto-fix against already-running app |
 
 ### Regression Runner Options
 
@@ -86,7 +88,7 @@ yarn regression
 # Report at: app/e2e/results/regression-report.html
 ```
 
-**Auto mode** — Claude Code fixes failures automatically:
+**Auto mode** — launches app automatically, fixes failures, expands coverage:
 ```bash
 yarn regression:auto
 # Afterwards:
@@ -95,6 +97,10 @@ yarn regression:auto
 #   3. If fixes look good:  commit them
 #   4. If fixes are wrong:  discard them (git checkout .)
 ```
+
+**Requires:** `core/setup-rust-env.ps1` must have been run at least once in the
+current session, or the MSVC environment must be available. The runner uses
+PowerShell to launch the app with the correct build environment.
 
 ## Workflow: After All Tests Pass (Coverage Expansion)
 
@@ -125,6 +131,23 @@ yarn e2e:visual:baseline:auto   # regenerate + review + auto-fix
 
 Commit the updated screenshots.
 
+## How Iterations Work
+
+The runner uses a **sweep + fix** strategy:
+
+1. **Sweep** (iteration 1): Runs ALL tests (~40 min for 338+ tests)
+2. **Fix iterations** (2+): Only re-runs tests that FAILED (`--last-failed`)
+   - This cuts iteration time from ~40 min to ~2-5 min
+3. When all tests pass: enters **coverage expansion** phase
+
+This means a typical auto run might be:
+- Sweep: 40 min → 15 failures found
+- Fix 1: Claude fixes, re-run 15 tests → 5 min → 3 still fail
+- Fix 2: Claude fixes, re-run 3 tests → 1 min → all pass
+- Expand: Create new tests → 10 min
+
+Total: ~56 min instead of 120+ min if every iteration ran all tests.
+
 ## Safety Guards (Auto Mode)
 
 - Changes are left as uncommitted modifications — you commit or discard
@@ -132,7 +155,7 @@ Commit the updated screenshots.
 - Stops when failures are infrastructure issues (timeouts, app not starting)
 - Max iteration cap (default 15) prevents runaway changes
 - Max files per iteration (default 10) limits blast radius
-- Claude Code only gets Edit, Read, Grep, Glob, Bash tools
+- Claude Code can only modify test files (NOT application source code)
 
 ## File Layout
 

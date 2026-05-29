@@ -6,6 +6,7 @@
  * custom events for rename, and Tauri API for delete (to skip confirm dialog).
  */
 import { test, expect } from "../fixtures";
+import { resetToNewWorkbook } from "../helpers/screenshots";
 
 /** Helper: add a sheet via the "+" button in the sheet tab bar. */
 async function addSheetViaButton(page: any) {
@@ -42,6 +43,9 @@ async function renameSheetViaEvent(page: any, index: number, newName: string) {
 
 test.describe("Sheet switching", () => {
   test("sheet tab is visible with correct name", async ({ grid }) => {
+    // Reset to clean workbook — prior tests may leave extra sheets/data
+    await resetToNewWorkbook(grid.page);
+
     const tab = grid.page.locator('button[data-sheet-tab="0"]');
     await expect(tab).toBeVisible();
     await expect(tab).toContainText("Sheet1");
