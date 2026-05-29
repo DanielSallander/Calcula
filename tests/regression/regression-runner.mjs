@@ -53,6 +53,7 @@ const MAX_FILES_PER_ITERATION = parseInt(args["max-files"] || "10", 10);
 const E2E_MANUAL = args["e2e-manual"] === "true"; // use already-running app for E2E
 const EXPAND_COVERAGE = args["expand"] !== "false"; // auto-create new scenarios when green (default: true)
 const EXPAND_ITERATIONS = parseInt(args["expand-iterations"] || "5", 10);
+const ALLOW_APP_FIXES = args["allow-app-fixes"] === "true"; // allow Claude to fix application source code
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -398,18 +399,47 @@ function invokeClaudeCodeFix(failureReport, iteration) {
     "5. Do not add new features or refactor unrelated code",
     "6. After fixing, briefly explain what you changed and why",
     "",
-    "CRITICAL SAFETY RULES (MANDATORY — VIOLATION WILL CAUSE REGRESSIONS):",
-    "- FORBIDDEN: Do NOT modify ANY file in app/src/ (core, shell, api — all forbidden)",
-    "- FORBIDDEN: Do NOT modify ANY file in core/ (Rust source)",
-    "- FORBIDDEN: Do NOT modify app/package.json",
-    "- FORBIDDEN: Do NOT modify tests/regression/regression-runner.mjs",
-    "- ALLOWED: app/e2e/tests/*.spec.ts (test specs)",
-    "- ALLOWED: app/e2e/visual/*.spec.ts (visual test specs)",
-    "- ALLOWED: app/e2e/fixtures.ts (test fixtures)",
-    "- ALLOWED: app/e2e/helpers/*.ts (test helpers)",
-    "- ALLOWED: app/extensions/**/__tests__/*.test.ts (unit tests)",
-    "- ALLOWED: tests/regression/registry.json (coverage tracking)",
-    "- If a test fails due to an application bug, SKIP the test with test.skip() and note why",
+    ...(ALLOW_APP_FIXES ? [
+      "APPLICATION FIX MODE ENABLED:",
+      "You are allowed to fix application source code IF AND ONLY IF you are certain",
+      "the failure is caused by an actual bug in the application — NOT a test issue.",
+      "",
+      "BEFORE modifying any application file, you MUST:",
+      "1. First check if the test itself is wrong (bad selector, wrong expected value,",
+      "   timing issue, stale assumption about UI layout)",
+      "2. Read the application source code to confirm the bug exists",
+      "3. Verify that the fix is minimal and doesn't change unrelated behavior",
+      "4. In your response, explain WHY this is an app bug and not a test issue",
+      "",
+      "ALLOWED (test files — always):",
+      "- app/e2e/tests/*.spec.ts, app/e2e/visual/*.spec.ts",
+      "- app/e2e/fixtures.ts, app/e2e/helpers/*.ts",
+      "- app/extensions/**/__tests__/*.test.ts",
+      "- tests/regression/registry.json",
+      "",
+      "ALLOWED (application files — only for confirmed bugs):",
+      "- app/src/core/, app/src/shell/, app/src/api/ (TypeScript source)",
+      "- core/ (Rust source)",
+      "",
+      "STILL FORBIDDEN:",
+      "- app/package.json",
+      "- tests/regression/regression-runner.mjs",
+      "- Do NOT refactor, add features, or improve code — only fix the specific bug",
+    ] : [
+      "CRITICAL SAFETY RULES (MANDATORY — VIOLATION WILL CAUSE REGRESSIONS):",
+      "- FORBIDDEN: Do NOT modify ANY file in app/src/ (core, shell, api — all forbidden)",
+      "- FORBIDDEN: Do NOT modify ANY file in core/ (Rust source)",
+      "- FORBIDDEN: Do NOT modify app/package.json",
+      "- FORBIDDEN: Do NOT modify tests/regression/regression-runner.mjs",
+      "- ALLOWED: app/e2e/tests/*.spec.ts (test specs)",
+      "- ALLOWED: app/e2e/visual/*.spec.ts (visual test specs)",
+      "- ALLOWED: app/e2e/fixtures.ts (test fixtures)",
+      "- ALLOWED: app/e2e/helpers/*.ts (test helpers)",
+      "- ALLOWED: app/extensions/**/__tests__/*.test.ts (unit tests)",
+      "- ALLOWED: tests/regression/registry.json (coverage tracking)",
+      "- If a test fails due to an application bug, SKIP the test with test.skip() and note why",
+      "  Write a bug report in your response explaining the bug and suggested fix",
+    ]),
   ].join("\n");
 
   // Include screenshot diff images as Read instructions in the prompt
@@ -870,7 +900,7 @@ function escapeHtml(str) {
 async function main() {
   log("=== Calcula Regression Runner ===");
   log(`Mode: ${MODE} | Max iterations: ${MAX_ITERATIONS} | Expand: ${EXPAND_ITERATIONS} iterations`);
-  log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"} | E2E manual: ${E2E_MANUAL}`);
+  log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"} | E2E manual: ${E2E_MANUAL} | App fixes: ${ALLOW_APP_FIXES}`);
   log(`Strategy: Full sweep on iteration 1, then --last-failed on fix iterations`);
 
   ensureDir(RESULTS_DIR);

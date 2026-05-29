@@ -33,7 +33,8 @@ All commands run from `app/`:
 | Command | What it does |
 |---------|-------------|
 | `yarn regression` | Full suite — auto-launches app per iteration |
-| `yarn regression:auto` | Auto-fix + coverage expansion |
+| `yarn regression:auto` | Auto-fix + coverage expansion (test fixes only) |
+| `yarn regression:auto:fix-app` | Auto-fix including application bug fixes |
 | `yarn regression:auto --expand-iterations=10` | More expansion cycles |
 | `yarn regression:auto --expand=false` | Fix only, no new scenarios |
 | `yarn regression:manual` | Full suite against already-running app |
@@ -52,6 +53,7 @@ node tests/regression/regression-runner.mjs [options]
   --e2e-manual             Use already-running app for E2E (default for yarn regression)
   --expand=false           Disable coverage expansion after green (default: true)
   --expand-iterations=N    Max scenario creation cycles (default: 5)
+  --allow-app-fixes        Allow Claude Code to fix application source code (default: off)
 ```
 
 ## Workflow: First-Time Setup
@@ -155,7 +157,9 @@ Total: ~56 min instead of 120+ min if every iteration ran all tests.
 - Stops when failures are infrastructure issues (timeouts, app not starting)
 - Max iteration cap (default 15) prevents runaway changes
 - Max files per iteration (default 10) limits blast radius
-- Claude Code can only modify test files (NOT application source code)
+- Claude Code can only modify test files by default (NOT application source code)
+- With `--allow-app-fixes`: Claude Code CAN fix app source, but must first verify
+  the failure is an actual app bug (not a test issue) and explain its reasoning
 
 ## File Layout
 

@@ -28,6 +28,7 @@
     "e2e:report": "playwright show-report",
     "regression": "node ../tests/regression/regression-runner.mjs",
     "regression:auto": "node ../tests/regression/regression-runner.mjs --mode=auto --max-iterations=15",
+    "regression:auto:fix-app": "node ../tests/regression/regression-runner.mjs --mode=auto --max-iterations=15 --allow-app-fixes",
     "regression:manual": "node ../tests/regression/regression-runner.mjs --e2e-manual",
     "regression:manual:auto": "node ../tests/regression/regression-runner.mjs --mode=auto --max-iterations=15 --e2e-manual"
   },
