@@ -344,11 +344,17 @@
       "tier": 2,
       "category": "Data",
       "description": "Create/delete/rename tables, totals row, structured references, table styles",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No dedicated E2E tests. May be partially covered by workflow specs."
+      "e2eTests": [
+        "e2e/tests/tables.spec.ts"
+      ],
+      "screenshots": [
+        "tables-before-create",
+        "tables-after-create",
+        "tables-totals-row-sum"
+      ],
+      "notes": "E2E covers table creation, renaming, totals row with Sum, and deletion via Tauri API."
     },
     {
       "id": "feat.find-replace",
@@ -491,11 +497,17 @@
       "tier": 3,
       "category": "Review",
       "description": "Add/edit/delete comments, replies, resolve, notes, indicators",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/comments-notes.spec.ts"
+      ],
+      "screenshots": [
+        "comments-cell-with-indicator",
+        "notes-cell-with-indicator",
+        "comments-indicators-visible"
+      ],
+      "notes": "E2E covers comment CRUD, replies, resolve/unresolve, note CRUD, and indicator retrieval via Tauri API."
     },
     {
       "id": "feat.hyperlinks",
@@ -868,13 +880,20 @@
       "tier": 2,
       "category": "Editing",
       "description": "Function autocomplete dropdown and tooltip",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [
         "src/core/lib/formulaCompletion.test.ts"
       ],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Unit tests for completion logic. No visual test for dropdown overlay."
+      "e2eTests": [
+        "e2e/tests/formula-autocomplete.spec.ts"
+      ],
+      "screenshots": [
+        "autocomplete-dropdown-visible",
+        "autocomplete-arrow-nav",
+        "autocomplete-after-escape",
+        "autocomplete-function-inserted"
+      ],
+      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion."
     },
     {
       "id": "feat.status-bar",

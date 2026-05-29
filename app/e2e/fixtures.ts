@@ -75,6 +75,26 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         page = await context.waitForEvent("page", { timeout: 10_000 });
       }
 
+      // A prior worker may have left a Script Editor window open (separate
+      // Tauri WebviewWindow). If multiple pages exist, find the main window
+      // — the one with the spreadsheet container — not the Script Editor.
+      const allPages = context.pages();
+      if (allPages.length > 1) {
+        for (const candidate of allPages) {
+          const hasSpreadsheet = await candidate
+            .waitForSelector("[data-focus-container='spreadsheet']", {
+              state: "visible",
+              timeout: 500,
+            })
+            .then(() => true)
+            .catch(() => false);
+          if (hasSpreadsheet) {
+            page = candidate;
+            break;
+          }
+        }
+      }
+
       // Dismiss any dialogs left over from prior workers (all share the same app).
       for (let i = 0; i < 3; i++) {
         await page.keyboard.press("Escape");
@@ -82,9 +102,11 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       }
 
       // Wait for the app to be fully loaded.
+      // Keep this well below the 30s test timeout — the fixture setup shares
+      // the same budget as the test body and teardown.
       await page.waitForSelector("[data-focus-container='spreadsheet']", {
         state: "visible",
-        timeout: 30_000,
+        timeout: 15_000,
       });
 
       await use(page);

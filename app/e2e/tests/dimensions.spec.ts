@@ -39,6 +39,9 @@ test.describe("Column Width & Row Height", () => {
     appPage,
     grid,
   }) => {
+    // Start from a clean grid so data from prior test files doesn't leak
+    // into the screenshot comparison.
+    await resetToNewWorkbook(appPage);
     // Put data in cells
     await grid.setCellValue("A1", "This is a long text value for width test");
     await grid.setCellValue("A2", "Short");

@@ -119,9 +119,21 @@ test.describe("Invoice builder workflow", () => {
   });
 
   test("step 5: apply number formatting to currency columns", async ({ grid }) => {
-    // Apply comma format to price and amount columns
-    await grid.selectRange("D406", "E412");
-    await grid.clickFormatButton("commaFormat");
+    // Apply comma format to price and amount columns via Tauri API directly.
+    // selectRange + clickFormatButton is unreliable for off-screen rows (400+)
+    // because canvas click coordinates break when cells aren't in the viewport.
+    const rows: number[] = [];
+    for (let r = 405; r <= 411; r++) rows.push(r);
+    const cols = [3, 4]; // D and E columns
+
+    await grid.page.evaluate(async ({ rows, cols }) => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("apply_formatting", {
+        params: { rows, cols, numberFormat: "#,##0" },
+      });
+      window.dispatchEvent(new Event("grid:refresh"));
+    }, { rows, cols });
+    await grid.page.waitForTimeout(300);
 
     const fmt = await grid.getCellStyleStringProp("E406", "numberFormat");
     expect(fmt).toContain("separator");
