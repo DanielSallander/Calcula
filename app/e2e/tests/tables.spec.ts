@@ -59,10 +59,10 @@ test.describe("Structured Tables", () => {
     const createResult: any = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       // Set up data
-      await tauri.core.invoke("set_cell_value", { row: 0, col: 21, value: "X" });
-      await tauri.core.invoke("set_cell_value", { row: 0, col: 22, value: "Y" });
-      await tauri.core.invoke("set_cell_value", { row: 1, col: 21, value: "1" });
-      await tauri.core.invoke("set_cell_value", { row: 1, col: 22, value: "2" });
+      await tauri.core.invoke("update_cell", { row: 0, col: 21, value: "X" });
+      await tauri.core.invoke("update_cell", { row: 0, col: 22, value: "Y" });
+      await tauri.core.invoke("update_cell", { row: 1, col: 21, value: "1" });
+      await tauri.core.invoke("update_cell", { row: 1, col: 22, value: "2" });
       return tauri.core.invoke("create_table", {
         params: {
           name: "",
@@ -100,14 +100,14 @@ test.describe("Structured Tables", () => {
     // Create a table with numeric data
     const createResult: any = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
-      await tauri.core.invoke("set_cell_value", { row: 6, col: 17, value: "Item" });
-      await tauri.core.invoke("set_cell_value", { row: 6, col: 18, value: "Amount" });
-      await tauri.core.invoke("set_cell_value", { row: 7, col: 17, value: "A" });
-      await tauri.core.invoke("set_cell_value", { row: 7, col: 18, value: "100" });
-      await tauri.core.invoke("set_cell_value", { row: 8, col: 17, value: "B" });
-      await tauri.core.invoke("set_cell_value", { row: 8, col: 18, value: "200" });
-      await tauri.core.invoke("set_cell_value", { row: 9, col: 17, value: "C" });
-      await tauri.core.invoke("set_cell_value", { row: 9, col: 18, value: "300" });
+      await tauri.core.invoke("update_cell", { row: 6, col: 17, value: "Item" });
+      await tauri.core.invoke("update_cell", { row: 6, col: 18, value: "Amount" });
+      await tauri.core.invoke("update_cell", { row: 7, col: 17, value: "A" });
+      await tauri.core.invoke("update_cell", { row: 7, col: 18, value: "100" });
+      await tauri.core.invoke("update_cell", { row: 8, col: 17, value: "B" });
+      await tauri.core.invoke("update_cell", { row: 8, col: 18, value: "200" });
+      await tauri.core.invoke("update_cell", { row: 9, col: 17, value: "C" });
+      await tauri.core.invoke("update_cell", { row: 9, col: 18, value: "300" });
       return tauri.core.invoke("create_table", {
         params: {
           name: "TotalsTest",
@@ -133,7 +133,7 @@ test.describe("Structured Tables", () => {
           params: {
             tableId: id,
             columnName: "Amount",
-            function: "Sum",
+            function: "sum",
           },
         });
       },
@@ -151,10 +151,10 @@ test.describe("Structured Tables", () => {
     // Create a small table
     const createResult: any = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
-      await tauri.core.invoke("set_cell_value", { row: 12, col: 17, value: "Col1" });
-      await tauri.core.invoke("set_cell_value", { row: 12, col: 18, value: "Col2" });
-      await tauri.core.invoke("set_cell_value", { row: 13, col: 17, value: "X" });
-      await tauri.core.invoke("set_cell_value", { row: 13, col: 18, value: "Y" });
+      await tauri.core.invoke("update_cell", { row: 12, col: 17, value: "Col1" });
+      await tauri.core.invoke("update_cell", { row: 12, col: 18, value: "Col2" });
+      await tauri.core.invoke("update_cell", { row: 13, col: 17, value: "X" });
+      await tauri.core.invoke("update_cell", { row: 13, col: 18, value: "Y" });
       return tauri.core.invoke("create_table", {
         params: {
           name: "",

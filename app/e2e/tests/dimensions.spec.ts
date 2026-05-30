@@ -56,6 +56,7 @@ test.describe("Column Width & Row Height", () => {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     });
     await appPage.waitForTimeout(300);
+    await grid.navigateTo("A1");
     await waitForGridStable(appPage);
     await softly(takeGridScreenshot(appPage, "dimensions-after-set-col-width"));
 
@@ -77,6 +78,7 @@ test.describe("Column Width & Row Height", () => {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     });
     await appPage.waitForTimeout(300);
+    await grid.navigateTo("A1");
     await waitForGridStable(appPage);
     await softly(takeGridScreenshot(appPage, "dimensions-after-row-height"));
 

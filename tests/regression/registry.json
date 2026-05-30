@@ -485,11 +485,18 @@
       "tier": 3,
       "category": "Data",
       "description": "Group/ungroup, collapse/expand, outline levels",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No E2E coverage."
+      "e2eTests": [
+        "e2e/tests/grouping.spec.ts"
+      ],
+      "screenshots": [
+        "grouping-rows-grouped",
+        "grouping-rows-collapsed",
+        "grouping-rows-expanded",
+        "grouping-columns-grouped"
+      ],
+      "notes": "E2E covers row/column group, ungroup, collapse, and expand via Tauri API with visual regression."
     },
     {
       "id": "feat.comments",
@@ -515,11 +522,16 @@
       "tier": 3,
       "category": "Editing",
       "description": "Insert/edit/remove hyperlinks, click-to-follow",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/hyperlinks.spec.ts"
+      ],
+      "screenshots": [
+        "hyperlinks-url-added",
+        "hyperlinks-indicators-visible"
+      ],
+      "notes": "E2E covers hyperlink CRUD (add URL, add internal ref, update, remove) and indicator retrieval via Tauri API."
     },
     {
       "id": "feat.protection",
@@ -527,11 +539,16 @@
       "tier": 3,
       "category": "Security",
       "description": "Protect/unprotect sheets, cell protection, edit ranges",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/protection.spec.ts"
+      ],
+      "screenshots": [
+        "protection-sheet-protected",
+        "protection-allow-edit-cleared"
+      ],
+      "notes": "E2E covers protect/unprotect sheet, cell edit check, protection status, and allow-edit range CRUD via Tauri API."
     },
     {
       "id": "feat.sparklines",
@@ -820,11 +837,16 @@
       "tier": 3,
       "category": "Formulas",
       "description": "Trace precedents/dependents arrows overlay",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/formula-tracing.spec.ts"
+      ],
+      "screenshots": [
+        "tracing-precedents",
+        "tracing-range-precedents"
+      ],
+      "notes": "E2E covers trace precedents (cell refs and range refs), trace dependents, and empty result for constants via Tauri API."
     },
     {
       "id": "feat.evaluate-formula",
@@ -832,11 +854,16 @@
       "tier": 3,
       "category": "Formulas",
       "description": "Step-by-step formula evaluator dialog",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/evaluate-formula.spec.ts"
+      ],
+      "screenshots": [
+        "evaluate-formula-init",
+        "evaluate-formula-constant"
+      ],
+      "notes": "E2E covers init session, step-through to completion, restart, and constant cell handling via Tauri API."
     },
     {
       "id": "feat.error-checking",
@@ -890,10 +917,9 @@
       "screenshots": [
         "autocomplete-dropdown-visible",
         "autocomplete-arrow-nav",
-        "autocomplete-after-escape",
-        "autocomplete-function-inserted"
+        "autocomplete-after-escape"
       ],
-      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion."
+      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion (function insertion verified functionally via the formula bar; no full-page screenshot because the post-Tab viewport captures non-deterministic cross-test residual grid data)."
     },
     {
       "id": "feat.status-bar",
@@ -1005,11 +1031,16 @@
       "tier": 3,
       "category": "Navigation",
       "description": "Go To Special dialog (blanks, constants, formulas, etc.)",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/go-to-special.spec.ts"
+      ],
+      "screenshots": [
+        "go-to-special-blanks",
+        "go-to-special-formulas-sheet"
+      ],
+      "notes": "E2E covers finding blanks, constants, and formulas via Tauri API go_to_special command."
     },
     {
       "id": "feat.document-theme",

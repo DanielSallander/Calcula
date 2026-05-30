@@ -27,13 +27,20 @@ import { execSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+  selectTests, updateHistory, saveHistory,
+  logSamplingReport, parsePlaywrightResults,
+} from "./test-sampler.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const APP_DIR = path.join(PROJECT_ROOT, "app");
 const RESULTS_DIR = path.join(APP_DIR, "e2e", "results");
 const REPORT_FILE = path.join(RESULTS_DIR, "regression-report.html");
-const CLAUDE_CMD = process.env.CLAUDE_CMD || "claude";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-8";
+const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || "max";
+const CLAUDE_BASE = process.env.CLAUDE_CMD || "claude";
+const CLAUDE_CMD = `${CLAUDE_BASE} --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT}`;
 
 // ---------------------------------------------------------------------------
 // Parse CLI arguments
@@ -53,7 +60,10 @@ const MAX_FILES_PER_ITERATION = parseInt(args["max-files"] || "10", 10);
 const E2E_MANUAL = args["e2e-manual"] === "true"; // use already-running app for E2E
 const EXPAND_COVERAGE = args["expand"] !== "false"; // auto-create new scenarios when green (default: true)
 const EXPAND_ITERATIONS = parseInt(args["expand-iterations"] || "5", 10);
-const ALLOW_APP_FIXES = args["allow-app-fixes"] === "true"; // allow Claude to fix application source code
+const ALLOW_APP_FIXES = args["allow-app-fixes"] === "true";
+const SAMPLE_SIZE = parseInt(args["sample-size"] || "100", 10);
+const QUARANTINE_SWEEPS = parseInt(args["quarantine-sweeps"] || "10", 10);
+const FULL_SWEEP = args["full-sweep"] === "true";
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -232,22 +242,26 @@ function killApp(child) {
  * @param extraArgs - Additional Playwright args
  * @param lastFailedOnly - If true, only re-run tests that failed last time (--last-failed)
  */
-function e2eCmd(extraArgs = "", lastFailedOnly = false) {
+function e2eCmd(extraArgs = "") {
   const manual = E2E_MANUAL ? "cross-env E2E_MANUAL=1 " : "";
-  const lastFailed = lastFailedOnly ? "--last-failed " : "";
-  return `${manual}yarn playwright test ${lastFailed}${extraArgs} 2>&1`;
+  return `${manual}yarn playwright test ${extraArgs} 2>&1`;
 }
 
-/**
- * Run all E2E tests (functional + visual) in a single Playwright run.
- * @param lastFailedOnly - If true, only re-run tests that failed in the previous run.
- *   This dramatically speeds up fix iterations (from ~40 min to ~2-5 min).
- */
-function runAllE2E(lastFailedOnly = false) {
-  const mode = lastFailedOnly ? "re-running failed tests only" : "full sweep";
+function runE2E(specFiles = null) {
+  let mode, cmdArgs;
+  if (specFiles === null) {
+    mode = "re-running failed tests only";
+    cmdArgs = "--last-failed";
+  } else if (specFiles.length === 0) {
+    log("Phase 3+4: E2E tests — no specs selected");
+    return { phase: "e2e-all", success: true, output: "" };
+  } else {
+    mode = `sampled sweep (${specFiles.length} specs)`;
+    cmdArgs = specFiles.join(" ");
+  }
   const manualNote = E2E_MANUAL ? " (manual)" : "";
   log(`Phase 3+4: E2E tests — ${mode}${manualNote}`);
-  const result = exec(e2eCmd("", lastFailedOnly), { timeout: E2E_TIMEOUT });
+  const result = exec(e2eCmd(cmdArgs), { timeout: E2E_TIMEOUT });
   log(result.success ? "  [PASS] All E2E passed" : "  [FAIL] E2E tests failed");
   return {
     phase: "e2e-all",
@@ -481,7 +495,32 @@ function invokeClaudeCodeFix(failureReport, iteration) {
     );
   }
 
+  revertForbiddenChanges();
   return result.success;
+}
+
+function revertForbiddenChanges() {
+  const FORBIDDEN = [
+    "tests/regression/regression-runner.mjs",
+    "tests/regression/validate-baselines.mjs",
+    "tests/regression/test-sampler.mjs",
+    "tests/regression/suggested-scenarios.md",
+    "tests/regression/README.md",
+    "app/package.json",
+    ".gitignore",
+  ];
+  if (!ALLOW_APP_FIXES) {
+    FORBIDDEN.push("app/src/");
+    FORBIDDEN.push("core/");
+  }
+  const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
+  for (const line of status.output.trim().split("\n").filter(Boolean)) {
+    const filePath = line.trim().replace(/^[MADRCU? ]+\s+/, "");
+    if (FORBIDDEN.some((p) => filePath.startsWith(p) || filePath === p)) {
+      log(`  Reverting unauthorized change: ${filePath}`);
+      exec(`git checkout -- "${filePath}"`, { cwd: PROJECT_ROOT });
+    }
+  }
 }
 
 function checkForChanges(iteration) {
@@ -663,29 +702,44 @@ The first run creates golden baselines automatically.`;
     );
 
     if (!result.success) {
-      log("  Claude Code failed to create scenarios");
+      log("  Claude Code failed to create scenarios — skipping to next iteration");
       fs.writeFileSync(path.join(RESULTS_DIR, `expand-error-iter${expandIter}.txt`), result.output);
-      break;
+      scenarioLog.push({ iteration: expandIter, specs: [], status: "claude-failed" });
+      continue;
     }
 
     fs.writeFileSync(path.join(RESULTS_DIR, `expand-response-iter${expandIter}.md`), result.output);
 
-    // Check if files were actually created
+    // Revert unauthorized changes
+    revertForbiddenChanges();
+    const preCheck = exec("git diff --name-only", { cwd: PROJECT_ROOT });
+    for (const f of preCheck.output.trim().split("\n").filter(Boolean)) {
+      if (f === "tests/regression/registry.json") continue;
+      if (f.endsWith(".spec.ts") || f.includes("fixtures.ts") || f.includes("helpers/")) {
+        log(`  Reverting unauthorized edit to existing file: ${f}`);
+        exec(`git checkout -- "${f}"`, { cwd: PROJECT_ROOT });
+      }
+    }
+
+    // Identify new spec files
     const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
-    const newFiles = status.output.split("\n").filter((l) => l.startsWith("??") || l.startsWith(" A") || l.startsWith("A "));
-    const modifiedFiles = status.output.split("\n").filter((l) => l.trim().startsWith("M "));
+    const newFiles = status.output.split("\n").filter((l) => l.startsWith("??"));
+    const createdSpecs = newFiles
+      .map((l) => l.trim().replace(/^\?\?\s*/, ""))
+      .filter((f) => f.endsWith(".spec.ts"));
 
-    if (newFiles.length === 0 && modifiedFiles.length === 0) {
-      log("  No new files created — stopping expansion");
-      break;
+    if (createdSpecs.length === 0) {
+      log("  No new spec files created — skipping to next iteration");
+      scenarioLog.push({ iteration: expandIter, specs: [], status: "no-new-specs" });
+      continue;
     }
 
-    log(`  Created/modified ${newFiles.length + modifiedFiles.length} file(s)`);
-    for (const f of [...newFiles, ...modifiedFiles].slice(0, 10)) {
-      log(`    ${f.trim()}`);
-    }
+    log(`  Created ${createdSpecs.length} new spec(s):`);
+    for (const f of createdSpecs) log(`    [NEW] ${f}`);
 
-    // Launch app fresh to test the new scenarios
+    const specPaths = createdSpecs.map((s) => s.replace(/^app\//, "")).join(" ");
+
+    // Launch app
     let expandApp = null;
     if (!E2E_MANUAL) {
       expandApp = launchApp();
@@ -700,61 +754,52 @@ The first run creates golden baselines automatically.`;
       await new Promise((r) => setTimeout(r, 3000));
     }
 
-    // Run the E2E tests to verify the new scenarios work
-    log("  Running E2E tests to verify new scenarios...");
-    const e2eResult = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
+    // Run ONLY the new specs
+    log(`  Running ${createdSpecs.length} new spec(s)...`);
+    const e2eResult = exec(e2eCmd(specPaths), { timeout: E2E_TIMEOUT });
 
     if (e2eResult.success) {
       log("  [PASS] New scenarios pass!");
       if (expandApp) killApp(expandApp);
-
-      // Track what was created
-      const createdSpecs = newFiles
-        .map((l) => l.trim().replace(/^\?\?\s*/, ""))
-        .filter((f) => f.endsWith(".spec.ts"));
-      scenarioLog.push({
-        iteration: expandIter,
-        specs: createdSpecs,
-        status: "pass",
-      });
+      scenarioLog.push({ iteration: expandIter, specs: createdSpecs, status: "pass" });
     } else {
       log("  [FAIL] New scenarios have failures — asking Claude Code to fix...");
       if (expandApp) killApp(expandApp);
 
-      // One fix attempt for the new tests
       const failureReport = collectFailures([{
-        phase: "e2e-expansion",
-        success: false,
-        output: e2eResult.output,
+        phase: "e2e-expansion", success: false, output: e2eResult.output,
       }]);
 
       if (failureReport) {
         invokeClaudeCodeFix(failureReport, `expand-${expandIter}`);
 
-        // Launch fresh again for retry
         let retryApp = null;
         if (!E2E_MANUAL) {
           retryApp = launchApp();
           const cdpOk2 = await waitForCDP(CDP_PORT, 900_000);
-          if (!cdpOk2) { killApp(retryApp); scenarioLog.push({ iteration: expandIter, specs: [], status: "infra-fail" }); break; }
+          if (!cdpOk2) { killApp(retryApp); scenarioLog.push({ iteration: expandIter, specs: createdSpecs, status: "infra-fail" }); continue; }
           await new Promise((r) => setTimeout(r, 3000));
         }
 
-        // Re-run to verify fix
-        log("  Re-running E2E after fix...");
-        const retryResult = exec(e2eCmd(""), { timeout: E2E_TIMEOUT });
+        log(`  Re-running ${createdSpecs.length} spec(s) after fix...`);
+        const retryResult = exec(e2eCmd(specPaths), { timeout: E2E_TIMEOUT });
         if (retryApp) killApp(retryApp);
+
         if (retryResult.success) {
           log("  [PASS] Fixed — new scenarios pass!");
-          scenarioLog.push({ iteration: expandIter, specs: [], status: "pass-after-fix" });
+          scenarioLog.push({ iteration: expandIter, specs: createdSpecs, status: "pass-after-fix" });
         } else {
-          log("  [FAIL] Still failing — stopping expansion to avoid breaking the suite");
-          scenarioLog.push({ iteration: expandIter, specs: [], status: "fail" });
-          break;
+          log("  [FAIL] Still failing — removing broken specs and continuing");
+          for (const spec of createdSpecs) {
+            const fullPath = path.join(PROJECT_ROOT, spec);
+            if (fs.existsSync(fullPath)) { fs.unlinkSync(fullPath); log(`    Deleted: ${spec}`); }
+            const ssDir = path.join(path.dirname(fullPath), "__screenshots__", path.basename(spec));
+            if (fs.existsSync(ssDir)) fs.rmSync(ssDir, { recursive: true });
+          }
+          scenarioLog.push({ iteration: expandIter, specs: createdSpecs, status: "fail-deleted" });
         }
       } else {
-        scenarioLog.push({ iteration: expandIter, specs: [], status: "infra-fail" });
-        break;
+        scenarioLog.push({ iteration: expandIter, specs: createdSpecs, status: "infra-fail" });
       }
     }
   }
@@ -901,6 +946,8 @@ async function main() {
   log("=== Calcula Regression Runner ===");
   log(`Mode: ${MODE} | Max iterations: ${MAX_ITERATIONS} | Expand: ${EXPAND_ITERATIONS} iterations`);
   log(`Skip Rust: ${SKIP_RUST} | Only: ${ONLY || "all"} | E2E manual: ${E2E_MANUAL} | App fixes: ${ALLOW_APP_FIXES}`);
+  log(`Claude model: ${CLAUDE_MODEL} | Effort: ${CLAUDE_EFFORT}`);
+  log(`Sample size: ${FULL_SWEEP ? "ALL (full sweep)" : SAMPLE_SIZE} | Quarantine: ${QUARANTINE_SWEEPS} sweeps`);
   log(`Strategy: Full sweep on iteration 1, then --last-failed on fix iterations`);
 
   ensureDir(RESULTS_DIR);
@@ -914,6 +961,8 @@ async function main() {
   const allIterations = [];
   let noChangeCount = 0;
   let hadE2EFailures = false;
+  let lastFailedSpecs = [];
+  let sweepHistory = null;
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     log(`\n--- Iteration ${iteration} of ${MAX_ITERATIONS} ---`);
@@ -955,8 +1004,32 @@ async function main() {
         await new Promise((r) => setTimeout(r, 3000));
       }
 
-      // Run E2E: full sweep on iteration 1, --last-failed on fix iterations
-      results.push(runAllE2E(isFixIteration));
+      // Sweep or fix iteration
+      let e2eResult;
+      if (isFixIteration) {
+        e2eResult = runE2E(null); // --last-failed
+      } else {
+        const selection = selectTests({
+          sampleSize: SAMPLE_SIZE,
+          quarantineSweeps: QUARANTINE_SWEEPS,
+          lastFailedSpecs,
+          fullSweep: FULL_SWEEP,
+        });
+        sweepHistory = selection.history;
+        logSamplingReport(selection, log);
+        e2eResult = runE2E(selection.specs);
+      }
+      results.push(e2eResult);
+
+      // Update history after sweep
+      if (!isFixIteration && sweepHistory) {
+        const resultsJsonPath = path.join(APP_DIR, "e2e", "results", "results.json");
+        const specResults = parsePlaywrightResults(resultsJsonPath);
+        updateHistory(sweepHistory, specResults, QUARANTINE_SWEEPS);
+        lastFailedSpecs = Object.entries(specResults)
+          .filter(([, r]) => r === "fail")
+          .map(([spec]) => spec);
+      }
 
       // Kill the app after tests
       if (appProcess) {
