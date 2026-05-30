@@ -617,43 +617,66 @@ async function expandCoverage() {
 
     const currentSummary = buildGapSummary(current.gaps, current.registry);
 
-    // Collect existing test file names to tell Claude what already exists
-    const existingTests = exec("ls app/e2e/tests/*.spec.ts app/e2e/visual/*.spec.ts 2>/dev/null", {
-      cwd: PROJECT_ROOT,
-    }).output.trim().split("\n").filter(Boolean).map((f) => f.trim());
+    // Collect existing test file names
+    const testDirs = [
+      path.join(APP_DIR, "e2e", "tests"),
+      path.join(APP_DIR, "e2e", "visual"),
+    ];
+    const existingSpecs = [];
+    for (const dir of testDirs) {
+      if (fs.existsSync(dir)) {
+        for (const f of fs.readdirSync(dir)) {
+          if (f.endsWith(".spec.ts")) existingSpecs.push(f);
+        }
+      }
+    }
 
-    const existingTestList = existingTests.map((f) => `  - ${path.basename(f)}`).join("\n");
+    const existingTestList = existingSpecs.map((f) => `  - ${f} (DO NOT MODIFY)`).join("\n");
+
+    // Filter gap list: only show features that don't already have a spec file
+    const gapFeatures = Object.values(current.gaps).flat();
+    const uncoveredFeatures = gapFeatures.filter((f) => {
+      // Check if any existing spec likely covers this feature
+      const featureKey = f.id.replace(/^(core|feat)\./, "").replace(/-/g, "");
+      return !existingSpecs.some((spec) => {
+        const specKey = spec.replace(".spec.ts", "").replace(/-/g, "");
+        return specKey.includes(featureKey) || featureKey.includes(specKey);
+      });
+    });
+
+    if (uncoveredFeatures.length === 0) {
+      log("  All gap features already have spec files — stopping expansion");
+      break;
+    }
+
+    const filteredSummary = uncoveredFeatures
+      .map((f) => `  - **${f.name}** (${f.id}): ${f.description}`)
+      .join("\n");
 
     // Ask Claude Code to implement 3 test scenarios
     const prompt = `You are expanding test coverage for the Calcula spreadsheet application.
 Calcula is an open-source Excel alternative (Tauri + Rust backend + React/Canvas frontend).
 The project is at: ${PROJECT_ROOT}
 
-## Existing Test Coverage
+## EXISTING SPECS — DO NOT TOUCH
 
-These E2E test specs ALREADY EXIST — do NOT recreate or duplicate their coverage:
+These files already exist. Do NOT modify, edit, or recreate them:
 
 ${existingTestList}
 
-BEFORE creating any new test, you MUST:
-1. Read tests/regression/registry.json to see what features are already covered
-2. Read the existing spec files listed above to understand what scenarios they test
-3. Only create tests for features/scenarios that are NOT already covered
+## Features That Need NEW Test Specs
 
-## Coverage Gaps
+Create specs ONLY for the features below. These features do NOT have any
+existing spec file yet:
 
-The following features need E2E test coverage:
-
-${currentSummary}
+${filteredSummary}
 
 ## Your Task
 
-Implement exactly 3 new E2E Playwright test specs for the highest-priority
-uncovered features (Tier 1 first, then Tier 2, then Tier 3).
+Create exactly 3 NEW .spec.ts files in app/e2e/tests/ for the features listed above.
+Choose the 3 highest-priority features (by tier number, lowest = highest priority).
 
-Each spec MUST test something genuinely new — a feature or use case not exercised
-by any existing spec. Do not create a "tables.spec.ts" if table testing is already
-partially covered in another spec. Instead, focus on the specific untested aspects.
+DO NOT create a spec file if one with a similar name already exists above.
 
 ## Implementation Rules
 
