@@ -126,6 +126,12 @@ export async function waitForGridStable(page: Page, timeoutMs = 3000): Promise<v
  * Take a full-page screenshot checkpoint for visual regression comparison.
  * This captures the entire application window including ribbon, grid, and status bar.
  *
+ * Pass `target` to capture a single element (e.g. a centered modal dialog)
+ * instead of the whole page. This is required for overlays that sit on top of
+ * the grid canvas: masking the canvas on a full-page shot would paint the mask
+ * rectangle over the overlay itself, hiding it. Capturing the element keeps the
+ * same baseline filename so registry entries do not change.
+ *
  * @param page - Playwright page
  * @param name - Unique checkpoint name (used as filename). Use kebab-case.
  * @param options - Override default comparison options
@@ -137,12 +143,21 @@ export async function takeCheckpoint(
     maxDiffPixelRatio?: number;
     threshold?: number;
     mask?: ReturnType<Page["locator"]>[];
+    target?: Locator;
   }
 ): Promise<void> {
   await waitForGridStable(page);
+  const { target, ...rest } = options ?? {};
+  if (target) {
+    await expect(target).toHaveScreenshot(`${name}.png`, {
+      ...DEFAULT_SCREENSHOT_OPTIONS,
+      ...rest,
+    });
+    return;
+  }
   await expect(page).toHaveScreenshot(`${name}.png`, {
     ...DEFAULT_SCREENSHOT_OPTIONS,
-    ...options,
+    ...rest,
     fullPage: false,
   });
 }

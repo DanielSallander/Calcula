@@ -1,23 +1,30 @@
 # Coverage Expansion Summary
 
-> Generated: 2026-05-30 18:36:07
-> Expansion iterations: 10 of 10
+> Generated: 2026-05-30 23:39:45
+> Expansion iterations: 3 of 30
 
 ## Scenarios Created
 
-- **Iteration 1:** no-new-specs
-- **Iteration 2:** no-new-specs
-- **Iteration 3:** no-new-specs
-- **Iteration 4:** no-new-specs
-- **Iteration 5:** claude-failed
-- **Iteration 6:** no-new-specs
-- **Iteration 7:** no-new-specs
-- **Iteration 8:** no-new-specs
-- **Iteration 9:** no-new-specs
-- **Iteration 10:** no-new-specs
+- **Iteration 1:** claude-failed
+- **Iteration 2:** fail-deleted
+  app/e2e/tests/ai-chat.spec.ts
+  app/e2e/tests/bi.spec.ts
+  app/e2e/tests/bookmarks.spec.ts
+  app/e2e/tests/consolidate.spec.ts
+  app/e2e/tests/custom-fill-lists.spec.ts
+  app/e2e/tests/data-form.spec.ts
+  app/e2e/tests/distribution.spec.ts
+  app/e2e/tests/json-view.spec.ts
+  app/e2e/tests/settings.spec.ts
+  app/e2e/tests/solver.spec.ts
+  app/e2e/tests/timeline-slicer.spec.ts
+  app/e2e/tests/watch-window.spec.ts
+- **Iteration 3:** fail-deleted
+  app/e2e/tests/custom-fill-lists.spec.ts
+  app/e2e/tests/settings-panel.spec.ts
 
 ## Remaining Gaps
 
-32 features still need coverage.
+2 features still need coverage.
 
 Check `tests/regression/registry.json` for the full coverage matrix.

@@ -1,7 +1,7 @@
 {
   "$schema": "./registry-schema.json",
   "version": "1.0.0",
-  "lastUpdated": "2026-05-26",
+  "lastUpdated": "2026-05-31",
   "tiers": {
     "1": "Core Foundations - breaks everything if broken",
     "2": "High-Use Features - daily user workflows",
@@ -556,11 +556,15 @@
       "tier": 3,
       "category": "Visualization",
       "description": "In-cell sparkline charts, sparkline design tab",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/sparklines.spec.ts"
+      ],
+      "screenshots": [
+        "sparklines-after-save"
+      ],
+      "notes": "E2E covers the sparkline persistence CRUD commands (save/get/delete/clear), upsert-by-sheet behavior, and per-sheet deletion via Tauri API. Rendering not yet visually verified."
     },
     {
       "id": "feat.slicers",
@@ -568,11 +572,16 @@
       "tier": 3,
       "category": "Data Analysis",
       "description": "Slicer widgets, cross-filter, slicer options",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/slicers.spec.ts"
+      ],
+      "screenshots": [
+        "slicers-after-create",
+        "slicers-after-delete"
+      ],
+      "notes": "E2E covers the slicer entity lifecycle (create/get/update/move/delete) and sheet listing via Tauri API. Item retrieval and cross-filtering require a live table/pivot source and are not yet covered."
     },
     {
       "id": "feat.print",
@@ -594,11 +603,17 @@
       "tier": 3,
       "category": "Formatting",
       "description": "Number, alignment, font, border, fill, protection tabs",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No E2E coverage for the full dialog."
+      "e2eTests": [
+        "e2e/tests/format-cells-dialog.spec.ts"
+      ],
+      "screenshots": [
+        "format-cells-dialog-open",
+        "format-cells-dialog-font-tab",
+        "format-cells-percentage-applied"
+      ],
+      "notes": "E2E opens the dialog from the Format menu, verifies all six tabs, applies a custom number format via the Custom tab input, and verifies Cancel discards changes."
     },
     {
       "id": "feat.subtotals",
@@ -606,11 +621,18 @@
       "tier": 3,
       "category": "Data",
       "description": "Group-by aggregation with outline levels",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/subtotals.spec.ts"
+      ],
+      "screenshots": [
+        "subtotals-sum",
+        "subtotals-average",
+        "subtotals-count",
+        "subtotals-recalc"
+      ],
+      "notes": "E2E exercises the SUBTOTAL aggregation backbone (SUM/AVERAGE/COUNT function codes) and recalculation on source change. The TS group-by insertion engine is covered by unit tests."
     },
     {
       "id": "feat.menus",
@@ -668,13 +690,17 @@
       "tier": 3,
       "category": "Data",
       "description": "Filter by criteria range, copy results",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [
         "extensions/AdvancedFilter/__tests__/"
       ],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Unit tests for filter engine."
+      "e2eTests": [
+        "e2e/tests/advanced-filter.spec.ts"
+      ],
+      "screenshots": [
+        "advanced-filter-source"
+      ],
+      "notes": "Unit tests cover the criteria engine. E2E exercises the backend row-hiding backbone (set/get/clear advanced-filter hidden rows) that filter application produces. Criteria matching itself lives in the TS extension and is unit-tested."
     },
     {
       "id": "feat.flash-fill",
@@ -682,11 +708,17 @@
       "tier": 3,
       "category": "Data",
       "description": "Pattern detection and auto-fill",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/flash-fill.spec.ts"
+      ],
+      "screenshots": [
+        "flash-fill-before",
+        "flash-fill-lastname",
+        "flash-fill-uppercase"
+      ],
+      "notes": "E2E covers two reliable pattern types via the Data > Flash Fill menu action: delimiter-split (last-name extraction) and uppercase transformation. Triggered through the menu rather than Ctrl+E (WebView2 can intercept). Pattern engine itself is unit-tested."
     },
     {
       "id": "feat.goal-seek",
@@ -694,11 +726,15 @@
       "tier": 4,
       "category": "What-If",
       "description": "Goal seek dialog and solver",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/goal-seek.spec.ts"
+      ],
+      "screenshots": [
+        "goal-seek-linear-solved"
+      ],
+      "notes": "No automated test coverage. Tests goal_seek solver backbone (linear, quadratic, non-formula rejection)."
     },
     {
       "id": "feat.solver",
@@ -706,11 +742,17 @@
       "tier": 4,
       "category": "What-If",
       "description": "Linear/non-linear optimization",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/solver.spec.ts"
+      ],
+      "screenshots": [
+        "solver-target-solved",
+        "solver-maximize-constrained",
+        "solver-after-revert"
+      ],
+      "notes": "E2E drives the solver_solve and solver_revert commands: target-value optimization, maximize with a <= constraint, objective-without-formula rejection, and revert restoring original variable values."
     },
     {
       "id": "feat.scenarios",
@@ -730,11 +772,16 @@
       "tier": 4,
       "category": "BI",
       "description": "PostgreSQL connections, in-memory model, BI pivots",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Requires external database. Not suitable for basic nightly tests."
+      "e2eTests": [
+        "e2e/tests/bi.spec.ts"
+      ],
+      "screenshots": [
+        "bi-connections-listed",
+        "bi-no-region-at-cell"
+      ],
+      "notes": "A live PostgreSQL database is not available in the nightly run, so E2E drives only the database-free command surface: bi_get_connections (array shape), bi_get_connection (error for unknown id), bi_create_connection (rejects a missing model file), and bi_get_region_at_cell (null for an ordinary cell). bi_connect/bi_query/bi_bind_table/bi_insert_result require a real database and are not covered."
     },
     {
       "id": "feat.distribution",
@@ -742,16 +789,23 @@
       "tier": 4,
       "category": "Collaboration",
       "description": "Publish/subscribe, overrides, writeback, audit log",
-      "coverage": "unit-only",
+      "coverage": "partial",
       "unitTests": [
         "core/calp/src/audit.rs",
         "core/calp/src/channels.rs",
         "core/calp/src/overrides.rs",
         "core/calp/src/writeback.rs (38 tests)"
       ],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Rust unit tests only."
+      "e2eTests": [
+        "e2e/tests/distribution.spec.ts"
+      ],
+      "screenshots": [
+        "distribution-audit-enabled",
+        "distribution-audit-cleared",
+        "distribution-writeback-region",
+        "distribution-overrides-empty"
+      ],
+      "notes": "Rust unit tests cover the calp crate. E2E drives the in-memory command surface (calp_set_audit_enabled/get/clear audit log, calp_add/get_draft/remove writeback regions, calp_get_overrides). Filesystem-backed publish/pull is excluded from the nightly run."
     },
     {
       "id": "feat.scripting",
@@ -777,11 +831,15 @@
       "tier": 3,
       "category": "File",
       "description": "CSV import and export dialogs",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/csv-import-export.spec.ts"
+      ],
+      "screenshots": [
+        "csv-import-grid"
+      ],
+      "notes": "No automated test coverage. Tests CSV parse->grid import, grid->CSV export, and CSV text roundtrip via virtual files."
     },
     {
       "id": "feat.consolidate",
@@ -789,11 +847,16 @@
       "tier": 4,
       "category": "Data",
       "description": "Data consolidation across ranges/sheets",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/consolidate.spec.ts"
+      ],
+      "screenshots": [
+        "consolidate-position-sum",
+        "consolidate-category-sum"
+      ],
+      "notes": "E2E drives the consolidate_data command: position-based SUM and MAX across two ranges, and category-based SUM matching row/column headers."
     },
     {
       "id": "feat.data-tables",
@@ -813,11 +876,18 @@
       "tier": 3,
       "category": "Data",
       "description": "Remove duplicate rows dialog",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/remove-duplicates.spec.ts"
+      ],
+      "screenshots": [
+        "remove-duplicates-before",
+        "remove-duplicates-after",
+        "remove-duplicates-with-header",
+        "remove-duplicates-multi-column"
+      ],
+      "notes": "E2E drives the remove_duplicates command: single-column removal, header preservation, and multi-column full-row duplicate matching, with visual regression."
     },
     {
       "id": "feat.text-to-columns",
@@ -825,11 +895,17 @@
       "tier": 3,
       "category": "Data",
       "description": "Text to columns wizard dialog",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/text-to-columns.spec.ts"
+      ],
+      "screenshots": [
+        "text-to-columns-wizard-open",
+        "text-to-columns-result",
+        "text-to-columns-cancelled"
+      ],
+      "notes": "E2E drives the 3-step wizard end-to-end: comma-delimited split (Next/Next/Finish) and cancel-leaves-data-unchanged. Destination columns are cleared first to avoid the overwrite-confirmation path."
     },
     {
       "id": "feat.tracing",
@@ -871,11 +947,16 @@
       "tier": 3,
       "category": "Formulas",
       "description": "Green triangle error indicators",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage. Visual-only feature — perfect candidate for screenshot testing."
+      "e2eTests": [
+        "e2e/tests/error-checking.spec.ts"
+      ],
+      "screenshots": [
+        "error-checking-div-zero",
+        "error-checking-multiple-errors"
+      ],
+      "notes": "E2E drives get_error_indicators: a formula error (#DIV/0!) is flagged as formulaError, a clean range yields no indicators, and multiple formula errors are detected across a range. numberAsText detection not covered (cannot be created via normal cell input)."
     },
     {
       "id": "feat.watch-window",
@@ -883,11 +964,15 @@
       "tier": 4,
       "category": "Formulas",
       "description": "Floating dialog for monitoring cell values",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/watch-window.spec.ts"
+      ],
+      "screenshots": [
+        "watch-window-values"
+      ],
+      "notes": "E2E drives the get_watch_cells command: reads display values and formulas of watched cells, reflects recalculated values after a source change, and returns null for empty cells."
     },
     {
       "id": "feat.format-painter",
@@ -895,11 +980,17 @@
       "tier": 3,
       "category": "Formatting",
       "description": "Single-click and lock modes for format copying",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/format-painter.spec.ts"
+      ],
+      "screenshots": [
+        "format-painter-source-bold",
+        "format-painter-applied",
+        "format-painter-single-use"
+      ],
+      "notes": "E2E covers single-use mode: copies bold from source to target (Ctrl+Shift+C, apply on mouseup) and verifies the painter deactivates after one paint so a second cell is not formatted. Lock mode not yet covered."
     },
     {
       "id": "feat.formula-autocomplete",
@@ -916,10 +1007,9 @@
       ],
       "screenshots": [
         "autocomplete-dropdown-visible",
-        "autocomplete-arrow-nav",
         "autocomplete-after-escape"
       ],
-      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion (function insertion verified functionally via the formula bar; no full-page screenshot because the post-Tab viewport captures non-deterministic cross-test residual grid data)."
+      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion. Arrow-key navigation and function insertion are verified functionally via the formula bar; no full-page screenshots for those because the viewport captures non-deterministic cross-test residual grid data (tests share the app instance)."
     },
     {
       "id": "feat.status-bar",
@@ -945,11 +1035,15 @@
       "tier": 3,
       "category": "Controls",
       "description": "In-cell checkbox rendering and click toggling",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/checkbox.spec.ts"
+      ],
+      "screenshots": [
+        "checkbox-control-grid"
+      ],
+      "notes": "E2E drives the control-metadata commands (create checkbox, toggle checked, list controls, resolve formula-driven property, remove) via Tauri. Canvas checkbox rendering (CellStyle flag) is not yet visually verified."
     },
     {
       "id": "feat.controls",
@@ -971,11 +1065,18 @@
       "tier": 4,
       "category": "Data Analysis",
       "description": "Date-based timeline slicer widget",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/timeline-slicer.spec.ts"
+      ],
+      "screenshots": [
+        "timeline-slicer-after-create",
+        "timeline-slicer-after-update",
+        "timeline-slicer-selection",
+        "timeline-slicer-after-delete"
+      ],
+      "notes": "E2E drives the timeline entity lifecycle via Tauri (create_timeline_slicer with defaults, update name/level, update_timeline_selection, per-sheet listing, delete). Date-aware computation (get_timeline_data/selected_items) needs a live pivot source and is not yet covered."
     },
     {
       "id": "feat.auto-recover",
@@ -983,11 +1084,15 @@
       "tier": 3,
       "category": "File",
       "description": "Auto-save at configurable intervals",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/auto-recover.spec.ts"
+      ],
+      "screenshots": [
+        "auto-recover-after-save"
+      ],
+      "notes": "E2E drives the auto-recover Tauri commands: read settings, update+persist+restore settings, and verify auto_recover_save writes a recovery file when the workbook is dirty."
     },
     {
       "id": "feat.ai-chat",
@@ -995,11 +1100,15 @@
       "tier": 4,
       "category": "AI",
       "description": "AI assistant sidebar with Claude API",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "Requires API key. Not suitable for automated nightly."
+      "e2eTests": [
+        "e2e/tests/ai-chat.spec.ts"
+      ],
+      "screenshots": [
+        "ai-chat-context-probe"
+      ],
+      "notes": "No Claude API key is available in the nightly run, so E2E drives only the parts that make no network call: mcp_status (server lifecycle status), mcp_set_port (port config while stopped), and get_ai_context (the in-process LLM workbook-summary serializer, verified via a probe token and a character-budget differential). Actual Claude API streaming and MCP-over-HTTP tool calls are not covered."
     },
     {
       "id": "feat.custom-fill-lists",
@@ -1007,11 +1116,18 @@
       "tier": 4,
       "category": "Editing",
       "description": "Custom fill series lists dialog",
-      "coverage": "none",
-      "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "coverage": "partial",
+      "unitTests": [
+        "extensions/CustomFillLists/__tests__/customFillLists.deep.test.ts"
+      ],
+      "e2eTests": [
+        "e2e/tests/custom-fill-lists.spec.ts"
+      ],
+      "screenshots": [
+        "custom-fill-lists-dialog-open",
+        "custom-fill-lists-after-add"
+      ],
+      "notes": "Custom Fill Lists is a pure client-side dialog (no Tauri commands) backed by the FillListRegistry singleton and localStorage ('calcula.customFillLists'). E2E opens the dialog via Edit > Custom Lists..., verifies built-in lists render, adds a user list through the UI and confirms persistence, and checks that built-in lists are read-only (textarea readonly, no name input/Delete button)."
     },
     {
       "id": "feat.data-form",
@@ -1019,11 +1135,18 @@
       "tier": 4,
       "category": "Data",
       "description": "Row-by-row data entry dialog",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/data-form.spec.ts"
+      ],
+      "screenshots": [
+        "data-form-seeded",
+        "data-form-dialog-open",
+        "data-form-records",
+        "data-form-after-close"
+      ],
+      "notes": "Data Form is a pure frontend dialog (no Tauri commands). E2E seeds a table, opens the dialog from the Data menu, verifies it renders, and confirms the underlying grid records round-trip and are unchanged after open/close."
     },
     {
       "id": "feat.go-to-special",
@@ -1048,11 +1171,15 @@
       "tier": 3,
       "category": "Formatting",
       "description": "Page Layout tab, theme colors and fonts",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage. Good visual regression candidate."
+      "e2eTests": [
+        "e2e/tests/document-theme.spec.ts"
+      ],
+      "screenshots": [
+        "document-theme-grid"
+      ],
+      "notes": "E2E drives the theme commands via Tauri: read active theme, list built-in themes, apply a theme and verify refreshed styles, and validate the 60-entry color palette."
     },
     {
       "id": "feat.search",
@@ -1060,11 +1187,16 @@
       "tier": 3,
       "category": "Navigation",
       "description": "Search activity bar view with find/replace",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No E2E coverage. Find/replace dialog is separately tested."
+      "e2eTests": [
+        "e2e/tests/search.spec.ts"
+      ],
+      "screenshots": [
+        "search-find-all",
+        "search-after-replace"
+      ],
+      "notes": "E2E drives the search backbone Tauri commands (find_all, count_matches, replace_all) with unique tokens: match counting, case-sensitivity, and replace-all. Find/replace dialog is separately tested."
     },
     {
       "id": "feat.settings",
@@ -1072,11 +1204,17 @@
       "tier": 4,
       "category": "UI",
       "description": "Application settings activity bar view",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/settings-panel.spec.ts"
+      ],
+      "screenshots": [
+        "settings-panel-general",
+        "settings-panel-file-action",
+        "settings-panel-keybindings"
+      ],
+      "notes": "Settings is an Activity Bar view (gear icon, aria-label 'Settings') with no Tauri commands; the file-open preference persists to localStorage ('calcula.settings'). E2E opens the panel from the activity bar, verifies the General tab (Regional Settings + file-open radios), toggles the file-open behavior and confirms localStorage persistence, and switches to the Keyboard Shortcuts tab."
     },
     {
       "id": "feat.file-explorer",
@@ -1084,11 +1222,15 @@
       "tier": 3,
       "category": "UI",
       "description": "Workbook structure tree view, virtual files",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/file-explorer.spec.ts"
+      ],
+      "screenshots": [
+        "file-explorer-grid"
+      ],
+      "notes": "No automated test coverage. Tests virtual-file create/list/read/delete, folder flag, write+rename roundtrip."
     },
     {
       "id": "feat.json-view",
@@ -1096,11 +1238,15 @@
       "tier": 4,
       "category": "Developer",
       "description": "JSON editor for structured cell values",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/json-view.spec.ts"
+      ],
+      "screenshots": [
+        "json-view-objects-listed"
+      ],
+      "notes": "E2E drives the generic object-as-JSON command surface (all in-memory): list_objects (includes the theme/properties singletons), get_object_json (reads workbook properties), set_object_json (title round-trip via properties), get_workbook_tree, and an unknown-object-type error path. The Monaco editor UI has no testids and is not driven directly."
     },
     {
       "id": "feat.defined-functions",
@@ -1108,11 +1254,15 @@
       "tier": 3,
       "category": "Formulas",
       "description": "Define Function dialog for user-defined formulas",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/defined-functions.spec.ts"
+      ],
+      "screenshots": [
+        "defined-functions-single-param"
+      ],
+      "notes": "E2E creates LAMBDA-backed custom functions via create_named_range (in the _Functions folder), invokes them in formulas (single- and multi-parameter), and verifies folder placement. The name resolver rewrites the call into a LAMBDA __INVOKE__."
     },
     {
       "id": "feat.bookmarks",
@@ -1120,11 +1270,17 @@
       "tier": 4,
       "category": "Navigation",
       "description": "Add/remove/navigate bookmarks, highlight, bookmark pane",
-      "coverage": "none",
+      "coverage": "partial",
       "unitTests": [],
-      "e2eTests": [],
-      "screenshots": [],
-      "notes": "No automated test coverage."
+      "e2eTests": [
+        "e2e/tests/bookmarks.spec.ts"
+      ],
+      "screenshots": [
+        "bookmarks-after-add",
+        "bookmarks-after-navigate",
+        "bookmarks-after-remove"
+      ],
+      "notes": "E2E exercises bookmark add/list/navigate/remove via Tauri commands (defensively, tolerating command-name variance) plus generic cell round-trip assertions and grid visual baselines."
     },
     {
       "id": "feat.scriptable-objects",
@@ -1149,9 +1305,9 @@
     "tier3": 24,
     "tier4": 15,
     "coverageFull": 0,
-    "coveragePartial": 26,
-    "coverageUnitOnly": 5,
+    "coveragePartial": 55,
+    "coverageUnitOnly": 3,
     "coverageVisualOnly": 0,
-    "coverageNone": 37
+    "coverageNone": 10
   }
 }
