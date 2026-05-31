@@ -222,7 +222,7 @@ async function handleCellEdited(row: number, col: number, value: string): Promis
       // or if the formula is different from the current one
       if (!column.calculatedFormula || column.calculatedFormula !== converted) {
         await setCalculatedColumnAsync(table.id, column.name, converted);
-        emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+        emitAppEvent(AppEvents.GRID_REFRESH);
       }
     }
     return;
@@ -256,10 +256,9 @@ async function handleCellEdited(row: number, col: number, value: string): Promis
       emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
 
       // Re-fetch viewport data and repaint to show computed values + table styling.
-      // Uses GRID_DATA_REFRESH which re-fetches cells from backend (unlike GRID_REFRESH
-      // which only repaints with stale data). The pendingRefreshRef mechanism in
-      // GridCanvas handles the case where a fetch is already in progress.
-      emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+      // Uses GRID_REFRESH which re-fetches cells from backend. The pendingRefreshRef
+      // mechanism in GridCanvas handles the case where a fetch is already in progress.
+      emitAppEvent(AppEvents.GRID_REFRESH);
     }
   }
 }

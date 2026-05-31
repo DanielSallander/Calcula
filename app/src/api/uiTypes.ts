@@ -44,6 +44,10 @@ export interface MenuItemDefinition {
     onClick: () => void;
     title?: string;
   };
+  /** Order for positioning within the menu (lower = higher up) */
+  order?: number;
+  /** Priority for ordering (higher = shown first) */
+  priority?: number;
 }
 
 /**
@@ -80,6 +84,9 @@ export type TaskPaneContextKey =
   | "bi"              // BI (Business Intelligence) pane
   | "collection"      // Cell contains a List or Dict (3D cell)
   | "file-viewer"     // Virtual file viewer requested
+  | "connections"     // BI Connections pane
+  | "slicer"          // Slicer selected
+  | "timeline-slicer" // Timeline slicer selected
   | "always";         // Always available
 
 /**
@@ -136,10 +143,16 @@ export interface DialogProps {
 export interface DialogDefinition {
   /** Unique identifier for the dialog */
   id: string;
+  /** Optional title for the dialog */
+  title?: string;
   /** The React component to render */
   component: React.ComponentType<DialogProps>;
   /** Priority for z-index ordering (higher = on top) */
   priority?: number;
+  /** Optional default width in px */
+  width?: number;
+  /** Optional default height in px */
+  height?: number;
 }
 
 // ============================================================================

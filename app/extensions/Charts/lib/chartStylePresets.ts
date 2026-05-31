@@ -5,6 +5,7 @@
 //          one-click style change.
 
 import type { ChartRenderTheme } from "../rendering/chartTheme";
+import type { AxisSpec } from "../types";
 
 // ============================================================================
 // Preset Type
@@ -444,7 +445,7 @@ export function applyPreset(preset: ChartStylePreset): Record<string, unknown> {
  */
 export function buildPresetUpdates(
   preset: ChartStylePreset,
-  currentSpec: { yAxis: { gridLines: boolean } & Record<string, unknown>; markOptions?: Record<string, unknown> },
+  currentSpec: { yAxis: AxisSpec; markOptions?: unknown },
 ): Record<string, unknown> {
   const updates: Record<string, unknown> = {
     palette: preset.palette,

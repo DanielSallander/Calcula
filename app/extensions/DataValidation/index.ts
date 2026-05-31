@@ -12,6 +12,7 @@ import {
   cellEvents,
   getValidationPrompt,
   hasInCellDropdown,
+  registerCommitGuard,
   type OverlayRegistration,
 } from "@api";
 import { renderDropdownChevrons, hitTestDropdownChevron } from "./rendering/dropdownChevronRenderer";
@@ -159,7 +160,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregClick);
 
   // 8. Register the commit guard
-  const unregGuard = context.grid.editGuards.register(validationCommitGuard);
+  const unregGuard = registerCommitGuard(validationCommitGuard);
   cleanupFns.push(unregGuard);
 
   // 9. Register data menu items
@@ -170,25 +171,29 @@ function activate(context: ExtensionContext): void {
   // Selection changed: show/hide input prompt tooltip
   const unsubSelection = ExtensionRegistry.onSelectionChange(async (sel) => {
     setCurrentSelection(sel);
+    if (!sel) return;
+
+    const activeRow = sel.endRow;
+    const activeCol = sel.endCol;
 
     // Close dropdown if selection moves away
     const openDd = getOpenDropdownCell();
-    if (openDd && (sel.activeRow !== openDd.row || sel.activeCol !== openDd.col)) {
+    if (openDd && (activeRow !== openDd.row || activeCol !== openDd.col)) {
       hideOverlay(DROPDOWN_OVERLAY_ID);
       setOpenDropdownCell(null);
     }
 
     // Show or hide input prompt
     try {
-      const prompt = await getValidationPrompt(sel.activeRow, sel.activeCol);
-      if (prompt && prompt.show && (prompt.title || prompt.message)) {
-        setPromptState(true, { row: sel.activeRow, col: sel.activeCol });
+      const prompt = await getValidationPrompt(activeRow, activeCol);
+      if (prompt && prompt.showPrompt && (prompt.title || prompt.message)) {
+        setPromptState(true, { row: activeRow, col: activeCol });
 
         // Position the tooltip relative to the click/selection
         // Use a small offset from the selection coordinates
         const anchorRect = {
-          x: sel.activeCol * 80 + 60, // Approximate, will be adjusted
-          y: sel.activeRow * 20 + 40,
+          x: activeCol * 80 + 60, // Approximate, will be adjusted
+          y: activeRow * 20 + 40,
           width: 80,
           height: 20,
         };

@@ -652,7 +652,7 @@ export function drawPivotCell(
       ctx,
       iconX,
       iconY,
-      cell.isCollapsed,
+      cell.isCollapsed ?? false,
       theme,
       options.isHoveredIcon || false
     );
@@ -680,7 +680,7 @@ export function drawPivotCell(
       ctx,
       iconX,
       iconY,
-      cell.isCollapsed,
+      cell.isCollapsed ?? false,
       theme,
       options.isHoveredIcon || false
     );

@@ -7,6 +7,8 @@ import React, { useRef, useCallback, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import * as monaco from "monaco-editor";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Monaco 0.52+ moved json to top-level; languages.json still works at runtime
+const monacoJson = (monaco.languages as any).json;
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import { chartSpecJsonSchema } from "../lib/chartSpecSchema";
@@ -32,7 +34,7 @@ function registerSchema() {
   if (schemaRegistered) return;
   schemaRegistered = true;
 
-  monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
+  monacoJson.jsonDefaults.setDiagnosticsOptions({
     validate: true,
     allowComments: false,
     trailingCommas: "error",

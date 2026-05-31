@@ -21,4 +21,4 @@ export * from "./lib";
 
 // Resolve ambiguous exports between ./state, ./types, and ./lib
 export { setActiveSheet, setColumnWidth, setRowHeight } from "./state";
-export type { FreezeConfig, MergeResult, MergedRegion, VisibleRange, SheetContext } from "./types";
+export type { FreezeConfig, MergeResult, MergedRegion, VisibleRange, SheetContext, ClearApplyTo, SplitConfig } from "./types";

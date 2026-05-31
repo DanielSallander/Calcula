@@ -32,8 +32,8 @@ let currentSelection: {
   startCol: number;
   endRow: number;
   endCol: number;
-  activeRow: number;
-  activeCol: number;
+  activeRow?: number;
+  activeCol?: number;
 } | null = null;
 
 // ============================================================================
@@ -74,8 +74,8 @@ export function setCurrentSelection(
     startCol: number;
     endRow: number;
     endCol: number;
-    activeRow: number;
-    activeCol: number;
+    activeRow?: number;
+    activeCol?: number;
   } | null
 ): void {
   currentSelection = sel;

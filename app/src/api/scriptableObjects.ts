@@ -1094,12 +1094,15 @@ function buildSheetContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Sh
     },
     onSelectionChange(handler) {
       const unsub = ExtensionRegistry.onSelectionChange((sel) => {
+        if (!sel) return;
+        const row = sel.row ?? sel.startRow;
+        const col = sel.col ?? sel.startCol;
         handler({
           sheetIndex: sel.sheetIndex ?? 0,
-          row: sel.row,
-          col: sel.col,
-          endRow: sel.endRow ?? sel.row,
-          endCol: sel.endCol ?? sel.col,
+          row,
+          col,
+          endRow: sel.endRow ?? row,
+          endCol: sel.endCol ?? col,
         });
       });
       cleanupFns.push(unsub);
@@ -1156,7 +1159,8 @@ function buildCellContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Cel
     },
     onSelect(handler) {
       const unsub = ExtensionRegistry.onSelectionChange((sel) => {
-        handler({ row: sel.row, col: sel.col, sheetIndex: sel.sheetIndex ?? 0 });
+        if (!sel) return;
+        handler({ row: sel.row ?? sel.startRow, col: sel.col ?? sel.startCol, sheetIndex: sel.sheetIndex ?? 0 });
       });
       cleanupFns.push(unsub);
       return unsub;

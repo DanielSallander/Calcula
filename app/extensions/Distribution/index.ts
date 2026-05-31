@@ -76,21 +76,21 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:publishPackage",
     label: "Publish Package...",
-    action: () => context.ui.dialogs.open(PUBLISH_DIALOG_ID),
+    action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
     order: 900,
   });
 
   context.ui.menus.registerItem("data", {
     id: "data:subscribePackage",
     label: "Subscribe to Package...",
-    action: () => context.ui.dialogs.open(SUBSCRIBE_DIALOG_ID),
+    action: () => context.ui.dialogs.show(SUBSCRIBE_DIALOG_ID),
     order: 901,
   });
 
   context.ui.menus.registerItem("data", {
     id: "data:refreshSubscriptions",
     label: "Refresh Subscriptions...",
-    action: () => context.ui.dialogs.open(REFRESH_PREVIEW_DIALOG_ID),
+    action: () => context.ui.dialogs.show(REFRESH_PREVIEW_DIALOG_ID),
     order: 902,
   });
 
@@ -107,7 +107,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:designateWriteback",
     label: "Designate Writeback Region...",
-    action: () => context.ui.dialogs.open(DESIGNATE_WRITEBACK_DIALOG_ID),
+    action: () => context.ui.dialogs.show(DESIGNATE_WRITEBACK_DIALOG_ID),
     order: 904,
   });
 

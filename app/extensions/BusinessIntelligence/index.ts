@@ -8,6 +8,7 @@ import {
   ExtensionRegistry,
   TaskPaneExtensions,
   removeTaskPaneContextKey,
+  registerCommitGuard,
   IconConnections,
   IconGetData,
 } from "@api";
@@ -52,15 +53,11 @@ function activate(context: ExtensionContext): void {
 
   // 3. Register edit guard - blocks edits in BI locked regions
   cleanupFunctions.push(
-    context.grid.editGuards.register(async (row, col) => {
+    registerCommitGuard(async (row, col, _value) => {
       try {
         const region = await getRegionAtCell(row, col);
         if (region) {
-          return {
-            blocked: true,
-            message:
-              "This cell is part of a BI query result and cannot be edited. Use the BI pane to refresh the data.",
-          };
+          return { action: "block" as const };
         }
       } catch (error) {
         console.error("[BI Extension] Failed to check BI region:", error);

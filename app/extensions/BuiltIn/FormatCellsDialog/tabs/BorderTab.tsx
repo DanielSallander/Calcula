@@ -188,7 +188,7 @@ export function BorderTab(): React.ReactElement {
                 borderLeft: "2px solid transparent",
                 position: "relative",
                 overflow: "hidden",
-                ...{
+                ...(({
                   borderTopColor: borderTop.style !== "none" ? borderTop.color : "transparent",
                   borderTopWidth: borderTop.style !== "none" ? getBorderStyle(borderTop).borderWidth : "2px",
                   borderTopStyle: borderTop.style !== "none" ? (getBorderStyle(borderTop).borderStyle as string) : "solid",
@@ -201,7 +201,7 @@ export function BorderTab(): React.ReactElement {
                   borderLeftColor: borderLeft.style !== "none" ? borderLeft.color : "transparent",
                   borderLeftWidth: borderLeft.style !== "none" ? getBorderStyle(borderLeft).borderWidth : "2px",
                   borderLeftStyle: borderLeft.style !== "none" ? (getBorderStyle(borderLeft).borderStyle as string) : "solid",
-                },
+                }) as React.CSSProperties),
               }}
             >
               {(borderDiagonalDown.style !== "none" || borderDiagonalUp.style !== "none") && (

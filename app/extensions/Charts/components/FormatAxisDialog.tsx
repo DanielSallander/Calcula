@@ -295,7 +295,7 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
               <div className={s.row}>
                 <span style={{ width: 16 }} />
                 <span className={s.label}>Scale Type</span>
-                <select className={s.select} value={scaleType} onChange={(e) => setScaleType(e.target.value)}>
+                <select className={s.select} value={scaleType} onChange={(e) => setScaleType(e.target.value as "linear" | "log" | "pow" | "sqrt")}>
                   <option value="linear">Linear</option>
                   <option value="log">Logarithmic</option>
                   <option value="pow">Power</option>

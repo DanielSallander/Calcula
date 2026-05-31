@@ -195,10 +195,10 @@ export function createOverlayMoveHandlers(
       region,
       startMouseX: mouseX,
       startMouseY: mouseY,
-      startX: region.floating.x,
-      startY: region.floating.y,
-      currentX: region.floating.x,
-      currentY: region.floating.y,
+      startX: region.floating!.x,
+      startY: region.floating!.y,
+      currentX: region.floating!.x,
+      currentY: region.floating!.y,
       hasMoved: false,
     };
 

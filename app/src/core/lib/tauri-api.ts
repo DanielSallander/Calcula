@@ -17,6 +17,8 @@ import type {
   UpdateCellResult,
   SpillRangeInfo,
   UsedRangeResult,
+  ClearApplyTo,
+  SplitConfig,
 } from "../types";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
 
@@ -171,16 +173,7 @@ export async function clearRange(
   });
 }
 
-/**
- * Clear apply to options (Excel-compatible).
- */
-export type ClearApplyTo =
-  | "all"
-  | "contents"
-  | "formats"
-  | "hyperlinks"
-  | "removeHyperlinks"
-  | "resetContents";
+// ClearApplyTo is imported from ../types
 
 /**
  * Clear a range with options for what to clear.
@@ -1047,10 +1040,7 @@ export async function getFreezePanes(): Promise<FreezeConfig> {
 // SPLIT WINDOW API
 // ============================================================================
 
-export interface SplitConfig {
-  splitRow: number | null;
-  splitCol: number | null;
-}
+// SplitConfig is imported from ../types
 
 export async function setSplitWindow(
   splitRow: number | null,

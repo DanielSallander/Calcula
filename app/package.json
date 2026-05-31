@@ -6,9 +6,9 @@
   "scripts": {
     "dev": "vite",
     "dev:data": "cross-env VITE_LOAD_MOCK_DATA=true vite",
-    "build": "vite build",
-    "check-types": "tsc -b",
-    "check-types:watch": "tsc -b --watch",
+    "build": "tsc --noEmit -p tsconfig.check.json && vite build",
+    "check-types": "tsc --noEmit -p tsconfig.check.json",
+    "check-types:watch": "tsc --noEmit -p tsconfig.check.json --watch",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -229,7 +229,7 @@ function handleMouseDown(e: MouseEvent): void {
 
   const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
   const colHeaderHeight = lastConfig.colHeaderHeight || 24;
-  const defaultColWidth = lastConfig.defaultColumnWidth || 100;
+  const defaultColWidth = lastConfig.defaultCellWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 24;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
@@ -287,7 +287,7 @@ function handleMouseMove(e: MouseEvent): void {
   // Hover cursor feedback
   const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
   const colHeaderHeight = lastConfig.colHeaderHeight || 24;
-  const defaultColWidth = lastConfig.defaultColumnWidth || 100;
+  const defaultColWidth = lastConfig.defaultCellWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 24;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
@@ -339,7 +339,7 @@ function handleMouseUp(e: MouseEvent): void {
 
   const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
   const colHeaderHeight = lastConfig.colHeaderHeight || 24;
-  const defaultColWidth = lastConfig.defaultColumnWidth || 100;
+  const defaultColWidth = lastConfig.defaultCellWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 24;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
@@ -445,7 +445,7 @@ export function renderPageBreakOverlay(
 
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
-  const defaultColWidth = config.defaultColumnWidth || 100;
+  const defaultColWidth = config.defaultCellWidth || 100;
   const defaultRowHeight = config.defaultRowHeight || 24;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, dimensions.columnWidths);

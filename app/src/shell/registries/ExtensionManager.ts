@@ -226,6 +226,33 @@ function buildContext(): ExtensionContext {
         registerDoubleClickInterceptor: registerCellDoubleClickInterceptor,
       },
     },
+    keyboard: {
+      registerShortcut: (combo: string, commandId: string, options?: import("../../api/keyboard").RegisterShortcutOptions) =>
+        registerShortcut(combo, commandId, "", options),
+      getShortcuts,
+    },
+    keybindings: {
+      register: registerKeybinding,
+      getAll: getAllKeybindings,
+      getEffectiveCombo,
+    },
+    settings: {
+      get: <T extends string | number | boolean>(key: string, defaultValue: T): T =>
+        getSetting("", key, defaultValue),
+      set: (key: string, value: string | number | boolean) =>
+        setSetting("", key, value),
+      remove: (key: string) =>
+        removeSetting("", key),
+      registerSettings: (defs: import("../../api/settings").SettingDefinition[]) =>
+        registerSettingDefinitions("", defs),
+    },
+    cellEditors: {
+      register: registerCellEditor,
+    },
+    fileFormats: {
+      registerFormat: registerFileFormat,
+      getFormats: getFileFormats,
+    },
   };
 }
 

@@ -11,7 +11,7 @@ import {
   getBiModelInfo,
   type BiConnectionInfo,
 } from "../lib/filterPaneApi";
-import type { SlicerSourceType } from "../lib/filterPaneTypes";
+import type { SlicerSourceType, SlicerConnection } from "../lib/filterPaneTypes";
 
 // ============================================================================
 // Types

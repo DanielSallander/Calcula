@@ -83,7 +83,7 @@ export function useSpreadsheetEditing({
   // it will reclaim focus via its own setTimeout(0) handler, so this is safe in all cases.
   useEffect(() => {
     const handleFocusRestoreForEditing = () => {
-      if (isEditing && isOnDifferentSheet) {
+      if (isEditing && isOnDifferentSheet()) {
         // Only grab container focus during cross-sheet formula editing.
         // When InlineEditor is rendered (same sheet), stealing focus causes
         // a blur that can prematurely commit the edit.

@@ -5,6 +5,7 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import type { DeclaredProperty } from "@api/scriptableObjects";
 import {
   ExtensionRegistry,
   AppEvents,
@@ -693,7 +694,7 @@ function activate(context: ExtensionContext): void {
 
   // Handle shape:declareProperties from scripts
   const unsubDeclareProps = onAppEvent("shape:declareProperties", (detail) => {
-    const d = detail as { instanceId: string; props: Array<{ key: string; label: string; type: string; defaultValue?: string }> };
+    const d = detail as { instanceId: string; props: DeclaredProperty[] };
     setDeclaredProperties(d.instanceId, d.props);
     // Refresh the properties pane if it's open for this shape
     const parts = d.instanceId.replace("control-", "").split("-");

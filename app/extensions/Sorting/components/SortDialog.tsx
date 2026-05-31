@@ -64,6 +64,11 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
     async function init() {
       try {
         setIsLoading(true);
+        if (!selection) {
+          setError("No selection available.");
+          setIsLoading(false);
+          return;
+        }
         const range = await detectSortRange(selection);
         if (!range) {
           setError("No data found in the selected range.");

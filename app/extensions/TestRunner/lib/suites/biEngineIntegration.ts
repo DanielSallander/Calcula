@@ -102,7 +102,7 @@ async function cleanupConnections() {
   try {
     const pivots = await getAllPivotTables();
     for (const p of pivots) {
-      try { await deletePivotTable(p.pivotId); } catch { /* */ }
+      try { if (p.pivotId != null) await deletePivotTable(p.pivotId); } catch { /* */ }
     }
   } catch { /* */ }
 }

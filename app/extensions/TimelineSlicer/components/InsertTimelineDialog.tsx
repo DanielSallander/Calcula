@@ -184,7 +184,7 @@ export function InsertTimelineDialog({
       const sheetsResult = await getSheets();
       setActiveSheetIndex(sheetsResult.activeIndex);
 
-      const pivots = await getAllPivotTables();
+      const pivots = await getAllPivotTables<Array<{ id: number; name: string; sheetIndex: number }>>();
       const pivotSources: PivotSource[] = [];
 
       for (const p of pivots) {

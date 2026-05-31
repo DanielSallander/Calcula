@@ -251,7 +251,7 @@ class CellWindowCache {
   /** Row index -> PivotRowData (with cells). */
   private rows = new Map<number, PivotRowData>();
   /** Start rows of windows currently being fetched. */
-  private pending = new Set<number>();
+  pending = new Set<number>();
   /** Version of the PivotView these windows belong to. */
   version = 0;
 

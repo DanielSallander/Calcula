@@ -134,8 +134,8 @@ interface SubtotalsDialogContext {
   endCol: number;
 }
 
-export function SubtotalsDialog({ onClose, context }: DialogProps) {
-  const ctx = context as SubtotalsDialogContext | undefined;
+export function SubtotalsDialog({ onClose, data }: DialogProps) {
+  const ctx = data as SubtotalsDialogContext | undefined;
 
   // Default to a reasonable range if no context
   const startRow = ctx?.startRow ?? 0;

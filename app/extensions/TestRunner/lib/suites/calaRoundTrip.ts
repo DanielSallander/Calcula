@@ -13,6 +13,7 @@ import {
   expectCellValue,
 } from "../assertions";
 import { invokeBackend } from "@api/backend";
+import type { CellData } from "@api";
 import { appDataDir } from "@tauri-apps/api/path";
 
 const A = AREA_CALA_ROUNDTRIP;

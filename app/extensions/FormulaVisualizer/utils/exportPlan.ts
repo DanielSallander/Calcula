@@ -6,7 +6,7 @@ import type { FormulaEvalPlan } from "@api";
 export function formatPlanAsYaml(plan: FormulaEvalPlan): string {
   const lines: string[] = [];
 
-  lines.push(`formula: "${plan.formulaText}"`);
+  lines.push(`formula: "${plan.formula}"`);
   lines.push(`total_steps: ${plan.steps.length}`);
   lines.push("");
 

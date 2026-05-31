@@ -201,7 +201,7 @@ export function FilterDropdown({
       }
     }
 
-    emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+    emitAppEvent(AppEvents.GRID_REFRESH);
 
     // Trigger slicer refresh so cross-filter has_data is recalculated
     window.dispatchEvent(

@@ -8,6 +8,8 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import type { editor as monacoEditor } from "monaco-editor";
 import * as monaco from "monaco-editor";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Monaco 0.52+ moved typescript to top-level; languages.typescript still works at runtime
+const monacoTs = (monaco.languages as any).typescript;
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 // Vite ?raw import: loads .d.ts as a plain string for Monaco type registration
@@ -218,18 +220,18 @@ loader.config({ monaco });
 
 // Register object context type definitions for IntelliSense
 (function registerObjectScriptTypes() {
-  monaco.languages.typescript.javascriptDefaults.addExtraLib(
+  monacoTs.javascriptDefaults.addExtraLib(
     objectContextsDts,
     "objectContexts.d.ts",
   );
 
-  monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+  monacoTs.javascriptDefaults.setDiagnosticsOptions({
     noSemanticValidation: false,
     noSyntaxValidation: false,
   });
 
-  monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
-    target: monaco.languages.typescript.ScriptTarget.ESNext,
+  monacoTs.javascriptDefaults.setCompilerOptions({
+    target: monacoTs.ScriptTarget.ESNext,
     allowNonTsExtensions: true,
     allowJs: true,
     checkJs: true,

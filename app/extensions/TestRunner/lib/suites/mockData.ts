@@ -5,7 +5,7 @@
 
 import type { TestSuite } from "../types";
 import { expectCellValue, assertTrue, assertEqual } from "../assertions";
-import { setActiveSheet } from "@api";
+import { setActiveSheetApi } from "@api";
 
 /**
  * Mock data structure (from mockData.csv.ts):
@@ -21,7 +21,7 @@ export const mockDataSuite: TestSuite = {
   // Ensure we're on sheet 0 (earlier test suites may have switched sheets)
   // and wait for mock data to be loaded (it loads with a delay after mount)
   beforeEach: async (ctx) => {
-    await setActiveSheet(0);
+    await setActiveSheetApi(0);
     await ctx.settle();
 
     const maxWait = 5000;

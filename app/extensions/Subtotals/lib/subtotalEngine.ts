@@ -122,7 +122,6 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
         row: grandTotalRow,
         col,
         value: `=SUBTOTAL(${functionCode},${colLetter}${gtStartRow}:${colLetter}${gtEndRow})`,
-        invariant: true,
       });
     }
 
@@ -131,7 +130,7 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
     // Step 4: Create outline groups for each data section
     for (const pos of subtotalRowPositions) {
       try {
-        await groupRows({ startRow: pos.dataStart, endRow: pos.dataEnd });
+        await groupRows(pos.dataStart, pos.dataEnd);
       } catch (e) {
         console.warn("[Subtotals] Failed to group rows:", e);
       }

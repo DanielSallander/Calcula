@@ -2180,6 +2180,7 @@ export interface CellConditionalFormat {
  */
 export interface EvaluateCFResult {
   cells: CellConditionalFormat[];
+  error?: string;
 }
 
 /**

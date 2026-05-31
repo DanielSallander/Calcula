@@ -69,6 +69,9 @@ export interface ZoneField {
   // For calculated fields in the VALUES zone
   isCalculated?: boolean;
   calculatedFormula?: string;
+  // For "Show Values As" calculations that reference another field/item
+  baseField?: string;
+  baseItem?: string;
 }
 
 // Aggregation option for the dropdown menu

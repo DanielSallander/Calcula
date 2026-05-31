@@ -234,9 +234,10 @@ function activate(context: ExtensionContext): void {
     showOverlay(VIEW_CREATE_OVERLAY_ID, {});
   });
 
-  context.commands.register("bookmarks.activateView", async (args?: { id?: string }) => {
-    if (!args?.id) return;
-    const success = await activateViewBookmark(args.id);
+  context.commands.register("bookmarks.activateView", async (args?: unknown) => {
+    const a = args as { id?: string } | undefined;
+    if (!a?.id) return;
+    const success = await activateViewBookmark(a.id);
     if (success) {
       showToast("View activated", { variant: "success" });
     } else {
@@ -244,16 +245,18 @@ function activate(context: ExtensionContext): void {
     }
   });
 
-  context.commands.register("bookmarks.deleteView", (args?: { id?: string }) => {
-    if (!args?.id) return;
-    if (removeViewBookmark(args.id)) {
+  context.commands.register("bookmarks.deleteView", (args?: unknown) => {
+    const a = args as { id?: string } | undefined;
+    if (!a?.id) return;
+    if (removeViewBookmark(a.id)) {
       showToast("View bookmark removed", { variant: "info" });
     }
   });
 
-  context.commands.register("bookmarks.editView", (args?: { id?: string }) => {
-    if (!args?.id) return;
-    showOverlay(VIEW_EDIT_OVERLAY_ID, { data: { viewBookmarkId: args.id } });
+  context.commands.register("bookmarks.editView", (args?: unknown) => {
+    const a = args as { id?: string } | undefined;
+    if (!a?.id) return;
+    showOverlay(VIEW_EDIT_OVERLAY_ID, { data: { viewBookmarkId: a.id } });
   });
 
   context.commands.register("bookmarks.removeAllViews", () => {

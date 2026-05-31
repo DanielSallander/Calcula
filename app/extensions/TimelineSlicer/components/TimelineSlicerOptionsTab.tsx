@@ -2,7 +2,7 @@
 // PURPOSE: Contextual ribbon tab for timeline slicer options.
 // CONTEXT: Appears when a timeline slicer is selected on the grid.
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { css } from "@emotion/css";
 import { showDialog } from "@api";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
@@ -112,12 +112,23 @@ const tabStyles = {
 };
 
 // ============================================================================
+// Ribbon group definitions for collapse logic
+// ============================================================================
+
+const TIMELINE_GROUPS = [
+  { collapseOrder: 3, expandedWidth: 200 }, // Level
+  { collapseOrder: 2, expandedWidth: 120 }, // Filter
+  { collapseOrder: 1, expandedWidth: 150 }, // Timeline
+];
+
+// ============================================================================
 // Component
 // ============================================================================
 
 export function TimelineSlicerOptionsTab(): React.ReactElement {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [timeline, setTimeline] = useState<TimelineSlicer | null>(null);
-  const collapsed = useRibbonCollapse(3);
+  const collapsed = useRibbonCollapse(containerRef, TIMELINE_GROUPS);
 
   useEffect(() => {
     const handleUpdate = (e: Event) => {
@@ -179,7 +190,7 @@ export function TimelineSlicerOptionsTab(): React.ReactElement {
   const levelLabels = ["Years", "Quarters", "Months", "Days"];
 
   return (
-    <div className={tabStyles.container}>
+    <div ref={containerRef} className={tabStyles.container}>
       <RibbonGroup label="Level" icon="L" collapsed={collapsed[0]}>
         <div className={tabStyles.levelButtons}>
           {levels.map((level, i) => (

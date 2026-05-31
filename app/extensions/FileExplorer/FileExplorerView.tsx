@@ -7,7 +7,7 @@ import type { ActivityViewProps } from "@api/uiTypes";
 import {
   getSheets,
   getAllNamedRanges,
-  setActiveSheet as setActiveSheetApi,
+  setActiveSheetApi,
   openTaskPane,
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
@@ -42,7 +42,7 @@ import type { NotebookSummary } from "../ScriptNotebook/types";
 
 const h = React.createElement;
 
-function Icon({ children, color = "#666" }: { children: React.ReactNode; color?: string }) {
+function Icon({ children, color = "#666" }: { children?: React.ReactNode; color?: string }) {
   return h("svg", {
     width: 14,
     height: 14,
@@ -334,14 +334,14 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
   const [creatingType, setCreatingType] = useState<"file" | "folder" | null>(null);
   const [creatingParent, setCreatingParent] = useState<string>(""); // "" = root of files
   const [creatingName, setCreatingName] = useState("");
-  const createInputRef = useRef<HTMLInputElement>(null);
+  const createInputRef = useRef<HTMLInputElement>(null!);
 
   // Inline rename state
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string>("");
   const [renamingIsDir, setRenamingIsDir] = useState(false);
   const [renamingName, setRenamingName] = useState("");
-  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null!);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -390,7 +390,7 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
   const handleNavigateSheet = useCallback(async (index: number) => {
     try {
       await setActiveSheetApi(index);
-      setActiveSheet(index);
+      setActiveSheet(index as number);
     } catch (err) {
       console.error("[FileExplorer] Failed to switch sheet:", err);
     }
@@ -989,14 +989,14 @@ function TreeNodeItem({
   onContextMenu: (e: React.MouseEvent, node: TreeNode) => void;
   renamingNodeId: string | null;
   renamingName: string;
-  renameInputRef: React.RefObject<HTMLInputElement | null>;
+  renameInputRef: React.RefObject<HTMLInputElement>;
   onRenamingNameChange: (name: string) => void;
   onConfirmRename: () => void;
   onCancelRename: () => void;
   creatingType: "file" | "folder" | null;
   creatingInNodeId: string;
   creatingName: string;
-  createInputRef: React.RefObject<HTMLInputElement | null>;
+  createInputRef: React.RefObject<HTMLInputElement>;
   onCreatingNameChange: (name: string) => void;
   onConfirmCreate: () => void;
   onCancelCreate: () => void;

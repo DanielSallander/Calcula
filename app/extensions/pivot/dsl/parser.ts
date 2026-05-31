@@ -448,7 +448,7 @@ class Parser {
       return { key: tok.value.toLowerCase(), location: tok.location };
     }
     // Also accept some keywords that might be used as directive names
-    if (tok.type === TokenType.Identifier || isAnyIdentLike(tok)) {
+    if (isAnyIdentLike(tok)) {
       this.advance();
       return { key: tok.value.toLowerCase(), location: tok.location };
     }

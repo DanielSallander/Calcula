@@ -215,7 +215,7 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
         // Refresh table cache and grid
         await refreshCache();
         emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
-        emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+        emitAppEvent(AppEvents.GRID_REFRESH);
       } else {
         setError(res.error ?? "Failed to remove duplicates.");
       }

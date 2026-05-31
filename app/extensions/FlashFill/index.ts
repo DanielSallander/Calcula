@@ -43,6 +43,7 @@ const cleanupFns: (() => void)[] = [];
  */
 async function executeFlashFill(): Promise<void> {
   const snapshot = getGridStateSnapshot();
+  if (!snapshot) return;
   const selection = snapshot.selection;
   if (!selection) {
     showToast("Select a cell in the column you want to fill.", { variant: "warning" });
@@ -312,13 +313,8 @@ function activate(context: ExtensionContext): void {
   console.log("[FlashFill] Activating...");
 
   // 1. Register command
-  context.commands.register({
-    id: "flashfill.execute",
-    name: "Flash Fill",
-    shortcut: "Ctrl+E",
-    execute: async () => {
-      await executeFlashFill();
-    },
+  context.commands.register("flashfill.execute", async () => {
+    await executeFlashFill();
   });
 
   // 2. Register Data menu item

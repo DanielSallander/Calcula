@@ -1261,8 +1261,8 @@ function activate(context: ExtensionContext): void {
           // Use indentLevel to determine the correct field index.
           // For columns, indentLevel carries the column field depth directly.
           const fieldIndex = bounds.isRow
-            ? (cell.indentLevel || pivotColIndex)
-            : cell.indentLevel;
+            ? (cell.indentLevel ?? pivotColIndex)
+            : (cell.indentLevel ?? 0);
 
           try {
             await togglePivotGroup({
@@ -1362,7 +1362,7 @@ function activate(context: ExtensionContext): void {
   // Register double-click interceptor - toggle hierarchy on header double-click,
   // and silently block edit mode for all pivot cells.
   cleanupFunctions.push(
-    context.grid.cellClicks.registerDoubleClickInterceptor(async (row, col, event) => {
+    context.grid.cellClicks.registerDoubleClickInterceptor((row, col, event) => {
       // Check if double-click is on a +/- icon -> just consume it (no toggle).
       // The single-click interceptor already handled the toggle; if we toggled
       // again here the state would flip back (double-toggle bug).
@@ -1403,7 +1403,7 @@ function activate(context: ExtensionContext): void {
           // If this cell is an expandable row header, toggle it
           if (cell.cellType === "RowHeader" && cell.isExpandable) {
             try {
-              await togglePivotGroup({
+              togglePivotGroup({
                 pivotId,
                 isRow: true,
                 fieldIndex: cell.indentLevel || pivotColIndex,

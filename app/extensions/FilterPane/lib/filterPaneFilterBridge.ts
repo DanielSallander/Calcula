@@ -324,7 +324,7 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
       );
     }
 
-    emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+    emitAppEvent(AppEvents.GRID_REFRESH);
   } catch (err) {
     console.error("[FilterPane] Failed to apply filter:", err);
   }
@@ -370,7 +370,7 @@ export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
       }
     }
 
-    emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+    emitAppEvent(AppEvents.GRID_REFRESH);
   } catch (err) {
     console.error("[FilterPane] Failed to clear filter:", err);
   }

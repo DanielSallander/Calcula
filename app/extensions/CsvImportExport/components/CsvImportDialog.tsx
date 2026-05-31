@@ -11,7 +11,7 @@ import {
   restoreFocusToGrid,
   showToast,
   addSheet,
-  setActiveSheet,
+  setActiveSheetApi,
   getSheets,
 } from "@api";
 import type { CellUpdateInput } from "@api";
@@ -293,11 +293,7 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
         });
         setRawText(text);
       } catch (err) {
-        showToast({
-          message: `Failed to read file: ${err}`,
-          type: "error",
-          duration: 5000,
-        });
+        showToast(`Failed to read file: ${err}`, { type: "error", duration: 5000 });
       }
     }
   }, [encoding]);
@@ -321,7 +317,7 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
     try {
       const allRows = parseCsv(rawText, parseOptions);
       if (allRows.length === 0) {
-        showToast({ message: "No data to import.", type: "warning", duration: 3000 });
+        showToast("No data to import.", { type: "warning", duration: 3000 });
         setImporting(false);
         return;
       }
@@ -334,7 +330,7 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
       if (importTarget === "new") {
         const sheetsResult = await addSheet();
         const newIdx = sheetsResult.sheets.length - 1;
-        await setActiveSheet(newIdx);
+        await setActiveSheetApi(newIdx);
         // Dispatch to frontend
         window.dispatchEvent(
           new CustomEvent("sheets:changed", { detail: sheetsResult }),
@@ -377,20 +373,12 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
 
       window.dispatchEvent(new CustomEvent("grid:refresh"));
 
-      showToast({
-        message: `Imported ${dataRows.length} rows from CSV.`,
-        type: "success",
-        duration: 3000,
-      });
+      showToast(`Imported ${dataRows.length} rows from CSV.`, { type: "success", duration: 3000 });
 
       restoreFocusToGrid();
       onClose();
     } catch (err) {
-      showToast({
-        message: `Import failed: ${err}`,
-        type: "error",
-        duration: 5000,
-      });
+      showToast(`Import failed: ${err}`, { type: "error", duration: 5000 });
     } finally {
       setImporting(false);
     }

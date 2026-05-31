@@ -4,8 +4,6 @@
 // custom actions, and event handlers.
 // NOTE: Moved from core/registry to shell/registries per microkernel architecture.
 
-import type { SheetInfo } from "../../core/lib/tauri-api";
-
 // ============================================================================
 // Types for Sheet Extensions
 // ============================================================================
@@ -13,7 +11,7 @@ import type { SheetInfo } from "../../core/lib/tauri-api";
 /** Context passed to sheet-related extension callbacks */
 export interface SheetContext {
   /** The sheet being acted upon */
-  sheet: SheetInfo;
+  sheet: { name: string; index: number };
   /** Index of the sheet */
   index: number;
   /** Whether this is the active sheet */

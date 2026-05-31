@@ -159,7 +159,7 @@ export const CsvExportDialog: React.FC<DialogProps> = ({ onClose }) => {
       // Get grid bounds to know the data extent
       const [maxRow, maxCol] = await getGridBounds();
       if (maxRow === 0 && maxCol === 0) {
-        showToast({ message: "No data to export.", type: "warning", duration: 3000 });
+        showToast("No data to export.", { type: "warning", duration: 3000 });
         setExporting(false);
         return;
       }
@@ -215,21 +215,13 @@ export const CsvExportDialog: React.FC<DialogProps> = ({ onClose }) => {
           encoding: encoding || null,
         });
 
-        showToast({
-          message: `Exported ${data.length} rows to CSV.`,
-          type: "success",
-          duration: 3000,
-        });
+        showToast(`Exported ${data.length} rows to CSV.`, { type: "success", duration: 3000 });
 
         restoreFocusToGrid();
         onClose();
       }
     } catch (err) {
-      showToast({
-        message: `Export failed: ${err}`,
-        type: "error",
-        duration: 5000,
-      });
+      showToast(`Export failed: ${err}`, { type: "error", duration: 5000 });
     } finally {
       setExporting(false);
     }

@@ -702,7 +702,7 @@ function ErrorBarsSection({ spec, onSpecChange }: DesignTabProps): React.ReactEl
 
   const updateErrorBars = (updates: Partial<ErrorBarOptions>) => {
     const newEB = { ...errorBars, ...updates };
-    onSpecChange({ markOptions: { ...opts, errorBars: newEB } });
+    onSpecChange({ markOptions: { ...opts, errorBars: newEB } as any });
   };
 
   return (

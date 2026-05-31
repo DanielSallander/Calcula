@@ -26,6 +26,7 @@
     /* ARCHITECTURE PATHS */
     /* This allows imports like: import { ... } from '@api/types' */
     "paths": {
+      "@api": ["./src/api/index.ts"],
       "@api/*": ["./src/api/*"],
       "@core/*": ["./src/core/*"],
       "@shell/*": ["./src/shell/*"]

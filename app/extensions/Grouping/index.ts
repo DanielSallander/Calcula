@@ -257,10 +257,10 @@ function activate(context: ExtensionContext): void {
   console.log("[Grouping] Activating...");
 
   // 1. Register the post-header overlay renderer
-  const unregOverlay = context.grid.overlays.register(
-    "grouping-outline-bar",
-    renderOutlineBar,
-  );
+  const unregOverlay = context.grid.overlays.register({
+    type: "grouping-outline-bar",
+    render: (ctx) => renderOutlineBar(ctx.ctx, ctx.config, ctx.viewport, ctx.dimensions, ctx.canvasWidth, ctx.canvasHeight),
+  });
   cleanupFns.push(unregOverlay);
 
   // 2. Register group settings dialog

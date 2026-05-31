@@ -120,6 +120,17 @@ function runRustTests() {
   };
 }
 
+function runTypeCheck() {
+  log("Phase 1b: TypeScript type check (tsc --noEmit)");
+  const result = exec("yarn check-types 2>&1", { timeout: 120_000 }); // 2 min
+  log(result.success ? "  [PASS] Type check passed" : "  [FAIL] Type errors found");
+  return {
+    phase: "typecheck",
+    success: result.success,
+    output: result.output,
+  };
+}
+
 function runUnitTests() {
   log("Phase 2: Vitest unit tests (yarn test)");
   const result = exec("yarn test 2>&1", { timeout: 300_000 });
@@ -995,6 +1006,11 @@ async function main() {
     // Phase 1: Rust tests
     if (!SKIP_RUST && (!ONLY || ONLY === "rust")) {
       results.push(runRustTests());
+    }
+
+    // Phase 1b: TypeScript type check
+    if (!ONLY || ONLY === "typecheck") {
+      results.push(runTypeCheck());
     }
 
     // Phase 2: Vitest unit tests

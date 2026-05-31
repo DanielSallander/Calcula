@@ -1266,10 +1266,10 @@ export const excelGapFeaturesSuite: TestSuite = {
         await ctx.settle();
 
         const cell = await ctx.getCell(A.row, A.col);
-        const val = parseFloat(cell.display.replace(",", "."));
+        const val = parseFloat(cell!.display.replace(",", "."));
         assertTrue(
           Math.abs(val - 1.1752) < 0.001,
-          `SINH(1) should be ~1.1752, got ${cell.display}`
+          `SINH(1) should be ~1.1752, got ${cell!.display}`
         );
       },
     },
@@ -1343,10 +1343,10 @@ export const excelGapFeaturesSuite: TestSuite = {
         await ctx.settle();
 
         const cell = await ctx.getCell(A.row, A.col);
-        const val = parseFloat(cell.display.replace(",", "."));
+        const val = parseFloat(cell!.display.replace(",", "."));
         assertTrue(
           Math.abs(val - 1.7724) < 0.001,
-          `SQRTPI(1) should be ~1.7724, got ${cell.display}`
+          `SQRTPI(1) should be ~1.7724, got ${cell!.display}`
         );
       },
     },

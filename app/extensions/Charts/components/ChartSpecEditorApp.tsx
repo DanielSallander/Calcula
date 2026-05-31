@@ -283,14 +283,11 @@ function renderInlineText(text: string, key?: string): React.ReactNode {
     let firstMatch: { index: number; length: number; node: React.ReactNode } | null = null;
 
     if (boldMatch && boldMatch.index !== undefined) {
-      const idx = boldMatch.index;
-      if (!firstMatch || idx < firstMatch.index) {
-        firstMatch = {
-          index: idx,
-          length: boldMatch[0].length,
-          node: <strong key={`${key}-b-${partKey}`} style={{ color: "#e0e0e0", fontWeight: 600 }}>{boldMatch[1]}</strong>,
-        };
-      }
+      firstMatch = {
+        index: boldMatch.index,
+        length: boldMatch[0].length,
+        node: <strong key={`${key}-b-${partKey}`} style={{ color: "#e0e0e0", fontWeight: 600 }}>{boldMatch[1]}</strong>,
+      };
     }
     if (codeMatch && codeMatch.index !== undefined) {
       const idx = codeMatch.index;

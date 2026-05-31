@@ -1192,7 +1192,7 @@ function SpreadsheetContent({
         setSplitDrag(null);
         return;
       }
-      handleMouseUp(event);
+      handleMouseUp();
     },
     [handleMouseUp, splitDrag, splitConfig]
   );

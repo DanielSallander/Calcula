@@ -111,6 +111,7 @@ export {
   redo,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
 
   // Find & Replace
   findAll,

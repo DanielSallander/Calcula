@@ -6,6 +6,8 @@ import { useToastStore } from "../shell/Toast/useToastStore";
 
 export interface ToastOptions {
   variant?: "info" | "success" | "warning" | "error";
+  /** Alias for `variant` — either name works. */
+  type?: "info" | "success" | "warning" | "error";
   /** Auto-dismiss delay in ms. Default: 5000. Use 0 to require manual dismiss. */
   duration?: number;
 }
@@ -18,7 +20,7 @@ export interface ToastOptions {
 export function showToast(message: string, options: ToastOptions = {}): void {
   useToastStore.getState().addToast({
     message,
-    variant: options.variant ?? "info",
+    variant: options.variant ?? options.type ?? "info",
     duration: options.duration ?? 5000,
   });
 }

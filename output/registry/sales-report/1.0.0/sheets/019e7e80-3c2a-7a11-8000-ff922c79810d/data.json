@@ -1,0 +1,348 @@
+{
+  "cells": {
+    "A1": {
+      "v": "Sales Performance Report",
+      "t": "s"
+    },
+    "A10": {
+      "v": "PriceRange",
+      "t": "s"
+    },
+    "A11": {
+      "v": "ComputedRevenue",
+      "t": "s"
+    },
+    "A13": {
+      "v": "Filtered Measures",
+      "t": "s"
+    },
+    "A14": {
+      "v": "BikeSales",
+      "t": "s"
+    },
+    "A15": {
+      "v": "ClothingSales",
+      "t": "s"
+    },
+    "A16": {
+      "v": "USSales",
+      "t": "s"
+    },
+    "A17": {
+      "v": "BikeSharePct",
+      "t": "s"
+    },
+    "A18": {
+      "v": "HighValueOrders",
+      "t": "s"
+    },
+    "A19": {
+      "v": "USBikeSales",
+      "t": "s"
+    },
+    "A20": {
+      "v": "SalesAllProducts",
+      "t": "s"
+    },
+    "A21": {
+      "v": "SalesAllCustomers",
+      "t": "s"
+    },
+    "A22": {
+      "v": "SalesClearDateAndTerritory",
+      "t": "s"
+    },
+    "A23": {
+      "v": "ClearColumnColor",
+      "t": "s"
+    },
+    "A25": {
+      "v": "Advanced Analytics",
+      "t": "s"
+    },
+    "A26": {
+      "v": "RoundedAvgOrderValue",
+      "t": "s"
+    },
+    "A27": {
+      "v": "VolumeCategory",
+      "t": "s"
+    },
+    "A28": {
+      "v": "SalesHealthScore",
+      "t": "s"
+    },
+    "A29": {
+      "v": "BikeVsClothingRatio",
+      "t": "s"
+    },
+    "A3": {
+      "v": "TotalSales",
+      "t": "s"
+    },
+    "A30": {
+      "v": "SalesInThousandsRounded",
+      "t": "s"
+    },
+    "A31": {
+      "v": "EstTaxAndMarkup",
+      "t": "s"
+    },
+    "A32": {
+      "v": "WeightedAvgPrice",
+      "t": "s"
+    },
+    "A33": {
+      "v": "QtyBucketLabel",
+      "t": "s"
+    },
+    "A34": {
+      "v": "NormalizedSales",
+      "t": "s"
+    },
+    "A35": {
+      "v": "SalesConcentration",
+      "t": "s"
+    },
+    "A36": {
+      "v": "SqrtSalesPerCustomer",
+      "t": "s"
+    },
+    "A37": {
+      "v": "IsSignificantSeller",
+      "t": "s"
+    },
+    "A38": {
+      "v": "PriceQtyCorrelation",
+      "t": "s"
+    },
+    "A39": {
+      "v": "RevenueModBucket",
+      "t": "s"
+    },
+    "A4": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "A40": {
+      "v": "BikeQtyIfHigh",
+      "t": "s"
+    },
+    "A41": {
+      "v": "PctOfProductTotal",
+      "t": "s"
+    },
+    "A42": {
+      "v": "PctOfCustomerTotal",
+      "t": "s"
+    },
+    "A43": {
+      "v": "KeepBikesClearTerritory",
+      "t": "s"
+    },
+    "A44": {
+      "v": "CategoryShareClearDate",
+      "t": "s"
+    },
+    "A45": {
+      "v": "TotalSalesAccumulated",
+      "t": "s"
+    },
+    "A6": {
+      "v": "Key Performance Indicators",
+      "t": "s"
+    },
+    "A7": {
+      "v": "AvgOrderValue",
+      "t": "s"
+    },
+    "A8": {
+      "v": "RevenuePerCustomer",
+      "t": "s"
+    },
+    "A9": {
+      "v": "AvgQtyPerLine",
+      "t": "s"
+    },
+    "B10": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B11": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B14": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B15": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B16": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B17": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B18": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B19": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B20": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B21": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B22": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B23": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B26": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B27": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B28": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B29": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B3": {
+      "v": "TotalQty",
+      "t": "s"
+    },
+    "B30": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B31": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B32": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B33": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B34": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B35": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B36": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B37": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B38": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B39": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B4": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B40": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B41": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B42": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B43": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B44": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B45": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B7": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B8": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "B9": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "C3": {
+      "v": "OrderLineCount",
+      "t": "s"
+    },
+    "C4": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "D3": {
+      "v": "DistinctCustomers",
+      "t": "s"
+    },
+    "D4": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "E3": {
+      "v": "DistinctProducts",
+      "t": "s"
+    },
+    "E4": {
+      "v": "(connect to view)",
+      "t": "s"
+    },
+    "F3": {
+      "v": "AvgUnitPrice",
+      "t": "s"
+    },
+    "F4": {
+      "v": "(connect to view)",
+      "t": "s"
+    }
+  }
+}

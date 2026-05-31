@@ -56,6 +56,16 @@ export interface Selection {
   type: SelectionType;
   /** Additional selection ranges from Ctrl+Click multi-selection */
   additionalRanges?: SelectionRange[];
+  /** Active cell row (alias for endRow, used by extensions) */
+  activeRow?: number;
+  /** Active cell column (alias for endCol, used by extensions) */
+  activeCol?: number;
+  /** Active cell row (alias for endRow, used by scriptable objects) */
+  row?: number;
+  /** Active cell column (alias for endCol, used by scriptable objects) */
+  col?: number;
+  /** Sheet index this selection belongs to (0-based) */
+  sheetIndex?: number;
 }
 
 /**
@@ -190,6 +200,10 @@ export interface GridConfig {
    * Managed by the Grouping extension; default is 0 (no outline bar).
    */
   outlineBarHeight?: number;
+  /** Index of the currently active sheet (used by extensions) */
+  activeSheet?: number;
+  /** Default row height in pixels (alias for defaultCellHeight, used by Print extension) */
+  defaultRowHeight?: number;
 }
 
 /**

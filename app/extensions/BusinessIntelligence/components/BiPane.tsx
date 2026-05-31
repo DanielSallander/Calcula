@@ -328,7 +328,7 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
 
       const response = await insertResult({
         connectionId: selectedConnectionId,
-        sheetIndex: gridState.sheetContext?.activeSheet ?? 0,
+        sheetIndex: gridState.sheetContext?.activeSheetIndex ?? 0,
         startRow,
         startCol,
       });

@@ -728,7 +728,7 @@ function activate(context: ExtensionContext): void {
     }
 
     // General chart context menu (body, title, legend, etc.)
-    if (hover.hitResult.type === "body" || hover.hitResult.type === "title" || hover.hitResult.type === "legend") {
+    if ((hover.hitResult.type as string) === "body" || hover.hitResult.type === "title" || hover.hitResult.type === "legend") {
       e.preventDefault();
       e.stopPropagation();
 
@@ -746,7 +746,7 @@ function activate(context: ExtensionContext): void {
         emitAppEvent("scriptable-objects:edit-script", {
           objectType: "chart",
           instanceId: String(hover.chartId),
-          objectName: chart?.spec?.title?.text ?? `Chart ${hover.chartId}`,
+          objectName: chart?.spec?.title ?? `Chart ${hover.chartId}`,
         });
       });
       menu.appendChild(item);
@@ -1142,7 +1142,7 @@ function handleQuickAccessButtonClick(
     hideOverlay(QA_OVERLAY_ID);
   }
 
-  context.events.emit(AppEvents.GRID_REFRESH);
+  emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 // ============================================================================

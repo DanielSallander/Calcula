@@ -191,7 +191,7 @@ function getSelectedRow(): number | null {
     const row = parseInt(selEl.getAttribute("data-active-row") || "");
     if (!isNaN(row)) return row;
   }
-  const sel = (window as Record<string, unknown>).__calcula_selection as
+  const sel = (window as unknown as Record<string, unknown>).__calcula_selection as
     | { activeRow?: number }
     | undefined;
   return sel?.activeRow ?? null;
@@ -207,7 +207,7 @@ function getSelectedCol(): number | null {
     const col = parseInt(selEl.getAttribute("data-active-col") || "");
     if (!isNaN(col)) return col;
   }
-  const sel = (window as Record<string, unknown>).__calcula_selection as
+  const sel = (window as unknown as Record<string, unknown>).__calcula_selection as
     | { activeCol?: number }
     | undefined;
   return sel?.activeCol ?? null;
@@ -369,10 +369,10 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
   // 5. Register page break preview overlay
-  const unregOverlay = context.grid.overlays.register(
-    "page-break-preview",
-    renderPageBreakOverlay,
-  );
+  const unregOverlay = context.grid.overlays.register({
+    type: "page-break-preview",
+    render: (ctx) => renderPageBreakOverlay(ctx.ctx, ctx.config, ctx.viewport, ctx.dimensions, ctx.canvasWidth, ctx.canvasHeight),
+  });
   cleanupFns.push(unregOverlay);
 
   // 6. Listen for view mode changes to sync page break preview state

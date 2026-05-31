@@ -4,6 +4,7 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import type { Selection } from "@api";
 import { CoreCommands } from "@api/commands";
 import { ExtensionRegistry, IconFormatPainter } from "@api";
 import { registerMenuItem } from "@api/ui";
@@ -15,7 +16,7 @@ import { isFormatPainterActive } from "./formatPainterState";
 // ============================================================================
 
 let isActivated = false;
-let currentSelection: { startRow: number; startCol: number; endRow: number; endCol: number; type: string } | null = null;
+let currentSelection: Selection | null = null;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================

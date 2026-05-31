@@ -12,6 +12,7 @@ import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides
 import type { MousePosition, HeaderDragState } from "../types";
 import { getColumnFromHeader, getRowFromHeader } from "../../../lib/gridRenderer";
 import { getColumnWidth } from "../../../lib/gridRenderer/layout/dimensions";
+import { createEmptyDimensionOverrides } from "../../../types";
 import { checkColumnHeaderClickInterceptor } from "../../../../api/columnHeaderOverrides";
 
 interface HeaderSelectionDependencies {
@@ -126,9 +127,9 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     const scrollX = viewport.scrollX || 0;
     let colX = rowHeaderWidth - scrollX;
     for (let c = 0; c < headerCol; c++) {
-      colX += getColumnWidth(c, config, dimensions);
+      colX += getColumnWidth(c, config, dimensions ?? createEmptyDimensionOverrides());
     }
-    const colWidth = getColumnWidth(headerCol, config, dimensions);
+    const colWidth = getColumnWidth(headerCol, config, dimensions ?? createEmptyDimensionOverrides());
 
     const interceptResult = checkColumnHeaderClickInterceptor(
       headerCol, mouseX, mouseY, colX, colWidth, colHeaderHeight,

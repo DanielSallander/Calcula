@@ -31,7 +31,7 @@ export async function applyTimelineFilter(
     }
 
     // Trigger grid refresh
-    emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+    emitAppEvent(AppEvents.GRID_REFRESH);
 
     // Notify the Pivot extension to refresh its overlay
     window.dispatchEvent(new Event("pivot:refresh"));

@@ -44,6 +44,9 @@ export type ShowValuesAs =
   | 'difference'
   | 'percent_difference'
   | 'running_total'
+  | 'percent_of_running_total'
+  | 'rank_ascending'
+  | 'rank_descending'
   | 'index';
 
 // Report layout matching ReportLayout enum
@@ -128,6 +131,8 @@ export interface BiPivotModelInfo {
   measures: MeasureField[];
   /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
   lookupColumns?: string[];
+  /** The connection ID this pivot is associated with (BI pivots only) */
+  connectionId?: number;
 }
 
 /** Table metadata from a BI model */

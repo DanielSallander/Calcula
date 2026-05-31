@@ -179,8 +179,8 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
       // For row headers: indentLevel for compact layout, col for outline/tabular
       // For column headers: indentLevel carries the column field depth (set by backend)
       const fieldIndex = isRow
-        ? (cell.indentLevel || col)
-        : cell.indentLevel;
+        ? (cell.indentLevel ?? col)
+        : (cell.indentLevel ?? 0);
 
       const newExpandedState = !isExpanded;
       onExpandCollapse?.(row, col, newExpandedState, isRow);

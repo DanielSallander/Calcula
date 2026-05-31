@@ -6,6 +6,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   AppEvents,
   hideDialog,
+  registerCommitGuard,
 } from "@api";
 import { protectionEditGuard, PROTECTION_WARNING_DIALOG_ID } from "./handlers/editGuardHandler";
 import { ProtectionWarningModal } from "./components/ProtectionWarningModal";
@@ -51,7 +52,13 @@ function activate(context: ExtensionContext): void {
   console.log("[Protection] Activating...");
 
   // 1. Register edit guard (blocks editing locked cells on protected sheets)
-  const unregEditGuard = context.grid.editGuards.register(protectionEditGuard);
+  const unregEditGuard = registerCommitGuard(async (row, col, _value) => {
+    const result = await protectionEditGuard(row, col);
+    if (result && result.blocked) {
+      return { action: "block" as const };
+    }
+    return null;
+  });
   cleanupFns.push(unregEditGuard);
 
   // 2. Register dialogs

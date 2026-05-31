@@ -2047,6 +2047,7 @@ export function useEditing(): UseEditingReturn {
     }
 
     // Re-parse the original formula to restore highlighting
+    if (!editing) return;
     const refs = parseFormulaReferences(editing.value, false);
     dispatch(setFormulaReferences(refs));
 

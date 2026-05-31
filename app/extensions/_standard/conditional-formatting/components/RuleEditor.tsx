@@ -177,9 +177,9 @@ export function RuleEditor({ rule, onChange, isNew }: RuleEditorProps): React.Re
   }, [onChange]);
   
   // Handle condition property change
-  const handleConditionChange = useCallback(<K extends keyof RuleCondition>(
-    key: K,
-    value: RuleCondition[K]
+  const handleConditionChange = useCallback((
+    key: string,
+    value: unknown
   ) => {
     onChange({ condition: { ...rule.condition, [key]: value } as RuleCondition });
   }, [rule.condition, onChange]);

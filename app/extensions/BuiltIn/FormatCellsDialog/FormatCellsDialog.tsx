@@ -15,7 +15,7 @@ import {
   applyFormatting,
 } from "@api/lib";
 import { setCellProtection, getCellProtection } from "@api/backend";
-import { useFormatCellsStore, type FillMode } from "./hooks/useFormatCellsState";
+import { useFormatCellsStore, type FillMode, type BorderSide } from "./hooks/useFormatCellsState";
 import type { FillData, FillParam, PatternType, GradientDirection } from "@api";
 import { NumberTab } from "./tabs/NumberTab";
 import { AlignmentTab } from "./tabs/AlignmentTab";
@@ -117,7 +117,7 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
   const dialogRef = useRef<HTMLDivElement>(null);
 
   const gridState = useGridState();
-  const selection = gridState.selection;
+  const selection = gridState.selection!;
 
   const store = useFormatCellsStore();
   const { activeTab, setActiveTab, loadFromStyle, reset } = store;
@@ -153,12 +153,12 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
             backgroundColor: style.backgroundColor,
             // Load fill data
             ...(style.fill ? loadFillFromStyleData(style.fill) : {}),
-            borderTop: style.borderTop ? { style: style.borderTop.style, color: style.borderTop.color } : undefined,
-            borderRight: style.borderRight ? { style: style.borderRight.style, color: style.borderRight.color } : undefined,
-            borderBottom: style.borderBottom ? { style: style.borderBottom.style, color: style.borderBottom.color } : undefined,
-            borderLeft: style.borderLeft ? { style: style.borderLeft.style, color: style.borderLeft.color } : undefined,
-            borderDiagonalDown: style.borderDiagonalDown ? { style: style.borderDiagonalDown.style, color: style.borderDiagonalDown.color } : undefined,
-            borderDiagonalUp: style.borderDiagonalUp ? { style: style.borderDiagonalUp.style, color: style.borderDiagonalUp.color } : undefined,
+            borderTop: style.borderTop ? { style: style.borderTop.style as BorderSide["style"], color: style.borderTop.color } : undefined,
+            borderRight: style.borderRight ? { style: style.borderRight.style as BorderSide["style"], color: style.borderRight.color } : undefined,
+            borderBottom: style.borderBottom ? { style: style.borderBottom.style as BorderSide["style"], color: style.borderBottom.color } : undefined,
+            borderLeft: style.borderLeft ? { style: style.borderLeft.style as BorderSide["style"], color: style.borderLeft.color } : undefined,
+            borderDiagonalDown: style.borderDiagonalDown ? { style: style.borderDiagonalDown.style as BorderSide["style"], color: style.borderDiagonalDown.color } : undefined,
+            borderDiagonalUp: style.borderDiagonalUp ? { style: style.borderDiagonalUp.style as BorderSide["style"], color: style.borderDiagonalUp.color } : undefined,
           });
         }
 

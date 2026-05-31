@@ -185,7 +185,7 @@ export async function syncReportConnections(
     }
 
     if (removed.length > 0 || added.length > 0) {
-      emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+      emitAppEvent(AppEvents.GRID_REFRESH);
     }
   } catch (err) {
     console.error("[Slicer] Failed to sync report connections:", err);
@@ -233,7 +233,7 @@ export async function applySlicerFilter(slicer: Slicer): Promise<void> {
     }
 
     // Trigger grid refresh so filtered rows are visible
-    emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+    emitAppEvent(AppEvents.GRID_REFRESH);
   } catch (err) {
     console.error("[Slicer] Failed to apply filter:", err);
   }

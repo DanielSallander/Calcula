@@ -34,6 +34,7 @@ import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
 import { isGlobalFormulaMode, isEditingFormula, isChartSeriesRefMode, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
 import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
+import { createEmptyDimensionOverrides } from "../../types";
 import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
 
 // Custom cursor data URLs for Excel-style header selection arrows
@@ -139,7 +140,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const refDragStartRef = useRef<CellPosition | null>(null);
   const refResizeStartRef = useRef<CellPosition | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
-  const overlayResizeStateRef = useRef<{ region: import("../../../../api/gridOverlays").GridRegion; currentEndRow: number; currentEndCol: number } | null>(null);
+  const overlayResizeStateRef = useRef<{ region: import("../../lib/gridRenderer/core").GridRegion; currentEndRow: number; currentEndCol: number } | null>(null);
   const overlayMoveStateRef = useRef<OverlayMoveState | null>(null);
 
   // -------------------------------------------------------------------------
@@ -639,9 +640,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                   const scrollX = viewport.scrollX || 0;
                   let colX = rowHeaderWidth - scrollX;
                   for (let c = 0; c < headerCol; c++) {
-                    colX += getColumnWidth(c, config, dimensions);
+                    colX += getColumnWidth(c, config, dimensions ?? createEmptyDimensionOverrides());
                   }
-                  const colWidth = getColumnWidth(headerCol, config, dimensions);
+                  const colWidth = getColumnWidth(headerCol, config, dimensions ?? createEmptyDimensionOverrides());
                   const filterBtnLeft = colX + colWidth - FILTER_BUTTON_SIZE - FILTER_BUTTON_MARGIN * 2;
                   if (mouseX >= filterBtnLeft && mouseX <= colX + colWidth) {
                     setCursorStyle("pointer");

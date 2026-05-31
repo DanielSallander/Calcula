@@ -320,6 +320,7 @@ export { dispatchGridAction } from "./gridDispatch";
 // ============================================================================
 
 export { registerEditGuard, checkRangeGuards } from "./editGuards";
+export type { EditGuardResult, EditGuardFn } from "./editGuards";
 
 // ============================================================================
 // Commit Guards
@@ -883,6 +884,7 @@ export type {
   GradientDirection,
   ViewMode,
   SortRangeResult,
+  UnderlineStyle,
 } from "./types";
 
 // ============================================================================
@@ -1387,7 +1389,7 @@ export type {
   ObjectLifecycleStage,
   BaseObjectContext,
   WorkbookContext,
-  SheetContext,
+  SheetContext as ScriptSheetContext,
   CellContext,
   RowContext,
   ColumnContext,

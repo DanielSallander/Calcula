@@ -40,7 +40,7 @@ export function FontTab(): React.ReactElement {
   // Theme font resolution for display
   const theme = getCachedTheme();
   const themeFontLabels: Record<string, string> = useMemo(() => {
-    if (!theme) return {};
+    if (!theme) return {} as Record<string, string>;
     return {
       Body: `Body (${theme.fonts.body})`,
       Headings: `Headings (${theme.fonts.heading})`,

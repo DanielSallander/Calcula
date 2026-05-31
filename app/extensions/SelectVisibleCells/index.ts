@@ -33,7 +33,7 @@ import { getGridStateSnapshot } from "@api/grid";
 function selectVisibleCells(): void {
   const state = getGridStateSnapshot();
   if (!state?.selection) {
-    showToast({ message: "No selection", type: "warning" });
+    showToast("No selection", { type: "warning" });
     return;
   }
 
@@ -81,7 +81,7 @@ function selectVisibleCells(): void {
   }
 
   if (rowBands.length === 0 || colSpans.length === 0) {
-    showToast({ message: "No visible cells in selection", type: "info" });
+    showToast("No visible cells in selection", { type: "info" });
     return;
   }
 
@@ -119,10 +119,7 @@ function selectVisibleCells(): void {
   );
   const totalOriginal = (maxRow - minRow + 1) * (maxCol - minCol + 1);
   if (totalVisible < totalOriginal) {
-    showToast({
-      message: `Selected ${totalVisible} visible cell(s) (${totalOriginal - totalVisible} hidden)`,
-      type: "info",
-    });
+    showToast(`Selected ${totalVisible} visible cell(s) (${totalOriginal - totalVisible} hidden)`, { type: "info" });
   }
 }
 

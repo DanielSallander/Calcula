@@ -255,37 +255,38 @@ export function DataValidationDialog(props: DialogProps) {
     } else if ("wholeNumber" in rule) {
       setValidationType("wholeNumber");
       setOperator(rule.wholeNumber.operator);
-      setFormula1(rule.wholeNumber.value1);
-      setFormula2(rule.wholeNumber.value2 ?? "");
+      setFormula1(String(rule.wholeNumber.formula1));
+      setFormula2(rule.wholeNumber.formula2 != null ? String(rule.wholeNumber.formula2) : "");
     } else if ("decimal" in rule) {
       setValidationType("decimal");
       setOperator(rule.decimal.operator);
-      setFormula1(rule.decimal.value1);
-      setFormula2(rule.decimal.value2 ?? "");
+      setFormula1(String(rule.decimal.formula1));
+      setFormula2(rule.decimal.formula2 != null ? String(rule.decimal.formula2) : "");
     } else if ("list" in rule) {
       setValidationType("list");
       const src = rule.list.source;
-      if ("inline" in src) {
-        setListSource(src.inline.join(","));
+      if ("values" in src) {
+        setListSource(src.values.join(","));
       } else if ("range" in src) {
-        setListSource(src.range);
+        const r = src.range;
+        setListSource(`=${r.startRow}:${r.startCol}:${r.endRow}:${r.endCol}`);
       }
       setInCellDropdown(rule.list.inCellDropdown);
     } else if ("date" in rule) {
       setValidationType("date");
       setOperator(rule.date.operator);
-      setFormula1(rule.date.value1);
-      setFormula2(rule.date.value2 ?? "");
+      setFormula1(String(rule.date.formula1));
+      setFormula2(rule.date.formula2 != null ? String(rule.date.formula2) : "");
     } else if ("time" in rule) {
       setValidationType("time");
       setOperator(rule.time.operator);
-      setFormula1(rule.time.value1);
-      setFormula2(rule.time.value2 ?? "");
+      setFormula1(String(rule.time.formula1));
+      setFormula2(rule.time.formula2 != null ? String(rule.time.formula2) : "");
     } else if ("textLength" in rule) {
       setValidationType("textLength");
       setOperator(rule.textLength.operator);
-      setFormula1(rule.textLength.value1);
-      setFormula2(rule.textLength.value2 ?? "");
+      setFormula1(String(rule.textLength.formula1));
+      setFormula2(rule.textLength.formula2 != null ? String(rule.textLength.formula2) : "");
     } else if ("custom" in rule) {
       setValidationType("custom");
       setCustomFormula(rule.custom.formula);
@@ -295,12 +296,12 @@ export function DataValidationDialog(props: DialogProps) {
     setIgnoreBlanks(dv.ignoreBlanks);
 
     // Populate prompt
-    setShowPrompt(dv.prompt.show);
+    setShowPrompt(dv.prompt.showPrompt);
     setPromptTitle(dv.prompt.title);
     setPromptMessage(dv.prompt.message);
 
     // Populate error alert
-    setShowAlert(dv.errorAlert.show);
+    setShowAlert(dv.errorAlert.showAlert);
     setAlertStyle(dv.errorAlert.style);
     setErrorTitle(dv.errorAlert.title);
     setErrorMessage(dv.errorAlert.message);
@@ -327,32 +328,36 @@ export function DataValidationDialog(props: DialogProps) {
 
   // Build the rule object from current state
   function buildRule(): DataValidationRule {
+    const f1 = parseFloat(formula1) || 0;
+    const f2 = formula2 ? parseFloat(formula2) || 0 : undefined;
     switch (validationType) {
       case "none":
-        return { none: {} };
+        return { none: true };
       case "wholeNumber":
-        return createWholeNumberRule(operator, formula1, formula2 || undefined);
+        return createWholeNumberRule(operator, f1, f2);
       case "decimal":
-        return createDecimalRule(operator, formula1, formula2 || undefined);
+        return createDecimalRule(operator, f1, f2);
       case "list": {
         // If source starts with = it's a range reference
         if (listSource.startsWith("=")) {
-          return createListRuleFromRange(listSource, inCellDropdown);
+          // Store as inline values for now (range parsing is complex)
+          const values = [listSource];
+          return createListRule(values, inCellDropdown);
         }
         // Otherwise it's inline comma-separated
         const values = listSource.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
         return createListRule(values, inCellDropdown);
       }
       case "date":
-        return createDateRule(operator, formula1, formula2 || undefined);
+        return createDateRule(operator, f1, f2);
       case "time":
-        return createTimeRule(operator, formula1, formula2 || undefined);
+        return createTimeRule(operator, f1, f2);
       case "textLength":
-        return createTextLengthRule(operator, formula1, formula2 || undefined);
+        return createTextLengthRule(operator, f1, f2);
       case "custom":
         return createCustomRule(customFormula);
       default:
-        return { none: {} };
+        return { none: true };
     }
   }
 
@@ -364,12 +369,12 @@ export function DataValidationDialog(props: DialogProps) {
         rule,
         ignoreBlanks,
         prompt: {
-          show: showPrompt,
+          showPrompt,
           title: promptTitle,
           message: promptMessage,
         },
         errorAlert: {
-          show: showAlert,
+          showAlert,
           style: alertStyle,
           title: errorTitle,
           message: errorMessage,

@@ -109,7 +109,7 @@ async function clearArea(ctx: { setCells: (u: Array<{ row: number; col: number; 
   try {
     const pivots = await getAllPivotTables();
     for (const p of pivots) {
-      await deletePivotTable(p.pivotId);
+      if (p.pivotId != null) await deletePivotTable(p.pivotId);
     }
   } catch { /* ignore */ }
 

@@ -6,7 +6,7 @@
 import React, { useState } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import {
-  setActiveSheet,
+  setActiveSheetApi,
   scrollToCell,
   setSelection,
   columnToLetter,
@@ -147,7 +147,7 @@ export function GoToDialog({ data, onClose }: DialogProps) {
 
     const ref = refs[selectedIndex];
     try {
-      await setActiveSheet(ref.sheetIndex);
+      await setActiveSheetApi(ref.sheetIndex);
       scrollToCell(ref.row, ref.col);
       setSelection({
         startRow: ref.row,

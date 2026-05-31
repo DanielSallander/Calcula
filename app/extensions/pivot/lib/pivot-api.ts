@@ -26,6 +26,7 @@ import {
   setInflightOperation,
 } from "./pivotViewStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import type { CalculatedFieldDef, ValueColumnRefDef } from '../components/types';
 
 /**
  * Pipeline stages (total = 4):
@@ -160,6 +161,8 @@ export interface CreatePivotRequest {
   hasHeaders?: boolean;
   /** Optional: friendly name for the pivot table */
   name?: string;
+  /** Optional: source table name (for table-backed pivots) */
+  sourceTableName?: string;
 }
 
 /** Field configuration for row/column areas */
@@ -249,6 +252,10 @@ export interface UpdatePivotFieldsRequest {
   filterFields?: PivotFieldConfig[];
   /** Layout options (optional) */
   layout?: LayoutConfig;
+  /** Calculated fields (replaces all when provided) */
+  calculatedFields?: CalculatedFieldDef[];
+  /** Unified column ordering for interleaving values and calculated fields */
+  valueColumnOrder?: ValueColumnRefDef[];
 }
 
 /** Request to toggle a group's expand/collapse state */
@@ -477,7 +484,7 @@ export interface BiMeasureFieldInfo {
   name: string;
   table: string;
   sourceColumn: string;
-  aggregation: string;
+  aggregation: AggregationType;
 }
 
 /** BI field reference (table + column) */
@@ -514,6 +521,10 @@ export interface UpdateBiPivotFieldsRequest {
   layout?: LayoutConfig;
   /** All columns toggled to LOOKUP mode, including those not in zones */
   lookupColumns?: string[];
+  /** Calculated fields (replaces all when provided) */
+  calculatedFields?: CalculatedFieldDef[];
+  /** Unified column ordering for interleaving values and calculated fields */
+  valueColumnOrder?: ValueColumnRefDef[];
 }
 
 /** Pivot region info returned when checking if a cell is in a pivot */
@@ -1021,6 +1032,8 @@ export interface ExtendedLayoutConfig extends LayoutConfig {
 /** Pivot table info response */
 export interface PivotTableInfo {
   id: PivotId;
+  /** Alias for id, used by some callers */
+  pivotId?: PivotId;
   name: string;
   sourceRange: string;
   destination: string;
@@ -1030,6 +1043,10 @@ export interface PivotTableInfo {
   useCustomSortLists: boolean;
   hasHeaders: boolean;
   sourceTableName?: string;
+  /** Source field info (available when queried with detail) */
+  sourceFields?: SourceFieldInfo[];
+  /** Row hierarchy info (available when queried with detail) */
+  rowHierarchies?: Array<{ name: string }>;
 }
 
 /** Range information */
@@ -1805,7 +1822,6 @@ export async function showReportFilterPages(
 import { processDsl, serialize, type CompileContext, type CompileResult } from '../dsl';
 import type { DslError } from '../dsl/errors';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
-import type { CalculatedFieldDef, ValueColumnRefDef } from '../components/types';
 
 /** Result from validating DSL text against a pivot's fields. */
 export interface ValidatePivotDslResult {

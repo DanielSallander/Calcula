@@ -122,6 +122,7 @@ function activate(context: ExtensionContext): void {
 
   // Selection changed: update cached selection for menu actions
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
+    if (!sel) return;
     setMenuSelection({
       startRow: sel.startRow ?? sel.activeRow,
       startCol: sel.startCol ?? sel.activeCol,

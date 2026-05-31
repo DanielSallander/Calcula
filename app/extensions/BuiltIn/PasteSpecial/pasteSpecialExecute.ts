@@ -488,7 +488,7 @@ async function pasteFormats(
     row: destRow,
     col: destCol,
     oldValue: undefined,
-    newValue: undefined,
+    newValue: "",
     formula: null,
   });
 }

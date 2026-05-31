@@ -467,7 +467,7 @@ export function HomeTabComponent({
         case "subscript": {
           const sel = gridState.selection ?? lastSelectionRef.current;
           if (!sel) break;
-          const isSuperscript = itemId === "superscript";
+          const isSuperscript = (item as unknown as string) === "superscript";
           const cellData = await getCell(sel.startRow, sel.startCol);
           const cellText = cellData?.display ?? "";
           if (!cellText) break;

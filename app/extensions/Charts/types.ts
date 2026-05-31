@@ -630,6 +630,8 @@ export interface AxisSpec {
   crossesAt?: AxisCrossesAt;
   /** Custom value where the axis crosses (when crossesAt is "value"). */
   crossesAtValue?: number;
+  /** Whether to reverse the axis direction. */
+  reverse?: boolean;
 
   // -- Axis Line Styling --
 

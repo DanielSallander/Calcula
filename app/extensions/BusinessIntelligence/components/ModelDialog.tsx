@@ -55,7 +55,7 @@ function toBiPivotModelInfo(
       name: m.name,
       table: m.table,
       sourceColumn: "",
-      aggregation: "",
+      aggregation: "sum" as const,
     })),
   };
 }
@@ -257,7 +257,7 @@ export function ModelDialog({
 
       const response = await pivot.createFromBiModel({
         destinationCell: cellAddress,
-        destinationSheet: gridState.sheetContext?.activeSheet,
+        destinationSheet: gridState.sheetContext?.activeSheetIndex,
         connectionId: createdConnection.id,
       });
 

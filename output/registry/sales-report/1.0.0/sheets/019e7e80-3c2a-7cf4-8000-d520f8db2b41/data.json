@@ -1,0 +1,512 @@
+{
+  "cells": {
+    "A1": {
+      "v": "Data Model Reference",
+      "t": "s"
+    },
+    "A12": {
+      "v": "Measure",
+      "t": "s"
+    },
+    "A13": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "A14": {
+      "v": "  TotalSales",
+      "t": "s"
+    },
+    "A15": {
+      "v": "  TotalQty",
+      "t": "s"
+    },
+    "A16": {
+      "v": "  OrderLineCount",
+      "t": "s"
+    },
+    "A17": {
+      "v": "  DistinctCustomers",
+      "t": "s"
+    },
+    "A18": {
+      "v": "  DistinctProducts",
+      "t": "s"
+    },
+    "A19": {
+      "v": "  AvgUnitPrice",
+      "t": "s"
+    },
+    "A20": {
+      "v": "  MaxLineTotal",
+      "t": "s"
+    },
+    "A21": {
+      "v": "  MinLineTotal",
+      "t": "s"
+    },
+    "A22": {
+      "v": "  PurchaseTotal",
+      "t": "s"
+    },
+    "A23": {
+      "v": "KPIs",
+      "t": "s"
+    },
+    "A24": {
+      "v": "  AvgOrderValue",
+      "t": "s"
+    },
+    "A25": {
+      "v": "  RevenuePerCustomer",
+      "t": "s"
+    },
+    "A26": {
+      "v": "  AvgQtyPerLine",
+      "t": "s"
+    },
+    "A27": {
+      "v": "  PriceRange",
+      "t": "s"
+    },
+    "A28": {
+      "v": "  ComputedRevenue",
+      "t": "s"
+    },
+    "A29": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "A3": {
+      "v": "Table",
+      "t": "s"
+    },
+    "A30": {
+      "v": "  BikeSales",
+      "t": "s"
+    },
+    "A31": {
+      "v": "  ClothingSales",
+      "t": "s"
+    },
+    "A32": {
+      "v": "  USSales",
+      "t": "s"
+    },
+    "A33": {
+      "v": "  BikeSharePct",
+      "t": "s"
+    },
+    "A34": {
+      "v": "  HighValueOrders",
+      "t": "s"
+    },
+    "A35": {
+      "v": "  USBikeSales",
+      "t": "s"
+    },
+    "A36": {
+      "v": "  SalesAllProducts",
+      "t": "s"
+    },
+    "A37": {
+      "v": "  SalesAllCustomers",
+      "t": "s"
+    },
+    "A38": {
+      "v": "  SalesClearDateAndTerritory",
+      "t": "s"
+    },
+    "A39": {
+      "v": "  ClearColumnColor",
+      "t": "s"
+    },
+    "A4": {
+      "v": "dim_customer",
+      "t": "s"
+    },
+    "A40": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "A41": {
+      "v": "  RoundedAvgOrderValue",
+      "t": "s"
+    },
+    "A42": {
+      "v": "  VolumeCategory",
+      "t": "s"
+    },
+    "A43": {
+      "v": "  SalesHealthScore",
+      "t": "s"
+    },
+    "A44": {
+      "v": "  BikeVsClothingRatio",
+      "t": "s"
+    },
+    "A45": {
+      "v": "  SalesInThousandsRounded",
+      "t": "s"
+    },
+    "A46": {
+      "v": "  EstTaxAndMarkup",
+      "t": "s"
+    },
+    "A47": {
+      "v": "  WeightedAvgPrice",
+      "t": "s"
+    },
+    "A48": {
+      "v": "  QtyBucketLabel",
+      "t": "s"
+    },
+    "A49": {
+      "v": "  NormalizedSales",
+      "t": "s"
+    },
+    "A5": {
+      "v": "dim_date",
+      "t": "s"
+    },
+    "A50": {
+      "v": "  SalesConcentration",
+      "t": "s"
+    },
+    "A51": {
+      "v": "  SqrtSalesPerCustomer",
+      "t": "s"
+    },
+    "A52": {
+      "v": "  IsSignificantSeller",
+      "t": "s"
+    },
+    "A53": {
+      "v": "  PriceQtyCorrelation",
+      "t": "s"
+    },
+    "A54": {
+      "v": "  RevenueModBucket",
+      "t": "s"
+    },
+    "A55": {
+      "v": "  BikeQtyIfHigh",
+      "t": "s"
+    },
+    "A56": {
+      "v": "  PctOfProductTotal",
+      "t": "s"
+    },
+    "A57": {
+      "v": "  PctOfCustomerTotal",
+      "t": "s"
+    },
+    "A58": {
+      "v": "  KeepBikesClearTerritory",
+      "t": "s"
+    },
+    "A59": {
+      "v": "  CategoryShareClearDate",
+      "t": "s"
+    },
+    "A6": {
+      "v": "dim_product",
+      "t": "s"
+    },
+    "A60": {
+      "v": "  TotalSalesAccumulated",
+      "t": "s"
+    },
+    "A7": {
+      "v": "dim_territory",
+      "t": "s"
+    },
+    "A8": {
+      "v": "fact_sales",
+      "t": "s"
+    },
+    "A9": {
+      "v": "fact_purchasing",
+      "t": "s"
+    },
+    "B12": {
+      "v": "Group",
+      "t": "s"
+    },
+    "B13": {
+      "v": "9 measures",
+      "t": "s"
+    },
+    "B14": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B15": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B16": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B17": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B18": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B19": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B20": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B21": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B22": {
+      "v": "Basic",
+      "t": "s"
+    },
+    "B23": {
+      "v": "5 measures",
+      "t": "s"
+    },
+    "B24": {
+      "v": "KPIs",
+      "t": "s"
+    },
+    "B25": {
+      "v": "KPIs",
+      "t": "s"
+    },
+    "B26": {
+      "v": "KPIs",
+      "t": "s"
+    },
+    "B27": {
+      "v": "KPIs",
+      "t": "s"
+    },
+    "B28": {
+      "v": "KPIs",
+      "t": "s"
+    },
+    "B29": {
+      "v": "10 measures",
+      "t": "s"
+    },
+    "B3": {
+      "v": "Type",
+      "t": "s"
+    },
+    "B30": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B31": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B32": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B33": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B34": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B35": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B36": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B37": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B38": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B39": {
+      "v": "Filtered",
+      "t": "s"
+    },
+    "B4": {
+      "v": "Dimension",
+      "t": "s"
+    },
+    "B40": {
+      "v": "20 measures",
+      "t": "s"
+    },
+    "B41": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B42": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B43": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B44": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B45": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B46": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B47": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B48": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B49": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B5": {
+      "v": "Dimension",
+      "t": "s"
+    },
+    "B50": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B51": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B52": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B53": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B54": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B55": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B56": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B57": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B58": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B59": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B6": {
+      "v": "Dimension",
+      "t": "s"
+    },
+    "B60": {
+      "v": "Complex",
+      "t": "s"
+    },
+    "B7": {
+      "v": "Dimension",
+      "t": "s"
+    },
+    "B8": {
+      "v": "Fact",
+      "t": "s"
+    },
+    "B9": {
+      "v": "Fact",
+      "t": "s"
+    },
+    "C3": {
+      "v": "Columns",
+      "t": "s"
+    },
+    "C4": {
+      "v": "customerid, fullname, firstname, lastname, title, emailaddress, city, stateprovince, country, postalcode",
+      "t": "s"
+    },
+    "C5": {
+      "v": "datekey, year, quarter, month, day, yearmonth, monthname, dayname, weekofyear, dayofweek",
+      "t": "s"
+    },
+    "C6": {
+      "v": "productid, productname, productnumber, color, size, weight, listprice, standardcost, productline, class, style, categoryname, subcategoryname",
+      "t": "s"
+    },
+    "C7": {
+      "v": "territoryid, territoryname, countryregioncode, territorygroup, salesytd, saleslastyear, costytd, costlastyear",
+      "t": "s"
+    },
+    "C8": {
+      "v": "salesorderdetailid, productid, orderqty, unitprice, linetotal, orderdate, customerid, territoryid",
+      "t": "s"
+    },
+    "C9": {
+      "v": "purchaseorderdetailid, purchaseorderid, orderdate, duedate, productid, vendorid, employeeid, revisionnumber, status, unitprice, receivedqty, rejectedqty",
+      "t": "s"
+    },
+    "D3": {
+      "v": "Column Count",
+      "t": "s"
+    },
+    "D4": {
+      "v": 10.0,
+      "t": "n"
+    },
+    "D5": {
+      "v": 10.0,
+      "t": "n"
+    },
+    "D6": {
+      "v": 13.0,
+      "t": "n"
+    },
+    "D7": {
+      "v": 8.0,
+      "t": "n"
+    },
+    "D8": {
+      "v": 8.0,
+      "t": "n"
+    },
+    "D9": {
+      "v": 12.0,
+      "t": "n"
+    }
+  }
+}

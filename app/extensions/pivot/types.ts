@@ -3,6 +3,7 @@
 // CONTEXT: Re-exports types from API and defines extension-specific types.
 
 import type { LayoutConfig, AggregationType } from "@api";
+import type { CalculatedFieldDef } from "./components/types";
 import type { BiPivotModelInfo, ShowValuesAs } from "@api/pivot";
 
 // Re-export types from API that the extension uses
@@ -43,6 +44,7 @@ export interface PivotEditorViewData {
   initialValues: ZoneField[];
   initialFilters: ZoneField[];
   initialLayout: Partial<LayoutConfig>;
+  initialCalculatedFields?: CalculatedFieldDef[];
   biModel?: BiPivotModelInfo;
   sourceTableName?: string;
 }

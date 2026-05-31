@@ -17,7 +17,6 @@ import type {
 } from "./uiTypes";
 import type {
   CellDecorationFn,
-  CellDecorationRegistration,
 } from "./cellDecorations";
 import type {
   StyleInterceptorFn,
@@ -32,6 +31,9 @@ import type { ISettingsAPI } from "./settings";
 import type { ICellEditorAPI } from "./cellEditors";
 import type { IFileFormatAPI } from "./fileFormats";
 import type { CustomFunctionDef } from "./formulaFunctions";
+import type { EditGuardResult } from "./editGuards";
+import type { CellClickEvent } from "./cellClickInterceptors";
+import type { CellDoubleClickEvent } from "./cellDoubleClickInterceptors";
 
 // ============================================================================
 // Sub-API Interfaces (Services available through ExtensionContext)
@@ -103,7 +105,7 @@ export interface IEventAPI {
 
 /** Cell decoration registration */
 export interface ICellDecorationAPI {
-  register(id: string, renderFn: CellDecorationFn, priority?: number): CellDecorationRegistration;
+  register(id: string, renderFn: CellDecorationFn, priority?: number): () => void;
   unregister(id: string): void;
 }
 
@@ -111,7 +113,7 @@ export interface ICellDecorationAPI {
 export interface IStyleInterceptorAPI {
   register(id: string, interceptorFn: StyleInterceptorFn, priority?: number): () => void;
   unregister(id: string): void;
-  markRangeDirty(sheetIndex: number, startRow: number, startCol: number, endRow: number, endCol: number): void;
+  markRangeDirty(range: { startRow: number; startCol: number; endRow: number; endCol: number; sheetIndex?: number }): void;
   markSheetDirty(sheetIndex: number): void;
 }
 
@@ -122,7 +124,7 @@ export interface IGridOverlayAPI {
 
 /** Edit guard registration */
 export interface IEditGuardAPI {
-  register(guard: (row: number, col: number) => boolean | string): () => void;
+  register(guard: (row: number, col: number) => Promise<EditGuardResult | null>): () => void;
 }
 
 /** Range guard registration (blocks drag/move/copy onto protected ranges) */
@@ -142,8 +144,8 @@ export interface IFormulasAPI {
 
 /** Cell click interceptor registration */
 export interface ICellClickAPI {
-  registerClickInterceptor(handler: (row: number, col: number, event: MouseEvent) => boolean | Promise<boolean>): () => void;
-  registerDoubleClickInterceptor(handler: (row: number, col: number, event: MouseEvent) => boolean): () => void;
+  registerClickInterceptor(handler: (row: number, col: number, event: CellClickEvent) => boolean | Promise<boolean>): () => void;
+  registerDoubleClickInterceptor(handler: (row: number, col: number, event: CellDoubleClickEvent) => boolean | Promise<boolean>): () => void;
 }
 
 /** Toast notifications */
