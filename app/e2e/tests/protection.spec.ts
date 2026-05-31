@@ -72,12 +72,13 @@ test.describe("Sheet Protection", () => {
     await grid.page.waitForTimeout(300);
 
     // Check if a cell can be edited (should be blocked by default)
-    const canEdit: any = await grid.page.evaluate(async () => {
+    const editCheck: any = await grid.page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       return tauri.core.invoke("can_edit_cell", { row: 2, col: 30 });
     });
 
-    expect(canEdit.allowed).toBe(false);
+    // can_edit_cell returns ProtectionCheckResult { canEdit, reason }
+    expect(editCheck.canEdit).toBe(false);
 
     // Clean up: unprotect the sheet
     await grid.page.evaluate(async () => {

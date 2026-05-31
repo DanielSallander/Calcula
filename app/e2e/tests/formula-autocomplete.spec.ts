@@ -6,10 +6,7 @@
  * Uses cells in column V, rows 1-10.
  */
 import { test, expect } from "../fixtures";
-import {
-  takeGridScreenshot,
-  takeCheckpoint,
-} from "../helpers/screenshots";
+import { takeCheckpoint } from "../helpers/screenshots";
 
 test.describe("Formula Autocomplete", () => {
   test("dropdown appears when typing a formula function name", async ({
@@ -53,7 +50,6 @@ test.describe("Formula Autocomplete", () => {
   });
 
   test("arrow keys navigate autocomplete suggestions", async ({
-    appPage,
     grid,
   }) => {
     await grid.navigateTo("V2");
@@ -67,7 +63,9 @@ test.describe("Formula Autocomplete", () => {
     await grid.page.keyboard.press("ArrowDown");
     await grid.page.waitForTimeout(200);
 
-    await takeCheckpoint(appPage, "autocomplete-arrow-nav");
+    // No screenshot here: a full-page/grid capture at this point includes
+    // residual data from sibling tests (shared app instance), making the
+    // baseline non-deterministic. Navigation is verified functionally below.
 
     // Try accepting with Tab (accepts the suggestion if autocomplete is active)
     await grid.page.keyboard.press("Tab");
@@ -110,7 +108,9 @@ test.describe("Formula Autocomplete", () => {
       // This is acceptable behavior
     }
 
-    await takeGridScreenshot(appPage, "autocomplete-after-escape");
+    // No screenshot here: after Escape the dropdown is gone, so the grid
+    // capture only shows residual data left by sibling tests (shared app
+    // instance) and is non-deterministic. Dismissal is verified above.
 
     // Clean up: make sure we're out of edit mode
     await grid.page.keyboard.press("Escape");
@@ -118,7 +118,6 @@ test.describe("Formula Autocomplete", () => {
   });
 
   test("completing a function inserts parentheses", async ({
-    appPage,
     grid,
   }) => {
     await grid.navigateTo("V4");
@@ -141,7 +140,9 @@ test.describe("Formula Autocomplete", () => {
       expect(formulaText.toUpperCase()).toContain("SUM");
     }
 
-    await takeCheckpoint(appPage, "autocomplete-function-inserted");
+    // No screenshot here: a full-page/grid capture at this point includes
+    // residual data from sibling tests (shared app instance), making the
+    // baseline non-deterministic. Insertion is verified functionally above.
 
     // Clean up
     await grid.page.keyboard.press("Escape");

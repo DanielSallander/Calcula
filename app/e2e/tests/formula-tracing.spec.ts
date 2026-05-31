@@ -8,6 +8,23 @@
 import { test, expect } from "../fixtures";
 import { takeGridScreenshot, softly } from "../helpers/screenshots";
 
+/**
+ * Count the total number of same-sheet cells a TraceResult references.
+ * Contiguous precedents/dependents are collapsed into rectangular ranges,
+ * so we must sum the cells covered by `ranges` in addition to the singleton
+ * `cells` array.
+ */
+function countTracedCells(result: any): number {
+  const cells = result.cells || [];
+  const ranges = result.ranges || [];
+  const rangeCells = ranges.reduce(
+    (sum: number, r: any) =>
+      sum + (r.endRow - r.startRow + 1) * (r.endCol - r.startCol + 1),
+    0,
+  );
+  return cells.length + rangeCells;
+}
+
 test.describe("Formula Tracing", () => {
   test("trace precedents of a formula cell", async ({ appPage, grid }) => {
     // Set up: AG1=10, AG2=20, AG3=SUM(AG1:AG2)
@@ -16,8 +33,8 @@ test.describe("Formula Tracing", () => {
     await grid.setCellValueDirect("AG3", "=AG1+AG2");
     await grid.page.waitForTimeout(300);
 
-    // Verify formula evaluates correctly
-    const value = await grid.getCellFormulaBarText("AG3");
+    // Verify formula evaluates correctly (display value, not the formula text)
+    const value = await grid.getCellDisplayValue("AG3");
     expect(value).toBe("30");
 
     // Trace precedents of AG3 (row 2, col 32)
@@ -28,10 +45,11 @@ test.describe("Formula Tracing", () => {
     await grid.page.waitForTimeout(300);
 
     expect(result).toBeDefined();
-    // AG3 depends on AG1 and AG2
-    expect(result.cells || result.references).toBeDefined();
-    const refs = result.cells || result.references || [];
-    expect(refs.length).toBeGreaterThanOrEqual(2);
+    // AG3 depends on AG1 and AG2. Contiguous precedents are grouped into a
+    // rectangular range (see api_types.rs TraceRange) rather than returned as
+    // individual cells, so count cells covered by ranges as well.
+    expect(result.cells).toBeDefined();
+    expect(countTracedCells(result)).toBeGreaterThanOrEqual(2);
 
     await grid.navigateTo("AG1");
     await softly(takeGridScreenshot(appPage, "tracing-precedents"));
@@ -86,8 +104,8 @@ test.describe("Formula Tracing", () => {
     await grid.setCellValueDirect("AH4", "=SUM(AH1:AH3)");
     await grid.page.waitForTimeout(300);
 
-    // Verify SUM result
-    const value = await grid.getCellFormulaBarText("AH4");
+    // Verify SUM result (display value, not the formula text)
+    const value = await grid.getCellDisplayValue("AH4");
     expect(value).toBe("6");
 
     // Trace precedents of AH4 (row 3, col 33)
@@ -98,9 +116,8 @@ test.describe("Formula Tracing", () => {
     await grid.page.waitForTimeout(300);
 
     expect(result).toBeDefined();
-    // Should reference AH1:AH3 (either as individual cells or a range)
-    const refs = result.cells || result.references || [];
-    expect(refs.length).toBeGreaterThanOrEqual(1);
+    // Should reference AH1:AH3 (either as individual cells or a grouped range)
+    expect(countTracedCells(result)).toBeGreaterThanOrEqual(1);
 
     await grid.navigateTo("AH1");
     await softly(takeGridScreenshot(appPage, "tracing-range-precedents"));

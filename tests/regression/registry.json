@@ -1006,10 +1006,9 @@
         "e2e/tests/formula-autocomplete.spec.ts"
       ],
       "screenshots": [
-        "autocomplete-dropdown-visible",
-        "autocomplete-after-escape"
+        "autocomplete-dropdown-visible"
       ],
-      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion. Arrow-key navigation and function insertion are verified functionally via the formula bar; no full-page screenshots for those because the viewport captures non-deterministic cross-test residual grid data (tests share the app instance)."
+      "notes": "Unit tests for completion logic. E2E covers dropdown visibility, keyboard navigation, escape dismiss, and function insertion. Arrow-key navigation, escape dismiss, and function insertion are verified functionally via the formula bar / overlay visibility; no full-page or grid screenshots for those because the viewport captures non-deterministic cross-test residual grid data (tests share the app instance)."
     },
     {
       "id": "feat.status-bar",
