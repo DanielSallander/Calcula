@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::AppState;
+use crate::bi::types::BiState;
 
 use calp::manifest::SubscriptionManifest;
 use calp::registry::LocalRegistry;
@@ -89,6 +90,7 @@ pub struct SheetInfo {
 #[tauri::command]
 pub fn calp_publish(
     state: State<AppState>,
+    bi_state: State<BiState>,
     params: PublishParams,
 ) -> Result<PublishResponse, String> {
     let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
@@ -114,6 +116,9 @@ pub fn calp_publish(
         if scripts.is_empty() { None } else { Some(scripts.clone()) }
     };
 
+    // Capture active BI connections as data sources
+    let data_sources = capture_bi_data_sources(&state, &bi_state)?;
+
     let request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
@@ -124,6 +129,7 @@ pub fn calp_publish(
         published_by: params.published_by,
         writeback_regions,
         object_scripts,
+        data_sources,
     };
 
     let result = calp::publish::publish(&registry, &request)
@@ -143,6 +149,7 @@ pub fn calp_publish(
 #[tauri::command]
 pub fn calp_pull(
     state: State<AppState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
     params: PullParams,
 ) -> Result<PullResponse, String> {
     let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
@@ -219,6 +226,18 @@ pub fn calp_pull(
 
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(&state, Some(&params.registry_path));
+
+    // Restore pivot definitions from the package and render to grid.
+    // The source_sheet_index in each definition is relative to the publisher's
+    // workbook. We need to offset it by the number of sheets that existed
+    // before the pull (since pulled sheets are appended).
+    if !result.pivot_definitions.is_empty() {
+        let sheet_offset = {
+            let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+            names.len() - sheets_pulled
+        };
+        restore_pulled_pivots(&result.pivot_definitions, &state, &pivot_state, sheet_offset);
+    }
 
     Ok(PullResponse {
         package_name: result.package_name,
@@ -1248,4 +1267,615 @@ pub fn calp_next_version(
     };
 
     Ok(next.to_string())
+}
+
+// ============================================================================
+// Pivot Restoration for Pulled Packages
+// ============================================================================
+
+/// Restore pivot definitions from a pulled .calp package: deserialize, rebuild
+/// cache from source grid data, calculate the view, and write output cells.
+fn restore_pulled_pivots(
+    pivot_defs: &[persistence::SavedPivotDefinition],
+    state: &AppState,
+    pivot_state: &crate::pivot::types::PivotState,
+    sheet_offset: usize,
+) {
+    use pivot_engine::{PivotCache, PivotDefinition};
+    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid};
+
+    let mut pivot_tables = match pivot_state.pivot_tables.lock() {
+        Ok(pt) => pt,
+        Err(_) => return,
+    };
+
+    let mut grids = match state.grids.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    let sheet_names = match state.sheet_names.lock() {
+        Ok(sn) => sn,
+        Err(_) => return,
+    };
+
+    let mut shared_styles = match state.style_registry.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    for saved in pivot_defs {
+        let def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to deserialize pivot definition {}: {}", saved.id, e);
+                continue;
+            }
+        };
+
+        let pivot_id = def.id;
+
+        // Find the source sheet index (adjust for subscriber's existing sheets)
+        let source_sheet_idx = saved.source_sheet_index.unwrap_or(0) + sheet_offset;
+
+        // Build cache from source grid data
+        let source_grid = match grids.get(source_sheet_idx) {
+            Some(g) => g,
+            None => {
+                crate::log_warn!("CALP", "Source sheet {} not found for pivot {}", source_sheet_idx, pivot_id);
+                continue;
+            }
+        };
+
+        let (mut cache, _field_names) = match build_cache_from_grid(
+            source_grid,
+            def.source_start,
+            def.source_end,
+            def.source_has_headers,
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to build cache for pivot {}: {}", pivot_id, e);
+                continue;
+            }
+        };
+
+        // Calculate the pivot view
+        let view = safe_calculate_pivot(&def, &mut cache);
+
+        // Find the destination sheet and write pivot output to grid
+        let dest_sheet_name = def.destination_sheet.as_deref().unwrap_or("");
+        let dest_sheet_idx = sheet_names.iter()
+            .position(|n| n == dest_sheet_name)
+            .unwrap_or(0);
+
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            let _merged = write_pivot_to_grid(
+                dest_grid,
+                None, // no active_grid dual-write needed
+                &view,
+                def.destination,
+                &mut shared_styles,
+            );
+        }
+
+        // Store in PivotState
+        pivot_tables.insert(pivot_id, (def, cache));
+    }
+}
+
+// ============================================================================
+// Capture BI Data Sources for Publishing
+// ============================================================================
+
+/// Extract active BI connections from BiState as publishable data sources.
+/// For each connection that has active queries, captures: model JSON, bindings,
+/// queries with grid placements, and server/database (without credentials).
+fn capture_bi_data_sources(
+    state: &AppState,
+    bi_state: &BiState,
+) -> Result<Vec<calp::publish::PublishDataSource>, String> {
+    let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+
+    let mut data_sources = Vec::new();
+
+    for conn in connections.values() {
+        // Only include connections that have active queries (data in the grid)
+        if conn.active_queries.is_empty() {
+            continue;
+        }
+
+        // Get the engine and serialize the model
+        let model_json = match &conn.engine {
+            Some(engine_arc) => {
+                match engine_arc.try_lock() {
+                    Ok(engine) => {
+                        serde_json::to_value(engine.model())
+                            .map_err(|e| format!("Failed to serialize model: {}", e))?
+                    }
+                    Err(_) => {
+                        crate::log_warn!("CALP", "Engine busy for connection {}, skipping", conn.id);
+                        continue;
+                    }
+                }
+            }
+            None => continue,
+        };
+
+        // Parse server and database from connection string (PostgreSQL key=value format)
+        let (server, database) = parse_pg_connection_info(&conn.connection_string);
+
+        // Generate a stable ID for this data source
+        let ds_id = format!("{:016x}", conn.id);
+
+        // Convert bindings
+        let bindings: Vec<calp::PackageBinding> = conn.bindings.iter().map(|b| {
+            calp::PackageBinding {
+                model_table: b.model_table.clone(),
+                schema: b.schema.clone(),
+                source_table: b.source_table.clone(),
+            }
+        }).collect();
+
+        // Convert active queries to package queries
+        let queries: Vec<calp::PackageQuery> = conn.active_queries.iter().map(|(entity_id, aq)| {
+            let sheet_id = sheet_ids.get(aq.sheet_index)
+                .copied()
+                .unwrap_or_else(|| identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+
+            calp::PackageQuery {
+                id: entity_id.to_string(),
+                name: format!("Query {}", entity_id),
+                data_source_id: ds_id.clone(),
+                request: calp::PackageQueryRequest {
+                    measures: aq.request.measures.clone(),
+                    group_by: aq.request.group_by.iter().map(|g| {
+                        calp::PackageColumnRef {
+                            table: g.table.clone(),
+                            column: g.column.clone(),
+                        }
+                    }).collect(),
+                    filters: aq.request.filters.iter().map(|f| {
+                        calp::PackageFilter {
+                            table: f.table.clone(),
+                            column: f.column.clone(),
+                            operator: f.operator.clone(),
+                            value: f.value.clone(),
+                        }
+                    }).collect(),
+                },
+                placement: calp::QueryPlacement {
+                    sheet_id,
+                    start_row: aq.start_row,
+                    start_col: aq.start_col,
+                    include_headers: true,
+                },
+                extra: std::collections::HashMap::new(),
+            }
+        }).collect();
+
+        data_sources.push(calp::publish::PublishDataSource {
+            id: ds_id,
+            name: conn.name.clone(),
+            connection_type: conn.connection_type.as_str().to_string(),
+            server,
+            database,
+            model_json,
+            bindings,
+            queries,
+        });
+    }
+
+    Ok(data_sources)
+}
+
+/// Parse server (host) and database (dbname) from a PostgreSQL connection string.
+/// Strips credentials — only returns the non-sensitive parts.
+fn parse_pg_connection_info(connection_string: &str) -> (String, String) {
+    let mut server = String::new();
+    let mut database = String::new();
+
+    for part in connection_string.split_whitespace() {
+        if let Some((key, value)) = part.split_once('=') {
+            match key.to_lowercase().as_str() {
+                "host" | "server" => server = value.to_string(),
+                "dbname" | "database" => database = value.to_string(),
+                "port" => {
+                    if !server.is_empty() && !value.is_empty() && value != "5432" {
+                        server = format!("{}:{}", server, value);
+                    }
+                }
+                _ => {} // Skip user, password, sslmode, etc.
+            }
+        }
+    }
+
+    (server, database)
+}
+
+// ============================================================================
+// Phase: Live Data Sources — Refresh & Connection Configuration
+// ============================================================================
+
+/// Response from a data refresh operation.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataRefreshResponse {
+    pub sources_refreshed: usize,
+    pub queries_executed: usize,
+    pub cells_updated: usize,
+    /// Data sources that could not auto-connect (need manual configuration).
+    pub needs_configuration: Vec<DataSourceNeedsConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataSourceNeedsConfig {
+    pub data_source_id: String,
+    pub name: String,
+    pub server: String,
+    pub database: String,
+    pub connection_type: String,
+}
+
+/// Refresh all data sources for the current workbook's subscriptions.
+///
+/// For each data source:
+/// 1. Check subscriber's saved connection config
+/// 2. If none, try building SSPI connection string and testing it
+/// 3. If connection works: load model, bind tables, execute queries, write cells
+/// 4. If connection fails: add to needs_configuration list
+#[tauri::command]
+pub async fn calp_refresh_data(
+    state: State<'_, AppState>,
+    bi_state: State<'_, BiState>,
+) -> Result<DataRefreshResponse, String> {
+    use calp::data_refresh;
+
+    let mut sources_refreshed = 0usize;
+    let mut queries_executed = 0usize;
+    let mut cells_updated = 0usize;
+    let mut needs_config = Vec::new();
+
+    // Collect data sources from all subscriptions
+    let subscription_data: Vec<(
+        calp::PackageDataSource,
+        std::path::PathBuf,
+        Option<String>, // saved connection string
+    )> = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let mut result = Vec::new();
+
+        for sub in &subs.subscriptions {
+            // Skip dev and file-channel subscriptions
+            if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+                continue;
+            }
+
+            let registry_path = sub.registry_url
+                .strip_prefix("file://")
+                .unwrap_or(&sub.registry_url);
+
+            let registry = match calp::LocalRegistry::open(std::path::Path::new(registry_path)) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            for ds in &ver_manifest.data_sources {
+                let ver_dir = std::path::Path::new(registry_path)
+                    .join(&sub.package_name)
+                    .join(&sub.resolved_version);
+                let model_path = ver_dir.join(&ds.model_path);
+
+                let saved_conn = sub.data_source_configs.iter()
+                    .find(|c| c.data_source_id == ds.id)
+                    .map(|c| c.connection_string.clone());
+
+                result.push((ds.clone(), model_path, saved_conn));
+            }
+        }
+
+        result
+    };
+
+    if subscription_data.is_empty() {
+        return Ok(DataRefreshResponse {
+            sources_refreshed: 0,
+            queries_executed: 0,
+            cells_updated: 0,
+            needs_configuration: Vec::new(),
+        });
+    }
+
+    for (ds, model_path, saved_conn) in &subscription_data {
+        // Determine connection string
+        let connection_string = if let Some(saved) = saved_conn {
+            saved.clone()
+        } else {
+            // Try SSPI
+            data_refresh::build_sspi_connection_string(&ds.server, &ds.database)
+        };
+
+        // Load model
+        let model_json = match data_refresh::read_model_json(&model_path) {
+            Ok(json) => json,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to read model for data source {}: {}", ds.id, e);
+                continue;
+            }
+        };
+
+        // Detect ModelBundle format
+        let actual_model_json = if model_json.get("formatVersion").is_some() {
+            model_json.get("model")
+                .ok_or_else(|| format!("ModelBundle missing 'model' field for {}", ds.id))?
+                .clone()
+        } else {
+            model_json
+        };
+
+        let model: bi_engine::DataModel = serde_json::from_value(actual_model_json)
+            .map_err(|e| format!("Failed to parse model for {}: {}", ds.id, e))?;
+
+        // Create a temporary engine for this refresh
+        let mut engine = bi_engine::Engine::new(model);
+        engine.set_auto_tier_config(bi_engine::AutoTierConfig {
+            enabled: true,
+            max_rows: 100_000,
+            default_ttl_secs: 3600,
+        });
+
+        // Try to connect to the database
+        let config = bi_engine::PostgresConfig::new(&connection_string);
+        let connector_idx = match engine.add_postgres(config).await {
+            Ok(idx) => idx,
+            Err(_e) => {
+                // Connection failed — if this was a saved config, it's stale;
+                // if SSPI, the user likely needs to configure manually.
+                if saved_conn.is_none() {
+                    needs_config.push(DataSourceNeedsConfig {
+                        data_source_id: ds.id.clone(),
+                        name: ds.name.clone(),
+                        server: ds.server.clone(),
+                        database: ds.database.clone(),
+                        connection_type: ds.connection_type.clone(),
+                    });
+                } else {
+                    needs_config.push(DataSourceNeedsConfig {
+                        data_source_id: ds.id.clone(),
+                        name: ds.name.clone(),
+                        server: ds.server.clone(),
+                        database: ds.database.clone(),
+                        connection_type: ds.connection_type.clone(),
+                    });
+                }
+                continue;
+            }
+        };
+
+        // Bind tables
+        for binding in &ds.bindings {
+            let source_binding = bi_engine::SourceBinding::new(&binding.schema, &binding.source_table);
+            engine.bind_table(&binding.model_table, connector_idx, source_binding);
+        }
+
+        // Execute queries and write results to grid
+        for query in &ds.queries {
+            // Build engine query request from package query
+            let query_request = bi_engine::QueryRequest {
+                measures: query.request.measures.clone(),
+                group_by: query.request.group_by.iter()
+                    .map(|g| bi_engine::ColumnRef::new(&g.table, &g.column))
+                    .collect(),
+                filters: query.request.filters.iter()
+                    .map(|f| bi_engine::FilterCondition {
+                        column: f.column.clone(),
+                        operator: match f.operator.as_str() {
+                            "=" | "eq" => bi_engine::FilterOperator::Equal,
+                            "!=" | "ne" => bi_engine::FilterOperator::NotEqual,
+                            ">" | "gt" => bi_engine::FilterOperator::GreaterThan,
+                            "<" | "lt" => bi_engine::FilterOperator::LessThan,
+                            ">=" | "gte" => bi_engine::FilterOperator::GreaterThanOrEqual,
+                            "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
+                            _ => bi_engine::FilterOperator::Equal,
+                        },
+                        value: f.value.clone(),
+                    })
+                    .collect(),
+                lookups: vec![],
+            };
+
+            let (batches, _refreshed) = match engine.query_auto_refresh(query_request).await {
+                Ok(result) => result,
+                Err(e) => {
+                    crate::log_warn!("CALP", "Query {} failed: {}", query.id, e);
+                    continue;
+                }
+            };
+
+            // Convert to result
+            let result = crate::bi::commands::batches_to_result(&batches);
+
+            // Find the sheet index for this query's placement
+            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+            let sheet_index = sheet_ids.iter()
+                .position(|sid| *sid == query.placement.sheet_id);
+
+            let sheet_index = match sheet_index {
+                Some(idx) => idx,
+                None => {
+                    crate::log_warn!("CALP", "Sheet not found for query {} placement", query.id);
+                    continue;
+                }
+            };
+
+            // Write cells to grid
+            let start_row = query.placement.start_row;
+            let start_col = query.placement.start_col;
+            let header_offset = if query.placement.include_headers { 1u32 } else { 0u32 };
+
+            {
+                let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+                let grid = grids.get_mut(sheet_index)
+                    .ok_or_else(|| format!("Sheet index {} out of range", sheet_index))?;
+
+                if query.placement.include_headers {
+                    let bold_style_idx = {
+                        let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+                        styles.get_or_create(engine::CellStyle::new().with_bold(true))
+                    };
+                    for (col_idx, col_name) in result.columns.iter().enumerate() {
+                        let mut cell = engine::Cell::new_text(col_name.clone());
+                        cell.style_index = bold_style_idx;
+                        grid.set_cell(start_row, start_col + col_idx as u32, cell);
+                    }
+                }
+
+                for (row_idx, row) in result.rows.iter().enumerate() {
+                    let grid_row = start_row + header_offset + row_idx as u32;
+                    for (col_idx, value) in row.iter().enumerate() {
+                        let grid_col = start_col + col_idx as u32;
+                        let cell = match value {
+                            Some(s) => {
+                                if let Ok(num) = s.parse::<f64>() {
+                                    engine::Cell::new_number(num)
+                                } else {
+                                    engine::Cell::new_text(s.clone())
+                                }
+                            }
+                            None => engine::Cell::new(),
+                        };
+                        grid.set_cell(grid_row, grid_col, cell);
+                        cells_updated += 1;
+                    }
+                }
+            }
+
+            queries_executed += 1;
+        }
+
+        sources_refreshed += 1;
+    }
+
+    Ok(DataRefreshResponse {
+        sources_refreshed,
+        queries_executed,
+        cells_updated,
+        needs_configuration: needs_config,
+    })
+}
+
+/// Save a subscriber's connection configuration for a specific data source.
+/// Called after the user enters credentials in the ConnectionDialog.
+#[tauri::command]
+pub fn calp_save_data_source_config(
+    state: State<AppState>,
+    data_source_id: String,
+    connection_string: String,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+
+    for sub in &mut subs.subscriptions {
+        // Find any subscription that references this data source
+        let registry_path = sub.registry_url
+            .strip_prefix("file://")
+            .unwrap_or(&sub.registry_url);
+
+        let registry = match calp::LocalRegistry::open(std::path::Path::new(registry_path)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if ver_manifest.data_sources.iter().any(|ds| ds.id == data_source_id) {
+            // Update or add the config
+            if let Some(existing) = sub.data_source_configs.iter_mut()
+                .find(|c| c.data_source_id == data_source_id)
+            {
+                existing.connection_string = connection_string.clone();
+                existing.last_connected = Some(now.clone());
+            } else {
+                sub.data_source_configs.push(calp::SubscriberDataSourceConfig {
+                    data_source_id: data_source_id.clone(),
+                    connection_string: connection_string.clone(),
+                    last_connected: Some(now.clone()),
+                });
+            }
+            return Ok(());
+        }
+    }
+
+    Err(format!("No subscription found with data source {}", data_source_id))
+}
+
+/// Get the list of data sources for the current workbook's subscriptions.
+/// Returns data source metadata so the frontend can show connection status.
+#[tauri::command]
+pub fn calp_get_data_sources(
+    state: State<AppState>,
+) -> Result<Vec<DataSourceInfo>, String> {
+    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+
+    for sub in &subs.subscriptions {
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+
+        let registry_path = sub.registry_url
+            .strip_prefix("file://")
+            .unwrap_or(&sub.registry_url);
+
+        let registry = match calp::LocalRegistry::open(std::path::Path::new(registry_path)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        for ds in &ver_manifest.data_sources {
+            let is_configured = sub.data_source_configs.iter()
+                .any(|c| c.data_source_id == ds.id && !c.connection_string.is_empty());
+
+            result.push(DataSourceInfo {
+                id: ds.id.clone(),
+                name: ds.name.clone(),
+                connection_type: ds.connection_type.clone(),
+                server: ds.server.clone(),
+                database: ds.database.clone(),
+                query_count: ds.queries.len(),
+                is_configured,
+                package_name: sub.package_name.clone(),
+            });
+        }
+    }
+
+    Ok(result)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataSourceInfo {
+    pub id: String,
+    pub name: String,
+    pub connection_type: String,
+    pub server: String,
+    pub database: String,
+    pub query_count: usize,
+    pub is_configured: bool,
+    pub package_name: String,
 }

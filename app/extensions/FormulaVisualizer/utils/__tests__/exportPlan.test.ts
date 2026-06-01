@@ -35,7 +35,7 @@ function makeNode(overrides: Record<string, any> = {}) {
 describe("formatPlanAsYaml", () => {
   it("formats a simple single-node plan", () => {
     const plan = {
-      formulaText: "=SUM(A1:A3)",
+      formula: "=SUM(A1:A3)",
       rootId: "n1",
       nodes: [makeNode()],
       steps: [
@@ -56,7 +56,7 @@ describe("formatPlanAsYaml", () => {
 
   it("includes rawValue when present", () => {
     const plan = {
-      formulaText: "=A1",
+      formula: "=A1",
       rootId: "n1",
       nodes: [makeNode({ label: "A1", nodeType: "cell_ref", subtitle: "", value: "42", rawValue: "42.0" })],
       steps: [{ nodeId: "n1", description: "Read A1" }],
@@ -68,7 +68,7 @@ describe("formatPlanAsYaml", () => {
 
   it("renders nested tree structure", () => {
     const plan = {
-      formulaText: "=A1+A2",
+      formula: "=A1+A2",
       rootId: "root",
       nodes: [
         makeNode({ id: "root", label: "+", nodeType: "operator", subtitle: "", value: "3", children: ["left", "right"] }),
@@ -93,7 +93,7 @@ describe("formatPlanAsYaml", () => {
 
   it("skips steps with missing nodes", () => {
     const plan = {
-      formulaText: "=X",
+      formula: "=X",
       rootId: "n1",
       nodes: [makeNode()],
       steps: [
@@ -112,7 +112,7 @@ describe("formatPlanAsYaml", () => {
 
   it("handles empty steps", () => {
     const plan = {
-      formulaText: "=1",
+      formula: "=1",
       rootId: "n1",
       nodes: [makeNode({ label: "1", nodeType: "literal", subtitle: "", value: "1" })],
       steps: [],
@@ -124,7 +124,7 @@ describe("formatPlanAsYaml", () => {
 
   it("includes step number in tree when present", () => {
     const plan = {
-      formulaText: "=SUM(1,2)",
+      formula: "=SUM(1,2)",
       rootId: "n1",
       nodes: [makeNode({ stepNumber: 3 })],
       steps: [],

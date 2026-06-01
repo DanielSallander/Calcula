@@ -94,7 +94,8 @@ describe("SelectVisibleCells", () => {
     mockGridState = null;
     selectVisibleCellsFn!();
     expect(mockShowToast).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "No selection", type: "warning" }),
+      "No selection",
+      expect.objectContaining({ type: "warning" }),
     );
   });
 
@@ -188,7 +189,8 @@ describe("SelectVisibleCells", () => {
     selectVisibleCellsFn!();
 
     expect(mockShowToast).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "No visible cells in selection", type: "info" }),
+      "No visible cells in selection",
+      expect.objectContaining({ type: "info" }),
     );
     expect(mockDispatchGridAction).not.toHaveBeenCalled();
   });
@@ -205,10 +207,8 @@ describe("SelectVisibleCells", () => {
     selectVisibleCellsFn!();
 
     expect(mockShowToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.stringContaining("3 visible cell(s)"),
-        type: "info",
-      }),
+      expect.stringContaining("3 visible cell(s)"),
+      expect.objectContaining({ type: "info" }),
     );
   });
 

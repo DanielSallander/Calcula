@@ -1458,6 +1458,17 @@ pub struct BiValueFieldRef {
     pub measure_name: String,
 }
 
+/// Serializable BI pivot metadata for persistence in .cala/.calp files.
+/// Does NOT include connection_id (runtime-only, resolved from BiState on load).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedBiPivotMetadata {
+    pub pivot_id: PivotId,
+    pub model_tables: Vec<BiModelTableMeta>,
+    pub measures: Vec<MeasureFieldInfo>,
+    pub lookup_columns: Vec<String>,
+}
+
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
 #[derive(Debug, Clone)]
 pub struct BiPivotMetadata {

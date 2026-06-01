@@ -410,6 +410,7 @@ mod tests {
                 extra: std::collections::HashMap::new(),
             }],
             channel: String::new(),
+            data_source_configs: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -434,6 +435,7 @@ mod tests {
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
             channel: String::new(),
+            data_source_configs: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -455,6 +457,7 @@ mod tests {
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
             channel: String::new(),
+            data_source_configs: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -476,6 +479,7 @@ mod tests {
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
             channel: String::new(),
+            data_source_configs: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
 
@@ -498,6 +502,7 @@ mod tests {
             resolved_at: String::new(),
             sheets: Vec::new(),
             channel: String::new(),
+            data_source_configs: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
         let mut layer = OverrideLayer::new();

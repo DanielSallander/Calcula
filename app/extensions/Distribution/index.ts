@@ -14,10 +14,12 @@ import {
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
   DESIGNATE_WRITEBACK_DIALOG_ID,
+  CONNECTION_DIALOG_ID,
   PublishDialogDefinition,
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
   DesignateWritebackDialogDefinition,
+  ConnectionDialogDefinition,
 } from "./manifest";
 import { WritebackPane } from "./components/WritebackPane";
 import {
@@ -32,7 +34,8 @@ import {
   getRegionForCell,
 } from "./lib/writebackStore";
 import { registerCommitGuard } from "@api/commitGuards";
-import { saveWritebackDraft, type SubmissionValue } from "@api/distribution";
+import { saveWritebackDraft, refreshData, type SubmissionValue } from "@api/distribution";
+import { emitAppEvent } from "@api/events";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -67,10 +70,12 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(SubscribeDialogDefinition);
   context.ui.dialogs.register(RefreshPreviewDialogDefinition);
   context.ui.dialogs.register(DesignateWritebackDialogDefinition);
+  context.ui.dialogs.register(ConnectionDialogDefinition);
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIBE_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(REFRESH_PREVIEW_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(CONNECTION_DIALOG_ID));
 
   // Register menu items under Data menu
   context.ui.menus.registerItem("data", {
@@ -119,6 +124,41 @@ function activate(context: ExtensionContext): void {
       context.ui.taskPanes.showContainer();
     },
     order: 905,
+  });
+
+  context.ui.menus.registerItem("data", {
+    id: "data:refreshData",
+    label: "Refresh Data",
+    action: async () => {
+      try {
+        const result = await refreshData();
+
+        if (result.needsConfiguration.length > 0) {
+          // Show connection dialog for data sources that need manual setup
+          context.ui.dialogs.show(CONNECTION_DIALOG_ID, {
+            dataSources: result.needsConfiguration,
+          });
+        } else if (result.sourcesRefreshed > 0) {
+          // Data refreshed successfully — notify the grid
+          emitAppEvent(AppEvents.SHEET_CHANGED, {});
+          context.ui.notifications.showToast(
+            `Refreshed ${result.queriesExecuted} queries, ${result.cellsUpdated} cells updated`,
+            { type: "success", duration: 3000 },
+          );
+        } else {
+          context.ui.notifications.showToast(
+            "No data sources found in subscriptions",
+            { type: "info", duration: 3000 },
+          );
+        }
+      } catch (err) {
+        context.ui.notifications.showToast(
+          `Refresh failed: ${err}`,
+          { type: "error", duration: 5000 },
+        );
+      }
+    },
+    order: 906,
   });
 
   // -----------------------------------------------------------------------

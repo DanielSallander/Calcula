@@ -3,6 +3,7 @@
 //! CONTEXT: Phase 2 — raw subscribe-and-materialize, no override layer.
 
 use std::fs;
+use std::path::PathBuf;
 use std::collections::HashMap;
 
 use identity::SheetId;
@@ -31,6 +32,18 @@ pub struct PullResult {
     /// Object scripts bundled with the package.
     /// These should be loaded in restricted mode and marked as read-only.
     pub object_scripts: Vec<SavedObjectScript>,
+    /// Data source definitions from the package, with resolved model paths.
+    pub data_sources: Vec<PulledDataSource>,
+    /// Pivot table definitions from the package.
+    pub pivot_definitions: Vec<persistence::SavedPivotDefinition>,
+}
+
+/// A data source pulled from a package, ready for connection resolution.
+pub struct PulledDataSource {
+    /// The data source definition from the version manifest.
+    pub definition: PackageDataSource,
+    /// Absolute path to the embedded model.json in the registry.
+    pub model_path: PathBuf,
 }
 
 /// A sheet pulled from a package, ready to be inserted into a workbook.
@@ -166,8 +179,44 @@ pub fn pull(
         resolved_at: request.now.clone(),
         sheets: subscribed_sheets,
         channel: String::new(), // default/production channel
+        data_source_configs: Vec::new(),
         extra: HashMap::new(),
     };
+
+    // Read pivot definitions
+    let mut pulled_pivot_defs: Vec<persistence::SavedPivotDefinition> = Vec::new();
+    {
+        let pivot_dir = registry.root()
+            .join(&request.package_name)
+            .join(subscription.resolved_version.as_str())
+            .join("pivot_definitions");
+        if pivot_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&pivot_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "json") {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            if let Ok(def) = serde_json::from_str::<persistence::SavedPivotDefinition>(&content) {
+                                pulled_pivot_defs.push(def);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Resolve data source model paths
+    let pulled_data_sources: Vec<PulledDataSource> = ver_manifest.data_sources.iter().map(|ds| {
+        let ver_dir = registry.root()
+            .join(&request.package_name)
+            .join(subscription.resolved_version.as_str());
+        let model_path = ver_dir.join(&ds.model_path);
+        PulledDataSource {
+            definition: ds.clone(),
+            model_path,
+        }
+    }).collect();
 
     Ok(PullResult {
         package_name: request.package_name.clone(),
@@ -176,6 +225,8 @@ pub fn pull(
         tables: pulled_tables,
         subscription,
         object_scripts: pulled_scripts,
+        data_sources: pulled_data_sources,
+        pivot_definitions: pulled_pivot_defs,
     })
 }
 
@@ -215,6 +266,7 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            data_sources: Vec::new(),
         };
         publish::publish(reg, &request).unwrap();
         wb

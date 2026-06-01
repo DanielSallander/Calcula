@@ -22,7 +22,13 @@ pub mod writeback;
 
 pub use error::CalpError;
 pub use identity_provider::SubmitterIdentity;
-pub use manifest::{PackageManifest, VersionEntry, VersionManifest, PublishedSheet};
+pub mod data_refresh;
+
+pub use manifest::{
+    PackageManifest, VersionEntry, VersionManifest, PublishedSheet,
+    PackageDataSource, PackageBinding, PackageQuery, PackageQueryRequest,
+    PackageColumnRef, PackageFilter, QueryPlacement, SubscriberDataSourceConfig,
+};
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
 pub use version::{VersionPin, SemVer};

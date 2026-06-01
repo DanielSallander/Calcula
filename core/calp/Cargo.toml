@@ -15,3 +15,4 @@ thiserror = "1.0"
 
 [dev-dependencies]
 tempfile = "3.10"
+pivot-engine = { path = "../pivot-engine" }

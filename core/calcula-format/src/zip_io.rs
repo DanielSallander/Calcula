@@ -60,6 +60,12 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     if !workbook.pivot_layouts.is_empty() {
         manifest.features.push("pivot_layouts".to_string());
     }
+    if !workbook.pivot_definitions.is_empty() {
+        manifest.features.push("pivot_definitions".to_string());
+    }
+    if !workbook.bi_pivot_metadata.is_empty() {
+        manifest.features.push("bi_pivot_metadata".to_string());
+    }
     if !workbook.object_scripts.is_empty() {
         manifest.features.push("object_scripts".to_string());
     }
@@ -148,6 +154,26 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(layout_json.as_bytes())?;
+    }
+
+    // Write full pivot definitions (PivotDefinition as JSON)
+    for pivot_def in &workbook.pivot_definitions {
+        let json = serde_json::to_string_pretty(pivot_def)?;
+        zip.start_file(
+            format!("pivot_definitions/def_{}.json", pivot_def.id),
+            options.clone(),
+        )?;
+        zip.write_all(json.as_bytes())?;
+    }
+
+    // Write BI pivot metadata
+    for (i, bi_meta) in workbook.bi_pivot_metadata.iter().enumerate() {
+        let json = serde_json::to_string_pretty(bi_meta)?;
+        zip.start_file(
+            format!("bi_pivot_metadata/meta_{}.json", i),
+            options.clone(),
+        )?;
+        zip.write_all(json.as_bytes())?;
     }
 
     // Write ribbon filters
@@ -379,6 +405,50 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read full pivot definitions
+    let mut pivot_definitions: Vec<persistence::SavedPivotDefinition> = Vec::new();
+    if manifest.features.contains(&"pivot_definitions".to_string()) {
+        let def_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("pivot_definitions/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for def_name in def_names {
+            if let Some(def) = read_optional_json::<persistence::SavedPivotDefinition>(&mut archive, &def_name)? {
+                pivot_definitions.push(def);
+            }
+        }
+    }
+
+    // Read BI pivot metadata
+    let mut bi_pivot_metadata: Vec<serde_json::Value> = Vec::new();
+    if manifest.features.contains(&"bi_pivot_metadata".to_string()) {
+        let meta_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("bi_pivot_metadata/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for meta_name in meta_names {
+            if let Some(meta) = read_optional_json::<serde_json::Value>(&mut archive, &meta_name)? {
+                bi_pivot_metadata.push(meta);
+            }
+        }
+    }
+
     // Read object scripts (scriptable objects)
     let mut object_scripts: Vec<SavedObjectScript> = Vec::new();
     if manifest.features.contains(&"object_scripts".to_string()) {
@@ -527,6 +597,8 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         sparklines,
         named_ranges: Vec::new(),
         pivot_layouts,
+        pivot_definitions,
+        bi_pivot_metadata,
         object_scripts,
     })
 }
@@ -657,6 +729,8 @@ mod tests {
             sparklines: Vec::new(),
             named_ranges: Vec::new(),
             pivot_layouts: Vec::new(),
+            pivot_definitions: Vec::new(),
+            bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
         }
     }

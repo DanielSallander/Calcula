@@ -1248,6 +1248,9 @@ export {
   refreshPreview,
   refreshApply,
   detach,
+  refreshData,
+  saveDataSourceConfig,
+  getDataSources,
 } from "./distribution";
 
 export type {
@@ -1270,6 +1273,9 @@ export type {
   SheetChangeInfo,
   RefreshResult,
   StructuralConflict,
+  DataRefreshResponse,
+  DataSourceNeedsConfig,
+  DataSourceInfo,
 } from "./distribution";
 
 // ============================================================================

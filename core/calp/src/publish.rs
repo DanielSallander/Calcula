@@ -13,6 +13,19 @@ use crate::manifest::*;
 use crate::registry::LocalRegistry;
 use crate::version::SemVer;
 
+/// A data source to embed in the published package.
+pub struct PublishDataSource {
+    pub id: String,
+    pub name: String,
+    pub connection_type: String,
+    pub server: String,
+    pub database: String,
+    /// The BI DataModel as JSON (will be written to models/{id}/model.json).
+    pub model_json: serde_json::Value,
+    pub bindings: Vec<PackageBinding>,
+    pub queries: Vec<PackageQuery>,
+}
+
 /// Request to publish selected sheets from a workbook.
 pub struct PublishRequest<'a> {
     pub workbook: &'a Workbook,
@@ -28,6 +41,8 @@ pub struct PublishRequest<'a> {
     /// Object scripts to include in the package.
     /// If None, all workbook object scripts are published.
     pub object_scripts: Option<Vec<SavedObjectScript>>,
+    /// Data source definitions to embed in the package for live data.
+    pub data_sources: Vec<PublishDataSource>,
 }
 
 /// Result of a publish operation.
@@ -123,6 +138,17 @@ pub fn publish(
         locked_cells: Vec::new(),
         writeback_regions: request.writeback_regions.clone(),
         object_scripts: published_scripts,
+        data_sources: request.data_sources.iter().map(|ds| PackageDataSource {
+            id: ds.id.clone(),
+            name: ds.name.clone(),
+            connection_type: ds.connection_type.clone(),
+            server: ds.server.clone(),
+            database: ds.database.clone(),
+            model_path: format!("models/{}/model.json", ds.id),
+            bindings: ds.bindings.clone(),
+            queries: ds.queries.clone(),
+            extra: std::collections::HashMap::new(),
+        }).collect(),
         extra: std::collections::HashMap::new(),
     };
 
@@ -181,6 +207,35 @@ pub fn publish(
                 serde_json::to_string_pretty(&def)?,
             )?;
         }
+    }
+
+    // Write pivot definitions
+    if !request.workbook.pivot_definitions.is_empty() {
+        let pivot_dir = registry.root()
+            .join(&request.package_name)
+            .join(&version_str)
+            .join("pivot_definitions");
+        fs::create_dir_all(&pivot_dir)?;
+        for pivot_def in &request.workbook.pivot_definitions {
+            fs::write(
+                pivot_dir.join(format!("{}.json", pivot_def.id)),
+                serde_json::to_string_pretty(pivot_def)?,
+            )?;
+        }
+    }
+
+    // Write embedded data source models
+    for ds in &request.data_sources {
+        let model_dir = registry.root()
+            .join(&request.package_name)
+            .join(&version_str)
+            .join("models")
+            .join(&ds.id);
+        fs::create_dir_all(&model_dir)?;
+        fs::write(
+            model_dir.join("model.json"),
+            serde_json::to_string_pretty(&ds.model_json)?,
+        )?;
     }
 
     // Update package manifest
@@ -248,6 +303,7 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            data_sources: Vec::new(),
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -288,6 +344,7 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            data_sources: Vec::new(),
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -314,6 +371,7 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            data_sources: Vec::new(),
         };
 
         publish(&reg, &request).unwrap();

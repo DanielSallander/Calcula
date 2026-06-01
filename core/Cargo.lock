@@ -122,6 +122,7 @@ dependencies = [
  "engine",
  "identity",
  "persistence",
+ "pivot-engine",
  "serde",
  "serde_json",
  "tempfile",

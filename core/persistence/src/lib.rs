@@ -67,8 +67,31 @@ pub struct Workbook {
     pub ribbon_filters: Vec<SavedRibbonFilter>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: Vec<SavedPivotLayout>,
+    /// Full pivot table definitions (opaque JSON — PivotDefinition from pivot-engine).
+    /// The persistence layer stores these as-is; the app layer handles
+    /// serializing/deserializing to the concrete PivotDefinition type.
+    pub pivot_definitions: Vec<SavedPivotDefinition>,
+    /// BI pivot metadata for reconnecting to BI models on load.
+    /// Stored as opaque JSON — the app layer handles deserialization.
+    pub bi_pivot_metadata: Vec<serde_json::Value>,
     /// Object scripts (scriptable objects — primitive + component scripts)
     pub object_scripts: Vec<SavedObjectScript>,
+}
+
+/// A pivot table definition stored in the workbook.
+/// Uses opaque JSON for the definition itself to avoid coupling
+/// the persistence crate to the pivot-engine crate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPivotDefinition {
+    /// The pivot's unique ID (for cross-referencing with BI metadata).
+    pub id: EntityId,
+    /// "grid" or "bi" — determines how to rebuild the cache on load.
+    pub source_type: String,
+    /// For grid-sourced pivots: the sheet index containing the source data.
+    pub source_sheet_index: Option<usize>,
+    /// The full PivotDefinition serialized as JSON.
+    pub definition: serde_json::Value,
 }
 
 /// Workbook-level document properties.
@@ -222,6 +245,8 @@ impl Workbook {
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pivot_layouts: Vec::new(),
+            pivot_definitions: Vec::new(),
+            bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
         }
     }
@@ -244,6 +269,8 @@ impl Workbook {
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
             pivot_layouts: Vec::new(),
+            pivot_definitions: Vec::new(),
+            bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
         }
     }

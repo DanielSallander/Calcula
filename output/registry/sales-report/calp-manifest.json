@@ -3,11 +3,11 @@
   "name": "sales-report",
   "kind": "report",
   "author": "Calcula CLI",
-  "created": "2026-05-31T14:46:33Z",
+  "created": "2026-06-01T19:31:17Z",
   "versions": [
     {
       "version": "1.0.0",
-      "publishedAt": "2026-05-31T14:46:33Z",
+      "publishedAt": "2026-06-01T19:31:17Z",
       "publishedBy": "Calcula CLI"
     }
   ]

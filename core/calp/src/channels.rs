@@ -103,6 +103,7 @@ pub fn make_file_subscription(
         resolved_at: now.to_string(),
         sheets,
         channel: channel.to_string(),
+        data_source_configs: Vec::new(),
         extra: std::collections::HashMap::new(),
     }
 }
@@ -206,6 +207,7 @@ mod tests {
             resolved_at: String::new(),
             sheets: Vec::new(),
             channel: String::new(),
+            data_source_configs: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(!is_file_channel(&registry_sub));
@@ -219,18 +221,21 @@ mod tests {
                 package_name: "pkg".to_string(), registry_url: String::new(),
                 version_pin: "^1.0".to_string(), resolved_version: "1.0.0".to_string(),
                 resolved_at: String::new(), sheets: Vec::new(), channel: String::new(),
+                data_source_configs: Vec::new(),
                 extra: std::collections::HashMap::new(),
             },
             Subscription {
                 package_name: "pkg".to_string(), registry_url: String::new(),
                 version_pin: "channel:dev".to_string(), resolved_version: "channel:dev".to_string(),
                 resolved_at: String::new(), sheets: Vec::new(), channel: "dev".to_string(),
+                data_source_configs: Vec::new(),
                 extra: std::collections::HashMap::new(),
             },
             Subscription {
                 package_name: "pkg".to_string(), registry_url: String::new(),
                 version_pin: "channel:test".to_string(), resolved_version: "channel:test".to_string(),
                 resolved_at: String::new(), sheets: Vec::new(), channel: "test".to_string(),
+                data_source_configs: Vec::new(),
                 extra: std::collections::HashMap::new(),
             },
         ];

@@ -918,6 +918,168 @@ fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppSt
 }
 
 // ============================================================================
+// PIVOT DEFINITION PERSISTENCE (save + load)
+// ============================================================================
+
+/// Collect full pivot definitions and BI metadata from PivotState into the Workbook.
+fn collect_pivot_definitions(
+    pivot_state: &crate::pivot::types::PivotState,
+    state: &AppState,
+    workbook: &mut Workbook,
+) {
+    use persistence::SavedPivotDefinition;
+    use crate::pivot::types::SavedBiPivotMetadata;
+
+    let pivot_tables = match pivot_state.pivot_tables.lock() {
+        Ok(pt) => pt,
+        Err(_) => return,
+    };
+    let bi_metadata = match pivot_state.bi_metadata.lock() {
+        Ok(bm) => bm,
+        Err(_) => return,
+    };
+    let sheet_names = match state.sheet_names.lock() {
+        Ok(sn) => sn,
+        Err(_) => return,
+    };
+
+    for (pivot_id, (def, _cache)) in pivot_tables.iter() {
+        let is_bi = bi_metadata.contains_key(pivot_id);
+        let source_sheet_index = if !is_bi {
+            // For grid pivots, find the source sheet by the destination_sheet name
+            // (source data is typically on the same or a known sheet)
+            def.destination_sheet.as_ref().and_then(|name|
+                sheet_names.iter().position(|n| n == name)
+            )
+        } else {
+            None
+        };
+
+        let definition_json = match serde_json::to_value(def) {
+            Ok(json) => json,
+            Err(_) => continue,
+        };
+
+        workbook.pivot_definitions.push(SavedPivotDefinition {
+            id: *pivot_id,
+            source_type: if is_bi { "bi".to_string() } else { "grid".to_string() },
+            source_sheet_index,
+            definition: definition_json,
+        });
+    }
+
+    // Collect BI metadata
+    for (pivot_id, meta) in bi_metadata.iter() {
+        let saved = SavedBiPivotMetadata {
+            pivot_id: *pivot_id,
+            model_tables: meta.model_tables.clone(),
+            measures: meta.measures.clone(),
+            lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+        };
+        match serde_json::to_value(&saved) {
+            Ok(json) => workbook.bi_pivot_metadata.push(json),
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Restore full pivot definitions and BI metadata from Workbook into PivotState.
+/// For grid-sourced pivots, rebuilds the cache from source data.
+/// For BI pivots, creates an empty cache (data arrives when user reconnects).
+fn restore_pivot_definitions(
+    workbook: &Workbook,
+    pivot_state: &crate::pivot::types::PivotState,
+    state: &AppState,
+) {
+    use pivot_engine::{PivotCache, PivotDefinition};
+    use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
+    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot};
+
+    let mut pivot_tables = match pivot_state.pivot_tables.lock() {
+        Ok(pt) => pt,
+        Err(_) => return,
+    };
+
+    // Clear any existing pivot state
+    pivot_tables.clear();
+
+    let grids = match state.grids.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    for saved in &workbook.pivot_definitions {
+        // Deserialize the PivotDefinition from opaque JSON
+        let def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::log_warn!("PIVOT", "Failed to deserialize pivot definition {}: {}", saved.id, e);
+                continue;
+            }
+        };
+
+        let pivot_id = def.id;
+
+        // Build cache based on source type
+        let cache = if saved.source_type == "grid" {
+            // Rebuild cache from source grid data
+            let sheet_idx = saved.source_sheet_index.unwrap_or(0);
+            if let Some(grid) = grids.get(sheet_idx) {
+                match build_cache_from_grid(
+                    grid,
+                    def.source_start,
+                    def.source_end,
+                    def.source_has_headers,
+                ) {
+                    Ok((mut cache, _field_names)) => {
+                        // Calculate the pivot to populate aggregates
+                        let _view = safe_calculate_pivot(&def, &mut cache);
+                        cache
+                    }
+                    Err(e) => {
+                        crate::log_warn!("PIVOT", "Failed to rebuild cache for pivot {}: {}", pivot_id, e);
+                        PivotCache::new(pivot_id, 0)
+                    }
+                }
+            } else {
+                crate::log_warn!("PIVOT", "Source sheet {} not found for pivot {}", sheet_idx, pivot_id);
+                PivotCache::new(pivot_id, 0)
+            }
+        } else {
+            // BI pivot — empty cache until user reconnects
+            PivotCache::new(pivot_id, 0)
+        };
+
+        pivot_tables.insert(pivot_id, (def, cache));
+    }
+
+    // Restore BI metadata
+    let mut bi_metadata = match pivot_state.bi_metadata.lock() {
+        Ok(bm) => bm,
+        Err(_) => return,
+    };
+    bi_metadata.clear();
+
+    for meta_json in &workbook.bi_pivot_metadata {
+        let saved: SavedBiPivotMetadata = match serde_json::from_value(meta_json.clone()) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::log_warn!("PIVOT", "Failed to deserialize BI metadata: {}", e);
+                continue;
+            }
+        };
+
+        bi_metadata.insert(saved.pivot_id, BiPivotMetadata {
+            connection_id: 0, // placeholder — resolved when user connects to BI
+            model_tables: saved.model_tables,
+            measures: saved.measures,
+            last_query: None,
+            lookup_columns: saved.lookup_columns.into_iter().collect(),
+        });
+    }
+}
+
+// ============================================================================
 // COMMANDS
 // ============================================================================
 
@@ -970,6 +1132,9 @@ pub fn save_file(
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
+
+    // Collect full pivot definitions from PivotState
+    collect_pivot_definitions(&pivot_state, &state, &mut workbook);
 
     // Serialize subscription metadata into user_files so it persists in the .cala archive
     {
@@ -1054,6 +1219,7 @@ pub fn open_file(
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
     path: String,
 ) -> Result<Vec<CellData>, String> {
     let path_buf = PathBuf::from(&path);
@@ -1318,6 +1484,9 @@ pub fn open_file(
 
     // Restore pivot layouts from workbook
     *state.pivot_layouts.lock().unwrap() = workbook.pivot_layouts.clone();
+
+    // Restore full pivot definitions into PivotState
+    restore_pivot_definitions(&workbook, &pivot_state, &state);
 
     // Restore object scripts (scriptable objects) from workbook
     *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();

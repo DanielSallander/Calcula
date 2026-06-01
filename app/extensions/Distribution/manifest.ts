@@ -7,6 +7,7 @@ import { PublishDialog } from "./components/PublishDialog";
 import { SubscribeDialog } from "./components/SubscribeDialog";
 import { RefreshPreviewDialog } from "./components/RefreshPreviewDialog";
 import { DesignateWritebackDialog } from "./components/DesignateWritebackDialog";
+import { ConnectionDialog } from "./components/ConnectionDialog";
 
 export const DISTRIBUTION_EXTENSION_ID = "calcula.distribution";
 export const OVERRIDES_PANE_ID = "distribution:overrides";
@@ -30,6 +31,7 @@ export const PUBLISH_DIALOG_ID = "distribution:publishDialog";
 export const SUBSCRIBE_DIALOG_ID = "distribution:subscribeDialog";
 export const REFRESH_PREVIEW_DIALOG_ID = "distribution:refreshPreviewDialog";
 export const DESIGNATE_WRITEBACK_DIALOG_ID = "distribution:designateWritebackDialog";
+export const CONNECTION_DIALOG_ID = "distribution:connectionDialog";
 
 export const PublishDialogDefinition: DialogDefinition = {
   id: PUBLISH_DIALOG_ID,
@@ -52,5 +54,11 @@ export const RefreshPreviewDialogDefinition: DialogDefinition = {
 export const DesignateWritebackDialogDefinition: DialogDefinition = {
   id: DESIGNATE_WRITEBACK_DIALOG_ID,
   component: DesignateWritebackDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const ConnectionDialogDefinition: DialogDefinition = {
+  id: CONNECTION_DIALOG_ID,
+  component: ConnectionDialog as React.ComponentType<DialogProps>,
   priority: 100,
 };

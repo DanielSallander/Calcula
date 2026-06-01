@@ -1,7 +1,7 @@
 # Coverage Expansion Summary
 
-> Generated: 2026-05-31 10:31:07
-> Expansion iterations: 0 of 15
+> Generated: 2026-05-31 21:55:47
+> Expansion iterations: 0 of 30
 
 ## Scenarios Created
 

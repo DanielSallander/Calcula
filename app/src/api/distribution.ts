@@ -462,3 +462,61 @@ export function getWritebackLayer(): Promise<WritebackLayer> {
 export function submitRegion(regionId: string, registryPath: string): Promise<number> {
   return invokeBackend("calp_submit_region", { regionId, registryPath });
 }
+
+// ============================================================================
+// Live Data Sources
+// ============================================================================
+
+/** A data source that needs manual configuration (SSPI failed). */
+export interface DataSourceNeedsConfig {
+  dataSourceId: string;
+  name: string;
+  server: string;
+  database: string;
+  connectionType: string;
+}
+
+/** Result of a data refresh operation. */
+export interface DataRefreshResponse {
+  sourcesRefreshed: number;
+  queriesExecuted: number;
+  cellsUpdated: number;
+  needsConfiguration: DataSourceNeedsConfig[];
+}
+
+/** Info about a data source in the current workbook. */
+export interface DataSourceInfo {
+  id: string;
+  name: string;
+  connectionType: string;
+  server: string;
+  database: string;
+  queryCount: number;
+  isConfigured: boolean;
+  packageName: string;
+}
+
+/**
+ * Refresh all data sources for the current workbook's subscriptions.
+ * Tries SSPI first, then uses saved credentials, or reports which
+ * data sources need manual configuration.
+ */
+export function refreshData(): Promise<DataRefreshResponse> {
+  return invokeBackend("calp_refresh_data");
+}
+
+/**
+ * Save connection credentials for a data source.
+ * Stored in the subscriber's local .cala file, never in the registry.
+ */
+export function saveDataSourceConfig(
+  dataSourceId: string,
+  connectionString: string,
+): Promise<void> {
+  return invokeBackend("calp_save_data_source_config", { dataSourceId, connectionString });
+}
+
+/** Get all data sources for the current workbook's subscriptions. */
+export function getDataSources(): Promise<DataSourceInfo[]> {
+  return invokeBackend("calp_get_data_sources");
+}

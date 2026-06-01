@@ -101,6 +101,11 @@ pub struct VersionManifest {
     /// scripts but can add their own script layers on top.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_scripts: Vec<PublishedObjectScript>,
+    /// Data source definitions for live data. Each data source embeds a BI
+    /// model, table bindings, and query definitions with grid placements.
+    /// Subscribers can refresh data from the original database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_sources: Vec<PackageDataSource>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -145,6 +150,125 @@ pub struct PublishedNamedRange {
     pub sheet_id: Option<SheetId>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+// ===========================================================================
+// Data Source types (live .calp packages)
+// ===========================================================================
+
+/// A data source definition embedded in a .calp package version.
+/// Describes how to connect to external data and what queries to execute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageDataSource {
+    /// Stable UUID for this data source within the package.
+    pub id: String,
+    /// Human-readable name (e.g., "Sales Database").
+    pub name: String,
+    /// Connection type: "PostgreSQL", "SqlServer".
+    pub connection_type: String,
+    /// Server host (or host:port). No credentials.
+    pub server: String,
+    /// Database name.
+    pub database: String,
+    /// Relative path to embedded DataModel JSON: "models/{id}/model.json".
+    pub model_path: String,
+    /// Table bindings: logical model tables -> physical database tables.
+    pub bindings: Vec<PackageBinding>,
+    /// Queries that populate cells in the spreadsheet.
+    pub queries: Vec<PackageQuery>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Maps a logical model table to a physical database table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageBinding {
+    /// Logical table name in the BI model.
+    pub model_table: String,
+    /// Database schema (e.g., "public", "dbo").
+    pub schema: String,
+    /// Physical table name in the database.
+    pub source_table: String,
+}
+
+/// A query definition with its grid placement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageQuery {
+    /// Stable query ID (survives across versions).
+    pub id: String,
+    /// Human-readable name (e.g., "Revenue by Region").
+    pub name: String,
+    /// Which data source this query uses.
+    pub data_source_id: String,
+    /// The query definition (measures, group_by, filters).
+    pub request: PackageQueryRequest,
+    /// Where results are placed in the grid.
+    pub placement: QueryPlacement,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// The query parameters: what to compute and how to slice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageQueryRequest {
+    pub measures: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<PackageColumnRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<PackageFilter>,
+}
+
+/// A column reference (table + column) for GROUP BY.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageColumnRef {
+    pub table: String,
+    pub column: String,
+}
+
+/// A filter condition for queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageFilter {
+    pub table: String,
+    pub column: String,
+    pub operator: String,
+    pub value: String,
+}
+
+/// Where query results are placed in the spreadsheet grid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryPlacement {
+    /// Sheet ID where results are placed.
+    pub sheet_id: SheetId,
+    /// Top-left row of the result region.
+    pub start_row: u32,
+    /// Top-left column of the result region.
+    pub start_col: u32,
+    /// Whether to include column headers as the first row.
+    #[serde(default = "default_true")]
+    pub include_headers: bool,
+}
+
+fn default_true() -> bool { true }
+
+/// Subscriber-local connection configuration for a data source.
+/// Stored in the .cala file (never in the shared registry).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriberDataSourceConfig {
+    /// Which data source this config applies to.
+    pub data_source_id: String,
+    /// The subscriber's full connection string (may include credentials).
+    pub connection_string: String,
+    /// When the subscriber last successfully connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_connected: Option<String>,
 }
 
 /// A cell marked as locked-no-override.
@@ -194,6 +318,11 @@ pub struct Subscription {
     /// and the active channel determines which source is used.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub channel: String,
+    /// Subscriber-local connection configurations for data sources.
+    /// Stored in the .cala file, never in the shared registry.
+    /// Contains the subscriber's connection strings (may include credentials).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_source_configs: Vec<SubscriberDataSourceConfig>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }

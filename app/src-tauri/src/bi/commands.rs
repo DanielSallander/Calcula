@@ -91,7 +91,7 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
 }
 
 /// Convert `Vec<RecordBatch>` to `BiQueryResult` (columns + string rows).
-fn batches_to_result(batches: &[arrow::record_batch::RecordBatch]) -> BiQueryResult {
+pub fn batches_to_result(batches: &[arrow::record_batch::RecordBatch]) -> BiQueryResult {
     if batches.is_empty() {
         return BiQueryResult {
             columns: vec![],

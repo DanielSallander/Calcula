@@ -3,7 +3,8 @@
 
 import React, { useState } from "react";
 import type { DialogProps } from "@api";
-import { pullPackage } from "@api";
+import { pullPackage, emitAppEvent, AppEvents } from "@api";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export function SubscribeDialog({ onClose }: DialogProps) {
   const [registryPath, setRegistryPath] = useState("");
@@ -11,6 +12,21 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const [versionPin, setVersionPin] = useState("latest");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const handleBrowse = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Registry Folder",
+      });
+      if (selected && typeof selected === "string") {
+        setRegistryPath(selected);
+      }
+    } catch {
+      // user cancelled
+    }
+  };
 
   const handlePull = async () => {
     setError(null);
@@ -22,6 +38,13 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         packageName,
         versionPin,
       });
+
+      // Notify the app that sheets have changed so UI refreshes
+      emitAppEvent(AppEvents.SHEET_CHANGED, {});
+
+      // Close the dialog after a brief moment so the user sees the result
+      setTimeout(() => onClose(), 600);
+
       setStatus(
         `Pulled ${result.packageName} v${result.resolvedVersion}: ${result.sheetsPulled} sheet(s)`
       );
@@ -44,8 +67,11 @@ export function SubscribeDialog({ onClose }: DialogProps) {
 
       <div style={fieldStyle}>
         <label>Registry Path</label>
-        <input style={inputStyle} value={registryPath} onChange={(e) => setRegistryPath(e.target.value)}
-          placeholder="C:\shared\registry" />
+        <div style={{ display: "flex", gap: "4px" }}>
+          <input style={{ ...inputStyle, flex: 1 }} value={registryPath} onChange={(e) => setRegistryPath(e.target.value)}
+            placeholder="C:\shared\registry" />
+          <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>Browse...</button>
+        </div>
       </div>
       <div style={fieldStyle}>
         <label>Package Name</label>

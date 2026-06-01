@@ -3957,6 +3957,9 @@ pub fn run() {
             calp_commands::calp_save_writeback_draft,
             calp_commands::calp_get_writeback_layer,
             calp_commands::calp_submit_region,
+            calp_commands::calp_refresh_data,
+            calp_commands::calp_save_data_source_config,
+            calp_commands::calp_get_data_sources,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
