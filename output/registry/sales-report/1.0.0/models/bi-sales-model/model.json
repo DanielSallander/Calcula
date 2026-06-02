@@ -1,0 +1,2765 @@
+{
+  "calculated_columns": [
+    {
+      "data_type": "String",
+      "expression": {
+        "TextFunc": {
+          "args": [
+            {
+              "QualifiedColumnRef": {
+                "column": "city",
+                "table_or_var": "dim_customer"
+              }
+            },
+            {
+              "LiteralInt": 4
+            }
+          ],
+          "function": "Left"
+        }
+      },
+      "name": "Test",
+      "table": "dim_customer"
+    },
+    {
+      "data_type": "String",
+      "expression": {
+        "TextFunc": {
+          "args": [
+            {
+              "QualifiedColumnRef": {
+                "column": "productname",
+                "table_or_var": "dim_product"
+              }
+            }
+          ],
+          "function": "Upper"
+        }
+      },
+      "name": "UpperProductName",
+      "table": "dim_product"
+    },
+    {
+      "data_type": "String",
+      "expression": {
+        "TextFunc": {
+          "args": [
+            {
+              "TextFunc": {
+                "args": [
+                  {
+                    "QualifiedColumnRef": {
+                      "column": "city",
+                      "table_or_var": "dim_customer"
+                    }
+                  },
+                  {
+                    "LiteralString": ", "
+                  },
+                  {
+                    "QualifiedColumnRef": {
+                      "column": "stateprovince",
+                      "table_or_var": "dim_customer"
+                    }
+                  },
+                  {
+                    "LiteralString": ", "
+                  },
+                  {
+                    "QualifiedColumnRef": {
+                      "column": "country",
+                      "table_or_var": "dim_customer"
+                    }
+                  }
+                ],
+                "function": "Concatenate"
+              }
+            }
+          ],
+          "function": "Trim"
+        }
+      },
+      "name": "FullLocation",
+      "table": "dim_customer"
+    },
+    {
+      "data_type": "String",
+      "expression": {
+        "If": {
+          "condition": {
+            "Comparison": {
+              "left": {
+                "QualifiedColumnRef": {
+                  "column": "unitprice",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "op": "GreaterThan",
+              "right": {
+                "LiteralInt": 100
+              }
+            }
+          },
+          "else_expr": {
+            "If": {
+              "condition": {
+                "Comparison": {
+                  "left": {
+                    "QualifiedColumnRef": {
+                      "column": "unitprice",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "op": "GreaterThan",
+                  "right": {
+                    "LiteralInt": 25
+                  }
+                }
+              },
+              "else_expr": {
+                "LiteralString": "Low"
+              },
+              "then_expr": {
+                "LiteralString": "Medium"
+              }
+            }
+          },
+          "then_expr": {
+            "LiteralString": "High"
+          }
+        }
+      },
+      "name": "PriceTier",
+      "table": "fact_sales"
+    },
+    {
+      "data_type": {
+        "Decimal": [
+          38,
+          0
+        ]
+      },
+      "expression": {
+        "BinaryOp": {
+          "left": {
+            "QualifiedColumnRef": {
+              "column": "unitprice",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "op": "Multiply",
+          "right": {
+            "QualifiedColumnRef": {
+              "column": "orderqty",
+              "table_or_var": "fact_sales"
+            }
+          }
+        }
+      },
+      "name": "ComputedLineTotal",
+      "table": "fact_sales"
+    },
+    {
+      "data_type": "String",
+      "expression": {
+        "TextFunc": {
+          "args": [
+            {
+              "QualifiedColumnRef": {
+                "column": "productname",
+                "table_or_var": "dim_product"
+              }
+            }
+          ],
+          "function": "Len"
+        }
+      },
+      "name": "ProductNameLength",
+      "table": "dim_product"
+    },
+    {
+      "data_type": "String",
+      "expression": {
+        "TextFunc": {
+          "args": [
+            {
+              "QualifiedColumnRef": {
+                "column": "emailaddress",
+                "table_or_var": "dim_customer"
+              }
+            }
+          ],
+          "function": "Lower"
+        }
+      },
+      "name": "EmailLower",
+      "table": "dim_customer"
+    },
+    {
+      "data_type": "String",
+      "expression": {
+        "Coalesce": [
+          {
+            "QualifiedColumnRef": {
+              "column": "color",
+              "table_or_var": "dim_product"
+            }
+          },
+          {
+            "LiteralString": "N/A"
+          }
+        ]
+      },
+      "name": "ColorOrNA",
+      "table": "dim_product"
+    }
+  ],
+  "contexts": [],
+  "global_variables": [],
+  "measure_groups": [
+    {
+      "description": null,
+      "name": "Basic"
+    },
+    {
+      "description": null,
+      "name": "KPIs"
+    },
+    {
+      "description": null,
+      "name": "Filtered"
+    },
+    {
+      "description": null,
+      "name": "Complex"
+    }
+  ],
+  "measures": [
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "linetotal",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "Sum"
+        }
+      },
+      "group": "Basic",
+      "name": "TotalSales"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "orderqty",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "Sum"
+        }
+      },
+      "group": "Basic",
+      "name": "TotalQty"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "salesorderdetailid",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "Count"
+        }
+      },
+      "group": "Basic",
+      "name": "OrderLineCount"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "customerid",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "DistinctCount"
+        }
+      },
+      "group": "Basic",
+      "name": "DistinctCustomers"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "productid",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "DistinctCount"
+        }
+      },
+      "group": "Basic",
+      "name": "DistinctProducts"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "unitprice",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "Average"
+        }
+      },
+      "group": "Basic",
+      "name": "AvgUnitPrice"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "linetotal",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "Max"
+        }
+      },
+      "group": "Basic",
+      "name": "MaxLineTotal"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "QualifiedColumnRef": {
+              "column": "linetotal",
+              "table_or_var": "fact_sales"
+            }
+          },
+          "operation": "Min"
+        }
+      },
+      "group": "Basic",
+      "name": "MinLineTotal"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "BinaryOp": {
+              "left": {
+                "QualifiedColumnRef": {
+                  "column": "receivedqty",
+                  "table_or_var": "fact_purchasing"
+                }
+              },
+              "op": "Multiply",
+              "right": {
+                "QualifiedColumnRef": {
+                  "column": "unitprice",
+                  "table_or_var": "fact_purchasing"
+                }
+              }
+            }
+          },
+          "operation": "Sum"
+        }
+      },
+      "group": "Basic",
+      "name": "PurchaseTotal"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "salesorderdetailid",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Count"
+            }
+          },
+          "numerator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          }
+        }
+      },
+      "group": "KPIs",
+      "name": "AvgOrderValue"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "customerid",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "DistinctCount"
+            }
+          },
+          "numerator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          }
+        }
+      },
+      "group": "KPIs",
+      "name": "RevenuePerCustomer"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "salesorderdetailid",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Count"
+            }
+          },
+          "numerator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "orderqty",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          }
+        }
+      },
+      "group": "KPIs",
+      "name": "AvgQtyPerLine"
+    },
+    {
+      "expression": {
+        "BinaryOp": {
+          "left": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "unitprice",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Max"
+            }
+          },
+          "op": "Subtract",
+          "right": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "unitprice",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Min"
+            }
+          }
+        }
+      },
+      "group": "KPIs",
+      "name": "PriceRange"
+    },
+    {
+      "expression": {
+        "Aggregate": {
+          "operand": {
+            "BinaryOp": {
+              "left": {
+                "QualifiedColumnRef": {
+                  "column": "unitprice",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "op": "Multiply",
+              "right": {
+                "QualifiedColumnRef": {
+                  "column": "orderqty",
+                  "table_or_var": "fact_sales"
+                }
+              }
+            }
+          },
+          "operation": "Sum"
+        }
+      },
+      "group": "KPIs",
+      "name": "ComputedRevenue"
+    },
+    {
+      "expression": {
+        "Keep": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "filters": [
+            {
+              "column": "categoryname",
+              "operator": "Equal",
+              "table": "dim_product",
+              "value": "Bikes"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "BikeSales"
+    },
+    {
+      "expression": {
+        "Keep": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "filters": [
+            {
+              "column": "categoryname",
+              "operator": "Equal",
+              "table": "dim_product",
+              "value": "Clothing"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "ClothingSales"
+    },
+    {
+      "expression": {
+        "Keep": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "filters": [
+            {
+              "column": "countryregioncode",
+              "operator": "Equal",
+              "table": "dim_territory",
+              "value": "US"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "USSales"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "numerator": {
+            "Keep": {
+              "expr": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "filters": [
+                {
+                  "column": "categoryname",
+                  "operator": "Equal",
+                  "table": "dim_product",
+                  "value": "Bikes"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "group": "Filtered",
+      "name": "BikeSharePct"
+    },
+    {
+      "expression": {
+        "Keep": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "salesorderdetailid",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Count"
+            }
+          },
+          "filters": [
+            {
+              "column": "unitprice",
+              "operator": "GreaterThan",
+              "table": "fact_sales",
+              "value": "100"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "HighValueOrders"
+    },
+    {
+      "expression": {
+        "ScalarFunc": {
+          "args": [
+            {
+              "SafeDivide": {
+                "alternate": {
+                  "LiteralInt": 0
+                },
+                "denominator": {
+                  "Aggregate": {
+                    "operand": {
+                      "QualifiedColumnRef": {
+                        "column": "salesorderdetailid",
+                        "table_or_var": "fact_sales"
+                      }
+                    },
+                    "operation": "Count"
+                  }
+                },
+                "numerator": {
+                  "Aggregate": {
+                    "operand": {
+                      "QualifiedColumnRef": {
+                        "column": "linetotal",
+                        "table_or_var": "fact_sales"
+                      }
+                    },
+                    "operation": "Sum"
+                  }
+                }
+              }
+            },
+            {
+              "LiteralInt": 2
+            }
+          ],
+          "function": "Round"
+        }
+      },
+      "group": "Complex",
+      "name": "RoundedAvgOrderValue"
+    },
+    {
+      "expression": {
+        "Switch": {
+          "cases": [
+            [
+              {
+                "LiteralInt": 1
+              },
+              {
+                "LiteralString": "High Volume (>50)"
+              }
+            ],
+            [
+              {
+                "LiteralInt": 0
+              },
+              {
+                "LiteralString": "Exactly 50"
+              }
+            ]
+          ],
+          "default": {
+            "LiteralString": "Low Volume (<50)"
+          },
+          "expr": {
+            "ScalarFunc": {
+              "args": [
+                {
+                  "BinaryOp": {
+                    "left": {
+                      "Aggregate": {
+                        "operand": {
+                          "QualifiedColumnRef": {
+                            "column": "salesorderdetailid",
+                            "table_or_var": "fact_sales"
+                          }
+                        },
+                        "operation": "Count"
+                      }
+                    },
+                    "op": "Subtract",
+                    "right": {
+                      "LiteralInt": 50
+                    }
+                  }
+                }
+              ],
+              "function": "Sign"
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "VolumeCategory"
+    },
+    {
+      "expression": {
+        "Block": {
+          "bindings": [
+            [
+              "total",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              }
+            ],
+            [
+              "lines",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "salesorderdetailid",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Count"
+                }
+              }
+            ],
+            [
+              "avg_val",
+              {
+                "SafeDivide": {
+                  "alternate": {
+                    "LiteralInt": 0
+                  },
+                  "denominator": {
+                    "ColumnRef": "lines"
+                  },
+                  "numerator": {
+                    "ColumnRef": "total"
+                  }
+                }
+              }
+            ]
+          ],
+          "result": {
+            "If": {
+              "condition": {
+                "And": [
+                  {
+                    "Comparison": {
+                      "left": {
+                        "ColumnRef": "total"
+                      },
+                      "op": "GreaterThan",
+                      "right": {
+                        "LiteralInt": 10000
+                      }
+                    }
+                  },
+                  {
+                    "Comparison": {
+                      "left": {
+                        "ColumnRef": "avg_val"
+                      },
+                      "op": "GreaterThan",
+                      "right": {
+                        "LiteralInt": 100
+                      }
+                    }
+                  }
+                ]
+              },
+              "else_expr": {
+                "If": {
+                  "condition": {
+                    "Or": [
+                      {
+                        "Comparison": {
+                          "left": {
+                            "ColumnRef": "total"
+                          },
+                          "op": "GreaterThan",
+                          "right": {
+                            "LiteralInt": 5000
+                          }
+                        }
+                      },
+                      {
+                        "Comparison": {
+                          "left": {
+                            "ColumnRef": "lines"
+                          },
+                          "op": "GreaterThan",
+                          "right": {
+                            "LiteralInt": 20
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "else_expr": {
+                    "If": {
+                      "condition": {
+                        "IsBlank": {
+                          "ColumnRef": "total"
+                        }
+                      },
+                      "else_expr": {
+                        "LiteralString": "Needs Attention"
+                      },
+                      "then_expr": {
+                        "LiteralString": "No Data"
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "LiteralString": "Good"
+                  }
+                }
+              },
+              "then_expr": {
+                "LiteralString": "Excellent"
+              }
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "SalesHealthScore"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Coalesce": [
+              {
+                "Keep": {
+                  "expr": {
+                    "Aggregate": {
+                      "operand": {
+                        "QualifiedColumnRef": {
+                          "column": "linetotal",
+                          "table_or_var": "fact_sales"
+                        }
+                      },
+                      "operation": "Sum"
+                    }
+                  },
+                  "filters": [
+                    {
+                      "column": "categoryname",
+                      "operator": "Equal",
+                      "table": "dim_product",
+                      "value": "Clothing"
+                    }
+                  ]
+                }
+              },
+              {
+                "LiteralInt": 1
+              }
+            ]
+          },
+          "numerator": {
+            "Keep": {
+              "expr": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "filters": [
+                {
+                  "column": "categoryname",
+                  "operator": "Equal",
+                  "table": "dim_product",
+                  "value": "Bikes"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "BikeVsClothingRatio"
+    },
+    {
+      "expression": {
+        "ScalarFunc": {
+          "args": [
+            {
+              "SafeDivide": {
+                "alternate": {
+                  "LiteralInt": 0
+                },
+                "denominator": {
+                  "LiteralInt": 1000
+                },
+                "numerator": {
+                  "Aggregate": {
+                    "operand": {
+                      "QualifiedColumnRef": {
+                        "column": "linetotal",
+                        "table_or_var": "fact_sales"
+                      }
+                    },
+                    "operation": "Sum"
+                  }
+                }
+              }
+            }
+          ],
+          "function": "Floor"
+        }
+      },
+      "group": "Complex",
+      "name": "SalesInThousandsRounded"
+    },
+    {
+      "expression": {
+        "Block": {
+          "bindings": [
+            [
+              "base",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              }
+            ],
+            [
+              "tax",
+              {
+                "BinaryOp": {
+                  "left": {
+                    "ColumnRef": "base"
+                  },
+                  "op": "Multiply",
+                  "right": {
+                    "LiteralFloat": 0.08
+                  }
+                }
+              }
+            ],
+            [
+              "markup",
+              {
+                "BinaryOp": {
+                  "left": {
+                    "ColumnRef": "base"
+                  },
+                  "op": "Multiply",
+                  "right": {
+                    "LiteralFloat": 0.15
+                  }
+                }
+              }
+            ]
+          ],
+          "result": {
+            "ScalarFunc": {
+              "args": [
+                {
+                  "BinaryOp": {
+                    "left": {
+                      "BinaryOp": {
+                        "left": {
+                          "ColumnRef": "base"
+                        },
+                        "op": "Add",
+                        "right": {
+                          "ColumnRef": "tax"
+                        }
+                      }
+                    },
+                    "op": "Add",
+                    "right": {
+                      "ColumnRef": "markup"
+                    }
+                  }
+                },
+                {
+                  "LiteralInt": 2
+                }
+              ],
+              "function": "Round"
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "EstTaxAndMarkup"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "orderqty",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "numerator": {
+            "Aggregate": {
+              "operand": {
+                "BinaryOp": {
+                  "left": {
+                    "QualifiedColumnRef": {
+                      "column": "unitprice",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "op": "Multiply",
+                  "right": {
+                    "QualifiedColumnRef": {
+                      "column": "orderqty",
+                      "table_or_var": "fact_sales"
+                    }
+                  }
+                }
+              },
+              "operation": "Sum"
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "WeightedAvgPrice"
+    },
+    {
+      "expression": {
+        "If": {
+          "condition": {
+            "Comparison": {
+              "left": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "orderqty",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "op": "GreaterThan",
+              "right": {
+                "LiteralInt": 1000
+              }
+            }
+          },
+          "else_expr": {
+            "Coalesce": [
+              {
+                "If": {
+                  "condition": {
+                    "Comparison": {
+                      "left": {
+                        "Aggregate": {
+                          "operand": {
+                            "QualifiedColumnRef": {
+                              "column": "orderqty",
+                              "table_or_var": "fact_sales"
+                            }
+                          },
+                          "operation": "Sum"
+                        }
+                      },
+                      "op": "GreaterThan",
+                      "right": {
+                        "LiteralInt": 0
+                      }
+                    }
+                  },
+                  "else_expr": "Blank",
+                  "then_expr": {
+                    "TextFunc": {
+                      "args": [
+                        {
+                          "LiteralString": "Small: "
+                        },
+                        {
+                          "Aggregate": {
+                            "operand": {
+                              "QualifiedColumnRef": {
+                                "column": "orderqty",
+                                "table_or_var": "fact_sales"
+                              }
+                            },
+                            "operation": "Sum"
+                          }
+                        },
+                        {
+                          "LiteralString": " units"
+                        }
+                      ],
+                      "function": "Concatenate"
+                    }
+                  }
+                }
+              },
+              {
+                "LiteralString": "No orders"
+              }
+            ]
+          },
+          "then_expr": {
+            "TextFunc": {
+              "args": [
+                {
+                  "LiteralString": "Bulk: "
+                },
+                {
+                  "ScalarFunc": {
+                    "args": [
+                      {
+                        "SafeDivide": {
+                          "alternate": {
+                            "LiteralInt": 0
+                          },
+                          "denominator": {
+                            "LiteralInt": 1000
+                          },
+                          "numerator": {
+                            "Aggregate": {
+                              "operand": {
+                                "QualifiedColumnRef": {
+                                  "column": "orderqty",
+                                  "table_or_var": "fact_sales"
+                                }
+                              },
+                              "operation": "Sum"
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "LiteralInt": 1
+                      }
+                    ],
+                    "function": "Round"
+                  }
+                },
+                {
+                  "LiteralString": "k units"
+                }
+              ],
+              "function": "Concatenate"
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "QtyBucketLabel"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "BinaryOp": {
+              "left": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Max"
+                }
+              },
+              "op": "Subtract",
+              "right": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Min"
+                }
+              }
+            }
+          },
+          "numerator": {
+            "BinaryOp": {
+              "left": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "op": "Subtract",
+              "right": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Min"
+                }
+              }
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "NormalizedSales"
+    },
+    {
+      "expression": {
+        "Block": {
+          "bindings": [
+            [
+              "total",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              }
+            ],
+            [
+              "max_line",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Max"
+                }
+              }
+            ],
+            [
+              "n_lines",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "salesorderdetailid",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Count"
+                }
+              }
+            ],
+            [
+              "pct",
+              {
+                "SafeDivide": {
+                  "alternate": {
+                    "LiteralInt": 0
+                  },
+                  "denominator": {
+                    "ColumnRef": "total"
+                  },
+                  "numerator": {
+                    "ColumnRef": "max_line"
+                  }
+                }
+              }
+            ]
+          ],
+          "result": {
+            "If": {
+              "condition": {
+                "Comparison": {
+                  "left": {
+                    "ColumnRef": "pct"
+                  },
+                  "op": "GreaterThan",
+                  "right": {
+                    "LiteralFloat": 0.5
+                  }
+                }
+              },
+              "else_expr": {
+                "TextFunc": {
+                  "args": [
+                    {
+                      "LiteralString": "Distributed across "
+                    },
+                    {
+                      "ColumnRef": "n_lines"
+                    },
+                    {
+                      "LiteralString": " lines"
+                    }
+                  ],
+                  "function": "Concatenate"
+                }
+              },
+              "then_expr": {
+                "TextFunc": {
+                  "args": [
+                    {
+                      "LiteralString": "Concentrated ("
+                    },
+                    {
+                      "ScalarFunc": {
+                        "args": [
+                          {
+                            "BinaryOp": {
+                              "left": {
+                                "ColumnRef": "pct"
+                              },
+                              "op": "Multiply",
+                              "right": {
+                                "LiteralInt": 100
+                              }
+                            }
+                          },
+                          {
+                            "LiteralInt": 0
+                          }
+                        ],
+                        "function": "Round"
+                      }
+                    },
+                    {
+                      "LiteralString": "% in max)"
+                    }
+                  ],
+                  "function": "Concatenate"
+                }
+              }
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "SalesConcentration"
+    },
+    {
+      "expression": {
+        "ScalarFunc": {
+          "args": [
+            {
+              "ScalarFunc": {
+                "args": [
+                  {
+                    "ScalarFunc": {
+                      "args": [
+                        {
+                          "SafeDivide": {
+                            "alternate": {
+                              "LiteralInt": 0
+                            },
+                            "denominator": {
+                              "Aggregate": {
+                                "operand": {
+                                  "QualifiedColumnRef": {
+                                    "column": "customerid",
+                                    "table_or_var": "fact_sales"
+                                  }
+                                },
+                                "operation": "DistinctCount"
+                              }
+                            },
+                            "numerator": {
+                              "Aggregate": {
+                                "operand": {
+                                  "QualifiedColumnRef": {
+                                    "column": "linetotal",
+                                    "table_or_var": "fact_sales"
+                                  }
+                                },
+                                "operation": "Sum"
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "function": "Abs"
+                    }
+                  }
+                ],
+                "function": "Sqrt"
+              }
+            },
+            {
+              "LiteralInt": 2
+            }
+          ],
+          "function": "Round"
+        }
+      },
+      "group": "Complex",
+      "name": "SqrtSalesPerCustomer"
+    },
+    {
+      "expression": {
+        "And": [
+          {
+            "Comparison": {
+              "left": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "op": "GreaterThan",
+              "right": {
+                "LiteralInt": 1000
+              }
+            }
+          },
+          {
+            "Not": {
+              "IsBlank": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "unitprice",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Average"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "group": "Complex",
+      "name": "IsSignificantSeller"
+    },
+    {
+      "expression": {
+        "If": {
+          "condition": {
+            "Comparison": {
+              "left": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "unitprice",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Average"
+                }
+              },
+              "op": "GreaterThan",
+              "right": {
+                "LiteralInt": 50
+              }
+            }
+          },
+          "else_expr": {
+            "If": {
+              "condition": {
+                "Comparison": {
+                  "left": {
+                    "SafeDivide": {
+                      "alternate": {
+                        "LiteralInt": 0
+                      },
+                      "denominator": {
+                        "Aggregate": {
+                          "operand": {
+                            "QualifiedColumnRef": {
+                              "column": "salesorderdetailid",
+                              "table_or_var": "fact_sales"
+                            }
+                          },
+                          "operation": "Count"
+                        }
+                      },
+                      "numerator": {
+                        "Aggregate": {
+                          "operand": {
+                            "QualifiedColumnRef": {
+                              "column": "orderqty",
+                              "table_or_var": "fact_sales"
+                            }
+                          },
+                          "operation": "Sum"
+                        }
+                      }
+                    }
+                  },
+                  "op": "GreaterThan",
+                  "right": {
+                    "LiteralInt": 5
+                  }
+                }
+              },
+              "else_expr": {
+                "LiteralString": "Low price / Low qty"
+              },
+              "then_expr": {
+                "LiteralString": "Low price / High qty"
+              }
+            }
+          },
+          "then_expr": {
+            "If": {
+              "condition": {
+                "Comparison": {
+                  "left": {
+                    "SafeDivide": {
+                      "alternate": {
+                        "LiteralInt": 0
+                      },
+                      "denominator": {
+                        "Aggregate": {
+                          "operand": {
+                            "QualifiedColumnRef": {
+                              "column": "salesorderdetailid",
+                              "table_or_var": "fact_sales"
+                            }
+                          },
+                          "operation": "Count"
+                        }
+                      },
+                      "numerator": {
+                        "Aggregate": {
+                          "operand": {
+                            "QualifiedColumnRef": {
+                              "column": "orderqty",
+                              "table_or_var": "fact_sales"
+                            }
+                          },
+                          "operation": "Sum"
+                        }
+                      }
+                    }
+                  },
+                  "op": "LessThan",
+                  "right": {
+                    "LiteralInt": 3
+                  }
+                }
+              },
+              "else_expr": {
+                "LiteralString": "High price / High qty"
+              },
+              "then_expr": {
+                "LiteralString": "High price / Low qty"
+              }
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "PriceQtyCorrelation"
+    },
+    {
+      "expression": {
+        "ScalarFunc": {
+          "args": [
+            {
+              "ScalarFunc": {
+                "args": [
+                  {
+                    "SafeDivide": {
+                      "alternate": {
+                        "LiteralInt": 0
+                      },
+                      "denominator": {
+                        "LiteralInt": 1000
+                      },
+                      "numerator": {
+                        "Aggregate": {
+                          "operand": {
+                            "QualifiedColumnRef": {
+                              "column": "linetotal",
+                              "table_or_var": "fact_sales"
+                            }
+                          },
+                          "operation": "Sum"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "function": "Floor"
+              }
+            },
+            {
+              "LiteralInt": 10
+            }
+          ],
+          "function": "Mod"
+        }
+      },
+      "group": "Complex",
+      "name": "RevenueModBucket"
+    },
+    {
+      "expression": {
+        "Block": {
+          "bindings": [
+            [
+              "bike_qty",
+              {
+                "Keep": {
+                  "expr": {
+                    "Aggregate": {
+                      "operand": {
+                        "QualifiedColumnRef": {
+                          "column": "orderqty",
+                          "table_or_var": "fact_sales"
+                        }
+                      },
+                      "operation": "Sum"
+                    }
+                  },
+                  "filters": [
+                    {
+                      "column": "categoryname",
+                      "operator": "Equal",
+                      "table": "dim_product",
+                      "value": "Bikes"
+                    }
+                  ]
+                }
+              }
+            ],
+            [
+              "total_qty",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "orderqty",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              }
+            ]
+          ],
+          "result": {
+            "If": {
+              "condition": {
+                "Comparison": {
+                  "left": {
+                    "SafeDivide": {
+                      "alternate": {
+                        "LiteralInt": 0
+                      },
+                      "denominator": {
+                        "ColumnRef": "total_qty"
+                      },
+                      "numerator": {
+                        "ColumnRef": "bike_qty"
+                      }
+                    }
+                  },
+                  "op": "GreaterThan",
+                  "right": {
+                    "LiteralFloat": 0.5
+                  }
+                }
+              },
+              "else_expr": {
+                "ColumnRef": "bike_qty"
+              },
+              "then_expr": {
+                "ScalarFunc": {
+                  "args": [
+                    {
+                      "ColumnRef": "bike_qty"
+                    },
+                    {
+                      "LiteralFloat": 0.5
+                    }
+                  ],
+                  "function": "Power"
+                }
+              }
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "BikeQtyIfHigh"
+    },
+    {
+      "expression": {
+        "Keep": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "filters": [
+            {
+              "column": "categoryname",
+              "operator": "Equal",
+              "table": "dim_product",
+              "value": "Bikes"
+            },
+            {
+              "column": "countryregioncode",
+              "operator": "Equal",
+              "table": "dim_territory",
+              "value": "US"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "USBikeSales"
+    },
+    {
+      "expression": {
+        "Clear": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "targets": [
+            {
+              "Table": "dim_product"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "SalesAllProducts"
+    },
+    {
+      "expression": {
+        "Clear": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "targets": [
+            {
+              "Table": "dim_customer"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "SalesAllCustomers"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Clear": {
+              "expr": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "targets": [
+                {
+                  "Table": "dim_product"
+                }
+              ]
+            }
+          },
+          "numerator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "PctOfProductTotal"
+    },
+    {
+      "expression": {
+        "SafeDivide": {
+          "alternate": {
+            "LiteralInt": 0
+          },
+          "denominator": {
+            "Clear": {
+              "expr": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "targets": [
+                {
+                  "Table": "dim_customer"
+                }
+              ]
+            }
+          },
+          "numerator": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "PctOfCustomerTotal"
+    },
+    {
+      "expression": {
+        "Clear": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "targets": [
+            {
+              "Table": "dim_date"
+            },
+            {
+              "Table": "dim_territory"
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "SalesClearDateAndTerritory"
+    },
+    {
+      "expression": {
+        "Clear": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "targets": [
+            {
+              "Column": {
+                "column": "color",
+                "table": "dim_product"
+              }
+            }
+          ]
+        }
+      },
+      "group": "Filtered",
+      "name": "ClearColumnColor"
+    },
+    {
+      "expression": {
+        "Clear": {
+          "expr": {
+            "Keep": {
+              "expr": {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              },
+              "filters": [
+                {
+                  "column": "categoryname",
+                  "operator": "Equal",
+                  "table": "dim_product",
+                  "value": "Bikes"
+                }
+              ]
+            }
+          },
+          "targets": [
+            {
+              "Table": "dim_territory"
+            }
+          ]
+        }
+      },
+      "group": "Complex",
+      "name": "KeepBikesClearTerritory"
+    },
+    {
+      "expression": {
+        "Block": {
+          "bindings": [
+            [
+              "current",
+              {
+                "Aggregate": {
+                  "operand": {
+                    "QualifiedColumnRef": {
+                      "column": "linetotal",
+                      "table_or_var": "fact_sales"
+                    }
+                  },
+                  "operation": "Sum"
+                }
+              }
+            ],
+            [
+              "all_products_no_date",
+              {
+                "Clear": {
+                  "expr": {
+                    "Aggregate": {
+                      "operand": {
+                        "QualifiedColumnRef": {
+                          "column": "linetotal",
+                          "table_or_var": "fact_sales"
+                        }
+                      },
+                      "operation": "Sum"
+                    }
+                  },
+                  "targets": [
+                    {
+                      "Table": "dim_product"
+                    },
+                    {
+                      "Table": "dim_date"
+                    }
+                  ]
+                }
+              }
+            ]
+          ],
+          "result": {
+            "If": {
+              "condition": {
+                "Comparison": {
+                  "left": {
+                    "SafeDivide": {
+                      "alternate": {
+                        "LiteralInt": 0
+                      },
+                      "denominator": {
+                        "ColumnRef": "all_products_no_date"
+                      },
+                      "numerator": {
+                        "ColumnRef": "current"
+                      }
+                    }
+                  },
+                  "op": "GreaterThan",
+                  "right": {
+                    "LiteralFloat": 0.1
+                  }
+                }
+              },
+              "else_expr": {
+                "LiteralString": "Minor contributor"
+              },
+              "then_expr": {
+                "TextFunc": {
+                  "args": [
+                    {
+                      "LiteralString": "Major: "
+                    },
+                    {
+                      "ScalarFunc": {
+                        "args": [
+                          {
+                            "BinaryOp": {
+                              "left": {
+                                "SafeDivide": {
+                                  "alternate": {
+                                    "LiteralInt": 0
+                                  },
+                                  "denominator": {
+                                    "ColumnRef": "all_products_no_date"
+                                  },
+                                  "numerator": {
+                                    "ColumnRef": "current"
+                                  }
+                                }
+                              },
+                              "op": "Multiply",
+                              "right": {
+                                "LiteralInt": 100
+                              }
+                            }
+                          },
+                          {
+                            "LiteralInt": 1
+                          }
+                        ],
+                        "function": "Round"
+                      }
+                    },
+                    {
+                      "LiteralString": "%"
+                    }
+                  ],
+                  "function": "Concatenate"
+                }
+              }
+            }
+          }
+        }
+      },
+      "group": "Complex",
+      "name": "CategoryShareClearDate"
+    },
+    {
+      "expression": {
+        "UseRelationship": {
+          "expr": {
+            "Aggregate": {
+              "operand": {
+                "QualifiedColumnRef": {
+                  "column": "linetotal",
+                  "table_or_var": "fact_sales"
+                }
+              },
+              "operation": "Sum"
+            }
+          },
+          "relationship_name": "fact_sales_dim_date_2"
+        }
+      },
+      "group": "Complex",
+      "name": "TotalSalesAccumulated"
+    }
+  ],
+  "relationships": [
+    {
+      "active": true,
+      "cardinality": "ManyToOne",
+      "conditions": [
+        {
+          "from_column": "productid",
+          "operator": "Equal",
+          "to_column": "productid"
+        }
+      ],
+      "from_table": "fact_sales",
+      "name": "fact_sales_dim_product",
+      "propagation": "Auto",
+      "to_table": "dim_product"
+    },
+    {
+      "active": true,
+      "cardinality": "ManyToOne",
+      "conditions": [
+        {
+          "from_column": "orderdate",
+          "operator": "Equal",
+          "to_column": "datekey"
+        }
+      ],
+      "from_table": "fact_sales",
+      "name": "fact_sales_dim_date",
+      "propagation": "Auto",
+      "to_table": "dim_date"
+    },
+    {
+      "active": true,
+      "cardinality": "ManyToOne",
+      "conditions": [
+        {
+          "from_column": "customerid",
+          "operator": "Equal",
+          "to_column": "customerid"
+        }
+      ],
+      "from_table": "fact_sales",
+      "name": "fact_sales_dim_customer",
+      "propagation": "Auto",
+      "to_table": "dim_customer"
+    },
+    {
+      "active": true,
+      "cardinality": "ManyToOne",
+      "conditions": [
+        {
+          "from_column": "territoryid",
+          "operator": "Equal",
+          "to_column": "territoryid"
+        }
+      ],
+      "from_table": "fact_sales",
+      "name": "fact_sales_dim_territory",
+      "propagation": "Auto",
+      "to_table": "dim_territory"
+    },
+    {
+      "active": false,
+      "cardinality": "ManyToMany",
+      "conditions": [
+        {
+          "from_column": "orderdate",
+          "operator": "LessThanOrEqual",
+          "to_column": "datekey"
+        }
+      ],
+      "from_table": "fact_sales",
+      "name": "fact_sales_dim_date_2",
+      "propagation": "Auto",
+      "to_table": "dim_date"
+    },
+    {
+      "active": true,
+      "cardinality": "ManyToOne",
+      "conditions": [
+        {
+          "from_column": "orderdate",
+          "operator": "Equal",
+          "to_column": "datekey"
+        }
+      ],
+      "from_table": "fact_purchasing",
+      "name": "fact_purchasing_dim_date",
+      "propagation": "Auto",
+      "to_table": "dim_date"
+    },
+    {
+      "active": true,
+      "cardinality": "ManyToOne",
+      "conditions": [
+        {
+          "from_column": "productid",
+          "operator": "Equal",
+          "to_column": "productid"
+        }
+      ],
+      "from_table": "fact_purchasing",
+      "name": "fact_purchasing_dim_product",
+      "propagation": "Auto",
+      "to_table": "dim_product"
+    }
+  ],
+  "table_variables": [],
+  "tables": [
+    {
+      "columns": [
+        {
+          "data_type": "Int32",
+          "name": "customerid",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "fullname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "firstname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "lastname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "title",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "emailaddress",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "city",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "stateprovince",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "country",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "postalcode",
+          "nullable": true
+        }
+      ],
+      "name": "dim_customer",
+      "refresh_strategies": [
+        {
+          "secs": 7200,
+          "type": "interval"
+        }
+      ],
+      "storage_mode": "in_memory"
+    },
+    {
+      "columns": [
+        {
+          "data_type": "Date",
+          "name": "datekey",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "year",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "quarter",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "month",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "day",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "yearmonth",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "monthname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "dayname",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "weekofyear",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "dayofweek",
+          "nullable": true
+        }
+      ],
+      "name": "dim_date",
+      "storage_mode": "in_memory"
+    },
+    {
+      "columns": [
+        {
+          "data_type": "Int32",
+          "name": "productid",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "productname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "productnumber",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "color",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "size",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              8,
+              2
+            ]
+          },
+          "name": "weight",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "listprice",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "standardcost",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "productline",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "class",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "style",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "categoryname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "subcategoryname",
+          "nullable": true
+        }
+      ],
+      "name": "dim_product"
+    },
+    {
+      "columns": [
+        {
+          "data_type": "Int32",
+          "name": "territoryid",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "territoryname",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "countryregioncode",
+          "nullable": true
+        },
+        {
+          "data_type": "String",
+          "name": "territorygroup",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "salesytd",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "saleslastyear",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "costytd",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "costlastyear",
+          "nullable": true
+        }
+      ],
+      "name": "dim_territory"
+    },
+    {
+      "columns": [
+        {
+          "data_type": "Int32",
+          "name": "salesorderdetailid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "productid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "orderqty",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "unitprice",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "linetotal",
+          "nullable": true
+        },
+        {
+          "data_type": "Date",
+          "name": "orderdate",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "customerid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "territoryid",
+          "nullable": true
+        }
+      ],
+      "name": "fact_sales"
+    },
+    {
+      "columns": [
+        {
+          "data_type": "Int32",
+          "name": "purchaseorderdetailid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "purchaseorderid",
+          "nullable": true
+        },
+        {
+          "data_type": "Date",
+          "name": "orderdate",
+          "nullable": true
+        },
+        {
+          "data_type": "Date",
+          "name": "duedate",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "productid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "vendorid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "employeeid",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "revisionnumber",
+          "nullable": true
+        },
+        {
+          "data_type": "Int32",
+          "name": "status",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              38,
+              0
+            ]
+          },
+          "name": "unitprice",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              8,
+              2
+            ]
+          },
+          "name": "receivedqty",
+          "nullable": true
+        },
+        {
+          "data_type": {
+            "Decimal": [
+              8,
+              2
+            ]
+          },
+          "name": "rejectedqty",
+          "nullable": true
+        }
+      ],
+      "name": "fact_purchasing"
+    }
+  ]
+}

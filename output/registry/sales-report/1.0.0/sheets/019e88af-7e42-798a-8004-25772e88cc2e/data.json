@@ -1,0 +1,12 @@
+{
+  "cells": {
+    "A1": {
+      "v": "Sales Performance Dashboard",
+      "t": "s"
+    },
+    "A2": {
+      "v": "Product category sales by territory group (from BI model)",
+      "t": "s"
+    }
+  }
+}

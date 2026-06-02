@@ -3,16 +3,86 @@
   "packageName": "sales-report",
   "version": "1.0.0",
   "kind": "report",
-  "publishedAt": "2026-06-01T19:31:17Z",
+  "publishedAt": "2026-06-02T14:14:23Z",
   "publishedBy": "Calcula CLI",
   "sheets": [
     {
-      "sheetId": "019e84ab-4656-7e62-8008-444b43d85b14",
+      "sheetId": "019e88af-7e42-798a-8004-25772e88cc2e",
       "name": "Dashboard"
     },
     {
-      "sheetId": "019e84ab-4655-7494-8002-08d6d26bcbe2",
+      "sheetId": "019e88af-7e41-7ccf-8000-548fe23d5dea",
       "name": "Sales Data"
+    }
+  ],
+  "dataSources": [
+    {
+      "id": "bi-sales-model",
+      "name": "Adventure Works Sales Model",
+      "connectionType": "embedded",
+      "server": "",
+      "database": "",
+      "modelPath": "models/bi-sales-model/model.json",
+      "bindings": [
+        {
+          "modelTable": "dim_customer",
+          "schema": "BI",
+          "sourceTable": "dim_customer"
+        },
+        {
+          "modelTable": "dim_date",
+          "schema": "BI",
+          "sourceTable": "dim_date"
+        },
+        {
+          "modelTable": "dim_product",
+          "schema": "BI",
+          "sourceTable": "dim_product"
+        },
+        {
+          "modelTable": "dim_territory",
+          "schema": "BI",
+          "sourceTable": "dim_territory"
+        },
+        {
+          "modelTable": "fact_sales",
+          "schema": "BI",
+          "sourceTable": "fact_sales"
+        },
+        {
+          "modelTable": "fact_purchasing",
+          "schema": "BI",
+          "sourceTable": "fact_purchasing"
+        }
+      ],
+      "queries": [
+        {
+          "id": "sales-by-category-territory",
+          "name": "Sales by Category & Territory",
+          "dataSourceId": "bi-sales-model",
+          "request": {
+            "measures": [
+              "[fact_sales].[linetotal]"
+            ],
+            "groupBy": [
+              {
+                "table": "dim_product",
+                "column": "categoryname"
+              },
+              {
+                "table": "dim_territory",
+                "column": "territorygroup"
+              }
+            ]
+          },
+          "placement": {
+            "sheetId": "019e88af-7e41-7fb2-800b-d6423e6e7396",
+            "startRow": 0,
+            "startCol": 0,
+            "includeHeaders": true
+          }
+        }
+      ]
     }
   ]
 }

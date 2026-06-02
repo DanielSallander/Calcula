@@ -224,6 +224,19 @@ pub fn publish(
         }
     }
 
+    // Write BI pivot metadata (needed for BI-connected pivots)
+    if !request.workbook.bi_pivot_metadata.is_empty() {
+        let pivot_dir = registry.root()
+            .join(&request.package_name)
+            .join(&version_str)
+            .join("pivot_definitions");
+        fs::create_dir_all(&pivot_dir)?;
+        fs::write(
+            pivot_dir.join("bi_metadata.json"),
+            serde_json::to_string_pretty(&request.workbook.bi_pivot_metadata)?,
+        )?;
+    }
+
     // Write embedded data source models
     for ds in &request.data_sources {
         let model_dir = registry.root()

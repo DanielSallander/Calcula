@@ -1,6 +1,6 @@
 {
-  "id": "019e84ab-4656-75b9-8002-45d73abf4f8f",
-  "sourceType": "grid",
+  "id": "019e88af-7e42-7403-800c-cb06a8a359e7",
+  "sourceType": "bi",
   "sourceSheetIndex": 1,
   "definition": {
     "allow_multiple_filters_per_field": false,
@@ -13,11 +13,11 @@
         "grouping": "None",
         "hidden_items": [],
         "is_attribute": false,
-        "name": "Quarter",
+        "name": "Territory Group",
         "show_all_items": false,
         "show_subtotals": true,
         "sort_order": "Ascending",
-        "source_index": 2
+        "source_index": 3
       }
     ],
     "destination": [
@@ -27,7 +27,7 @@
     "destination_sheet": "Dashboard",
     "enable_data_value_editing": false,
     "filter_fields": [],
-    "id": "019e84ab-4656-75b9-8002-45d73abf4f8f",
+    "id": "019e88af-7e42-7403-800c-cb06a8a359e7",
     "layout": {
       "alt_text_description": null,
       "alt_text_title": null,
@@ -47,7 +47,7 @@
       "subtotal_location": "AtBottom",
       "values_position": "Columns"
     },
-    "name": "Revenue by Region",
+    "name": "Sales by Category & Territory",
     "refresh_on_open": false,
     "row_fields": [
       {
@@ -56,7 +56,7 @@
         "grouping": "None",
         "hidden_items": [],
         "is_attribute": false,
-        "name": "Region",
+        "name": "Category",
         "show_all_items": false,
         "show_subtotals": true,
         "sort_order": "Ascending",
@@ -77,11 +77,11 @@
     ],
     "slicer_filters": [],
     "source_end": [
-      32,
-      4
+      48,
+      8
     ],
     "source_has_headers": true,
-    "source_range_display": null,
+    "source_range_display": "Adventure Works Sales Model",
     "source_start": [
       0,
       0
@@ -94,10 +94,19 @@
         "aggregation": "Sum",
         "base_field_index": null,
         "base_item": null,
-        "name": "Sum of Revenue",
+        "name": "Sum of Line Total",
         "number_format": null,
         "show_values_as": "Normal",
-        "source_index": 3
+        "source_index": 8
+      },
+      {
+        "aggregation": "Sum",
+        "base_field_index": null,
+        "base_item": null,
+        "name": "Sum of Order Qty",
+        "number_format": null,
+        "show_values_as": "Normal",
+        "source_index": 6
       }
     ],
     "version": 0

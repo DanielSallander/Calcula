@@ -150,6 +150,7 @@ pub fn calp_publish(
 pub fn calp_pull(
     state: State<AppState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, BiState>,
     params: PullParams,
 ) -> Result<PullResponse, String> {
     let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
@@ -227,6 +228,10 @@ pub fn calp_pull(
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(&state, Some(&params.registry_path));
 
+    // Auto-load embedded BI models from the pulled package.
+    // This creates BI connections so that BI pivots have a live engine to query.
+    let embedded_connection_ids = load_embedded_data_sources(&result.data_sources, &bi_state);
+
     // Restore pivot definitions from the package and render to grid.
     // The source_sheet_index in each definition is relative to the publisher's
     // workbook. We need to offset it by the number of sheets that existed
@@ -236,7 +241,14 @@ pub fn calp_pull(
             let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
             names.len() - sheets_pulled
         };
-        restore_pulled_pivots(&result.pivot_definitions, &state, &pivot_state, sheet_offset);
+        restore_pulled_pivots(
+            &result.pivot_definitions,
+            &result.bi_pivot_metadata,
+            &state,
+            &pivot_state,
+            sheet_offset,
+            &embedded_connection_ids,
+        );
     }
 
     Ok(PullResponse {
@@ -1273,16 +1285,107 @@ pub fn calp_next_version(
 // Pivot Restoration for Pulled Packages
 // ============================================================================
 
+/// Load embedded BI model data sources from a pulled package into BiState.
+/// Returns a mapping from package data source ID to the created connection ID.
+fn load_embedded_data_sources(
+    data_sources: &[calp::pull::PulledDataSource],
+    bi_state: &BiState,
+) -> std::collections::HashMap<String, u64> {
+    use crate::bi::types::{Connection, ConnectionType};
+    use crate::bi::engine_registry::ModelKey;
+
+    let mut ds_to_conn: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+    for ds in data_sources {
+        let model_path = ds.model_path.to_string_lossy().to_string();
+
+        // Read and parse the embedded model JSON
+        let json_str = match std::fs::read_to_string(&ds.model_path) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to read embedded model {}: {}", model_path, e);
+                continue;
+            }
+        };
+        let model: bi_engine::DataModel = match serde_json::from_str(&json_str) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to parse embedded model {}: {}", model_path, e);
+                continue;
+            }
+        };
+
+        // Create the BI engine (no database connection yet)
+        let mut engine = bi_engine::Engine::new(model);
+        engine.set_auto_tier_config(bi_engine::AutoTierConfig {
+            enabled: true,
+            max_rows: 100_000,
+            default_ttl_secs: 3600,
+        });
+        engine.set_query_cache_config(bi_engine::QueryCacheConfig {
+            enabled: true,
+            max_entries: 256,
+            max_memory_bytes: 64 * 1024 * 1024,
+            ttl_secs: 300,
+        });
+
+        let model_key = ModelKey::from_model_path(&model_path);
+        let (engine_arc, _was_existing, _cache_dir) =
+            bi_state.engine_registry.get_or_create(&model_key, engine);
+
+        // Allocate a connection ID and register the connection
+        let conn_id = {
+            let mut next_id = bi_state.next_connection_id.lock().unwrap();
+            let id = *next_id;
+            *next_id += 1;
+            id
+        };
+
+        let connection = Connection {
+            id: conn_id,
+            name: ds.definition.name.clone(),
+            description: format!("Embedded model from package ({})", ds.definition.id),
+            connection_type: ConnectionType::PostgreSQL,
+            connection_string: String::new(), // no database yet
+            model_path: Some(model_path),
+            engine: Some(engine_arc),
+            model_key: Some(model_key),
+            connector_index: None,
+            bindings: Vec::new(),
+            last_refreshed: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            is_connected: false,
+            active_queries: std::collections::HashMap::new(),
+        };
+
+        bi_state.connections.lock().unwrap().insert(conn_id, connection);
+        ds_to_conn.insert(ds.definition.id.clone(), conn_id);
+
+        crate::log_info!(
+            "CALP",
+            "Loaded embedded BI model '{}' as connection {} (ds_id={})",
+            ds.definition.name,
+            conn_id,
+            ds.definition.id
+        );
+    }
+
+    ds_to_conn
+}
+
 /// Restore pivot definitions from a pulled .calp package: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
 fn restore_pulled_pivots(
     pivot_defs: &[persistence::SavedPivotDefinition],
+    bi_pivot_metadata: &[serde_json::Value],
     state: &AppState,
     pivot_state: &crate::pivot::types::PivotState,
     sheet_offset: usize,
+    embedded_connection_ids: &std::collections::HashMap<String, u64>,
 ) {
     use pivot_engine::{PivotCache, PivotDefinition};
-    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid};
+    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid, update_pivot_region};
+    use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
 
     let mut pivot_tables = match pivot_state.pivot_tables.lock() {
         Ok(pt) => pt,
@@ -1305,7 +1408,7 @@ fn restore_pulled_pivots(
     };
 
     for saved in pivot_defs {
-        let def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
+        let mut def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
             Ok(d) => d,
             Err(e) => {
                 crate::log_warn!("CALP", "Failed to deserialize pivot definition {}: {}", saved.id, e);
@@ -1315,29 +1418,35 @@ fn restore_pulled_pivots(
 
         let pivot_id = def.id;
 
-        // Find the source sheet index (adjust for subscriber's existing sheets)
-        let source_sheet_idx = saved.source_sheet_index.unwrap_or(0) + sheet_offset;
+        // For BI pivots, ensure the source display shows the model name, not a grid range
+        if saved.source_type == "bi" && def.source_range_display.is_none() {
+            def.source_range_display = Some("BI Model".to_string());
+        }
 
-        // Build cache from source grid data
-        let source_grid = match grids.get(source_sheet_idx) {
-            Some(g) => g,
-            None => {
-                crate::log_warn!("CALP", "Source sheet {} not found for pivot {}", source_sheet_idx, pivot_id);
-                continue;
+        // Build cache — try grid data first (even for BI pivots, the package
+        // includes a snapshot of the data), fall back to empty cache.
+        let source_sheet_idx = saved.source_sheet_index.map(|i| i + sheet_offset);
+        let (mut cache, _field_names) = if let Some(idx) = source_sheet_idx {
+            if let Some(source_grid) = grids.get(idx) {
+                match build_cache_from_grid(
+                    source_grid,
+                    def.source_start,
+                    def.source_end,
+                    def.source_has_headers,
+                ) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        crate::log_warn!("CALP", "Failed to build cache for pivot {}: {}", pivot_id, e);
+                        (PivotCache::new(pivot_id, 0), Vec::new())
+                    }
+                }
+            } else {
+                crate::log_warn!("CALP", "Source sheet {} not found for pivot {}", idx, pivot_id);
+                (PivotCache::new(pivot_id, 0), Vec::new())
             }
-        };
-
-        let (mut cache, _field_names) = match build_cache_from_grid(
-            source_grid,
-            def.source_start,
-            def.source_end,
-            def.source_has_headers,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                crate::log_warn!("CALP", "Failed to build cache for pivot {}: {}", pivot_id, e);
-                continue;
-            }
+        } else {
+            // No source sheet — empty cache (BI pivot without snapshot data)
+            (PivotCache::new(pivot_id, 0), Vec::new())
         };
 
         // Calculate the pivot view
@@ -1359,8 +1468,31 @@ fn restore_pulled_pivots(
             );
         }
 
+        // Register the protected region so the frontend can discover this pivot
+        update_pivot_region(state, pivot_id, dest_sheet_idx, def.destination, &view);
+
         // Store in PivotState
         pivot_tables.insert(pivot_id, (def, cache));
+    }
+
+    // Restore BI pivot metadata, resolving connection_id from embedded data sources
+    if !bi_pivot_metadata.is_empty() {
+        // Use the first embedded connection ID if available
+        let default_conn_id = embedded_connection_ids.values().next().copied().unwrap_or(0);
+
+        if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {
+            for meta_json in bi_pivot_metadata {
+                if let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) {
+                    bi_meta.insert(saved.pivot_id, BiPivotMetadata {
+                        connection_id: default_conn_id,
+                        model_tables: saved.model_tables,
+                        measures: saved.measures,
+                        last_query: None,
+                        lookup_columns: saved.lookup_columns.into_iter().collect(),
+                    });
+                }
+            }
+        }
     }
 }
 

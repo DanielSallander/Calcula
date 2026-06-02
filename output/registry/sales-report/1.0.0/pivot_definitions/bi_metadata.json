@@ -1,0 +1,609 @@
+[
+  {
+    "lookupColumns": [],
+    "measures": [
+      {
+        "aggregation": "Sum",
+        "name": "TotalSales",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "TotalQty",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "OrderLineCount",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "DistinctCustomers",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "DistinctProducts",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "AvgUnitPrice",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "MaxLineTotal",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "MinLineTotal",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "PurchaseTotal",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "AvgOrderValue",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "RevenuePerCustomer",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "AvgQtyPerLine",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "PriceRange",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "ComputedRevenue",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "BikeSales",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "ClothingSales",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "USSales",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "BikeSharePct",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "HighValueOrders",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "RoundedAvgOrderValue",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "VolumeCategory",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SalesHealthScore",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "BikeVsClothingRatio",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SalesInThousandsRounded",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "EstTaxAndMarkup",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "WeightedAvgPrice",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "QtyBucketLabel",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "NormalizedSales",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SalesConcentration",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SqrtSalesPerCustomer",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "IsSignificantSeller",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "PriceQtyCorrelation",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "RevenueModBucket",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "BikeQtyIfHigh",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "USBikeSales",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SalesAllProducts",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SalesAllCustomers",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "PctOfProductTotal",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "PctOfCustomerTotal",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "SalesClearDateAndTerritory",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "ClearColumnColor",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "KeepBikesClearTerritory",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "CategoryShareClearDate",
+        "sourceColumn": "",
+        "table": ""
+      },
+      {
+        "aggregation": "Sum",
+        "name": "TotalSalesAccumulated",
+        "sourceColumn": "",
+        "table": ""
+      }
+    ],
+    "modelTables": [
+      {
+        "columns": [
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "customerid"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "fullname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "firstname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "lastname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "title"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "emailaddress"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "city"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "stateprovince"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "country"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "postalcode"
+          }
+        ],
+        "name": "dim_customer"
+      },
+      {
+        "columns": [
+          {
+            "dataType": "Date",
+            "isNumeric": false,
+            "name": "datekey"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "year"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "quarter"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "month"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "day"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "yearmonth"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "monthname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "dayname"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "weekofyear"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "dayofweek"
+          }
+        ],
+        "name": "dim_date"
+      },
+      {
+        "columns": [
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "productid"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "productname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "productnumber"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "color"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "size"
+          },
+          {
+            "dataType": "{\"Decimal\":[8,2]}",
+            "isNumeric": true,
+            "name": "weight"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "listprice"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "standardcost"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "productline"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "class"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "style"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "categoryname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "subcategoryname"
+          }
+        ],
+        "name": "dim_product"
+      },
+      {
+        "columns": [
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "territoryid"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "territoryname"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "countryregioncode"
+          },
+          {
+            "dataType": "String",
+            "isNumeric": false,
+            "name": "territorygroup"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "salesytd"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "saleslastyear"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "costytd"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "costlastyear"
+          }
+        ],
+        "name": "dim_territory"
+      },
+      {
+        "columns": [
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "salesorderdetailid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "productid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "orderqty"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "unitprice"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "linetotal"
+          },
+          {
+            "dataType": "Date",
+            "isNumeric": false,
+            "name": "orderdate"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "customerid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "territoryid"
+          }
+        ],
+        "name": "fact_sales"
+      },
+      {
+        "columns": [
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "purchaseorderdetailid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "purchaseorderid"
+          },
+          {
+            "dataType": "Date",
+            "isNumeric": false,
+            "name": "orderdate"
+          },
+          {
+            "dataType": "Date",
+            "isNumeric": false,
+            "name": "duedate"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "productid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "vendorid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "employeeid"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "revisionnumber"
+          },
+          {
+            "dataType": "Int32",
+            "isNumeric": true,
+            "name": "status"
+          },
+          {
+            "dataType": "{\"Decimal\":[38,0]}",
+            "isNumeric": true,
+            "name": "unitprice"
+          },
+          {
+            "dataType": "{\"Decimal\":[8,2]}",
+            "isNumeric": true,
+            "name": "receivedqty"
+          },
+          {
+            "dataType": "{\"Decimal\":[8,2]}",
+            "isNumeric": true,
+            "name": "rejectedqty"
+          }
+        ],
+        "name": "fact_purchasing"
+      }
+    ],
+    "pivotId": "019e88af-7e42-7403-800c-cb06a8a359e7"
+  }
+]

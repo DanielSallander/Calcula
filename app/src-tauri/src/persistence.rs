@@ -993,7 +993,7 @@ fn restore_pivot_definitions(
 ) {
     use pivot_engine::{PivotCache, PivotDefinition};
     use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
-    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot};
+    use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, update_pivot_region};
 
     let mut pivot_tables = match pivot_state.pivot_tables.lock() {
         Ok(pt) => pt,
@@ -1021,7 +1021,7 @@ fn restore_pivot_definitions(
         let pivot_id = def.id;
 
         // Build cache based on source type
-        let cache = if saved.source_type == "grid" {
+        let (cache, view) = if saved.source_type == "grid" {
             // Rebuild cache from source grid data
             let sheet_idx = saved.source_sheet_index.unwrap_or(0);
             if let Some(grid) = grids.get(sheet_idx) {
@@ -1033,22 +1033,35 @@ fn restore_pivot_definitions(
                 ) {
                     Ok((mut cache, _field_names)) => {
                         // Calculate the pivot to populate aggregates
-                        let _view = safe_calculate_pivot(&def, &mut cache);
-                        cache
+                        let view = safe_calculate_pivot(&def, &mut cache);
+                        (cache, Some(view))
                     }
                     Err(e) => {
                         crate::log_warn!("PIVOT", "Failed to rebuild cache for pivot {}: {}", pivot_id, e);
-                        PivotCache::new(pivot_id, 0)
+                        (PivotCache::new(pivot_id, 0), None)
                     }
                 }
             } else {
                 crate::log_warn!("PIVOT", "Source sheet {} not found for pivot {}", sheet_idx, pivot_id);
-                PivotCache::new(pivot_id, 0)
+                (PivotCache::new(pivot_id, 0), None)
             }
         } else {
             // BI pivot — empty cache until user reconnects
-            PivotCache::new(pivot_id, 0)
+            let mut empty_cache = PivotCache::new(pivot_id, 0);
+            let view = safe_calculate_pivot(&def, &mut empty_cache);
+            (empty_cache, Some(view))
         };
+
+        // Register the protected region so the frontend can discover this pivot
+        if let Some(ref view) = view {
+            let sheet_names = state.sheet_names.lock().unwrap();
+            let dest_sheet_name = def.destination_sheet.as_deref().unwrap_or("");
+            let dest_sheet_idx = sheet_names.iter()
+                .position(|n| n == dest_sheet_name)
+                .unwrap_or(0);
+            drop(sheet_names);
+            update_pivot_region(state, pivot_id, dest_sheet_idx, def.destination, view);
+        }
 
         pivot_tables.insert(pivot_id, (def, cache));
     }

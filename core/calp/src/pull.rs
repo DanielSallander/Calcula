@@ -36,6 +36,8 @@ pub struct PullResult {
     pub data_sources: Vec<PulledDataSource>,
     /// Pivot table definitions from the package.
     pub pivot_definitions: Vec<persistence::SavedPivotDefinition>,
+    /// BI pivot metadata for reconnecting to BI models.
+    pub bi_pivot_metadata: Vec<serde_json::Value>,
 }
 
 /// A data source pulled from a package, ready for connection resolution.
@@ -206,6 +208,23 @@ pub fn pull(
         }
     }
 
+    // Read BI pivot metadata (if present)
+    let bi_pivot_metadata: Vec<serde_json::Value> = {
+        let meta_path = registry.root()
+            .join(&request.package_name)
+            .join(subscription.resolved_version.as_str())
+            .join("pivot_definitions")
+            .join("bi_metadata.json");
+        if meta_path.exists() {
+            fs::read_to_string(&meta_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+
     // Resolve data source model paths
     let pulled_data_sources: Vec<PulledDataSource> = ver_manifest.data_sources.iter().map(|ds| {
         let ver_dir = registry.root()
@@ -227,6 +246,7 @@ pub fn pull(
         object_scripts: pulled_scripts,
         data_sources: pulled_data_sources,
         pivot_definitions: pulled_pivot_defs,
+        bi_pivot_metadata,
     })
 }
 

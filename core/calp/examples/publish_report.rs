@@ -1,21 +1,23 @@
 //! FILENAME: core/calp/examples/publish_report.rs
-//! PURPOSE: Build a report workbook with sample data + pivot table and publish
-//!          it as a .calp package. The subscriber gets both the data sheet and
-//!          a PivotDefinition that Calcula can render on open.
+//! PURPOSE: Build a report workbook with sales data + pivot table and publish
+//!          it as a .calp package with an embedded BI model data source.
+//!          The subscriber gets the data sheet, an interactive pivot, and
+//!          the BI model for live data refresh.
 //!
-//! USAGE:   cargo run --example publish_report -- <registry_dir>
+//! USAGE:   cargo run --example publish_report -- <registry_dir> [model_path]
 //!
 //! Example:
 //!   cargo run --example publish_report -- \
-//!     "C:\Dropbox\Projekt\Calcula\output\registry"
+//!     "C:\Dropbox\Projekt\Calcula\output\registry" \
+//!     "C:\Dropbox\Projekt\Calcula Studio\examples\model.json"
 
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 
 use engine::style::{
-    BorderLineStyle, BorderStyle as CellBorderStyle, Borders, CellStyle, Color, Fill, FontStyle,
-    TextAlign, VerticalAlign,
+    BorderLineStyle, BorderStyle as CellBorderStyle, CellStyle, Color, Fill,
+    NumberFormat, TextAlign, VerticalAlign,
 };
 use engine::ThemeColor;
 use persistence::{SavedCell, SavedCellValue, SavedPivotDefinition, Sheet, Workbook};
@@ -23,9 +25,11 @@ use pivot_engine::{
     AggregationType, PivotDefinition, PivotField, PivotId, ValueField,
 };
 
-use calp::publish::{publish, PublishRequest};
+use calp::publish::{publish, PublishDataSource, PublishRequest};
+use calp::{PackageBinding, PackageQuery, PackageQueryRequest, PackageColumnRef, QueryPlacement};
 use calp::registry::LocalRegistry;
 use calp::version::SemVer;
+use identity::SheetId;
 
 // ---------------------------------------------------------------------------
 // Color helpers
@@ -78,7 +82,7 @@ fn make_title_style() -> CellStyle {
 
 fn make_number_style() -> CellStyle {
     let mut s = CellStyle::new();
-    s.number_format = engine::style::NumberFormat::Number {
+    s.number_format = NumberFormat::Number {
         decimal_places: 0,
         use_thousands_separator: true,
     };
@@ -89,7 +93,7 @@ fn make_number_style() -> CellStyle {
 fn make_number_alt_style() -> CellStyle {
     let mut s = CellStyle::new();
     s.fill = Fill::Solid { color: tc(234, 240, 247) };
-    s.number_format = engine::style::NumberFormat::Number {
+    s.number_format = NumberFormat::Number {
         decimal_places: 0,
         use_thousands_separator: true,
     };
@@ -126,59 +130,99 @@ fn put_number(cells: &mut HashMap<(u32, u32), SavedCell>, row: u32, col: u32, va
 }
 
 // ---------------------------------------------------------------------------
-// Sample sales data
+// Sample sales data (denormalized from the BI model's star schema)
+// Simulates a JOIN of fact_sales + dim_product + dim_territory + dim_date
 // ---------------------------------------------------------------------------
 
 struct SalesRow {
-    region: &'static str,
+    category: &'static str,
     product: &'static str,
+    territory: &'static str,
+    territory_group: &'static str,
+    year: f64,
     quarter: &'static str,
-    revenue: f64,
-    units: f64,
+    order_qty: f64,
+    unit_price: f64,
+    line_total: f64,
 }
 
 fn sample_data() -> Vec<SalesRow> {
     vec![
-        SalesRow { region: "North", product: "Widget A", quarter: "Q1", revenue: 45000.0, units: 150.0 },
-        SalesRow { region: "North", product: "Widget A", quarter: "Q2", revenue: 52000.0, units: 173.0 },
-        SalesRow { region: "North", product: "Widget A", quarter: "Q3", revenue: 48000.0, units: 160.0 },
-        SalesRow { region: "North", product: "Widget A", quarter: "Q4", revenue: 61000.0, units: 203.0 },
-        SalesRow { region: "North", product: "Widget B", quarter: "Q1", revenue: 32000.0, units: 200.0 },
-        SalesRow { region: "North", product: "Widget B", quarter: "Q2", revenue: 35000.0, units: 219.0 },
-        SalesRow { region: "North", product: "Widget B", quarter: "Q3", revenue: 29000.0, units: 181.0 },
-        SalesRow { region: "North", product: "Widget B", quarter: "Q4", revenue: 41000.0, units: 256.0 },
-        SalesRow { region: "South", product: "Widget A", quarter: "Q1", revenue: 38000.0, units: 127.0 },
-        SalesRow { region: "South", product: "Widget A", quarter: "Q2", revenue: 41000.0, units: 137.0 },
-        SalesRow { region: "South", product: "Widget A", quarter: "Q3", revenue: 39000.0, units: 130.0 },
-        SalesRow { region: "South", product: "Widget A", quarter: "Q4", revenue: 47000.0, units: 157.0 },
-        SalesRow { region: "South", product: "Widget B", quarter: "Q1", revenue: 28000.0, units: 175.0 },
-        SalesRow { region: "South", product: "Widget B", quarter: "Q2", revenue: 31000.0, units: 194.0 },
-        SalesRow { region: "South", product: "Widget B", quarter: "Q3", revenue: 27000.0, units: 169.0 },
-        SalesRow { region: "South", product: "Widget B", quarter: "Q4", revenue: 36000.0, units: 225.0 },
-        SalesRow { region: "East",  product: "Widget A", quarter: "Q1", revenue: 55000.0, units: 183.0 },
-        SalesRow { region: "East",  product: "Widget A", quarter: "Q2", revenue: 62000.0, units: 207.0 },
-        SalesRow { region: "East",  product: "Widget A", quarter: "Q3", revenue: 58000.0, units: 193.0 },
-        SalesRow { region: "East",  product: "Widget A", quarter: "Q4", revenue: 71000.0, units: 237.0 },
-        SalesRow { region: "East",  product: "Widget B", quarter: "Q1", revenue: 42000.0, units: 263.0 },
-        SalesRow { region: "East",  product: "Widget B", quarter: "Q2", revenue: 46000.0, units: 288.0 },
-        SalesRow { region: "East",  product: "Widget B", quarter: "Q3", revenue: 39000.0, units: 244.0 },
-        SalesRow { region: "East",  product: "Widget B", quarter: "Q4", revenue: 53000.0, units: 331.0 },
-        SalesRow { region: "West",  product: "Widget A", quarter: "Q1", revenue: 49000.0, units: 163.0 },
-        SalesRow { region: "West",  product: "Widget A", quarter: "Q2", revenue: 54000.0, units: 180.0 },
-        SalesRow { region: "West",  product: "Widget A", quarter: "Q3", revenue: 51000.0, units: 170.0 },
-        SalesRow { region: "West",  product: "Widget A", quarter: "Q4", revenue: 63000.0, units: 210.0 },
-        SalesRow { region: "West",  product: "Widget B", quarter: "Q1", revenue: 36000.0, units: 225.0 },
-        SalesRow { region: "West",  product: "Widget B", quarter: "Q2", revenue: 39000.0, units: 244.0 },
-        SalesRow { region: "West",  product: "Widget B", quarter: "Q3", revenue: 34000.0, units: 213.0 },
-        SalesRow { region: "West",  product: "Widget B", quarter: "Q4", revenue: 47000.0, units: 294.0 },
+        // Bikes - North America
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q1", order_qty: 42.0, unit_price: 2295.0, line_total: 96390.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q2", order_qty: 55.0, unit_price: 2295.0, line_total: 126225.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q3", order_qty: 38.0, unit_price: 2295.0, line_total: 87210.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q4", order_qty: 67.0, unit_price: 2295.0, line_total: 153765.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q1", order_qty: 61.0, unit_price: 2443.0, line_total: 149023.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q2", order_qty: 73.0, unit_price: 2443.0, line_total: 178339.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q3", order_qty: 49.0, unit_price: 2443.0, line_total: 119707.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q4", order_qty: 82.0, unit_price: 2443.0, line_total: 200326.0 },
+        // Bikes - Europe
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q1", order_qty: 31.0, unit_price: 2295.0, line_total: 71145.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q2", order_qty: 44.0, unit_price: 2295.0, line_total: 100980.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q3", order_qty: 29.0, unit_price: 2295.0, line_total: 66555.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q4", order_qty: 51.0, unit_price: 2295.0, line_total: 117045.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "France", territory_group: "Europe", year: 2024.0, quarter: "Q1", order_qty: 38.0, unit_price: 2443.0, line_total: 92834.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "France", territory_group: "Europe", year: 2024.0, quarter: "Q2", order_qty: 52.0, unit_price: 2443.0, line_total: 127036.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q3", order_qty: 35.0, unit_price: 2443.0, line_total: 85505.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q4", order_qty: 60.0, unit_price: 2443.0, line_total: 146580.0 },
+        // Bikes - Pacific
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q1", order_qty: 25.0, unit_price: 2295.0, line_total: 57375.0 },
+        SalesRow { category: "Bikes", product: "Mountain-200 Black", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q2", order_qty: 33.0, unit_price: 2295.0, line_total: 75735.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q3", order_qty: 28.0, unit_price: 2443.0, line_total: 68404.0 },
+        SalesRow { category: "Bikes", product: "Road-250 Red", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q4", order_qty: 45.0, unit_price: 2443.0, line_total: 109935.0 },
+        // Components - North America
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q1", order_qty: 120.0, unit_price: 1364.0, line_total: 163680.0 },
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q2", order_qty: 145.0, unit_price: 1364.0, line_total: 197780.0 },
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q3", order_qty: 98.0, unit_price: 1364.0, line_total: 133672.0 },
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q4", order_qty: 160.0, unit_price: 1364.0, line_total: 218240.0 },
+        // Components - Europe
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q1", order_qty: 85.0, unit_price: 1364.0, line_total: 115940.0 },
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q2", order_qty: 110.0, unit_price: 1364.0, line_total: 150040.0 },
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "France", territory_group: "Europe", year: 2024.0, quarter: "Q3", order_qty: 72.0, unit_price: 1364.0, line_total: 98208.0 },
+        SalesRow { category: "Components", product: "HL Mountain Frame", territory: "France", territory_group: "Europe", year: 2024.0, quarter: "Q4", order_qty: 130.0, unit_price: 1364.0, line_total: 177320.0 },
+        // Accessories - North America
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q1", order_qty: 210.0, unit_price: 35.0, line_total: 7350.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q2", order_qty: 280.0, unit_price: 35.0, line_total: 9800.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q3", order_qty: 195.0, unit_price: 35.0, line_total: 6825.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q4", order_qty: 320.0, unit_price: 35.0, line_total: 11200.0 },
+        // Accessories - Europe
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q1", order_qty: 150.0, unit_price: 35.0, line_total: 5250.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q2", order_qty: 190.0, unit_price: 35.0, line_total: 6650.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q3", order_qty: 135.0, unit_price: 35.0, line_total: 4725.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q4", order_qty: 225.0, unit_price: 35.0, line_total: 7875.0 },
+        // Accessories - Pacific
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q1", order_qty: 100.0, unit_price: 35.0, line_total: 3500.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q2", order_qty: 140.0, unit_price: 35.0, line_total: 4900.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q3", order_qty: 115.0, unit_price: 35.0, line_total: 4025.0 },
+        SalesRow { category: "Accessories", product: "Sport-100 Helmet", territory: "Australia", territory_group: "Pacific", year: 2024.0, quarter: "Q4", order_qty: 180.0, unit_price: 35.0, line_total: 6300.0 },
+        // Clothing - North America
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q1", order_qty: 95.0, unit_price: 64.0, line_total: 6080.0 },
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q2", order_qty: 125.0, unit_price: 64.0, line_total: 8000.0 },
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "Northwest", territory_group: "North America", year: 2024.0, quarter: "Q3", order_qty: 88.0, unit_price: 64.0, line_total: 5632.0 },
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "Southwest", territory_group: "North America", year: 2024.0, quarter: "Q4", order_qty: 150.0, unit_price: 64.0, line_total: 9600.0 },
+        // Clothing - Europe
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "France", territory_group: "Europe", year: 2024.0, quarter: "Q1", order_qty: 70.0, unit_price: 64.0, line_total: 4480.0 },
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "United Kingdom", territory_group: "Europe", year: 2024.0, quarter: "Q2", order_qty: 95.0, unit_price: 64.0, line_total: 6080.0 },
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "Germany", territory_group: "Europe", year: 2024.0, quarter: "Q3", order_qty: 60.0, unit_price: 64.0, line_total: 3840.0 },
+        SalesRow { category: "Clothing", product: "Classic Vest", territory: "France", territory_group: "Europe", year: 2024.0, quarter: "Q4", order_qty: 110.0, unit_price: 64.0, line_total: 7040.0 },
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Headers for the data sheet (matches BI model schema)
+// ---------------------------------------------------------------------------
+
+const HEADERS: [&str; 9] = [
+    "Category", "Product", "Territory", "Territory Group",
+    "Year", "Quarter", "Order Qty", "Unit Price", "Line Total",
+];
 
 // ---------------------------------------------------------------------------
 // Sheet builders
 // ---------------------------------------------------------------------------
 
-/// Build the "Sales Data" sheet — raw tabular data that serves as pivot source.
+/// Build the "Sales Data" sheet — denormalized sales data as pivot source.
 fn build_data_sheet() -> Sheet {
     let mut sheet = Sheet::new("Sales Data".to_string());
 
@@ -194,12 +238,10 @@ fn build_data_sheet() -> Sheet {
 
     let cells = &mut sheet.cells;
 
-    // Headers (row 0): Region | Product | Quarter | Revenue | Units
-    put_text(cells, 0, 0, "Region", 1);
-    put_text(cells, 0, 1, "Product", 1);
-    put_text(cells, 0, 2, "Quarter", 1);
-    put_text(cells, 0, 3, "Revenue", 1);
-    put_text(cells, 0, 4, "Units", 1);
+    // Headers (row 0)
+    for (col, header) in HEADERS.iter().enumerate() {
+        put_text(cells, 0, col as u32, header, 1);
+    }
 
     // Data rows
     let data = sample_data();
@@ -207,25 +249,32 @@ fn build_data_sheet() -> Sheet {
         let r = (i + 1) as u32;
         let text_style = if i % 2 == 0 { 2 } else { 3 };
         let num_style = if i % 2 == 0 { 4 } else { 5 };
-        put_text(cells, r, 0, row.region, text_style);
+        put_text(cells, r, 0, row.category, text_style);
         put_text(cells, r, 1, row.product, text_style);
-        put_text(cells, r, 2, row.quarter, text_style);
-        put_number(cells, r, 3, row.revenue, num_style);
-        put_number(cells, r, 4, row.units, num_style);
+        put_text(cells, r, 2, row.territory, text_style);
+        put_text(cells, r, 3, row.territory_group, text_style);
+        put_number(cells, r, 4, row.year, num_style);
+        put_text(cells, r, 5, row.quarter, text_style);
+        put_number(cells, r, 6, row.order_qty, num_style);
+        put_number(cells, r, 7, row.unit_price, num_style);
+        put_number(cells, r, 8, row.line_total, num_style);
     }
 
     // Column widths
-    sheet.column_widths.insert(0, 100.0);
-    sheet.column_widths.insert(1, 100.0);
-    sheet.column_widths.insert(2, 80.0);
-    sheet.column_widths.insert(3, 120.0);
-    sheet.column_widths.insert(4, 80.0);
+    sheet.column_widths.insert(0, 110.0);
+    sheet.column_widths.insert(1, 160.0);
+    sheet.column_widths.insert(2, 130.0);
+    sheet.column_widths.insert(3, 130.0);
+    sheet.column_widths.insert(4, 60.0);
+    sheet.column_widths.insert(5, 70.0);
+    sheet.column_widths.insert(6, 80.0);
+    sheet.column_widths.insert(7, 90.0);
+    sheet.column_widths.insert(8, 110.0);
 
     sheet
 }
 
-/// Build the "Dashboard" sheet with a title. The pivot output will be rendered
-/// here by Calcula when it opens the file and recalculates the pivot.
+/// Build the "Dashboard" sheet with a title.
 fn build_dashboard_sheet() -> Sheet {
     let mut sheet = Sheet::new("Dashboard".to_string());
 
@@ -235,11 +284,11 @@ fn build_dashboard_sheet() -> Sheet {
     ];
 
     let cells = &mut sheet.cells;
-    put_text(cells, 0, 0, "Sales Performance Report", 1);
-    put_text(cells, 1, 0, "Pivot table below is calculated from the Sales Data sheet.", 0);
+    put_text(cells, 0, 0, "Sales Performance Dashboard", 1);
+    put_text(cells, 1, 0, "Product category sales by territory group (from BI model)", 0);
 
     sheet.column_widths.insert(0, 200.0);
-    for i in 1..6 {
+    for i in 1..8 {
         sheet.column_widths.insert(i, 120.0);
     }
     sheet.row_heights.insert(0, 36.0);
@@ -247,41 +296,174 @@ fn build_dashboard_sheet() -> Sheet {
     sheet
 }
 
-/// Build a PivotDefinition that references the "Sales Data" sheet.
-/// Layout: Region as rows, Quarter as columns, Sum of Revenue as values.
-fn build_pivot_definition(data_row_count: usize) -> PivotDefinition {
+/// Build a PivotDefinition referencing the "Sales Data" sheet.
+/// Layout: Category + Product as rows, Territory Group as columns, Sum of Line Total.
+fn build_pivot_definition(data_row_count: usize, is_bi: bool) -> PivotDefinition {
     let pivot_id = PivotId::from_bytes(identity::generate_uuid_v7());
 
     let mut def = PivotDefinition::new(
         pivot_id,
         (0, 0),                                      // source_start (row 0, col 0)
-        ((data_row_count) as u32, 4),                 // source_end (last data row, col 4)
+        (data_row_count as u32, 8),                   // source_end (last data row, col 8)
     );
 
-    def.name = Some("Revenue by Region".to_string());
+    def.name = Some("Sales by Category & Territory".to_string());
     def.source_has_headers = true;
+    if is_bi {
+        def.source_range_display = Some("Adventure Works Sales Model".to_string());
+    }
 
     // Pivot output starts at row 3 on the Dashboard sheet (below the title)
     def.destination = (3, 0);
     def.destination_sheet = Some("Dashboard".to_string());
 
-    // Row fields: Region (col 0), Product (col 1)
+    // Row fields: Category (col 0), Product (col 1)
     def.row_fields = vec![
-        PivotField::new(0, "Region".to_string()),
+        PivotField::new(0, "Category".to_string()),
         PivotField::new(1, "Product".to_string()),
     ];
 
-    // Column fields: Quarter (col 2)
+    // Column fields: Territory Group (col 3)
     def.column_fields = vec![
-        PivotField::new(2, "Quarter".to_string()),
+        PivotField::new(3, "Territory Group".to_string()),
     ];
 
-    // Value fields: Sum of Revenue (col 3)
+    // Value fields: Sum of Line Total (col 8), Sum of Order Qty (col 6)
     def.value_fields = vec![
-        ValueField::new(3, "Sum of Revenue".to_string(), AggregationType::Sum),
+        ValueField::new(8, "Sum of Line Total".to_string(), AggregationType::Sum),
+        ValueField::new(6, "Sum of Order Qty".to_string(), AggregationType::Sum),
     ];
 
     def
+}
+
+/// Build BI pivot metadata (SavedBiPivotMetadata) from model JSON.
+/// This metadata tells the pivot extension what tables/columns/measures are available.
+fn build_bi_pivot_metadata(pivot_id: PivotId, model: &serde_json::Value) -> serde_json::Value {
+    let mut model_tables = Vec::new();
+
+    if let Some(tables) = model.get("tables").and_then(|t| t.as_array()) {
+        for table in tables {
+            let name = table.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let columns: Vec<serde_json::Value> = table.get("columns")
+                .and_then(|c| c.as_array())
+                .map(|cols| cols.iter().map(|col| {
+                    let col_name = col.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let data_type = col.get("data_type").map(|dt| {
+                        if dt.is_string() { dt.as_str().unwrap_or("String").to_string() }
+                        else { format!("{}", dt) }
+                    }).unwrap_or_else(|| "String".to_string());
+                    let is_numeric = matches!(data_type.as_str(), "Int32" | "Int64" | "Float64")
+                        || data_type.starts_with("{\"Decimal");
+                    serde_json::json!({
+                        "name": col_name,
+                        "dataType": data_type,
+                        "isNumeric": is_numeric,
+                    })
+                }).collect())
+                .unwrap_or_default();
+            model_tables.push(serde_json::json!({
+                "name": name,
+                "columns": columns,
+            }));
+        }
+    }
+
+    // Extract measures from the model (DAX measures or calculated measures)
+    let measures: Vec<serde_json::Value> = model.get("measures")
+        .and_then(|m| m.as_array())
+        .map(|arr| arr.iter().map(|m| {
+            serde_json::json!({
+                "name": m.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                "table": m.get("table").and_then(|t| t.as_str()).unwrap_or(""),
+                "sourceColumn": m.get("source_column").and_then(|s| s.as_str()).unwrap_or(""),
+                "aggregation": m.get("aggregation").and_then(|a| a.as_str()).unwrap_or("Sum"),
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "pivotId": pivot_id.to_string(),
+        "modelTables": model_tables,
+        "measures": measures,
+        "lookupColumns": [],
+    })
+}
+
+/// Load a BI model file and build a PublishDataSource from it.
+fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
+    let raw = match std::fs::read_to_string(model_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: Could not read model file: {}", e);
+            return None;
+        }
+    };
+
+    // Parse - handle both raw DataModel and ModelBundle wrapper formats
+    let model_json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Warning: Could not parse model JSON: {}", e);
+            return None;
+        }
+    };
+
+    // If it's a ModelBundle, extract the inner "model" field
+    let model = if model_json.get("model").is_some() && model_json.get("formatVersion").is_some() {
+        model_json["model"].clone()
+    } else {
+        model_json
+    };
+
+    // Extract table names from the model for bindings
+    let tables = model.get("tables")
+        .and_then(|t| t.as_array())
+        .map(|arr| arr.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let bindings: Vec<PackageBinding> = tables.iter().map(|table_name| {
+        PackageBinding {
+            model_table: table_name.clone(),
+            schema: "BI".to_string(),
+            source_table: table_name.clone(),
+        }
+    }).collect();
+
+    let ds_id = "bi-sales-model".to_string();
+
+    // Define a query that matches our pivot layout
+    let query = PackageQuery {
+        id: "sales-by-category-territory".to_string(),
+        name: "Sales by Category & Territory".to_string(),
+        data_source_id: ds_id.clone(),
+        request: PackageQueryRequest {
+            measures: vec!["[fact_sales].[linetotal]".to_string()],
+            group_by: vec![
+                PackageColumnRef { table: "dim_product".to_string(), column: "categoryname".to_string() },
+                PackageColumnRef { table: "dim_territory".to_string(), column: "territorygroup".to_string() },
+            ],
+            filters: vec![],
+        },
+        placement: QueryPlacement {
+            sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
+            start_row: 0,
+            start_col: 0,
+            include_headers: true,
+        },
+        extra: HashMap::new(),
+    };
+
+    Some(PublishDataSource {
+        id: ds_id,
+        name: "Adventure Works Sales Model".to_string(),
+        connection_type: "embedded".to_string(),
+        server: String::new(),
+        database: String::new(),
+        model_json: model,
+        bindings,
+        queries: vec![query],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -291,17 +473,22 @@ fn build_pivot_definition(data_row_count: usize) -> PivotDefinition {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: publish_report <registry_dir>");
+        eprintln!("Usage: publish_report <registry_dir> [model_path]");
         eprintln!();
         eprintln!("Example:");
         eprintln!("  cargo run --example publish_report -- \\");
-        eprintln!("    \"C:\\Dropbox\\Projekt\\Calcula\\output\\registry\"");
+        eprintln!("    \"C:\\Dropbox\\Projekt\\Calcula\\output\\registry\" \\");
+        eprintln!("    \"C:\\Dropbox\\Projekt\\Calcula Studio\\examples\\model.json\"");
         std::process::exit(1);
     }
 
     let registry_path = Path::new(&args[1]);
 
-    // Build workbook with data + dashboard sheets
+    // Optionally load the BI model
+    let model_path = args.get(2).map(|s| Path::new(s));
+    let data_source = model_path.and_then(|p| load_bi_data_source(p));
+
+    // Build workbook
     let data = sample_data();
     let data_count = data.len();
     drop(data);
@@ -313,21 +500,40 @@ fn main() {
     workbook.sheets.clear();
     workbook.sheets.push(dashboard_sheet);
     workbook.sheets.push(data_sheet);
-    workbook.properties.title = "Sales Performance Report".to_string();
+    workbook.properties.title = "Sales Performance Dashboard".to_string();
     workbook.properties.author = "Calcula Report Builder".to_string();
-    workbook.properties.description = "Sample report with pivot table".to_string();
+    workbook.properties.description = "Sales report with BI model pivot table".to_string();
+
+    // Prepare data sources (needed before pivot definition to determine source type)
+    let data_sources: Vec<PublishDataSource> = match data_source {
+        Some(ds) => {
+            println!("BI model embedded: {} ({} bindings, {} queries)", ds.name, ds.bindings.len(), ds.queries.len());
+            vec![ds]
+        }
+        None => {
+            println!("No BI model provided (pivot uses static grid data only)");
+            vec![]
+        }
+    };
+    let is_bi = !data_sources.is_empty();
 
     // Build and embed the pivot definition
-    let pivot_def = build_pivot_definition(data_count);
-    println!("Pivot: {} ({}x{} source)", pivot_def.name.as_deref().unwrap_or("unnamed"), data_count, 5);
+    let pivot_def = build_pivot_definition(data_count, is_bi);
+    println!("Pivot: {} ({}x{} source)", pivot_def.name.as_deref().unwrap_or("unnamed"), data_count, HEADERS.len());
 
     let pivot_json = serde_json::to_value(&pivot_def).expect("Failed to serialize PivotDefinition");
     workbook.pivot_definitions.push(SavedPivotDefinition {
         id: pivot_def.id,
-        source_type: "grid".to_string(),
-        source_sheet_index: Some(1), // "Sales Data" is sheet index 1
+        source_type: if is_bi { "bi".to_string() } else { "grid".to_string() },
+        source_sheet_index: Some(1), // "Sales Data" is sheet index 1 (snapshot data for initial render)
         definition: pivot_json,
     });
+
+    // If we have a BI model, add BI pivot metadata so the pivot knows about model fields
+    if is_bi {
+        let bi_meta = build_bi_pivot_metadata(pivot_def.id, &data_sources[0].model_json);
+        workbook.bi_pivot_metadata.push(bi_meta);
+    }
 
     println!("Built workbook: {} sheets, {} pivot(s)", workbook.sheets.len(), workbook.pivot_definitions.len());
 
@@ -349,7 +555,7 @@ fn main() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
         format!(
-            "2026-06-01T{:02}:{:02}:{:02}Z",
+            "2026-06-02T{:02}:{:02}:{:02}Z",
             (dur.as_secs() / 3600) % 24,
             (dur.as_secs() / 60) % 60,
             dur.as_secs() % 60,
@@ -366,7 +572,7 @@ fn main() {
         published_by: "Calcula CLI".to_string(),
         writeback_regions: None,
         object_scripts: None,
-        data_sources: Vec::new(),
+        data_sources,
     };
 
     let result = publish(&registry, &request).expect("Publish failed");
