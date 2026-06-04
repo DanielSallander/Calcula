@@ -256,6 +256,37 @@ fn arrow_cell_to_value(array: &dyn Array, idx: usize) -> CellValue {
             let divisor = 10f64.powi(scale as i32);
             CellValue::Number(raw as f64 / divisor)
         }
+        ArrowDataType::Dictionary(key_type, _) => {
+            // Dictionary-encoded columns (e.g. Dictionary(Int32, Utf8))
+            use arrow::datatypes::DataType;
+            match key_type.as_ref() {
+                DataType::Int8 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int8Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    CellValue::Text(values.value(key).to_string())
+                }
+                DataType::Int16 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int16Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    CellValue::Text(values.value(key).to_string())
+                }
+                DataType::Int32 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int32Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    CellValue::Text(values.value(key).to_string())
+                }
+                DataType::Int64 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int64Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    CellValue::Text(values.value(key).to_string())
+                }
+                _ => CellValue::Text(format!("<unsupported dict key: {:?}>", key_type)),
+            }
+        }
         _ => CellValue::Text(format!("<unsupported: {:?}>", array.data_type())),
     }
 }
@@ -613,6 +644,32 @@ pub(crate) fn write_pivot_to_grid(
     );
 
     merge_regions
+}
+
+/// Checks whether a destination cell overlaps with any existing pivot table region.
+/// Returns an error message if the destination falls inside a protected pivot region.
+pub(crate) fn check_pivot_overlap(
+    state: &AppState,
+    sheet_index: usize,
+    destination: (u32, u32),
+) -> Result<(), String> {
+    let (dest_row, dest_col) = destination;
+    let regions = state.protected_regions.lock().unwrap();
+    for region in regions.iter() {
+        if region.region_type == "pivot"
+            && region.sheet_index == sheet_index
+            && dest_row >= region.start_row
+            && dest_row <= region.end_row
+            && dest_col >= region.start_col
+            && dest_col <= region.end_col
+        {
+            return Err(format!(
+                "Cannot create pivot table: destination cell is inside an existing pivot table ({})",
+                region.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Updates the pivot region tracking for a pivot table.

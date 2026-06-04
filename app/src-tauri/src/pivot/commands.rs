@@ -116,6 +116,9 @@ pub fn create_pivot_table(
         dest_sheet_idx
     );
 
+    // Check that destination doesn't overlap an existing pivot table
+    check_pivot_overlap(&state, dest_sheet_idx, destination)?;
+
     // Get grid data for source
     let grids = state.grids.lock().unwrap();
     let grid = grids
@@ -3592,6 +3595,9 @@ pub async fn create_pivot_from_bi_model(
     let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
         *state.active_sheet.lock().unwrap()
     });
+
+    // Check that destination doesn't overlap an existing pivot table
+    check_pivot_overlap(&state, dest_sheet_idx, destination)?;
 
     // Generate pivot ID
     let pivot_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());

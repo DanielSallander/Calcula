@@ -296,6 +296,38 @@ fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<String> {
                 Some(format!("{}.{:0>width$}", whole, frac, width = scale as usize))
             }
         }
+        ArrowDataType::Dictionary(key_type, _) => {
+            // Dictionary-encoded columns (e.g. Dictionary(Int32, Utf8))
+            // Decode the dictionary index to the actual string value.
+            use arrow::datatypes::DataType;
+            match key_type.as_ref() {
+                DataType::Int8 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int8Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    Some(values.value(key).to_string())
+                }
+                DataType::Int16 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int16Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    Some(values.value(key).to_string())
+                }
+                DataType::Int32 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int32Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    Some(values.value(key).to_string())
+                }
+                DataType::Int64 => {
+                    let dict = array.as_any().downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int64Type>>().unwrap();
+                    let values = arrow::array::cast::as_string_array(dict.values());
+                    let key = dict.keys().value(idx) as usize;
+                    Some(values.value(key).to_string())
+                }
+                _ => Some(format!("<unsupported dict key: {:?}>", key_type)),
+            }
+        }
         _ => {
             Some(format!("<unsupported: {:?}>", array.data_type()))
         }

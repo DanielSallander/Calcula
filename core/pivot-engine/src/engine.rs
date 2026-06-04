@@ -1508,7 +1508,7 @@ impl<'a> PivotCalculator<'a> {
 
         items
     }
-    
+
     /// Recursively flattens nodes with DFS traversal.
     fn flatten_nodes(
         &self,
@@ -1586,6 +1586,7 @@ impl<'a> PivotCalculator<'a> {
                     parent_index,
                     field_indices: fields.iter().map(|f| f.source_index).collect(),
                     attribute_labels: Vec::new(),
+
                 });
 
                 // Fix up direct children's parent_index from placeholder to actual
@@ -1616,6 +1617,7 @@ impl<'a> PivotCalculator<'a> {
                         parent_index: my_index,
                         field_indices: fields.iter().map(|f| f.source_index).collect(),
                         attribute_labels: Vec::new(),
+    
                     }
                 };
 
@@ -1636,6 +1638,7 @@ impl<'a> PivotCalculator<'a> {
                     parent_index,
                     field_indices: fields.iter().map(|f| f.source_index).collect(),
                     attribute_labels: Vec::new(),
+
                 });
 
                 // Recurse into children if not collapsed
@@ -2187,6 +2190,28 @@ impl<'a> PivotCalculator<'a> {
                                 ch.is_collapsed = anc.is_collapsed;
                                 ch.indent_level = anc.depth as u8;
                                 ch
+                            } else {
+                                PivotViewCell::corner()
+                            }
+                        } else if value_depth < item.group_values.len()
+                            && value_depth < item.field_indices.len()
+                        {
+                            // No ancestor item exists (value-field expansion removed
+                            // the parent). Reconstruct the column field label from
+                            // the item's group_values at this depth.
+                            let gv = item.group_values[value_depth];
+                            let fi = item.field_indices[value_depth];
+                            // Use a synthetic "ancestor index" based on the group
+                            // value to detect group boundaries.
+                            let synth_key = usize::MAX - (gv as usize);
+                            if current_group != Some(synth_key) {
+                                current_group = Some(synth_key);
+                                let label = if let Some(fc) = self.cache.fields.get(fi) {
+                                    self.get_value_label(fc, gv)
+                                } else {
+                                    format!("{}", gv)
+                                };
+                                PivotViewCell::column_header(label)
                             } else {
                                 PivotViewCell::corner()
                             }
@@ -3018,10 +3043,13 @@ fn expand_axis_for_values(
         }
         return;
     }
-    
-    // For each existing item, create copies for each value field
+
+    // For each existing item, create copies for each value field.
+    // Leaf items get a synthetic parent inserted so that column headers
+    // can display the column field value (e.g. "USA") above the measure
+    // names (e.g. "[TotalSales]").
     let original_items = std::mem::take(items);
-    
+
     for item in original_items {
         if item.is_grand_total || item.is_subtotal {
             // For totals, add value field variants
