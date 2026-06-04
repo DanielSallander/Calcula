@@ -119,6 +119,11 @@ pub fn calp_publish(
     // Capture active BI connections as data sources
     let data_sources = capture_bi_data_sources(&state, &bi_state)?;
 
+    // Validate BI pivot definitions against the embedded model before publishing.
+    // This catches mismatched field names (e.g., grid-style "Category" instead of
+    // BI-style "dim_product.categoryname") that would silently break for subscribers.
+    validate_bi_pivot_definitions(&workbook, &data_sources)?;
+
     // Build exclusion regions from pivot protected regions.
     // Pivot output cells are recalculated by subscribers, so we strip them
     // from the published data — only hard-coded cell values go into the package.
@@ -2116,4 +2121,143 @@ pub struct DataSourceInfo {
     pub query_count: usize,
     pub is_configured: bool,
     pub package_name: String,
+}
+
+// ============================================================================
+// BI Pivot Publish-Time Validation
+// ============================================================================
+
+/// Validate all BI pivot definitions in the workbook against the embedded BI models.
+/// Returns an error with a human-readable summary if any field names are invalid.
+fn validate_bi_pivot_definitions(
+    workbook: &persistence::Workbook,
+    data_sources: &[calp::publish::PublishDataSource],
+) -> Result<(), String> {
+    use pivot_engine::PivotDefinition;
+
+    // Collect all table names, column names, and measure names from data sources
+    let mut all_tables: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut all_measures: Vec<String> = Vec::new();
+
+    for ds in data_sources {
+        // Navigate into ModelBundle wrapper if present
+        let model_json = if ds.model_json.get("formatVersion").is_some() {
+            ds.model_json.get("model").unwrap_or(&ds.model_json)
+        } else {
+            &ds.model_json
+        };
+
+        if let Some(tables) = model_json.get("tables").and_then(|t| t.as_array()) {
+            for table in tables {
+                let table_name = table.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let columns: Vec<String> = table.get("columns")
+                    .and_then(|c| c.as_array())
+                    .map(|cols| cols.iter()
+                        .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                        .collect())
+                    .unwrap_or_default();
+                all_tables.insert(table_name.to_string(), columns);
+            }
+        }
+
+        if let Some(measures) = model_json.get("measures").and_then(|m| m.as_array()) {
+            for measure in measures {
+                if let Some(name) = measure.get("name").and_then(|n| n.as_str()) {
+                    all_measures.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    // If no data sources with models, nothing to validate against
+    if all_tables.is_empty() && all_measures.is_empty() {
+        return Ok(());
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+
+    for pivot_def in &workbook.pivot_definitions {
+        if pivot_def.source_type != "bi" {
+            continue;
+        }
+
+        let def: PivotDefinition = serde_json::from_value(pivot_def.definition.clone())
+            .map_err(|e| format!("Failed to parse pivot definition {}: {}", pivot_def.id, e))?;
+
+        let id_str = pivot_def.id.to_string();
+        let pivot_name = def.name.as_deref().unwrap_or(&id_str);
+
+        // Validate row fields
+        for field in &def.row_fields {
+            validate_dimension_field(field.name.as_str(), "Row", pivot_name, &all_tables, &mut errors);
+        }
+
+        // Validate column fields
+        for field in &def.column_fields {
+            validate_dimension_field(field.name.as_str(), "Column", pivot_name, &all_tables, &mut errors);
+        }
+
+        // Validate filter fields
+        for field in &def.filter_fields {
+            validate_dimension_field(field.field.name.as_str(), "Filter", pivot_name, &all_tables, &mut errors);
+        }
+
+        // Validate value fields — must match a BI measure name
+        for field in &def.value_fields {
+            if !all_measures.iter().any(|m| m == &field.name) {
+                errors.push(format!(
+                    "BI pivot \"{}\": Value field \"{}\" does not match any measure in the model. Available measures: {}",
+                    pivot_name,
+                    field.name,
+                    if all_measures.is_empty() { "(none)".to_string() } else { all_measures.join(", ") },
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Publish failed: BI pivot definitions have invalid fields:\n  - {}",
+            errors.join("\n  - ")
+        ))
+    }
+}
+
+/// Validate a single dimension field (row, column, or filter) for a BI pivot.
+/// Must be in "Table.Column" format with a valid table and column name.
+fn validate_dimension_field(
+    name: &str,
+    area: &str,
+    pivot_name: &str,
+    tables: &std::collections::HashMap<String, Vec<String>>,
+    errors: &mut Vec<String>,
+) {
+    if !name.contains('.') {
+        errors.push(format!(
+            "BI pivot \"{}\": {} field \"{}\" is not in Table.Column format (expected e.g. \"dim_product.categoryname\")",
+            pivot_name, area, name,
+        ));
+        return;
+    }
+
+    let (table_name, column_name) = name.split_once('.').unwrap();
+
+    if let Some(columns) = tables.get(table_name) {
+        if !columns.iter().any(|c| c == column_name) {
+            errors.push(format!(
+                "BI pivot \"{}\": {} field \"{}\" references column \"{}\" which does not exist in table \"{}\". Available columns: {}",
+                pivot_name, area, name, column_name, table_name,
+                if columns.is_empty() { "(none)".to_string() } else { columns.join(", ") },
+            ));
+        }
+    } else {
+        let available = tables.keys().cloned().collect::<Vec<_>>().join(", ");
+        errors.push(format!(
+            "BI pivot \"{}\": {} field \"{}\" references table \"{}\" which does not exist in the model. Available tables: {}",
+            pivot_name, area, name, table_name,
+            if available.is_empty() { "(none)".to_string() } else { available },
+        ));
+    }
 }
