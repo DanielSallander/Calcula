@@ -7,6 +7,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { css } from '@emotion/css';
 import { onAppEvent, emitAppEvent } from '@api';
 import { PivotEvents } from '../lib/pivotEvents';
+import { getActivePivotId } from '../handlers/selectionHandler';
 import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import type { LayoutConfig, ReportLayout, ValuesPosition, PivotId } from './types';
 import type { RibbonContext } from '@api/extensions';
@@ -158,9 +159,14 @@ export function PivotDesignTab({
         }));
       }
     );
-    // Request current state in case we missed the initial broadcast
-    // (e.g. user switched to Home tab and back to Design)
-    emitAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT);
+    // Try to get the active pivot directly (covers the case where the event
+    // was emitted before this component mounted)
+    const active = getActivePivotId();
+    if (active !== null) {
+      setLayoutState((prev) => prev ?? { pivotId: active, layout: {} });
+    } else {
+      emitAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT);
+    }
     return unsub;
   }, []);
 

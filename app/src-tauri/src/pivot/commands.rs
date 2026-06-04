@@ -3845,6 +3845,27 @@ pub async fn update_bi_pivot_fields(
             referenced_tables.push(f.table.clone());
         }
     }
+    // Also include tables referenced by measures (e.g., fact_sales for SUM(fact_sales[linetotal]))
+    {
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        if let Some(meta) = bi_meta.get(&pivot_id) {
+            for measure_name in request.value_fields.iter().map(|v| &v.measure_name) {
+                if let Some(m) = meta.measures.iter().find(|m| m.name == *measure_name) {
+                    if !m.table.is_empty() && !referenced_tables.contains(&m.table) {
+                        referenced_tables.push(m.table.clone());
+                    }
+                }
+            }
+            // Also add ALL model tables — the BI engine may need any table for
+            // relationships, calculated columns, or measure expressions
+            for t in &meta.model_tables {
+                if !referenced_tables.contains(&t.name) {
+                    referenced_tables.push(t.name.clone());
+                }
+            }
+        }
+    }
     let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
     auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
 

@@ -5,9 +5,10 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { css } from '@emotion/css';
-import { onAppEvent, emitAppEvent, showDialog } from '@api';
+import { onAppEvent, emitAppEvent, showDialog, openTaskPane } from '@api';
 import { PivotEvents } from '../lib/pivotEvents';
 import { refreshPivotCache, getPivotTableInfo, deletePivotTable, addCalculatedField, addCalculatedItem, showReportFilterPages } from '../lib/pivot-api';
+import { getActivePivotId } from '../handlers/selectionHandler';
 import type { PivotId } from './types';
 import type { RibbonContext } from '@api/extensions';
 import { ChangeDataSourceDialog } from './ChangeDataSourceDialog';
@@ -149,11 +150,21 @@ export function PivotAnalyzeTab({
     const unsub = onAppEvent<LayoutState>(
       PivotEvents.PIVOT_LAYOUT_STATE,
       (detail) => {
+        console.log(`[CALP-DIAG] PivotAnalyzeTab received PIVOT_LAYOUT_STATE: pivotId=${detail.pivotId}`);
         setPivotId(detail.pivotId);
       }
     );
-    // Request current state
-    emitAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT);
+    // Try to get the active pivot directly (covers the case where the event
+    // was emitted before this component mounted)
+    const active = getActivePivotId();
+    if (active !== null) {
+      console.log(`[CALP-DIAG] PivotAnalyzeTab mounted, found activePivotId=${active}`);
+      setPivotId(active);
+    } else {
+      // Request current state from the task pane (if open)
+      console.log(`[CALP-DIAG] PivotAnalyzeTab mounted, requesting layout state`);
+      emitAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT);
+    }
     return unsub;
   }, []);
 
@@ -185,7 +196,19 @@ export function PivotAnalyzeTab({
       await refreshPivotCache(pivotId);
       window.dispatchEvent(new Event('pivot:refresh'));
     } catch (err) {
-      console.error('[PivotAnalyzeTab] Refresh failed:', err);
+      const errStr = String(err);
+      if (errStr.includes('Not connected') || errStr.includes('No connection')) {
+        // BI pivot not connected — offer to open Connections pane
+        const shouldConnect = window.confirm(
+          'This pivot table is not connected to a data source.\n\n' +
+          'Open the Connections panel to connect?'
+        );
+        if (shouldConnect) {
+          openTaskPane("connections-pane");
+        }
+      } else {
+        console.error('[PivotAnalyzeTab] Refresh failed:', err);
+      }
     } finally {
       setIsRefreshing(false);
     }

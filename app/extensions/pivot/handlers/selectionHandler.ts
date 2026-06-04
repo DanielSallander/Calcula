@@ -31,6 +31,15 @@ import { PivotEvents } from "../lib/pivotEvents";
 /** Cached pivot regions for fast local bounds checking. */
 let cachedRegions: PivotRegionData[] = [];
 
+/** The currently active pivot ID (set when selection is inside a pivot region).
+ *  Exported so ribbon tabs can read it directly on mount without waiting for events. */
+let activePivotId: number | null = null;
+
+/** Get the currently active pivot ID. */
+export function getActivePivotId(): number | null {
+  return activePivotId;
+}
+
 /** Flag to prevent closing the pane right after a pivot is created (regions not yet cached). */
 let justCreatedPivot = false;
 
@@ -232,12 +241,13 @@ export function handleSelectionChange(
     lastCheckedSelection.row === row &&
     lastCheckedSelection.col === col
   ) {
+    console.log(`[CALP-DIAG] handleSelectionChange(${row},${col}) SKIPPED (same cell)`);
     return;
   }
 
   // Skip if a check is already in progress
   if (checkInProgress) {
-    console.log(`[PERF][pivot-sel] handleSelectionChange(${row},${col}) SKIPPED (checkInProgress)`);
+    console.log(`[CALP-DIAG] handleSelectionChange(${row},${col}) SKIPPED (checkInProgress)`);
     return;
   }
 
@@ -245,6 +255,8 @@ export function handleSelectionChange(
 
   // Fast local bounds check using cached regions
   const localPivotRegion = findPivotRegionAtCell(row, col);
+
+  console.log(`[CALP-DIAG] handleSelectionChange(${row},${col}): inPivot=${!!localPivotRegion}, manuallyClosed=${manuallyClosed.includes(PIVOT_PANE_ID)}, cachedRegions=${cachedRegions.length}, analyzeTabRegistered=${analyzeTabRegistered}, lastChecked=${JSON.stringify(lastCheckedSelection)}`);
 
   if (localPivotRegion === null) {
     // Cell is NOT in any pivot region - close pivot pane if open
@@ -263,6 +275,7 @@ export function handleSelectionChange(
       return;
     }
     lastCheckedSelection = { row, col };
+    activePivotId = null;
     removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
     // Hide the contextual pivot ribbon tabs
@@ -277,8 +290,8 @@ export function handleSelectionChange(
     return;
   }
 
-  // Cell IS in a pivot region - set context key (even if manually closed,
-  // so the View menu knows we're in a pivot area)
+  // Cell IS in a pivot region - set context key and active pivot ID
+  activePivotId = localPivotRegion.pivotId;
   addTaskPaneContextKey("pivot");
   // Show the contextual pivot ribbon tabs
   if (!analyzeTabRegistered) {
@@ -290,9 +303,24 @@ export function handleSelectionChange(
     designTabRegistered = true;
   }
 
-  // Check if manually closed
+  // Check if manually closed — still need to notify ribbon tabs of the active pivot
   if (manuallyClosed.includes(PIVOT_PANE_ID)) {
     lastCheckedSelection = { row, col };
+    // Fetch pivot info for the ribbon tabs even though the pane is closed.
+    // Use setTimeout to ensure the ribbon tab components have mounted
+    // (they're registered just above, but React needs a tick to render them).
+    const region = cachedRegions.find(
+      (r) => row >= r.startRow && row <= r.endRow && col >= r.startCol && col <= r.endCol
+    );
+    console.log(`[CALP-DIAG] handleSelectionChange: pane manually closed, region=${region ? `pivotId=${region.pivotId}` : 'null'}, scheduling PIVOT_LAYOUT_STATE`);
+    if (region) {
+      setTimeout(() => {
+        emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, {
+          pivotId: region.pivotId,
+          layout: {},
+        });
+      }, 50);
+    }
     return;
   }
 
@@ -405,12 +433,15 @@ async function checkPivotAtSelection(
 
       openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
 
-      // Notify ribbon tabs immediately so they don't have to wait for the
-      // task pane to mount and emit PIVOT_LAYOUT_STATE
-      emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, {
-        pivotId: pivotInfo.pivotId,
-        layout: paneData.initialLayout,
-      });
+      // Notify ribbon tabs after a short delay to ensure they've mounted
+      // (ribbon tab registration happens synchronously, but React needs
+      // a tick to render the component and subscribe to events).
+      setTimeout(() => {
+        emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, {
+          pivotId: pivotInfo.pivotId,
+          layout: paneData.initialLayout,
+        });
+      }, 50);
     } else {
       closeTaskPane(PIVOT_PANE_ID);
       emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId: null, layout: {} });

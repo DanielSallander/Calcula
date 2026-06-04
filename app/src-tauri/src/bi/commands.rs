@@ -1603,13 +1603,26 @@ pub async fn auto_bind_tables_on_connection(
         (engine_arc, connector_index)
     };
 
+    // Read stored bindings from the connection (populated from package/model)
+    let stored_bindings: Vec<BiBindRequest> = {
+        let connections = bi_state.connections.lock().unwrap();
+        connections.get(&connection_id)
+            .map(|c| c.bindings.clone())
+            .unwrap_or_default()
+    };
+
     let mut engine = engine_arc.lock().await;
     for table_name in table_names {
         if !engine.registry().has_table(table_name) {
-            let source_table = table_name.to_lowercase();
-            let binding = bi_engine::SourceBinding::new("BI", &source_table);
+            // Check stored bindings first for the correct schema/source_table
+            let (schema, source_table) = stored_bindings.iter()
+                .find(|b| b.model_table.eq_ignore_ascii_case(table_name))
+                .map(|b| (b.schema.as_str(), b.source_table.as_str()))
+                .unwrap_or(("BI", *table_name));
+            let source_table_lower = source_table.to_lowercase();
+            let binding = bi_engine::SourceBinding::new(schema, &source_table_lower);
             engine.bind_table(*table_name, connector_index, binding);
-            log_info!("BI", "auto_bind: conn={}, {} -> BI.{}", connection_id, table_name, source_table);
+            log_info!("BI", "auto_bind: conn={}, {} -> {}.{}", connection_id, table_name, schema, source_table_lower);
         }
     }
 

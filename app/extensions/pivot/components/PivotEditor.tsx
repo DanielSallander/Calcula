@@ -11,6 +11,7 @@ import { SaveLoadToolbar } from './SaveLoadToolbar';
 import { usePivotEditorState } from './usePivotEditorState';
 import { buildSourceSignature } from '../lib/namedConfigs';
 import { pivot, savePivotLayout } from '@api/pivot';
+import { openTaskPane } from '@api';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import type {
@@ -79,6 +80,10 @@ export function PivotEditor({
 }: PivotEditorProps): React.ReactElement {
   const isBiPivot = !!biModel;
 
+  // Track whether we've seen at least one successful update (or user-initiated change).
+  // Suppresses the connect prompt on the initial auto-triggered mount update.
+  const hasUserInteracted = useRef(false);
+
   // JSON toggle (Phase C)
   const jsonToggle = useJsonToggle("pivot_layout", String(pivotId), onViewUpdate);
 
@@ -114,37 +119,34 @@ export function PivotEditor({
   const resetZonesRef = useRef<(() => void) | null>(null);
 
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
+    // Build BI request upfront (if applicable) so it's accessible in catch block for retry
+    let biRequest: UpdateBiPivotFieldsRequest | undefined;
+    if (isBiPivot) {
+      const isRealBiField = (f: { name: string }) => f.name.includes('.');
+      const toBiRef = (f: { name: string }) =>
+        toBiFieldRef(f.name, lookupColumns.has(f.name));
+      const biFilterFields = (request.filterFields ?? [])
+        .filter(isRealBiField)
+        .map(f => ({ ...toBiRef(f), hiddenItems: f.hiddenItems }));
+      biRequest = {
+        pivotId: request.pivotId,
+        rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
+        columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
+        valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name)),
+        filterFields: biFilterFields,
+        layout: request.layout,
+        lookupColumns: [...lookupColumns],
+        calculatedFields: request.calculatedFields,
+        valueColumnOrder: request.valueColumnOrder,
+      };
+    }
+
     try {
       const t0 = performance.now();
 
-      if (isBiPivot) {
+      if (isBiPivot && biRequest) {
         console.log(`[CALP-DIAG] PivotEditor.handleUpdate: BI pivot, pivotId=${request.pivotId}`);
         console.log(`[CALP-DIAG]   request rows=${request.rowFields?.length}, cols=${request.columnFields?.length}, vals=${request.valueFields?.length}`);
-        // Filter out synthetic "Total" field (internal pivot engine detail)
-        // and any field without a "Table.Column" format (no dot = not a real BI field)
-        const isRealBiField = (f: { name: string }) => f.name.includes('.');
-        // Convert the generic UpdatePivotFieldsRequest to BI-specific request.
-        // Mark fields as lookup based on the lookupColumns state.
-        const toBiRef = (f: { name: string }) =>
-          toBiFieldRef(f.name, lookupColumns.has(f.name));
-        // Build BI filter refs with hiddenItems preserved
-        const biFilterFields = (request.filterFields ?? [])
-          .filter(isRealBiField)
-          .map(f => ({
-            ...toBiRef(f),
-            hiddenItems: f.hiddenItems,
-          }));
-        const biRequest: UpdateBiPivotFieldsRequest = {
-          pivotId: request.pivotId,
-          rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
-          columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
-          valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name)),
-          filterFields: biFilterFields,
-          layout: request.layout,
-          lookupColumns: [...lookupColumns],
-          calculatedFields: request.calculatedFields,
-          valueColumnOrder: request.valueColumnOrder,
-        };
         console.log(`[CALP-DIAG]   biRequest: rows=${biRequest.rowFields.length} [${biRequest.rowFields.map(f => `${f.table}.${f.column}`).join(', ')}]`);
         console.log(`[CALP-DIAG]   biRequest: vals=${biRequest.valueFields.length} [${biRequest.valueFields.map(f => f.measureName).join(', ')}]`);
         await pivot.updateBiFields(biRequest);
@@ -152,6 +154,7 @@ export function PivotEditor({
         await pivot.updateFields(request);
       }
 
+      hasUserInteracted.current = true;
       const ipcMs = performance.now() - t0;
       // Notify parent that the pivot view has been updated
       if (onViewUpdate) {
@@ -171,8 +174,22 @@ export function PivotEditor({
       } else {
         const errStr = String(error);
       console.error(`[CALP-DIAG] PivotEditor.handleUpdate FAILED: ${errStr}`);
-      if (errStr.includes("Not connected") || errStr.includes("not found") || errStr.includes("No connection")) {
-        console.warn('[CALP-DIAG] Data source not connected. Open Data > Connections to connect.');
+      if (errStr.includes("Not connected") || errStr.includes("No connection")) {
+        resetZonesRef.current?.();
+        // Only show the connect prompt for user-initiated changes,
+        // not the auto-triggered mount update
+        if (hasUserInteracted.current) {
+          const shouldConnect = window.confirm(
+            "This pivot table is not connected to a data source.\n\n" +
+            "Open the Connections panel to connect?"
+          );
+          if (shouldConnect) {
+            openTaskPane("connections-pane");
+          }
+        } else {
+          // First mount — silently skip, user hasn't done anything yet
+          hasUserInteracted.current = true;
+        }
       }
       }
     }

@@ -117,8 +117,21 @@ export function registerPivotContextMenuItems(): () => void {
       onClick: async (ctx) => {
         const pivotId = getPivotIdFromContext(ctx);
         if (pivotId === null) return;
-        await refreshPivotCache(pivotId);
-        window.dispatchEvent(new Event("pivot:refresh"));
+        try {
+          await refreshPivotCache(pivotId);
+          window.dispatchEvent(new Event("pivot:refresh"));
+        } catch (err) {
+          const errStr = String(err);
+          if (errStr.includes("Not connected") || errStr.includes("No connection")) {
+            const shouldConnect = window.confirm(
+              "This pivot table is not connected to a data source.\n\n" +
+              "Open the Connections panel to connect?"
+            );
+            if (shouldConnect) {
+              openTaskPane("connections-pane");
+            }
+          }
+        }
       },
     },
 
