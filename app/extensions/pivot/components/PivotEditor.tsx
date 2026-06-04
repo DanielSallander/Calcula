@@ -118,6 +118,8 @@ export function PivotEditor({
       const t0 = performance.now();
 
       if (isBiPivot) {
+        console.log(`[CALP-DIAG] PivotEditor.handleUpdate: BI pivot, pivotId=${request.pivotId}`);
+        console.log(`[CALP-DIAG]   request rows=${request.rowFields?.length}, cols=${request.columnFields?.length}, vals=${request.valueFields?.length}`);
         // Filter out synthetic "Total" field (internal pivot engine detail)
         // and any field without a "Table.Column" format (no dot = not a real BI field)
         const isRealBiField = (f: { name: string }) => f.name.includes('.');
@@ -143,6 +145,8 @@ export function PivotEditor({
           calculatedFields: request.calculatedFields,
           valueColumnOrder: request.valueColumnOrder,
         };
+        console.log(`[CALP-DIAG]   biRequest: rows=${biRequest.rowFields.length} [${biRequest.rowFields.map(f => `${f.table}.${f.column}`).join(', ')}]`);
+        console.log(`[CALP-DIAG]   biRequest: vals=${biRequest.valueFields.length} [${biRequest.valueFields.map(f => f.measureName).join(', ')}]`);
         await pivot.updateBiFields(biRequest);
       } else {
         await pivot.updateFields(request);
@@ -165,7 +169,11 @@ export function PivotEditor({
         // User cancelled — revert the optimistic zone state
         resetZonesRef.current?.();
       } else {
-        console.error('Failed to update pivot fields:', error);
+        const errStr = String(error);
+      console.error(`[CALP-DIAG] PivotEditor.handleUpdate FAILED: ${errStr}`);
+      if (errStr.includes("Not connected") || errStr.includes("not found") || errStr.includes("No connection")) {
+        console.warn('[CALP-DIAG] Data source not connected. Open Data > Connections to connect.');
+      }
       }
     }
   }, [isBiPivot, lookupColumns, onViewUpdate]);

@@ -11,6 +11,7 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   ExtensionRegistry,
+  emitAppEvent,
 } from "@api";
 import type { LayoutConfig, AggregationType } from "@api";
 import {
@@ -21,6 +22,7 @@ import {
   PIVOT_ANALYZE_TAB_ID,
 } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
+import { PivotEvents } from "../lib/pivotEvents";
 
 // ---------------------------------------------------------------------------
 // Module-level state (owned by the pivot extension, not by the shell)
@@ -333,6 +335,14 @@ async function checkPivotAtSelection(
 
       const isBiPivot = !!pivotInfo.biModel;
 
+      if (isBiPivot) {
+        console.log(`[CALP-DIAG] checkPivotAtSelection: BI pivot detected, pivotId=${pivotInfo.pivotId}, connectionId=${pivotInfo.biModel?.connectionId}, tables=${pivotInfo.biModel?.tables?.length}, measures=${pivotInfo.biModel?.measures?.length}`);
+        console.log(`[CALP-DIAG]   row_fields=${config.rowFields.length} [${config.rowFields.map(f => f.name).join(', ')}]`);
+        console.log(`[CALP-DIAG]   col_fields=${config.columnFields.length} [${config.columnFields.map(f => f.name).join(', ')}]`);
+        console.log(`[CALP-DIAG]   val_fields=${config.valueFields.length} [${config.valueFields.map(f => f.name).join(', ')}]`);
+        console.log(`[CALP-DIAG]   sourceFields=${pivotInfo.sourceFields.length}`);
+      }
+
       // For BI pivots, use sourceIndex = -1 so the frontend consistently
       // uses name-based references (not cache column indices)
       const biIdx = isBiPivot ? -1 : undefined;
@@ -394,8 +404,16 @@ async function checkPivotAtSelection(
       };
 
       openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
+
+      // Notify ribbon tabs immediately so they don't have to wait for the
+      // task pane to mount and emit PIVOT_LAYOUT_STATE
+      emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, {
+        pivotId: pivotInfo.pivotId,
+        layout: paneData.initialLayout,
+      });
     } else {
       closeTaskPane(PIVOT_PANE_ID);
+      emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId: null, layout: {} });
     }
   } catch (error) {
     console.error("[Pivot Extension] Failed to check pivot at selection:", error);

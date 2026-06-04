@@ -119,6 +119,26 @@ pub fn calp_publish(
     // Capture active BI connections as data sources
     let data_sources = capture_bi_data_sources(&state, &bi_state)?;
 
+    // Build exclusion regions from pivot protected regions.
+    // Pivot output cells are recalculated by subscribers, so we strip them
+    // from the published data — only hard-coded cell values go into the package.
+    let excluded_regions = {
+        let regions = state.protected_regions.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        regions.iter()
+            .filter(|r| r.region_type == "pivot")
+            .filter_map(|r| {
+                sheet_ids.get(r.sheet_index).map(|&sid| calp::publish::ExcludedRegion {
+                    sheet_id: sid,
+                    start_row: r.start_row,
+                    start_col: r.start_col,
+                    end_row: r.end_row,
+                    end_col: r.end_col,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
     let request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
@@ -130,6 +150,7 @@ pub fn calp_publish(
         writeback_regions,
         object_scripts,
         data_sources,
+        excluded_regions,
     };
 
     let result = calp::publish::publish(&registry, &request)
@@ -1285,6 +1306,47 @@ pub fn calp_next_version(
 // Pivot Restoration for Pulled Packages
 // ============================================================================
 
+/// Connection spec info extracted from a model's connectionSpecs.
+pub struct ConnectionSpecInfo {
+    pub server: String,
+    pub database: String,
+    pub connector_type: String,
+    pub preferred_auth: String,
+}
+
+/// Extract server, database, connector type, and preferred auth from a model's connectionSpecs.
+pub fn extract_connection_spec_info(model_json: &serde_json::Value) -> ConnectionSpecInfo {
+    if let Some(specs) = model_json.get("connectionSpecs").and_then(|s| s.as_array()) {
+        if let Some(spec) = specs.first() {
+            let connector_type = spec.get("connectorType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("PostgreSQL")
+                .to_string();
+            let preferred_auth = spec.get("preferred_auth")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UsernamePassword")
+                .to_string();
+            if let Some(target) = spec.get("target") {
+                let host = target.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let port = target.get("port").and_then(|v| v.as_u64()).map(|p| p as u16);
+                let database = target.get("database").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let server = if let Some(p) = port {
+                    if p != 5432 { format!("{}:{}", host, p) } else { host }
+                } else {
+                    host
+                };
+                return ConnectionSpecInfo { server, database, connector_type, preferred_auth };
+            }
+        }
+    }
+    ConnectionSpecInfo {
+        server: String::new(),
+        database: String::new(),
+        connector_type: String::new(),
+        preferred_auth: String::new(),
+    }
+}
+
 /// Load embedded BI model data sources from a pulled package into BiState.
 /// Returns a mapping from package data source ID to the created connection ID.
 fn load_embedded_data_sources(
@@ -1299,7 +1361,7 @@ fn load_embedded_data_sources(
     for ds in data_sources {
         let model_path = ds.model_path.to_string_lossy().to_string();
 
-        // Read and parse the embedded model JSON
+        // Read the raw JSON to access both ModelBundle wrapper and DataModel
         let json_str = match std::fs::read_to_string(&ds.model_path) {
             Ok(s) => s,
             Err(e) => {
@@ -1307,10 +1369,29 @@ fn load_embedded_data_sources(
                 continue;
             }
         };
-        let model: bi_engine::DataModel = match serde_json::from_str(&json_str) {
+        let json_value: serde_json::Value = match serde_json::from_str(&json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to parse embedded model JSON {}: {}", model_path, e);
+                continue;
+            }
+        };
+
+        // Extract connection info from connectionSpecs (ModelBundle wrapper level)
+        let spec_info = extract_connection_spec_info(&json_value);
+        crate::log_info!("CALP-DIAG", "load_embedded_data_sources: ds_id={}, spec_info: server='{}', database='{}', preferred_auth='{}', connector_type='{}'",
+            ds.definition.id, spec_info.server, spec_info.database, spec_info.preferred_auth, spec_info.connector_type);
+
+        // Parse the DataModel from the JSON (handles both ModelBundle and raw format)
+        let model_json = if json_value.get("model").is_some() && json_value.get("formatVersion").is_some() {
+            json_value.get("model").unwrap().clone()
+        } else {
+            json_value
+        };
+        let model: bi_engine::DataModel = match serde_json::from_value(model_json) {
             Ok(m) => m,
             Err(e) => {
-                crate::log_warn!("CALP", "Failed to parse embedded model {}: {}", model_path, e);
+                crate::log_warn!("CALP", "Failed to deserialize DataModel {}: {}", model_path, e);
                 continue;
             }
         };
@@ -1341,17 +1422,34 @@ fn load_embedded_data_sources(
             id
         };
 
+        // Build bindings from the package definition
+        let bindings: Vec<crate::bi::types::BiBindRequest> = ds.definition.bindings.iter().map(|b| {
+            crate::bi::types::BiBindRequest {
+                model_table: b.model_table.clone(),
+                schema: b.schema.clone(),
+                source_table: b.source_table.clone(),
+            }
+        }).collect();
+
+        // Use server/database from model's connectionSpecs, falling back to package metadata
+        let conn_server = if !spec_info.server.is_empty() { spec_info.server.clone() } else { ds.definition.server.clone() };
+        let conn_database = if !spec_info.database.is_empty() { spec_info.database.clone() } else { ds.definition.database.clone() };
+        let conn_preferred_auth = spec_info.preferred_auth.clone();
+
         let connection = Connection {
             id: conn_id,
             name: ds.definition.name.clone(),
             description: format!("Embedded model from package ({})", ds.definition.id),
             connection_type: ConnectionType::PostgreSQL,
-            connection_string: String::new(), // no database yet
+            connection_string: String::new(), // subscriber provides credentials via Connect
+            server: conn_server.clone(),
+            database: conn_database.clone(),
+            preferred_auth: conn_preferred_auth.clone(),
             model_path: Some(model_path),
             engine: Some(engine_arc),
             model_key: Some(model_key),
             connector_index: None,
-            bindings: Vec::new(),
+            bindings,
             last_refreshed: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             is_connected: false,
@@ -1362,11 +1460,15 @@ fn load_embedded_data_sources(
         ds_to_conn.insert(ds.definition.id.clone(), conn_id);
 
         crate::log_info!(
-            "CALP",
-            "Loaded embedded BI model '{}' as connection {} (ds_id={})",
-            ds.definition.name,
+            "CALP-DIAG",
+            "Created BI connection: conn_id={}, name='{}', ds_id='{}', server='{}', database='{}', preferred_auth='{}', conn_str='{}'",
             conn_id,
-            ds.definition.id
+            ds.definition.name,
+            ds.definition.id,
+            conn_server,
+            conn_database,
+            conn_preferred_auth,
+            "(empty — awaiting credentials)"
         );
     }
 
@@ -1479,10 +1581,14 @@ fn restore_pulled_pivots(
     if !bi_pivot_metadata.is_empty() {
         // Use the first embedded connection ID if available
         let default_conn_id = embedded_connection_ids.values().next().copied().unwrap_or(0);
+        crate::log_info!("CALP-DIAG", "Restoring BI metadata: {} entries, embedded_connection_ids={:?}, default_conn_id={}",
+            bi_pivot_metadata.len(), embedded_connection_ids, default_conn_id);
 
         if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {
             for meta_json in bi_pivot_metadata {
                 if let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) {
+                    crate::log_info!("CALP-DIAG", "  BI metadata: pivot_id={}, tables={}, measures={}, assigned connection_id={}",
+                        saved.pivot_id, saved.model_tables.len(), saved.measures.len(), default_conn_id);
                     bi_meta.insert(saved.pivot_id, BiPivotMetadata {
                         connection_id: default_conn_id,
                         model_tables: saved.model_tables,
@@ -1604,7 +1710,7 @@ fn capture_bi_data_sources(
 
 /// Parse server (host) and database (dbname) from a PostgreSQL connection string.
 /// Strips credentials — only returns the non-sensitive parts.
-fn parse_pg_connection_info(connection_string: &str) -> (String, String) {
+pub fn parse_pg_connection_info(connection_string: &str) -> (String, String) {
     let mut server = String::new();
     let mut database = String::new();
 
@@ -1764,8 +1870,8 @@ pub async fn calp_refresh_data(
         });
 
         // Try to connect to the database
-        let config = bi_engine::PostgresConfig::new(&connection_string);
-        let connector_idx = match engine.add_postgres(config).await {
+        let (target, auth) = crate::bi::commands::parse_connection_string(&connection_string);
+        let connector_idx = match engine.add_postgres(target, auth).await {
             Ok(idx) => idx,
             Err(_e) => {
                 // Connection failed — if this was a saved config, it's stale;

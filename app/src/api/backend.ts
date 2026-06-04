@@ -3187,6 +3187,9 @@ export interface ConnectionInfo {
   description: string;
   connectionType: string;
   connectionString: string;
+  server: string;
+  database: string;
+  preferredAuth: string;
   modelPath: string | null;
   lastRefreshed: string | null;
   isConnected: boolean;

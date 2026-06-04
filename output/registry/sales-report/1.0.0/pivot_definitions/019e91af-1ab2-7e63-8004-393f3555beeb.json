@@ -1,5 +1,5 @@
 {
-  "id": "019e88af-7e42-7403-800c-cb06a8a359e7",
+  "id": "019e91af-1ab2-7e63-8004-393f3555beeb",
   "sourceType": "bi",
   "sourceSheetIndex": 1,
   "definition": {
@@ -13,11 +13,11 @@
         "grouping": "None",
         "hidden_items": [],
         "is_attribute": false,
-        "name": "Territory Group",
+        "name": "dim_territory.territorygroup",
         "show_all_items": false,
         "show_subtotals": true,
         "sort_order": "Ascending",
-        "source_index": 3
+        "source_index": 0
       }
     ],
     "destination": [
@@ -27,7 +27,7 @@
     "destination_sheet": "Dashboard",
     "enable_data_value_editing": false,
     "filter_fields": [],
-    "id": "019e88af-7e42-7403-800c-cb06a8a359e7",
+    "id": "019e91af-1ab2-7e63-8004-393f3555beeb",
     "layout": {
       "alt_text_description": null,
       "alt_text_title": null,
@@ -56,7 +56,7 @@
         "grouping": "None",
         "hidden_items": [],
         "is_attribute": false,
-        "name": "Category",
+        "name": "dim_product.categoryname",
         "show_all_items": false,
         "show_subtotals": true,
         "sort_order": "Ascending",
@@ -68,11 +68,11 @@
         "grouping": "None",
         "hidden_items": [],
         "is_attribute": false,
-        "name": "Product",
+        "name": "dim_product.productname",
         "show_all_items": false,
         "show_subtotals": true,
         "sort_order": "Ascending",
-        "source_index": 1
+        "source_index": 0
       }
     ],
     "slicer_filters": [],
@@ -94,19 +94,19 @@
         "aggregation": "Sum",
         "base_field_index": null,
         "base_item": null,
-        "name": "Sum of Line Total",
+        "name": "TotalSales",
         "number_format": null,
         "show_values_as": "Normal",
-        "source_index": 8
+        "source_index": 0
       },
       {
         "aggregation": "Sum",
         "base_field_index": null,
         "base_item": null,
-        "name": "Sum of Order Qty",
+        "name": "TotalQty",
         "number_format": null,
         "show_values_as": "Normal",
-        "source_index": 6
+        "source_index": 0
       }
     ],
     "version": 0

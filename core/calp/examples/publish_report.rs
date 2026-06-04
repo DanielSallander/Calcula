@@ -25,7 +25,7 @@ use pivot_engine::{
     AggregationType, PivotDefinition, PivotField, PivotId, ValueField,
 };
 
-use calp::publish::{publish, PublishDataSource, PublishRequest};
+use calp::publish::{publish, ExcludedRegion, PublishDataSource, PublishRequest};
 use calp::{PackageBinding, PackageQuery, PackageQueryRequest, PackageColumnRef, QueryPlacement};
 use calp::registry::LocalRegistry;
 use calp::version::SemVer;
@@ -317,29 +317,45 @@ fn build_pivot_definition(data_row_count: usize, is_bi: bool) -> PivotDefinition
     def.destination = (3, 0);
     def.destination_sheet = Some("Dashboard".to_string());
 
-    // Row fields: Category (col 0), Product (col 1)
-    def.row_fields = vec![
-        PivotField::new(0, "Category".to_string()),
-        PivotField::new(1, "Product".to_string()),
-    ];
-
-    // Column fields: Territory Group (col 3)
-    def.column_fields = vec![
-        PivotField::new(3, "Territory Group".to_string()),
-    ];
-
-    // Value fields: Sum of Line Total (col 8), Sum of Order Qty (col 6)
-    def.value_fields = vec![
-        ValueField::new(8, "Sum of Line Total".to_string(), AggregationType::Sum),
-        ValueField::new(6, "Sum of Order Qty".to_string(), AggregationType::Sum),
-    ];
+    if is_bi {
+        // BI pivot: field names must be in "Table.Column" format and value fields
+        // must reference BI model measure names (not grid column headers).
+        // Source index 0 is used as placeholder — the BI engine resolves by name.
+        def.row_fields = vec![
+            PivotField::new(0, "dim_product.categoryname".to_string()),
+            PivotField::new(0, "dim_product.productname".to_string()),
+        ];
+        def.column_fields = vec![
+            PivotField::new(0, "dim_territory.territorygroup".to_string()),
+        ];
+        // Value fields use BI measure names directly
+        def.value_fields = vec![
+            ValueField::new(0, "TotalSales".to_string(), AggregationType::Sum),
+            ValueField::new(0, "TotalQty".to_string(), AggregationType::Sum),
+        ];
+    } else {
+        // Grid pivot: field names are grid column headers, source_index is column position
+        def.row_fields = vec![
+            PivotField::new(0, "Category".to_string()),
+            PivotField::new(1, "Product".to_string()),
+        ];
+        def.column_fields = vec![
+            PivotField::new(3, "Territory Group".to_string()),
+        ];
+        def.value_fields = vec![
+            ValueField::new(8, "Sum of Line Total".to_string(), AggregationType::Sum),
+            ValueField::new(6, "Sum of Order Qty".to_string(), AggregationType::Sum),
+        ];
+    }
 
     def
 }
 
 /// Build BI pivot metadata (SavedBiPivotMetadata) from model JSON.
 /// This metadata tells the pivot extension what tables/columns/measures are available.
-fn build_bi_pivot_metadata(pivot_id: PivotId, model: &serde_json::Value) -> serde_json::Value {
+fn build_bi_pivot_metadata(pivot_id: PivotId, model_or_bundle: &serde_json::Value) -> serde_json::Value {
+    // Handle both ModelBundle (tables inside "model") and raw DataModel
+    let model = model_or_bundle.get("model").unwrap_or(model_or_bundle);
     let mut model_tables = Vec::new();
 
     if let Some(tables) = model.get("tables").and_then(|t| t.as_array()) {
@@ -409,15 +425,16 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
         }
     };
 
-    // If it's a ModelBundle, extract the inner "model" field
-    let model = if model_json.get("model").is_some() && model_json.get("formatVersion").is_some() {
-        model_json["model"].clone()
+    // If it's a ModelBundle, use it as-is (connectionSpecs live at the wrapper level).
+    // Extract the inner DataModel for table inspection.
+    let (bundle, inner_model) = if model_json.get("model").is_some() && model_json.get("formatVersion").is_some() {
+        (model_json.clone(), model_json["model"].clone())
     } else {
-        model_json
+        (model_json.clone(), model_json)
     };
 
-    // Extract table names from the model for bindings
-    let tables = model.get("tables")
+    // Extract table names from the inner model for bindings
+    let tables = inner_model.get("tables")
         .and_then(|t| t.as_array())
         .map(|arr| arr.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -457,10 +474,10 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
     Some(PublishDataSource {
         id: ds_id,
         name: "Adventure Works Sales Model".to_string(),
-        connection_type: "embedded".to_string(),
-        server: String::new(),
+        connection_type: "PostgreSQL".to_string(),
+        server: String::new(), // read from model's connectionSpecs at pull time
         database: String::new(),
-        model_json: model,
+        model_json: bundle, // embed full ModelBundle (includes connectionSpecs)
         bindings,
         queries: vec![query],
     })
@@ -562,6 +579,20 @@ fn main() {
         )
     };
 
+    // Exclude pivot output cells from the Dashboard sheet.
+    // Subscribers recalculate these from the pivot definition + source data.
+    let dashboard_id = workbook.sheets[0].id;
+    let pivot_dest = pivot_def.destination; // (3, 0) on Dashboard
+    let excluded_regions = vec![
+        ExcludedRegion {
+            sheet_id: dashboard_id,
+            start_row: pivot_dest.0,
+            start_col: pivot_dest.1,
+            end_row: pivot_dest.0 + 100, // generous upper bound
+            end_col: pivot_dest.1 + 20,
+        },
+    ];
+
     let request = PublishRequest {
         workbook: &workbook,
         package_name: "sales-report".to_string(),
@@ -573,6 +604,7 @@ fn main() {
         writeback_regions: None,
         object_scripts: None,
         data_sources,
+        excluded_regions,
     };
 
     let result = publish(&registry, &request).expect("Publish failed");

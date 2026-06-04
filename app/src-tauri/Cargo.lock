@@ -2112,6 +2112,8 @@ dependencies = [
  "chrono",
  "engine-core",
  "rust_decimal",
+ "serde",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tiberius",

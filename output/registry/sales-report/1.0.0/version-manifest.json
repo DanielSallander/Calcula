@@ -3,15 +3,15 @@
   "packageName": "sales-report",
   "version": "1.0.0",
   "kind": "report",
-  "publishedAt": "2026-06-02T14:14:23Z",
+  "publishedAt": "2026-06-02T08:10:32Z",
   "publishedBy": "Calcula CLI",
   "sheets": [
     {
-      "sheetId": "019e88af-7e42-798a-8004-25772e88cc2e",
+      "sheetId": "019e91af-1ab2-73ea-8007-a56abca36171",
       "name": "Dashboard"
     },
     {
-      "sheetId": "019e88af-7e41-7ccf-8000-548fe23d5dea",
+      "sheetId": "019e91af-1ab1-7303-8007-f5c8cd12fa0b",
       "name": "Sales Data"
     }
   ],
@@ -19,7 +19,7 @@
     {
       "id": "bi-sales-model",
       "name": "Adventure Works Sales Model",
-      "connectionType": "embedded",
+      "connectionType": "PostgreSQL",
       "server": "",
       "database": "",
       "modelPath": "models/bi-sales-model/model.json",
@@ -76,7 +76,7 @@
             ]
           },
           "placement": {
-            "sheetId": "019e88af-7e41-7fb2-800b-d6423e6e7396",
+            "sheetId": "019e91af-1ab1-75e6-8007-cb572f3efb9c",
             "startRow": 0,
             "startCol": 0,
             "includeHeaders": true

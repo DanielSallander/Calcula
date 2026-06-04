@@ -21,6 +21,7 @@ import {
   deleteConnection,
   refreshConnection,
   getModelInfo,
+  updateConnection,
 } from "../lib/bi-api";
 import { PIVOT_PANE_ID } from "../../Pivot/manifest";
 import {
@@ -267,6 +268,27 @@ export function ConnectionsPane(
   const handleConnect = useCallback(
     async (connectionId: number) => {
       try {
+        // If the connection has no database URL (e.g., embedded from a package),
+        // either auto-connect (Integrated) or prompt for credentials.
+        const conn = connections.find((c) => c.id === connectionId);
+        if (conn && !conn.connectionString && conn.preferredAuth !== "Integrated") {
+          const server = conn.server || "localhost";
+          const db = conn.database || "mydb";
+          // Backend will resolve the OS username as default;
+          // user only provides the password
+          const password = window.prompt(
+            `Connect to ${conn.name}\n` +
+            `Server: ${server}\n` +
+            `Database: ${db}\n\n` +
+            `Enter password:`,
+          );
+          if (password === null) return; // cancelled
+          await updateConnection({ id: connectionId, connectionString: `__PASSWORD_ONLY__:${password}` });
+          await loadConnections();
+        }
+        // For Integrated auth with no connection string, bi_connect handles it
+        // using server/database from the model + AuthMethod::Integrated
+
         setLoadingId(connectionId);
         setStatus("Connecting...");
         await connect(connectionId);
@@ -278,7 +300,7 @@ export function ConnectionsPane(
         setLoadingId(null);
       }
     },
-    [loadConnections, setStatus],
+    [connections, loadConnections, setStatus],
   );
 
   const handleDisconnect = useCallback(
@@ -302,12 +324,43 @@ export function ConnectionsPane(
       try {
         setLoadingId(connectionId);
         setStatus("Refreshing...");
-        const results = await refreshConnection(connectionId);
-        const totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
-        setStatus(
-          `Refreshed ${results.length} queries (${totalRows} total rows)`,
-          "success",
-        );
+
+        // Try refreshing active queries (BI grid queries)
+        let queryCount = 0;
+        let totalRows = 0;
+        try {
+          const results = await refreshConnection(connectionId);
+          queryCount = results.length;
+          totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
+        } catch {
+          // No active queries — that's OK if there are pivots
+        }
+
+        // Also refresh any BI pivots connected to this connection
+        let pivotCount = 0;
+        try {
+          const allPivots = await pivot.getAll();
+          for (const p of allPivots) {
+            try {
+              await pivot.refreshCache(p.id);
+              pivotCount++;
+            } catch {
+              // Individual pivot refresh failure is non-fatal
+            }
+          }
+        } catch {
+          // Pivot refresh errors are non-fatal
+        }
+
+        if (queryCount > 0 || pivotCount > 0) {
+          const parts = [];
+          if (queryCount > 0) parts.push(`${queryCount} queries (${totalRows} rows)`);
+          if (pivotCount > 0) parts.push(`${pivotCount} pivot table(s)`);
+          setStatus(`Refreshed ${parts.join(" + ")}`, "success");
+        } else {
+          setStatus("No queries or pivot tables to refresh.", "info");
+        }
+
         window.dispatchEvent(new Event("grid:refresh"));
         await loadConnections();
       } catch (err) {
@@ -463,6 +516,12 @@ export function ConnectionsPane(
                 <div>
                   <strong>Type:</strong> {conn.connectionType}
                 </div>
+                {(conn.server || conn.database) && (
+                  <div>
+                    {conn.server && <><strong>Server:</strong> {conn.server} </>}
+                    {conn.database && <><strong>Database:</strong> {conn.database}</>}
+                  </div>
+                )}
                 {conn.tableCount > 0 && (
                   <div>
                     <strong>Tables:</strong> {conn.tableCount} |{" "}

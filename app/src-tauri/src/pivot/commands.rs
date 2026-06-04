@@ -975,6 +975,7 @@ pub async fn refresh_pivot_cache(
     window: tauri::Window,
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "refresh_pivot_cache pivot_id={}", pivot_id);
@@ -985,10 +986,98 @@ pub async fn refresh_pivot_cache(
     let token = CancellationToken::new();
     pivot_state.cancellation_tokens.lock().unwrap().insert(pivot_id, token.clone());
 
-    // Check if this is a BI-backed pivot. BI pivots don't rebuild from the grid;
-    // they recalculate from their existing cache (data comes from the BI engine
-    // via update_bi_pivot_fields, not from grid cells).
+    // Check if this is a BI-backed pivot. BI pivots re-query the live database
+    // via update_bi_pivot_fields rather than rebuilding from grid cells.
     let is_bi_pivot = pivot_state.bi_metadata.lock().unwrap().contains_key(&pivot_id);
+
+    if is_bi_pivot {
+        log_info!("CALP-DIAG", "refresh_pivot_cache: BI pivot {} — re-querying live database", pivot_id);
+        // Reconstruct an UpdateBiPivotFieldsRequest from the stored definition
+        let bi_request = {
+            let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let (definition, _cache) = pivot_tables
+                .get(&pivot_id)
+                .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            let meta = bi_meta.get(&pivot_id)
+                .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
+
+            // Parse "Table.Column" field names back into BiFieldRef
+            let parse_field = |name: &str, is_lookup: bool| -> super::types::BiFieldRef {
+                let (table, column) = name.split_once('.')
+                    .map(|(t, c)| (t.to_string(), c.to_string()))
+                    .unwrap_or_else(|| (String::new(), name.to_string()));
+                super::types::BiFieldRef { table, column, is_lookup, hidden_items: Vec::new() }
+            };
+
+            let row_fields: Vec<super::types::BiFieldRef> = definition.row_fields.iter()
+                .map(|f| parse_field(&f.name, f.is_attribute))
+                .collect();
+            let column_fields: Vec<super::types::BiFieldRef> = definition.column_fields.iter()
+                .map(|f| parse_field(&f.name, f.is_attribute))
+                .collect();
+            let value_fields: Vec<super::types::BiValueFieldRef> = definition.value_fields.iter()
+                .map(|v| super::types::BiValueFieldRef { measure_name: v.name.clone() })
+                .collect();
+            let filter_fields: Vec<super::types::BiFieldRef> = definition.filter_fields.iter()
+                .map(|f| {
+                    let mut field = parse_field(&f.field.name, f.field.is_attribute);
+                    field.hidden_items = f.field.hidden_items.clone();
+                    field
+                })
+                .collect();
+            // Slicer filters store source_index, not Table.Column names.
+            // For BI refresh, we need the field names — look them up from the cache.
+            let slicer_fields: Vec<super::types::BiFieldRef> = Vec::new(); // TODO: resolve from cache field names if needed
+            let calc_fields: Option<Vec<super::types::CalculatedFieldDef>> = if definition.calculated_fields.is_empty() {
+                None
+            } else {
+                Some(definition.calculated_fields.iter().map(|cf| {
+                    super::types::CalculatedFieldDef {
+                        name: cf.name.clone(),
+                        formula: cf.formula.clone(),
+                        number_format: cf.number_format.clone(),
+                    }
+                }).collect())
+            };
+            let value_column_order = if definition.value_column_order.is_empty() {
+                None
+            } else {
+                Some(definition.value_column_order.iter().map(|v| {
+                    match v {
+                        pivot_engine::ValueColumnRef::Value(i) => super::types::ValueColumnRefDef::Value { index: *i },
+                        pivot_engine::ValueColumnRef::Calculated(i) => super::types::ValueColumnRefDef::Calculated { index: *i },
+                    }
+                }).collect())
+            };
+
+            super::types::UpdateBiPivotFieldsRequest {
+                pivot_id,
+                row_fields,
+                column_fields,
+                value_fields,
+                filter_fields,
+                slicer_fields,
+                layout: None, // keep current layout
+                lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+                calculated_fields: calc_fields,
+                value_column_order,
+            }
+        };
+
+        log_info!("CALP-DIAG", "refresh_pivot_cache: reconstructed BI request: rows={}, cols={}, values={}, filters={}",
+            bi_request.row_fields.len(), bi_request.column_fields.len(),
+            bi_request.value_fields.len(), bi_request.filter_fields.len());
+        for (i, f) in bi_request.row_fields.iter().enumerate() {
+            log_info!("CALP-DIAG", "  row_field[{}]: {}.{} (lookup={})", i, f.table, f.column, f.is_lookup);
+        }
+        for (i, f) in bi_request.value_fields.iter().enumerate() {
+            log_info!("CALP-DIAG", "  value_field[{}]: {}", i, f.measure_name);
+        }
+
+        // Delegate to update_bi_pivot_fields which handles the full BI query flow
+        return update_bi_pivot_fields(state, pivot_state, bi_state, bi_request).await;
+    }
 
     // 1. Lock briefly: read source info, build new cache from grid, release locks
     let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx, destination) = {
@@ -1006,15 +1095,7 @@ pub async fn refresh_pivot_cache(
         pivot_state.previous_states.lock().unwrap()
             .insert(pivot_id, (old_definition.clone(), old_cache.clone()));
 
-        if is_bi_pivot {
-            // BI pivot: keep existing cache, just bump version and recalculate
-            log_info!("PIVOT", "refresh_pivot_cache: BI pivot {} — recalculating from existing cache", pivot_id);
-            let mut new_def = definition.clone();
-            new_def.bump_version();
-            let new_cache = cache.clone();
-            drop(pivot_tables);
-            (old_definition, old_cache, new_def, new_cache, dest_sheet_idx, destination)
-        } else {
+        {
             // Grid pivot: rebuild cache from source grid data
             let mut source_start = definition.source_start;
             let mut source_end = definition.source_end;
@@ -1327,11 +1408,15 @@ pub fn get_pivot_at_cell(
         let bi_meta = pivot_state.bi_metadata.lock().unwrap();
         bi_meta.get(&pivot_id).map(|meta| {
             log_info!(
-                "PIVOT",
-                "get_pivot_at_cell: BI pivot_id={}, {} tables, {} measures",
+                "CALP-DIAG",
+                "get_pivot_at_cell: BI pivot_id={}, connection_id={}, {} tables, {} measures, row_fields={}, col_fields={}, val_fields={}",
                 pivot_id,
+                meta.connection_id,
                 meta.model_tables.len(),
-                meta.measures.len()
+                meta.measures.len(),
+                field_configuration.row_fields.len(),
+                field_configuration.column_fields.len(),
+                field_configuration.value_fields.len()
             );
             BiPivotModelInfo {
                 connection_id: meta.connection_id,
@@ -2960,6 +3045,7 @@ pub async fn refresh_all_pivot_tables(
     window: tauri::Window,
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
 ) -> Result<Vec<PivotViewResponse>, String> {
     log_info!("PIVOT", "refresh_all_pivot_tables");
 
@@ -2970,7 +3056,7 @@ pub async fn refresh_all_pivot_tables(
 
     let mut responses = Vec::new();
     for pivot_id in pivot_ids {
-        match refresh_pivot_cache(window.clone(), state.clone(), pivot_state.clone(), pivot_id).await {
+        match refresh_pivot_cache(window.clone(), state.clone(), pivot_state.clone(), bi_state.clone(), pivot_id).await {
             Ok(response) => responses.push(response),
             Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
         }
@@ -3736,13 +3822,17 @@ pub async fn update_bi_pivot_fields(
     let connection_id = {
         let bi_meta = pivot_state.bi_metadata.lock()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
-        bi_meta.get(&pivot_id)
-            .map(|m| m.connection_id)
+        let meta = bi_meta.get(&pivot_id);
+        log_info!("CALP-DIAG", "update_bi_pivot_fields: pivot_id={}, bi_metadata exists={}, connection_id={}",
+            pivot_id, meta.is_some(), meta.map(|m| m.connection_id).unwrap_or(999));
+        meta.map(|m| m.connection_id)
             .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?
     };
 
     // Auto-connect if needed
+    log_info!("CALP-DIAG", "update_bi_pivot_fields: calling auto_connect for connection_id={}", connection_id);
     auto_connect_bi_connection(&bi_state, connection_id).await?;
+    log_info!("CALP-DIAG", "update_bi_pivot_fields: auto_connect succeeded for connection_id={}", connection_id);
 
     // Collect table names referenced in fields for auto-binding
     let mut referenced_tables: Vec<String> = Vec::new();

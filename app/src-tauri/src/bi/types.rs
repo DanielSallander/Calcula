@@ -59,6 +59,13 @@ pub struct Connection {
     pub connection_type: ConnectionType,
     /// Database connection string.
     pub connection_string: String,
+    /// Database server host (or host:port). No credentials. From model connectionSpecs.
+    pub server: String,
+    /// Database name. From model connectionSpecs.
+    pub database: String,
+    /// Preferred authentication method from model connectionSpecs.
+    /// "Integrated" = Windows/SSPI, "UsernamePassword" = prompt for creds.
+    pub preferred_auth: String,
     /// Path to the loaded model JSON file.
     pub model_path: Option<String>,
     /// The shared BI Engine instance (Arc for sharing across connections with the same model).
@@ -112,6 +119,9 @@ pub struct ConnectionInfo {
     pub description: String,
     pub connection_type: String,
     pub connection_string: String,
+    pub server: String,
+    pub database: String,
+    pub preferred_auth: String,
     pub model_path: Option<String>,
     pub last_refreshed: Option<String>,
     pub is_connected: bool,
@@ -142,6 +152,9 @@ impl Connection {
             description: self.description.clone(),
             connection_type: self.connection_type.as_str().to_string(),
             connection_string: self.connection_string.clone(),
+            server: self.server.clone(),
+            database: self.database.clone(),
+            preferred_auth: self.preferred_auth.clone(),
             model_path: self.model_path.clone(),
             last_refreshed: self.last_refreshed.clone(),
             is_connected: self.is_connected,

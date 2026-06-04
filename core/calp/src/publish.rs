@@ -6,7 +6,7 @@
 use std::fs;
 
 use identity::EntityId;
-use persistence::{SavedTable, SavedObjectScript, Workbook};
+use persistence::{SavedCell, SavedTable, SavedObjectScript, Workbook};
 
 use crate::error::CalpError;
 use crate::manifest::*;
@@ -26,6 +26,17 @@ pub struct PublishDataSource {
     pub queries: Vec<PackageQuery>,
 }
 
+/// A rectangular region of cells to exclude from published sheet data.
+/// Used to strip pivot output cells (which are recalculated by subscribers).
+pub struct ExcludedRegion {
+    /// The sheet ID this exclusion applies to.
+    pub sheet_id: identity::SheetId,
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
 /// Request to publish selected sheets from a workbook.
 pub struct PublishRequest<'a> {
     pub workbook: &'a Workbook,
@@ -43,6 +54,9 @@ pub struct PublishRequest<'a> {
     pub object_scripts: Option<Vec<SavedObjectScript>>,
     /// Data source definitions to embed in the package for live data.
     pub data_sources: Vec<PublishDataSource>,
+    /// Cell regions to exclude from published sheet data (e.g., pivot output).
+    /// These regions are recalculated by subscribers from the source definition.
+    pub excluded_regions: Vec<ExcludedRegion>,
 }
 
 /// Result of a publish operation.
@@ -160,8 +174,29 @@ pub fn publish(
         let sheet_dir = registry.sheet_dir(&request.package_name, &version_str, &sheet.id);
         fs::create_dir_all(&sheet_dir)?;
 
+        // Filter out cells in excluded regions (e.g., pivot output areas).
+        // These cells are recalculated by subscribers from the pivot definition.
+        let exclusions: Vec<&ExcludedRegion> = request.excluded_regions.iter()
+            .filter(|r| r.sheet_id == sheet.id)
+            .collect();
+
+        let cells = if exclusions.is_empty() {
+            std::borrow::Cow::Borrowed(&sheet.cells)
+        } else {
+            let filtered: std::collections::HashMap<(u32, u32), SavedCell> = sheet.cells.iter()
+                .filter(|(&(row, col), _)| {
+                    !exclusions.iter().any(|r|
+                        row >= r.start_row && row <= r.end_row &&
+                        col >= r.start_col && col <= r.end_col
+                    )
+                })
+                .map(|(&k, v)| (k, v.clone()))
+                .collect();
+            std::borrow::Cow::Owned(filtered)
+        };
+
         // Cell data
-        let cell_data = calcula_format::sheet_data::cells_to_sheet_data(&sheet.cells);
+        let cell_data = calcula_format::sheet_data::cells_to_sheet_data(&cells);
         fs::write(sheet_dir.join("data.json"), serde_json::to_string_pretty(&cell_data)?)?;
 
         // Styles

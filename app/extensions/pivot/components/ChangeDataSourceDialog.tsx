@@ -46,7 +46,16 @@ export function ChangeDataSourceDialog({
       });
   }, [isOpen, pivotId]);
 
+  // Detect if the source is a BI model (not a cell range)
+  const isBiSource = !!(sourceRange && !sourceRange.match(/^[A-Za-z]+\d*[!:]/) && !sourceRange.match(/^\$?[A-Z]+\$?\d+/));
+
   const handleApply = useCallback(async () => {
+    // For BI pivots, just close — the data source is managed via Connections panel
+    if (isBiSource) {
+      onClose();
+      return;
+    }
+
     setError(null);
 
     const trimmed = sourceRange.trim();
@@ -72,7 +81,7 @@ export function ChangeDataSourceDialog({
     } finally {
       setIsLoading(false);
     }
-  }, [pivotId, sourceRange, onChanged, onClose]);
+  }, [pivotId, sourceRange, isBiSource, onChanged, onClose]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -107,24 +116,40 @@ export function ChangeDataSourceDialog({
 
         {/* Content */}
         <div style={styles.content}>
-          <div style={styles.fieldGroup}>
-            <label style={styles.label}>
-              Table/Range:
-            </label>
-            <input
-              type="text"
-              style={styles.input}
-              value={sourceRange}
-              onChange={(e) => setSourceRange(e.target.value)}
-              placeholder="e.g., Sheet1!A1:D100"
-              disabled={isLoading}
-              autoFocus
-            />
-            <span style={styles.hint}>
-              Enter the new data range including the sheet name (e.g., Sheet1!A1:D100).
-              You can use full-column references like Sheet1!A:D.
-            </span>
-          </div>
+          {/* BI pivot: show model name as read-only */}
+          {isBiSource ? (
+            <div style={styles.fieldGroup}>
+              <label style={styles.label}>
+                Data Source:
+              </label>
+              <div style={{ ...styles.input, background: '#f0f0f0', color: '#555', cursor: 'default' }}>
+                {sourceRange}
+              </div>
+              <span style={styles.hint}>
+                This pivot table is connected to a BI model. Use the Connections
+                panel (Data &gt; Connections) to manage the data source.
+              </span>
+            </div>
+          ) : (
+            <div style={styles.fieldGroup}>
+              <label style={styles.label}>
+                Table/Range:
+              </label>
+              <input
+                type="text"
+                style={styles.input}
+                value={sourceRange}
+                onChange={(e) => setSourceRange(e.target.value)}
+                placeholder="e.g., Sheet1!A1:D100"
+                disabled={isLoading}
+                autoFocus
+              />
+              <span style={styles.hint}>
+                Enter the new data range including the sheet name (e.g., Sheet1!A1:D100).
+                You can use full-column references like Sheet1!A:D.
+              </span>
+            </div>
+          )}
 
           {/* Error */}
           {error && (

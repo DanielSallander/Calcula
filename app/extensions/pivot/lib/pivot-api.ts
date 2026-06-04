@@ -1701,6 +1701,8 @@ export async function updateBiFields(
     const dt = performance.now() - t0;
     cachePivotView(request.pivotId, result);
     clearPreviousView(request.pivotId);
+    // Trigger overlay refresh so the grid redraws with the new pivot data
+    window.dispatchEvent(new CustomEvent("pivot:refresh"));
     console.log(
       `[PERF][pivot] updateBiFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
     );

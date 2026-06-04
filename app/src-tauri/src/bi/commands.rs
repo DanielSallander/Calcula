@@ -44,6 +44,108 @@ fn index_to_col(mut idx: u32) -> String {
     result
 }
 
+/// Parse a connection string (PostgreSQL URL or key=value format) into
+/// `ConnectionTarget` + `AuthMethod` for the new engine auth API.
+pub(crate) fn parse_connection_string(conn_str: &str) -> (bi_engine::ConnectionTarget, bi_engine::AuthMethod) {
+    // Try URL format: postgresql://user:pass@host:port/database
+    if conn_str.starts_with("postgresql://") || conn_str.starts_with("postgres://") {
+        // Simple URL parsing without pulling in the url crate
+        let rest = conn_str.splitn(2, "://").nth(1).unwrap_or("");
+        let (userinfo, hostpath) = if let Some(at_pos) = rest.rfind('@') {
+            (&rest[..at_pos], &rest[at_pos + 1..])
+        } else {
+            ("", rest)
+        };
+        let (username, password) = if let Some(colon_pos) = userinfo.find(':') {
+            (&userinfo[..colon_pos], &userinfo[colon_pos + 1..])
+        } else {
+            (userinfo, "")
+        };
+        let (hostport, database) = if let Some(slash_pos) = hostpath.find('/') {
+            (&hostpath[..slash_pos], &hostpath[slash_pos + 1..])
+        } else {
+            (hostpath, "")
+        };
+        // Strip query params from database
+        let database = database.split('?').next().unwrap_or(database);
+        let (host, port) = if let Some(colon_pos) = hostport.rfind(':') {
+            (&hostport[..colon_pos], hostport[colon_pos + 1..].parse::<u16>().ok())
+        } else {
+            (hostport, None)
+        };
+
+        let mut target = bi_engine::ConnectionTarget::new(host, database);
+        if let Some(p) = port {
+            target = target.with_port(p);
+        }
+        let auth = if !username.is_empty() {
+            bi_engine::AuthMethod::UsernamePassword {
+                username: username.to_string(),
+                password: password.to_string(),
+            }
+        } else {
+            bi_engine::AuthMethod::Integrated
+        };
+        (target, auth)
+    } else {
+        // Key=value format: host=... dbname=... user=... password=...
+        let mut host = "localhost".to_string();
+        let mut port: Option<u16> = None;
+        let mut dbname = String::new();
+        let mut user = String::new();
+        let mut password = String::new();
+        let mut schema: Option<String> = None;
+
+        for part in conn_str.split_whitespace() {
+            if let Some((key, value)) = part.split_once('=') {
+                match key.to_lowercase().as_str() {
+                    "host" | "server" => host = value.to_string(),
+                    "port" => port = value.parse().ok(),
+                    "dbname" | "database" => dbname = value.to_string(),
+                    "user" | "username" => user = value.to_string(),
+                    "password" => password = value.to_string(),
+                    "schema" | "search_path" | "options" => schema = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut target = bi_engine::ConnectionTarget::new(&host, &dbname);
+        if let Some(p) = port {
+            target = target.with_port(p);
+        }
+        if let Some(s) = schema {
+            target = target.with_default_schema(&s);
+        }
+        let auth = if !user.is_empty() {
+            bi_engine::AuthMethod::UsernamePassword {
+                username: user,
+                password,
+            }
+        } else {
+            bi_engine::AuthMethod::Integrated
+        };
+        (target, auth)
+    }
+}
+
+/// Build a `ConnectionTarget` from server and database strings.
+fn build_target_from_connection_info(server: &str, database: &str) -> bi_engine::ConnectionTarget {
+    let (host, port) = if let Some(colon_pos) = server.rfind(':') {
+        (&server[..colon_pos], server[colon_pos + 1..].parse::<u16>().ok())
+    } else {
+        (server, None)
+    };
+    let mut target = bi_engine::ConnectionTarget::new(
+        if host.is_empty() { "localhost" } else { host },
+        if database.is_empty() { "postgres" } else { database },
+    );
+    if let Some(p) = port {
+        target = target.with_port(p);
+    }
+    target
+}
+
 /// Build a `BiModelInfo` from an Engine's DataModel.
 fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
     let tables = model
@@ -274,6 +376,9 @@ pub async fn bi_create_connection(
     let json_value: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
+    // Extract connectionSpecs from ModelBundle (if present) for server/database info
+    let model_conn_spec = crate::calp_commands::extract_connection_spec_info(&json_value);
+
     // Detect ModelBundle format (has "formatVersion" at top level)
     let model_json = if json_value.get("formatVersion").is_some() {
         log_info!("BI", "Detected Calcula Studio ModelBundle format");
@@ -341,12 +446,20 @@ pub async fn bi_create_connection(
         id
     };
 
+    // Prefer connectionSpecs from model, fall back to parsing the connection string
+    let (target, _auth) = parse_connection_string(&request.connection_string);
+    let server = if !model_conn_spec.server.is_empty() { model_conn_spec.server } else { target.host.clone() };
+    let database = if !model_conn_spec.database.is_empty() { model_conn_spec.database } else { target.database.clone() };
+    let preferred_auth = if !model_conn_spec.preferred_auth.is_empty() { model_conn_spec.preferred_auth } else { "UsernamePassword".to_string() };
     let connection = Connection {
         id,
         name: request.name,
         description: request.description.unwrap_or_default(),
         connection_type: ConnectionType::PostgreSQL,
         connection_string: request.connection_string,
+        server,
+        database,
+        preferred_auth,
         model_path: Some(request.model_path),
         engine: Some(engine_arc),
         model_key: Some(model_key),
@@ -469,23 +582,65 @@ pub async fn bi_connect(
     request: BiConnectRequest,
 ) -> Result<ConnectionInfo, String> {
     let connection_id = request.connection_id;
-    log_info!("BI", "bi_connect: connection_id={}", connection_id);
+    log_info!("CALP-DIAG", "bi_connect called: connection_id={}", connection_id);
 
-    // Get the engine Arc and connection string
-    let (engine_arc, conn_str) = {
+    // Get the engine Arc, connection string, and server/database/auth info
+    let (engine_arc, conn_str, server, database, preferred_auth) = {
         let connections = bi_state.connections.lock().unwrap();
         let conn = connections.get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
         let engine_arc = conn.engine.clone()
             .ok_or("No model loaded for this connection.")?;
-        (engine_arc, conn.connection_string.clone())
+        (engine_arc, conn.connection_string.clone(), conn.server.clone(), conn.database.clone(), conn.preferred_auth.clone())
+    };
+
+    log_info!("CALP-DIAG", "bi_connect: conn_str='{}', server='{}', database='{}', preferred_auth='{}'",
+        if conn_str.starts_with("__PASSWORD_ONLY__") { "__PASSWORD_ONLY__:***" } else { &conn_str },
+        server, database, preferred_auth);
+
+    // Build ConnectionTarget + AuthMethod
+    let (target, auth) = if conn_str.starts_with("__PASSWORD_ONLY__:") {
+        // Password-only mode: use OS username + server/database from model
+        let password = conn_str.trim_start_matches("__PASSWORD_ONLY__:");
+        let os_user = std::env::var("USERNAME")
+            .unwrap_or_else(|_| "postgres".to_string());
+        let target = build_target_from_connection_info(&server, &database);
+        let auth = bi_engine::AuthMethod::UsernamePassword {
+            username: os_user.clone(),
+            password: password.to_string(),
+        };
+        // Update the stored connection string to the resolved form
+        {
+            let mut connections = bi_state.connections.lock().unwrap();
+            if let Some(conn) = connections.get_mut(&connection_id) {
+                conn.connection_string = format!(
+                    "host={} dbname={} user={} password={}",
+                    server, database, os_user, password
+                );
+            }
+        }
+        (target, auth)
+    } else if !conn_str.is_empty() {
+        // Explicit connection string provided — parse it
+        parse_connection_string(&conn_str)
+    } else if preferred_auth == "Integrated" {
+        // Integrated auth: use server/database from model, no credentials needed
+        let target = build_target_from_connection_info(&server, &database);
+        (target, bi_engine::AuthMethod::Integrated)
+    } else if !server.is_empty() && !database.is_empty() {
+        // Server/database known but no credentials — error
+        return Err(format!(
+            "No credentials configured for {}. Click Connect in the Connections panel to provide username and password.",
+            if database.is_empty() { &server } else { &database }
+        ));
+    } else {
+        return Err("No database URL configured. Use 'Add Connection' with a PostgreSQL connection string to enable live data refresh.".to_string());
     };
 
     // Lock the shared engine for async database connection
     let idx = {
         let mut engine = engine_arc.lock().await;
-        let config = bi_engine::PostgresConfig::new(&conn_str);
-        engine.add_postgres(config).await
+        engine.add_postgres(target, auth).await
             .map_err(|e| format!("Connection failed: {}", e))?
     };
 
@@ -1361,19 +1516,47 @@ pub async fn auto_connect_bi_connection(
     bi_state: &BiState,
     connection_id: ConnectionId,
 ) -> Result<(), String> {
-    let (already_connected, conn_str) = {
+    let (already_connected, conn_str, server, database) = {
         let connections = bi_state.connections.lock().unwrap();
         let conn = connections.get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        (conn.is_connected, conn.connection_string.clone())
+        (conn.is_connected, conn.connection_string.clone(), conn.server.clone(), conn.database.clone())
     };
+
+    log_info!("CALP-DIAG", "auto_connect: conn_id={}, already_connected={}, conn_str='{}', server='{}', database='{}'",
+        connection_id, already_connected,
+        if conn_str.starts_with("__PASSWORD_ONLY__") { "__PASSWORD_ONLY__:***".to_string() }
+        else if conn_str.is_empty() { "(empty)".to_string() }
+        else { format!("(len={})", conn_str.len()) },
+        server, database);
 
     if already_connected {
         return Ok(());
     }
 
-    if conn_str.is_empty() {
-        return Err("No connection string configured.".to_string());
+    // Resolve the connection string — handle __PASSWORD_ONLY__ format
+    let resolved_conn_str = if conn_str.starts_with("__PASSWORD_ONLY__:") {
+        let password = conn_str.trim_start_matches("__PASSWORD_ONLY__:");
+        let os_user = std::env::var("USERNAME")
+            .unwrap_or_else(|_| "postgres".to_string());
+        let full = format!("host={} dbname={} user={} password={}", server, database, os_user, password);
+        // Store the resolved connection string
+        {
+            let mut connections = bi_state.connections.lock().unwrap();
+            if let Some(conn) = connections.get_mut(&connection_id) {
+                conn.connection_string = full.clone();
+            }
+        }
+        full
+    } else {
+        conn_str
+    };
+
+    if resolved_conn_str.is_empty() {
+        return Err(format!(
+            "Not connected. Open Data > Connections and click Connect on '{}' to provide credentials.",
+            if !database.is_empty() { &database } else { "the data source" }
+        ));
     }
 
     log_info!("BI", "auto_connect: conn_id={}, connecting...", connection_id);
@@ -1388,8 +1571,8 @@ pub async fn auto_connect_bi_connection(
 
     let idx = {
         let mut engine = engine_arc.lock().await;
-        let config = bi_engine::PostgresConfig::new(&conn_str);
-        engine.add_postgres(config).await
+        let (target, auth) = parse_connection_string(&resolved_conn_str);
+        engine.add_postgres(target, auth).await
             .map_err(|e| format!("Auto-connect failed: {}", e))?
     };
 
