@@ -5,6 +5,7 @@
 pub mod types;
 pub mod commands;
 pub mod engine_registry;
+pub mod credential_cache;
 
 pub use commands::*;
 pub use types::{BiState, ConnectionId};

@@ -628,11 +628,33 @@ pub async fn bi_connect(
         let target = build_target_from_connection_info(&server, &database);
         (target, bi_engine::AuthMethod::Integrated)
     } else if !server.is_empty() && !database.is_empty() {
-        // Server/database known but no credentials — error
-        return Err(format!(
-            "No credentials configured for {}. Click Connect in the Connections panel to provide username and password.",
-            if database.is_empty() { &server } else { &database }
-        ));
+        // Server/database known — try cached credentials
+        if let Some((cached_user, cached_pass)) =
+            super::credential_cache::get_credentials(&server, &database)
+        {
+            log_info!("CALP-DIAG", "bi_connect: using cached credentials for {}:{}", server, database);
+            let target = build_target_from_connection_info(&server, &database);
+            let auth = bi_engine::AuthMethod::UsernamePassword {
+                username: cached_user.clone(),
+                password: cached_pass.clone(),
+            };
+            // Store the resolved connection string
+            {
+                let mut connections = bi_state.connections.lock().unwrap();
+                if let Some(conn) = connections.get_mut(&connection_id) {
+                    conn.connection_string = format!(
+                        "host={} dbname={} user={} password={}",
+                        server, database, cached_user, cached_pass
+                    );
+                }
+            }
+            (target, auth)
+        } else {
+            return Err(format!(
+                "Not connected. Open Data > Connections and click Connect on '{}' to provide credentials.",
+                if database.is_empty() { &server } else { &database }
+            ));
+        }
     } else {
         return Err("No database URL configured. Use 'Add Connection' with a PostgreSQL connection string to enable live data refresh.".to_string());
     };
@@ -671,6 +693,26 @@ pub async fn bi_connect(
 
     // Save cache to disk after successful refresh (crash protection)
     save_cache_for_connection(&bi_state, connection_id).await;
+
+    // Cache credentials for future auto-connect (keyed by server+database)
+    if !server.is_empty() && !database.is_empty() {
+        let stored_conn_str = bi_state.connections.lock().unwrap()
+            .get(&connection_id)
+            .map(|c| c.connection_string.clone())
+            .unwrap_or_default();
+        log_info!("CALP-DIAG", "bi_connect: saving credentials, server='{}', database='{}', conn_str_len={}",
+            server, database, stored_conn_str.len());
+        let (_, auth_for_cache) = parse_connection_string(&stored_conn_str);
+        match auth_for_cache {
+            bi_engine::AuthMethod::UsernamePassword { ref username, ref password } => {
+                super::credential_cache::save_credentials(&server, &database, username, password);
+                log_info!("CALP-DIAG", "Cached credentials for {}:{} user={}", server, database, username);
+            }
+            _ => {
+                log_info!("CALP-DIAG", "bi_connect: auth method is not UsernamePassword, skipping cache");
+            }
+        }
+    }
 
     log_info!("BI", "Connected: id={}, connector_index={}", connection_id, idx);
     Ok(info)
@@ -1535,7 +1577,7 @@ pub async fn auto_connect_bi_connection(
     }
 
     // Resolve the connection string — handle __PASSWORD_ONLY__ format
-    let resolved_conn_str = if conn_str.starts_with("__PASSWORD_ONLY__:") {
+    let mut resolved_conn_str = if conn_str.starts_with("__PASSWORD_ONLY__:") {
         let password = conn_str.trim_start_matches("__PASSWORD_ONLY__:");
         let os_user = std::env::var("USERNAME")
             .unwrap_or_else(|_| "postgres".to_string());
@@ -1553,10 +1595,25 @@ pub async fn auto_connect_bi_connection(
     };
 
     if resolved_conn_str.is_empty() {
-        return Err(format!(
-            "Not connected. Open Data > Connections and click Connect on '{}' to provide credentials.",
-            if !database.is_empty() { &database } else { "the data source" }
-        ));
+        // Try cached credentials before failing
+        if let Some((cached_user, cached_pass)) =
+            super::credential_cache::get_credentials(&server, &database)
+        {
+            log_info!("BI", "auto_connect: using cached credentials for {}:{}", server, database);
+            let full = format!("host={} dbname={} user={} password={}", server, database, cached_user, cached_pass);
+            {
+                let mut connections = bi_state.connections.lock().unwrap();
+                if let Some(conn) = connections.get_mut(&connection_id) {
+                    conn.connection_string = full.clone();
+                }
+            }
+            resolved_conn_str = full;
+        } else {
+            return Err(format!(
+                "Not connected. Open Data > Connections and click Connect on '{}' to provide credentials.",
+                if !database.is_empty() { &database } else { "the data source" }
+            ));
+        }
     }
 
     log_info!("BI", "auto_connect: conn_id={}, connecting...", connection_id);

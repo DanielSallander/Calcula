@@ -12,6 +12,7 @@ import { usePivotEditorState } from './usePivotEditorState';
 import { buildSourceSignature } from '../lib/namedConfigs';
 import { pivot, savePivotLayout } from '@api/pivot';
 import { openTaskPane } from '@api';
+import { getConnections, connect, updateConnection } from '../../BusinessIntelligence/lib/bi-api';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import type {
@@ -46,6 +47,97 @@ interface PivotEditorProps {
   sourceTableName?: string;
   onClose?: () => void;
   onViewUpdate?: () => void;
+}
+
+/** Banner showing BI connection status with connect action */
+function BiConnectionBanner({ connectionId, onConnected }: {
+  connectionId: number;
+  onConnected: () => void;
+}) {
+  const [isConnected, setIsConnected] = useState<boolean | null>(null);
+  const [connName, setConnName] = useState("");
+  const [isConnecting, setIsConnecting] = useState(false);
+
+  useEffect(() => {
+    getConnections().then(conns => {
+      const conn = conns.find(c => c.id === connectionId);
+      if (conn) {
+        setIsConnected(conn.isConnected);
+        setConnName(conn.name);
+      }
+    }).catch(() => {});
+  }, [connectionId]);
+
+  const handleConnect = useCallback(async () => {
+    try {
+      const conns = await getConnections();
+      const conn = conns.find(c => c.id === connectionId);
+      if (!conn) return;
+
+      if (!conn.connectionString) {
+        const server = conn.server || "localhost";
+        const db = conn.database || "mydb";
+        const password = window.prompt(
+          `Connect to ${conn.name}\nServer: ${server}\nDatabase: ${db}\n\nEnter password:`,
+        );
+        if (password === null) return;
+        await updateConnection({ id: connectionId, connectionString: `__PASSWORD_ONLY__:${password}` });
+      }
+
+      setIsConnecting(true);
+      await connect(connectionId);
+      setIsConnected(true);
+      onConnected();
+    } catch (err) {
+      window.alert(`Failed to connect: ${err}`);
+    } finally {
+      setIsConnecting(false);
+    }
+  }, [connectionId, onConnected]);
+
+  if (isConnected === null) return null;
+
+  const bgColor = isConnected ? '#f0f7ff' : '#fff8e1';
+  const borderColor = isConnected ? '#d0e4f5' : '#ffe082';
+  const dotColor = isConnected ? '#4caf50' : '#ff9800';
+
+  return (
+    <div style={{
+      padding: '6px 10px',
+      fontSize: '11px',
+      color: '#555',
+      background: bgColor,
+      borderBottom: `1px solid ${borderColor}`,
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+    }}>
+      <span style={{
+        width: '7px', height: '7px', borderRadius: '50%',
+        background: dotColor, display: 'inline-block', flexShrink: 0,
+      }} />
+      {isConnected ? (
+        <span>{connName}</span>
+      ) : (
+        <>
+          <span style={{ color: '#e65100' }}>
+            {connName || 'Data source'} — disconnected
+          </span>
+          <button
+            onClick={handleConnect}
+            disabled={isConnecting}
+            style={{
+              marginLeft: 'auto', padding: '2px 8px', fontSize: '11px',
+              background: '#1976d2', color: '#fff', border: 'none',
+              borderRadius: '3px', cursor: isConnecting ? 'wait' : 'pointer',
+            }}
+          >
+            {isConnecting ? 'Connecting...' : 'Connect'}
+          </button>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** Parse a BI field key "Table.Column" into a BiFieldRef, optionally marking as lookup */
@@ -510,25 +602,13 @@ export function PivotEditor({
       ) : (
       <>
       {isBiPivot && biModel && (
-        <div style={{
-          padding: '4px 10px',
-          fontSize: '11px',
-          color: '#555',
-          background: '#f0f7ff',
-          borderBottom: '1px solid #d0e4f5',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-        }}>
-          <span style={{
-            width: '6px',
-            height: '6px',
-            borderRadius: '50%',
-            background: '#4caf50',
-            display: 'inline-block',
-          }} />
-          <span>Connection #{biModel.connectionId}</span>
-        </div>
+        <BiConnectionBanner
+          connectionId={biModel.connectionId}
+          onConnected={() => {
+            // Retry any pending update after connecting
+            if (onViewUpdate) onViewUpdate();
+          }}
+        />
       )}
 
       {/* Fields tab content */}

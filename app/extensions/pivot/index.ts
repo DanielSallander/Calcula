@@ -94,6 +94,8 @@ import { drawPivotCell, DEFAULT_PIVOT_THEME, createPivotTheme } from "./renderin
 import type { PivotCellDrawResult, PivotTheme } from "./rendering/pivot";
 import { getThemeOverridesForStyle, DEFAULT_PIVOT_STYLE_ID } from "./components/PivotTableStylesGallery";
 
+import { getConnections } from "../BusinessIntelligence/lib/bi-api";
+
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
 export { cachePivotView, getCachedPivotView };
 
@@ -205,6 +207,13 @@ let transitionCleanupTimer: ReturnType<typeof setTimeout> | null = null;
  * This flag prevents that redundant second call from executing.
  */
 let isRefreshingPivotRegions = false;
+
+/**
+ * Cached BI connection status per pivot ID.
+ * Updated during refreshPivotRegions. Used by the overlay to draw a connection badge.
+ * null = not a BI pivot, true = connected, false = disconnected.
+ */
+const biConnectionStatus = new Map<number, boolean | null>();
 
 /**
  * Version counter for structural changes (row/column insert/delete).
@@ -365,6 +374,67 @@ function drawLoadingOverlay(overlayCtx: OverlayRenderContext, pivotId: number): 
       requestOverlayRedraw();
     }
   });
+}
+
+/**
+ * Update the BI connection status cache for all pivot regions.
+ * Called from refreshPivotRegions (non-blocking).
+ */
+function updateBiConnectionStatus(regions: PivotRegionData[]): void {
+  // Fire-and-forget: fetch connections and check which pivots are BI-connected
+  getConnections().then(conns => {
+    const connMap = new Map(conns.map(c => [c.id, c.isConnected]));
+
+    // For each pivot region, check if it has BI metadata via getPivotAtCell
+    for (const region of regions) {
+      // Quick check: try to get BI info for this pivot
+      getPivotAtCell(region.startRow, region.startCol).then(info => {
+        if (info?.biModel) {
+          const connected = connMap.get(info.biModel.connectionId) ?? false;
+          const prev = biConnectionStatus.get(region.pivotId);
+          biConnectionStatus.set(region.pivotId, connected);
+          // Redraw if status changed
+          if (prev !== connected) {
+            requestOverlayRedraw();
+          }
+        } else {
+          biConnectionStatus.set(region.pivotId, null); // not a BI pivot
+        }
+      }).catch(() => {
+        biConnectionStatus.set(region.pivotId, null);
+      });
+    }
+  }).catch(() => {});
+}
+
+/**
+ * Draw a small connection status badge in the top-right area of a BI pivot.
+ * Green = connected, orange = disconnected. Non-BI pivots show nothing.
+ */
+function drawBiConnectionBadge(overlayCtx: OverlayRenderContext, pivotId: number): void {
+  const status = biConnectionStatus.get(pivotId);
+  if (status === null || status === undefined) return; // not a BI pivot
+
+  const { ctx: canvas, region } = overlayCtx;
+  // Use the overlay helpers to find the top-right corner of the pivot
+  const colX = overlayGetColumnX(overlayCtx, region.endCol);
+  const colW = overlayGetColumnWidth(overlayCtx, region.endCol);
+  const rowY = overlayGetRowY(overlayCtx, region.startRow);
+
+  const dotRadius = 4;
+  const padding = 6;
+  const x = colX + colW - dotRadius - padding;
+  const y = rowY + dotRadius + padding;
+
+  canvas.save();
+  canvas.beginPath();
+  canvas.arc(x, y, dotRadius, 0, Math.PI * 2);
+  canvas.fillStyle = status ? '#4caf50' : '#ff9800';
+  canvas.fill();
+  canvas.strokeStyle = '#fff';
+  canvas.lineWidth = 1.5;
+  canvas.stroke();
+  canvas.restore();
 }
 
 /**
@@ -814,6 +884,9 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     // white fill, so stale cells underneath are hidden even before refreshCells()
     // completes from the grid:refresh below.
     replaceGridRegionsByType("pivot", gridRegions);
+
+    // Update BI connection status for overlay badges (non-blocking)
+    updateBiConnectionStatus(regions);
 
     // Notify other components (selection handler, etc.)
     emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions });
@@ -1454,6 +1527,8 @@ function activate(context: ExtensionContext): void {
             if (isLoading(pivotId)) {
               drawLoadingOverlay(ctx, pivotId);
             }
+            // Draw connection status badge for BI pivots
+            drawBiConnectionBadge(ctx, pivotId);
           }
         }
       },
