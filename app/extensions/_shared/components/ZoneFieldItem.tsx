@@ -50,7 +50,7 @@ export function ZoneFieldItem({
   if (isCalcField) {
     displayName = field.customName || field.name;
   } else if (zone === 'values' && field.aggregation && !isBiField) {
-    displayName = getValueFieldDisplayName(field.name, field.aggregation);
+    displayName = field.customName || getValueFieldDisplayName(field.name, field.aggregation);
   } else {
     let raw = field.customName || field.name;
     // Strip brackets from BI measure names: "[Sum of Linetotal]" -> "Sum of Linetotal"

@@ -147,8 +147,11 @@ export function usePivotEditorState({
         const valIdx = regularValues.length;
         const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
         const isBiField = f.sourceIndex === -1;
+        // For BI fields, keep the original [MeasureName] in `name` so
+        // toBiValueFieldRef can extract the real measure name for the backend.
+        // The custom display name travels separately via `customName`.
         const displayName = isBiField
-          ? (f.customName || f.name)
+          ? f.name
           : (f.customName || getValueFieldDisplayName(f.name, aggregation));
         regularValues.push({
           sourceIndex: f.sourceIndex,
@@ -156,6 +159,7 @@ export function usePivotEditorState({
           aggregation,
           numberFormat: f.numberFormat,
           showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
+          customName: f.customName || undefined,
         });
         columnOrder.push({ type: 'value', index: valIdx });
       }

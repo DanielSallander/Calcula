@@ -359,7 +359,11 @@ export function ValueFieldSettingsModal({
         <div className={modalStyles.content}>
           <div className={modalStyles.field}>
             <label className={modalStyles.label}>Source Name</label>
-            <div className={modalStyles.sourceInfo}>{field.name}</div>
+            <div className={modalStyles.sourceInfo}>{
+              field.name.startsWith('[') && field.name.endsWith(']')
+                ? field.name.substring(1, field.name.length - 1)
+                : field.name
+            }</div>
           </div>
 
           <div className={modalStyles.field}>

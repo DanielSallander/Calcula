@@ -3368,6 +3368,14 @@ pub fn run() {
         }
     }
 
+    // Load log filter config (muted categories/levels)
+    match logging::load_log_filter_config() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[LOG_FILTER] Failed to load config: {}", e);
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -3452,6 +3460,8 @@ pub fn run() {
             logging::log_frontend_atomic,
             logging::get_next_seq,
             logging::sort_log_file,
+            logging::get_log_filter_config,
+            logging::set_log_filter,
             // Calculation mode commands
             calculation::set_calculation_mode,
             calculation::get_calculation_mode,

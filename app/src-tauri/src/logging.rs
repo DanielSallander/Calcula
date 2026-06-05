@@ -1,6 +1,7 @@
 //! FILENAME: app/src-tauri/src/logging.rs
 // PURPOSE: Unified logging system for the application.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -22,6 +23,12 @@ pub static LOG_FILE: Lazy<Mutex<Option<File>>> = Lazy::new(|| Mutex::new(None));
 
 /// Cached log path for frontend access
 static LOG_PATH: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
+
+/// Muted categories — log calls with these categories are suppressed entirely
+static MUTED_CATEGORIES: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Muted levels — log calls with these levels are suppressed entirely
+static MUTED_LEVELS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Get next sequence number
 pub fn next_seq() -> u64 {
@@ -132,10 +139,29 @@ pub fn init_log_file() -> Result<PathBuf, String> {
     Ok(log_path)
 }
 
+/// Check if a log call should be suppressed based on muted categories/levels
+fn is_muted(level: &str, category: &str) -> bool {
+    if let Ok(cats) = MUTED_CATEGORIES.lock() {
+        if cats.contains(category) {
+            return true;
+        }
+    }
+    if let Ok(lvls) = MUTED_LEVELS.lock() {
+        if lvls.contains(level) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Write a log line in unified format.
 /// PERFORMANCE: Does NOT flush after every write. The OS buffer handles batching.
 /// Only info/warn/error levels print to console to reduce stdout I/O overhead.
 pub fn write_log(level: &str, category: &str, message: &str) {
+    if is_muted(level, category) {
+        return;
+    }
+
     let seq = next_seq();
     let line = format!("{}|{}|{}|{}", seq, level, category, message);
 
@@ -274,6 +300,84 @@ pub fn sort_log_file() -> Result<String, String> {
     
     log_exit_info!("CMD", "sort_log_file", "sorted {} lines", line_count);
     Ok(format!("Sorted {} lines", line_count))
+}
+
+// ============================================================================
+// LOG FILTER CONFIG
+// ============================================================================
+
+/// Config file structure matching app/log-filter.config.json
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFilterConfig {
+    #[serde(default)]
+    pub muted: Vec<String>,
+    #[serde(default)]
+    pub muted_backend_categories: Vec<String>,
+    #[serde(default)]
+    pub muted_backend_levels: Vec<String>,
+}
+
+/// Load log filter config from app/log-filter.config.json.
+/// Applies backend filters and returns the full config for the frontend.
+pub fn load_log_filter_config() -> Result<LogFilterConfig, String> {
+    let project_root = get_project_root()?;
+    let config_path = project_root.join("log-filter.config.json");
+
+    if !config_path.exists() {
+        eprintln!("[LOG_FILTER] No config file at {:?}, all logs enabled", config_path);
+        return Ok(LogFilterConfig {
+            muted: vec![],
+            muted_backend_categories: vec![],
+            muted_backend_levels: vec![],
+        });
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read log filter config: {}", e))?;
+
+    let config: LogFilterConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse log filter config: {}", e))?;
+
+    // Apply backend filters
+    if let Ok(mut cats) = MUTED_CATEGORIES.lock() {
+        cats.clear();
+        cats.extend(config.muted_backend_categories.clone());
+    }
+    if let Ok(mut lvls) = MUTED_LEVELS.lock() {
+        lvls.clear();
+        lvls.extend(config.muted_backend_levels.clone());
+    }
+
+    let cat_count = config.muted_backend_categories.len();
+    let lvl_count = config.muted_backend_levels.len();
+    let fe_count = config.muted.len();
+    eprintln!(
+        "[LOG_FILTER] Loaded config: {} frontend muted, {} backend categories muted, {} backend levels muted",
+        fe_count, cat_count, lvl_count
+    );
+
+    Ok(config)
+}
+
+/// Get log filter config (reads from file, applies backend filters, returns full config)
+#[tauri::command]
+pub fn get_log_filter_config() -> Result<LogFilterConfig, String> {
+    load_log_filter_config()
+}
+
+/// Set backend log filter at runtime (from frontend logFilter API)
+#[tauri::command]
+pub fn set_log_filter(muted_categories: Vec<String>, muted_levels: Vec<String>) -> Result<(), String> {
+    if let Ok(mut cats) = MUTED_CATEGORIES.lock() {
+        cats.clear();
+        cats.extend(muted_categories);
+    }
+    if let Ok(mut lvls) = MUTED_LEVELS.lock() {
+        lvls.clear();
+        lvls.extend(muted_levels);
+    }
+    Ok(())
 }
 
 // ============================================================================

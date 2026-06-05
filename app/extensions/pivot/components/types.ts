@@ -72,6 +72,7 @@ export interface ValueFieldConfig {
   aggregation: AggregationType;
   numberFormat?: string;
   showValuesAs?: ShowValuesAs;
+  customName?: string;
 }
 
 // Layout configuration matching LayoutConfig in pivot_commands.rs
@@ -163,6 +164,7 @@ export interface BiFieldRef {
 /** Reference to a model measure (for BI pivot value fields) */
 export interface BiValueFieldRef {
   measureName: string;
+  customName?: string;
 }
 
 /** Request to create a BI model pivot */

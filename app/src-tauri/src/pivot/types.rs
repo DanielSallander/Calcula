@@ -486,6 +486,9 @@ pub struct ValueFieldConfig {
     pub position: Option<usize>,
     /// Show as rule for calculated display
     pub show_as: Option<ShowAsRule>,
+    /// User-provided custom display name override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
 }
 
 /// Layout configuration.
@@ -1113,6 +1116,9 @@ pub struct ZoneFieldInfo {
     /// Items hidden by the filter (only for filter fields).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden_items: Option<Vec<String>>,
+    /// User-provided custom display name override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
 }
 
 /// Current field configuration for the pivot editor
@@ -1456,6 +1462,9 @@ pub struct BiFieldRef {
 #[serde(rename_all = "camelCase")]
 pub struct BiValueFieldRef {
     pub measure_name: String,
+    /// User-provided custom display name override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
 }
 
 /// Serializable BI pivot metadata for persistence in .cala/.calp files.

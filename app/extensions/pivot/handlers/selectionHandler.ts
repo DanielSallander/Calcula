@@ -396,7 +396,7 @@ async function checkPivotAtSelection(
         name: f.name,
         isNumeric: f.isNumeric,
         aggregation: f.aggregation as AggregationType | undefined,
-        customName: isBiPivot ? f.name : undefined,
+        customName: f.customName ?? (isBiPivot ? f.name : undefined),
       }));
 
       const initialFilters: ZoneField[] = config.filterFields.map((f) => ({

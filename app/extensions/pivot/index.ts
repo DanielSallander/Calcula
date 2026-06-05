@@ -1527,8 +1527,7 @@ function activate(context: ExtensionContext): void {
             if (isLoading(pivotId)) {
               drawLoadingOverlay(ctx, pivotId);
             }
-            // Draw connection status badge for BI pivots
-            drawBiConnectionBadge(ctx, pivotId);
+            // Connection status badge is shown in the task pane only
           }
         }
       },

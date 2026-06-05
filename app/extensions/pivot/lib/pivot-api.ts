@@ -439,6 +439,8 @@ export interface ZoneFieldInfo {
   isLookup?: boolean;
   /** Items hidden by the filter. Only present for filter fields with active filters. */
   hiddenItems?: string[];
+  /** User-provided custom display name override. */
+  customName?: string;
 }
 
 /** Current field configuration for the pivot editor */
@@ -498,6 +500,7 @@ export interface BiFieldRef {
 /** BI value field reference (measure name) */
 export interface BiValueFieldRef {
   measureName: string;
+  customName?: string;
 }
 
 /** Request to create a BI model pivot */
@@ -1917,6 +1920,7 @@ export async function getPivotDsl(pivotId: PivotId): Promise<string> {
       aggregation: f.aggregation as ZoneField['aggregation'],
       isLookup: f.isLookup,
       hiddenItems: f.hiddenItems,
+      customName: f.customName,
     }));
 
   const rows = toZoneFields(config.rowFields);
@@ -2027,6 +2031,7 @@ export async function applyPivotDsl(
       aggregation,
       numberFormat: f.numberFormat,
       showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
+      customName: f.customName || undefined,
     });
   }
 
@@ -2045,10 +2050,10 @@ export async function applyPivotDsl(
       if (dotIndex === -1) return { table: '', column: name, isLookup };
       return { table: name.substring(0, dotIndex), column: name.substring(dotIndex + 1), isLookup };
     };
-    const toBiValueRef = (name: string): BiValueFieldRef => {
+    const toBiValueRef = (name: string, customName?: string): BiValueFieldRef => {
       const measureName = name.startsWith('[') && name.endsWith(']')
         ? name.substring(1, name.length - 1) : name;
-      return { measureName };
+      return { measureName, customName };
     };
     const isRealBiField = (f: { name: string }) => f.name.includes('.');
 
@@ -2056,7 +2061,7 @@ export async function applyPivotDsl(
       pivotId,
       rowFields: rowFields.filter(isRealBiField).map(f => toBiRef(f.name, result.rows.find(r => r.name === f.name)?.isLookup)),
       columnFields: columnFields.filter(isRealBiField).map(f => toBiRef(f.name, result.columns.find(c => c.name === f.name)?.isLookup)),
-      valueFields: regularValues.map(f => toBiValueRef(f.name)),
+      valueFields: regularValues.map(f => toBiValueRef(f.name, f.customName)),
       filterFields: filterFields.filter(isRealBiField).map(f => ({
         ...toBiRef(f.name),
         hiddenItems: f.hiddenItems,

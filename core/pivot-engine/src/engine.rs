@@ -2131,7 +2131,10 @@ impl<'a> PivotCalculator<'a> {
                 } else {
                     for col_ref in &col_order {
                         let name = match col_ref {
-                            ValueColumnRef::Value(i) => self.definition.value_fields[*i].name.clone(),
+                            ValueColumnRef::Value(i) => {
+                                let vf = &self.definition.value_fields[*i];
+                                vf.custom_name.clone().unwrap_or_else(|| vf.name.clone())
+                            }
                             ValueColumnRef::Calculated(i) => self.definition.calculated_fields[*i].name.clone(),
                         };
                         if is_last_header {
@@ -3028,9 +3031,10 @@ fn expand_axis_for_values(
     if items.is_empty() {
         // No axis items - create items just for value fields
         for (i, vf) in value_fields.iter().enumerate() {
+            let display = vf.custom_name.clone().unwrap_or_else(|| vf.name.clone());
             items.push(FlatAxisItem {
                 group_values: vec![i as ValueId], // Use value field index as pseudo-ID
-                label: vf.name.clone(),
+                label: display,
                 depth: 0,
                 is_subtotal: false,
                 is_grand_total: false,
@@ -3047,28 +3051,30 @@ fn expand_axis_for_values(
     // For each existing item, create copies for each value field.
     // Leaf items get a synthetic parent inserted so that column headers
     // can display the column field value (e.g. "USA") above the measure
-    // names (e.g. "[TotalSales]").
+    // names (e.g. "TotalSales").
     let original_items = std::mem::take(items);
 
     for item in original_items {
         if item.is_grand_total || item.is_subtotal {
             // For totals, add value field variants
             for (i, vf) in value_fields.iter().enumerate() {
+                let display = vf.custom_name.clone().unwrap_or_else(|| vf.name.clone());
                 let mut new_item = item.clone();
                 new_item.group_values.push(i as ValueId);
                 new_item.label = if item.is_grand_total {
-                    format!("Grand Total - {}", vf.name)
+                    format!("Grand Total - {}", display)
                 } else {
-                    format!("{} - {}", item.label, vf.name)
+                    format!("{} - {}", item.label, display)
                 };
                 items.push(new_item);
             }
         } else if !item.has_children || item.is_collapsed {
             // Leaf items or collapsed items get value field children
             for (i, vf) in value_fields.iter().enumerate() {
+                let display = vf.custom_name.clone().unwrap_or_else(|| vf.name.clone());
                 let mut new_item = item.clone();
                 new_item.group_values.push(i as ValueId);
-                new_item.label = vf.name.clone();
+                new_item.label = display;
                 new_item.depth += 1;
                 new_item.has_children = false;
                 items.push(new_item);

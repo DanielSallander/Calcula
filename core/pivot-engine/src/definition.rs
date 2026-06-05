@@ -205,6 +205,10 @@ pub struct ValueField {
     /// Show values as (normal, % of grand total, % of row, etc.).
     pub show_values_as: ShowValuesAs,
 
+    /// User-provided custom display name override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
+
     /// Base field index for Difference/RunningTotal/Rank calculations.
     /// References a row or column field whose items define the comparison axis.
     #[serde(default)]
@@ -224,6 +228,7 @@ impl ValueField {
             aggregation,
             number_format: None,
             show_values_as: ShowValuesAs::Normal,
+            custom_name: None,
             base_field_index: None,
             base_item: None,
         }

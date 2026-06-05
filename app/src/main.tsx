@@ -3,6 +3,9 @@
 // CONTEXT: Initializes React and loads the shell application
 // ARCHITECTURE: Loads core extensions and feature extensions before rendering
 
+import { installLogFilter } from "./utils/logFilter";
+installLogFilter();
+
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./shell";

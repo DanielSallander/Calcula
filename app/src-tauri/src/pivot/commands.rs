@@ -1020,7 +1020,7 @@ pub async fn refresh_pivot_cache(
                 .map(|f| parse_field(&f.name, f.is_attribute))
                 .collect();
             let value_fields: Vec<super::types::BiValueFieldRef> = definition.value_fields.iter()
-                .map(|v| super::types::BiValueFieldRef { measure_name: v.name.clone() })
+                .map(|v| super::types::BiValueFieldRef { measure_name: v.name.clone(), custom_name: v.custom_name.clone() })
                 .collect();
             let filter_fields: Vec<super::types::BiFieldRef> = definition.filter_fields.iter()
                 .map(|f| {
@@ -1310,6 +1310,7 @@ pub fn get_pivot_at_cell(
             aggregation: None,
             is_lookup: f.is_attribute,
             hidden_items: None,
+            custom_name: None,
         }
     }).collect();
 
@@ -1322,6 +1323,7 @@ pub fn get_pivot_at_cell(
             aggregation: None,
             is_lookup: f.is_attribute,
             hidden_items: None,
+            custom_name: None,
         }
     }).collect();
 
@@ -1334,6 +1336,7 @@ pub fn get_pivot_at_cell(
             aggregation: Some(aggregation_to_string(f.aggregation)),
             is_lookup: false,
             hidden_items: None,
+            custom_name: f.custom_name.clone(),
         }
     }).collect();
 
@@ -1351,6 +1354,7 @@ pub fn get_pivot_at_cell(
             aggregation: None,
             is_lookup: f.field.is_attribute,
             hidden_items: hidden,
+            custom_name: None,
         }
     }).collect();
     
@@ -3722,6 +3726,50 @@ pub async fn update_bi_pivot_fields(
         }
     }
 
+    // Fast path: if only custom_name changed on value fields (no structural
+    // changes to dimensions, measures, filters, layout, etc.), skip the
+    // expensive BI query and just recalculate the view from the existing cache.
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        if let Some((definition, stored_cache)) = pivot_tables.get_mut(&pivot_id) {
+            let cosmetic_only = is_bi_cosmetic_only_change(definition, &request);
+            if cosmetic_only {
+                log_info!("PIVOT", "update_bi_pivot_fields: cosmetic-only change, skipping BI query");
+                // Update custom names on existing value fields
+                for (vf, req_vf) in definition.value_fields.iter_mut().zip(request.value_fields.iter()) {
+                    vf.custom_name = req_vf.custom_name.clone();
+                }
+                // Apply layout if provided
+                if let Some(ref layout_config) = request.layout {
+                    apply_layout_config(&mut definition.layout, layout_config);
+                }
+                definition.bump_version();
+
+                let view = safe_calculate_pivot(definition, stored_cache);
+                store_view(&pivot_state, pivot_id, &view);
+                let response = view_to_response(&view, definition, stored_cache);
+                let destination = definition.destination;
+                let auto_fit = definition.layout.auto_fit_column_widths;
+                let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+                drop(pivot_tables);
+
+                update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+                if auto_fit {
+                    auto_fit_pivot_columns(&state, destination, &view);
+                }
+                update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+                recalculate_sheet_formulas(&state, &pivot_state);
+
+                let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+                log_perf!("PIVOT", "update_bi_pivot_fields (cosmetic) pivot_id={} | TOTAL={:.1}ms", pivot_id, total_ms);
+
+                return Ok(response);
+            }
+        }
+        drop(pivot_tables);
+    }
+
     let has_values = !request.value_fields.is_empty();
     let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty();
     let has_filters = !request.filter_fields.is_empty();
@@ -4185,11 +4233,13 @@ pub async fn update_bi_pivot_fields(
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                ValueField::new(
+                let mut vf = ValueField::new(
                     measure_start + i,
                     format!("[{}]", v.measure_name),
                     AggregationType::Sum, // SUM of pre-aggregated = identity
-                )
+                );
+                vf.custom_name = v.custom_name.clone();
+                vf
             })
             .collect();
     }

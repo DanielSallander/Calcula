@@ -148,12 +148,12 @@ function toBiFieldRef(name: string, isLookup?: boolean): BiFieldRef {
 }
 
 /** Parse a BI measure field key "[MeasureName]" into a BiValueFieldRef */
-function toBiValueFieldRef(name: string): BiValueFieldRef {
+function toBiValueFieldRef(name: string, customName?: string): BiValueFieldRef {
   // Strip brackets: "[Revenue]" -> "Revenue"
   const measureName = name.startsWith('[') && name.endsWith(']')
     ? name.substring(1, name.length - 1)
     : name;
-  return { measureName };
+  return { measureName, customName };
 }
 
 export function PivotEditor({
@@ -224,7 +224,7 @@ export function PivotEditor({
         pivotId: request.pivotId,
         rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
         columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
-        valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name)),
+        valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name, f.customName)),
         filterFields: biFilterFields,
         layout: request.layout,
         lookupColumns: [...lookupColumns],
@@ -532,7 +532,7 @@ export function PivotEditor({
       pivotId,
       rowFields: rows.filter(isRealBiField).map(toBiRef),
       columnFields: columns.filter(isRealBiField).map(toBiRef),
-      valueFields: values.map((f) => toBiValueFieldRef(f.name)),
+      valueFields: values.map((f) => toBiValueFieldRef(f.name, f.customName)),
       filterFields: filters.filter(isRealBiField).map(toBiRef),
       lookupColumns: [...lookupColumns],
     };

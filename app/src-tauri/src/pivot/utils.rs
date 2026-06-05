@@ -203,6 +203,7 @@ pub(crate) fn config_to_value_field(config: &ValueFieldConfig) -> ValueField {
     
     let mut field = ValueField::new(config.source_index, config.name.clone(), aggregation);
     field.number_format = config.number_format.clone();
+    field.custom_name = config.custom_name.clone();
     
     if let Some(ref show_as) = config.show_values_as {
         field.show_values_as = match show_as.to_lowercase().as_str() {
@@ -767,4 +768,89 @@ pub(crate) fn extract_cell_window(
             }
         })
         .collect()
+}
+
+/// Returns true if the BI update request differs from the current definition
+/// only in cosmetic ways (custom_name on value fields, layout) — meaning the
+/// underlying BI query doesn't need to be re-executed.
+pub(crate) fn is_bi_cosmetic_only_change(
+    definition: &PivotDefinition,
+    request: &UpdateBiPivotFieldsRequest,
+) -> bool {
+    // Row fields must match
+    if definition.row_fields.len() != request.row_fields.len() {
+        return false;
+    }
+    for (def_f, req_f) in definition.row_fields.iter().zip(request.row_fields.iter()) {
+        let expected_name = format!("{}.{}", req_f.table, req_f.column);
+        if def_f.name != expected_name || def_f.is_attribute != req_f.is_lookup {
+            return false;
+        }
+    }
+
+    // Column fields must match
+    if definition.column_fields.len() != request.column_fields.len() {
+        return false;
+    }
+    for (def_f, req_f) in definition.column_fields.iter().zip(request.column_fields.iter()) {
+        let expected_name = format!("{}.{}", req_f.table, req_f.column);
+        if def_f.name != expected_name || def_f.is_attribute != req_f.is_lookup {
+            return false;
+        }
+    }
+
+    // Value fields: same measures (ignoring custom_name)
+    if definition.value_fields.len() != request.value_fields.len() {
+        return false;
+    }
+    for (def_vf, req_vf) in definition.value_fields.iter().zip(request.value_fields.iter()) {
+        let expected_name = format!("[{}]", req_vf.measure_name);
+        if def_vf.name != expected_name {
+            return false;
+        }
+    }
+
+    // Filter fields must match
+    if definition.filter_fields.len() != request.filter_fields.len() {
+        return false;
+    }
+    for (def_f, req_f) in definition.filter_fields.iter().zip(request.filter_fields.iter()) {
+        let expected_name = format!("{}.{}", req_f.table, req_f.column);
+        if def_f.field.name != expected_name {
+            return false;
+        }
+    }
+
+    // Calculated fields must not have changed
+    if request.calculated_fields.is_some() {
+        let req_calcs = request.calculated_fields.as_ref().unwrap();
+        if req_calcs.len() != definition.calculated_fields.len() {
+            return false;
+        }
+        for (dc, rc) in definition.calculated_fields.iter().zip(req_calcs.iter()) {
+            if dc.name != rc.name || dc.formula != rc.formula {
+                return false;
+            }
+        }
+    }
+
+    // Value column order must not have changed
+    if request.value_column_order.is_some() {
+        let req_order = request.value_column_order.as_ref().unwrap();
+        if req_order.len() != definition.value_column_order.len() {
+            return false;
+        }
+        for (d, r) in definition.value_column_order.iter().zip(req_order.iter()) {
+            let matches = match (d, r) {
+                (pivot_engine::ValueColumnRef::Value(a), ValueColumnRefDef::Value { index }) => *a == *index,
+                (pivot_engine::ValueColumnRef::Calculated(a), ValueColumnRefDef::Calculated { index }) => *a == *index,
+                _ => false,
+            };
+            if !matches {
+                return false;
+            }
+        }
+    }
+
+    true
 }

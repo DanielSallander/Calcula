@@ -510,13 +510,25 @@ export function drawPivotCell(
   // Paint themed text for cells whose text is rendered by the grid renderer.
   // The overlay redraws the text so it matches the theme colors.
   if (cell.cellType !== 'FilterDropdown' && cell.cellType !== 'Blank') {
-    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+    let displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+
+    // Strip bracket notation from BI measure names (e.g. "[TotalSales]" → "TotalSales")
+    if (displayText.startsWith('[') && displayText.endsWith(']')) {
+      displayText = displayText.substring(1, displayText.length - 1);
+    }
+
     if (displayText) {
       const { color, font, align } = getThemedTextStyle(cell, theme);
       ctx.fillStyle = color;
       ctx.font = font;
       ctx.textAlign = align;
       ctx.textBaseline = 'middle';
+
+      // Reserve space for header filter arrow button
+      const hasHeaderFilter = cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader';
+      const btnMargin = 3;
+      const btnSize = height - btnMargin * 2;
+      const rightReserve = hasHeaderFilter ? btnSize + btnMargin + CELL_PADDING_X : 0;
 
       // Indented row headers: offset text for expand icon + indent
       let textX: number;
@@ -530,6 +542,12 @@ export function drawPivotCell(
         textX = x + CELL_PADDING_X + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
       } else {
         textX = x + CELL_PADDING_X;
+      }
+
+      // Truncate text to avoid collision with header filter arrow
+      if (hasHeaderFilter) {
+        const maxWidth = width - CELL_PADDING_X - rightReserve;
+        displayText = truncateText(ctx, displayText, maxWidth);
       }
 
       ctx.fillText(displayText, textX, y + height / 2);
