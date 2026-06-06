@@ -102,11 +102,12 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       }
 
       // Wait for the app to be fully loaded.
-      // Keep this well below the 30s test timeout — the fixture setup shares
-      // the same budget as the test body and teardown.
+      // After a cold Rust build the React app may take 20-30s to render inside
+      // WebView2, so use a generous timeout.  The invariant project sets its
+      // test timeout to 120s, so 60s here is safe.
       await page.waitForSelector("[data-focus-container='spreadsheet']", {
         state: "visible",
-        timeout: 15_000,
+        timeout: 60_000,
       });
 
       await use(page);

@@ -182,6 +182,9 @@ export function bootstrapShell(): void {
   };
   registerExtensionRegistryService(extensionRegistryService);
 
+  // Expose extension registry for E2E invariant testing (mirrors __CALCULA_GRID_STATE__)
+  (window as any).__CALCULA_EXTENSION_REGISTRY__ = extensionRegistryService;
+
   // Grid Extensions Service - adapts Shell types to API types
   const gridExtensionsService: GridExtensionsService = {
     registerContextMenuItem: (item: GridContextMenuItem) => {

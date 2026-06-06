@@ -91,10 +91,38 @@ export default async function globalSetup() {
 
   console.log("[e2e] Launching cargo tauri dev with CDP on port", CDP_PORT, "...");
 
+  // Build the MSVC environment so Rust can find the correct link.exe.
+  // Without this, Git's link.exe shadows MSVC's and the build fails.
+  // These match core/setup-rust-env.ps1.
+  const msvcBinDir =
+    "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\arm64";
+  const rustEnv: Record<string, string> = {
+    LIB: [
+      "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\arm64",
+      "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\arm64",
+      "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\lib\\arm64",
+    ].join(";"),
+    INCLUDE: [
+      "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um",
+      "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\ucrt",
+      "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\shared",
+      "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\include",
+    ].join(";"),
+    // Prepend MSVC bin to PATH so its link.exe is found before Git's
+    PATH: `${msvcBinDir};${process.env.PATH ?? ""}`,
+  };
+
+  // Clear CC/AR/CFLAGS so cc crate uses MSVC directly
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.CC;
+  delete cleanEnv.AR;
+  delete cleanEnv.CFLAGS;
+
   const child: ChildProcess = spawn("yarn", ["tauri", "dev"], {
     cwd: path.resolve(__dirname, ".."),
     env: {
-      ...process.env,
+      ...cleanEnv,
+      ...rustEnv,
       // Tell WebView2 to open a CDP port.
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
     },

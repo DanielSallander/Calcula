@@ -25,6 +25,8 @@
     "e2e:visual:baseline": "playwright test --project=visual --update-snapshots && node ../tests/regression/validate-baselines.mjs",
     "e2e:visual:baseline:auto": "playwright test --project=visual --update-snapshots && node ../tests/regression/validate-baselines.mjs --auto-fix",
     "e2e:visual:review": "node ../tests/regression/validate-baselines.mjs",
+    "e2e:invariant": "playwright test --project=invariant",
+    "e2e:invariant:manual": "cross-env E2E_MANUAL=1 playwright test --project=invariant",
     "e2e:report": "playwright show-report",
     "regression": "node ../tests/regression/regression-runner.mjs",
     "regression:auto": "node ../tests/regression/regression-runner.mjs --mode=auto --max-iterations=15",

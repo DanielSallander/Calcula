@@ -33,6 +33,7 @@ import {
   resetSelectionHandlerState,
   getSelectedSlicerIds,
   isSlicerSelected,
+  deselectSlicer,
   broadcastSelectedSlicers,
 } from "./handlers/selectionHandler";
 
@@ -46,6 +47,8 @@ import {
   resetStore,
   getSlicerById,
   getAllSlicers,
+  createSlicerAsync,
+  deleteSlicerAsync,
   updateSlicerPositionAsync,
   updateSlicerSelectionAsync,
   getCachedItems,
@@ -482,6 +485,24 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
+  // Slicer deleted: deselect the deleted slicer so the contextual ribbon tab
+  // is removed. Without this, deleting a selected slicer leaves the Options
+  // tab visible with no slicer to configure.
+  // -----------------------------------------------------------------------
+
+  const handleSlicerDeleted = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    const deletedId = detail?.slicerId as number | undefined;
+    if (deletedId != null && isSlicerSelected(deletedId)) {
+      deselectSlicer();
+    }
+  };
+  window.addEventListener(SlicerEvents.SLICER_DELETED, handleSlicerDeleted);
+  cleanupFunctions.push(() => {
+    window.removeEventListener(SlicerEvents.SLICER_DELETED, handleSlicerDeleted);
+  });
+
+  // -----------------------------------------------------------------------
   // Cross-filter: refresh slicer items when a ribbon filter selection changes
   // -----------------------------------------------------------------------
 
@@ -515,6 +536,15 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   refreshCache().catch(console.error);
+
+  // Expose slicer lifecycle functions for E2E invariant testing
+  (window as any).__CALCULA_SLICER__ = {
+    createSlicerAsync,
+    deleteSlicerAsync,
+    selectSlicer,
+    deselectSlicer,
+    getAllSlicers,
+  };
 
   console.log("[Slicer Extension] Registered successfully");
 }

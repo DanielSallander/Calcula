@@ -64,5 +64,11 @@ export default defineConfig({
       testDir: "./e2e/visual",
       testMatch: "**/*.spec.ts",
     },
+    {
+      name: "invariant",
+      testDir: "./e2e/tests",
+      testMatch: "**/state-consistency.spec.ts",
+      timeout: 120_000,
+    },
   ],
 });
