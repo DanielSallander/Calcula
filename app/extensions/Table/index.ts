@@ -195,6 +195,14 @@ function activate(context: ExtensionContext): void {
   // Initial cache load
   refreshCache().catch(console.error);
 
+  // Expose lifecycle functions for E2E invariant testing
+  (window as any).__CALCULA_TABLE__ = {
+    getTableAtCell,
+    getTableById,
+    handleSelectionChange,
+    ensureDesignTabRegistered,
+  };
+
   console.log("[Table Extension] Registered successfully");
 }
 

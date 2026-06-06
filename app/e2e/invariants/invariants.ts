@@ -43,6 +43,7 @@ interface ContextualTabRule {
 }
 
 const CONTEXTUAL_TAB_RULES: Record<string, ContextualTabRule> = {
+  // --- Slicer ---
   Slicer: {
     validate: (s) => s.logical.slicers.length > 0,
     expectation: "at least one slicer must exist",
@@ -51,37 +52,48 @@ const CONTEXTUAL_TAB_RULES: Record<string, ContextualTabRule> = {
     validate: (s) => s.logical.slicers.length > 0,
     expectation: "at least one slicer must exist",
   },
+
+  // --- Timeline Slicer ---
+  Timeline: {
+    validate: (s) => s.logical.timelines.length > 0,
+    expectation: "at least one timeline slicer must exist",
+  },
+
+  // --- Charts ---
   "Chart Design": {
     validate: (s) => s.logical.charts.length > 0,
     expectation: "at least one chart must exist",
   },
-  Design: {
-    // Generic "Design" tab could be chart or table — accept either
-    validate: (s) => s.logical.charts.length > 0 || s.logical.tables.length > 0,
-    expectation: "at least one chart or table must exist",
-  },
+
+  // --- Table ---
   "Table Design": {
     validate: (s) => s.logical.tables.length > 0,
     expectation: "at least one table must exist",
   },
-  "PivotTable Analyze": {
-    // Pivot tables are validated via selection being inside a pivot — for now
-    // we just check that the tab label exists without panic. Pivots are complex
-    // to validate since they live in the grid range, not as standalone objects.
-    validate: () => true,
-    expectation: "selection must be inside a pivot table",
+
+  // --- Pivot (two tabs, same rule) ---
+  "Pivot Table": {
+    validate: (s) => s.logical.pivots.length > 0,
+    expectation: "at least one pivot table must exist",
   },
-  "PivotTable Design": {
-    validate: () => true,
-    expectation: "selection must be inside a pivot table",
+  "Pivot Table Design": {
+    validate: (s) => s.logical.pivots.length > 0,
+    expectation: "at least one pivot table must exist",
   },
+
+  // --- Sparklines (no color, but still a contextual tab) ---
   Sparkline: {
-    validate: () => true,
-    expectation: "sparklines must exist in selected range",
+    validate: (s) => s.logical.sparklineGroups.length > 0,
+    expectation: "at least one sparkline group must exist",
   },
-  Timeline: {
-    validate: () => true,
-    expectation: "a timeline slicer must exist",
+
+  // Generic "Design" tab could be chart, table, or pivot — accept any
+  Design: {
+    validate: (s) =>
+      s.logical.charts.length > 0 ||
+      s.logical.tables.length > 0 ||
+      s.logical.pivots.length > 0,
+    expectation: "at least one chart, table, or pivot must exist",
   },
 };
 
@@ -120,13 +132,19 @@ const contextualRibbonTabConsistency: Invariant = {
             `Contextual tab "${tab.label}" is visible but ${rule.expectation}. ` +
             `Found: slicers=${snapshot.logical.slicers.length}, ` +
             `charts=${snapshot.logical.charts.length}, ` +
-            `tables=${snapshot.logical.tables.length}`,
+            `tables=${snapshot.logical.tables.length}, ` +
+            `pivots=${snapshot.logical.pivots.length}, ` +
+            `timelines=${snapshot.logical.timelines.length}, ` +
+            `sparklines=${snapshot.logical.sparklineGroups.length}`,
           details: {
             tabLabel: tab.label,
             accentColor: tab.accentColor,
             slicerCount: snapshot.logical.slicers.length,
             chartCount: snapshot.logical.charts.length,
             tableCount: snapshot.logical.tables.length,
+            pivotCount: snapshot.logical.pivots.length,
+            timelineCount: snapshot.logical.timelines.length,
+            sparklineCount: snapshot.logical.sparklineGroups.length,
           },
         });
       }
@@ -168,24 +186,6 @@ const noConsoleErrors: Invariant = {
   },
 };
 
-/**
- * INVARIANT: No dialogs should be orphaned (visible without being intentionally
- * opened). After an action that doesn't explicitly open a dialog, the dialog
- * count should not spontaneously increase.
- *
- * NOTE: This is tracked across snapshots by the runner, not within a single
- * snapshot. For now we just capture the count for the runner to use.
- */
-const noOrphanedDialogs: Invariant = {
-  id: "no-orphaned-dialogs",
-  description: "No dialogs appear spontaneously without user action",
-  check(_snapshot) {
-    // This invariant is intentionally a no-op in single-snapshot mode.
-    // The runner tracks dialog count across snapshots and flags unexpected increases.
-    return [];
-  },
-};
-
 // ============================================================================
 // Export
 // ============================================================================
@@ -195,5 +195,4 @@ export const ALL_INVARIANTS: Invariant[] = [
   contextualRibbonTabConsistency,
   noJsExceptions,
   noConsoleErrors,
-  noOrphanedDialogs,
 ];

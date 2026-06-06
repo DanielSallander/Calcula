@@ -81,6 +81,9 @@ export function formatReport(result: RunResult): string {
     lines.push(`  Slicers: ${snap.logical.slicers.length}`);
     lines.push(`  Charts: ${snap.logical.charts.length}`);
     lines.push(`  Tables: ${snap.logical.tables.length}`);
+    lines.push(`  Pivots: ${snap.logical.pivots.length}`);
+    lines.push(`  Timelines: ${snap.logical.timelines.length}`);
+    lines.push(`  Sparklines: ${snap.logical.sparklineGroups.length}`);
     lines.push(
       `  Ribbon tabs: ${snap.visual.ribbonTabs.map((t) => `${t.label}${t.accentColor ? " [contextual]" : ""}`).join(", ")}`
     );

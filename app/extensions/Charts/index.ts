@@ -1012,6 +1012,17 @@ function activate(context: ExtensionContext): void {
   document.addEventListener("keydown", handleDeleteKey, true); // capture phase
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
 
+  // Expose lifecycle functions for E2E invariant testing
+  (window as any).__CALCULA_CHARTS__ = {
+    getAllCharts,
+    getChartById,
+    deleteChart,
+    selectChart,
+    deselectChart,
+    getCurrentChartId,
+    syncChartRegions,
+  };
+
   console.log("[Chart Extension] Registered successfully");
 }
 

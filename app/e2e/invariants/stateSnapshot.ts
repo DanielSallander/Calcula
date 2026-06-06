@@ -31,6 +31,26 @@ export interface TableInfo {
   name: string;
 }
 
+export interface PivotInfo {
+  pivotId: number;
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+export interface TimelineInfo {
+  id: number;
+  name: string;
+  sheetIndex: number;
+}
+
+export interface SparklineGroupInfo {
+  id: string;
+  cellCount: number;
+}
+
 export interface SelectionInfo {
   startRow: number;
   startCol: number;
@@ -42,6 +62,9 @@ export interface LogicalState {
   slicers: SlicerInfo[];
   charts: ChartInfo[];
   tables: TableInfo[];
+  pivots: PivotInfo[];
+  timelines: TimelineInfo[];
+  sparklineGroups: SparklineGroupInfo[];
   selection: SelectionInfo | null;
   activeSheet: number;
   isEditing: boolean;
@@ -151,8 +174,20 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
       tauri.core.invoke("get_all_tables", {}).catch(() => []),
     ]);
 
+    // Pivot regions from frontend cache (no backend command for "get all pivots")
+    const pivotApi = (window as any).__CALCULA_PIVOT__;
+    const pivotRegions: any[] = pivotApi?.getCachedRegions?.() ?? [];
+
+    // Timeline slicers from frontend cache
+    const timelineApi = (window as any).__CALCULA_TIMELINE__;
+    const timelines: any[] = timelineApi?.getAllTimelines?.() ?? [];
+
+    // Sparkline groups from frontend store
+    const sparkApi = (window as any).__CALCULA_SPARKLINES__;
+    const sparkGroups: any[] = sparkApi?.getAllGroups?.() ?? [];
+
     // Extract selection from grid state
-    let selection: SelectionInfo | null = null;
+    let selection: any = null;
     if (gridState?.selection) {
       const sel = gridState.selection;
       selection = {
@@ -177,6 +212,23 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
         id: t.id,
         name: t.name,
       })),
+      pivots: pivotRegions.map((r: any) => ({
+        pivotId: r.pivotId ?? r.pivot_id ?? 0,
+        sheetIndex: r.sheetIndex ?? r.sheet_index ?? 0,
+        startRow: r.startRow ?? 0,
+        startCol: r.startCol ?? 0,
+        endRow: r.endRow ?? 0,
+        endCol: r.endCol ?? 0,
+      })),
+      timelines: timelines.map((t: any) => ({
+        id: t.id,
+        name: t.name,
+        sheetIndex: t.sheetIndex ?? t.sheet_index ?? 0,
+      })),
+      sparklineGroups: sparkGroups.map((g: any) => ({
+        id: g.id,
+        cellCount: g.cells?.length ?? g.locationCells?.length ?? 1,
+      })),
       selection,
       activeSheet: gridState?.activeSheet ?? 0,
       isEditing: gridState?.editing === true,
@@ -188,15 +240,11 @@ async function captureVisualState(page: Page): Promise<VisualState> {
   return page.evaluate(() => {
     // Read ribbon tabs from the registry (exposed on window by bootstrap.ts)
     const registry = (window as any).__CALCULA_EXTENSION_REGISTRY__;
-    let ribbonTabs: RibbonTabInfo[] = [];
+    let ribbonTabs: any[] = [];
 
     if (registry?.getRibbonTabs) {
       const tabs = registry.getRibbonTabs() as any[];
-      // Also check which tab button is active in the DOM
-      const tabButtons = document.querySelectorAll<HTMLButtonElement>(
-        "[data-ribbon-content]"
-      );
-      // Tab buttons are the siblings before [data-ribbon-content]
+      // Tab buttons are inside the first div child of ribbon container
       const headerContainer = document.querySelector(
         "[data-ribbon-content]"
       )?.parentElement?.querySelector("div");
@@ -241,7 +289,3 @@ async function captureVisualState(page: Page): Promise<VisualState> {
     };
   });
 }
-
-// Re-export the type for use in evaluate callbacks
-type RibbonTabInfo_Inner = RibbonTabInfo;
-type SelectionInfo_Inner = SelectionInfo;

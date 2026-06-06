@@ -22,6 +22,7 @@ import {
 
 import {
   selectTimeline,
+  deselectTimeline,
   handleSelectionChange,
   resetSelectionHandlerState,
   getSelectedTimelineIds,
@@ -39,6 +40,8 @@ import {
   resetStore,
   getTimelineById,
   getAllTimelines,
+  createTimelineAsync,
+  deleteTimelineAsync,
   updateTimelinePositionAsync,
   updateTimelineSelectionAsync,
   getCachedTimelineData,
@@ -461,6 +464,23 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
+  // Timeline deleted: deselect the deleted timeline so the contextual
+  // ribbon tab is removed.
+  // -----------------------------------------------------------------------
+
+  const handleTimelineDeleted = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    const deletedId = detail?.timelineId as number | undefined;
+    if (deletedId != null && isTimelineSelected(deletedId)) {
+      deselectTimeline();
+    }
+  };
+  window.addEventListener(TimelineSlicerEvents.TIMELINE_DELETED, handleTimelineDeleted);
+  cleanupFunctions.push(() => {
+    window.removeEventListener(TimelineSlicerEvents.TIMELINE_DELETED, handleTimelineDeleted);
+  });
+
+  // -----------------------------------------------------------------------
   // Refresh on pivot changes
   // -----------------------------------------------------------------------
 
@@ -477,6 +497,15 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   refreshCache().catch(console.error);
+
+  // Expose lifecycle functions for E2E invariant testing
+  (window as any).__CALCULA_TIMELINE__ = {
+    createTimelineAsync,
+    deleteTimelineAsync,
+    selectTimeline,
+    deselectTimeline,
+    getAllTimelines,
+  };
 
   console.log("[TimelineSlicer Extension] Registered successfully");
 }

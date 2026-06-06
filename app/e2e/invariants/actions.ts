@@ -23,16 +23,24 @@ export interface Action {
 }
 
 // ============================================================================
-// Helper: Tauri invoke from page context
+// Helper: dispatch key on spreadsheet grid
 // ============================================================================
 
-async function tauriInvoke(page: Page, command: string, args: Record<string, unknown> = {}): Promise<any> {
-  return page.evaluate(
-    async ([cmd, a]) => {
-      const tauri = (window as any).__TAURI__;
-      return tauri.core.invoke(cmd, a);
+async function dispatchKeyOnGrid(page: Page, key: string, ctrlKey = false) {
+  const spreadsheet = page.locator("[data-focus-container='spreadsheet']");
+  await spreadsheet.focus();
+  await spreadsheet.evaluate(
+    (el, opts) => {
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: opts.key,
+          ctrlKey: opts.ctrlKey,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
     },
-    [command, args] as const
+    { key, ctrlKey }
   );
 }
 
@@ -46,8 +54,6 @@ const slicerCreate: Action = {
   weight: 3,
   precondition: (s) => s.logical.tables.length > 0,
   async execute(page, _grid) {
-    // Use the frontend store's createSlicerAsync which handles overlay
-    // registration, item fetching, and event dispatch — the full UI lifecycle.
     const slicerId = await page.evaluate(async () => {
       const slicerApi = (window as any).__CALCULA_SLICER__;
       if (!slicerApi) return null;
@@ -72,11 +78,8 @@ const slicerCreate: Action = {
       return slicer?.id ?? null;
     });
     if (slicerId != null) {
-      // Select the slicer — this registers the contextual ribbon tab,
-      // which is the behavior we want to test.
       await page.evaluate((id: number) => {
-        const slicerApi = (window as any).__CALCULA_SLICER__;
-        slicerApi?.selectSlicer(id);
+        (window as any).__CALCULA_SLICER__?.selectSlicer(id);
       }, slicerId);
       await page.waitForTimeout(300);
     }
@@ -89,8 +92,6 @@ const slicerDelete: Action = {
   weight: 3,
   precondition: (s) => s.logical.slicers.length > 0,
   async execute(page, _grid) {
-    // Use the frontend store's deleteSlicerAsync which dispatches
-    // SLICER_DELETED — triggering the cleanup we're testing.
     await page.evaluate(async () => {
       const slicerApi = (window as any).__CALCULA_SLICER__;
       if (!slicerApi) return;
@@ -104,11 +105,10 @@ const slicerDelete: Action = {
 
 const slicerClickAway: Action = {
   id: "slicer.click-away",
-  category: "slicer",
+  category: "deselect",
   weight: 2,
   precondition: () => true,
   async execute(_page, grid) {
-    // Click on a neutral cell to deselect any slicer
     await grid.clickCell("A1");
     await grid.page.waitForTimeout(200);
   },
@@ -124,7 +124,6 @@ const chartCreate: Action = {
   weight: 3,
   precondition: () => true,
   async execute(page, grid) {
-    // First ensure there's some data for the chart
     await grid.setCellValueDirect("Z1", "Category");
     await grid.setCellValueDirect("AA1", "Value");
     await grid.setCellValueDirect("Z2", "A");
@@ -132,18 +131,12 @@ const chartCreate: Action = {
     await grid.setCellValueDirect("Z3", "B");
     await grid.setCellValueDirect("AA3", "20");
 
-    const chartId = await page.evaluate(async () => {
+    await page.evaluate(async () => {
       const tauri = (window as any).__TAURI__;
       const id = crypto.randomUUID();
       const spec = {
         mark: "bar",
-        data: {
-          sheetIndex: 0,
-          startRow: 0,
-          startCol: 25,
-          endRow: 2,
-          endCol: 26,
-        },
+        data: { sheetIndex: 0, startRow: 0, startCol: 25, endRow: 2, endCol: 26 },
         hasHeaders: true,
         seriesOrientation: "columns",
         categoryIndex: 0,
@@ -153,11 +146,8 @@ const chartCreate: Action = {
       await tauri.core.invoke("save_chart", {
         entry: { id, sheetIndex: 0, specJson: JSON.stringify(spec) },
       });
-      return id;
     });
-    if (chartId) {
-      await page.waitForTimeout(300);
-    }
+    await page.waitForTimeout(300);
   },
 };
 
@@ -167,14 +157,49 @@ const chartDelete: Action = {
   weight: 3,
   precondition: (s) => s.logical.charts.length > 0,
   async execute(page, _grid) {
-    await page.evaluate(async () => {
-      const tauri = (window as any).__TAURI__;
-      const charts = await tauri.core.invoke("get_charts");
+    // Use the frontend store's deleteChart which handles cleanup
+    await page.evaluate(() => {
+      const chartApi = (window as any).__CALCULA_CHARTS__;
+      if (!chartApi) return;
+      const charts = chartApi.getAllCharts();
       if (charts && charts.length > 0) {
-        await tauri.core.invoke("delete_chart", { id: charts[0].id });
+        chartApi.deleteChart(charts[0].id);
+        chartApi.syncChartRegions();
       }
     });
     await page.waitForTimeout(300);
+  },
+};
+
+const chartSelect: Action = {
+  id: "chart.select",
+  category: "chart",
+  weight: 2,
+  precondition: (s) => s.logical.charts.length > 0,
+  async execute(page, _grid) {
+    await page.evaluate(() => {
+      const chartApi = (window as any).__CALCULA_CHARTS__;
+      if (!chartApi) return;
+      const charts = chartApi.getAllCharts();
+      if (charts && charts.length > 0) {
+        chartApi.selectChart(charts[0].id);
+      }
+    });
+    await page.waitForTimeout(200);
+  },
+};
+
+const chartDeselect: Action = {
+  id: "chart.deselect",
+  category: "deselect",
+  weight: 2,
+  precondition: () => true,
+  async execute(page, _grid) {
+    await page.evaluate(() => {
+      const chartApi = (window as any).__CALCULA_CHARTS__;
+      chartApi?.deselectChart();
+    });
+    await page.waitForTimeout(100);
   },
 };
 
@@ -188,7 +213,6 @@ const tableCreate: Action = {
   weight: 3,
   precondition: () => true,
   async execute(page, grid) {
-    // Put some data in a fresh area for the table
     const col = "AE";
     const col2 = "AF";
     const col3 = "AG";
@@ -208,9 +232,9 @@ const tableCreate: Action = {
         params: {
           name: "",
           startRow: 0,
-          startCol: 30, // Column AE = 30
+          startCol: 30,
           endRow: 2,
-          endCol: 32, // Column AG = 32
+          endCol: 32,
           hasHeaders: true,
           styleOptions: {
             totalRow: false,
@@ -245,11 +269,160 @@ const tableDelete: Action = {
   },
 };
 
+const tableSelectInto: Action = {
+  id: "table.select-into",
+  category: "table",
+  weight: 2,
+  precondition: (s) => s.logical.tables.length > 0,
+  async execute(_page, grid) {
+    // Navigate into the table area to trigger the Table Design tab
+    await grid.navigateTo("AE2");
+    await grid.page.waitForTimeout(300);
+  },
+};
+
+const tableSelectAway: Action = {
+  id: "table.select-away",
+  category: "deselect",
+  weight: 2,
+  precondition: () => true,
+  async execute(_page, grid) {
+    // Navigate away from any table to dismiss the Table Design tab
+    await grid.navigateTo("A1");
+    await grid.page.waitForTimeout(200);
+  },
+};
+
+// ============================================================================
+// Sparkline Actions
+// ============================================================================
+
+const sparklineCreate: Action = {
+  id: "sparkline.create",
+  category: "sparkline",
+  weight: 2,
+  precondition: () => true,
+  async execute(page, grid) {
+    // Ensure some data exists for the sparkline
+    await grid.setCellValueDirect("AP1", "10");
+    await grid.setCellValueDirect("AQ1", "20");
+    await grid.setCellValueDirect("AR1", "15");
+    await grid.setCellValueDirect("AS1", "30");
+
+    await page.evaluate(() => {
+      const sparkApi = (window as any).__CALCULA_SPARKLINES__;
+      if (!sparkApi) return;
+      // Create a sparkline in AT1 with data from AP1:AS1
+      sparkApi.createSparklineGroup(
+        { startRow: 0, startCol: 45, endRow: 0, endCol: 45 }, // location: AT1
+        { startRow: 0, startCol: 41, endRow: 0, endCol: 44 }, // data: AP1:AS1
+        "line"
+      );
+    });
+    await page.waitForTimeout(300);
+  },
+};
+
+const sparklineDelete: Action = {
+  id: "sparkline.delete",
+  category: "sparkline",
+  weight: 2,
+  precondition: (s) => s.logical.sparklineGroups.length > 0,
+  async execute(page, _grid) {
+    await page.evaluate(() => {
+      const sparkApi = (window as any).__CALCULA_SPARKLINES__;
+      if (!sparkApi) return;
+      const groups = sparkApi.getAllGroups();
+      if (groups && groups.length > 0) {
+        sparkApi.removeSparklineGroup(groups[0].id);
+      }
+    });
+    await page.waitForTimeout(200);
+  },
+};
+
+const sparklineSelectInto: Action = {
+  id: "sparkline.select-into",
+  category: "sparkline",
+  weight: 2,
+  precondition: (s) => s.logical.sparklineGroups.length > 0,
+  async execute(_page, grid) {
+    // Navigate to sparkline cell to trigger the Sparkline Design tab
+    await grid.navigateTo("AT1");
+    await grid.page.waitForTimeout(300);
+  },
+};
+
+// ============================================================================
+// Row/Column Structure Actions
+// ============================================================================
+
+const insertRow: Action = {
+  id: "structure.insert-row",
+  category: "structure",
+  weight: 1,
+  precondition: () => true,
+  async execute(page, grid) {
+    // Insert a row at a safe position (row 50, far from test data)
+    await grid.navigateTo("A50");
+    await page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("insert_rows", { startRow: 49, count: 1 }).catch(() => {});
+    });
+    await page.waitForTimeout(200);
+  },
+};
+
+const deleteRow: Action = {
+  id: "structure.delete-row",
+  category: "structure",
+  weight: 1,
+  precondition: () => true,
+  async execute(page, grid) {
+    // Delete a row at a safe position (row 50)
+    await grid.navigateTo("A50");
+    await page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("delete_rows", { startRow: 49, count: 1 }).catch(() => {});
+    });
+    await page.waitForTimeout(200);
+  },
+};
+
+const insertColumn: Action = {
+  id: "structure.insert-col",
+  category: "structure",
+  weight: 1,
+  precondition: () => true,
+  async execute(page, _grid) {
+    // Insert a column at a safe position (col 60, far from test data)
+    await page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("insert_columns", { startCol: 59, count: 1 }).catch(() => {});
+    });
+    await page.waitForTimeout(200);
+  },
+};
+
+const deleteColumn: Action = {
+  id: "structure.delete-col",
+  category: "structure",
+  weight: 1,
+  precondition: () => true,
+  async execute(page, _grid) {
+    // Delete a column at a safe position (col 60)
+    await page.evaluate(async () => {
+      const tauri = (window as any).__TAURI__;
+      await tauri.core.invoke("delete_columns", { startCol: 59, count: 1 }).catch(() => {});
+    });
+    await page.waitForTimeout(200);
+  },
+};
+
 // ============================================================================
 // Cell / Selection Actions
 // ============================================================================
 
-/** Random cell references for click targets */
 const CELL_REFS = [
   "A1", "B2", "C3", "D4", "E5", "A10", "B15", "C20", "D1", "E2",
   "F3", "G4", "H5", "A30", "B30",
@@ -301,16 +474,7 @@ const formatBold: Action = {
   precondition: () => true,
   async execute(page, grid) {
     await grid.clickCell("A1");
-    // Use keyboard shortcut dispatched directly on the grid element.
-    // Clicking the ribbon button can be blocked by overlapping ribbon tab
-    // content (e.g. "Page Break Preview" from the View tab).
-    const spreadsheet = page.locator("[data-focus-container='spreadsheet']");
-    await spreadsheet.focus();
-    await spreadsheet.evaluate((el) => {
-      el.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "b", ctrlKey: true, bubbles: true, cancelable: true,
-      }));
-    });
+    await dispatchKeyOnGrid(page, "b", true);
     await page.waitForTimeout(100);
   },
 };
@@ -322,13 +486,7 @@ const formatItalic: Action = {
   precondition: () => true,
   async execute(page, grid) {
     await grid.clickCell("A1");
-    const spreadsheet = page.locator("[data-focus-container='spreadsheet']");
-    await spreadsheet.focus();
-    await spreadsheet.evaluate((el) => {
-      el.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "i", ctrlKey: true, bubbles: true, cancelable: true,
-      }));
-    });
+    await dispatchKeyOnGrid(page, "i", true);
     await page.waitForTimeout(100);
   },
 };
@@ -376,8 +534,6 @@ const switchRibbonTab: Action = {
     if (await tabBtn.isVisible({ timeout: 500 }).catch(() => false)) {
       await tabBtn.click();
       await page.waitForTimeout(200);
-      // Switch back to Home to avoid leaving ribbon content from View/Page Layout
-      // that can overlap and block clicks on other ribbon elements.
       if (tabName !== "Home") {
         const homeBtn = page.locator("button").filter({ hasText: "Home" }).first();
         if (await homeBtn.isVisible({ timeout: 500 }).catch(() => false)) {
@@ -421,9 +577,22 @@ export const ACTION_CATALOG: Action[] = [
   // Chart lifecycle
   chartCreate,
   chartDelete,
+  chartSelect,
+  chartDeselect,
   // Table lifecycle
   tableCreate,
   tableDelete,
+  tableSelectInto,
+  tableSelectAway,
+  // Sparkline lifecycle
+  sparklineCreate,
+  sparklineDelete,
+  sparklineSelectInto,
+  // Row/Column structure
+  insertRow,
+  deleteRow,
+  insertColumn,
+  deleteColumn,
   // Selection
   cellClick,
   cellEdit,

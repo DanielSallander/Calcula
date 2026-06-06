@@ -1851,6 +1851,13 @@ function activate(context: ExtensionContext): void {
   // Initial region load
   refreshPivotRegions(false);
 
+  // Expose lifecycle functions for E2E invariant testing
+  (window as any).__CALCULA_PIVOT__ = {
+    getCachedRegions,
+    findPivotRegionAtCell,
+    handleSelectionChange,
+  };
+
   console.log("[Pivot Extension] Registered successfully");
 }
 

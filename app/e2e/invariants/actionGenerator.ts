@@ -85,7 +85,9 @@ export function createActionGenerator(options: GeneratorOptions): ActionGenerato
         const totalObjects =
           snapshot.logical.slicers.length +
           snapshot.logical.charts.length +
-          snapshot.logical.tables.length;
+          snapshot.logical.tables.length +
+          snapshot.logical.timelines.length +
+          snapshot.logical.sparklineGroups.length;
         if (totalObjects < 2) w *= 2;
       }
 
@@ -94,8 +96,18 @@ export function createActionGenerator(options: GeneratorOptions): ActionGenerato
         const totalObjects =
           snapshot.logical.slicers.length +
           snapshot.logical.charts.length +
-          snapshot.logical.tables.length;
+          snapshot.logical.tables.length +
+          snapshot.logical.timelines.length +
+          snapshot.logical.sparklineGroups.length;
         if (totalObjects > 3) w *= 2;
+      }
+
+      // Boost select-into actions when objects exist but no contextual tab shown
+      if (a.id.endsWith(".select-into") || a.id === "chart.select") {
+        const hasContextualTab = snapshot.visual.ribbonTabs.some(
+          (t) => t.accentColor !== null
+        );
+        if (!hasContextualTab) w *= 1.5;
       }
 
       return w;

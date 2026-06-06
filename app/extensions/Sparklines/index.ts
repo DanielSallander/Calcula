@@ -221,6 +221,15 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unsubFill);
 
   isActivated = true;
+
+  // Expose lifecycle functions for E2E invariant testing
+  (window as any).__CALCULA_SPARKLINES__ = {
+    createSparklineGroup,
+    removeSparklineGroup,
+    getAllGroups,
+    ensureDesignTabRegistered,
+  };
+
   console.log("[Sparklines] Activated successfully.");
 }
 

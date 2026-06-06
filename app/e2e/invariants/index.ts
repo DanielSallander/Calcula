@@ -2,7 +2,14 @@
 // PURPOSE: Barrel export for the invariant testing framework.
 
 export { captureSnapshot, installErrorTracking } from "./stateSnapshot";
-export type { StateSnapshot } from "./stateSnapshot";
+export type {
+  StateSnapshot,
+  LogicalState,
+  VisualState,
+  PivotInfo,
+  TimelineInfo,
+  SparklineGroupInfo,
+} from "./stateSnapshot";
 
 export { ALL_INVARIANTS } from "./invariants";
 export type { Invariant, InvariantViolation } from "./invariants";
