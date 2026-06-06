@@ -1095,6 +1095,10 @@ pub struct PivotHierarchiesInfo {
     pub data_hierarchies: Vec<DataHierarchyInfo>,
     /// Filter hierarchies
     pub filter_hierarchies: Vec<RowColumnHierarchyInfo>,
+    /// Slicer filter field names (fields included in GROUP BY for slicers
+    /// but not shown as visible filter rows). "Table.Column" format.
+    #[serde(default)]
+    pub slicer_filter_fields: Vec<String>,
     /// BI model info (only present for BI-backed pivots)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bi_model: Option<BiPivotModelInfo>,

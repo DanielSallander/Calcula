@@ -852,5 +852,11 @@ pub(crate) fn is_bi_cosmetic_only_change(
         }
     }
 
+    // Slicer fields: if the request includes slicer_fields, the caller wants
+    // to add/update slicer GROUP BY columns, which requires a full BI query.
+    if !request.slicer_fields.is_empty() {
+        return false;
+    }
+
     true
 }

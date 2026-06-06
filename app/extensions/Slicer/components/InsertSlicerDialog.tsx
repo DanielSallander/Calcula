@@ -59,6 +59,7 @@ interface HierarchiesResult {
   columnHierarchies: Array<{ name: string }>;
   dataHierarchies: Array<{ name: string }>;
   filterHierarchies: Array<{ name: string }>;
+  slicerFilterFields?: string[];
   biModel?: BiModelInfo;
 }
 
@@ -150,11 +151,22 @@ async function ensureBiFieldsInPivot(
     resolveHierarchyFieldRef(h.name, lookupCols, resolveModel),
   );
 
+  // Collect existing slicer filter fields so they aren't lost
+  const existingSlicerFields: BiFieldRef[] = (result.slicerFilterFields ?? [])
+    .map((name) => parseBiFieldRef(name, []));
+
   // Add missing fields as slicer fields — included in the GROUP BY
   // query so they appear in the cache, but NOT shown as visible filter rows.
-  const slicerFields: BiFieldRef[] = missingFields.map((fieldKey) =>
+  const newSlicerFields: BiFieldRef[] = missingFields.map((fieldKey) =>
     parseBiFieldRef(fieldKey, []),
   );
+  // Merge: existing + new (avoiding duplicates)
+  const slicerFields: BiFieldRef[] = [...existingSlicerFields];
+  for (const nf of newSlicerFields) {
+    if (!slicerFields.some((f) => f.table === nf.table && f.column === nf.column)) {
+      slicerFields.push(nf);
+    }
+  }
 
   // Re-query the BI engine with the updated field configuration
   await updateBiPivotFields({

@@ -998,7 +998,7 @@ pub async fn refresh_pivot_cache(
         // Reconstruct an UpdateBiPivotFieldsRequest from the stored definition
         let bi_request = {
             let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-            let (definition, _cache) = pivot_tables
+            let (definition, cache) = pivot_tables
                 .get(&pivot_id)
                 .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
             let bi_meta = pivot_state.bi_metadata.lock().unwrap();
@@ -1029,9 +1029,36 @@ pub async fn refresh_pivot_cache(
                     field
                 })
                 .collect();
-            // Slicer filters store source_index, not Table.Column names.
-            // For BI refresh, we need the field names — look them up from the cache.
-            let slicer_fields: Vec<super::types::BiFieldRef> = Vec::new(); // TODO: resolve from cache field names if needed
+            // Slicer filters store source_index — resolve to Table.Column
+            // names from the cache so they are included in the BI GROUP BY query.
+            let slicer_fields: Vec<super::types::BiFieldRef> = definition.slicer_filters.iter()
+                .filter_map(|sf| {
+                    cache.field_name(sf.source_index).and_then(|name| {
+                        // Field names are "Table.Column" in the definition or
+                        // bare "Column" from the Arrow schema.
+                        let (table, column) = name.split_once('.')
+                            .map(|(t, c)| (t.to_string(), c.to_string()))
+                            .unwrap_or_else(|| {
+                                // Bare column name — look up table from BI metadata
+                                let table_name = meta.model_tables.iter()
+                                    .find(|t| t.columns.iter().any(|c| c.name == name))
+                                    .map(|t| t.name.clone())
+                                    .unwrap_or_default();
+                                (table_name, name)
+                            });
+                        if table.is_empty() {
+                            None
+                        } else {
+                            Some(super::types::BiFieldRef {
+                                table,
+                                column,
+                                is_lookup: false,
+                                hidden_items: sf.hidden_items.clone(),
+                            })
+                        }
+                    })
+                })
+                .collect();
             let calc_fields: Option<Vec<super::types::CalculatedFieldDef>> = if definition.calculated_fields.is_empty() {
                 None
             } else {
@@ -2069,12 +2096,48 @@ pub fn get_pivot_hierarchies(
         })
     };
 
+    // Slicer filter field names (resolve source_index to name from cache)
+    let slicer_filter_fields: Vec<String> = definition.slicer_filters.iter()
+        .filter_map(|sf| {
+            cache.field_name(sf.source_index).map(|name| {
+                // If the cache field name is bare "column", try to resolve
+                // to "table.column" using the definition field names as reference.
+                if !name.contains('.') {
+                    // Search all definition fields for one that ends with this column name
+                    let all_def_names: Vec<&str> = definition.row_fields.iter()
+                        .chain(definition.column_fields.iter())
+                        .chain(definition.filter_fields.iter().map(|f| &f.field))
+                        .map(|f| f.name.as_str())
+                        .collect();
+                    // Check if the column belongs to any known table in BI metadata
+                    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+                    if let Some(meta) = bi_meta.get(&pivot_id) {
+                        for t in &meta.model_tables {
+                            if t.columns.iter().any(|c| c.name == name) {
+                                return format!("{}.{}", t.name, name);
+                            }
+                        }
+                    }
+                    // If we can't find the table, check if any definition field has
+                    // this column name as a suffix
+                    for def_name in &all_def_names {
+                        if def_name.ends_with(&format!(".{}", name)) {
+                            return def_name.to_string();
+                        }
+                    }
+                }
+                name
+            })
+        })
+        .collect();
+
     Ok(PivotHierarchiesInfo {
         hierarchies,
         row_hierarchies,
         column_hierarchies,
         data_hierarchies,
         filter_hierarchies,
+        slicer_filter_fields,
         bi_model,
     })
 }

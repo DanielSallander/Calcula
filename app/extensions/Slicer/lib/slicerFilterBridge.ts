@@ -25,6 +25,7 @@ interface HierarchiesInfo {
   columnHierarchies: Array<{ name: string }>;
   dataHierarchies: Array<{ name: string }>;
   filterHierarchies: Array<{ name: string }>;
+  slicerFilterFields?: string[];
   biModel?: {
     tables: Array<{ name: string; columns: Array<{ name: string }> }>;
     lookupColumns?: string[];
@@ -113,15 +114,26 @@ export async function ensureBiFieldInPivotCache(
     const valueFields = info.dataHierarchies.map((h) => parseBiValueFieldRef(h.name));
     const filterFields = info.filterHierarchies.map((h) => resolveHierarchyFieldRef(h.name, lookupCols, info.biModel));
 
+    // Collect existing slicer filter fields so they aren't lost
+    const existingSlicerFields: BiFieldRef[] = (info.slicerFilterFields ?? [])
+      .map((name) => parseBiFieldRef(name, []));
+
     // Add the missing field as a slicer field — included in the GROUP BY
     // query so it appears in the cache, but NOT shown as a visible filter row.
+    const newSlicerField = parseBiFieldRef(fieldName, []);
+    // Avoid duplicates
+    const allSlicerFields = [...existingSlicerFields];
+    if (!allSlicerFields.some((f) => f.table === newSlicerField.table && f.column === newSlicerField.column)) {
+      allSlicerFields.push(newSlicerField);
+    }
+
     await updateBiPivotFields({
       pivotId,
       rowFields,
       columnFields,
       valueFields,
       filterFields,
-      slicerFields: [parseBiFieldRef(fieldName, [])],
+      slicerFields: allSlicerFields,
       lookupColumns: lookupCols,
     });
 
