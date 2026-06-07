@@ -177,7 +177,7 @@ export function PivotEditor({
   const hasUserInteracted = useRef(false);
 
   // JSON toggle (Phase C)
-  const jsonToggle = useJsonToggle("pivot_layout", String(pivotId), onViewUpdate);
+  const jsonToggle = useJsonToggle("pivot", String(pivotId), onViewUpdate);
 
   // Tab state: Fields (visual drag-drop) or Design (DSL text editor)
   const [activeTab, setActiveTab] = useState<EditorTab>('fields');

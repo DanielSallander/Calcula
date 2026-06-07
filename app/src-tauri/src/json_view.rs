@@ -31,6 +31,7 @@ pub fn get_object_json(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::ScriptState>,
     timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
+    pivot_state: State<crate::pivot::PivotState>,
     object_type: String,
     object_id: String,
 ) -> Result<String, String> {
@@ -92,6 +93,15 @@ pub fn get_object_json(
                 .ok_or_else(|| format!("Notebook '{}' not found", object_id))?;
             serde_json::to_string_pretty(notebook).map_err(|e| e.to_string())
         }
+        "pivot" => {
+            let id: pivot_engine::PivotId = serde_json::from_value(
+                serde_json::Value::String(object_id.clone())
+            ).map_err(|_| "Invalid pivot id".to_string())?;
+            let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            let (definition, _cache) = pivot_tables.get(&id)
+                .ok_or_else(|| format!("Pivot {} not found", object_id))?;
+            serde_json::to_string_pretty(definition).map_err(|e| e.to_string())
+        }
         "pivot_layout" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
             let layouts = state.pivot_layouts.lock().unwrap();
@@ -122,6 +132,7 @@ pub fn set_object_json(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::ScriptState>,
     timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
+    pivot_state: State<crate::pivot::PivotState>,
     object_type: String,
     object_id: String,
     json: String,
@@ -228,6 +239,20 @@ pub fn set_object_json(
                 Err(format!("Notebook '{}' not found", object_id))
             }
         }
+        "pivot" => {
+            let id: pivot_engine::PivotId = serde_json::from_value(
+                serde_json::Value::String(object_id.clone())
+            ).map_err(|_| "Invalid pivot id".to_string())?;
+            let new_definition: pivot_engine::PivotDefinition = serde_json::from_str(&json)
+                .map_err(|e| format!("Invalid pivot JSON: {}", e))?;
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((definition, _cache)) = pivot_tables.get_mut(&id) {
+                *definition = new_definition;
+                Ok(())
+            } else {
+                Err(format!("Pivot {} not found", object_id))
+            }
+        }
         "pivot_layout" => {
             let id = identity::EntityId::parse(&object_id).ok_or_else(|| "Invalid pivot layout id".to_string())?;
             let new_layout: ::persistence::SavedPivotLayout = serde_json::from_str(&json)
@@ -269,6 +294,7 @@ pub fn list_objects(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::ScriptState>,
     timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
+    pivot_state: State<crate::pivot::PivotState>,
 ) -> Vec<ObjectEntry> {
     let mut entries = Vec::new();
 
@@ -382,6 +408,18 @@ pub fn list_objects(
         }
     }
 
+    // Pivot tables
+    {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        for (id, (definition, _cache)) in pivot_tables.iter() {
+            entries.push(ObjectEntry {
+                object_type: "pivot".to_string(),
+                object_id: id.to_string(),
+                label: format!("Pivot: {}", definition.name.as_deref().unwrap_or("Untitled")),
+            });
+        }
+    }
+
     // Pivot layouts
     {
         let layouts = state.pivot_layouts.lock().unwrap();
@@ -417,6 +455,7 @@ pub fn get_workbook_tree(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::ScriptState>,
     timeline_slicer_state: State<crate::timeline_slicer::TimelineSlicerState>,
+    pivot_state: State<crate::pivot::PivotState>,
 ) -> TreeNode {
     let mut root = TreeNode {
         label: "Workbook".to_string(),
@@ -641,6 +680,28 @@ pub fn get_workbook_tree(
                     label: notebook.name.clone(),
                     object_type: Some("notebook".to_string()),
                     object_id: Some(notebook.id.clone()),
+                    children: Vec::new(),
+                });
+            }
+            root.children.push(node);
+        }
+    }
+
+    // Pivot Tables
+    {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        if !pivot_tables.is_empty() {
+            let mut node = TreeNode {
+                label: format!("Pivot Tables ({})", pivot_tables.len()),
+                object_type: None,
+                object_id: None,
+                children: Vec::new(),
+            };
+            for (id, (definition, _cache)) in pivot_tables.iter() {
+                node.children.push(TreeNode {
+                    label: definition.name.clone().unwrap_or_else(|| "Untitled".to_string()),
+                    object_type: Some("pivot".to_string()),
+                    object_id: Some(id.to_string()),
                     children: Vec::new(),
                 });
             }
