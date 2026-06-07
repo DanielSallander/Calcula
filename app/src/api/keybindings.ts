@@ -260,6 +260,44 @@ function isEditing(): boolean {
   return false;
 }
 
+/**
+ * Check if focus is currently within the spreadsheet grid container.
+ * When focus is outside the grid (e.g., in a dialog, side pane, or menu),
+ * grid-scoped keybindings should not fire so that native browser behaviour
+ * (e.g., Ctrl+C to copy selected text) works as expected.
+ */
+function isGridFocused(): boolean {
+  const active = document.activeElement;
+  if (!active) return false;
+  const container = (active as HTMLElement).closest?.('[data-focus-container="spreadsheet"]');
+  return container !== null && container !== undefined;
+}
+
+/**
+ * Command IDs that should only fire when the grid has focus.
+ * When focus is in a dialog, side pane, or menu, these are skipped
+ * so native browser shortcuts (copy, paste, undo, etc.) work normally.
+ */
+const GRID_SCOPED_COMMANDS = new Set([
+  "core.clipboard.copy",
+  "core.clipboard.cut",
+  "core.clipboard.paste",
+  "core.clipboard.pasteSpecial",
+  "core.clipboard.pasteValues",
+  "core.clipboard.pasteFormulas",
+  "core.clipboard.pasteFormatting",
+  "core.clipboard.pasteLink",
+  "core.edit.undo",
+  "core.edit.redo",
+  "core.edit.clearContents",
+  "core.edit.fillDown",
+  "core.edit.fillRight",
+  "core.edit.fillUp",
+  "core.edit.fillLeft",
+  "core.format.cells",
+  "core.format.painter",
+]);
+
 // ============================================================================
 // Registry Operations
 // ============================================================================
@@ -548,6 +586,7 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   if (modifierKeys.includes(event.key)) return false;
 
   const editing = isEditing();
+  const gridFocused = isGridFocused();
 
   // Find matching keybindings
   const matches: KeyBinding[] = [];
@@ -558,6 +597,17 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
     const ctx = binding.context ?? "always";
     if (ctx === "editing" && !editing) return;
     if (ctx === "not-editing" && editing) return;
+
+    // Skip grid-scoped commands when focus is outside the grid
+    // (e.g., in dialogs, side panes, menus) so native browser
+    // shortcuts like Ctrl+C to copy text work as expected.
+    if (!gridFocused && GRID_SCOPED_COMMANDS.has(binding.commandId)) {
+      console.debug(
+        `[Keybindings] Skipping grid-scoped command '${binding.commandId}' ` +
+        `— focus is outside grid (active: ${document.activeElement?.tagName})`
+      );
+      return;
+    }
 
     matches.push(binding);
   });

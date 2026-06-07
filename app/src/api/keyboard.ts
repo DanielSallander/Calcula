@@ -113,6 +113,40 @@ function isEditing(): boolean {
   return false;
 }
 
+/**
+ * Check if focus is within the spreadsheet grid container.
+ */
+function isGridFocused(): boolean {
+  const active = document.activeElement;
+  if (!active) return false;
+  const container = (active as HTMLElement).closest?.('[data-focus-container="spreadsheet"]');
+  return container !== null && container !== undefined;
+}
+
+/**
+ * Command IDs that should only fire when the grid has focus.
+ * Mirrors the set in keybindings.ts.
+ */
+const GRID_SCOPED_COMMANDS = new Set([
+  "core.clipboard.copy",
+  "core.clipboard.cut",
+  "core.clipboard.paste",
+  "core.clipboard.pasteSpecial",
+  "core.clipboard.pasteValues",
+  "core.clipboard.pasteFormulas",
+  "core.clipboard.pasteFormatting",
+  "core.clipboard.pasteLink",
+  "core.edit.undo",
+  "core.edit.redo",
+  "core.edit.clearContents",
+  "core.edit.fillDown",
+  "core.edit.fillRight",
+  "core.edit.fillUp",
+  "core.edit.fillLeft",
+  "core.format.cells",
+  "core.format.painter",
+]);
+
 // ============================================================================
 // Global Keyboard Listener
 // ============================================================================
@@ -126,6 +160,7 @@ function installListener(): void {
     if (bindings.length === 0) return;
 
     const editing = isEditing();
+    const gridFocused = isGridFocused();
 
     // Find all matching bindings, sorted by priority (highest first)
     const matches = bindings
@@ -134,6 +169,16 @@ function installListener(): void {
         const when = b.when ?? "always";
         if (when === "editing" && !editing) return false;
         if (when === "not-editing" && editing) return false;
+
+        // Skip grid-scoped commands when focus is outside the grid
+        if (!gridFocused && GRID_SCOPED_COMMANDS.has(b.commandId)) {
+          console.debug(
+            `[Keyboard] Skipping grid-scoped command '${b.commandId}' ` +
+            `— focus is outside grid (active: ${document.activeElement?.tagName})`
+          );
+          return false;
+        }
+
         return true;
       })
       .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
