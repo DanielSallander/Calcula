@@ -111,6 +111,44 @@ Each connector is responsible for:
 - Query dialect translation (the planner generates abstract queries; the connector translates to source-specific SQL)
 - Result set deserialization into columnar format
 
+### 8. Authentication Architecture
+
+Authentication is separated from connection targeting so that **model files never contain secrets**. This mirrors how SSAS models work: the model declares *where* to connect, and each user's own identity resolves the actual authentication.
+
+#### Core Types (in `engine-connectors/src/auth.rs`)
+
+- **`ConnectionTarget`** — host, port, database, schema, TLS settings. Serializable. This is what gets stored in model files.
+- **`AuthMethod`** — how to authenticate (Integrated, UsernamePassword, EnvironmentVariable). **Not serializable** because it may contain secrets.
+- **`AuthMethodKind`** — secret-free discriminant of `AuthMethod`. Serializable. Stored as a hint in model files.
+- **`ConnectionSpec`** — bundles `ConnectionTarget` + `AuthMethodKind`. The complete model-file representation of a data source.
+- **`ConnectorAuth`** trait — declares which auth methods a connector type supports.
+
+#### Auth Methods
+
+| Method | Description | Secrets stored? |
+|--------|-------------|----------------|
+| `Integrated` | Windows/SSPI/Kerberos — uses the OS-level identity of the running process | None |
+| `UsernamePassword` | Explicit credentials provided by the host app at connection time | In memory only, never persisted by the engine |
+| `EnvironmentVariable` | Credentials read from named env vars at connection time | Only variable names are stored |
+
+#### Flow
+
+1. **Model file** stores `ConnectionSpec` (target + preferred auth kind).
+2. **Host application** reads the spec and resolves an `AuthMethod` from the user's environment (e.g., for `Integrated`, it just passes through; for `UsernamePassword`, it may prompt the user).
+3. **Engine** receives `ConnectionTarget` + `AuthMethod` via `Engine::add_<type>_source()`.
+4. **Connector** builds its native connection string from the structured parts via `Config::from_target()`.
+
+#### Checklist for New Connector Authors
+
+When adding a new data source connector, you MUST:
+
+1. Implement `ConnectorAuth` for your connector struct.
+2. Add `YourConfig::from_target(ConnectionTarget, AuthMethod)` constructor.
+3. Handle **every** `AuthMethod` variant — return `AuthMethodNotSupported` for unsupported ones.
+4. Add `Engine::add_<name>_source(ConnectionTarget, AuthMethod)` to the facade.
+5. Add a variant to `AnyConnector` in `registry.rs` (the compiler enforces `ConnectorAuth`).
+6. Add tests for each supported auth method.
+
 ## Data Flow
 
 ```
@@ -198,3 +236,91 @@ The recommendation is to evaluate Arrow + DataFusion as the foundation and build
 Each stage produces a usable library that the other projects can start integrating against.
 
 **Current status:** Milestones 1–12 are complete. The engine supports columnar storage, star-schema relationships, PostgreSQL and SQL Server connectors, query pushdown, measure computation with context manipulation, table variables, execution plan visualization, text-based measure definition via a DAX-like parser, DAX-inspired functions (IF, SWITCH, DIVIDE, ROUND, math functions, etc.), named context definitions (CONTEXT), scalar variables (VAR/RETURN), two-stage aggregation via QUERY-in-VAR, and per-query lookup columns for optimized dimension property retrieval.
+
+## Ingest-Time Optimization and Caching Architecture
+
+The engine operates as a local-first, per-user library — not a central server. This fundamentally changes the optimization trade-offs compared to systems like VertiPaq (Analysis Services / Power BI):
+
+- In a central model, heavy upfront processing (complex compression, dictionary encoding, sort ordering) pays off because it runs once on a server and benefits many subsequent queries.
+- In Calcula's distributed model, each user refreshes independently on their own hardware. Processing cost is paid per user, per refresh, every time. The optimal point on the cost curve is therefore much lower — cheap optimizations that run instantly and reduce memory/disk usage with near-zero overhead.
+
+This philosophy drives the following architectural layers.
+
+### Automatic Batch Optimizer (`engine-core::optimize`)
+
+A single `optimize_batch()` function runs once per ingested `RecordBatch`, applying three transformations:
+
+**1. Integer narrowing.** SQL Server and PostgreSQL routinely return `BIGINT`/`Int64` for columns where the actual values fit in `Int8`, `Int16`, or `Int32`. The optimizer scans min/max (a single SIMD-friendly pass via Arrow's aggregate kernels) and casts to the narrowest type that fits. All-null columns are left unchanged.
+
+**2. Dictionary encoding of low-cardinality strings.** Country codes, status fields, category names — columns where the number of distinct values is small relative to the row count. The optimizer samples up to 8,192 rows and counts distinct values. If the ratio falls below a configurable threshold (default: 50%), the column is wrapped in `DictionaryArray<Int32, Utf8>`. The scan early-exits the moment the ratio exceeds the threshold, so high-cardinality columns (user IDs, free text) cost almost nothing to evaluate. DataFusion handles `DictionaryArray` natively in joins and aggregations.
+
+**3. Timestamp-to-Date32 conversion.** Date-only columns frequently arrive as `Timestamp` (8 bytes) when `Date32` (4 bytes) would suffice. The optimizer checks every non-null value; if all fall on day boundaries (midnight), it converts. Handles all four Arrow `TimeUnit` variants (nanosecond, microsecond, millisecond, second).
+
+Configuration is exposed via `OptimizerConfig` with per-optimization toggles, tunable thresholds, and a `min_rows_to_analyze` floor (default: 1024) that skips analysis on batches too small to benefit.
+
+The optimizer runs at three integration points:
+
+| Path | When | Effect |
+|------|------|--------|
+| `Engine::refresh_table()` | In-memory table refresh | Persistent — optimized data stays in cache |
+| Pipeline fetch registration | Local aggregation queries | Transient — reduces memory during DataFusion execution |
+| Auto-tiered dimension tables | First query touching a dimension | Persistent — cached for session lifetime |
+
+### Sort on Load
+
+After optimization, cached tables are sorted by their primary join key, inferred automatically from the data model's relationship graph:
+
+- Fact tables (the "from" side of `ManyToOne` relationships) are sorted by the foreign key column.
+- Dimension tables (the "to" side) are sorted by the primary key column.
+- When a table appears in multiple relationships, the fact-side FK is preferred (most impactful for join performance).
+
+Sorting improves hash join probe locality (grouped key values → better CPU cache behavior), makes subsequent dictionary encoding more effective (sorted strings produce longer runs), and benefits filter scans when predicates target the sort column. The cost is a single `lexsort_to_indices` + `take` pass — negligible relative to the network fetch that produced the data.
+
+### Auto-Tier Dimension Caching
+
+Dimension tables are typically small (thousands to a few hundred thousand rows) but touched by nearly every query. Fetching the same `dim_customer` table from the source 50 times in a session is pure waste. The auto-tier system addresses this:
+
+**Candidate identification.** A table is eligible if it appears as the "to" (one/dimension) side of a `ManyToOne` relationship, is not explicitly set to `InMemory` by the user, has a registered source binding, and has not been previously rejected (too many rows).
+
+**Lazy caching.** When `query_auto_tier()` is called, the engine identifies which candidates are needed by the current query's `group_by` columns. Those tables are fetched with `LIMIT max_rows + 1`, and if the result fits within the configured threshold (default: 100,000 rows), the data is optimized, sorted, and cached. If it exceeds the threshold, the table is marked as rejected and never re-checked.
+
+**Background pre-warm.** After the query returns results to the user, `auto_tier_remaining()` caches all other eligible dimension tables. The user doesn't wait for this — they're already reading the results of their first query. By the time they pivot to a different dimension, it's likely already warm.
+
+**TTL-based staleness.** Auto-tiered tables have a configurable TTL (default: 1 hour). When the TTL expires, the table is re-fetched. If it has grown beyond the row threshold, it's evicted from cache and rejected.
+
+**Planner awareness.** The pushdown planner is informed of auto-tiered tables via `plan_with_cached()`, ensuring they are treated as local data (forcing `LocalAggregation` rather than attempting to push aggregation to the source). The pipeline serves any table present in the cache, regardless of its `StorageMode` setting in the model.
+
+**Discoverability.** `auto_tiered_tables()` and `auto_tier_rejected_tables()` let the host application show the user which tables were automatically cached and which were skipped.
+
+### Query-Result LRU Cache
+
+The engine caches completed query results so that repeated identical queries return instantly:
+
+**Cache key.** A deterministic hash of the `QueryRequest` (measures, group_by, filters, lookups) combined with a model version counter. The model version is bumped on any change that could affect results (model edits, data refreshes, auto-tier changes).
+
+**LRU eviction.** The cache enforces two limits: maximum entry count (default: 256) and maximum memory (default: 64 MB). When either is exceeded, the least-recently-accessed entry is evicted.
+
+**TTL expiry.** Entries expire after a configurable duration (default: 5 minutes). For DirectQuery tables, the source can change at any time without the engine knowing, so a short TTL provides a conservative safety net. Host applications can increase the TTL if they know data is stable, or call `clear_query_cache()` when data changes are detected.
+
+**Transparent integration.** The cache is checked before query execution in `query()`, `query_auto_tier()`, and `query_auto_refresh()`. `query_explained()` intentionally bypasses the cache because plans and timing differ per execution.
+
+**Automatic invalidation.** The entire cache is invalidated (all entries cleared, model version bumped) when:
+- `refresh_table()` is called (underlying data changed)
+- `set_model()` is called (measure definitions or schema changed)
+- An auto-tiered table is newly cached (available local data changed)
+
+This is whole-cache invalidation — simple and safe. Per-table invalidation tracking could be added later for finer granularity, but the cache refills quickly due to LRU and the common case (user re-runs the same report) hits on the first query after invalidation.
+
+### Compressed Disk Cache
+
+The engine persists cached in-memory tables to disk on shutdown and restores them on startup, avoiding full re-fetches from the source. The format is Arrow IPC with **Zstd compression**, which typically reduces file sizes by 60–80% compared to uncompressed Arrow IPC.
+
+The Arrow IPC reader handles decompression transparently, so the load path requires no special handling. Metadata (cache age, schema hash, fingerprint) is stored alongside in `metadata.json` to support TTL-based staleness checks and schema compatibility validation across sessions.
+
+### Optimization Observability
+
+Optimization statistics are reported at two levels:
+
+**ExecutionPlan nodes.** Each `SourceFetch` plan node includes properties showing what the optimizer did: columns narrowed, strings dictionary-encoded, timestamps converted, percentage of bytes saved, and absolute byte counts. These appear in `query_explained()` output and can be rendered by the host application for debugging and tuning.
+
+**`refresh_table_explained()`.** Returns `OptimizationStats` after refreshing a cached table, letting the host app surface diagnostics like "Refreshed dim_products: 3 cols narrowed, 2 dictionary-encoded, 45% smaller."

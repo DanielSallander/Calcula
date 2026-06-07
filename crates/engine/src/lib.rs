@@ -22,9 +22,12 @@
 //!     .build()?;
 //!
 //! let mut engine = Engine::new(model);
-//! let pg_idx = engine
-//!     .add_postgres(PostgresConfig::new("postgresql://user:pass@localhost/db"))
-//!     .await?;
+//! let target = ConnectionTarget::new("localhost", "db").with_port(5432);
+//! let auth = AuthMethod::UsernamePassword {
+//!     username: "user".into(),
+//!     password: "pass".into(),
+//! };
+//! let pg_idx = engine.add_postgres(target, auth).await?;
 //! engine.bind_table("Sales", pg_idx, SourceBinding::new("public", "sales"));
 //!
 //! let results = engine.query(QueryRequest {
@@ -81,8 +84,11 @@ pub use engine_core::types::{DataType, TableColumn, Value};
 
 // --- Re-exports from engine-connectors ---
 
-pub use engine_connectors::postgres::{PostgresConfig, PostgresConnector};
-pub use engine_connectors::sqlserver::{SqlServerConfig, SqlServerConnector};
+pub use engine_connectors::auth::{
+    AuthMethod, AuthMethodKind, ConnectionSpec, ConnectionTarget, ConnectorAuth,
+};
+pub use engine_connectors::postgres::PostgresConnector;
+pub use engine_connectors::sqlserver::SqlServerConnector;
 pub use engine_connectors::traits::{
     AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
     SourceTable,
@@ -286,8 +292,16 @@ impl Engine {
     }
 
     /// Register a PostgreSQL data source and return its connector index.
-    pub async fn add_postgres(&mut self, config: PostgresConfig) -> ConnectorResult<usize> {
-        let connector = PostgresConnector::connect(config).await?;
+    ///
+    /// The connection target (host, port, database) and authentication method
+    /// are separate, enabling models to store only the target while auth
+    /// resolves from the user's environment.
+    pub async fn add_postgres(
+        &mut self,
+        target: ConnectionTarget,
+        auth: AuthMethod,
+    ) -> ConnectorResult<usize> {
+        let connector = PostgresConnector::connect(target, auth).await?;
         let idx = self
             .registry
             .add_connector(AnyConnector::Postgres(connector));
@@ -295,8 +309,15 @@ impl Engine {
     }
 
     /// Register a SQL Server data source and return its connector index.
-    pub async fn add_sqlserver(&mut self, config: SqlServerConfig) -> ConnectorResult<usize> {
-        let connector = SqlServerConnector::connect(config).await?;
+    ///
+    /// See [`add_postgres`](Self::add_postgres) for rationale on the
+    /// target/auth separation.
+    pub async fn add_sqlserver(
+        &mut self,
+        target: ConnectionTarget,
+        auth: AuthMethod,
+    ) -> ConnectorResult<usize> {
+        let connector = SqlServerConnector::connect(target, auth).await?;
         let idx = self
             .registry
             .add_connector(AnyConnector::SqlServer(connector));
@@ -357,8 +378,7 @@ impl Engine {
             .map_err(crate::QueryError::Engine)?;
 
         // Check query cache (after refresh — stale data was already invalidated).
-        let cache_key =
-            query_cache::query_cache_key(&request, self.query_cache.model_version());
+        let cache_key = query_cache::query_cache_key(&request, self.query_cache.model_version());
         if let Some(cached) = self.query_cache.get(cache_key) {
             return Ok((cached, refreshed));
         }
@@ -448,10 +468,7 @@ impl Engine {
         self.refresh_table_inner(table_name).await
     }
 
-    async fn refresh_table_inner(
-        &mut self,
-        table_name: &str,
-    ) -> EngineResult<OptimizationStats> {
+    async fn refresh_table_inner(&mut self, table_name: &str) -> EngineResult<OptimizationStats> {
         let table = self.model.table(table_name)?;
         if !table.is_in_memory() {
             return Err(EngineError::TableNotInMemory(table_name.to_string()));
@@ -487,10 +504,9 @@ impl Engine {
             let (optimized, stats) =
                 engine_core::optimize::optimize_batch(&combined, &self.optimizer_config)?;
             // Sort by the table's primary join key for better join/filter locality.
-            let sorted = if let Some(sort_col) = engine_core::optimize::infer_sort_column(
-                table_name,
-                self.model.relationships(),
-            ) {
+            let sorted = if let Some(sort_col) =
+                engine_core::optimize::infer_sort_column(table_name, self.model.relationships())
+            {
                 engine_core::optimize::sort_batch_by_column(&optimized, sort_col)?
             } else {
                 optimized
@@ -705,10 +721,9 @@ impl Engine {
             let combined = arrow::compute::concat_batches(&schema, &batches)?;
             let (optimized, _) =
                 engine_core::optimize::optimize_batch(&combined, &self.optimizer_config)?;
-            let sorted = if let Some(sort_col) = engine_core::optimize::infer_sort_column(
-                table_name,
-                self.model.relationships(),
-            ) {
+            let sorted = if let Some(sort_col) =
+                engine_core::optimize::infer_sort_column(table_name, self.model.relationships())
+            {
                 engine_core::optimize::sort_batch_by_column(&optimized, sort_col)?
             } else {
                 optimized
@@ -726,10 +741,7 @@ impl Engine {
     /// Identifies which dimension tables in the query's group_by or filter
     /// context are auto-tier candidates, and caches them before execution.
     /// Returns the names of tables that were auto-tiered.
-    async fn auto_tier_for_query(
-        &mut self,
-        request: &QueryRequest,
-    ) -> EngineResult<Vec<String>> {
+    async fn auto_tier_for_query(&mut self, request: &QueryRequest) -> EngineResult<Vec<String>> {
         if !self.auto_tier_config.enabled {
             return Ok(Vec::new());
         }
@@ -810,8 +822,7 @@ impl Engine {
             .map_err(QueryError::Engine)?;
 
         // Check query cache.
-        let cache_key =
-            query_cache::query_cache_key(&request, self.query_cache.model_version());
+        let cache_key = query_cache::query_cache_key(&request, self.query_cache.model_version());
         if let Some(cached) = self.query_cache.get(cache_key) {
             // Still pre-warm remaining in background.
             if let Ok(more) = self.auto_tier_remaining().await {
@@ -950,14 +961,11 @@ impl Engine {
                     file_path.display()
                 ))
             })?;
-            let mut writer = FileWriter::try_new_with_options(
-                file,
-                &batch.schema(),
-                write_options.clone(),
-            )
-            .map_err(|e| {
-                EngineError::InvalidData(format!("Arrow IPC writer init failed: {e}"))
-            })?;
+            let mut writer =
+                FileWriter::try_new_with_options(file, &batch.schema(), write_options.clone())
+                    .map_err(|e| {
+                        EngineError::InvalidData(format!("Arrow IPC writer init failed: {e}"))
+                    })?;
             writer
                 .write(batch)
                 .map_err(|e| EngineError::InvalidData(format!("Arrow IPC write failed: {e}")))?;
@@ -1518,11 +1526,9 @@ mod tests {
         assert!(engine.auto_tier_candidates().is_empty());
 
         // Register bindings for dims.
-        engine.registry.bind(
-            "dim_products",
-            0,
-            SourceBinding::new("public", "products"),
-        );
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
         engine.registry.bind(
             "dim_customers",
             0,
@@ -1548,12 +1554,9 @@ mod tests {
                 .unwrap(),
             )
             .add_table(
-                Table::new(
-                    "dim_products",
-                    vec![Column::new("id", DataType::Int64)],
-                )
-                .unwrap()
-                .with_storage_mode(StorageMode::InMemory),
+                Table::new("dim_products", vec![Column::new("id", DataType::Int64)])
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory),
             )
             .add_relationship(Relationship::many_to_one(
                 "sales_products",
@@ -1571,11 +1574,9 @@ mod tests {
             enabled: true,
             ..Default::default()
         });
-        engine.registry.bind(
-            "dim_products",
-            0,
-            SourceBinding::new("public", "products"),
-        );
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
 
         // Already InMemory → not a candidate.
         assert!(engine.auto_tier_candidates().is_empty());
@@ -1589,11 +1590,9 @@ mod tests {
             enabled: true,
             ..Default::default()
         });
-        engine.registry.bind(
-            "dim_products",
-            0,
-            SourceBinding::new("public", "products"),
-        );
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
 
         // Mark as rejected.
         engine
@@ -1612,11 +1611,9 @@ mod tests {
             enabled: true,
             ..Default::default()
         });
-        engine.registry.bind(
-            "dim_products",
-            0,
-            SourceBinding::new("public", "products"),
-        );
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
 
         // Mark as already cached.
         engine

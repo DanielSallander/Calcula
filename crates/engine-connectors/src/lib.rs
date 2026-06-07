@@ -12,6 +12,7 @@
 //! with the rest of the engine.
 
 pub mod arrow_convert;
+pub mod auth;
 pub mod error;
 pub mod postgres;
 pub mod sqlserver;
@@ -19,9 +20,10 @@ pub mod sqlserver_convert;
 pub mod traits;
 pub mod type_mapping;
 
+pub use auth::{AuthMethod, AuthMethodKind, ConnectionSpec, ConnectionTarget, ConnectorAuth};
 pub use error::{ConnectorError, ConnectorResult};
-pub use postgres::{PostgresConfig, PostgresConnector};
-pub use sqlserver::{SqlServerConfig, SqlServerConnector};
+pub use postgres::PostgresConnector;
+pub use sqlserver::SqlServerConnector;
 pub use traits::{
     AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
     InFilterCondition, JoinAggregationRequest, JoinClause, MeasureExpr, QualifiedColumn,

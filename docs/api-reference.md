@@ -29,14 +29,24 @@ let mut engine = Engine::new(model);
 ```rust
 // PostgreSQL
 let pg_idx = engine
-    .add_postgres(PostgresConfig::new("postgresql://user:pass@localhost/db"))
+    .add_postgres(
+        ConnectionTarget::new("localhost", "db").with_port(5432),
+        AuthMethod::UsernamePassword {
+            username: "user".into(),
+            password: "pass".into(),
+        },
+    )
     .await?;
 
 // SQL Server
 let ss_idx = engine
-    .add_sqlserver(SqlServerConfig::from_ado_string(
-        "Server=tcp:localhost;Database=mydb;User Id=sa;Password=secret;"
-    )?)
+    .add_sqlserver(
+        ConnectionTarget::new("localhost", "mydb").with_port(1433),
+        AuthMethod::UsernamePassword {
+            username: "sa".into(),
+            password: "secret".into(),
+        },
+    )
     .await?;
 ```
 
@@ -651,18 +661,27 @@ Used in `keep_in()` expressions or `ContextOp::KeepIn`.
 
 ## Connectors
 
-### PostgresConfig
+### ConnectionTarget
 
 ```rust
-let config = PostgresConfig::new("postgresql://user:pass@host:5432/db");
+let target = ConnectionTarget::new("host", "db").with_port(5432);
 ```
 
-### SqlServerConfig
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `new(host, database)` | `Self` | Create a target with host and database |
+| `with_port(port)` | `Self` | Set the port (default: 5432 for PG, 1433 for SQL Server) |
+| `host()` | `&str` | The hostname |
+| `database()` | `&str` | The database name |
+| `port()` | `Option<u16>` | The port, if set |
+
+### AuthMethod
 
 ```rust
-let config = SqlServerConfig::from_ado_string(
-    "Server=tcp:host,1433;Database=db;User Id=user;Password=pass;"
-)?;
+let auth = AuthMethod::UsernamePassword {
+    username: "user".into(),
+    password: "pass".into(),
+};
 ```
 
 ### SourceBinding

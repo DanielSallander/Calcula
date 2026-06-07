@@ -8,6 +8,8 @@ description = "Data source connectors for the Calcula Engine"
 [dependencies]
 engine-core = { path = "../engine-core" }
 arrow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 sqlx = { version = "0.8", features = [

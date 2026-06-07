@@ -9,34 +9,13 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
 
 use crate::arrow_convert::rows_to_record_batches;
+use crate::auth::{AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::traits::{Connector, FetchRequest, JoinAggregationRequest, SourceTable};
 use crate::type_mapping::pg_type_to_engine_type;
 
-/// Configuration for connecting to a PostgreSQL database.
-#[derive(Debug, Clone)]
-pub struct PostgresConfig {
-    /// Connection URL, e.g. `"postgresql://user:pass@host:port/dbname"`.
-    pub connection_url: String,
-    /// Maximum number of connections in the pool (default: 5).
-    pub max_connections: u32,
-}
-
-impl PostgresConfig {
-    /// Create a new configuration with the given connection URL.
-    pub fn new(connection_url: impl Into<String>) -> Self {
-        Self {
-            connection_url: connection_url.into(),
-            max_connections: 5,
-        }
-    }
-
-    /// Set the maximum number of connections in the pool.
-    pub fn with_max_connections(mut self, max: u32) -> Self {
-        self.max_connections = max;
-        self
-    }
-}
+/// Default number of connections in the pool.
+const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
 /// PostgreSQL connector using `sqlx` with connection pooling.
 pub struct PostgresConnector {
@@ -45,18 +24,80 @@ pub struct PostgresConnector {
     temp_table_counter: AtomicU64,
 }
 
+impl ConnectorAuth for PostgresConnector {
+    fn supported_auth_methods() -> Vec<AuthMethodKind> {
+        vec![
+            AuthMethodKind::UsernamePassword,
+            AuthMethodKind::EnvironmentVariable,
+        ]
+    }
+}
+
 impl PostgresConnector {
     /// Connect to a PostgreSQL database.
-    pub async fn connect(config: PostgresConfig) -> ConnectorResult<Self> {
+    ///
+    /// Builds the connection URL from the given target and auth method.
+    /// Uses port **5432** when `target.port` is `None`.
+    ///
+    /// # Auth method handling
+    ///
+    /// - [`AuthMethod::UsernamePassword`]: embeds credentials in the URL.
+    /// - [`AuthMethod::EnvironmentVariable`]: resolves env vars at call time.
+    /// - [`AuthMethod::Integrated`]: connects without credentials (relies on
+    ///   server-side GSSAPI/SSPI/peer authentication).
+    pub async fn connect(target: ConnectionTarget, auth: AuthMethod) -> ConnectorResult<Self> {
+        let url = Self::build_connection_url(target, auth)?;
         let pool = PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .connect(&config.connection_url)
+            .max_connections(DEFAULT_MAX_CONNECTIONS)
+            .connect(&url)
             .await
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
         Ok(Self {
             pool,
             temp_table_counter: AtomicU64::new(0),
         })
+    }
+
+    /// Build a PostgreSQL connection URL from a target and auth method.
+    fn build_connection_url(target: ConnectionTarget, auth: AuthMethod) -> ConnectorResult<String> {
+        let port = target.port.unwrap_or(5432);
+
+        let url = match auth {
+            AuthMethod::UsernamePassword { username, password } => {
+                format!(
+                    "postgresql://{}:{}@{}:{}/{}",
+                    username, password, target.host, port, target.database
+                )
+            }
+            AuthMethod::EnvironmentVariable {
+                username_var,
+                password_var,
+            } => {
+                let username = std::env::var(&username_var).map_err(|_| {
+                    ConnectorError::ConnectionFailed(format!(
+                        "environment variable '{}' not set",
+                        username_var
+                    ))
+                })?;
+                let password = std::env::var(&password_var).map_err(|_| {
+                    ConnectorError::ConnectionFailed(format!(
+                        "environment variable '{}' not set",
+                        password_var
+                    ))
+                })?;
+                format!(
+                    "postgresql://{}:{}@{}:{}/{}",
+                    username, password, target.host, port, target.database
+                )
+            }
+            AuthMethod::Integrated => {
+                return Err(ConnectorError::AuthMethodNotSupported(
+                    "Integrated (SSPI/Kerberos) authentication is not supported by the PostgreSQL connector".to_string(),
+                ));
+            }
+        };
+
+        Ok(url)
     }
 
     /// Close the connection pool gracefully.
@@ -657,9 +698,10 @@ impl Connector for PostgresConnector {
                     .group_by
                     .iter()
                     .filter(move |col| {
-                        request.table_map.iter().any(|(m, s)| {
-                            m.eq_ignore_ascii_case(model) && s == &col.table
-                        })
+                        request
+                            .table_map
+                            .iter()
+                            .any(|(m, s)| m.eq_ignore_ascii_case(model) && s == &col.table)
                     })
                     .map(move |col| (model.clone(), col.column.clone()))
             })
@@ -680,8 +722,11 @@ impl Connector for PostgresConnector {
                 &m.expression,
                 &group_by_pairs,
             );
-            let expr_sql =
-                pg_dialect::expr_to_sql_with_clear(&resolved, &request.table_map, &request.group_by)?;
+            let expr_sql = pg_dialect::expr_to_sql_with_clear(
+                &resolved,
+                &request.table_map,
+                &request.group_by,
+            )?;
             select_parts.push(format!("{expr_sql} AS \"{}\"", m.alias));
         }
 
@@ -812,7 +857,10 @@ mod pg_dialect {
         use engine_core::compute::expression::ScalarFunction;
 
         match expr {
-            Expression::QualifiedColumnRef { table_or_var, column } => {
+            Expression::QualifiedColumnRef {
+                table_or_var,
+                column,
+            } => {
                 let src = source_table(table_or_var, table_map);
                 Ok(format!("\"{src}\".\"{column}\""))
             }
@@ -825,7 +873,14 @@ mod pg_dialect {
 
             Expression::Aggregate { operation, operand } => {
                 // Check for KEEP inside aggregate operand.
-                if let Expression::Keep { expr: inner, filters, variables, conditions, in_predicates } = operand.as_ref() {
+                if let Expression::Keep {
+                    expr: inner,
+                    filters,
+                    variables,
+                    conditions,
+                    in_predicates,
+                } = operand.as_ref()
+                {
                     if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
                         let condition = filters_to_condition(filters, table_map)?;
                         let inner_sql = expr_to_sql(inner, table_map)?;
@@ -841,16 +896,26 @@ mod pg_dialect {
                 let r = expr_to_sql(right, table_map)?;
                 Ok(format!("({l} {} {r})", op.as_sql()))
             }
-            Expression::SafeDivide { numerator, denominator, alternate } => {
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
                 let n = expr_to_sql(numerator, table_map)?;
                 let d = expr_to_sql(denominator, table_map)?;
                 let alt = match alternate {
                     Some(a) => expr_to_sql(a, table_map)?,
                     None => "NULL".to_string(),
                 };
-                Ok(format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"))
+                Ok(format!(
+                    "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
+                ))
             }
-            Expression::If { condition, then_expr, else_expr } => {
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 let c = expr_to_sql(condition, table_map)?;
                 let t = expr_to_sql(then_expr, table_map)?;
                 let e = expr_to_sql(else_expr, table_map)?;
@@ -861,24 +926,40 @@ mod pg_dialect {
                 let r = expr_to_sql(right, table_map)?;
                 Ok(format!("({l} {} {r})", op.as_sql()))
             }
-            Expression::And(l, r) => {
-                Ok(format!("({} AND {})", expr_to_sql(l, table_map)?, expr_to_sql(r, table_map)?))
-            }
-            Expression::Or(l, r) => {
-                Ok(format!("({} OR {})", expr_to_sql(l, table_map)?, expr_to_sql(r, table_map)?))
-            }
+            Expression::And(l, r) => Ok(format!(
+                "({} AND {})",
+                expr_to_sql(l, table_map)?,
+                expr_to_sql(r, table_map)?
+            )),
+            Expression::Or(l, r) => Ok(format!(
+                "({} OR {})",
+                expr_to_sql(l, table_map)?,
+                expr_to_sql(r, table_map)?
+            )),
             Expression::Not(inner) => Ok(format!("(NOT {})", expr_to_sql(inner, table_map)?)),
-            Expression::IsBlank(inner) => Ok(format!("({} IS NULL)", expr_to_sql(inner, table_map)?)),
+            Expression::IsBlank(inner) => {
+                Ok(format!("({} IS NULL)", expr_to_sql(inner, table_map)?))
+            }
             Expression::Coalesce(exprs) => {
-                let parts: Vec<String> = exprs.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let parts: Vec<String> = exprs
+                    .iter()
+                    .map(|e| expr_to_sql(e, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(format!("COALESCE({})", parts.join(", ")))
             }
             Expression::ScalarFunc { function, args } => {
-                let mapped: Vec<String> = args.iter().map(|a| expr_to_sql(a, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let mapped: Vec<String> = args
+                    .iter()
+                    .map(|a| expr_to_sql(a, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 match function {
                     ScalarFunction::Round | ScalarFunction::RoundUp | ScalarFunction::RoundDown => {
                         let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
-                        let func = if matches!(function, ScalarFunction::RoundDown) { "TRUNC" } else { "ROUND" };
+                        let func = if matches!(function, ScalarFunction::RoundDown) {
+                            "TRUNC"
+                        } else {
+                            "ROUND"
+                        };
                         Ok(format!("{func}(({})::NUMERIC, {digits})", mapped[0]))
                     }
                     ScalarFunction::Trunc => {
@@ -892,14 +973,23 @@ mod pg_dialect {
                 }
             }
             Expression::TextFunc { function, args } => {
-                let mapped: Vec<String> = args.iter().map(|a| expr_to_sql(a, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let mapped: Vec<String> = args
+                    .iter()
+                    .map(|a| expr_to_sql(a, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(function.to_sql_strs(&mapped))
             }
             Expression::DateTimeFunc { function, args } => {
-                let mapped: Vec<String> = args.iter().map(|a| expr_to_sql(a, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let mapped: Vec<String> = args
+                    .iter()
+                    .map(|a| expr_to_sql(a, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(function.to_sql_strs(&mapped))
             }
-            Expression::IfError { expr: inner, alternate } => {
+            Expression::IfError {
+                expr: inner,
+                alternate,
+            } => {
                 let i = expr_to_sql(inner, table_map)?;
                 let a = expr_to_sql(alternate, table_map)?;
                 Ok(format!("COALESCE({i}, {a})"))
@@ -909,7 +999,13 @@ mod pg_dialect {
             Expression::ClearExcept { expr: inner, .. } | Expression::Clear { expr: inner, .. } => {
                 expr_to_sql(inner, table_map)
             }
-            Expression::Keep { expr: inner, filters, variables, conditions, in_predicates } => {
+            Expression::Keep {
+                expr: inner,
+                filters,
+                variables,
+                conditions,
+                in_predicates,
+            } => {
                 if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
                     let condition = filters_to_condition(filters, table_map)?;
                     return case_when_expr(inner, &condition, table_map);
@@ -920,11 +1016,19 @@ mod pg_dialect {
                 let inlined = expr.inline_bindings();
                 expr_to_sql(&inlined, table_map)
             }
-            Expression::Switch { expr: switch_expr, cases, default } => {
+            Expression::Switch {
+                expr: switch_expr,
+                cases,
+                default,
+            } => {
                 let e = expr_to_sql(switch_expr, table_map)?;
                 let mut sql = format!("CASE {e}");
                 for (v, r) in cases {
-                    sql.push_str(&format!(" WHEN {} THEN {}", expr_to_sql(v, table_map)?, expr_to_sql(r, table_map)?));
+                    sql.push_str(&format!(
+                        " WHEN {} THEN {}",
+                        expr_to_sql(v, table_map)?,
+                        expr_to_sql(r, table_map)?
+                    ));
                 }
                 if let Some(d) = default {
                     sql.push_str(&format!(" ELSE {}", expr_to_sql(d, table_map)?));
@@ -932,7 +1036,10 @@ mod pg_dialect {
                 sql.push_str(" END");
                 Ok(sql)
             }
-            Expression::Percentile { operand, percentile } => {
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
                 let op = expr_to_sql(operand, table_map)?;
                 let k = expr_to_sql(percentile, table_map)?;
                 Ok(format!("PERCENTILE_CONT({k}) WITHIN GROUP (ORDER BY {op})"))
@@ -943,8 +1050,13 @@ mod pg_dialect {
             }
             Expression::SelectedValue { column, alternate } => {
                 let c = expr_to_sql(column, table_map)?;
-                let a = match alternate { Some(v) => expr_to_sql(v, table_map)?, None => "NULL".to_string() };
-                Ok(format!("CASE WHEN COUNT(DISTINCT {c}) = 1 THEN MIN({c}) ELSE {a} END"))
+                let a = match alternate {
+                    Some(v) => expr_to_sql(v, table_map)?,
+                    None => "NULL".to_string(),
+                };
+                Ok(format!(
+                    "CASE WHEN COUNT(DISTINCT {c}) = 1 THEN MIN({c}) ELSE {a} END"
+                ))
             }
             Expression::FirstValue { column, .. } => {
                 let c = expr_to_sql(column, table_map)?;
@@ -956,11 +1068,17 @@ mod pg_dialect {
                 Ok(format!("(({ls} AND NOT {rs}) OR (NOT {ls} AND {rs}))"))
             }
             Expression::Greatest(args) => {
-                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|e| expr_to_sql(e, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(format!("GREATEST({})", parts.join(", ")))
             }
             Expression::Least(args) => {
-                let parts: Vec<String> = args.iter().map(|e| expr_to_sql(e, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|e| expr_to_sql(e, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(format!("LEAST({})", parts.join(", ")))
             }
             Expression::NullIf { expr: inner, value } => {
@@ -992,14 +1110,20 @@ mod pg_dialect {
                 Ok(format!("(ARRAY_AGG({v} ORDER BY {s} ASC NULLS LAST))[1]"))
             }
             // IN list
-            Expression::InList { expr: inner, values } => {
+            Expression::InList {
+                expr: inner,
+                values,
+            } => {
                 let e = expr_to_sql(inner, table_map)?;
-                let vals: Vec<String> = values.iter().map(|v| expr_to_sql(v, table_map)).collect::<ConnectorResult<Vec<_>>>()?;
+                let vals: Vec<String> = values
+                    .iter()
+                    .map(|v| expr_to_sql(v, table_map))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(format!("{e} IN ({})", vals.join(", ")))
             }
-            _ => Err(super::ConnectorError::UnsupportedOperation(
-                format!("PostgreSQL pushdown: unsupported expression {expr:?}")
-            )),
+            _ => Err(super::ConnectorError::UnsupportedOperation(format!(
+                "PostgreSQL pushdown: unsupported expression {expr:?}"
+            ))),
         }
     }
 
@@ -1013,7 +1137,9 @@ mod pg_dialect {
             AggregateOp::Max => format!("MAX({operand})"),
             AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand})"),
             AggregateOp::CountRows => "COUNT(*)".to_string(),
-            AggregateOp::Median => format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand})"),
+            AggregateOp::Median => {
+                format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand})")
+            }
             AggregateOp::StdevSample => format!("STDDEV_SAMP({operand})"),
             AggregateOp::StdevPop => format!("STDDEV_POP({operand})"),
             AggregateOp::VarSample => format!("VAR_SAMP({operand})"),
@@ -1032,7 +1158,12 @@ mod pg_dialect {
             .iter()
             .map(|f| {
                 let src = source_table(&f.table, table_map);
-                Ok(format!("\"{src}\".\"{}\" {} '{}'", f.column, f.operator.as_sql(), f.value))
+                Ok(format!(
+                    "\"{src}\".\"{}\" {} '{}'",
+                    f.column,
+                    f.operator.as_sql(),
+                    f.value
+                ))
             })
             .collect::<ConnectorResult<Vec<_>>>()?;
         Ok(parts.join(" AND "))
@@ -1055,11 +1186,20 @@ mod pg_dialect {
                 let r = case_when_expr(right, condition, table_map)?;
                 Ok(format!("({l} {} {r})", op.as_sql()))
             }
-            Expression::SafeDivide { numerator, denominator, alternate } => {
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
                 let n = case_when_expr(numerator, condition, table_map)?;
                 let d = case_when_expr(denominator, condition, table_map)?;
-                let alt = match alternate { Some(a) => expr_to_sql(a, table_map)?, None => "NULL".to_string() };
-                Ok(format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"))
+                let alt = match alternate {
+                    Some(a) => expr_to_sql(a, table_map)?,
+                    None => "NULL".to_string(),
+                };
+                Ok(format!(
+                    "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
+                ))
             }
             _ => expr_to_sql(expr, table_map),
         }
@@ -1074,57 +1214,95 @@ mod pg_dialect {
         use engine_core::model::ClearTarget;
 
         match expr {
-            Expression::Clear { expr: inner, targets } => {
+            Expression::Clear {
+                expr: inner,
+                targets,
+            } => {
                 let inner_sql = expr_to_sql_with_clear(inner, table_map, group_by)?;
                 let partition_cols: Vec<String> = group_by
                     .iter()
-                    .filter(|col| !targets.iter().any(|t| match t {
-                        ClearTarget::Table(table) => {
-                            table_map.iter().any(|(m, s)| m.eq_ignore_ascii_case(table) && s == &col.table)
-                        }
-                        ClearTarget::Column { table, column } => {
-                            table_map.iter().any(|(m, s)| m.eq_ignore_ascii_case(table) && s == &col.table)
-                                && col.column == *column
-                        }
-                    }))
+                    .filter(|col| {
+                        !targets.iter().any(|t| match t {
+                            ClearTarget::Table(table) => table_map
+                                .iter()
+                                .any(|(m, s)| m.eq_ignore_ascii_case(table) && s == &col.table),
+                            ClearTarget::Column { table, column } => {
+                                table_map
+                                    .iter()
+                                    .any(|(m, s)| m.eq_ignore_ascii_case(table) && s == &col.table)
+                                    && col.column == *column
+                            }
+                        })
+                    })
                     .map(|col| format!("\"{}\".\"{}\"", col.table, col.column))
                     .collect();
-                let over = if partition_cols.is_empty() { "OVER ()".to_string() } else { format!("OVER (PARTITION BY {})", partition_cols.join(", ")) };
+                let over = if partition_cols.is_empty() {
+                    "OVER ()".to_string()
+                } else {
+                    format!("OVER (PARTITION BY {})", partition_cols.join(", "))
+                };
                 Ok(format!("SUM({inner_sql}) {over}"))
             }
-            Expression::ClearExcept { expr: inner, table, except_columns } => {
+            Expression::ClearExcept {
+                expr: inner,
+                table,
+                except_columns,
+            } => {
                 let inner_sql = expr_to_sql_with_clear(inner, table_map, group_by)?;
                 let src_table = source_table(table, table_map);
                 let partition_cols: Vec<String> = group_by
                     .iter()
                     .filter(|col| {
-                        if col.table != src_table { true }
-                        else { except_columns.contains(&col.column) }
+                        if col.table != src_table {
+                            true
+                        } else {
+                            except_columns.contains(&col.column)
+                        }
                     })
                     .map(|col| format!("\"{}\".\"{}\"", col.table, col.column))
                     .collect();
-                let over = if partition_cols.is_empty() { "OVER ()".to_string() } else { format!("OVER (PARTITION BY {})", partition_cols.join(", ")) };
+                let over = if partition_cols.is_empty() {
+                    "OVER ()".to_string()
+                } else {
+                    format!("OVER (PARTITION BY {})", partition_cols.join(", "))
+                };
                 Ok(format!("SUM({inner_sql}) {over}"))
             }
-            Expression::SafeDivide { numerator, denominator, alternate } => {
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
                 let n = expr_to_sql_with_clear(numerator, table_map, group_by)?;
                 let d = expr_to_sql_with_clear(denominator, table_map, group_by)?;
-                let alt = match alternate { Some(a) => expr_to_sql_with_clear(a, table_map, group_by)?, None => "NULL".to_string() };
-                Ok(format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"))
+                let alt = match alternate {
+                    Some(a) => expr_to_sql_with_clear(a, table_map, group_by)?,
+                    None => "NULL".to_string(),
+                };
+                Ok(format!(
+                    "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
+                ))
             }
             Expression::BinaryOp { left, op, right } => {
                 let l = expr_to_sql_with_clear(left, table_map, group_by)?;
                 let r = expr_to_sql_with_clear(right, table_map, group_by)?;
                 Ok(format!("({l} {} {r})", op.as_sql()))
             }
-            Expression::If { condition, then_expr, else_expr } => {
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 let c = expr_to_sql_with_clear(condition, table_map, group_by)?;
                 let t = expr_to_sql_with_clear(then_expr, table_map, group_by)?;
                 let e = expr_to_sql_with_clear(else_expr, table_map, group_by)?;
                 Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
             }
             Expression::Coalesce(exprs) => {
-                let parts: Vec<String> = exprs.iter().map(|e| expr_to_sql_with_clear(e, table_map, group_by)).collect::<ConnectorResult<Vec<_>>>()?;
+                let parts: Vec<String> = exprs
+                    .iter()
+                    .map(|e| expr_to_sql_with_clear(e, table_map, group_by))
+                    .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(format!("COALESCE({})", parts.join(", ")))
             }
             Expression::Block { .. } => {
@@ -1134,5 +1312,57 @@ mod pg_dialect {
             _ => expr_to_sql(expr, table_map),
         }
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_url_username_password() {
+        let target = ConnectionTarget::new("dbhost", "analytics").with_port(5433);
+        let auth = AuthMethod::UsernamePassword {
+            username: "alice".into(),
+            password: "secret".into(),
+        };
+        let url = PostgresConnector::build_connection_url(target, auth).unwrap();
+        assert_eq!(url, "postgresql://alice:secret@dbhost:5433/analytics");
+    }
+
+    #[test]
+    fn build_url_default_port() {
+        let target = ConnectionTarget::new("host", "db");
+        let auth = AuthMethod::UsernamePassword {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let url = PostgresConnector::build_connection_url(target, auth).unwrap();
+        assert!(url.contains(":5432/"));
+    }
+
+    #[test]
+    fn build_url_integrated_returns_error() {
+        let target = ConnectionTarget::new("kerberos-host", "warehouse");
+        let err = PostgresConnector::build_connection_url(target, AuthMethod::Integrated).unwrap_err();
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    #[test]
+    fn build_url_env_var_missing() {
+        let target = ConnectionTarget::new("host", "db");
+        let auth = AuthMethod::EnvironmentVariable {
+            username_var: "__CALCULA_TEST_NONEXISTENT_USER__".into(),
+            password_var: "__CALCULA_TEST_NONEXISTENT_PASS__".into(),
+        };
+        let err = PostgresConnector::build_connection_url(target, auth).unwrap_err();
+        assert!(err.to_string().contains("environment variable"));
+    }
+
+    #[test]
+    fn supported_auth_methods_includes_username_password() {
+        let methods = PostgresConnector::supported_auth_methods();
+        assert!(methods.contains(&AuthMethodKind::UsernamePassword));
+        assert!(methods.contains(&AuthMethodKind::EnvironmentVariable));
+        assert!(!methods.contains(&AuthMethodKind::Integrated));
+    }
 }

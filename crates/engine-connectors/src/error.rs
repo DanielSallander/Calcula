@@ -49,6 +49,10 @@ pub enum ConnectorError {
     /// An operation is not supported by this connector.
     #[error("Unsupported operation: {0}")]
     UnsupportedOperation(String),
+
+    /// The requested authentication method is not supported by this connector.
+    #[error("Authentication method not supported: {0}")]
+    AuthMethodNotSupported(String),
 }
 
 /// Convenience result type for connector operations.

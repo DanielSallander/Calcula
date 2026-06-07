@@ -22,8 +22,18 @@ use std::time::Instant;
 use arrow::util::pretty::pretty_format_batches;
 use engine::*;
 
-const CONNECTION_STRING: &str = "postgresql://postgres:postgres@localhost:5432/Adventureworks";
 const SCHEMA: &str = "BI";
+
+fn test_target() -> ConnectionTarget {
+    ConnectionTarget::new("localhost", "Adventureworks").with_port(5432)
+}
+
+fn test_auth() -> AuthMethod {
+    AuthMethod::UsernamePassword {
+        username: "postgres".into(),
+        password: "postgres".into(),
+    }
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -161,12 +171,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let model = builder.build()?;
 
     // Connect to PostgreSQL.
+    let target = test_target();
+    let auth = test_auth();
     println!();
-    println!("Connecting to {}...", CONNECTION_STRING);
+    println!(
+        "Connecting to {}:{}...",
+        target.host(),
+        target.port().unwrap_or(5432)
+    );
     let mut engine = Engine::new(model);
-    let pg_idx = engine
-        .add_postgres(PostgresConfig::new(CONNECTION_STRING))
-        .await?;
+    let pg_idx = engine.add_postgres(target, auth).await?;
 
     let table_names: Vec<String> = engine
         .model()

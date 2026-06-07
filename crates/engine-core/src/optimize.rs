@@ -20,9 +20,8 @@ use arrow::array::{Array, ArrayRef, AsArray, PrimitiveArray};
 use arrow::compute::cast;
 use arrow::compute::kernels::aggregate::{max, min};
 use arrow::datatypes::{
-    ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimeUnit,
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType, UInt64Type,
+    ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt64Type,
 };
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
@@ -93,9 +92,7 @@ impl OptimizationStats {
 
     /// Returns `true` if any optimization was applied.
     pub fn any_applied(&self) -> bool {
-        self.integers_narrowed > 0
-            || self.strings_dictionarized > 0
-            || self.timestamps_to_date > 0
+        self.integers_narrowed > 0 || self.strings_dictionarized > 0 || self.timestamps_to_date > 0
     }
 }
 
@@ -260,8 +257,7 @@ fn dictionary_encode_string(
     let total_rows = array.len();
     let sample_size = config.string_sample_size.min(total_rows);
 
-    let max_distinct_allowed =
-        (sample_size as f64 * config.dictionary_ratio_threshold) as usize;
+    let max_distinct_allowed = (sample_size as f64 * config.dictionary_ratio_threshold) as usize;
 
     let mut distinct: HashSet<&str> = HashSet::with_capacity(max_distinct_allowed + 16);
     for i in 0..sample_size {
@@ -273,8 +269,7 @@ fn dictionary_encode_string(
         }
     }
 
-    let dict_type =
-        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+    let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
     let encoded = cast(column, &dict_type)?;
     let new_field = Field::new(field.name(), dict_type, field.is_nullable());
     stats.strings_dictionarized += 1;
@@ -291,8 +286,7 @@ fn dictionary_encode_large_string(
     let total_rows = array.len();
     let sample_size = config.string_sample_size.min(total_rows);
 
-    let max_distinct_allowed =
-        (sample_size as f64 * config.dictionary_ratio_threshold) as usize;
+    let max_distinct_allowed = (sample_size as f64 * config.dictionary_ratio_threshold) as usize;
 
     let mut distinct: HashSet<&str> = HashSet::with_capacity(max_distinct_allowed + 16);
     for i in 0..sample_size {
@@ -304,8 +298,7 @@ fn dictionary_encode_large_string(
         }
     }
 
-    let dict_type =
-        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::LargeUtf8));
+    let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::LargeUtf8));
     let encoded = cast(column, &dict_type)?;
     let new_field = Field::new(field.name(), dict_type, field.is_nullable());
     stats.strings_dictionarized += 1;
@@ -338,12 +331,10 @@ fn try_narrow_timestamp_to_date(
                 86_400_000,
             )
         }
-        DataType::Timestamp(TimeUnit::Second, _) => {
-            all_values_at_midnight::<TimestampSecondType>(
-                column.as_primitive::<TimestampSecondType>(),
-                86_400,
-            )
-        }
+        DataType::Timestamp(TimeUnit::Second, _) => all_values_at_midnight::<TimestampSecondType>(
+            column.as_primitive::<TimestampSecondType>(),
+            86_400,
+        ),
         _ => false,
     };
 
@@ -435,9 +426,11 @@ pub fn infer_sort_column<'a>(
     // Prefer "from" side (fact table FK) — most impactful for join performance.
     for rel in relationships {
         if rel.from_table() == table_name {
-            if let Some(cond) = rel.conditions().iter().find(|c| {
-                c.operator() == crate::model::JoinOperator::Equal
-            }) {
+            if let Some(cond) = rel
+                .conditions()
+                .iter()
+                .find(|c| c.operator() == crate::model::JoinOperator::Equal)
+            {
                 return Some(cond.from_column());
             }
         }
@@ -446,9 +439,11 @@ pub fn infer_sort_column<'a>(
     // Fall back to "to" side (dimension PK).
     for rel in relationships {
         if rel.to_table() == table_name {
-            if let Some(cond) = rel.conditions().iter().find(|c| {
-                c.operator() == crate::model::JoinOperator::Equal
-            }) {
+            if let Some(cond) = rel
+                .conditions()
+                .iter()
+                .find(|c| c.operator() == crate::model::JoinOperator::Equal)
+            {
                 return Some(cond.to_column());
             }
         }
@@ -461,8 +456,7 @@ pub fn infer_sort_column<'a>(
 mod tests {
     use super::*;
     use arrow::array::{
-        Int64Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-        UInt64Array,
+        Int64Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray, UInt64Array,
     };
 
     fn cfg() -> OptimizerConfig {
@@ -482,10 +476,7 @@ mod tests {
     #[test]
     fn narrows_int64_to_int8() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![1i64, 2, 3, -10, 100]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let (out, stats) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int8);
@@ -495,10 +486,7 @@ mod tests {
     #[test]
     fn narrows_int64_to_int16() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![0i64, 1000, -500]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let (out, _) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int16);
@@ -507,10 +495,7 @@ mod tests {
     #[test]
     fn narrows_int64_to_int32() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![0i64, 100_000]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let (out, _) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int32);
@@ -519,10 +504,7 @@ mod tests {
     #[test]
     fn leaves_large_int64_alone() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![0i64, i64::MAX]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let (out, stats) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
@@ -532,10 +514,7 @@ mod tests {
     #[test]
     fn narrows_uint64_to_uint8() {
         let col: ArrayRef = Arc::new(UInt64Array::from(vec![0u64, 50, 200]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::UInt64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::UInt64, false)], vec![col]);
 
         let (out, stats) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::UInt8);
@@ -545,10 +524,7 @@ mod tests {
     #[test]
     fn narrows_uint64_to_uint16() {
         let col: ArrayRef = Arc::new(UInt64Array::from(vec![0u64, 1000]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::UInt64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::UInt64, false)], vec![col]);
 
         let (out, _) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::UInt16);
@@ -557,10 +533,7 @@ mod tests {
     #[test]
     fn all_null_int64_unchanged() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![None, None, None]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, true)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, true)], vec![col]);
 
         let (out, stats) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
@@ -618,10 +591,7 @@ mod tests {
             })
             .collect();
         let col: ArrayRef = Arc::new(StringArray::from(values));
-        let batch = make_batch(
-            vec![Field::new("status", DataType::Utf8, true)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("status", DataType::Utf8, true)], vec![col]);
 
         let (out, stats) = optimize_batch(&batch, &cfg()).unwrap();
         assert!(matches!(
@@ -703,10 +673,7 @@ mod tests {
     #[test]
     fn skips_small_batches() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![1i64, 2, 3]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let config = OptimizerConfig::default(); // min_rows_to_analyze = 1024
         let (out, stats) = optimize_batch(&batch, &config).unwrap();
@@ -718,9 +685,7 @@ mod tests {
     #[test]
     fn multi_column_batch() {
         let int_col: ArrayRef = Arc::new(Int64Array::from(vec![1i64; 2000]));
-        let str_col: ArrayRef = Arc::new(StringArray::from(
-            vec!["active"; 2000],
-        ));
+        let str_col: ArrayRef = Arc::new(StringArray::from(vec!["active"; 2000]));
         let ts_col: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![
             1_704_067_200_000i64;
             2000
@@ -730,7 +695,11 @@ mod tests {
             vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("status", DataType::Utf8, false),
-                Field::new("date", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new(
+                    "date",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
             ],
             vec![int_col, str_col, ts_col],
         );
@@ -752,10 +721,7 @@ mod tests {
     #[test]
     fn preserves_row_count() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![5i64; 5000]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let (out, _) = optimize_batch(&batch, &cfg()).unwrap();
         assert_eq!(out.num_rows(), 5000);
@@ -764,10 +730,7 @@ mod tests {
     #[test]
     fn config_disables_integer_narrowing() {
         let col: ArrayRef = Arc::new(Int64Array::from(vec![1i64, 2, 3]));
-        let batch = make_batch(
-            vec![Field::new("x", DataType::Int64, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("x", DataType::Int64, false)], vec![col]);
 
         let config = OptimizerConfig {
             narrow_integers: false,
@@ -783,10 +746,7 @@ mod tests {
     fn config_disables_dictionary_encoding() {
         let values: Vec<&str> = (0..2000).map(|_| "same").collect();
         let col: ArrayRef = Arc::new(StringArray::from(values));
-        let batch = make_batch(
-            vec![Field::new("s", DataType::Utf8, false)],
-            vec![col],
-        );
+        let batch = make_batch(vec![Field::new("s", DataType::Utf8, false)], vec![col]);
 
         let config = OptimizerConfig {
             dictionary_encode_strings: false,
@@ -805,8 +765,7 @@ mod tests {
         use arrow::array::Int32Array;
 
         let ids: ArrayRef = Arc::new(Int32Array::from(vec![3, 1, 4, 1, 5]));
-        let names: ArrayRef =
-            Arc::new(StringArray::from(vec!["c", "a", "d", "a2", "e"]));
+        let names: ArrayRef = Arc::new(StringArray::from(vec!["c", "a", "d", "a2", "e"]));
         let batch = make_batch(
             vec![
                 Field::new("id", DataType::Int32, false),
@@ -862,10 +821,7 @@ mod tests {
         use arrow::array::Int32Array;
 
         let ids: ArrayRef = Arc::new(Int32Array::from(vec![3, 1, 2]));
-        let batch = make_batch(
-            vec![Field::new("id", DataType::Int32, false)],
-            vec![ids],
-        );
+        let batch = make_batch(vec![Field::new("id", DataType::Int32, false)], vec![ids]);
 
         let sorted = sort_batch_by_column(&batch, "nonexistent").unwrap();
         let sorted_ids = sorted
@@ -881,12 +837,8 @@ mod tests {
     fn sort_batch_with_nulls() {
         use arrow::array::Int32Array;
 
-        let ids: ArrayRef =
-            Arc::new(Int32Array::from(vec![Some(3), None, Some(1), None]));
-        let batch = make_batch(
-            vec![Field::new("id", DataType::Int32, true)],
-            vec![ids],
-        );
+        let ids: ArrayRef = Arc::new(Int32Array::from(vec![Some(3), None, Some(1), None]));
+        let batch = make_batch(vec![Field::new("id", DataType::Int32, true)], vec![ids]);
 
         let sorted = sort_batch_by_column(&batch, "id").unwrap();
         let sorted_ids = sorted
@@ -906,10 +858,7 @@ mod tests {
         use arrow::array::Int32Array;
 
         let ids: ArrayRef = Arc::new(Int32Array::from(vec![42]));
-        let batch = make_batch(
-            vec![Field::new("id", DataType::Int32, false)],
-            vec![ids],
-        );
+        let batch = make_batch(vec![Field::new("id", DataType::Int32, false)], vec![ids]);
 
         let sorted = sort_batch_by_column(&batch, "id").unwrap();
         assert_eq!(sorted.num_rows(), 1);
@@ -919,13 +868,8 @@ mod tests {
     fn infer_sort_column_from_fact_table() {
         use crate::model::Relationship;
 
-        let rel = Relationship::many_to_one(
-            "Sales_Products",
-            "Sales",
-            "product_id",
-            "Products",
-            "id",
-        );
+        let rel =
+            Relationship::many_to_one("Sales_Products", "Sales", "product_id", "Products", "id");
         let rels = vec![rel];
 
         // Fact table (from side) → sort by FK.
@@ -936,13 +880,8 @@ mod tests {
     fn infer_sort_column_from_dimension_table() {
         use crate::model::Relationship;
 
-        let rel = Relationship::many_to_one(
-            "Sales_Products",
-            "Sales",
-            "product_id",
-            "Products",
-            "id",
-        );
+        let rel =
+            Relationship::many_to_one("Sales_Products", "Sales", "product_id", "Products", "id");
         let rels = vec![rel];
 
         // Dimension table (to side) → sort by PK.
@@ -961,13 +900,8 @@ mod tests {
             "Customers",
             "id",
         );
-        let rel2 = Relationship::many_to_one(
-            "LineItems_Orders",
-            "LineItems",
-            "order_id",
-            "Orders",
-            "id",
-        );
+        let rel2 =
+            Relationship::many_to_one("LineItems_Orders", "LineItems", "order_id", "Orders", "id");
         let rels = vec![rel1, rel2];
 
         // "Orders" is from in rel1 → prefers FK column.

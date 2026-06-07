@@ -3,20 +3,19 @@
 //! These tests require a local SQL Server instance with AdventureWorks.
 //! Run with: `cargo test -p engine-connectors -- --ignored`
 
-use engine_connectors::sqlserver::{SqlServerConfig, SqlServerConnector};
+use engine_connectors::auth::{AuthMethod, ConnectionTarget};
+use engine_connectors::sqlserver::SqlServerConnector;
 use engine_connectors::traits::{AggregateExpr, AggregateFunction, Connector, FetchRequest};
 
-/// Connection string for the test SQL Server instance.
-///
-/// Set the `SQLSERVER_TEST_URL` environment variable to override.
-fn test_connection_string() -> String {
-    std::env::var("SQLSERVER_TEST_URL").unwrap_or_else(|_| {
-        "server=tcp:localhost,1433;user=sa;password=YourPassword;database=AdventureWorks;TrustServerCertificate=true".into()
-    })
-}
-
 async fn connect() -> SqlServerConnector {
-    SqlServerConnector::connect(SqlServerConfig::new(test_connection_string()))
+    let target = ConnectionTarget::new("localhost", "AdventureWorks")
+        .with_port(1433)
+        .with_trust_server_certificate(true);
+    let auth = AuthMethod::UsernamePassword {
+        username: "sa".into(),
+        password: "YourPassword".into(),
+    };
+    SqlServerConnector::connect(target, auth)
         .await
         .expect("failed to connect to SQL Server")
 }

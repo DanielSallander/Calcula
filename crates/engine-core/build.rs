@@ -24,8 +24,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let docs_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../docs/functions");
+    let docs_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../docs/functions");
 
     // Re-run if any function doc changes
     println!("cargo:rerun-if-changed={}", docs_dir.display());

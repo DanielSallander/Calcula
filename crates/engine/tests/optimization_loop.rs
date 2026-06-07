@@ -7,8 +7,18 @@
 
 use bi_engine::*;
 
-const CONNECTION_STRING: &str = "postgresql://postgres:postgres@localhost:5432/Adventureworks";
 const SCHEMA: &str = "BI";
+
+fn test_target() -> ConnectionTarget {
+    ConnectionTarget::new("localhost", "Adventureworks").with_port(5432)
+}
+
+fn test_auth() -> AuthMethod {
+    AuthMethod::UsernamePassword {
+        username: "postgres".into(),
+        password: "postgres".into(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Model setup
@@ -188,7 +198,7 @@ async fn setup_engine(measures: Vec<(&str, &str)>) -> Engine {
 
     let mut engine = Engine::new(model);
     let pg_idx = engine
-        .add_postgres(PostgresConfig::new(CONNECTION_STRING))
+        .add_postgres(test_target(), test_auth())
         .await
         .expect("failed to connect to postgres");
 

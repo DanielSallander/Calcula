@@ -374,8 +374,7 @@ impl QueryExecutor {
             // Optimize the batch (narrow integers, dictionary-encode strings,
             // convert midnight timestamps to Date32) to reduce memory pressure
             // during local joins and aggregation.
-            let (optimized, stats) =
-                engine_core::optimize::optimize_batch(&combined, &opt_config)?;
+            let (optimized, stats) = engine_core::optimize::optimize_batch(&combined, &opt_config)?;
 
             if stats.any_applied() {
                 opt_stats_by_table.push((table_name.clone(), stats));
@@ -435,10 +434,7 @@ impl QueryExecutor {
                 if let Some((_, stats)) = opt_stats_by_table.iter().find(|(n, _)| n == table_name) {
                     let mut details = Vec::new();
                     if stats.integers_narrowed > 0 {
-                        details.push(format!(
-                            "{} int col(s) narrowed",
-                            stats.integers_narrowed
-                        ));
+                        details.push(format!("{} int col(s) narrowed", stats.integers_narrowed));
                     }
                     if stats.strings_dictionarized > 0 {
                         details.push(format!(

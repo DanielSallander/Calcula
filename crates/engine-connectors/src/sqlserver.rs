@@ -9,36 +9,14 @@ use bb8_tiberius::ConnectionManager;
 use engine_core::model::{Column, Table};
 use tiberius::Config;
 
+use crate::auth::{AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::sqlserver_convert::tiberius_rows_to_record_batches;
 use crate::traits::{Connector, FetchRequest, SourceTable};
 use crate::type_mapping::sqlserver_type_to_engine_type;
 
-/// Configuration for connecting to a SQL Server database.
-#[derive(Debug, Clone)]
-pub struct SqlServerConfig {
-    /// ADO.NET-style connection string, e.g.
-    /// `"server=tcp:localhost,1433;user=sa;password=Pass;database=MyDb;TrustServerCertificate=true"`.
-    pub connection_string: String,
-    /// Maximum number of connections in the pool (default: 5).
-    pub max_connections: u32,
-}
-
-impl SqlServerConfig {
-    /// Create a new configuration with the given connection string.
-    pub fn new(connection_string: impl Into<String>) -> Self {
-        Self {
-            connection_string: connection_string.into(),
-            max_connections: 5,
-        }
-    }
-
-    /// Set the maximum number of connections in the pool.
-    pub fn with_max_connections(mut self, max: u32) -> Self {
-        self.max_connections = max;
-        self
-    }
-}
+/// Default number of connections in the pool.
+const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
 /// SQL Server connector using `tiberius` with `bb8` connection pooling.
 pub struct SqlServerConnector {
@@ -47,17 +25,38 @@ pub struct SqlServerConnector {
     temp_table_counter: AtomicU64,
 }
 
+impl ConnectorAuth for SqlServerConnector {
+    fn supported_auth_methods() -> Vec<AuthMethodKind> {
+        vec![
+            AuthMethodKind::Integrated,
+            AuthMethodKind::UsernamePassword,
+            AuthMethodKind::EnvironmentVariable,
+        ]
+    }
+}
+
 impl SqlServerConnector {
     /// Connect to a SQL Server database.
-    pub async fn connect(config: SqlServerConfig) -> ConnectorResult<Self> {
-        let tib_config = Config::from_ado_string(&config.connection_string)
+    ///
+    /// Builds the ADO.NET connection string from the given target and auth
+    /// method. Uses port **1433** when `target.port` is `None`.
+    ///
+    /// # Auth method handling
+    ///
+    /// - [`AuthMethod::Integrated`]: uses `IntegratedSecurity=true` (Windows
+    ///   Authentication / SSPI / Kerberos).
+    /// - [`AuthMethod::UsernamePassword`]: embeds `user=…;password=…`.
+    /// - [`AuthMethod::EnvironmentVariable`]: resolves env vars at call time.
+    pub async fn connect(target: ConnectionTarget, auth: AuthMethod) -> ConnectorResult<Self> {
+        let conn_str = Self::build_connection_string(target, auth)?;
+        let tib_config = Config::from_ado_string(&conn_str)
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
 
         let mgr = ConnectionManager::build(tib_config)
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
 
         let pool = Pool::builder()
-            .max_size(config.max_connections)
+            .max_size(DEFAULT_MAX_CONNECTIONS)
             .build(mgr)
             .await
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
@@ -66,6 +65,58 @@ impl SqlServerConnector {
             pool,
             temp_table_counter: AtomicU64::new(0),
         })
+    }
+
+    /// Build an ADO.NET connection string from a target and auth method.
+    fn build_connection_string(
+        target: ConnectionTarget,
+        auth: AuthMethod,
+    ) -> ConnectorResult<String> {
+        let port = target.port.unwrap_or(1433);
+
+        let trust = if target.trust_server_certificate {
+            "TrustServerCertificate=true;"
+        } else {
+            ""
+        };
+
+        let conn_str = match auth {
+            AuthMethod::Integrated => {
+                format!(
+                    "server=tcp:{},{};database={};IntegratedSecurity=true;{trust}",
+                    target.host, port, target.database
+                )
+            }
+            AuthMethod::UsernamePassword { username, password } => {
+                format!(
+                    "server=tcp:{},{};user={};password={};database={};{trust}",
+                    target.host, port, username, password, target.database
+                )
+            }
+            AuthMethod::EnvironmentVariable {
+                username_var,
+                password_var,
+            } => {
+                let username = std::env::var(&username_var).map_err(|_| {
+                    ConnectorError::ConnectionFailed(format!(
+                        "environment variable '{}' not set",
+                        username_var
+                    ))
+                })?;
+                let password = std::env::var(&password_var).map_err(|_| {
+                    ConnectorError::ConnectionFailed(format!(
+                        "environment variable '{}' not set",
+                        password_var
+                    ))
+                })?;
+                format!(
+                    "server=tcp:{},{};user={};password={};database={};{trust}",
+                    target.host, port, username, password, target.database
+                )
+            }
+        };
+
+        Ok(conn_str)
     }
 
     /// Get a connection from the pool.
@@ -758,5 +809,69 @@ mod tests {
         };
         let (sql, _) = SqlServerConnector::build_aggregate_sql(&request);
         assert!(sql.contains("[dbo].[orders]"));
+    }
+
+    #[test]
+    fn build_conn_str_integrated() {
+        let target = ConnectionTarget::new("sqlhost", "warehouse")
+            .with_port(1434)
+            .with_trust_server_certificate(true);
+        let s =
+            SqlServerConnector::build_connection_string(target, AuthMethod::Integrated).unwrap();
+        assert!(s.contains("IntegratedSecurity=true"));
+        assert!(s.contains("server=tcp:sqlhost,1434"));
+        assert!(s.contains("database=warehouse"));
+        assert!(s.contains("TrustServerCertificate=true"));
+    }
+
+    #[test]
+    fn build_conn_str_username_password() {
+        let target = ConnectionTarget::new("dbserver", "mydb");
+        let auth = AuthMethod::UsernamePassword {
+            username: "sa".into(),
+            password: "Pass123!".into(),
+        };
+        let s = SqlServerConnector::build_connection_string(target, auth).unwrap();
+        assert!(s.contains("user=sa"));
+        assert!(s.contains("password=Pass123!"));
+        assert!(s.contains(",1433"));
+    }
+
+    #[test]
+    fn build_conn_str_default_port() {
+        let target = ConnectionTarget::new("host", "db");
+        let auth = AuthMethod::UsernamePassword {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let s = SqlServerConnector::build_connection_string(target, auth).unwrap();
+        assert!(s.contains(",1433"));
+    }
+
+    #[test]
+    fn build_conn_str_no_trust_cert_by_default() {
+        let target = ConnectionTarget::new("host", "db");
+        let s =
+            SqlServerConnector::build_connection_string(target, AuthMethod::Integrated).unwrap();
+        assert!(!s.contains("TrustServerCertificate"));
+    }
+
+    #[test]
+    fn build_conn_str_env_var_missing() {
+        let target = ConnectionTarget::new("host", "db");
+        let auth = AuthMethod::EnvironmentVariable {
+            username_var: "__CALCULA_TEST_NONEXISTENT_USER__".into(),
+            password_var: "__CALCULA_TEST_NONEXISTENT_PASS__".into(),
+        };
+        let err = SqlServerConnector::build_connection_string(target, auth).unwrap_err();
+        assert!(err.to_string().contains("environment variable"));
+    }
+
+    #[test]
+    fn supported_auth_methods_includes_integrated() {
+        let methods = SqlServerConnector::supported_auth_methods();
+        assert!(methods.contains(&AuthMethodKind::Integrated));
+        assert!(methods.contains(&AuthMethodKind::UsernamePassword));
+        assert!(methods.contains(&AuthMethodKind::EnvironmentVariable));
     }
 }

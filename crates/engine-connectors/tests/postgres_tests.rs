@@ -4,14 +4,18 @@
 //! database. Run with: `cargo test -p engine-connectors -- --ignored`
 
 use arrow::datatypes::DataType as ArrowDataType;
-use engine_connectors::postgres::{PostgresConfig, PostgresConnector};
+use engine_connectors::auth::{AuthMethod, ConnectionTarget};
+use engine_connectors::postgres::PostgresConnector;
 use engine_connectors::traits::{Connector, FetchRequest, FilterCondition, FilterOperator};
 use engine_core::types::DataType;
 
-const TEST_URL: &str = "postgresql://postgres:postgres@localhost:5432/Adventureworks";
-
 async fn connect() -> PostgresConnector {
-    PostgresConnector::connect(PostgresConfig::new(TEST_URL))
+    let target = ConnectionTarget::new("localhost", "Adventureworks").with_port(5432);
+    let auth = AuthMethod::UsernamePassword {
+        username: "postgres".into(),
+        password: "postgres".into(),
+    };
+    PostgresConnector::connect(target, auth)
         .await
         .expect("failed to connect to AdventureWorks")
 }

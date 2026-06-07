@@ -318,8 +318,7 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
         let values: Vec<i32> = (0..num_rows as i32).collect();
-        let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(values))]).unwrap();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(values))]).unwrap();
         vec![batch]
     }
 
@@ -498,8 +497,7 @@ mod tests {
     fn group_by_affects_hash() {
         let mut r1 = make_request(&["Revenue"]);
         let mut r2 = make_request(&["Revenue"]);
-        r1.group_by
-            .push(ColumnRef::new("products", "category"));
+        r1.group_by.push(ColumnRef::new("products", "category"));
         // r2 has no group_by.
         assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
     }

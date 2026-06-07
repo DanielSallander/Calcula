@@ -176,8 +176,7 @@ impl PushdownPlanner {
 
         // In-memory or auto-tiered tables are already local — never push aggregates to a source.
         let any_in_memory = all_tables.iter().any(|t| {
-            model.table(t).is_ok_and(|tbl| tbl.is_in_memory())
-                || cached_tables.contains(*t)
+            model.table(t).is_ok_and(|tbl| tbl.is_in_memory()) || cached_tables.contains(*t)
         });
 
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
@@ -1610,7 +1609,10 @@ fn expression_to_source_sql(
             ))
         }
         // FirstValue: first value by sort order
-        Expression::FirstValue { column, order_by: _ } => {
+        Expression::FirstValue {
+            column,
+            order_by: _,
+        } => {
             let col_sql = expression_to_source_sql(column, model, registry)?;
             // Use subquery or MIN with ORDER BY — simplified as MIN for pushdown
             Ok(format!("MIN({col_sql})"))
@@ -1874,13 +1876,9 @@ fn build_join_aggregation_request(
         if *t == fact_table || joined.contains(*t) {
             continue;
         }
-        let rel = model
-            .find_relationship(fact_table, t)
-            .map_err(|_| {
-                QueryError::InvalidQuery(format!(
-                    "No relationship between '{fact_table}' and '{t}'"
-                ))
-            })?;
+        let rel = model.find_relationship(fact_table, t).map_err(|_| {
+            QueryError::InvalidQuery(format!("No relationship between '{fact_table}' and '{t}'"))
+        })?;
         let dim_binding = registry.binding_for(t)?;
         let (fact_col, dim_col) = if rel.from_table() == fact_table {
             (rel.from_column().to_string(), rel.to_column().to_string())

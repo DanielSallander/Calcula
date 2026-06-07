@@ -33,8 +33,18 @@ use std::time::Instant;
 use arrow::util::pretty::pretty_format_batches;
 use engine::*;
 
-const CONNECTION_STRING: &str = "postgresql://postgres:postgres@localhost:5432/Adventureworks";
 const SCHEMA: &str = "BI";
+
+fn test_target() -> ConnectionTarget {
+    ConnectionTarget::new("localhost", "Adventureworks").with_port(5432)
+}
+
+fn test_auth() -> AuthMethod {
+    AuthMethod::UsernamePassword {
+        username: "postgres".into(),
+        password: "postgres".into(),
+    }
+}
 
 /// Build the AdventureWorks BI star-schema data model.
 fn build_base_model() -> EngineResult<DataModel> {
@@ -415,11 +425,16 @@ async fn main() {
     };
 
     // Connect to PostgreSQL
-    println!("Connecting to {}...", CONNECTION_STRING);
-    let pg_config = PostgresConfig::new(CONNECTION_STRING);
+    let target = test_target();
+    let auth = test_auth();
+    println!(
+        "Connecting to {}:{}...",
+        target.host(),
+        target.port().unwrap_or(5432)
+    );
     let mut engine = Engine::new(base_model.clone());
 
-    let pg_idx = match engine.add_postgres(pg_config).await {
+    let pg_idx = match engine.add_postgres(target, auth).await {
         Ok(idx) => idx,
         Err(e) => {
             eprintln!("Failed to connect: {e}");

@@ -74,10 +74,7 @@ impl PushdownPlanner {
                 source_table,
                 request,
             } => {
-                node.add_property(
-                    "decision",
-                    PlanValue::Text("PushedJoinAggregation".into()),
-                );
+                node.add_property("decision", PlanValue::Text("PushedJoinAggregation".into()));
                 node.add_property(
                     "reason",
                     PlanValue::Text(
@@ -85,10 +82,7 @@ impl PushdownPlanner {
                     ),
                 );
                 node.add_property("source", PlanValue::Text(source_table.clone()));
-                node.add_property(
-                    "measures",
-                    PlanValue::Number(request.measures.len() as f64),
-                );
+                node.add_property("measures", PlanValue::Number(request.measures.len() as f64));
                 node.add_property("joins", PlanValue::Number(request.joins.len() as f64));
             }
             QueryPlan::LocalAggregation {

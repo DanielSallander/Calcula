@@ -109,6 +109,14 @@ engine-connectors → engine-core (types only)
 
 7. **No panics in library code.** All fallible operations return `Result<T, EngineError>`. Reserve `unwrap()` and `expect()` for cases where failure is truly impossible (and add a comment explaining why). Panics are acceptable in tests only.
 
+8. **Every connector must support the auth abstraction.** Authentication is separated from connection targets so that model files never contain secrets. When adding a new data source connector, you MUST:
+   - a. Implement `ConnectorAuth` for your connector struct (declares supported auth methods).
+   - b. Add a `from_target(ConnectionTarget, AuthMethod) -> ConnectorResult<Self>` constructor to your config type alongside any raw-string constructor.
+   - c. Add an `Engine::add_<name>_source(ConnectionTarget, AuthMethod)` method to the `Engine` facade.
+   - d. Add a variant to `AnyConnector` in `registry.rs` (the compiler enforces `ConnectorAuth` via the `supported_auth_methods()` dispatch).
+   - e. Handle **all** `AuthMethod` variants in `from_target` — return `ConnectorError::AuthMethodNotSupported` for methods you don't support.
+   See `engine-connectors/src/auth.rs` for the full type definitions and checklist.
+
 ## Coding Conventions
 
 ### Rust Style
@@ -278,3 +286,5 @@ Development should follow this order. Each milestone produces a usable library:
 - Writing connector code that is tightly coupled to a specific database (use the trait)
 - Forgetting null handling — analytical data always has nulls
 - Using `panic!` / `unwrap()` in library code paths
+- Adding a new connector without implementing `ConnectorAuth` or `from_target()`
+- Storing credentials in model files (only `ConnectionTarget` is serializable; `AuthMethod` is not)

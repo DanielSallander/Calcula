@@ -15,8 +15,18 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 use std::str::FromStr;
 
-const CONNECTION_STRING: &str = "postgresql://postgres:postgres@localhost:5432/Adventureworks";
 const SCHEMA: &str = "BI";
+
+fn test_target() -> ConnectionTarget {
+    ConnectionTarget::new("localhost", "Adventureworks").with_port(5432)
+}
+
+fn test_auth() -> AuthMethod {
+    AuthMethod::UsernamePassword {
+        username: "postgres".into(),
+        password: "postgres".into(),
+    }
+}
 
 /// Tolerance for grand totals (single-table aggregation via DataFusion).
 /// DataFusion's local Decimal128 aggregation with scale=0 introduces ~0.1-1% drift.
@@ -165,7 +175,7 @@ async fn setup_engine(measures: Vec<(&str, &str)>) -> Engine {
     let model = build_model_with_measures(measures).expect("failed to build model");
     let mut engine = Engine::new(model);
     let pg_idx = engine
-        .add_postgres(PostgresConfig::new(CONNECTION_STRING))
+        .add_postgres(test_target(), test_auth())
         .await
         .expect("failed to connect to postgres");
 
@@ -188,7 +198,7 @@ async fn setup_engine(measures: Vec<(&str, &str)>) -> Engine {
 async fn make_pool() -> sqlx::PgPool {
     PgPoolOptions::new()
         .max_connections(1)
-        .connect(CONNECTION_STRING)
+        .connect("postgresql://postgres:postgres@localhost:5432/Adventureworks")
         .await
         .unwrap()
 }
@@ -497,7 +507,15 @@ async fn validate_measures_01_to_10_basic_aggregates() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 1, measure);
         println!("  Running {label}...");
-        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(
+            &mut engine,
+            &pool,
+            measure,
+            sql,
+            GRAND_TOTAL_TOLERANCE,
+            &label,
+        )
+        .await;
         println!("  {label} OK");
     }
 }
@@ -555,7 +573,15 @@ async fn validate_measures_11_to_15_arithmetic() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 11, measure);
         println!("  Running {label}...");
-        compare_grand_total(&mut engine, &pool, measure, sql, ARITHMETIC_TOLERANCE, &label).await;
+        compare_grand_total(
+            &mut engine,
+            &pool,
+            measure,
+            sql,
+            ARITHMETIC_TOLERANCE,
+            &label,
+        )
+        .await;
         println!("  {label} OK");
     }
 }
@@ -798,7 +824,15 @@ async fn validate_measures_33_to_37_keep_context() {
     for (i, (measure, sql)) in cases.iter().enumerate() {
         let label = format!("Test{}: {}", i + 33, measure);
         println!("  Running {label}...");
-        compare_grand_total(&mut engine, &pool, measure, sql, GRAND_TOTAL_TOLERANCE, &label).await;
+        compare_grand_total(
+            &mut engine,
+            &pool,
+            measure,
+            sql,
+            GRAND_TOTAL_TOLERANCE,
+            &label,
+        )
+        .await;
         println!("  {label} OK");
     }
 }

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use arrow::record_batch::RecordBatch;
+use engine_connectors::auth::{AuthMethodKind, ConnectorAuth};
 use engine_connectors::postgres::PostgresConnector;
 use engine_connectors::sqlserver::SqlServerConnector;
 use engine_connectors::traits::{Connector, FetchRequest, SourceTable};
@@ -79,6 +80,18 @@ impl AnyConnector {
         match self {
             AnyConnector::Postgres(c) => c.row_count(schema, table_name).await,
             AnyConnector::SqlServer(c) => c.row_count(schema, table_name).await,
+        }
+    }
+
+    /// Returns the auth methods supported by this connector type.
+    ///
+    /// When adding a new `AnyConnector` variant, you MUST add a match arm
+    /// here. If the new connector does not implement [`ConnectorAuth`], the
+    /// code will not compile — this is intentional.
+    pub fn supported_auth_methods(&self) -> Vec<AuthMethodKind> {
+        match self {
+            AnyConnector::Postgres(_) => PostgresConnector::supported_auth_methods(),
+            AnyConnector::SqlServer(_) => SqlServerConnector::supported_auth_methods(),
         }
     }
 
