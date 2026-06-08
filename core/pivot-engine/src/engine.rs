@@ -1320,9 +1320,35 @@ impl<'a> PivotCalculator<'a> {
             }
         };
 
-        // Sort the values based on field's sort order
+        // Sort the values based on field's sort order.
+        // If this field has a sort_by_field_index, build a mapping from this field's
+        // ValueIds to the sort-by field's ValueIds so we can sort by proxy values
+        // (e.g., sort month_name items by month_number values).
         let mut sorted_ids: Vec<ValueId> = values_at_level.iter().copied().collect();
-        self.sort_value_ids(&mut sorted_ids, field_cache, &field.sort_order);
+        let sort_by_map = field.sort_by_field_index.and_then(|sort_fi| {
+            // Verify the sort-by field exists in the cache
+            let _ = self.cache.get_field(sort_fi)?;
+            let base_field_count = self.cache.fields.len();
+            let mut mapping: FxHashMap<ValueId, ValueId> = FxHashMap::default();
+            for (rec_idx, record) in self.cache.records.iter().enumerate() {
+                if !self.cache.filter_mask[rec_idx] {
+                    continue;
+                }
+                let display_vid = record_value_at(
+                    record, rec_idx, field.source_index,
+                    base_field_count, &self.cache.virtual_records,
+                );
+                // Only store the first mapping (1:1 relationship expected; MIN semantics)
+                mapping.entry(display_vid).or_insert_with(|| {
+                    record_value_at(
+                        record, rec_idx, sort_fi,
+                        base_field_count, &self.cache.virtual_records,
+                    )
+                });
+            }
+            Some((sort_fi, mapping))
+        });
+        self.sort_value_ids(&mut sorted_ids, field_cache, &field.sort_order, &sort_by_map);
 
         let mut nodes = Vec::with_capacity(sorted_ids.len());
 
@@ -1380,27 +1406,50 @@ impl<'a> PivotCalculator<'a> {
     }
 
     /// Sorts value IDs based on sort order.
+    /// When `sort_by_map` is provided (sort-by-column), items are compared using
+    /// the mapped sort-by field's values instead of the display field's own values.
     fn sort_value_ids(
         &self,
         ids: &mut Vec<ValueId>,
         field_cache: &crate::cache::FieldCache,
         sort_order: &crate::definition::SortOrder,
+        sort_by_map: &Option<(FieldIndex, FxHashMap<ValueId, ValueId>)>,
     ) {
         use crate::definition::SortOrder;
-        
+
         match sort_order {
             SortOrder::Ascending => {
-                ids.sort_by(|&a, &b| {
-                    self.compare_values(field_cache, a, b)
-                });
+                if let Some((sort_fi, mapping)) = sort_by_map {
+                    if let Some(sort_fc) = self.cache.get_field(*sort_fi) {
+                        ids.sort_by(|&a, &b| {
+                            let sa = mapping.get(&a).copied().unwrap_or(a);
+                            let sb = mapping.get(&b).copied().unwrap_or(b);
+                            self.compare_values(sort_fc, sa, sb)
+                        });
+                    } else {
+                        ids.sort_by(|&a, &b| self.compare_values(field_cache, a, b));
+                    }
+                } else {
+                    ids.sort_by(|&a, &b| self.compare_values(field_cache, a, b));
+                }
             }
             SortOrder::Descending => {
-                ids.sort_by(|&a, &b| {
-                    self.compare_values(field_cache, b, a)
-                });
+                if let Some((sort_fi, mapping)) = sort_by_map {
+                    if let Some(sort_fc) = self.cache.get_field(*sort_fi) {
+                        ids.sort_by(|&a, &b| {
+                            let sa = mapping.get(&a).copied().unwrap_or(a);
+                            let sb = mapping.get(&b).copied().unwrap_or(b);
+                            self.compare_values(sort_fc, sb, sa)
+                        });
+                    } else {
+                        ids.sort_by(|&a, &b| self.compare_values(field_cache, b, a));
+                    }
+                } else {
+                    ids.sort_by(|&a, &b| self.compare_values(field_cache, b, a));
+                }
             }
             SortOrder::Manual | SortOrder::DataSourceOrder => {
-                // Keep original order (order of first appearance)
+                // Manual sort overrides sort-by-column; keep original order
             }
         }
     }

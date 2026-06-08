@@ -3573,6 +3573,7 @@ fn extract_bi_model_metadata(
                         data_type: format!("{:?}", dt),
                         is_numeric,
                         lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
+                        sort_by_column: c.sort_by_column().map(|s| s.to_string()),
                     }
                 })
                 .collect();
@@ -4121,6 +4122,59 @@ pub async fn update_bi_pivot_fields(
     let hierarchy_row_refs: Vec<&BiFieldRef> = hierarchy_row_fields.iter().collect();
     let hierarchy_col_refs: Vec<&BiFieldRef> = hierarchy_col_fields.iter().collect();
 
+    // Collect hidden sort-by columns: for each GROUP BY field that has a
+    // sort_by_column configured in the BI model, we need that sort column
+    // in the cache. Add it as an extra GROUP BY column if not already present.
+    // Since sort-by has a 1:1 mapping with the display column, this doesn't
+    // change the number of groups.
+    let mut sort_by_extra_fields: Vec<BiFieldRef> = Vec::new();
+    {
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        if let Some(meta) = bi_meta.get(&pivot_id) {
+            // Collect all (table, column) pairs already in group_by
+            let mut existing_group_by: std::collections::HashSet<(String, String)> =
+                std::collections::HashSet::new();
+            for f in row_group_fields.iter()
+                .chain(hierarchy_row_refs.iter())
+                .chain(col_group_fields.iter())
+                .chain(hierarchy_col_refs.iter())
+                .chain(filter_group_fields.iter())
+                .chain(slicer_group_fields.iter())
+            {
+                existing_group_by.insert((f.table.clone(), f.column.clone()));
+            }
+
+            // For each group-by field, check if it has a sort_by_column
+            let all_group_fields: Vec<&BiFieldRef> = row_group_fields.iter()
+                .chain(hierarchy_row_refs.iter())
+                .chain(col_group_fields.iter())
+                .chain(hierarchy_col_refs.iter())
+                .chain(filter_group_fields.iter())
+                .chain(slicer_group_fields.iter())
+                .copied()
+                .collect();
+            for f in &all_group_fields {
+                if let Some(table_meta) = meta.model_tables.iter().find(|t| t.name == f.table) {
+                    if let Some(col_meta) = table_meta.columns.iter().find(|c| c.name == f.column) {
+                        if let Some(ref sort_col) = col_meta.sort_by_column {
+                            let key = (f.table.clone(), sort_col.clone());
+                            if !existing_group_by.contains(&key) {
+                                existing_group_by.insert(key);
+                                sort_by_extra_fields.push(BiFieldRef {
+                                    table: f.table.clone(),
+                                    column: sort_col.clone(),
+                                    is_lookup: false,
+                                    hidden_items: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Build BI engine QueryRequest
     // If no user measures but we have a synthetic one, include it in the query
     // so the BI engine gets a valid request. The synthetic measure column will
@@ -4130,6 +4184,7 @@ pub async fn update_bi_pivot_fields(
     } else {
         request.value_fields.iter().map(|v| v.measure_name.clone()).collect()
     };
+    let sort_by_extra_refs: Vec<&BiFieldRef> = sort_by_extra_fields.iter().collect();
     let query_group_by: Vec<bi_engine::ColumnRef> = row_group_fields
         .iter()
         .chain(hierarchy_row_refs.iter())
@@ -4137,6 +4192,7 @@ pub async fn update_bi_pivot_fields(
         .chain(hierarchy_col_refs.iter())
         .chain(filter_group_fields.iter())
         .chain(slicer_group_fields.iter())
+        .chain(sort_by_extra_refs.iter())
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
         .collect();
 
@@ -4312,7 +4368,8 @@ pub async fn update_bi_pivot_fields(
     // If synthetic dim: [synthetic at 0] [everything shifted by 1]
     let num_group_by = row_group_fields.len() + hierarchy_row_refs.len()
         + col_group_fields.len() + hierarchy_col_refs.len()
-        + filter_group_fields.len() + slicer_group_fields.len();
+        + filter_group_fields.len() + slicer_group_fields.len()
+        + sort_by_extra_fields.len();
     let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
 
     // Build a mapping from (table, column) -> cache column index.
@@ -4322,7 +4379,8 @@ pub async fn update_bi_pivot_fields(
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
-    // Group-by cols come first: row groups, hierarchy rows, col groups, hierarchy cols, filter groups, slicer groups
+    // Group-by cols come first: row groups, hierarchy rows, col groups, hierarchy cols,
+    // filter groups, slicer groups, then hidden sort-by columns
     let mut cache_idx = dim_offset;
     for f in row_group_fields.iter()
         .chain(hierarchy_row_refs.iter())
@@ -4330,6 +4388,7 @@ pub async fn update_bi_pivot_fields(
         .chain(hierarchy_col_refs.iter())
         .chain(filter_group_fields.iter())
         .chain(slicer_group_fields.iter())
+        .chain(sort_by_extra_refs.iter())
     {
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
@@ -4343,6 +4402,36 @@ pub async fn update_bi_pivot_fields(
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
     }
+
+    // Build sort-by resolution map: (table, column) -> cache_index_of_sort_by_column.
+    // Used to set sort_by_field_index on PivotField for BI columns with sort_by_column.
+    let sort_by_resolution: std::collections::HashMap<(String, String), usize> = {
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        let mut map = std::collections::HashMap::new();
+        if let Some(meta) = bi_meta.get(&pivot_id) {
+            for table_meta in &meta.model_tables {
+                for col_meta in &table_meta.columns {
+                    if let Some(ref sort_col) = col_meta.sort_by_column {
+                        if let Some(&sort_cache_idx) = field_to_cache_idx.get(
+                            &(table_meta.name.clone(), sort_col.clone())
+                        ) {
+                            map.insert(
+                                (table_meta.name.clone(), col_meta.name.clone()),
+                                sort_cache_idx,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        map
+    };
+
+    // Helper: resolve sort_by_field_index for a BiFieldRef
+    let resolve_sort_by = |f: &BiFieldRef| -> Option<usize> {
+        sort_by_resolution.get(&(f.table.clone(), f.column.clone())).copied()
+    };
 
     let mut pivot_tables = pivot_state.pivot_tables.lock()
         .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
@@ -4368,11 +4457,13 @@ pub async fn update_bi_pivot_fields(
                     .get(&(f.table.clone(), f.column.clone()))
                     .unwrap_or(&0);
                 let name = format!("{}.{}", f.table, f.column);
-                if f.is_lookup {
+                let mut pf = if f.is_lookup {
                     PivotField::new_attribute(idx, name)
                 } else {
                     PivotField::new(idx, name)
-                }
+                };
+                pf.sort_by_field_index = resolve_sort_by(f);
+                pf
             })
             .collect();
         // Append hierarchy level fields as row dimensions.
@@ -4398,6 +4489,7 @@ pub async fn update_bi_pivot_fields(
             if !hierarchy_first_levels.contains(&i) {
                 pf.collapsed = true;
             }
+            pf.sort_by_field_index = resolve_sort_by(f);
             row_fields_vec.push(pf);
         }
         definition.row_fields = row_fields_vec;
@@ -4414,11 +4506,13 @@ pub async fn update_bi_pivot_fields(
                 .get(&(f.table.clone(), f.column.clone()))
                     .unwrap_or(&0);
             let name = format!("{}.{}", f.table, f.column);
-            if f.is_lookup {
+            let mut pf = if f.is_lookup {
                 PivotField::new_attribute(idx, name)
             } else {
                 PivotField::new(idx, name)
-            }
+            };
+            pf.sort_by_field_index = resolve_sort_by(f);
+            pf
         })
         .collect();
     // Append hierarchy level fields as column dimensions.
@@ -4440,6 +4534,7 @@ pub async fn update_bi_pivot_fields(
         if !col_hierarchy_first_levels.contains(&i) {
             pf.collapsed = true;
         }
+        pf.sort_by_field_index = resolve_sort_by(f);
         col_fields_vec.push(pf);
     }
     definition.column_fields = col_fields_vec;
@@ -4483,11 +4578,12 @@ pub async fn update_bi_pivot_fields(
                 .get(&(f.table.clone(), f.column.clone()))
                 .unwrap_or(&0);
             let name = format!("{}.{}", f.table, f.column);
-            let field = if f.is_lookup {
+            let mut field = if f.is_lookup {
                 PivotField::new_attribute(idx, name)
             } else {
                 PivotField::new(idx, name)
             };
+            field.sort_by_field_index = resolve_sort_by(f);
             let mut filter = pivot_engine::PivotFilter {
                 field,
                 condition: pivot_engine::FilterCondition::ValueList(Vec::new()),

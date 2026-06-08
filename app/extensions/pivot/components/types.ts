@@ -151,6 +151,9 @@ export interface BiModelColumn {
   isNumeric: boolean;
   /** Custom lookup resolution expression (e.g., "MAX(category_name)"). */
   lookupResolution?: string;
+  /** Sort-by column name: sort this column's pivot items by another column's values.
+   *  Example: monthName sorted by monthNumber for calendar ordering. */
+  sortByColumn?: string;
 }
 
 /** Ragged hierarchy behavior — how to handle missing intermediate levels. */

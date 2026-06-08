@@ -1527,6 +1527,11 @@ pub struct BiModelColumnMeta {
     /// None means the default resolution (MIN) will be used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lookup_resolution: Option<String>,
+    /// Sort-by column name from the BI model. When set, pivot items for this
+    /// column are sorted by the sort-by column's values instead of alphabetically.
+    /// Example: month_name sorted by month_number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_by_column: Option<String>,
 }
 
 /// Measure metadata from a BI model.

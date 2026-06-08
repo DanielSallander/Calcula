@@ -17,6 +17,8 @@ export interface BiModelColumn {
   isNumeric: boolean;
   /** Custom lookup resolution expression (e.g., "MAX(category_name)"). */
   lookupResolution?: string;
+  /** Sort-by column name: sort this column's pivot items by another column's values. */
+  sortByColumn?: string;
 }
 
 export interface BiModelTable {

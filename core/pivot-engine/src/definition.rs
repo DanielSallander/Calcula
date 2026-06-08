@@ -89,6 +89,14 @@ pub struct PivotField {
     /// Used for BI pivot lookup columns that are resolved post-aggregation.
     #[serde(default)]
     pub is_attribute: bool,
+
+    /// Optional sort-by column: sort this field's items by the values of another
+    /// field instead of by the field's own values. This is the cache field index
+    /// of the sort-by column (e.g., month_number for a month_name field).
+    /// When set, Ascending/Descending sort uses this field's values for ordering.
+    /// A user-applied Manual sort overrides this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by_field_index: Option<FieldIndex>,
 }
 
 impl PivotField {
@@ -104,6 +112,7 @@ impl PivotField {
             show_all_items: false,
             grouping: FieldGrouping::None,
             is_attribute: false,
+            sort_by_field_index: None,
         }
     }
 
@@ -120,6 +129,7 @@ impl PivotField {
             show_all_items: false,
             grouping: FieldGrouping::None,
             is_attribute: true,
+            sort_by_field_index: None,
         }
     }
 }
