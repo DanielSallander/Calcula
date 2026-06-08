@@ -1434,6 +1434,12 @@ pub struct UpdateBiPivotFieldsRequest {
     /// Mapped to `definition.slicer_filters` instead of `filter_fields`.
     #[serde(default)]
     pub slicer_fields: Vec<BiFieldRef>,
+    /// Hierarchies placed on the row axis (drill-down paths).
+    #[serde(default)]
+    pub row_hierarchies: Vec<BiHierarchyFieldRef>,
+    /// Hierarchies placed on the column axis (drill-down paths).
+    #[serde(default)]
+    pub column_hierarchies: Vec<BiHierarchyFieldRef>,
     pub layout: Option<LayoutConfig>,
     /// All columns toggled to LOOKUP mode ("Table.Column" keys), including
     /// those not currently in a zone. Persisted for navigation round-trips.
@@ -1480,6 +1486,8 @@ pub struct SavedBiPivotMetadata {
     pub model_tables: Vec<BiModelTableMeta>,
     pub measures: Vec<MeasureFieldInfo>,
     pub lookup_columns: Vec<String>,
+    #[serde(default)]
+    pub hierarchies: Vec<BiHierarchyMeta>,
 }
 
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
@@ -1491,6 +1499,8 @@ pub struct BiPivotMetadata {
     pub model_tables: Vec<BiModelTableMeta>,
     /// Model measures
     pub measures: Vec<MeasureFieldInfo>,
+    /// Hierarchies defined in the BI model
+    pub hierarchies: Vec<BiHierarchyMeta>,
     /// Last executed query (for refresh)
     pub last_query: Option<BiPivotQuery>,
     /// All columns the user has toggled to LOOKUP mode ("Table.Column" keys).
@@ -1549,4 +1559,68 @@ pub struct BiPivotModelInfo {
     /// Includes fields not currently in a zone.
     #[serde(default)]
     pub lookup_columns: Vec<String>,
+    /// Hierarchies defined in the BI model (drill-down paths).
+    #[serde(default)]
+    pub hierarchies: Vec<BiHierarchyMeta>,
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchy Types (BI model hierarchies for drill-down)
+// ---------------------------------------------------------------------------
+
+/// Ragged hierarchy behavior — how to handle missing intermediate levels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BiRaggedBehavior {
+    ShowBlanks,
+    HideMembers,
+    RepeatParent,
+    ShowAsLeaf,
+}
+
+impl Default for BiRaggedBehavior {
+    fn default() -> Self {
+        BiRaggedBehavior::ShowBlanks
+    }
+}
+
+/// A single level within a hierarchy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiHierarchyLevelMeta {
+    /// Column name in the source table.
+    pub column: String,
+    /// Friendly display name (if different from column name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Whether this level may contain NULLs (ragged hierarchy).
+    #[serde(default)]
+    pub optional: bool,
+}
+
+/// A hierarchy defined on a BI model table — represents a drill-down path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiHierarchyMeta {
+    /// Hierarchy name (e.g., "Geography").
+    pub name: String,
+    /// Source table name.
+    pub table: String,
+    /// Ordered levels from coarsest to finest.
+    pub levels: Vec<BiHierarchyLevelMeta>,
+    /// How to handle missing intermediate levels.
+    #[serde(default)]
+    pub ragged_behavior: BiRaggedBehavior,
+}
+
+/// Reference to a hierarchy placed on a pivot axis (sent from frontend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiHierarchyFieldRef {
+    /// Hierarchy name.
+    pub hierarchy: String,
+    /// Table the hierarchy belongs to.
+    pub table: String,
+    /// Currently expanded node paths (e.g., ["USA", "USA|California"]).
+    #[serde(default)]
+    pub expanded: Vec<String>,
 }

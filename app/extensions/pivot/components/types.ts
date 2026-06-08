@@ -134,6 +134,8 @@ export interface BiPivotModelInfo {
   lookupColumns?: string[];
   /** The connection ID this pivot is associated with (BI pivots only) */
   connectionId?: number;
+  /** Hierarchies defined in the BI model (drill-down paths). */
+  hierarchies?: BiHierarchyMeta[];
 }
 
 /** Table metadata from a BI model */
@@ -149,6 +151,34 @@ export interface BiModelColumn {
   isNumeric: boolean;
   /** Custom lookup resolution expression (e.g., "MAX(category_name)"). */
   lookupResolution?: string;
+}
+
+/** Ragged hierarchy behavior — how to handle missing intermediate levels. */
+export type BiRaggedBehavior = 'ShowBlanks' | 'HideMembers' | 'RepeatParent' | 'ShowAsLeaf';
+
+/** A single level within a hierarchy. */
+export interface BiHierarchyLevel {
+  column: string;
+  displayName?: string;
+  optional?: boolean;
+}
+
+/** A hierarchy defined on a BI model table — represents a drill-down path. */
+export interface BiHierarchyMeta {
+  name: string;
+  table: string;
+  levels: BiHierarchyLevel[];
+  raggedBehavior?: BiRaggedBehavior;
+}
+
+/** Reference to a hierarchy placed on a pivot axis (sent to backend). */
+export interface BiHierarchyFieldRef {
+  /** Hierarchy name. */
+  hierarchy: string;
+  /** Table the hierarchy belongs to. */
+  table: string;
+  /** Currently expanded node paths (e.g., ["USA", "USA|California"]). */
+  expanded?: string[];
 }
 
 /** Reference to a table column (for BI pivot row/column/filter fields) */
@@ -184,6 +214,10 @@ export interface UpdateBiPivotFieldsRequest {
   filterFields: BiFieldRef[];
   /** Fields needed only by slicers — included in the query but not shown as visible filter rows */
   slicerFields?: BiFieldRef[];
+  /** Hierarchies placed on the row axis (drill-down). */
+  rowHierarchies?: BiHierarchyFieldRef[];
+  /** Hierarchies placed on the column axis (drill-down). */
+  columnHierarchies?: BiHierarchyFieldRef[];
   layout?: LayoutConfig;
   /** All columns toggled to LOOKUP mode, including those not in zones */
   lookupColumns?: string[];

@@ -24,19 +24,37 @@ export interface BiModelTable {
   columns: BiModelColumn[];
 }
 
+export interface BiHierarchyLevel {
+  column: string;
+  displayName?: string;
+  optional?: boolean;
+}
+
+export interface BiHierarchyMeta {
+  name: string;
+  table: string;
+  levels: BiHierarchyLevel[];
+  raggedBehavior?: 'ShowBlanks' | 'HideMembers' | 'RepeatParent' | 'ShowAsLeaf';
+}
+
 export interface BiPivotModelInfo {
   tables: BiModelTable[];
   measures: MeasureField[];
+  hierarchies?: BiHierarchyMeta[];
 }
 
 interface TableFieldListProps {
   biModel: BiPivotModelInfo;
   usedColumns: Set<string>;    // "TableName.ColumnName" keys
   usedMeasures: Set<string>;   // Measure names
+  /** Set of "Table.HierarchyName" keys for hierarchies currently placed in a zone */
+  usedHierarchies?: Set<string>;
   /** Set of "TableName.ColumnName" keys for columns marked as LOOKUP */
   lookupColumns?: Set<string>;
   onColumnToggle: (table: string, column: string, isNumeric: boolean, checked: boolean) => void;
   onMeasureToggle: (measure: MeasureField, checked: boolean) => void;
+  /** Called when user toggles a hierarchy in/out of the row axis */
+  onHierarchyToggle?: (table: string, hierarchyName: string, checked: boolean) => void;
   /** Called when user toggles a column between GROUP and LOOKUP mode */
   onLookupToggle?: (table: string, column: string) => void;
   onDragStart?: (field: DragField) => void;
@@ -171,6 +189,43 @@ const treeStyles = {
     color: #9a6700;
     &:hover { background: #fae17d; }
   `,
+  hierarchyItem: css`
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px 3px 12px;
+    cursor: grab;
+    user-select: none;
+    border-radius: 4px;
+    font-size: 12px;
+    transition: background 0.1s;
+    &:hover { background: #f0f7ff; }
+    &.dragging { opacity: 0.4; }
+  `,
+  hierarchyIcon: css`
+    font-size: 11px;
+    color: #0969da;
+    min-width: 16px;
+    text-align: center;
+  `,
+  hierarchyLevelList: css`
+    padding-left: 20px;
+    font-size: 11px;
+    color: #656d76;
+  `,
+  hierarchyLevel: css`
+    padding: 1px 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  `,
+  hierarchyLevelDot: css`
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #8b949e;
+    flex-shrink: 0;
+  `,
 };
 
 const folderMenuStyles = {
@@ -285,6 +340,78 @@ function TreeFieldItem({
       <span className={treeStyles.fieldTypeIcon}>
         {isMeasure ? '\u03A3' : isNumeric ? '#' : 'Aa'}
       </span>
+    </div>
+  );
+}
+
+/** A hierarchy item with checkbox, tree icon, and expandable level list. */
+function HierarchyFieldItem({
+  hierarchy,
+  isChecked,
+  onToggle,
+}: {
+  hierarchy: BiHierarchyMeta;
+  isChecked: boolean;
+  onToggle: (checked: boolean) => void;
+}) {
+  const [showLevels, setShowLevels] = useState(false);
+
+  const fieldKey = `${hierarchy.table}.__hierarchy__.${hierarchy.name}`;
+  const dragData: DragField = useMemo(
+    () => ({
+      sourceIndex: -3, // Special marker for hierarchy fields
+      name: fieldKey,
+      isNumeric: false,
+    }),
+    [fieldKey]
+  );
+
+  const { isDragging, dragHandleProps } = useDraggable(dragData, hierarchy.name);
+
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => onToggle(e.target.checked),
+    [onToggle]
+  );
+
+  const handleNameClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowLevels((prev) => !prev);
+  }, []);
+
+  return (
+    <div>
+      <div
+        {...dragHandleProps}
+        className={`${treeStyles.hierarchyItem} ${isDragging ? 'dragging' : ''}`}
+      >
+        <input
+          type="checkbox"
+          className={treeStyles.fieldCheckbox}
+          checked={isChecked}
+          onChange={handleChange}
+        />
+        <span
+          className={treeStyles.fieldName}
+          onClick={handleNameClick}
+          title={`Hierarchy: ${hierarchy.levels.map(l => l.displayName || l.column).join(' > ')}`}
+        >
+          {hierarchy.name}
+        </span>
+        <span className={treeStyles.hierarchyIcon} title="Hierarchy (drill-down path)">
+          {'\u2261'}
+        </span>
+      </div>
+      {showLevels && (
+        <div className={treeStyles.hierarchyLevelList}>
+          {hierarchy.levels.map((level, i) => (
+            <div key={i} className={treeStyles.hierarchyLevel}>
+              <span className={treeStyles.hierarchyLevelDot} />
+              <span>{level.displayName || level.column}</span>
+              {level.optional && <span style={{ opacity: 0.6 }}>(optional)</span>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -407,9 +534,11 @@ export function TableFieldList({
   biModel,
   usedColumns,
   usedMeasures,
+  usedHierarchies,
   lookupColumns,
   onColumnToggle,
   onMeasureToggle,
+  onHierarchyToggle,
   onLookupToggle,
 }: TableFieldListProps): React.ReactElement {
   const [searchQuery, setSearchQuery] = useState('');
@@ -471,7 +600,22 @@ export function TableFieldList({
       .filter((t) => t.columns.length > 0);
   }, [biModel.tables, query]);
 
-  const hasResults = filteredMeasures.length > 0 || filteredTables.some((t) => t.columns.length > 0);
+  // Filter hierarchies by search and group by table
+  const hierarchiesByTable = useMemo(() => {
+    const map = new Map<string, BiHierarchyMeta[]>();
+    if (!biModel.hierarchies) return map;
+    for (const h of biModel.hierarchies) {
+      if (query && !h.name.toLowerCase().includes(query) && !h.table.toLowerCase().includes(query)) {
+        continue;
+      }
+      const existing = map.get(h.table) || [];
+      existing.push(h);
+      map.set(h.table, existing);
+    }
+    return map;
+  }, [biModel.hierarchies, query]);
+
+  const hasResults = filteredMeasures.length > 0 || filteredTables.some((t) => t.columns.length > 0) || hierarchiesByTable.size > 0;
 
   return (
     <div className={styles.section} style={{ flex: 1, overflow: 'hidden' }}>
@@ -520,42 +664,60 @@ export function TableFieldList({
             )}
 
             {/* Table folders */}
-            {filteredTables.map((table) => (
-              <FolderNode
-                key={`table:${table.name}`}
-                name={table.name}
-                icon={'\uD83D\uDCC1'}
-                childCount={table.columns.length}
-                isExpanded={!!query || expandedFolders.has(table.name)}
-                onToggleExpand={() => toggleFolder(table.name)}
-                onExpandAll={expandAll}
-                onCollapseAll={collapseAll}
-              >
-                {table.columns.map((col) => {
-                  const colKey = `${table.name}.${col.name}`;
-                  return (
-                    <TreeFieldItem
-                      key={colKey}
-                      fieldKey={colKey}
-                      name={col.name}
-                      isNumeric={col.isNumeric}
-                      isChecked={usedColumns.has(colKey)}
-                      isMeasure={false}
-                      isLookup={lookupColumns?.has(colKey)}
-                      lookupResolution={col.lookupResolution}
-                      onToggle={(checked) =>
-                        onColumnToggle(table.name, col.name, col.isNumeric, checked)
-                      }
-                      onLookupToggle={
-                        onLookupToggle
-                          ? () => onLookupToggle(table.name, col.name)
-                          : undefined
-                      }
-                    />
-                  );
-                })}
-              </FolderNode>
-            ))}
+            {filteredTables.map((table) => {
+              const tableHierarchies = hierarchiesByTable.get(table.name) || [];
+              return (
+                <FolderNode
+                  key={`table:${table.name}`}
+                  name={table.name}
+                  icon={'\uD83D\uDCC1'}
+                  childCount={table.columns.length + tableHierarchies.length}
+                  isExpanded={!!query || expandedFolders.has(table.name)}
+                  onToggleExpand={() => toggleFolder(table.name)}
+                  onExpandAll={expandAll}
+                  onCollapseAll={collapseAll}
+                >
+                  {/* Hierarchies shown first within the table */}
+                  {tableHierarchies.map((h) => {
+                    const hKey = `${h.table}.${h.name}`;
+                    return (
+                      <HierarchyFieldItem
+                        key={`hierarchy:${hKey}`}
+                        hierarchy={h}
+                        isChecked={usedHierarchies?.has(hKey) ?? false}
+                        onToggle={(checked) => {
+                          if (onHierarchyToggle) onHierarchyToggle(h.table, h.name, checked);
+                        }}
+                      />
+                    );
+                  })}
+                  {/* Individual columns */}
+                  {table.columns.map((col) => {
+                    const colKey = `${table.name}.${col.name}`;
+                    return (
+                      <TreeFieldItem
+                        key={colKey}
+                        fieldKey={colKey}
+                        name={col.name}
+                        isNumeric={col.isNumeric}
+                        isChecked={usedColumns.has(colKey)}
+                        isMeasure={false}
+                        isLookup={lookupColumns?.has(colKey)}
+                        lookupResolution={col.lookupResolution}
+                        onToggle={(checked) =>
+                          onColumnToggle(table.name, col.name, col.isNumeric, checked)
+                        }
+                        onLookupToggle={
+                          onLookupToggle
+                            ? () => onLookupToggle(table.name, col.name)
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
+                </FolderNode>
+              );
+            })}
           </>
         )}
       </div>

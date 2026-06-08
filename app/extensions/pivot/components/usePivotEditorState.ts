@@ -242,6 +242,7 @@ export function usePivotEditorState({
         // For BI fields (sourceIndex === -1), set customName to preserve the original
         // field name through buildUpdateRequest (prevents "Sum of [Revenue]" mangling)
         const isBiField = field.index === -1;
+        const isHierarchyField = field.index === -3;
         const zoneField: ZoneField = {
           sourceIndex: field.index,
           name: field.name,
@@ -249,7 +250,7 @@ export function usePivotEditorState({
           aggregation: field.isNumeric
             ? getDefaultAggregation(true)
             : undefined,
-          customName: isBiField ? field.name : undefined,
+          customName: (isBiField || isHierarchyField) ? field.name : undefined,
         };
 
         if (field.isNumeric) {
@@ -258,11 +259,11 @@ export function usePivotEditorState({
           setRows((prev) => [...prev, zoneField]);
         }
       } else {
-        // Remove from all zones — use name-based match for BI fields (sourceIndex === -1)
-        const isBiField = field.index === -1;
+        // Remove from all zones — use name-based match for BI/hierarchy fields
+        const useNameMatch = field.index === -1 || field.index === -3;
         const removeFromZone = (prev: ZoneField[]) =>
           prev.filter((f) =>
-            isBiField ? f.name !== field.name : f.sourceIndex !== field.index
+            useNameMatch ? f.name !== field.name : f.sourceIndex !== field.index
           );
 
         setFilters(removeFromZone);

@@ -659,6 +659,51 @@ pub struct PivotDefinition {
     /// When empty, defaults to: all value fields in order, then all calculated fields.
     #[serde(default)]
     pub value_column_order: Vec<ValueColumnRef>,
+
+    /// Hierarchy configurations for ragged hierarchy support.
+    /// Each entry describes a group of consecutive row or column fields
+    /// that form a hierarchy with a specific ragged behavior.
+    #[serde(default)]
+    pub hierarchy_configs: Vec<HierarchyConfig>,
+}
+
+// ============================================================================
+// HIERARCHY CONFIGURATION
+// ============================================================================
+
+/// How to handle missing intermediate levels in a ragged hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RaggedBehavior {
+    /// Null levels render as blank cells. Always show "+" on non-leaf levels.
+    ShowBlanks,
+    /// Skip null intermediate levels. Show "+" only if non-null children exist.
+    HideMembers,
+    /// Fill null levels with parent's value. Always show "+" on non-leaf levels.
+    RepeatParent,
+    /// Treat nodes without children at next level as leaves. Show "+" only if children exist.
+    ShowAsLeaf,
+}
+
+impl Default for RaggedBehavior {
+    fn default() -> Self {
+        RaggedBehavior::ShowBlanks
+    }
+}
+
+/// Describes a hierarchy spanning consecutive row or column fields.
+/// Used by the engine to apply ragged behavior during tree building.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchyConfig {
+    /// Hierarchy name (e.g., "Geography").
+    pub name: String,
+    /// Starting index into row_fields or column_fields.
+    pub field_start: usize,
+    /// Number of consecutive fields in this hierarchy.
+    pub field_count: usize,
+    /// Whether this hierarchy is on the row axis (true) or column axis (false).
+    pub is_row: bool,
+    /// How to handle missing intermediate levels.
+    pub ragged_behavior: RaggedBehavior,
 }
 
 /// Reference to a column in the unified value/calculated field ordering.
@@ -697,6 +742,7 @@ impl PivotDefinition {
             calculated_fields: Vec::new(),
             calculated_items: Vec::new(),
             value_column_order: Vec::new(),
+            hierarchy_configs: Vec::new(),
         }
     }
     

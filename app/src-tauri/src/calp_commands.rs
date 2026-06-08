@@ -1598,6 +1598,7 @@ fn restore_pulled_pivots(
                         connection_id: default_conn_id,
                         model_tables: saved.model_tables,
                         measures: saved.measures,
+                        hierarchies: saved.hierarchies,
                         last_query: None,
                         lookup_columns: saved.lookup_columns.into_iter().collect(),
                     });

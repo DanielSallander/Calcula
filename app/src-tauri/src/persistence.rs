@@ -975,6 +975,7 @@ fn collect_pivot_definitions(
             model_tables: meta.model_tables.clone(),
             measures: meta.measures.clone(),
             lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+            hierarchies: meta.hierarchies.clone(),
         };
         match serde_json::to_value(&saved) {
             Ok(json) => workbook.bi_pivot_metadata.push(json),
@@ -1086,6 +1087,7 @@ fn restore_pivot_definitions(
             connection_id: 0, // placeholder — resolved when user connects to BI
             model_tables: saved.model_tables,
             measures: saved.measures,
+            hierarchies: saved.hierarchies,
             last_query: None,
             lookup_columns: saved.lookup_columns.into_iter().collect(),
         });

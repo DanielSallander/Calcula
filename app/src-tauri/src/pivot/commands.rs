@@ -1088,6 +1088,8 @@ pub async fn refresh_pivot_cache(
                 value_fields,
                 filter_fields,
                 slicer_fields,
+                row_hierarchies: Vec::new(),
+                column_hierarchies: Vec::new(),
                 layout: None, // keep current layout
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 calculated_fields: calc_fields,
@@ -1457,6 +1459,7 @@ pub fn get_pivot_at_cell(
                 tables: meta.model_tables.clone(),
                 measures: meta.measures.clone(),
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+                hierarchies: meta.hierarchies.clone(),
             }
         })
     };
@@ -2092,6 +2095,7 @@ pub fn get_pivot_hierarchies(
                 tables: meta.model_tables.clone(),
                 measures: meta.measures.clone(),
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+                hierarchies: meta.hierarchies.clone(),
             }
         })
     };
@@ -3545,7 +3549,7 @@ pub fn drill_through_to_sheet(
 /// Extracts model metadata (tables + measures) from a BI engine.
 fn extract_bi_model_metadata(
     engine: &bi_engine::Engine,
-) -> (Vec<BiModelTableMeta>, Vec<MeasureFieldInfo>) {
+) -> (Vec<BiModelTableMeta>, Vec<MeasureFieldInfo>, Vec<BiHierarchyMeta>) {
     let model = engine.model();
 
     let tables: Vec<BiModelTableMeta> = model
@@ -3597,7 +3601,35 @@ fn extract_bi_model_metadata(
         })
         .collect();
 
-    (tables, measures)
+    let hierarchies: Vec<BiHierarchyMeta> = model
+        .hierarchies()
+        .iter()
+        .map(|h| {
+            let levels = h
+                .levels()
+                .iter()
+                .map(|l| BiHierarchyLevelMeta {
+                    column: l.column().to_string(),
+                    display_name: l.display_name().map(|s| s.to_string()),
+                    optional: l.is_optional(),
+                })
+                .collect();
+            let ragged_behavior = match h.ragged_behavior() {
+                bi_engine::RaggedBehavior::ShowBlanks => BiRaggedBehavior::ShowBlanks,
+                bi_engine::RaggedBehavior::HideMembers => BiRaggedBehavior::HideMembers,
+                bi_engine::RaggedBehavior::RepeatParent => BiRaggedBehavior::RepeatParent,
+                bi_engine::RaggedBehavior::ShowAsLeaf => BiRaggedBehavior::ShowAsLeaf,
+            };
+            BiHierarchyMeta {
+                name: h.name().to_string(),
+                table: h.table().to_string(),
+                levels,
+                ragged_behavior,
+            }
+        })
+        .collect();
+
+    (tables, measures, hierarchies)
 }
 
 /// Creates an empty BI pivot from the full model (all tables + measures).
@@ -3622,7 +3654,7 @@ pub async fn create_pivot_from_bi_model(
     auto_connect_bi_connection(&bi_state, connection_id).await?;
 
     // Extract model metadata from the connection's engine
-    let (model_tables, measures) = {
+    let (model_tables, measures, hierarchies) = {
         let engine_arc = {
             let connections = bi_state.connections.lock().unwrap();
             let conn = connections.get(&connection_id)
@@ -3633,15 +3665,19 @@ pub async fn create_pivot_from_bi_model(
         let result = extract_bi_model_metadata(&engine);
         log_info!(
             "PIVOT",
-            "extract_bi_model_metadata: {} tables, {} measures",
+            "extract_bi_model_metadata: {} tables, {} measures, {} hierarchies",
             result.0.len(),
-            result.1.len()
+            result.1.len(),
+            result.2.len()
         );
         for t in &result.0 {
             log_info!("PIVOT", "  table: {} ({} columns)", t.name, t.columns.len());
         }
         for m in &result.1 {
             log_info!("PIVOT", "  measure: {} (table={})", m.name, m.table);
+        }
+        for h in &result.2 {
+            log_info!("PIVOT", "  hierarchy: {} (table={}, {} levels)", h.name, h.table, h.levels.len());
         }
         result
     };
@@ -3737,6 +3773,7 @@ pub async fn create_pivot_from_bi_model(
         connection_id,
         model_tables,
         measures,
+        hierarchies,
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
     };
@@ -3834,7 +3871,8 @@ pub async fn update_bi_pivot_fields(
     }
 
     let has_values = !request.value_fields.is_empty();
-    let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty();
+    let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty()
+        || !request.row_hierarchies.is_empty() || !request.column_hierarchies.is_empty();
     let has_filters = !request.filter_fields.is_empty();
     let has_slicer_fields = !request.slicer_fields.is_empty();
 
@@ -4017,6 +4055,72 @@ pub async fn update_bi_pivot_fields(
     // but mapped to slicer_filters instead of filter_fields (no visible filter row).
     let slicer_group_fields: Vec<&BiFieldRef> = request.slicer_fields.iter().collect();
 
+    // Expand hierarchy fields into GROUP BY columns.
+    // ALL levels are included in the query — the pivot engine's collapse mechanism
+    // controls which levels are visible. This avoids re-querying on expand/collapse.
+    let mut hierarchy_row_fields: Vec<BiFieldRef> = Vec::new();
+    let mut hierarchy_col_fields: Vec<BiFieldRef> = Vec::new();
+
+    // Track hierarchy metadata for setting up HierarchyConfig on the definition.
+    // (name, table, field_count, ragged_behavior, is_row)
+    struct HierarchyMeta {
+        name: String,
+        field_count: usize,
+        ragged_behavior: BiRaggedBehavior,
+        is_row: bool,
+    }
+    let mut hierarchy_metas: Vec<HierarchyMeta> = Vec::new();
+
+    {
+        let bi_meta = pivot_state.bi_metadata.lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        let meta = bi_meta.get(&pivot_id);
+
+        for href in &request.row_hierarchies {
+            if let Some(meta) = meta {
+                if let Some(h) = meta.hierarchies.iter().find(|h| h.name == href.hierarchy && h.table == href.table) {
+                    hierarchy_metas.push(HierarchyMeta {
+                        name: h.name.clone(),
+                        field_count: h.levels.len(),
+                        ragged_behavior: h.ragged_behavior.clone(),
+                        is_row: true,
+                    });
+                    for level in &h.levels {
+                        hierarchy_row_fields.push(BiFieldRef {
+                            table: href.table.clone(),
+                            column: level.column.clone(),
+                            is_lookup: false,
+                            hidden_items: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        for href in &request.column_hierarchies {
+            if let Some(meta) = meta {
+                if let Some(h) = meta.hierarchies.iter().find(|h| h.name == href.hierarchy && h.table == href.table) {
+                    hierarchy_metas.push(HierarchyMeta {
+                        name: h.name.clone(),
+                        field_count: h.levels.len(),
+                        ragged_behavior: h.ragged_behavior.clone(),
+                        is_row: false,
+                    });
+                    for level in &h.levels {
+                        hierarchy_col_fields.push(BiFieldRef {
+                            table: href.table.clone(),
+                            column: level.column.clone(),
+                            is_lookup: false,
+                            hidden_items: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let hierarchy_row_refs: Vec<&BiFieldRef> = hierarchy_row_fields.iter().collect();
+    let hierarchy_col_refs: Vec<&BiFieldRef> = hierarchy_col_fields.iter().collect();
+
     // Build BI engine QueryRequest
     // If no user measures but we have a synthetic one, include it in the query
     // so the BI engine gets a valid request. The synthetic measure column will
@@ -4028,7 +4132,9 @@ pub async fn update_bi_pivot_fields(
     };
     let query_group_by: Vec<bi_engine::ColumnRef> = row_group_fields
         .iter()
+        .chain(hierarchy_row_refs.iter())
         .chain(col_group_fields.iter())
+        .chain(hierarchy_col_refs.iter())
         .chain(filter_group_fields.iter())
         .chain(slicer_group_fields.iter())
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
@@ -4204,7 +4310,9 @@ pub async fn update_bi_pivot_fields(
     // Cache layout (BI engine result column order):
     // [group_by columns (row groups, col groups, filter groups, slicer groups)] [measure columns] [lookup columns]
     // If synthetic dim: [synthetic at 0] [everything shifted by 1]
-    let num_group_by = row_group_fields.len() + col_group_fields.len() + filter_group_fields.len() + slicer_group_fields.len();
+    let num_group_by = row_group_fields.len() + hierarchy_row_refs.len()
+        + col_group_fields.len() + hierarchy_col_refs.len()
+        + filter_group_fields.len() + slicer_group_fields.len();
     let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
 
     // Build a mapping from (table, column) -> cache column index.
@@ -4214,9 +4322,15 @@ pub async fn update_bi_pivot_fields(
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
-    // Group-by cols come first: row groups, then col groups, then filter groups, then slicer groups
+    // Group-by cols come first: row groups, hierarchy rows, col groups, hierarchy cols, filter groups, slicer groups
     let mut cache_idx = dim_offset;
-    for f in row_group_fields.iter().chain(col_group_fields.iter()).chain(filter_group_fields.iter()).chain(slicer_group_fields.iter()) {
+    for f in row_group_fields.iter()
+        .chain(hierarchy_row_refs.iter())
+        .chain(col_group_fields.iter())
+        .chain(hierarchy_col_refs.iter())
+        .chain(filter_group_fields.iter())
+        .chain(slicer_group_fields.iter())
+    {
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
     }
@@ -4240,11 +4354,13 @@ pub async fn update_bi_pivot_fields(
     // Lookup fields share the same hierarchy depth as the preceding GROUP field
     // from the same table (they are attributes, not new grouping levels).
     let old_row_fields = definition.row_fields.clone();
+    let hierarchy_row_start;
     if use_synthetic_dim {
         // Synthetic "Total" dimension as the only row field
         definition.row_fields = vec![PivotField::new(0, "Total".to_string())];
+        hierarchy_row_start = 1;
     } else {
-        definition.row_fields = request
+        let mut row_fields_vec: Vec<PivotField> = request
             .row_fields
             .iter()
             .map(|f| {
@@ -4259,12 +4375,38 @@ pub async fn update_bi_pivot_fields(
                 }
             })
             .collect();
+        // Append hierarchy level fields as row dimensions.
+        // Each hierarchy's level 0 is expanded; level 1+ are collapsed so only
+        // the first level shows initially. The user expands via toggle_pivot_group.
+        hierarchy_row_start = row_fields_vec.len();
+        // Build set of "first level of each hierarchy" indices
+        let mut hierarchy_first_levels = std::collections::HashSet::new();
+        {
+            let mut offset = 0usize;
+            for hm in hierarchy_metas.iter().filter(|h| h.is_row) {
+                hierarchy_first_levels.insert(offset);
+                offset += hm.field_count;
+            }
+        }
+        for (i, f) in hierarchy_row_fields.iter().enumerate() {
+            let idx = *field_to_cache_idx
+                .get(&(f.table.clone(), f.column.clone()))
+                .unwrap_or(&0);
+            let name = format!("{}.{}", f.table, f.column);
+            let mut pf = PivotField::new(idx, name);
+            // Collapse all items in levels deeper than the first of each hierarchy
+            if !hierarchy_first_levels.contains(&i) {
+                pf.collapsed = true;
+            }
+            row_fields_vec.push(pf);
+        }
+        definition.row_fields = row_fields_vec;
     }
     preserve_collapse_state(&mut definition.row_fields, &old_row_fields);
 
     // Column fields (preserving collapse state for fields that remain)
     let old_col_fields = definition.column_fields.clone();
-    definition.column_fields = request
+    let mut col_fields_vec: Vec<PivotField> = request
         .column_fields
         .iter()
         .map(|f| {
@@ -4279,6 +4421,28 @@ pub async fn update_bi_pivot_fields(
             }
         })
         .collect();
+    // Append hierarchy level fields as column dimensions.
+    let hierarchy_col_start = col_fields_vec.len();
+    let mut col_hierarchy_first_levels = std::collections::HashSet::new();
+    {
+        let mut offset = 0usize;
+        for hm in hierarchy_metas.iter().filter(|h| !h.is_row) {
+            col_hierarchy_first_levels.insert(offset);
+            offset += hm.field_count;
+        }
+    }
+    for (i, f) in hierarchy_col_fields.iter().enumerate() {
+        let idx = *field_to_cache_idx
+            .get(&(f.table.clone(), f.column.clone()))
+            .unwrap_or(&0);
+        let name = format!("{}.{}", f.table, f.column);
+        let mut pf = PivotField::new(idx, name);
+        if !col_hierarchy_first_levels.contains(&i) {
+            pf.collapsed = true;
+        }
+        col_fields_vec.push(pf);
+    }
+    definition.column_fields = col_fields_vec;
     preserve_collapse_state(&mut definition.column_fields, &old_col_fields);
 
     // Value fields — measures map to cache columns right after group_by columns
@@ -4403,6 +4567,40 @@ pub async fn update_bi_pivot_fields(
                 ValueColumnRefDef::Calculated { index } => pivot_engine::ValueColumnRef::Calculated(*index),
             })
             .collect();
+    }
+
+    // Set up hierarchy configs for ragged behavior support in the pivot engine.
+    {
+        definition.hierarchy_configs.clear();
+        let mut row_offset = hierarchy_row_start;
+        let mut col_offset = hierarchy_col_start;
+        for hm in &hierarchy_metas {
+            let ragged = match hm.ragged_behavior {
+                BiRaggedBehavior::ShowBlanks => pivot_engine::RaggedBehavior::ShowBlanks,
+                BiRaggedBehavior::HideMembers => pivot_engine::RaggedBehavior::HideMembers,
+                BiRaggedBehavior::RepeatParent => pivot_engine::RaggedBehavior::RepeatParent,
+                BiRaggedBehavior::ShowAsLeaf => pivot_engine::RaggedBehavior::ShowAsLeaf,
+            };
+            if hm.is_row {
+                definition.hierarchy_configs.push(pivot_engine::HierarchyConfig {
+                    name: hm.name.clone(),
+                    field_start: row_offset,
+                    field_count: hm.field_count,
+                    is_row: true,
+                    ragged_behavior: ragged,
+                });
+                row_offset += hm.field_count;
+            } else {
+                definition.hierarchy_configs.push(pivot_engine::HierarchyConfig {
+                    name: hm.name.clone(),
+                    field_start: col_offset,
+                    field_count: hm.field_count,
+                    is_row: false,
+                    ragged_behavior: ragged,
+                });
+                col_offset += hm.field_count;
+            }
+        }
     }
 
     definition.bump_version();

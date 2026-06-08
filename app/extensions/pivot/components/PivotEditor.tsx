@@ -24,6 +24,7 @@ import type {
   BiPivotModelInfo,
   BiFieldRef,
   BiValueFieldRef,
+  BiHierarchyFieldRef,
   MeasureField,
   PivotId,
   CalculatedFieldDef,
@@ -140,6 +141,17 @@ function BiConnectionBanner({ connectionId, onConnected }: {
   );
 }
 
+/** Check if a field name represents a hierarchy field ("Table.__hierarchy__.Name") */
+function isHierarchyField(name: string): boolean {
+  return name.includes('.__hierarchy__.');
+}
+
+/** Parse a hierarchy field key "Table.__hierarchy__.Name" into a BiHierarchyFieldRef */
+function toHierarchyFieldRef(name: string): BiHierarchyFieldRef {
+  const parts = name.split('.__hierarchy__.');
+  return { table: parts[0], hierarchy: parts[1], expanded: [] };
+}
+
 /** Parse a BI field key "Table.Column" into a BiFieldRef, optionally marking as lookup */
 function toBiFieldRef(name: string, isLookup?: boolean): BiFieldRef {
   const dotIndex = name.indexOf('.');
@@ -214,18 +226,29 @@ export function PivotEditor({
     // Build BI request upfront (if applicable) so it's accessible in catch block for retry
     let biRequest: UpdateBiPivotFieldsRequest | undefined;
     if (isBiPivot) {
-      const isRealBiField = (f: { name: string }) => f.name.includes('.');
+      const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
       const toBiRef = (f: { name: string }) =>
         toBiFieldRef(f.name, lookupColumns.has(f.name));
       const biFilterFields = (request.filterFields ?? [])
         .filter(isRealBiField)
         .map(f => ({ ...toBiRef(f), hiddenItems: f.hiddenItems }));
+
+      // Extract hierarchy fields from rows/columns
+      const rowHierarchies = (request.rowFields ?? [])
+        .filter(f => isHierarchyField(f.name))
+        .map(f => toHierarchyFieldRef(f.name));
+      const columnHierarchies = (request.columnFields ?? [])
+        .filter(f => isHierarchyField(f.name))
+        .map(f => toHierarchyFieldRef(f.name));
+
       biRequest = {
         pivotId: request.pivotId,
         rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
         columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
         valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name, f.customName)),
         filterFields: biFilterFields,
+        rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
+        columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
         layout: request.layout,
         lookupColumns: [...lookupColumns],
         calculatedFields: request.calculatedFields,
@@ -351,6 +374,20 @@ export function PivotEditor({
     return set;
   }, [isBiPivot, values]);
 
+  // Track which hierarchies are placed in a zone ("Table.HierarchyName" keys)
+  const usedHierarchiesSet = useMemo(() => {
+    if (!isBiPivot) return new Set<string>();
+    const set = new Set<string>();
+    for (const f of [...rows, ...columns]) {
+      // Hierarchy fields use the naming convention "Table.__hierarchy__.Name"
+      if (f.name.includes('.__hierarchy__.')) {
+        const parts = f.name.split('.__hierarchy__.');
+        set.add(`${parts[0]}.${parts[1]}`);
+      }
+    }
+    return set;
+  }, [isBiPivot, rows, columns]);
+
   // Saved layouts: track current DSL text and saveAs name for the toolbar
   const [currentDslText, setCurrentDslText] = useState('');
   const [currentSaveAsName, setCurrentSaveAsName] = useState<string | undefined>();
@@ -459,6 +496,26 @@ export function PivotEditor({
     [handleFieldToggle]
   );
 
+  // BI hierarchy toggle: add/remove hierarchy to Rows zone
+  const handleBiHierarchyToggle = useCallback(
+    (table: string, hierarchyName: string, checked: boolean) => {
+      if (!biModel?.hierarchies) return;
+      const hierarchy = biModel.hierarchies.find(
+        (h) => h.table === table && h.name === hierarchyName
+      );
+      if (!hierarchy) return;
+
+      const fieldName = `${table}.__hierarchy__.${hierarchyName}`;
+      const field: SourceField = {
+        index: -3, // Special marker for hierarchy fields
+        name: fieldName,
+        isNumeric: false,
+      };
+      handleFieldToggle(field, checked);
+    },
+    [biModel, handleFieldToggle]
+  );
+
   // Modal handlers
   const handleOpenValueSettings = useCallback((index: number) => {
     setValueSettingsIndex(index);
@@ -525,15 +582,19 @@ export function PivotEditor({
     }
 
     // Build and send the update request directly (same as handleUpdate logic)
-    const isRealBiField = (f: { name: string }) => f.name.includes('.');
+    const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
     const toBiRef = (f: { name: string }) =>
       toBiFieldRef(f.name, lookupColumns.has(f.name));
+    const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
+    const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const biRequest: UpdateBiPivotFieldsRequest = {
       pivotId,
       rowFields: rows.filter(isRealBiField).map(toBiRef),
       columnFields: columns.filter(isRealBiField).map(toBiRef),
       valueFields: values.map((f) => toBiValueFieldRef(f.name, f.customName)),
       filterFields: filters.filter(isRealBiField).map(toBiRef),
+      rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
+      columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
       lookupColumns: [...lookupColumns],
     };
     pivot.updateBiFields(biRequest).then(() => {
@@ -618,9 +679,11 @@ export function PivotEditor({
             biModel={biModel}
             usedColumns={usedColumnsSet}
             usedMeasures={usedMeasuresSet}
+            usedHierarchies={usedHierarchiesSet}
             lookupColumns={lookupColumns}
             onColumnToggle={handleBiColumnToggle}
             onMeasureToggle={handleBiMeasureToggle}
+            onHierarchyToggle={handleBiHierarchyToggle}
             onLookupToggle={handleLookupToggle}
           />
         ) : (

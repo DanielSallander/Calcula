@@ -18,9 +18,10 @@ use crate::cache::{
     parse_cache_value_as_date,
 };
 use crate::definition::{
-    AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, ManualGroup,
-    PivotDefinition, PivotField, ReportLayout, ShowValuesAs, SlicerFilter,
-    SubtotalLocation, ValueColumnRef, ValueField, ValuesPosition,
+    AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, HierarchyConfig,
+    ManualGroup, PivotDefinition, PivotField, RaggedBehavior, ReportLayout,
+    ShowValuesAs, SlicerFilter, SubtotalLocation, ValueColumnRef, ValueField,
+    ValuesPosition,
 };
 use crate::view::{
     BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType,
@@ -239,8 +240,17 @@ impl<'a> PivotCalculator<'a> {
         let t0 = Instant::now();
         let row_fields = self.effective_row_fields.clone();
         let col_fields = self.effective_col_fields.clone();
-        let row_tree = self.build_axis_tree(&row_fields);
-        let col_tree = self.build_axis_tree(&col_fields);
+        let mut row_tree = self.build_axis_tree(&row_fields);
+        let mut col_tree = self.build_axis_tree(&col_fields);
+
+        // Apply ragged hierarchy behaviors to the trees
+        for hc in &self.definition.hierarchy_configs {
+            if hc.is_row {
+                apply_ragged_behavior(&mut row_tree, hc, 0);
+            } else {
+                apply_ragged_behavior(&mut col_tree, hc, 0);
+            }
+        }
         let _tree_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 3: Flatten trees into ordered lists
@@ -3168,6 +3178,121 @@ pub fn drill_down(
     result.total_count = count;
     result.is_truncated = count > max_records;
     result
+}
+
+// ============================================================================
+// RAGGED HIERARCHY SUPPORT
+// ============================================================================
+
+/// Determines if a label represents a blank/null value in the hierarchy.
+fn is_blank_label(label: &str) -> bool {
+    label == "(blank)" || label.is_empty()
+}
+
+/// Applies ragged hierarchy behavior to a tree of axis nodes.
+/// `current_depth` is the depth in the overall tree (0 = root level).
+/// The function navigates to the hierarchy's field range and applies the behavior there.
+fn apply_ragged_behavior(
+    nodes: &mut Vec<AxisNode>,
+    config: &HierarchyConfig,
+    current_depth: usize,
+) {
+    if current_depth < config.field_start {
+        // Not yet at the hierarchy's start — recurse deeper
+        for node in nodes.iter_mut() {
+            if !node.children.is_empty() {
+                apply_ragged_behavior(&mut node.children, config, current_depth + 1);
+            }
+        }
+        return;
+    }
+
+    let hierarchy_level = current_depth - config.field_start;
+    if hierarchy_level >= config.field_count {
+        return; // Past the end of this hierarchy
+    }
+
+    match config.ragged_behavior {
+        RaggedBehavior::ShowBlanks => {
+            // Default: no transformation needed. Blanks appear as "(blank)".
+            for node in nodes.iter_mut() {
+                if !node.children.is_empty() {
+                    apply_ragged_behavior(&mut node.children, config, current_depth + 1);
+                }
+            }
+        }
+        RaggedBehavior::ShowAsLeaf => {
+            // Nodes whose children at the next level are ALL blank become leaves.
+            // Mixed parents (some non-blank children) keep the non-blank children
+            // and show blank children's grandchildren as direct leaves.
+            for node in nodes.iter_mut() {
+                if !node.children.is_empty() {
+                    let has_non_blank = node.children.iter().any(|c| !is_blank_label(&c.label));
+                    if !has_non_blank {
+                        // All children are blank — make this a leaf
+                        node.children.clear();
+                    } else {
+                        // Mixed: keep non-blank children; for blank children,
+                        // promote their grandchildren as direct leaf children.
+                        let mut new_children = Vec::new();
+                        for child in node.children.drain(..) {
+                            if is_blank_label(&child.label) {
+                                // Promote grandchildren (cities with null state)
+                                for mut gc in child.children {
+                                    gc.depth = child.depth;
+                                    // Grandchildren promoted to this level are leaves
+                                    gc.children.clear();
+                                    new_children.push(gc);
+                                }
+                            } else {
+                                new_children.push(child);
+                            }
+                        }
+                        node.children = new_children;
+                        apply_ragged_behavior(&mut node.children, config, current_depth + 1);
+                    }
+                }
+            }
+        }
+        RaggedBehavior::HideMembers => {
+            // Skip blank intermediate nodes: promote their children up.
+            // Recurse first so deeper levels are clean.
+            for node in nodes.iter_mut() {
+                if !node.children.is_empty() {
+                    apply_ragged_behavior(&mut node.children, config, current_depth + 1);
+                }
+            }
+            // Promote: blank nodes → replaced by their children at this depth
+            let mut new_nodes = Vec::with_capacity(nodes.len());
+            for node in nodes.drain(..) {
+                if is_blank_label(&node.label) && !node.children.is_empty() {
+                    for mut child in node.children {
+                        child.depth = node.depth;
+                        new_nodes.push(child);
+                    }
+                } else if is_blank_label(&node.label) && node.children.is_empty() {
+                    // Blank leaf with no children: skip entirely
+                    continue;
+                } else {
+                    new_nodes.push(node);
+                }
+            }
+            *nodes = new_nodes;
+        }
+        RaggedBehavior::RepeatParent => {
+            // Fill blank children's labels with the parent node's label.
+            for node in nodes.iter_mut() {
+                if !node.children.is_empty() {
+                    for child in node.children.iter_mut() {
+                        if is_blank_label(&child.label) {
+                            child.label = node.label.clone();
+                        }
+                    }
+                    apply_ragged_behavior(&mut node.children, config, current_depth + 1);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
