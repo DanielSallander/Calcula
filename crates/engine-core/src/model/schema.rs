@@ -7,6 +7,7 @@ use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
 use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
+use crate::model::hierarchy::Hierarchy;
 use crate::model::relationship::Relationship;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
@@ -28,6 +29,8 @@ pub struct DataModel {
     table_variables: Vec<TableVariable>,
     #[serde(default)]
     global_variables: Vec<GlobalVariable>,
+    #[serde(default)]
+    hierarchies: Vec<Hierarchy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_lookup_resolution: Option<String>,
 }
@@ -44,6 +47,7 @@ impl DataModel {
             contexts: Vec::new(),
             table_variables: Vec::new(),
             global_variables: Vec::new(),
+            hierarchies: Vec::new(),
             default_lookup_resolution: None,
         }
     }
@@ -136,6 +140,27 @@ impl DataModel {
             .ok_or_else(|| EngineError::GlobalVariableNotFound(name.to_string()))
     }
 
+    /// Returns all hierarchies in the model.
+    pub fn hierarchies(&self) -> &[Hierarchy] {
+        &self.hierarchies
+    }
+
+    /// Look up a hierarchy by name.
+    pub fn hierarchy(&self, name: &str) -> EngineResult<&Hierarchy> {
+        self.hierarchies
+            .iter()
+            .find(|h| h.name() == name)
+            .ok_or_else(|| EngineError::HierarchyNotFound(name.to_string()))
+    }
+
+    /// Returns all hierarchies that belong to a specific table.
+    pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
+        self.hierarchies
+            .iter()
+            .filter(|h| h.table() == table_name)
+            .collect()
+    }
+
     /// Returns the model-level default lookup resolution expression, if set.
     ///
     /// When a column has no per-column `lookup_resolution`, this expression is
@@ -199,6 +224,9 @@ impl DataModel {
         for gv in &self.global_variables {
             builder = builder.add_global_variable(gv.clone());
         }
+        for h in &self.hierarchies {
+            builder = builder.add_hierarchy(h.clone());
+        }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());
         }
@@ -259,6 +287,7 @@ pub struct DataModelBuilder {
     contexts: Vec<ContextDefinition>,
     table_variables: Vec<TableVariable>,
     global_variables: Vec<GlobalVariable>,
+    hierarchies: Vec<Hierarchy>,
     default_lookup_resolution: Option<String>,
 }
 
@@ -308,6 +337,12 @@ impl DataModelBuilder {
     /// Add a global variable to the model.
     pub fn add_global_variable(mut self, variable: GlobalVariable) -> Self {
         self.global_variables.push(variable);
+        self
+    }
+
+    /// Add a hierarchy to the model.
+    pub fn add_hierarchy(mut self, hierarchy: Hierarchy) -> Self {
+        self.hierarchies.push(hierarchy);
         self
     }
 
@@ -733,6 +768,106 @@ impl DataModelBuilder {
             }
         }
 
+        // 10. Validate hierarchies.
+        let mut seen_hierarchies = std::collections::HashSet::new();
+        for hierarchy in &self.hierarchies {
+            // Unique hierarchy names.
+            if !seen_hierarchies.insert(hierarchy.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate hierarchy '{}'",
+                    hierarchy.name()
+                )));
+            }
+
+            // No collision with table names.
+            if seen_tables.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with table '{}'", hierarchy.name()),
+                });
+            }
+
+            // No collision with context names.
+            if seen_contexts.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with context '{}'", hierarchy.name()),
+                });
+            }
+
+            // No collision with table variable names.
+            if seen_vars.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with table variable '{}'", hierarchy.name()),
+                });
+            }
+
+            // No collision with global variable names.
+            if seen_globals.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with global variable '{}'", hierarchy.name()),
+                });
+            }
+
+            // Table must exist.
+            let table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == hierarchy.table())
+                .ok_or_else(|| EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("table '{}' not found", hierarchy.table()),
+                })?;
+
+            // At least 2 levels.
+            if hierarchy.levels().len() < 2 {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!(
+                        "hierarchy must have at least 2 levels, found {}",
+                        hierarchy.levels().len()
+                    ),
+                });
+            }
+
+            // All level columns must exist, no duplicates.
+            let mut seen_level_columns = std::collections::HashSet::new();
+            for level in hierarchy.levels() {
+                if table.column(level.column()).is_err() {
+                    return Err(EngineError::InvalidHierarchy {
+                        name: hierarchy.name().to_string(),
+                        reason: format!(
+                            "level column '{}' not found in table '{}'",
+                            level.column(),
+                            hierarchy.table()
+                        ),
+                    });
+                }
+                if !seen_level_columns.insert(level.column()) {
+                    return Err(EngineError::InvalidHierarchy {
+                        name: hierarchy.name().to_string(),
+                        reason: format!("duplicate level column '{}'", level.column()),
+                    });
+                }
+            }
+
+            // First and last levels must not be optional.
+            if hierarchy.levels().first().unwrap().is_optional() {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: "first level cannot be optional".to_string(),
+                });
+            }
+            if hierarchy.levels().last().unwrap().is_optional() {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: "last level cannot be optional".to_string(),
+                });
+            }
+        }
+
         let model = DataModel {
             tables: self.tables,
             relationships: self.relationships,
@@ -742,6 +877,7 @@ impl DataModelBuilder {
             contexts: self.contexts,
             table_variables: self.table_variables,
             global_variables: self.global_variables,
+            hierarchies: self.hierarchies,
             default_lookup_resolution: self.default_lookup_resolution,
         };
 
@@ -1787,6 +1923,398 @@ mod tests {
         let restored: DataModel = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.global_variables().len(), 1);
         assert_eq!(restored.global_variables()[0].name(), "total_revenue");
+        assert!(restored.validate().is_ok());
+    }
+
+    // --- Hierarchy tests ---
+
+    fn dim_geography_table() -> Table {
+        Table::new(
+            "dim_geography",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("country", DataType::String),
+                Column::new("state", DataType::String),
+                Column::new("city", DataType::String),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn geography_hierarchy() -> Hierarchy {
+        use crate::model::hierarchy::HierarchyLevel;
+        Hierarchy::new(
+            "Geography",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("state"),
+                HierarchyLevel::new("city"),
+            ],
+        )
+    }
+
+    #[test]
+    fn hierarchy_added_to_model() {
+        let model = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(geography_hierarchy())
+            .build()
+            .unwrap();
+
+        assert_eq!(model.hierarchies().len(), 1);
+        assert!(model.hierarchy("Geography").is_ok());
+        assert!(model.hierarchy("Missing").is_err());
+    }
+
+    #[test]
+    fn hierarchies_for_table() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h2 = Hierarchy::new(
+            "Region",
+            "dim_geography",
+            vec![HierarchyLevel::new("country"), HierarchyLevel::new("state")],
+        );
+
+        let model = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_table(sales_table())
+            .add_hierarchy(geography_hierarchy())
+            .add_hierarchy(h2)
+            .build()
+            .unwrap();
+
+        assert_eq!(model.hierarchies_for_table("dim_geography").len(), 2);
+        assert!(model.hierarchies_for_table("Sales").is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_hierarchy_names() {
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(geography_hierarchy())
+            .add_hierarchy(geography_hierarchy())
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Duplicate"));
+        assert!(err.contains("Geography"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_name_collision_with_table() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "Sales",
+            "dim_geography",
+            vec![HierarchyLevel::new("country"), HierarchyLevel::new("state")],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_table(sales_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("conflicts with table"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_name_collision_with_context() {
+        use crate::model::context::{ContextDefinition, ContextOp};
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
+        let h = Hierarchy::new(
+            "my_ctx",
+            "dim_geography",
+            vec![HierarchyLevel::new("country"), HierarchyLevel::new("state")],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_context(ctx)
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("conflicts with context"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_name_collision_with_table_variable() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let var = TableVariable::new("my_var", "dim_geography", vec![]);
+        let h = Hierarchy::new(
+            "my_var",
+            "dim_geography",
+            vec![HierarchyLevel::new("country"), HierarchyLevel::new("state")],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_table_variable(var)
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("conflicts with table variable"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_name_collision_with_global_variable() {
+        use crate::compute::expression as expr;
+        use crate::model::global_variable::GlobalVariable;
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let gv = GlobalVariable::new("my_gv", "dim_geography", expr::col("country"));
+        let h = Hierarchy::new(
+            "my_gv",
+            "dim_geography",
+            vec![HierarchyLevel::new("country"), HierarchyLevel::new("state")],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_global_variable(gv)
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("conflicts with global variable"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_on_missing_table() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "H",
+            "NonExistent",
+            vec![HierarchyLevel::new("a"), HierarchyLevel::new("b")],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("NonExistent"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_with_missing_column() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "H",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("nonexistent"),
+            ],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_with_fewer_than_two_levels() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new("H", "dim_geography", vec![HierarchyLevel::new("country")]);
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("at least 2 levels"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_with_duplicate_columns() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "H",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("country"),
+            ],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("duplicate level column"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_with_optional_first_level() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "H",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country").with_optional(true),
+                HierarchyLevel::new("state"),
+            ],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("first level cannot be optional"));
+    }
+
+    #[test]
+    fn rejects_hierarchy_with_optional_last_level() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "H",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("city").with_optional(true),
+            ],
+        );
+
+        let result = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("last level cannot be optional"));
+    }
+
+    #[test]
+    fn accepts_hierarchy_with_optional_middle_level() {
+        use crate::model::hierarchy::{HierarchyLevel, RaggedBehavior};
+
+        let h = Hierarchy::new(
+            "Geography",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("state").with_optional(true),
+                HierarchyLevel::new("city"),
+            ],
+        )
+        .with_ragged_behavior(RaggedBehavior::RepeatParent);
+
+        let model = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build()
+            .unwrap();
+
+        assert_eq!(model.hierarchies().len(), 1);
+        assert!(model.hierarchies()[0].levels()[1].is_optional());
+    }
+
+    #[test]
+    fn hierarchy_ragged_behavior_survives_build() {
+        use crate::model::hierarchy::{HierarchyLevel, RaggedBehavior};
+
+        let h = Hierarchy::new(
+            "H",
+            "dim_geography",
+            vec![HierarchyLevel::new("country"), HierarchyLevel::new("city")],
+        )
+        .with_ragged_behavior(RaggedBehavior::HideMembers);
+
+        let model = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            model.hierarchy("H").unwrap().ragged_behavior(),
+            RaggedBehavior::HideMembers
+        );
+    }
+
+    #[test]
+    fn serde_backward_compat_no_hierarchies() {
+        let json = r#"{
+            "tables": [],
+            "relationships": [],
+            "measures": [],
+            "calculated_columns": [],
+            "measure_groups": []
+        }"#;
+        let model: DataModel = serde_json::from_str(json).unwrap();
+        assert!(model.hierarchies().is_empty());
+    }
+
+    #[test]
+    fn hierarchy_json_roundtrip() {
+        use crate::model::hierarchy::{HierarchyLevel, RaggedBehavior};
+
+        let h = Hierarchy::new(
+            "Geography",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("state")
+                    .with_display_name("State/Province")
+                    .with_optional(true),
+                HierarchyLevel::new("city"),
+            ],
+        )
+        .with_ragged_behavior(RaggedBehavior::RepeatParent);
+
+        let model = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        let restored: DataModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.hierarchies().len(), 1);
+        let rh = &restored.hierarchies()[0];
+        assert_eq!(rh.name(), "Geography");
+        assert_eq!(rh.table(), "dim_geography");
+        assert_eq!(rh.levels().len(), 3);
+        assert_eq!(rh.levels()[1].display_name(), Some("State/Province"));
+        assert!(rh.levels()[1].is_optional());
+        assert_eq!(rh.ragged_behavior(), RaggedBehavior::RepeatParent);
         assert!(restored.validate().is_ok());
     }
 }

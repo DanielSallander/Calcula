@@ -125,6 +125,19 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// A referenced hierarchy was not found.
+    #[error("Hierarchy '{0}' not found")]
+    HierarchyNotFound(String),
+
+    /// A hierarchy definition is invalid.
+    #[error("Invalid hierarchy '{name}': {reason}")]
+    InvalidHierarchy {
+        /// The hierarchy name.
+        name: String,
+        /// Description of the validation failure.
+        reason: String,
+    },
+
     /// An expression is invalid or used in an unsupported way.
     #[error("Invalid expression: {0}")]
     InvalidExpression(String),

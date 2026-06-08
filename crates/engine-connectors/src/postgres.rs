@@ -1343,7 +1343,8 @@ mod tests {
     #[test]
     fn build_url_integrated_returns_error() {
         let target = ConnectionTarget::new("kerberos-host", "warehouse");
-        let err = PostgresConnector::build_connection_url(target, AuthMethod::Integrated).unwrap_err();
+        let err =
+            PostgresConnector::build_connection_url(target, AuthMethod::Integrated).unwrap_err();
         assert!(err.to_string().contains("not supported"));
     }
 

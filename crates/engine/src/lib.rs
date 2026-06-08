@@ -75,8 +75,8 @@ pub use engine_core::compute::plan::{
 pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
-    DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator,
-    RefreshStrategy, Relationship, StorageMode, Table, TableVariable,
+    DataModelBuilder, FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, JoinCondition,
+    JoinOperator, RaggedBehavior, RefreshStrategy, Relationship, StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
