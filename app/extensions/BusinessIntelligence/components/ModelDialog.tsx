@@ -57,6 +57,7 @@ function toBiPivotModelInfo(
       sourceColumn: "",
       aggregation: "sum" as const,
     })),
+    hierarchies: info.hierarchies,
   };
 }
 

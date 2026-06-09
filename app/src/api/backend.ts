@@ -3219,6 +3219,20 @@ export interface BiModelInfo {
   tables: BiTableInfo[];
   measures: BiMeasureInfo[];
   relationships: BiRelationshipInfo[];
+  hierarchies?: BiHierarchyMeta[];
+}
+
+export interface BiHierarchyMeta {
+  name: string;
+  table: string;
+  levels: BiHierarchyLevelMeta[];
+  raggedBehavior?: 'ShowBlanks' | 'HideMembers' | 'RepeatParent' | 'ShowAsLeaf';
+}
+
+export interface BiHierarchyLevelMeta {
+  column: string;
+  displayName?: string;
+  optional?: boolean;
 }
 
 export interface BiTableInfo {

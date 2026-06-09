@@ -637,6 +637,7 @@ pub fn toggle_pivot_group(
         // Find the row to toggle by matching expandable cells against the request
         let target_row = find_toggle_row(view, &request);
         if let Some(row_idx) = target_row {
+            let old_visible_count = view.rows.iter().filter(|r| r.visible).count();
             let t_toggle = Instant::now();
             view.toggle_collapse(row_idx);
             // Re-assign sequential view_row to visible rows (eliminate gaps)
@@ -647,6 +648,50 @@ pub fn toggle_pivot_group(
                     visible_idx += 1;
                 }
             }
+
+            // If the visible row count didn't change, the toggle had no effect.
+            // This happens when child rows don't exist in the view (e.g., hierarchy
+            // fields with field-level collapsed=true). Fall through to the SLOW path
+            // which does a full recalculation with the updated definition.
+            if visible_idx == old_visible_count {
+                log_info!("PIVOT", "toggle_pivot_group: FAST path had no effect (children not in view), falling through to SLOW path");
+                drop(pivot_tables);
+                // Re-acquire for the SLOW path below
+                let mut pivot_tables = pivot_state.pivot_tables.lock()
+                    .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+                let (definition, cache) = pivot_tables
+                    .get_mut(&pivot_id)
+                    .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
+
+                let t_calc = Instant::now();
+                let view = safe_calculate_pivot(definition, cache);
+                let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
+
+                let t_resp = Instant::now();
+                let response = view_to_response(&view, definition, cache);
+                let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
+
+                store_view(&pivot_state, pivot_id, &view);
+                let destination = definition.destination;
+                let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+                drop(pivot_tables);
+
+                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+
+                let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+                log_perf!(
+                    "PIVOT",
+                    "toggle_pivot_group pivot_id={} rows={}x{} | FAST->SLOW calc={:.1}ms serialize={:.1}ms TOTAL={:.1}ms",
+                    pivot_id,
+                    response.row_count,
+                    response.col_count,
+                    calc_ms,
+                    serialize_ms,
+                    total_ms
+                );
+                return Ok(response);
+            }
+
             // Update version to match bumped definition
             view.version = definition.version;
             // Update row_count to reflect visible rows

@@ -185,10 +185,36 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
         })
         .collect();
 
+    let hierarchies = model
+        .hierarchies()
+        .iter()
+        .map(|h| {
+            use crate::pivot::types::{BiHierarchyMeta, BiHierarchyLevelMeta, BiRaggedBehavior};
+            let levels = h.levels().iter().map(|l| BiHierarchyLevelMeta {
+                column: l.column().to_string(),
+                display_name: l.display_name().map(|s| s.to_string()),
+                optional: l.is_optional(),
+            }).collect();
+            let ragged_behavior = match h.ragged_behavior() {
+                bi_engine::RaggedBehavior::ShowBlanks => BiRaggedBehavior::ShowBlanks,
+                bi_engine::RaggedBehavior::HideMembers => BiRaggedBehavior::HideMembers,
+                bi_engine::RaggedBehavior::RepeatParent => BiRaggedBehavior::RepeatParent,
+                bi_engine::RaggedBehavior::ShowAsLeaf => BiRaggedBehavior::ShowAsLeaf,
+            };
+            BiHierarchyMeta {
+                name: h.name().to_string(),
+                table: h.table().to_string(),
+                levels,
+                ragged_behavior,
+            }
+        })
+        .collect();
+
     BiModelInfo {
         tables,
         measures,
         relationships,
+        hierarchies,
     }
 }
 

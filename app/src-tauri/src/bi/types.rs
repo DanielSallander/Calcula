@@ -274,6 +274,8 @@ pub struct BiModelInfo {
     pub tables: Vec<BiTableInfo>,
     pub measures: Vec<BiMeasureInfo>,
     pub relationships: Vec<BiRelationshipInfo>,
+    #[serde(default)]
+    pub hierarchies: Vec<crate::pivot::types::BiHierarchyMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
