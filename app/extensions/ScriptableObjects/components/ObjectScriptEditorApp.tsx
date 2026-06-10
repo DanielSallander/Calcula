@@ -286,24 +286,32 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     loadScripts();
   }, [loadScripts]);
 
-  // Listen for Tauri events from main window
+  // Listen for Tauri events from main window (registered once on mount)
   useEffect(() => {
+    let cancelled = false;
     const unlisteners: Array<() => void> = [];
 
-    // Open with specific script
-    onOpenWithScript((payload) => {
+    // Open with specific script — set activeScriptId and reload scripts
+    // from backend to ensure we have the latest (including newly created scripts).
+    onOpenWithScript(async (payload) => {
+      if (cancelled) return;
       if (payload.scriptId) {
         setActiveScriptId(payload.scriptId);
-        const script = scripts.find((s) => s.id === payload.scriptId);
-        if (script) {
-          setSource(script.source);
-          setIsDirty(false);
+        // Always reload from backend to pick up newly created scripts
+        try {
+          const allScripts = await loadAllObjectScripts();
+          if (!cancelled) {
+            setScripts(allScripts);
+          }
+        } catch (e) {
+          console.error("[ObjectScriptEditorApp] Failed to reload scripts:", e);
         }
       }
-    }).then((fn) => unlisteners.push(fn));
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Console output forwarded from main window
     onConsoleOutput((payload) => {
+      if (cancelled) return;
       const message = payload.args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
       setConsoleEntries((prev) => [
         ...prev,
@@ -315,10 +323,11 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           timestamp: Date.now(),
         },
       ]);
-    });
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Script errors forwarded from main window
     onScriptError((payload) => {
+      if (cancelled) return;
       const message = `[${payload.scriptName}] Error: ${payload.error}${payload.stack ? "\n" + payload.stack : ""}`;
       setConsoleEntries((prev) => [
         ...prev,
@@ -331,12 +340,13 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         },
       ]);
       setShowConsole(true);
-    });
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Scripts changed externally
     onScriptsChanged((payload) => {
+      if (cancelled) return;
       setScripts(payload.scripts);
-    }).then((fn) => unlisteners.push(fn));
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
     // Notify main window on close
     const handleBeforeUnload = () => {
@@ -345,10 +355,11 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
+      cancelled = true;
       unlisteners.forEach((fn) => fn());
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, [scripts]);
+  }, []);
 
   // When activeScriptId or scripts change, load source.
   // If no script is selected but scripts exist, auto-select the first one.

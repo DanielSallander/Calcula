@@ -240,6 +240,56 @@ declare interface PivotContext extends BaseObjectContext {
 }
 
 // ============================================================================
+// Panel Context (ribbon tabs & sidebar views)
+// ============================================================================
+
+/** Context for Panel instances (ribbon tabs and sidebar views). */
+declare interface PanelContext extends BaseObjectContext {
+  /** The panel ID (matches the PanelDefinition.id used during registration). */
+  readonly instanceId: string;
+  /** The panel title. */
+  readonly title: string;
+
+  // -- Events --
+
+  /** Called when the panel tab/icon is clicked by the user. */
+  onClick(handler: (detail: { placement: string }) => void): () => void;
+  /** Called when the panel becomes the active tab or view. */
+  onActivate(handler: (detail: { placement: string }) => void): () => void;
+  /** Called when the panel loses active state (another tab/view selected). */
+  onDeactivate(handler: (detail: { placement: string }) => void): () => void;
+  /** Called when the panel is moved between ribbon and sidebar. */
+  onPlacementChange(handler: (detail: { oldPlacement: string; newPlacement: string }) => void): () => void;
+  /** Called when the panel becomes visible (opened/expanded). */
+  onShow(handler: () => void): () => void;
+  /** Called when the panel is hidden (closed/collapsed). */
+  onHide(handler: () => void): () => void;
+
+  // -- Actions --
+
+  /** Open (activate) this panel programmatically. */
+  open(): void;
+  /** Close (hide) this panel. For sidebar panels, collapses the side panel. */
+  close(): void;
+  /** Set a badge on the panel's tab/icon (e.g., notification count). Pass null to clear. */
+  setBadge(text: string | null): void;
+  /** Move this panel to a different location ("ribbon" or "sidebar"). */
+  moveTo(placement: "ribbon" | "sidebar"): void;
+
+  /** Panel properties (read-only). */
+  readonly properties: {
+    /** Panel ID. */
+    readonly panelId: string;
+    /** Panel title. */
+    readonly title: string;
+    /** Current placement: "ribbon" or "sidebar". */
+    readonly placement: string;
+    /** Whether the panel can be moved between locations. */
+    readonly movable: boolean;
+  };
+}
+
+// ============================================================================
 // Shape Context
 // ============================================================================
 

@@ -331,7 +331,7 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   // ---- Listen for edit-script requests (from context menus or property panels) ----
   cleanupFunctions.push(
-    onAppEvent(ScriptableObjectEvents.EDIT_SCRIPT, (detail) => {
+    onAppEvent(ScriptableObjectEvents.EDIT_SCRIPT, async (detail) => {
       const { objectType, instanceId, objectName } = detail as {
         objectType: ScriptableObjectType;
         instanceId?: string | null;
@@ -354,14 +354,21 @@ async function activate(context: ExtensionContext): Promise<void> {
           accessLevel: "restricted",
         };
         ObjectScriptManager.registerScript(script);
-        // Persist to backend
-        saveObjectScript(script).catch((e) => {
+        // Persist to backend before opening editor (so loadAllObjectScripts finds it)
+        try {
+          await saveObjectScript(script);
+        } catch (e) {
           console.warn("[ScriptableObjects] Failed to save new script:", e);
-        });
+        }
       }
 
       // Open the code editor in a separate window with this script
-      openObjectScriptEditor(script.id);
+      await openObjectScriptEditor(script.id);
+
+      // Re-emit scripts list so the editor window picks up any newly created scripts
+      // (the SCRIPTS_CHANGED event from registerScript may have fired before the window existed)
+      const allScripts = ObjectScriptManager.getAllScripts();
+      emitScriptsChanged(allScripts);
     }),
   );
 

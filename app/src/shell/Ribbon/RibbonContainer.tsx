@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
-import { onAppEvent, AppEvents } from "../../api/events";
+import { onAppEvent, emitAppEvent, AppEvents } from "../../api/events";
 import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "./PanelContextMenu";
 import type { PanelPlacement } from "../../api/uiTypes";
@@ -31,9 +31,10 @@ export function RibbonContainer(): React.ReactElement {
 
   const handleTabClick = useCallback(
     (tabId: string) => {
+      const prevTabId = activeTabId;
+
       if (isMinimized) {
         if (activeTabId === tabId && tempExpanded) {
-          // Clicking the same tab while expanded: collapse again
           setTempExpanded(false);
         } else {
           setActiveTabId(tabId);
@@ -41,6 +42,15 @@ export function RibbonContainer(): React.ReactElement {
         }
       } else {
         setActiveTabId(tabId);
+      }
+
+      // Emit panel events for scriptable objects
+      emitAppEvent("panel:clicked", { panelId: tabId, placement: "ribbon" });
+      if (prevTabId !== tabId) {
+        if (prevTabId) {
+          emitAppEvent("panel:deactivated", { panelId: prevTabId, placement: "ribbon" });
+        }
+        emitAppEvent("panel:activated", { panelId: tabId, placement: "ribbon" });
       }
     },
     [isMinimized, activeTabId, tempExpanded]
@@ -120,13 +130,14 @@ export function RibbonContainer(): React.ReactElement {
   const [contextMenu, setContextMenu] = useState<{
     position: { x: number; y: number };
     panelId: string;
+    panelTitle: string;
   } | null>(null);
 
   const handleTabContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     const panel = panelRegistry.getPanelByDownstreamId(tabId);
     if (!panel || panel.movable === false) return;
     e.preventDefault();
-    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id });
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id, panelTitle: panel.title });
   }, []);
 
   const handlePanelMove = useCallback((placement: PanelPlacement) => {
@@ -278,6 +289,8 @@ export function RibbonContainer(): React.ReactElement {
         <PanelContextMenu
           position={contextMenu.position}
           currentPlacement="ribbon"
+          panelId={contextMenu.panelId}
+          panelTitle={contextMenu.panelTitle}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />

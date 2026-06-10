@@ -37,6 +37,7 @@ pub enum ObjectScriptObjectTypeDef {
     Textbox,
     Timeline,
     Shape,
+    Panel,
 }
 
 /// Access level in the .cala JSON format.
@@ -72,6 +73,7 @@ impl From<&ScriptableObjectType> for ObjectScriptObjectTypeDef {
             ScriptableObjectType::Textbox => ObjectScriptObjectTypeDef::Textbox,
             ScriptableObjectType::Timeline => ObjectScriptObjectTypeDef::Timeline,
             ScriptableObjectType::Shape => ObjectScriptObjectTypeDef::Shape,
+            ScriptableObjectType::Panel => ObjectScriptObjectTypeDef::Panel,
         }
     }
 }
@@ -91,6 +93,7 @@ impl From<&ObjectScriptObjectTypeDef> for ScriptableObjectType {
             ObjectScriptObjectTypeDef::Textbox => ScriptableObjectType::Textbox,
             ObjectScriptObjectTypeDef::Timeline => ScriptableObjectType::Timeline,
             ObjectScriptObjectTypeDef::Shape => ScriptableObjectType::Shape,
+            ObjectScriptObjectTypeDef::Panel => ScriptableObjectType::Panel,
         }
     }
 }

@@ -11,6 +11,7 @@ import type { RibbonTabDefinition, RibbonContext } from "./types";
 import type { PanelService } from "../../api/ui";
 import { usePanelPlacementStore } from "./usePanelPlacementStore";
 import { SectionSidebarRenderer, SectionRibbonRenderer } from "../components/SectionRenderers";
+import { emitAppEvent, onAppEvent } from "../../api/events";
 
 /**
  * Generate a letter-based fallback icon from a panel title.
@@ -58,6 +59,27 @@ export function initPanelRegistry(deps: {
   activityBarImpl = deps.activityBar;
   extensionRegistryImpl = deps.extensionRegistry;
   activityBarStoreGetter = deps.getActivityBarStore;
+
+  // Listen for action events from panel scripts
+  onAppEvent("panel:open", (detail) => {
+    const { panelId } = detail as { panelId: string };
+    panelRegistry.openPanel(panelId);
+  });
+
+  onAppEvent("panel:close", (detail) => {
+    const { panelId } = detail as { panelId: string };
+    panelRegistry.closePanel(panelId);
+  });
+
+  onAppEvent("panel:moveTo", (detail) => {
+    const { panelId, placement } = detail as { panelId: string; placement: PanelPlacement };
+    panelRegistry.setPlacement(panelId, placement);
+  });
+
+  onAppEvent("panel:setBadge", (detail) => {
+    const { panelId, text } = detail as { panelId: string; text: string };
+    panelRegistry.setBadge(panelId, text);
+  });
 }
 
 /**
@@ -69,6 +91,7 @@ export function initPanelRegistry(deps: {
  */
 class PanelRegistryImpl implements PanelService {
   private panels: Map<string, PanelDefinition> = new Map();
+  private badges: Map<string, string> = new Map();
   private listeners: Set<() => void> = new Set();
 
   // =========================================================================
@@ -80,6 +103,13 @@ class PanelRegistryImpl implements PanelService {
     const placement = this.getPlacement(definition.id);
     this.projectPanel(definition, placement);
     this.notifyChange();
+
+    // Emit metadata for scriptable object contexts
+    emitAppEvent("panel:metadata", {
+      panelId: definition.id,
+      placement,
+      movable: definition.movable !== false,
+    });
   }
 
   unregisterPanel(panelId: string): void {
@@ -127,6 +157,13 @@ class PanelRegistryImpl implements PanelService {
     // Project into new location
     this.projectPanel(panel, placement);
     this.notifyChange();
+
+    // Emit placement change event for scriptable object contexts
+    emitAppEvent("panel:placementChanged", {
+      panelId,
+      oldPlacement: currentPlacement,
+      newPlacement: placement,
+    });
   }
 
   // =========================================================================
@@ -148,6 +185,23 @@ class PanelRegistryImpl implements PanelService {
         store.close();
       }
     }
+  }
+
+  // =========================================================================
+  // BADGES
+  // =========================================================================
+
+  setBadge(panelId: string, text: string): void {
+    if (text) {
+      this.badges.set(panelId, text);
+    } else {
+      this.badges.delete(panelId);
+    }
+    this.notifyChange();
+  }
+
+  getBadge(panelId: string): string {
+    return this.badges.get(panelId) || "";
   }
 
   // =========================================================================

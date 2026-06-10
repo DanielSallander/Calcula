@@ -5,12 +5,17 @@
 
 import React, { useEffect, useRef } from "react";
 import type { PanelPlacement } from "../../api/uiTypes";
+import { emitAppEvent } from "../../api/events";
 
 export interface PanelContextMenuProps {
   /** Screen coordinates where the menu should appear */
   position: { x: number; y: number };
   /** Current placement of the panel */
   currentPlacement: PanelPlacement;
+  /** The panel ID (for scriptable objects) */
+  panelId: string;
+  /** The panel display title (for script editor) */
+  panelTitle: string;
   /** Called when the user selects a new placement */
   onMove: (placement: PanelPlacement) => void;
   /** Called to close the menu */
@@ -23,6 +28,8 @@ export interface PanelContextMenuProps {
 export function PanelContextMenu({
   position,
   currentPlacement,
+  panelId,
+  panelTitle,
   onMove,
   onClose,
 }: PanelContextMenuProps): React.ReactElement {
@@ -55,9 +62,40 @@ export function PanelContextMenu({
   const targetPlacement: PanelPlacement = currentPlacement === "ribbon" ? "sidebar" : "ribbon";
   const label = currentPlacement === "ribbon" ? "Move to Sidebar" : "Move to Ribbon";
 
-  const handleClick = () => {
+  const handleMoveClick = () => {
     onMove(targetPlacement);
     onClose();
+  };
+
+  const handleEditScript = () => {
+    emitAppEvent("scriptable-objects:edit-script", {
+      objectType: "panel",
+      instanceId: panelId,
+      objectName: panelTitle,
+    });
+    onClose();
+  };
+
+  const menuItemStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    width: "100%",
+    padding: "6px 16px",
+    border: "none",
+    backgroundColor: "transparent",
+    cursor: "pointer",
+    fontSize: "12px",
+    color: "#333",
+    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+    textAlign: "left",
+  };
+
+  const handleMouseEnter = (e: React.MouseEvent) => {
+    (e.target as HTMLElement).style.backgroundColor = "#f0f0f0";
+  };
+  const handleMouseLeave = (e: React.MouseEvent) => {
+    (e.target as HTMLElement).style.backgroundColor = "transparent";
   };
 
   return (
@@ -77,27 +115,10 @@ export function PanelContextMenu({
       }}
     >
       <button
-        onClick={handleClick}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "8px",
-          width: "100%",
-          padding: "6px 16px",
-          border: "none",
-          backgroundColor: "transparent",
-          cursor: "pointer",
-          fontSize: "12px",
-          color: "#333",
-          fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-          textAlign: "left",
-        }}
-        onMouseEnter={(e) => {
-          (e.target as HTMLElement).style.backgroundColor = "#f0f0f0";
-        }}
-        onMouseLeave={(e) => {
-          (e.target as HTMLElement).style.backgroundColor = "transparent";
-        }}
+        onClick={handleMoveClick}
+        style={menuItemStyle}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
       >
         {targetPlacement === "sidebar" ? (
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#555" strokeWidth="1.2">
@@ -111,6 +132,22 @@ export function PanelContextMenu({
           </svg>
         )}
         {label}
+      </button>
+
+      {/* Separator */}
+      <div style={{ height: 1, backgroundColor: "#e5e5e5", margin: "4px 0" }} />
+
+      <button
+        onClick={handleEditScript}
+        style={menuItemStyle}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#555" strokeWidth="1.2">
+          <path d="M2 12l1-4 7-7 3 3-7 7-4 1z" />
+          <path d="M10 4l3 3" />
+        </svg>
+        Edit Script...
       </button>
     </div>
   );

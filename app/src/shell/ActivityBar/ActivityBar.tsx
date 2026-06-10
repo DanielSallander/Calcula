@@ -9,6 +9,7 @@ import type { ActivityViewDefinition } from "../../api/uiTypes";
 import type { PanelPlacement } from "../../api/uiTypes";
 import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "../Ribbon/PanelContextMenu";
+import { emitAppEvent } from "../../api/events";
 
 const ACTIVITY_BAR_WIDTH = 48;
 
@@ -33,27 +34,51 @@ export function ActivityBar(): React.ReactElement {
       });
     };
     update();
-    return ActivityBarExtensions.onRegistryChange(update);
+    const unsub1 = ActivityBarExtensions.onRegistryChange(update);
+    // Also re-render on panelRegistry changes (badge updates, etc.)
+    const unsub2 = panelRegistry.onRegistryChange(update);
+    return () => { unsub1(); unsub2(); };
   }, []);
 
   const handleIconClick = useCallback(
     (viewId: string) => {
+      const prevViewId = activeViewId;
+      const wasOpen = isOpen;
       toggle(viewId);
+
+      // Emit panel events for scriptable objects
+      emitAppEvent("panel:clicked", { panelId: viewId, placement: "sidebar" });
+
+      if (wasOpen && prevViewId === viewId) {
+        // Toggling off: panel is being hidden
+        emitAppEvent("panel:deactivated", { panelId: viewId, placement: "sidebar" });
+        emitAppEvent("panel:hidden", { panelId: viewId });
+      } else {
+        // Switching or opening
+        if (prevViewId && prevViewId !== viewId && wasOpen) {
+          emitAppEvent("panel:deactivated", { panelId: prevViewId, placement: "sidebar" });
+        }
+        emitAppEvent("panel:activated", { panelId: viewId, placement: "sidebar" });
+        if (!wasOpen) {
+          emitAppEvent("panel:shown", { panelId: viewId });
+        }
+      }
     },
-    [toggle]
+    [toggle, activeViewId, isOpen]
   );
 
   // Panel context menu state
   const [contextMenu, setContextMenu] = useState<{
     position: { x: number; y: number };
     panelId: string;
+    panelTitle: string;
   } | null>(null);
 
   const handleIconContextMenu = useCallback((e: React.MouseEvent, viewId: string) => {
     const panel = panelRegistry.getPanelByDownstreamId(viewId);
     if (!panel || panel.movable === false) return;
     e.preventDefault();
-    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id });
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id, panelTitle: panel.title });
   }, []);
 
   const handlePanelMove = useCallback((placement: PanelPlacement) => {
@@ -71,6 +96,7 @@ export function ActivityBar(): React.ReactElement {
             key={view.id}
             view={view}
             isActive={isOpen && activeViewId === view.id}
+            badge={panelRegistry.getBadge(view.id)}
             onClick={handleIconClick}
             onContextMenu={handleIconContextMenu}
           />
@@ -84,6 +110,7 @@ export function ActivityBar(): React.ReactElement {
             key={view.id}
             view={view}
             isActive={isOpen && activeViewId === view.id}
+            badge={panelRegistry.getBadge(view.id)}
             onClick={handleIconClick}
             onContextMenu={handleIconContextMenu}
           />
@@ -95,6 +122,8 @@ export function ActivityBar(): React.ReactElement {
         <PanelContextMenu
           position={contextMenu.position}
           currentPlacement="sidebar"
+          panelId={contextMenu.panelId}
+          panelTitle={contextMenu.panelTitle}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />
@@ -109,11 +138,13 @@ export function ActivityBar(): React.ReactElement {
 function ActivityBarIcon({
   view,
   isActive,
+  badge,
   onClick,
   onContextMenu,
 }: {
   view: ActivityViewDefinition;
   isActive: boolean;
+  badge?: string;
   onClick: (viewId: string) => void;
   onContextMenu?: (e: React.MouseEvent, viewId: string) => void;
 }): React.ReactElement {
@@ -143,6 +174,13 @@ function ActivityBarIcon({
       }}>
         {view.icon}
       </div>
+
+      {/* Badge */}
+      {badge && (
+        <div style={styles.badge}>
+          {badge}
+        </div>
+      )}
     </button>
   );
 }
@@ -205,6 +243,24 @@ const styles: Record<string, React.CSSProperties> = {
     width: 24,
     height: 24,
     transition: "opacity 0.1s",
+  },
+  badge: {
+    position: "absolute" as const,
+    bottom: 6,
+    right: 6,
+    minWidth: 16,
+    height: 16,
+    padding: "0 4px",
+    borderRadius: 8,
+    backgroundColor: "#0078d4",
+    color: "#fff",
+    fontSize: 9,
+    fontWeight: 600,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 1,
+    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
   },
 };
 

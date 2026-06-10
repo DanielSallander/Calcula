@@ -56,6 +56,7 @@ fn object_type_to_string(t: &ScriptableObjectType) -> String {
         ScriptableObjectType::Textbox => "textbox".to_string(),
         ScriptableObjectType::Timeline => "timeline".to_string(),
         ScriptableObjectType::Shape => "shape".to_string(),
+        ScriptableObjectType::Panel => "panel".to_string(),
     }
 }
 
@@ -73,6 +74,7 @@ fn string_to_object_type(s: &str) -> Result<ScriptableObjectType, String> {
         "textbox" => Ok(ScriptableObjectType::Textbox),
         "timeline" => Ok(ScriptableObjectType::Timeline),
         "shape" => Ok(ScriptableObjectType::Shape),
+        "panel" => Ok(ScriptableObjectType::Panel),
         _ => Err(format!("Invalid object type: {}", s)),
     }
 }

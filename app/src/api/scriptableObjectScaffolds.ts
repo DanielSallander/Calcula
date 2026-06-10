@@ -275,6 +275,62 @@ function setup(timeline) {
 }
 `;
 
+    case "panel":
+      return `// Panel: "${name}"
+// Access level: restricted (unlock full API via access level setting)
+//
+// This script runs when the panel is mounted.
+// Use it to react to tab clicks, activation, placement changes,
+// and to programmatically control the panel.
+
+function setup(panel) {
+  // == Events ==
+  // panel.onClick(({ placement }) => {
+  //   panel.log("Panel clicked, placement:", placement);
+  // });
+
+  // panel.onActivate(({ placement }) => {
+  //   panel.log("Panel activated in", placement);
+  // });
+
+  // panel.onDeactivate(({ placement }) => {
+  //   panel.log("Panel deactivated in", placement);
+  // });
+
+  // panel.onPlacementChange(({ oldPlacement, newPlacement }) => {
+  //   panel.log("Moved from", oldPlacement, "to", newPlacement);
+  // });
+
+  // panel.onShow(() => {
+  //   panel.log("Panel shown");
+  // });
+
+  // panel.onHide(() => {
+  //   panel.log("Panel hidden");
+  // });
+
+  // == Actions ==
+  // panel.open();                         // Open/activate this panel
+  // panel.close();                        // Close/hide this panel
+  // panel.setBadge("3");                  // Show badge on icon (e.g. notification count)
+  // panel.setBadge(null);                 // Clear badge
+  // panel.moveTo("sidebar");              // Move panel to sidebar
+  // panel.moveTo("ribbon");              // Move panel to ribbon
+
+  // == Properties (read-only) ==
+  // const id = panel.properties.panelId;
+  // const title = panel.properties.title;
+  // const placement = panel.properties.placement;  // "ribbon" or "sidebar"
+  // const movable = panel.properties.movable;
+
+  // == Custom Methods ==
+  // panel.expose("refresh", () => {
+  //   panel.log("Panel refresh triggered!");
+  //   panel.notify("Panel refreshed!", "info");
+  // });
+}
+`;
+
     case "shape":
       return `// Shape: "${name}"
 // Access level: restricted (unlock full API via access level setting)
@@ -447,6 +503,40 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
           methods: [
             { name: "style.itemRenderer", signature: "style.itemRenderer(renderer)", description: "Custom item rendering" },
             { name: "style.setProperty", signature: "style.setProperty(name, value)", description: "Set CSS property" },
+          ],
+        },
+      ];
+
+    case "panel":
+      return [
+        common,
+        {
+          category: "Events",
+          methods: [
+            { name: "onClick", signature: "onClick(handler)", description: "Called when the panel tab/icon is clicked" },
+            { name: "onActivate", signature: "onActivate(handler)", description: "Called when the panel becomes active" },
+            { name: "onDeactivate", signature: "onDeactivate(handler)", description: "Called when the panel loses active state" },
+            { name: "onPlacementChange", signature: "onPlacementChange(handler)", description: "Called when moved between ribbon and sidebar" },
+            { name: "onShow", signature: "onShow(handler)", description: "Called when the panel becomes visible" },
+            { name: "onHide", signature: "onHide(handler)", description: "Called when the panel is hidden" },
+          ],
+        },
+        {
+          category: "Actions",
+          methods: [
+            { name: "open", signature: "open()", description: "Open/activate this panel" },
+            { name: "close", signature: "close()", description: "Close/hide this panel" },
+            { name: "setBadge", signature: "setBadge(text)", description: "Set badge text on icon (null to clear)" },
+            { name: "moveTo", signature: "moveTo(placement)", description: "Move to 'ribbon' or 'sidebar'" },
+          ],
+        },
+        {
+          category: "Properties",
+          methods: [
+            { name: "properties.panelId", signature: "properties.panelId", description: "Panel ID" },
+            { name: "properties.title", signature: "properties.title", description: "Panel title" },
+            { name: "properties.placement", signature: "properties.placement", description: "Current placement (ribbon or sidebar)" },
+            { name: "properties.movable", signature: "properties.movable", description: "Whether the panel can be moved" },
           ],
         },
       ];

@@ -30,7 +30,9 @@ export type ScriptableObjectType =
   | "button"
   | "textbox"
   | "timeline"
-  | "shape";
+  | "shape"
+  // UI objects (per-instance scripts, keyed by panel ID)
+  | "panel";
 
 /** Where a script came from — local (user-created) or distributed (from a .calp package). */
 export type ScriptProvenance = "local" | "distributed";
@@ -508,6 +510,67 @@ export interface PivotContext extends BaseObjectContext {
 }
 
 // ============================================================================
+// Panel Context (ribbon tabs & sidebar views)
+// ============================================================================
+
+/** Context for Panel instances (ribbon tabs and sidebar views). */
+export interface PanelContext extends BaseObjectContext {
+  readonly objectType: "panel";
+
+  /** The panel ID (matches the PanelDefinition.id used during registration). */
+  readonly instanceId: string;
+
+  /** The panel title. */
+  readonly title: string;
+
+  /** Called when the panel tab/icon is clicked by the user. */
+  onClick(handler: EventHandler<{ placement: string }>): CleanupFn;
+
+  /** Called when the panel becomes the active tab or view. */
+  onActivate(handler: EventHandler<{ placement: string }>): CleanupFn;
+
+  /** Called when the panel loses active state (another tab/view selected). */
+  onDeactivate(handler: EventHandler<{ placement: string }>): CleanupFn;
+
+  /** Called when the panel is moved between ribbon and sidebar. */
+  onPlacementChange(handler: EventHandler<{ oldPlacement: string; newPlacement: string }>): CleanupFn;
+
+  /** Called when the panel becomes visible (opened/expanded). */
+  onShow(handler: EventHandler): CleanupFn;
+
+  /** Called when the panel is hidden (closed/collapsed). */
+  onHide(handler: EventHandler): CleanupFn;
+
+  // -- Actions --
+
+  /** Open (activate) this panel programmatically. */
+  open(): void;
+
+  /** Close (hide) this panel. For sidebar panels, collapses the side panel. */
+  close(): void;
+
+  /**
+   * Set a badge on the panel's tab/icon (e.g., notification count).
+   * Pass null or empty string to clear the badge.
+   */
+  setBadge(text: string | null): void;
+
+  /**
+   * Move this panel to a different location.
+   * @param placement "ribbon" or "sidebar"
+   */
+  moveTo(placement: "ribbon" | "sidebar"): void;
+
+  /** Panel properties (read-only). */
+  readonly properties: {
+    readonly panelId: string;
+    readonly title: string;
+    readonly placement: string;
+    readonly movable: boolean;
+  };
+}
+
+// ============================================================================
 // Shape Context
 // ============================================================================
 
@@ -596,6 +659,7 @@ export interface ObjectContextMap {
   textbox: BaseObjectContext;
   timeline: BaseObjectContext;
   shape: ShapeContext;
+  panel: PanelContext;
 }
 
 // ============================================================================
@@ -990,6 +1054,8 @@ function buildObjectContext(
       return buildPivotContext(base, definition, cleanupFns);
     case "shape":
       return buildShapeContext(base, definition, cleanupFns);
+    case "panel":
+      return buildPanelContext(base, definition, cleanupFns);
     default:
       return base;
   }
@@ -1641,6 +1707,125 @@ function buildShapeContext(
       declareProperties(props: DeclaredProperty[]): void {
         emitAppEvent("shape:declareProperties", { instanceId, props });
       },
+    },
+  };
+}
+
+// ---- Panel Context ----
+
+function buildPanelContext(
+  base: BaseObjectContext,
+  definition: ObjectScriptDefinition,
+  cleanupFns: CleanupFn[],
+): PanelContext {
+  const instanceId = definition.instanceId || "";
+
+  // Cache placement info, updated via events
+  let cachedPlacement = "unknown";
+  let cachedMovable = true;
+
+  // Listen for placement metadata broadcast (emitted by shell on registration and change)
+  const placementUnsub = onAppEvent("panel:metadata", (detail) => {
+    const d = detail as { panelId: string; placement: string; movable: boolean };
+    if (d.panelId === instanceId) {
+      cachedPlacement = d.placement;
+      cachedMovable = d.movable;
+    }
+  });
+  cleanupFns.push(placementUnsub);
+
+  // Also update on placement change events
+  const changeUnsub = onAppEvent("panel:placementChanged", (detail) => {
+    const d = detail as { panelId: string; newPlacement: string };
+    if (d.panelId === instanceId) {
+      cachedPlacement = d.newPlacement;
+    }
+  });
+  cleanupFns.push(changeUnsub);
+
+  return {
+    ...base,
+    objectType: "panel" as const,
+    instanceId,
+    title: definition.name,
+
+    onClick(handler) {
+      return tracked(cleanupFns, onAppEvent("panel:clicked", (detail) => {
+        const d = detail as { panelId: string; placement: string };
+        if (d.panelId === instanceId) {
+          handler({ placement: d.placement });
+        }
+      }));
+    },
+
+    onActivate(handler) {
+      return tracked(cleanupFns, onAppEvent("panel:activated", (detail) => {
+        const d = detail as { panelId: string; placement: string };
+        if (d.panelId === instanceId) {
+          handler({ placement: d.placement });
+        }
+      }));
+    },
+
+    onDeactivate(handler) {
+      return tracked(cleanupFns, onAppEvent("panel:deactivated", (detail) => {
+        const d = detail as { panelId: string; placement: string };
+        if (d.panelId === instanceId) {
+          handler({ placement: d.placement });
+        }
+      }));
+    },
+
+    onPlacementChange(handler) {
+      return tracked(cleanupFns, onAppEvent("panel:placementChanged", (detail) => {
+        const d = detail as { panelId: string; oldPlacement: string; newPlacement: string };
+        if (d.panelId === instanceId) {
+          handler({ oldPlacement: d.oldPlacement, newPlacement: d.newPlacement });
+        }
+      }));
+    },
+
+    onShow(handler) {
+      return tracked(cleanupFns, onAppEvent("panel:shown", (detail) => {
+        const d = detail as { panelId: string };
+        if (d.panelId === instanceId) {
+          handler();
+        }
+      }));
+    },
+
+    onHide(handler) {
+      return tracked(cleanupFns, onAppEvent("panel:hidden", (detail) => {
+        const d = detail as { panelId: string };
+        if (d.panelId === instanceId) {
+          handler();
+        }
+      }));
+    },
+
+    // -- Actions --
+
+    open() {
+      emitAppEvent("panel:open", { panelId: instanceId });
+    },
+
+    close() {
+      emitAppEvent("panel:close", { panelId: instanceId });
+    },
+
+    setBadge(text: string | null) {
+      emitAppEvent("panel:setBadge", { panelId: instanceId, text: text || "" });
+    },
+
+    moveTo(placement: "ribbon" | "sidebar") {
+      emitAppEvent("panel:moveTo", { panelId: instanceId, placement });
+    },
+
+    properties: {
+      get panelId() { return instanceId; },
+      get title() { return definition.name; },
+      get placement() { return cachedPlacement; },
+      get movable() { return cachedMovable; },
     },
   };
 }

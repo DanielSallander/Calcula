@@ -87,6 +87,7 @@ export function SidePanel(): React.ReactElement | null {
   const [contextMenu, setContextMenu] = useState<{
     position: { x: number; y: number };
     panelId: string;
+    panelTitle: string;
   } | null>(null);
 
   const handleHeaderContextMenu = useCallback((e: React.MouseEvent) => {
@@ -94,7 +95,7 @@ export function SidePanel(): React.ReactElement | null {
     const panel = panelRegistry.getPanelByDownstreamId(activeViewId);
     if (!panel || panel.movable === false) return;
     e.preventDefault();
-    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id });
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id, panelTitle: panel.title });
   }, [activeViewId]);
 
   const handlePanelMove = useCallback((placement: PanelPlacement) => {
@@ -142,6 +143,8 @@ export function SidePanel(): React.ReactElement | null {
         <PanelContextMenu
           position={contextMenu.position}
           currentPlacement="sidebar"
+          panelId={contextMenu.panelId}
+          panelTitle={contextMenu.panelTitle}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />
