@@ -19,6 +19,8 @@ export interface ActivityBarState {
   minWidth: number;
   /** Maximum width constraint */
   maxWidth: number;
+  /** Additional data passed when opening a view */
+  viewData: Record<string, unknown> | undefined;
 }
 
 /**
@@ -37,8 +39,8 @@ export interface ActivityBarActions {
   reset: () => void;
 }
 
-const DEFAULT_WIDTH = 280;
-const MIN_WIDTH = 200;
+const DEFAULT_WIDTH = 200;
+const MIN_WIDTH = 140;
 const MAX_WIDTH = 480;
 
 const initialState: ActivityBarState = {
@@ -47,6 +49,7 @@ const initialState: ActivityBarState = {
   width: DEFAULT_WIDTH,
   minWidth: MIN_WIDTH,
   maxWidth: MAX_WIDTH,
+  viewData: undefined,
 };
 
 /**
@@ -58,10 +61,11 @@ export const useActivityBarStore = create<ActivityBarState & ActivityBarActions>
     (set, get) => ({
       ...initialState,
 
-      openView: (viewId: string) => {
+      openView: (viewId: string, data?: Record<string, unknown>) => {
         set({
           isOpen: true,
           activeViewId: viewId,
+          viewData: data,
         });
       },
 

@@ -6,6 +6,9 @@ import React, { useCallback, useEffect, useState } from "react";
 import { useActivityBarStore } from "./useActivityBarStore";
 import { ActivityBarExtensions } from "../registries/activityBarExtensions";
 import type { ActivityViewDefinition } from "../../api/uiTypes";
+import type { PanelPlacement } from "../../api/uiTypes";
+import { panelRegistry } from "../registries/panelRegistry";
+import { PanelContextMenu } from "../Ribbon/PanelContextMenu";
 
 const ACTIVITY_BAR_WIDTH = 48;
 
@@ -40,6 +43,25 @@ export function ActivityBar(): React.ReactElement {
     [toggle]
   );
 
+  // Panel context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    position: { x: number; y: number };
+    panelId: string;
+  } | null>(null);
+
+  const handleIconContextMenu = useCallback((e: React.MouseEvent, viewId: string) => {
+    const panel = panelRegistry.getPanelByDownstreamId(viewId);
+    if (!panel || panel.movable === false) return;
+    e.preventDefault();
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id });
+  }, []);
+
+  const handlePanelMove = useCallback((placement: PanelPlacement) => {
+    if (contextMenu) {
+      panelRegistry.setPlacement(contextMenu.panelId, placement);
+    }
+  }, [contextMenu]);
+
   return (
     <div style={styles.container}>
       {/* Top section */}
@@ -50,6 +72,7 @@ export function ActivityBar(): React.ReactElement {
             view={view}
             isActive={isOpen && activeViewId === view.id}
             onClick={handleIconClick}
+            onContextMenu={handleIconContextMenu}
           />
         ))}
       </div>
@@ -62,9 +85,20 @@ export function ActivityBar(): React.ReactElement {
             view={view}
             isActive={isOpen && activeViewId === view.id}
             onClick={handleIconClick}
+            onContextMenu={handleIconContextMenu}
           />
         ))}
       </div>
+
+      {/* Panel context menu */}
+      {contextMenu && (
+        <PanelContextMenu
+          position={contextMenu.position}
+          currentPlacement="sidebar"
+          onMove={handlePanelMove}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -76,10 +110,12 @@ function ActivityBarIcon({
   view,
   isActive,
   onClick,
+  onContextMenu,
 }: {
   view: ActivityViewDefinition;
   isActive: boolean;
   onClick: (viewId: string) => void;
+  onContextMenu?: (e: React.MouseEvent, viewId: string) => void;
 }): React.ReactElement {
   const [isHovered, setIsHovered] = useState(false);
 
@@ -91,6 +127,7 @@ function ActivityBarIcon({
         ...(isHovered && !isActive ? styles.iconButtonHover : {}),
       }}
       onClick={() => onClick(view.id)}
+      onContextMenu={(e) => onContextMenu?.(e, view.id)}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       title={view.title}

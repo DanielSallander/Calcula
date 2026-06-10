@@ -1,12 +1,16 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/index.ts
 // PURPOSE: Home tab extension - always-visible ribbon tab with quick-access formatting.
-// CONTEXT: Replaces the empty ribbon placeholder with a customizable Home tab.
+// CONTEXT: Registers each formatting group (Clipboard, Font, Alignment, etc.) as a
+// separate ribbon group. This enables the sections-based panel system to transpose
+// groups between horizontal ribbon layout and vertical sidebar layout.
 
+import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ExtensionRegistry } from "@api/extensions";
 import { DialogExtensions } from "@api/ui";
-import { HomeTabComponent } from "./components/HomeTabComponent";
+import { HomeTabGroupComponent } from "./components/HomeTabGroupComponent";
 import { HomeTabCustomizeDialog } from "./components/HomeTabCustomizeDialog";
+import { loadLayout } from "./homeTabConfig";
 
 // ============================================================================
 // Constants
@@ -22,6 +26,30 @@ const HOME_CUSTOMIZE_DIALOG_ID = "home-tab-customize";
 let isActivated = false;
 
 // ============================================================================
+// Group Definitions
+// ============================================================================
+
+/** Icons for collapsed ribbon group buttons */
+const GROUP_ICONS: Record<string, string> = {
+  clipboard: "\u2702",
+  font: "A",
+  alignment: "\u2261",
+  number: "#",
+  styles: "\u2728",
+  editing: "\u270E",
+};
+
+/** Collapse priority per group (lower = collapses first) */
+const GROUP_ORDER: Record<string, number> = {
+  clipboard: 10,
+  font: 20,
+  alignment: 30,
+  number: 40,
+  styles: 50,
+  editing: 60,
+};
+
+// ============================================================================
 // Activation
 // ============================================================================
 
@@ -33,13 +61,28 @@ function activate(_context: ExtensionContext): void {
 
   console.log("[HomeTabExtension] Activating...");
 
-  // Register the Home ribbon tab - always visible, lowest order
+  // Register the Home ribbon tab (empty — groups are registered separately)
   ExtensionRegistry.registerRibbonTab({
     id: HOME_TAB_ID,
     label: "Home",
     order: 10,
-    component: HomeTabComponent,
+    // Placeholder component — groups render the actual content
+    component: () => null,
   });
+
+  // Register each group from the layout config
+  const layout = loadLayout();
+  for (const group of layout.groups) {
+    const itemIds = group.items;
+    ExtensionRegistry.registerRibbonGroup({
+      id: `home.${group.id}`,
+      tabId: HOME_TAB_ID,
+      label: group.label,
+      order: GROUP_ORDER[group.id] ?? 99,
+      component: ({ context }) =>
+        React.createElement(HomeTabGroupComponent, { context, itemIds }),
+    });
+  }
 
   // Register the customization dialog
   DialogExtensions.registerDialog({

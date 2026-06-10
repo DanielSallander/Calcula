@@ -6,13 +6,16 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useActivityBarStore } from "./useActivityBarStore";
 import { ActivityBarExtensions } from "../registries/activityBarExtensions";
 import type { ActivityViewDefinition } from "../../api/uiTypes";
+import type { PanelPlacement } from "../../api/uiTypes";
+import { panelRegistry } from "../registries/panelRegistry";
+import { PanelContextMenu } from "../Ribbon/PanelContextMenu";
 
 /**
  * Side Panel - the expandable content area next to the Activity Bar.
  * Renders the currently active activity view's component.
  */
 export function SidePanel(): React.ReactElement | null {
-  const { isOpen, activeViewId, width, setWidth, close } = useActivityBarStore();
+  const { isOpen, activeViewId, width, setWidth, close, viewData } = useActivityBarStore();
   const [activeView, setActiveView] = useState<ActivityViewDefinition | undefined>();
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef(0);
@@ -80,6 +83,26 @@ export function SidePanel(): React.ReactElement | null {
     }
   }, [isResizing]);
 
+  // Panel context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    position: { x: number; y: number };
+    panelId: string;
+  } | null>(null);
+
+  const handleHeaderContextMenu = useCallback((e: React.MouseEvent) => {
+    if (!activeViewId) return;
+    const panel = panelRegistry.getPanelByDownstreamId(activeViewId);
+    if (!panel || panel.movable === false) return;
+    e.preventDefault();
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id });
+  }, [activeViewId]);
+
+  const handlePanelMove = useCallback((placement: PanelPlacement) => {
+    if (contextMenu) {
+      panelRegistry.setPlacement(contextMenu.panelId, placement);
+    }
+  }, [contextMenu]);
+
   if (!isOpen || !activeView) {
     return null;
   }
@@ -89,7 +112,7 @@ export function SidePanel(): React.ReactElement | null {
   return (
     <div style={{ ...styles.container, width }}>
       {/* Header */}
-      <div style={styles.header}>
+      <div style={styles.header} onContextMenu={handleHeaderContextMenu}>
         <span style={styles.title}>{activeView.title}</span>
         <button
           style={styles.closeButton}
@@ -105,7 +128,7 @@ export function SidePanel(): React.ReactElement | null {
 
       {/* Content */}
       <div style={styles.content}>
-        <ViewComponent onClose={close} />
+        <ViewComponent onClose={close} data={viewData} />
       </div>
 
       {/* Resize handle on right edge */}
@@ -113,6 +136,16 @@ export function SidePanel(): React.ReactElement | null {
         style={styles.resizeHandle}
         onMouseDown={handleResizeStart}
       />
+
+      {/* Panel context menu */}
+      {contextMenu && (
+        <PanelContextMenu
+          position={contextMenu.position}
+          currentPlacement="sidebar"
+          onMove={handlePanelMove}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }

@@ -255,3 +255,75 @@ export interface ActivityViewDefinition {
    *  It can still be opened programmatically (e.g., from a menu item). */
   hidden?: boolean;
 }
+
+// ============================================================================
+// Panel Types (Location-Agnostic Extension Panels)
+// ============================================================================
+
+/**
+ * Allowed placement locations for a panel.
+ * - "sidebar": Left activity bar + side panel (vertical layout)
+ * - "ribbon": Top ribbon tab area (horizontal layout, 92px tall)
+ */
+export type PanelPlacement = "sidebar" | "ribbon";
+
+/**
+ * Props passed to panel section components.
+ * Each section receives its current placement so it can adapt its layout.
+ */
+export interface PanelSectionProps {
+  /** Current placement — "ribbon" means horizontal 92px, "sidebar" means vertical full-height */
+  placement: PanelPlacement;
+}
+
+/**
+ * A named section within a panel.
+ * Sections are the universal building block: the Shell renders them
+ * horizontally in the ribbon or vertically (collapsible) in the sidebar.
+ */
+export interface PanelSection {
+  /** Unique section identifier within the panel */
+  id: string;
+  /** Display label (shown as group label in ribbon, collapsible header in sidebar) */
+  label: string;
+  /** Optional icon for the section */
+  icon?: React.ReactNode;
+  /** The component to render as section content */
+  component: React.ComponentType<PanelSectionProps>;
+}
+
+/**
+ * Unified panel definition that extensions register once.
+ * The Shell decides where to render it based on user preference.
+ * Users can move panels between sidebar and ribbon via right-click context menu.
+ *
+ * Content is declared as **sections** — the Shell transposes them between
+ * horizontal layout (ribbon) and vertical layout (sidebar) automatically.
+ */
+export interface PanelDefinition {
+  /** Unique panel identifier */
+  id: string;
+  /** Display title */
+  title: string;
+  /** Icon (React element) for activity bar icons and ribbon tabs */
+  icon: React.ReactNode;
+  /** Sections that compose this panel's content.
+   *  The Shell renders them horizontally (ribbon) or vertically (sidebar).
+   *  A panel with a single section renders the content directly without
+   *  group labels or collapsible headers. */
+  sections: PanelSection[];
+  /** Where this panel appears by default before any user customization */
+  defaultPlacement: PanelPlacement;
+  /** Sort priority (higher = more prominent). Default: 0 */
+  priority?: number;
+  /** Whether the user can close this panel. Default: true */
+  closable?: boolean;
+  /** Whether the user can move this panel between locations. Default: true */
+  movable?: boolean;
+  /** Ribbon-specific: accent color for contextual tabs (e.g., "#217346") */
+  ribbonColor?: string;
+  /** Ribbon-specific: sort order when displayed as a ribbon tab (lower = first) */
+  ribbonOrder?: number;
+  /** Sidebar-specific: show in bottom section (like VS Code settings gear) */
+  sidebarBottom?: boolean;
+}

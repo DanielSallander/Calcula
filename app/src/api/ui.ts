@@ -15,6 +15,9 @@ import type {
   TaskPaneContextKey,
   StatusBarItemDefinition,
   ActivityViewDefinition,
+  PanelDefinition,
+  PanelPlacement,
+  PanelSection,
 } from "./uiTypes";
 
 // Re-export types from the canonical contract layer (api/uiTypes.ts)
@@ -34,6 +37,10 @@ export type {
   StatusBarAlignment,
   ActivityViewDefinition,
   ActivityViewProps,
+  PanelDefinition,
+  PanelPlacement,
+  PanelSection,
+  PanelSectionProps,
 } from "./uiTypes";
 
 // ============================================================================
@@ -666,4 +673,103 @@ export function isActivityBarOpen(): boolean {
 
 export function getActiveActivityViewId(): string | null {
   return activityBarService?.getActiveViewId() ?? null;
+}
+
+// ============================================================================
+// Panel Service (Location-Agnostic Extension Panels)
+// ============================================================================
+
+export interface PanelService {
+  registerPanel(definition: PanelDefinition): void;
+  unregisterPanel(panelId: string): void;
+  getPanel(panelId: string): PanelDefinition | undefined;
+  getAllPanels(): PanelDefinition[];
+  openPanel(panelId: string, data?: Record<string, unknown>): void;
+  closePanel(panelId: string): void;
+  getPlacement(panelId: string): PanelPlacement;
+  setPlacement(panelId: string, placement: PanelPlacement): void;
+  onRegistryChange(listener: () => void): () => void;
+}
+
+let panelService: PanelService | undefined;
+
+/**
+ * Register the Panel service implementation (called by Shell at startup).
+ */
+export function registerPanelService(service: PanelService): void {
+  panelService = service;
+}
+
+// ============================================================================
+// PanelExtensions Facade
+// ============================================================================
+
+export const PanelExtensions = {
+  registerPanel(definition: PanelDefinition): void {
+    if (!panelService) {
+      console.warn("[API] PanelService not registered. Call registerPanelService first.");
+      return;
+    }
+    panelService.registerPanel(definition);
+  },
+
+  unregisterPanel(panelId: string): void {
+    panelService?.unregisterPanel(panelId);
+  },
+
+  getPanel(panelId: string): PanelDefinition | undefined {
+    return panelService?.getPanel(panelId);
+  },
+
+  getAllPanels(): PanelDefinition[] {
+    return panelService?.getAllPanels() ?? [];
+  },
+
+  openPanel(panelId: string, data?: Record<string, unknown>): void {
+    panelService?.openPanel(panelId, data);
+  },
+
+  closePanel(panelId: string): void {
+    panelService?.closePanel(panelId);
+  },
+
+  getPlacement(panelId: string): PanelPlacement {
+    return panelService?.getPlacement(panelId) ?? "sidebar";
+  },
+
+  setPlacement(panelId: string, placement: PanelPlacement): void {
+    panelService?.setPlacement(panelId, placement);
+  },
+
+  onRegistryChange(listener: () => void): () => void {
+    return panelService?.onRegistryChange(listener) ?? (() => {});
+  },
+};
+
+// ============================================================================
+// Panel Function API (convenience wrappers)
+// ============================================================================
+
+export function registerPanel(definition: PanelDefinition): void {
+  PanelExtensions.registerPanel(definition);
+}
+
+export function unregisterPanel(panelId: string): void {
+  PanelExtensions.unregisterPanel(panelId);
+}
+
+export function openPanel(panelId: string, data?: Record<string, unknown>): void {
+  PanelExtensions.openPanel(panelId, data);
+}
+
+export function closePanel(panelId: string): void {
+  PanelExtensions.closePanel(panelId);
+}
+
+export function getPanelPlacement(panelId: string): PanelPlacement {
+  return PanelExtensions.getPlacement(panelId);
+}
+
+export function setPanelPlacement(panelId: string, placement: PanelPlacement): void {
+  PanelExtensions.setPlacement(panelId, placement);
 }

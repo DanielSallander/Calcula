@@ -45,6 +45,12 @@ import {
   openActivityView,
   closeActivityView,
   toggleActivityView,
+  registerPanel,
+  unregisterPanel,
+  openPanel,
+  closePanel,
+  getPanelPlacement,
+  setPanelPlacement,
 } from "../../api/ui";
 import { emitAppEvent, onAppEvent } from "../../api/events";
 import { showToast } from "../../api/notifications";
@@ -192,6 +198,14 @@ function buildContext(): ExtensionContext {
         open: openActivityView,
         close: closeActivityView,
         toggle: toggleActivityView,
+      },
+      panels: {
+        register: registerPanel,
+        unregister: unregisterPanel,
+        open: openPanel,
+        close: closePanel,
+        getPlacement: getPanelPlacement,
+        setPlacement: setPanelPlacement,
       },
       notifications: {
         showToast,

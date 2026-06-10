@@ -4,11 +4,14 @@
 // NOTE: This is the Inversion of Control wiring - Shell owns implementations,
 //       API defines contracts, this file connects them.
 
+import React from "react";
+
 import {
   registerTaskPaneService,
   registerDialogService,
   registerOverlayService,
   registerActivityBarService,
+  registerPanelService,
   registerTaskPaneHooks,
   registerActivityBarHooks,
   type TaskPaneService,
@@ -54,6 +57,58 @@ import {
 } from "./registries/sheetExtensions";
 import { ActivityBarExtensions as ActivityBarExtensionsImpl } from "./registries/activityBarExtensions";
 import { useActivityBarStore } from "./ActivityBar/useActivityBarStore";
+import { panelRegistry, initPanelRegistry } from "./registries/panelRegistry";
+import type { PanelSection, PanelSectionProps } from "../api/uiTypes";
+import type { RibbonGroupDefinition, RibbonTabDefinition as ShellRibbonTabDef } from "./registries/types";
+import { useGridState } from "../api/state";
+
+/**
+ * Wraps a RibbonGroupDefinition component (expects RibbonContext) into a
+ * PanelSection component (expects PanelSectionProps). The wrapper provides
+ * the RibbonContext from the grid state hook.
+ */
+function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): PanelSection {
+  const GroupComponent = group.component;
+  const SectionAdapter: React.ComponentType<PanelSectionProps> = () => {
+    const state = useGridState();
+    const context = {
+      selection: state.selection,
+      isDisabled: state.editing !== null,
+      executeCommand: async () => {},
+      refreshCells: async () => {},
+    };
+    return React.createElement(GroupComponent, { context });
+  };
+  SectionAdapter.displayName = `SectionAdapter(${group.id})`;
+  return {
+    id: group.id,
+    label: group.label,
+    component: SectionAdapter,
+  };
+}
+
+/**
+ * Wraps an entire ribbon tab component as a single PanelSection.
+ */
+function wrapRibbonTabAsSection(tab: { id: string; label: string; component: React.ComponentType<any> }): PanelSection {
+  const TabComponent = tab.component;
+  const SectionAdapter: React.ComponentType<PanelSectionProps> = () => {
+    const state = useGridState();
+    const context = {
+      selection: state.selection,
+      isDisabled: state.editing !== null,
+      executeCommand: async () => {},
+      refreshCells: async () => {},
+    };
+    return React.createElement(TabComponent, { context });
+  };
+  SectionAdapter.displayName = `TabSection(${tab.id})`;
+  return {
+    id: tab.id + ".main",
+    label: tab.label,
+    component: SectionAdapter,
+  };
+}
 
 let isBootstrapped = false;
 
@@ -138,13 +193,57 @@ export function bootstrapShell(): void {
   };
   registerOverlayService(overlayService);
 
-  // ActivityBar Service - wraps the Zustand store and ActivityBarExtensions registry
+  // ActivityBar Service - routes registerView through PanelRegistry
   const activityBarService: ActivityBarService = {
-    registerView: (definition) => ActivityBarExtensionsImpl.registerView(definition),
-    unregisterView: (viewId) => ActivityBarExtensionsImpl.unregisterView(viewId),
+    registerView: (definition) => {
+      // Wrap the view component as a single section
+      const ViewComponent = definition.component;
+      panelRegistry.registerPanel({
+        id: definition.id,
+        title: definition.title,
+        icon: definition.icon,
+        sections: [{
+          id: definition.id + ".main",
+          label: definition.title,
+          component: ({ placement }) => {
+            if (placement === "ribbon") {
+              // Sidebar panels in ribbon: force horizontal flow with CSS overrides
+              return React.createElement("div", {
+                className: "sidebar-panel-in-ribbon",
+                style: { height: "100%", overflow: "hidden" },
+              },
+                React.createElement("style", null, `
+                  .sidebar-panel-in-ribbon > div {
+                    flex-direction: row !important;
+                    height: 100% !important;
+                    overflow-x: auto !important;
+                    overflow-y: hidden !important;
+                    padding: 4px 8px !important;
+                    gap: 16px !important;
+                    flex-wrap: nowrap !important;
+                    align-items: flex-start !important;
+                  }
+                  .sidebar-panel-in-ribbon > div > div {
+                    flex-shrink: 0 !important;
+                    min-width: fit-content !important;
+                  }
+                `),
+                React.createElement(ViewComponent, { onClose: undefined, data: undefined, placement }),
+              );
+            }
+            return React.createElement(ViewComponent, { onClose: undefined, data: undefined, placement });
+          },
+        }],
+        defaultPlacement: "sidebar",
+        priority: definition.priority,
+        sidebarBottom: definition.bottom,
+        movable: true,
+      });
+    },
+    unregisterView: (viewId) => panelRegistry.unregisterPanel(viewId),
     getView: (viewId) => ActivityBarExtensionsImpl.getView(viewId),
     getAllViews: () => ActivityBarExtensionsImpl.getAllViews(),
-    openView: (viewId, data) => useActivityBarStore.getState().openView(viewId, data),
+    openView: (viewId, data) => panelRegistry.openPanel(viewId, data),
     closeView: () => useActivityBarStore.getState().close(),
     toggle: (viewId) => useActivityBarStore.getState().toggle(viewId),
     isOpen: () => useActivityBarStore.getState().isOpen,
@@ -160,19 +259,104 @@ export function bootstrapShell(): void {
   });
 
   // =========================================================================
+  // Initialize Panel Registry (must be before extension services that route through it)
+  // =========================================================================
+
+  // Inject downstream dependencies so PanelRegistry can project into renderers
+  // without circular imports.
+  initPanelRegistry({
+    activityBar: {
+      registerView: (def) => ActivityBarExtensionsImpl.registerView(def),
+      unregisterView: (id) => ActivityBarExtensionsImpl.unregisterView(id),
+    },
+    extensionRegistry: {
+      registerRibbonTab: (tab) => ExtensionRegistryImpl.registerRibbonTab(tab),
+      unregisterRibbonTab: (tabId) => ExtensionRegistryImpl.unregisterRibbonTab(tabId),
+    },
+    getActivityBarStore: () => useActivityBarStore.getState(),
+  });
+
+  // Panel Service - location-agnostic panel system
+  registerPanelService(panelRegistry);
+
+  // =========================================================================
   // Register Extension Services
   // =========================================================================
 
-  // Extension Registry Service
+  // Extension Registry Service - ribbon tab/group registration routes through PanelRegistry
   const extensionRegistryService: ExtensionRegistryService = {
-    registerAddIn: (manifest) => ExtensionRegistryImpl.registerAddIn(manifest),
-    unregisterAddIn: (addinId) => ExtensionRegistryImpl.unregisterAddIn(addinId),
+    registerAddIn: (manifest) => {
+      // Store manifest for bookkeeping (dependency checks, getRegisteredAddIns)
+      // and register commands. We bypass its ribbon tab/group registration since
+      // we route those through PanelRegistry as sections.
+      ExtensionRegistryImpl.registerAddIn(manifest);
+
+      // Route ribbon tabs through PanelRegistry with sections
+      if (manifest.ribbonTabs) {
+        for (const tab of manifest.ribbonTabs) {
+          const tabGroups = (manifest.ribbonGroups ?? [])
+            .filter((g) => g.tabId === tab.id)
+            .sort((a, b) => a.order - b.order);
+
+          // Convert each group to a section, or wrap entire tab as single section
+          const sections: PanelSection[] = tabGroups.length > 0
+            ? tabGroups.map(wrapRibbonGroupAsSection)
+            : [wrapRibbonTabAsSection(tab)];
+
+          panelRegistry.registerPanel({
+            id: tab.id,
+            title: tab.label,
+            icon: null as any,
+            sections,
+            defaultPlacement: "ribbon",
+            ribbonOrder: tab.order,
+            ribbonColor: tab.color,
+            priority: 1000 - tab.order,
+          });
+        }
+      }
+    },
+    unregisterAddIn: (addinId) => {
+      const manifest = ExtensionRegistryImpl.getRegisteredAddIns().find((m) => m.id === addinId);
+      if (manifest) {
+        manifest.ribbonTabs?.forEach((tab) => panelRegistry.unregisterPanel(tab.id));
+      }
+      ExtensionRegistryImpl.unregisterAddIn(addinId);
+    },
     registerCommand: (command) => ExtensionRegistryImpl.registerCommand(command),
     getCommand: (commandId) => ExtensionRegistryImpl.getCommand(commandId),
     getAllCommands: () => ExtensionRegistryImpl.getAllCommands(),
-    registerRibbonTab: (tab) => ExtensionRegistryImpl.registerRibbonTab(tab),
-    unregisterRibbonTab: (tabId) => ExtensionRegistryImpl.unregisterRibbonTab(tabId),
-    registerRibbonGroup: (group) => ExtensionRegistryImpl.registerRibbonGroup(group),
+    registerRibbonTab: (tab) => {
+      // Wrap entire tab component as a single section
+      panelRegistry.registerPanel({
+        id: tab.id,
+        title: tab.label,
+        icon: null as any,
+        sections: [wrapRibbonTabAsSection(tab)],
+        defaultPlacement: "ribbon",
+        ribbonOrder: tab.order,
+        ribbonColor: tab.color,
+        priority: 1000 - tab.order,
+      });
+    },
+    unregisterRibbonTab: (tabId) => panelRegistry.unregisterPanel(tabId),
+    registerRibbonGroup: (group) => {
+      // Groups registered after their tab — add as a new section to the existing panel
+      const panel = panelRegistry.getPanel(group.tabId);
+      if (panel) {
+        const newSection = wrapRibbonGroupAsSection(group);
+        // If panel currently has a single "main" section (wrapped tab), replace it
+        // since individual groups are being registered and should take precedence
+        const sections = panel.sections.length === 1 && panel.sections[0].id.endsWith(".main")
+          ? [newSection]
+          : [...panel.sections.filter((s) => s.id !== newSection.id), newSection];
+        panelRegistry.registerPanel({ ...panel, sections });
+      } else {
+        // Tab not registered yet — register directly into ExtensionRegistryImpl
+        // (it will be picked up when the tab is registered)
+        ExtensionRegistryImpl.registerRibbonGroup(group);
+      }
+    },
     getRibbonTabs: () => ExtensionRegistryImpl.getRibbonTabs(),
     getRibbonGroupsForTab: (tabId) => ExtensionRegistryImpl.getRibbonGroupsForTab(tabId),
     notifySelectionChange: (selection) => ExtensionRegistryImpl.notifySelectionChange(selection),

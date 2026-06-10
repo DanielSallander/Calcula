@@ -61,5 +61,6 @@ export type {
   AnchorRect,
   PanelDefinition,
   PanelPlacement,
-  PanelViewProps,
+  PanelSection,
+  PanelSectionProps,
 } from "../../api/uiTypes";

@@ -8,6 +8,9 @@ import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
 import { onAppEvent, AppEvents } from "../../api/events";
+import { panelRegistry } from "../registries/panelRegistry";
+import { PanelContextMenu } from "./PanelContextMenu";
+import type { PanelPlacement } from "../../api/uiTypes";
 
 export function RibbonContainer(): React.ReactElement {
   const state = useGridState();
@@ -113,6 +116,25 @@ export function RibbonContainer(): React.ReactElement {
     },
   };
 
+  // Panel context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    position: { x: number; y: number };
+    panelId: string;
+  } | null>(null);
+
+  const handleTabContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
+    const panel = panelRegistry.getPanelByDownstreamId(tabId);
+    if (!panel || panel.movable === false) return;
+    e.preventDefault();
+    setContextMenu({ position: { x: e.clientX, y: e.clientY }, panelId: panel.id });
+  }, []);
+
+  const handlePanelMove = useCallback((placement: PanelPlacement) => {
+    if (contextMenu) {
+      panelRegistry.setPlacement(contextMenu.panelId, placement);
+    }
+  }, [contextMenu]);
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const groups = activeTabId
     ? ExtensionRegistry.getRibbonGroupsForTab(activeTabId)
@@ -146,6 +168,7 @@ export function RibbonContainer(): React.ReactElement {
             <button
               key={tab.id}
               onClick={() => handleTabClick(tab.id)}
+              onContextMenu={(e) => handleTabContextMenu(e, tab.id)}
               style={{
                 padding: "6px 16px",
                 border: "none",
@@ -249,6 +272,16 @@ export function RibbonContainer(): React.ReactElement {
           </div>
         )}
       </div>
+
+      {/* Panel context menu */}
+      {contextMenu && (
+        <PanelContextMenu
+          position={contextMenu.position}
+          currentPlacement="ribbon"
+          onMove={handlePanelMove}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }
