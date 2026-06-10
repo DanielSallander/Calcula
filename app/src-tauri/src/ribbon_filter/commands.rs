@@ -6,7 +6,6 @@ use crate::pivot::PivotState;
 use crate::ribbon_filter::types::*;
 use crate::slicer::types::{SlicerItem, SlicerSourceType};
 use crate::{format_cell_value, AppState};
-use pivot_engine::PivotId;
 use std::collections::HashMap;
 use tauri::State;
 
@@ -19,6 +18,7 @@ use crate::log_debug;
 /// Create a new ribbon filter.
 #[tauri::command]
 pub fn create_ribbon_filter(
+    state: State<AppState>,
     ribbon_filter_state: State<RibbonFilterState>,
     params: CreateRibbonFilterParams,
 ) -> Result<RibbonFilter, String> {
@@ -61,23 +61,49 @@ pub fn create_ribbon_filter(
     let result = filter.clone();
     ribbon_filter_state.filters.lock().unwrap().insert(id, filter);
 
+    // Record undo for ribbon filter creation (undo = delete)
+    {
+        #[derive(serde::Serialize)]
+        struct RibbonFilterCreateSnapshot { filter_id: identity::EntityId }
+        let data = serde_json::to_vec(&RibbonFilterCreateSnapshot { filter_id: id }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Create ribbon filter");
+        undo_stack.record_custom_restore("ribbon_filter_create".to_string(), data, "Create ribbon filter");
+        undo_stack.commit_transaction();
+    }
+
     Ok(result)
 }
 
 /// Delete a ribbon filter.
 #[tauri::command]
 pub fn delete_ribbon_filter(
+    state: State<AppState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("RIBBON_FILTER", "delete_ribbon_filter id={}", filter_id);
 
-    ribbon_filter_state
+    let removed = ribbon_filter_state
         .filters
         .lock()
         .unwrap()
         .remove(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+    // Record undo for ribbon filter deletion (undo = recreate)
+    {
+        #[derive(serde::Serialize)]
+        struct RibbonFilterSnapshot {
+            filter_id: identity::EntityId,
+            previous: RibbonFilter,
+        }
+        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: removed }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Delete ribbon filter");
+        undo_stack.record_custom_restore("ribbon_filter_delete".to_string(), data, "Delete ribbon filter");
+        undo_stack.commit_transaction();
+    }
 
     Ok(())
 }
@@ -85,6 +111,7 @@ pub fn delete_ribbon_filter(
 /// Update ribbon filter properties.
 #[tauri::command]
 pub fn update_ribbon_filter(
+    state: State<AppState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
     params: UpdateRibbonFilterParams,
@@ -95,6 +122,20 @@ pub fn update_ribbon_filter(
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+    // Record undo snapshot before property changes
+    {
+        #[derive(serde::Serialize)]
+        struct RibbonFilterSnapshot {
+            filter_id: identity::EntityId,
+            previous: RibbonFilter,
+        }
+        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Update ribbon filter");
+        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Update ribbon filter");
+        undo_stack.commit_transaction();
+    }
 
     if let Some(name) = params.name {
         filter.name = name;
@@ -151,6 +192,7 @@ pub fn update_ribbon_filter(
 /// Update ribbon filter selection (which items are checked).
 #[tauri::command]
 pub fn update_ribbon_filter_selection(
+    state: State<AppState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
@@ -166,6 +208,20 @@ pub fn update_ribbon_filter_selection(
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+    // Record undo snapshot before selection change
+    {
+        #[derive(serde::Serialize)]
+        struct RibbonFilterSnapshot {
+            filter_id: identity::EntityId,
+            previous: RibbonFilter,
+        }
+        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Ribbon filter change");
+        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Ribbon filter change");
+        undo_stack.commit_transaction();
+    }
 
     filter.selected_items = selected_items;
     Ok(())
@@ -209,6 +265,7 @@ pub fn get_ribbon_filter(
 /// Convenience wrapper for update_ribbon_filter_selection(id, null).
 #[tauri::command]
 pub fn clear_ribbon_filter(
+    state: State<AppState>,
     ribbon_filter_state: State<RibbonFilterState>,
     filter_id: identity::EntityId,
 ) -> Result<(), String> {
@@ -218,6 +275,20 @@ pub fn clear_ribbon_filter(
     let filter = filters
         .get_mut(&filter_id)
         .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+    // Record undo snapshot
+    {
+        #[derive(serde::Serialize)]
+        struct RibbonFilterSnapshot {
+            filter_id: identity::EntityId,
+            previous: RibbonFilter,
+        }
+        let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Clear ribbon filter");
+        undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Clear ribbon filter");
+        undo_stack.commit_transaction();
+    }
 
     filter.selected_items = None;
     Ok(())
@@ -244,6 +315,23 @@ pub fn set_ribbon_filter_item_selected(
         value,
         selected
     );
+
+    // Record undo snapshot before any selection change
+    {
+        let filters = ribbon_filter_state.filters.lock().unwrap();
+        if let Some(filter) = filters.get(&filter_id) {
+            #[derive(serde::Serialize)]
+            struct RibbonFilterSnapshot {
+                filter_id: identity::EntityId,
+                previous: RibbonFilter,
+            }
+            let data = serde_json::to_vec(&RibbonFilterSnapshot { filter_id, previous: filter.clone() }).unwrap_or_default();
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            undo_stack.begin_transaction("Ribbon filter item toggle");
+            undo_stack.record_custom_restore("ribbon_filter".to_string(), data, "Ribbon filter item toggle");
+            undo_stack.commit_transaction();
+        }
+    }
 
     // First get the current items to know the full list
     let all_items: Vec<String> = {

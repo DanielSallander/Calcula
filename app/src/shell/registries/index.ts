@@ -44,6 +44,10 @@ export { DialogExtensions } from "./dialogExtensions";
 // Overlay extensions (Shell implementation)
 export { OverlayExtensions } from "./overlayExtensions";
 
+// Panel Registry (Shell implementation - location-agnostic panels)
+export { panelRegistry } from "./panelRegistry";
+export { usePanelPlacementStore } from "./usePanelPlacementStore";
+
 // UI extension types - re-exported from the canonical api/uiTypes.ts contract
 export type {
   TaskPaneViewDefinition,
@@ -55,4 +59,7 @@ export type {
   OverlayProps,
   OverlayLayer,
   AnchorRect,
+  PanelDefinition,
+  PanelPlacement,
+  PanelViewProps,
 } from "../../api/uiTypes";

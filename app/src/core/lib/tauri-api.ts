@@ -845,6 +845,9 @@ export interface UndoResult {
   canRedo: boolean;
   mergeChanged: boolean;
   structuralRestore: boolean;
+  pivotChanged: boolean;
+  slicerChanged: boolean;
+  ribbonFilterChanged: boolean;
 }
 
 /**

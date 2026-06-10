@@ -5,7 +5,6 @@
 use crate::pivot::PivotState;
 use crate::slicer::types::*;
 use crate::{format_cell_value, AppState};
-use pivot_engine::PivotId;
 use std::collections::HashMap;
 use tauri::State;
 
@@ -18,6 +17,7 @@ use crate::log_debug;
 /// Create a new slicer.
 #[tauri::command]
 pub fn create_slicer(
+    state: State<AppState>,
     slicer_state: State<SlicerState>,
     params: CreateSlicerParams,
 ) -> Result<Slicer, String> {
@@ -66,21 +66,47 @@ pub fn create_slicer(
     let result = slicer.clone();
     slicer_state.slicers.lock().unwrap().insert(id, slicer);
 
+    // Record undo for slicer creation (undo = delete the slicer)
+    {
+        #[derive(serde::Serialize)]
+        struct SlicerCreateSnapshot { slicer_id: identity::EntityId }
+        let data = serde_json::to_vec(&SlicerCreateSnapshot { slicer_id: id }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Create slicer");
+        undo_stack.record_custom_restore("slicer_create".to_string(), data, "Create slicer");
+        undo_stack.commit_transaction();
+    }
+
     Ok(result)
 }
 
 /// Delete a slicer.
 #[tauri::command]
 pub fn delete_slicer(
+    state: State<AppState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
     log_debug!("SLICER", "delete_slicer id={}", slicer_id);
 
     let mut slicers = slicer_state.slicers.lock().unwrap();
-    slicers
+    let removed = slicers
         .remove(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    // Record undo for slicer deletion (undo = recreate the slicer)
+    {
+        #[derive(serde::Serialize)]
+        struct SlicerSnapshot {
+            slicer_id: identity::EntityId,
+            previous: Slicer,
+        }
+        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: removed }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Delete slicer");
+        undo_stack.record_custom_restore("slicer_delete".to_string(), data, "Delete slicer");
+        undo_stack.commit_transaction();
+    }
 
     // Clean up computed properties for this slicer
     let mut computed_props = slicer_state.computed_properties.lock().unwrap();
@@ -107,6 +133,7 @@ pub fn delete_slicer(
 /// Update slicer properties (name, header, columns, style).
 #[tauri::command]
 pub fn update_slicer(
+    state: State<AppState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
     params: UpdateSlicerParams,
@@ -117,6 +144,20 @@ pub fn update_slicer(
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    // Record undo snapshot before property changes
+    {
+        #[derive(serde::Serialize)]
+        struct SlicerSnapshot {
+            slicer_id: identity::EntityId,
+            previous: Slicer,
+        }
+        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Update slicer");
+        undo_stack.record_custom_restore("slicer".to_string(), data, "Update slicer");
+        undo_stack.commit_transaction();
+    }
 
     if let Some(name) = params.name {
         slicer.name = name;
@@ -201,6 +242,7 @@ pub fn update_slicer_position(
 /// Update slicer selection (which items are checked).
 #[tauri::command]
 pub fn update_slicer_selection(
+    state: State<AppState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
     selected_items: Option<Vec<String>>,
@@ -216,6 +258,20 @@ pub fn update_slicer_selection(
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    // Record undo snapshot before selection change
+    {
+        #[derive(serde::Serialize)]
+        struct SlicerSnapshot {
+            slicer_id: identity::EntityId,
+            previous: Slicer,
+        }
+        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Slicer filter change");
+        undo_stack.record_custom_restore("slicer".to_string(), data, "Slicer filter change");
+        undo_stack.commit_transaction();
+    }
 
     slicer.selected_items = selected_items;
     Ok(())
@@ -243,6 +299,7 @@ pub fn get_slicer(
 /// Clear all filter selections on a slicer (set all items to selected).
 #[tauri::command]
 pub fn clear_slicer_filter(
+    state: State<AppState>,
     slicer_state: State<SlicerState>,
     slicer_id: identity::EntityId,
 ) -> Result<(), String> {
@@ -250,6 +307,20 @@ pub fn clear_slicer_filter(
     let slicer = slicers
         .get_mut(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    // Record undo snapshot
+    {
+        #[derive(serde::Serialize)]
+        struct SlicerSnapshot {
+            slicer_id: identity::EntityId,
+            previous: Slicer,
+        }
+        let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Clear slicer filter");
+        undo_stack.record_custom_restore("slicer".to_string(), data, "Clear slicer filter");
+        undo_stack.commit_transaction();
+    }
 
     slicer.selected_items = None;
     Ok(())
@@ -268,6 +339,23 @@ pub fn set_slicer_item_selected(
     value: String,
     selected: bool,
 ) -> Result<(), String> {
+    // Record undo snapshot before any selection change
+    {
+        let slicers = slicer_state.slicers.lock().unwrap();
+        if let Some(slicer) = slicers.get(&slicer_id) {
+            #[derive(serde::Serialize)]
+            struct SlicerSnapshot {
+                slicer_id: identity::EntityId,
+                previous: Slicer,
+            }
+            let data = serde_json::to_vec(&SlicerSnapshot { slicer_id, previous: slicer.clone() }).unwrap_or_default();
+            let mut undo_stack = state.undo_stack.lock().unwrap();
+            undo_stack.begin_transaction("Slicer item toggle");
+            undo_stack.record_custom_restore("slicer".to_string(), data, "Slicer item toggle");
+            undo_stack.commit_transaction();
+        }
+    }
+
     // Get the full item list to know when all are selected
     let all_items: Vec<String> = {
         let slicers = slicer_state.slicers.lock().unwrap();

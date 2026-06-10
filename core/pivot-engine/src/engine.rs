@@ -2878,10 +2878,6 @@ impl<'a> PivotCalculator<'a> {
                 Vec::new()
             };
 
-            let col_field_names: Vec<String> = self.effective_col_fields.iter()
-                .map(|f| f.name.clone())
-                .collect();
-
             for (col_idx, col_item) in col_items.iter().enumerate() {
                 let col_group_values = &col_item.group_values;
 
@@ -2902,7 +2898,6 @@ impl<'a> PivotCalculator<'a> {
                                 current_col_idx: col_idx,
                                 col_items,
                                 col_values: &all_col_values,
-                                col_field_names_by_depth: &col_field_names,
                             })
                         } else {
                             None

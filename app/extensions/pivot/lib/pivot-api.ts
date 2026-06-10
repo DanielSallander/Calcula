@@ -26,6 +26,8 @@ import {
   setInflightOperation,
 } from "./pivotViewStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
+import { emitAppEvent, AppEvents } from "@api";
+import { ask } from "@tauri-apps/plugin-dialog";
 import type { CalculatedFieldDef, ValueColumnRefDef } from '../components/types';
 
 /**
@@ -47,6 +49,41 @@ function setLoading(pivotId: number, stage: string, stageIndex = 0, totalStages 
 function clearLoading(pivotId: number): void {
   _clearLoading(pivotId);
   requestOverlayRedraw();
+}
+
+/**
+ * Check if a pivot operation overwrote existing cell data.
+ * If so, ask the user for confirmation. On cancel, revert the pivot
+ * to its previous state and trigger a full grid + pivot refresh.
+ * Returns true if the operation should proceed, false if cancelled.
+ *
+ * Uses `revertPivotOperation` instead of `undo()` because the undo
+ * system deadlocks when the pivot CustomRestore handler re-acquires
+ * locks already held by the undo transaction processor.
+ */
+async function confirmOverwriteOrUndo(response: PivotViewResponse): Promise<boolean> {
+  if (!response.overwrittenCellCount || response.overwrittenCellCount <= 0) {
+    return true;
+  }
+  const confirmed = await ask(
+    "A PivotTable report will overwrite existing data. Do you want to continue?",
+    { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
+  );
+  if (confirmed) {
+    return true;
+  }
+  // Undo the pivot operation by popping the undo entry and restoring the
+  // previous definition directly (bypasses the general undo system which
+  // deadlocks when the pivot restore handler re-acquires held locks)
+  try {
+    await apiUndoPivotOverwrite(response.pivotId);
+  } catch (e) {
+    console.warn("[pivot] undo_pivot_overwrite failed:", e);
+  }
+  emitAppEvent(AppEvents.GRID_REFRESH);
+  window.dispatchEvent(new CustomEvent("pivot:refresh"));
+  requestOverlayRedraw();
+  return false;
 }
 
 import {
@@ -93,6 +130,7 @@ import {
   getPivotCellWindow as apiGetPivotCellWindow,
   cancelPivotOperation as apiCancelPivotOperation,
   revertPivotOperation as apiRevertPivotOperation,
+  undoPivotOverwrite as apiUndoPivotOverwrite,
   changePivotDataSource as apiChangePivotDataSource,
   addCalculatedField as apiAddCalculatedField,
   updateCalculatedField as apiUpdateCalculatedField,
@@ -398,6 +436,8 @@ export interface PivotViewResponse {
   windowStartRow?: number;
   /** For windowed responses: lightweight descriptors for ALL rows (no cells). */
   rowDescriptors?: PivotRowDescriptorData[];
+  /** Number of non-empty cells outside the previous pivot region that were overwritten. */
+  overwrittenCellCount?: number;
 }
 
 /** Response for a cell window fetch (scroll-triggered). */
@@ -603,6 +643,21 @@ export async function updatePivotFields(
       );
       throw new Error("Pivot operation cancelled");
     }
+    // Check if the pivot overwrote existing cell data
+    if (result.overwrittenCellCount && result.overwrittenCellCount > 0) {
+      const confirmed = await ask(
+        "A PivotTable report will overwrite existing data. Do you want to continue?",
+        { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
+      );
+      if (!confirmed) {
+        restorePreviousView(request.pivotId);
+        apiUndoPivotOverwrite(request.pivotId).catch((e) =>
+          console.warn("[pivot] undo_pivot_overwrite after overwrite cancel failed:", e)
+        );
+        emitAppEvent(AppEvents.GRID_REFRESH);
+        throw new Error("Pivot operation cancelled - would overwrite data");
+      }
+    }
     const dt = performance.now() - t0;
     cachePivotView(request.pivotId, result);
     clearPreviousView(request.pivotId);
@@ -635,6 +690,10 @@ export async function togglePivotGroup(
 ): Promise<PivotViewResponse> {
   const t0 = performance.now();
   const result = await apiTogglePivotGroup<ToggleGroupRequest, PivotViewResponse>(request);
+  // Check if expanding overwrote existing cell data
+  if (!await confirmOverwriteOrUndo(result)) {
+    throw new Error("Pivot operation cancelled - would overwrite data");
+  }
   const dt = performance.now() - t0;
   cachePivotView(request.pivotId, result);
   console.log(
@@ -717,6 +776,21 @@ export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResp
         console.warn("[pivot] revert failed:", e)
       );
       throw new Error("Pivot operation cancelled");
+    }
+    // Check if refreshing overwrote existing cell data
+    if (result.overwrittenCellCount && result.overwrittenCellCount > 0) {
+      const confirmed = await ask(
+        "A PivotTable report will overwrite existing data. Do you want to continue?",
+        { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
+      );
+      if (!confirmed) {
+        restorePreviousView(pivotId);
+        apiUndoPivotOverwrite(pivotId).catch((e) =>
+          console.warn("[pivot] undo_pivot_overwrite after overwrite cancel failed:", e)
+        );
+        emitAppEvent(AppEvents.GRID_REFRESH);
+        throw new Error("Pivot operation cancelled - would overwrite data");
+      }
     }
     clearPreviousView(pivotId);
     return result;
@@ -1266,6 +1340,9 @@ export async function updatePivotLayout(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiUpdatePivotLayout<UpdatePivotLayoutRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1289,6 +1366,9 @@ export async function addPivotHierarchy(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiAddPivotHierarchy<AddHierarchyRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1305,6 +1385,9 @@ export async function removePivotHierarchy(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiRemovePivotHierarchy<RemoveHierarchyRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1321,6 +1404,9 @@ export async function movePivotField(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiMovePivotField<MoveFieldRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1337,6 +1423,9 @@ export async function setPivotAggregation(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiSetPivotAggregation<SetAggregationRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1369,6 +1458,9 @@ export async function applyPivotFilter(
   setLoading(request.pivotId, "Filtering...");
   try {
     const result = await apiApplyPivotFilter<ApplyPivotFilterRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1385,6 +1477,9 @@ export async function clearPivotFilter(
   setLoading(request.pivotId, "Filtering...");
   try {
     const result = await apiClearPivotFilter<ClearPivotFilterRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1427,6 +1522,9 @@ export async function setPivotItemVisibility(
   setLoading(request.pivotId, "Filtering...");
   try {
     const result = await apiSetPivotItemVisibility<SetItemVisibilityRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1445,7 +1543,13 @@ export async function getAllPivotTables(): Promise<PivotTableInfo[]> {
  * Refreshes all pivot tables in the workbook.
  */
 export async function refreshAllPivotTables(): Promise<PivotViewResponse[]> {
-  return apiRefreshAllPivotTables<PivotViewResponse[]>();
+  const results = await apiRefreshAllPivotTables<PivotViewResponse[]>();
+  for (const result of results) {
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
+  }
+  return results;
 }
 
 // ============================================================================
@@ -1490,6 +1594,9 @@ export async function setPivotItemExpanded(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiSetPivotItemExpanded<SetItemExpandedRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1506,6 +1613,9 @@ export async function expandCollapseLevel(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiExpandCollapseLevel<ExpandCollapseLevelRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1522,6 +1632,9 @@ export async function expandCollapseAll(
   setLoading(request.pivotId, "Updating...");
   try {
     const result = await apiExpandCollapseAll<ExpandCollapseAllRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1580,6 +1693,9 @@ export async function groupPivotField(
   setLoading(request.pivotId, "Grouping...");
   try {
     const result = await apiGroupPivotField<GroupFieldRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1596,6 +1712,9 @@ export async function createManualGroup(
   setLoading(request.pivotId, "Grouping...");
   try {
     const result = await apiCreateManualGroup<CreateManualGroupRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1612,6 +1731,9 @@ export async function ungroupPivotField(
   setLoading(request.pivotId, "Ungrouping...");
   try {
     const result = await apiUngroupPivotField<UngroupFieldRequest, PivotViewResponse>(request);
+    if (!await confirmOverwriteOrUndo(result)) {
+      throw new Error("Pivot operation cancelled - would overwrite data");
+    }
     cachePivotView(request.pivotId, result);
     return result;
   } finally {
@@ -1701,6 +1823,21 @@ export async function updateBiFields(
       );
       throw new Error("Pivot operation cancelled");
     }
+    // Check if the pivot overwrote existing cell data
+    if (result.overwrittenCellCount && result.overwrittenCellCount > 0) {
+      const confirmed = await ask(
+        "A PivotTable report will overwrite existing data. Do you want to continue?",
+        { title: "Calcula", kind: "warning", okLabel: "OK", cancelLabel: "Cancel" }
+      );
+      if (!confirmed) {
+        restorePreviousView(request.pivotId);
+        apiUndoPivotOverwrite(request.pivotId).catch((e) =>
+          console.warn("[pivot] undo_pivot_overwrite after overwrite cancel failed:", e)
+        );
+        emitAppEvent(AppEvents.GRID_REFRESH);
+        throw new Error("Pivot operation cancelled - would overwrite data");
+      }
+    }
     const dt = performance.now() - t0;
     cachePivotView(request.pivotId, result);
     clearPreviousView(request.pivotId);
@@ -1781,35 +1918,55 @@ export interface RemoveCalculatedItemRequest {
 export async function addCalculatedField(
   request: CalculatedFieldRequest
 ): Promise<PivotViewResponse> {
-  return apiAddCalculatedField<CalculatedFieldRequest, PivotViewResponse>(request);
+  const result = await apiAddCalculatedField<CalculatedFieldRequest, PivotViewResponse>(request);
+  if (!await confirmOverwriteOrUndo(result)) {
+    throw new Error("Pivot operation cancelled - would overwrite data");
+  }
+  return result;
 }
 
 /** Updates an existing calculated field. */
 export async function updateCalculatedField(
   request: UpdateCalculatedFieldRequest
 ): Promise<PivotViewResponse> {
-  return apiUpdateCalculatedField<UpdateCalculatedFieldRequest, PivotViewResponse>(request);
+  const result = await apiUpdateCalculatedField<UpdateCalculatedFieldRequest, PivotViewResponse>(request);
+  if (!await confirmOverwriteOrUndo(result)) {
+    throw new Error("Pivot operation cancelled - would overwrite data");
+  }
+  return result;
 }
 
 /** Removes a calculated field from a pivot table. */
 export async function removeCalculatedField(
   request: RemoveCalculatedFieldRequest
 ): Promise<PivotViewResponse> {
-  return apiRemoveCalculatedField<RemoveCalculatedFieldRequest, PivotViewResponse>(request);
+  const result = await apiRemoveCalculatedField<RemoveCalculatedFieldRequest, PivotViewResponse>(request);
+  if (!await confirmOverwriteOrUndo(result)) {
+    throw new Error("Pivot operation cancelled - would overwrite data");
+  }
+  return result;
 }
 
 /** Adds a calculated item to a pivot field. */
 export async function addCalculatedItem(
   request: CalculatedItemRequest
 ): Promise<PivotViewResponse> {
-  return apiAddCalculatedItem<CalculatedItemRequest, PivotViewResponse>(request);
+  const result = await apiAddCalculatedItem<CalculatedItemRequest, PivotViewResponse>(request);
+  if (!await confirmOverwriteOrUndo(result)) {
+    throw new Error("Pivot operation cancelled - would overwrite data");
+  }
+  return result;
 }
 
 /** Removes a calculated item from a pivot table. */
 export async function removeCalculatedItem(
   request: RemoveCalculatedItemRequest
 ): Promise<PivotViewResponse> {
-  return apiRemoveCalculatedItem<RemoveCalculatedItemRequest, PivotViewResponse>(request);
+  const result = await apiRemoveCalculatedItem<RemoveCalculatedItemRequest, PivotViewResponse>(request);
+  if (!await confirmOverwriteOrUndo(result)) {
+    throw new Error("Pivot operation cancelled - would overwrite data");
+  }
+  return result;
 }
 
 /** Generates one sheet per unique value of a filter field. */

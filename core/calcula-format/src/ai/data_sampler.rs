@@ -31,7 +31,6 @@ pub struct ColumnStats {
     pub max: f64,
     pub sum: f64,
     pub count: usize,
-    pub distinct_count: usize,
 }
 
 impl ColumnStats {
@@ -235,7 +234,6 @@ fn compute_column_stats(grid: &Grid, start_row: u32, max_row: u32, max_col: u32)
                 max: max_val,
                 sum,
                 count,
-                distinct_count: values.len(),
             });
         }
     }

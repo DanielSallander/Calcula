@@ -87,8 +87,6 @@ pub(crate) struct ColumnAxisContext<'a> {
     /// col_values[col_idx][field_name] = f64.
     pub(crate) col_values: &'a [HashMap<String, f64>],
 
-    /// Column field names by depth (for field-level reset on column axis).
-    pub(crate) col_field_names_by_depth: &'a [String],
 }
 
 /// Axis direction for window functions.
@@ -399,7 +397,7 @@ pub fn parse_calc_formula(formula: &str) -> Result<CalcExpr, String> {
 /// Evaluates a parsed expression tree given a name-to-value lookup map.
 /// If `ctx` is provided, visual calculation functions (RUNNINGSUM, COLLAPSE, etc.)
 /// are available. If `ctx` is None, those functions return an error.
-pub fn evaluate_calc_expr(
+pub(crate) fn evaluate_calc_expr(
     expr: &CalcExpr,
     values: &HashMap<String, f64>,
     ctx: Option<&VisualCalcContext>,
@@ -1176,7 +1174,7 @@ fn eval_isatlevel(
 /// LOOKUP skips subtotal/grand total rows; LOOKUPWITHTOTALS includes them.
 fn eval_lookup(
     args: &[CalcExpr],
-    values: &HashMap<String, f64>,
+    _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
     include_totals: bool,
 ) -> Result<f64, String> {

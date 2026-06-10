@@ -57,6 +57,10 @@ export function ZoneFieldItem({
     if (isBiField && raw.startsWith('[') && raw.endsWith(']')) {
       raw = raw.substring(1, raw.length - 1);
     }
+    // Strip hierarchy marker: "dim_date.__hierarchy__.YearMonthDay" -> "YearMonthDay"
+    if (raw.includes('.__hierarchy__.')) {
+      raw = raw.split('.__hierarchy__.')[1];
+    }
     displayName = raw;
   }
 

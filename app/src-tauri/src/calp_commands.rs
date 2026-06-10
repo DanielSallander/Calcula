@@ -1773,7 +1773,7 @@ pub struct DataSourceNeedsConfig {
 #[tauri::command]
 pub async fn calp_refresh_data(
     state: State<'_, AppState>,
-    bi_state: State<'_, BiState>,
+    _bi_state: State<'_, BiState>,
 ) -> Result<DataRefreshResponse, String> {
     use calp::data_refresh;
 

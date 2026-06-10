@@ -676,6 +676,7 @@ pub(crate) fn view_to_response(
             total_row_count: Some(total_rows),
             window_start_row: Some(0),
             row_descriptors,
+            overwritten_cell_count: 0,
         }
     } else {
         // Small pivot: send everything (no windowing)
@@ -696,6 +697,7 @@ pub(crate) fn view_to_response(
             total_row_count: None,
             window_start_row: None,
             row_descriptors: Vec::new(),
+            overwritten_cell_count: 0,
         }
     }
 }
@@ -855,6 +857,16 @@ pub(crate) fn is_bi_cosmetic_only_change(
     // Slicer fields: if the request includes slicer_fields, the caller wants
     // to add/update slicer GROUP BY columns, which requires a full BI query.
     if !request.slicer_fields.is_empty() {
+        return false;
+    }
+
+    // Hierarchy fields: if the request has hierarchies but the definition doesn't
+    // (or vice versa), it's a structural change requiring a full BI query.
+    let req_row_h_count = request.row_hierarchies.len();
+    let req_col_h_count = request.column_hierarchies.len();
+    let def_row_h_count = definition.hierarchy_configs.iter().filter(|h| h.is_row).count();
+    let def_col_h_count = definition.hierarchy_configs.iter().filter(|h| !h.is_row).count();
+    if req_row_h_count != def_row_h_count || req_col_h_count != def_col_h_count {
         return false;
     }
 

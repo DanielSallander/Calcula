@@ -20,7 +20,7 @@ pub fn get_selection_aggregations(
     start_col: u32,
     end_row: u32,
     end_col: u32,
-    selection_type: String,
+    _selection_type: String,
 ) -> SelectionAggregationResult {
     let grid = state.grid.lock().unwrap();
 

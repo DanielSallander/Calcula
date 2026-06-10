@@ -1102,10 +1102,132 @@ pub fn resolve_pivot_data_formula(
 // FINALIZE PIVOT UPDATE (grid write + region update + formula recalc)
 // ============================================================================
 
+/// Counts non-empty cells in the new pivot region that lie OUTSIDE the current
+/// (old) pivot region.  These are user-owned cells that the pivot would
+/// overwrite.  Must be called BEFORE `update_pivot_in_grid` writes to the grid.
+pub(crate) fn count_overwritten_cells(
+    state: &AppState,
+    pivot_id: PivotId,
+    dest_sheet_idx: usize,
+    destination: (u32, u32),
+    view: &PivotView,
+) -> u32 {
+    if view.row_count == 0 || view.col_count == 0 {
+        return 0;
+    }
+
+    let (dest_row, dest_col) = destination;
+    // Only count visible rows – collapsed rows are not written to the grid
+    let visible_row_count = view.rows.iter().filter(|r| r.visible).count() as u32;
+    if visible_row_count == 0 {
+        return 0;
+    }
+    let new_end_row = dest_row + visible_row_count - 1;
+    let new_end_col = dest_col + view.col_count as u32 - 1;
+
+    let old_region = get_pivot_region(state, pivot_id);
+
+    let grids = state.grids.lock().unwrap();
+    let grid = match grids.get(dest_sheet_idx) {
+        Some(g) => g,
+        None => return 0,
+    };
+
+    let mut count = 0u32;
+    for row in dest_row..=new_end_row {
+        for col in dest_col..=new_end_col {
+            // Skip cells inside the old pivot region – those belong to the pivot
+            if let Some(ref old) = old_region {
+                if row >= old.start_row && row <= old.end_row
+                    && col >= old.start_col && col <= old.end_col
+                {
+                    continue;
+                }
+            }
+            if let Some(cell) = grid.get_cell(row, col) {
+                if !matches!(cell.value, CellValue::Empty) {
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    count
+}
+
+/// A single saved cell: (row, col, cell_data).
+/// Uses a flat struct instead of HashMap<(u32, u32), Cell> because serde_json
+/// cannot serialize non-string map keys.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SavedCell {
+    pub row: u32,
+    pub col: u32,
+    pub cell: Cell,
+}
+
+/// Save cells that would be overwritten by a pivot expansion.
+/// Returns a list of (row, col, cell) for cells outside the old pivot region
+/// that have non-empty values.  Used by the undo system to restore these cells
+/// when the user cancels the overwrite.
+pub(crate) fn save_overwritten_cells(
+    state: &AppState,
+    pivot_id: PivotId,
+    dest_sheet_idx: usize,
+    destination: (u32, u32),
+    view: &PivotView,
+) -> Vec<SavedCell> {
+    let mut saved = Vec::new();
+    if view.row_count == 0 || view.col_count == 0 {
+        return saved;
+    }
+
+    let (dest_row, dest_col) = destination;
+    let visible_row_count = view.rows.iter().filter(|r| r.visible).count() as u32;
+    if visible_row_count == 0 {
+        return saved;
+    }
+    let new_end_row = dest_row + visible_row_count - 1;
+    let new_end_col = dest_col + view.col_count as u32 - 1;
+
+    let old_region = get_pivot_region(state, pivot_id);
+
+    let grids = state.grids.lock().unwrap();
+    let grid = match grids.get(dest_sheet_idx) {
+        Some(g) => g,
+        None => return saved,
+    };
+
+    for row in dest_row..=new_end_row {
+        for col in dest_col..=new_end_col {
+            // Skip cells inside the old pivot region
+            if let Some(ref old) = old_region {
+                if row >= old.start_row && row <= old.end_row
+                    && col >= old.start_col && col <= old.end_col
+                {
+                    continue;
+                }
+            }
+            if let Some(cell) = grid.get_cell(row, col) {
+                if !matches!(cell.value, CellValue::Empty) {
+                    saved.push(SavedCell { row, col, cell: cell.clone() });
+                }
+            }
+        }
+    }
+
+    saved
+}
+
 /// Combined helper that writes pivot cells to the grid, updates the protected
 /// region, and recalculates all formula cells on the active sheet so that
 /// formulas referencing pivot cells (both regular refs like =E5 and
 /// GETPIVOTDATA) pick up the new values.
+///
+/// NOTE: This function does NOT compute the overwrite count.  Callers that
+/// need it (Tauri commands) should call `count_overwritten_cells` **before**
+/// this function — while `state.grids` is not yet locked.  The undo/redo
+/// path calls `finalize_pivot_update` while already holding `state.grids`,
+/// so embedding the check here would deadlock.
 ///
 /// Every pivot command that modifies cell values should call this instead of
 /// calling `update_pivot_in_grid` + `update_pivot_region` separately.

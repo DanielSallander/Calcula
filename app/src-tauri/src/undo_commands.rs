@@ -3,11 +3,16 @@
 
 use crate::api_types::{CellData, MergedRegion};
 use crate::persistence::FileState;
+use crate::pivot::operations::*;
+use crate::pivot::types::PivotState;
+use crate::ribbon_filter::types::{RibbonFilter, RibbonFilterState};
+use crate::slicer::types::{Slicer, SlicerState};
 use crate::{
     extract_all_references, format_cell_value, update_column_dependencies,
     update_cross_sheet_dependencies, update_dependencies, update_row_dependencies, AppState,
 };
 use engine::{CellChange, GridSnapshot, Transaction, UndoMergeRegion};
+use pivot_engine::PivotDefinition;
 use serde::Serialize;
 use tauri::State;
 
@@ -29,6 +34,12 @@ pub struct UndoResult {
     pub merge_changed: bool,
     /// Whether a structural restore occurred (frontend should do a full refresh)
     pub structural_restore: bool,
+    /// Whether pivot table state was restored (frontend should refresh pivot view)
+    pub pivot_changed: bool,
+    /// Whether slicer state was restored (frontend should refresh slicers)
+    pub slicer_changed: bool,
+    /// Whether ribbon filter state was restored (frontend should refresh ribbon filters)
+    pub ribbon_filter_changed: bool,
 }
 
 /// Get current undo/redo state
@@ -165,10 +176,13 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
 fn apply_changes(
     state: &AppState,
     file_state: &FileState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    ribbon_filter_state: &RibbonFilterState,
     transaction: Transaction,
     is_undo: bool,
 ) -> UndoResult {
-    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let undo_stack = state.undo_stack.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -182,6 +196,13 @@ fn apply_changes(
     let mut updated_cells = Vec::new();
     let mut merge_changed = false;
     let mut structural_restore = false;
+    let mut pivot_changed = false;
+    let mut slicer_changed = false;
+    let mut ribbon_filter_changed = false;
+
+    // Deferred custom restores that need to run AFTER grid locks are released
+    // (pivot/slicer/ribbon_filter restores acquire their own locks and may need grid access)
+    let mut deferred_restores: Vec<(String, Vec<u8>)> = Vec::new();
 
     // Build the inverse transaction
     let mut inverse_transaction = Transaction::new(description.clone());
@@ -325,26 +346,26 @@ fn apply_changes(
                 merge_changed = true;
             }
             CellChange::CustomRestore { kind, data } => {
-                // Handle custom metadata restore (comments, notes, hyperlinks, etc.)
-                apply_custom_restore(state, kind, data, &mut inverse_transaction);
+                // Pivot/slicer/ribbon_filter restores need grid access and would deadlock
+                // if called while grid locks are held. Defer them.
+                if kind.starts_with("pivot_") || kind.starts_with("slicer") || kind.starts_with("ribbon_filter") {
+                    deferred_restores.push((kind.clone(), data.clone()));
+                } else {
+                    // Handle simple metadata restores (comments, notes, hyperlinks, etc.)
+                    apply_custom_restore(
+                        state, pivot_state, slicer_state, ribbon_filter_state,
+                        kind, data, &mut inverse_transaction,
+                    );
+                }
             }
         }
-    }
-
-    // Push inverse transaction to the appropriate stack
-    if is_undo {
-        undo_stack.push_redo(inverse_transaction);
-    } else {
-        undo_stack.push_undo_for_redo(inverse_transaction);
     }
 
     // Mark workbook as dirty
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
-    let can_undo = undo_stack.can_undo();
-    let can_redo = undo_stack.can_redo();
-
-    // Drop all locks before rebuilding dependencies
+    // Drop all grid/style locks BEFORE processing deferred restores
+    // (pivot/slicer/ribbon_filter restores need to acquire grid/state locks)
     drop(locale);
     drop(merged_regions);
     drop(row_heights);
@@ -353,6 +374,35 @@ fn apply_changes(
     drop(grids);
     drop(grid);
     drop(undo_stack);
+
+    // Process deferred pivot/slicer/ribbon_filter restores (now safe to acquire locks)
+    for (kind, data) in deferred_restores {
+        let restore_kind = apply_custom_restore(
+            state, pivot_state, slicer_state, ribbon_filter_state,
+            &kind, &data, &mut inverse_transaction,
+        );
+        match restore_kind {
+            CustomRestoreKind::Pivot => pivot_changed = true,
+            CustomRestoreKind::Slicer => slicer_changed = true,
+            CustomRestoreKind::RibbonFilter => ribbon_filter_changed = true,
+            CustomRestoreKind::Other => {}
+        }
+    }
+
+    // Push inverse transaction to the appropriate stack (re-acquire undo_stack)
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        if is_undo {
+            undo_stack.push_redo(inverse_transaction);
+        } else {
+            undo_stack.push_undo_for_redo(inverse_transaction);
+        }
+    }
+
+    let (can_undo, can_redo) = {
+        let undo_stack = state.undo_stack.lock().unwrap();
+        (undo_stack.can_undo(), undo_stack.can_redo())
+    };
 
     // Rebuild dependency maps after structural restore
     if structural_restore {
@@ -367,36 +417,88 @@ fn apply_changes(
         can_redo,
         merge_changed,
         structural_restore,
+        pivot_changed,
+        slicer_changed,
+        ribbon_filter_changed,
     }
 }
 
+/// Identifies which subsystem a CustomRestore affected.
+enum CustomRestoreKind {
+    Pivot,
+    Slicer,
+    RibbonFilter,
+    Other,
+}
+
 /// Handle custom metadata restore for undo/redo.
-/// `kind` identifies the subsystem (e.g., "comment", "note", "hyperlink").
+/// `kind` identifies the subsystem (e.g., "comment", "note", "hyperlink", "pivot", "slicer").
 /// `data` is the serialized previous state.
 fn apply_custom_restore(
     state: &AppState,
+    pivot_state: &PivotState,
+    slicer_state: &SlicerState,
+    ribbon_filter_state: &RibbonFilterState,
     kind: &str,
     data: &[u8],
     inverse_transaction: &mut Transaction,
-) {
+) -> CustomRestoreKind {
     match kind {
         "comment" => {
             apply_comment_restore(state, data, inverse_transaction);
+            CustomRestoreKind::Other
         }
         "note" => {
             apply_note_restore(state, data, inverse_transaction);
+            CustomRestoreKind::Other
         }
         "hyperlink" => {
             apply_hyperlink_restore(state, data, inverse_transaction);
+            CustomRestoreKind::Other
         }
-        "default_row_height" => {
+        "default_row_height" | "default_column_width" => {
             apply_default_dimension_restore(state, kind, data, inverse_transaction);
+            CustomRestoreKind::Other
         }
-        "default_column_width" => {
-            apply_default_dimension_restore(state, kind, data, inverse_transaction);
+        "pivot_definition" => {
+            apply_pivot_definition_restore(state, pivot_state, data, inverse_transaction);
+            CustomRestoreKind::Pivot
+        }
+        "pivot_create" => {
+            apply_pivot_create_restore(state, pivot_state, data, inverse_transaction);
+            CustomRestoreKind::Pivot
+        }
+        "pivot_delete" => {
+            apply_pivot_delete_restore(state, pivot_state, data, inverse_transaction);
+            CustomRestoreKind::Pivot
+        }
+        "slicer" => {
+            apply_slicer_restore(slicer_state, data, inverse_transaction);
+            CustomRestoreKind::Slicer
+        }
+        "slicer_create" => {
+            apply_slicer_create_restore(slicer_state, data, inverse_transaction);
+            CustomRestoreKind::Slicer
+        }
+        "slicer_delete" => {
+            apply_slicer_delete_restore(slicer_state, data, inverse_transaction);
+            CustomRestoreKind::Slicer
+        }
+        "ribbon_filter" => {
+            apply_ribbon_filter_restore(ribbon_filter_state, data, inverse_transaction);
+            CustomRestoreKind::RibbonFilter
+        }
+        "ribbon_filter_create" => {
+            apply_ribbon_filter_create_restore(ribbon_filter_state, data, inverse_transaction);
+            CustomRestoreKind::RibbonFilter
+        }
+        "ribbon_filter_delete" => {
+            apply_ribbon_filter_delete_restore(ribbon_filter_state, data, inverse_transaction);
+            CustomRestoreKind::RibbonFilter
         }
         _ => {
             eprintln!("[undo] Unknown custom restore kind: {}", kind);
+            CustomRestoreKind::Other
         }
     }
 }
@@ -585,7 +687,13 @@ fn apply_default_dimension_restore(
 
 /// Perform undo operation.
 #[tauri::command]
-pub fn undo(state: State<AppState>, file_state: State<FileState>) -> UndoResult {
+pub fn undo(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    pivot_state: State<'_, PivotState>,
+    slicer_state: State<'_, SlicerState>,
+    ribbon_filter_state: State<'_, RibbonFilterState>,
+) -> UndoResult {
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
         match undo_stack.pop_undo() {
@@ -599,17 +707,26 @@ pub fn undo(state: State<AppState>, file_state: State<FileState>) -> UndoResult 
                     can_redo: undo_stack.can_redo(),
                     merge_changed: false,
                     structural_restore: false,
+                    pivot_changed: false,
+                    slicer_changed: false,
+                    ribbon_filter_changed: false,
                 };
             }
         }
     };
 
-    apply_changes(&state, &file_state, transaction, true)
+    apply_changes(&state, &file_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, true)
 }
 
 /// Perform redo operation.
 #[tauri::command]
-pub fn redo(state: State<AppState>, file_state: State<FileState>) -> UndoResult {
+pub fn redo(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    pivot_state: State<'_, PivotState>,
+    slicer_state: State<'_, SlicerState>,
+    ribbon_filter_state: State<'_, RibbonFilterState>,
+) -> UndoResult {
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
         match undo_stack.pop_redo() {
@@ -623,12 +740,15 @@ pub fn redo(state: State<AppState>, file_state: State<FileState>) -> UndoResult 
                     can_redo: false,
                     merge_changed: false,
                     structural_restore: false,
+                    pivot_changed: false,
+                    slicer_changed: false,
+                    ribbon_filter_changed: false,
                 };
             }
         }
     };
 
-    apply_changes(&state, &file_state, transaction, false)
+    apply_changes(&state, &file_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, false)
 }
 
 /// Clear undo/redo history (e.g., when opening a new file).
@@ -636,4 +756,438 @@ pub fn redo(state: State<AppState>, file_state: State<FileState>) -> UndoResult 
 pub fn clear_undo_history(state: State<AppState>) {
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.clear();
+}
+
+// ============================================================================
+// PIVOT TABLE UNDO/REDO HANDLERS
+// ============================================================================
+
+/// Snapshot of a pivot definition for undo/redo.
+/// Optionally includes cells that were overwritten when the pivot expanded,
+/// so that `undo_pivot_overwrite` can restore them when the user cancels.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PivotDefinitionSnapshot {
+    pivot_id: pivot_engine::PivotId,
+    definition: PivotDefinition,
+    /// Cells overwritten by the pivot expansion.
+    /// Empty when no cells were overwritten.
+    #[serde(default)]
+    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+    /// Sheet index where overwritten cells lived.
+    #[serde(default)]
+    dest_sheet_idx: usize,
+}
+
+/// Snapshot of a full pivot table (definition + cache) for create/delete undo.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PivotFullSnapshot {
+    pivot_id: pivot_engine::PivotId,
+    definition: PivotDefinition,
+    cache: pivot_engine::PivotCache,
+}
+
+/// Restore a pivot definition for undo/redo.
+/// Replaces the current definition, recalculates the view, and rewrites the grid.
+fn apply_pivot_definition_restore(
+    state: &AppState,
+    pivot_state: &PivotState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: PivotDefinitionSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize pivot definition snapshot: {}", e);
+            return;
+        }
+    };
+
+    let pivot_id = snapshot.pivot_id;
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    if let Some((definition, cache)) = pivot_tables.get_mut(&pivot_id) {
+        // Save current definition for inverse transaction
+        let dest_sheet_idx_current = resolve_dest_sheet_index(state, definition);
+
+        let current_snapshot = PivotDefinitionSnapshot {
+            pivot_id,
+            definition: definition.clone(),
+            // Overwritten cells for the inverse will be captured when redo runs
+            overwritten_cells: Vec::new(),
+            dest_sheet_idx: dest_sheet_idx_current,
+        };
+        let inverse_data = serde_json::to_vec(&current_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "pivot_definition".to_string(),
+            data: inverse_data,
+        });
+
+        // Restore the old definition
+        *definition = snapshot.definition;
+
+        // Recalculate the view
+        let view = safe_calculate_pivot(definition, cache);
+
+        // Store view for windowed cell fetching
+        pivot_state.views.lock().unwrap().insert(pivot_id, view.clone());
+
+        let destination = definition.destination;
+        let dest_sheet_idx = resolve_dest_sheet_index(state, definition);
+
+        drop(pivot_tables);
+
+        // Rewrite the grid
+        finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+
+        // Restore cells that were overwritten by the previous pivot expansion
+        if !snapshot.overwritten_cells.is_empty() {
+            let mut grids = state.grids.lock().unwrap();
+            if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
+                for sc in &snapshot.overwritten_cells {
+                    dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                }
+            }
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if snapshot.dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                for sc in &snapshot.overwritten_cells {
+                    grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                }
+            }
+        }
+    } else {
+        eprintln!("[undo] Pivot table {} not found for definition restore", pivot_id);
+    }
+}
+
+/// Undo pivot creation: remove the pivot and clear its grid region.
+fn apply_pivot_create_restore(
+    state: &AppState,
+    pivot_state: &PivotState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: PivotFullSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize pivot create snapshot: {}", e);
+            return;
+        }
+    };
+
+    let pivot_id = snapshot.pivot_id;
+
+    // Save current state for redo (redo = re-create the pivot)
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    if let Some((definition, cache)) = pivot_tables.get(&pivot_id) {
+        let redo_snapshot = PivotFullSnapshot {
+            pivot_id,
+            definition: definition.clone(),
+            cache: cache.clone(),
+        };
+        let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "pivot_delete".to_string(),
+            data: redo_data,
+        });
+
+        let dest_sheet_idx = resolve_dest_sheet_index(state, definition);
+
+        // Clear the pivot grid region
+        let old_region = get_pivot_region(state, pivot_id);
+        if let Some(ref region) = old_region {
+            let mut grids = state.grids.lock().unwrap();
+            if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+                clear_pivot_region_from_grid(
+                    dest_grid,
+                    region.start_row, region.start_col,
+                    region.end_row, region.end_col,
+                );
+
+                let active_sheet = *state.active_sheet.lock().unwrap();
+                if dest_sheet_idx == active_sheet {
+                    let mut grid = state.grid.lock().unwrap();
+                    for row in region.start_row..=region.end_row {
+                        for col in region.start_col..=region.end_col {
+                            grid.clear_cell(row, col);
+                        }
+                    }
+                    grid.recalculate_bounds();
+                }
+            }
+        }
+    }
+
+    // Remove pivot
+    pivot_tables.remove(&pivot_id);
+    pivot_state.views.lock().unwrap().remove(&pivot_id);
+
+    // Clear active if this was the active pivot
+    let mut active = pivot_state.active_pivot_id.lock().unwrap();
+    if *active == Some(pivot_id) {
+        *active = None;
+    }
+    drop(active);
+
+    // Remove pivot region tracking
+    let mut regions = state.protected_regions.lock().unwrap();
+    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
+}
+
+/// Undo pivot deletion: re-create the pivot from the snapshot.
+fn apply_pivot_delete_restore(
+    state: &AppState,
+    pivot_state: &PivotState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: PivotFullSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize pivot delete snapshot: {}", e);
+            return;
+        }
+    };
+
+    let pivot_id = snapshot.pivot_id;
+    let definition = snapshot.definition;
+    let mut cache = snapshot.cache;
+
+    // Save for redo (redo = delete it again)
+    let redo_snapshot = PivotFullSnapshot {
+        pivot_id,
+        definition: definition.clone(),
+        cache: cache.clone(),
+    };
+    let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "pivot_create".to_string(),
+        data: redo_data,
+    });
+
+    // Recalculate view
+    let view = safe_calculate_pivot(&definition, &mut cache);
+    pivot_state.views.lock().unwrap().insert(pivot_id, view.clone());
+
+    let destination = definition.destination;
+    let dest_sheet_idx = resolve_dest_sheet_index(state, &definition);
+
+    // Restore pivot
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    pivot_tables.insert(pivot_id, (definition, cache));
+    drop(pivot_tables);
+
+    // Write to grid
+    finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+}
+
+// ============================================================================
+// SLICER UNDO/REDO HANDLERS
+// ============================================================================
+
+/// Snapshot of a slicer for property/selection undo.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SlicerSnapshot {
+    slicer_id: identity::EntityId,
+    previous: Slicer,
+}
+
+/// Snapshot for slicer creation undo (undo = delete).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SlicerCreateSnapshot {
+    slicer_id: identity::EntityId,
+}
+
+/// Restore a slicer's previous state (properties/selection).
+fn apply_slicer_restore(
+    slicer_state: &SlicerState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: SlicerSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize slicer snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut slicers = slicer_state.slicers.lock().unwrap();
+    if let Some(slicer) = slicers.get_mut(&snapshot.slicer_id) {
+        // Save current state for inverse
+        let inverse_snapshot = SlicerSnapshot {
+            slicer_id: snapshot.slicer_id,
+            previous: slicer.clone(),
+        };
+        let inverse_data = serde_json::to_vec(&inverse_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "slicer".to_string(),
+            data: inverse_data,
+        });
+
+        // Restore previous state
+        *slicer = snapshot.previous;
+    }
+}
+
+/// Undo slicer creation: remove the slicer.
+fn apply_slicer_create_restore(
+    slicer_state: &SlicerState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: SlicerCreateSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize slicer create snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut slicers = slicer_state.slicers.lock().unwrap();
+    if let Some(slicer) = slicers.remove(&snapshot.slicer_id) {
+        // Save for redo (redo = re-create)
+        let redo_snapshot = SlicerSnapshot {
+            slicer_id: snapshot.slicer_id,
+            previous: slicer,
+        };
+        let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "slicer_delete".to_string(),
+            data: redo_data,
+        });
+    }
+}
+
+/// Undo slicer deletion: re-create the slicer from snapshot.
+fn apply_slicer_delete_restore(
+    slicer_state: &SlicerState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: SlicerSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize slicer delete snapshot: {}", e);
+            return;
+        }
+    };
+
+    // Save for redo (redo = delete it again)
+    let redo_snapshot = SlicerCreateSnapshot {
+        slicer_id: snapshot.slicer_id,
+    };
+    let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "slicer_create".to_string(),
+        data: redo_data,
+    });
+
+    // Restore slicer
+    let mut slicers = slicer_state.slicers.lock().unwrap();
+    slicers.insert(snapshot.slicer_id, snapshot.previous);
+}
+
+// ============================================================================
+// RIBBON FILTER UNDO/REDO HANDLERS
+// ============================================================================
+
+/// Snapshot of a ribbon filter for property/selection undo.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RibbonFilterSnapshot {
+    filter_id: identity::EntityId,
+    previous: RibbonFilter,
+}
+
+/// Snapshot for ribbon filter creation undo (undo = delete).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RibbonFilterCreateSnapshot {
+    filter_id: identity::EntityId,
+}
+
+/// Restore a ribbon filter's previous state (properties/selection).
+fn apply_ribbon_filter_restore(
+    ribbon_filter_state: &RibbonFilterState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: RibbonFilterSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize ribbon filter snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    if let Some(filter) = filters.get_mut(&snapshot.filter_id) {
+        // Save current state for inverse
+        let inverse_snapshot = RibbonFilterSnapshot {
+            filter_id: snapshot.filter_id,
+            previous: filter.clone(),
+        };
+        let inverse_data = serde_json::to_vec(&inverse_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "ribbon_filter".to_string(),
+            data: inverse_data,
+        });
+
+        // Restore previous state
+        *filter = snapshot.previous;
+    }
+}
+
+/// Undo ribbon filter creation: remove the filter.
+fn apply_ribbon_filter_create_restore(
+    ribbon_filter_state: &RibbonFilterState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: RibbonFilterCreateSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize ribbon filter create snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    if let Some(filter) = filters.remove(&snapshot.filter_id) {
+        let redo_snapshot = RibbonFilterSnapshot {
+            filter_id: snapshot.filter_id,
+            previous: filter,
+        };
+        let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "ribbon_filter_delete".to_string(),
+            data: redo_data,
+        });
+    }
+}
+
+/// Undo ribbon filter deletion: re-create the filter from snapshot.
+fn apply_ribbon_filter_delete_restore(
+    ribbon_filter_state: &RibbonFilterState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: RibbonFilterSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize ribbon filter delete snapshot: {}", e);
+            return;
+        }
+    };
+
+    let redo_snapshot = RibbonFilterCreateSnapshot {
+        filter_id: snapshot.filter_id,
+    };
+    let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "ribbon_filter_create".to_string(),
+        data: redo_data,
+    });
+
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    filters.insert(snapshot.filter_id, snapshot.previous);
 }

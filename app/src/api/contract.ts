@@ -14,6 +14,8 @@ import type {
   AnchorRect,
   StatusBarItemDefinition,
   ActivityViewDefinition,
+  PanelDefinition,
+  PanelPlacement,
 } from "./uiTypes";
 import type {
   CellDecorationFn,
@@ -97,6 +99,16 @@ export interface IActivityBarAPI {
   toggle(viewId?: string): void;
 }
 
+/** Location-agnostic panel registration and management */
+export interface IPanelAPI {
+  register(definition: PanelDefinition): void;
+  unregister(panelId: string): void;
+  open(panelId: string, data?: Record<string, unknown>): void;
+  close(panelId: string): void;
+  getPlacement(panelId: string): PanelPlacement;
+  setPlacement(panelId: string, placement: PanelPlacement): void;
+}
+
 /** Application event system */
 export interface IEventAPI {
   emit<T = unknown>(eventName: AppEventName | string, detail?: T): void;
@@ -177,6 +189,7 @@ export interface ExtensionContext {
     overlays: IOverlayAPI;
     statusBar: IStatusBarAPI;
     activityBar: IActivityBarAPI;
+    panels: IPanelAPI;
     notifications: INotificationAPI;
   };
 

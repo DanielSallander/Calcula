@@ -26,6 +26,37 @@ fn store_view(pivot_state: &PivotState, pivot_id: PivotId, view: &PivotView) {
     pivot_state.views.lock().unwrap().insert(pivot_id, view.clone());
 }
 
+/// Record a pivot definition undo snapshot.
+/// `saved_cells` are cells that were overwritten by the pivot expansion
+/// (so that `undo_pivot_overwrite` can restore them when the user cancels).
+fn record_pivot_definition_undo(
+    state: &AppState,
+    pivot_id: PivotId,
+    definition: PivotDefinition,
+    overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+    dest_sheet_idx: usize,
+    description: &str,
+) {
+    #[derive(serde::Serialize)]
+    struct PivotDefinitionSnapshot {
+        pivot_id: PivotId,
+        definition: PivotDefinition,
+        overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+        dest_sheet_idx: usize,
+    }
+    let snapshot = PivotDefinitionSnapshot {
+        pivot_id,
+        definition,
+        overwritten_cells,
+        dest_sheet_idx,
+    };
+    let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.begin_transaction(description);
+    undo_stack.record_custom_restore("pivot_definition".to_string(), data, description);
+    undo_stack.commit_transaction();
+}
+
 /// Populate children_indices from parent_index on a PivotView.
 /// The engine sets parent_index but leaves children_indices empty.
 /// This is needed for toggle_collapse to find child rows.
@@ -233,6 +264,27 @@ pub fn create_pivot_table(
     let mut active = pivot_state.active_pivot_id.lock().unwrap();
     *active = Some(pivot_id);
 
+    // Record undo snapshot for pivot creation (undo = delete the pivot)
+    {
+        #[derive(serde::Serialize)]
+        struct PivotFullSnapshot {
+            pivot_id: PivotId,
+            definition: PivotDefinition,
+            cache: PivotCache,
+        }
+        let (def, cache) = pivot_tables.get(&pivot_id).unwrap();
+        let snapshot = PivotFullSnapshot {
+            pivot_id,
+            definition: def.clone(),
+            cache: cache.clone(),
+        };
+        let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Create pivot table");
+        undo_stack.record_custom_restore("pivot_create".to_string(), data, "Create pivot table");
+        undo_stack.commit_transaction();
+    }
+
     log_info!("PIVOT", "created pivot_id={} rows={} (empty - awaiting field configuration)", pivot_id, response.row_count);
 
     Ok(response)
@@ -304,6 +356,88 @@ pub fn revert_pivot_operation(
         // No previous state available — nothing to revert
         Ok(())
     }
+}
+
+/// Undoes the last pivot operation that overwrote existing cells.
+/// Called by the frontend when the user declines the "overwrite data?" dialog.
+///
+/// This bypasses the normal undo system (`apply_changes`) because that function
+/// holds grid/style/merge locks and then re-acquires them inside the pivot
+/// restore handler, causing a deadlock.  Instead, this command directly:
+///   1. Pops the last undo entry (so Ctrl+Z doesn't replay it)
+///   2. Extracts the pivot definition from the undo snapshot
+///   3. Restores the definition, recalculates the view, and rewrites the grid
+#[tauri::command]
+pub fn undo_pivot_overwrite(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<(), String> {
+    log_info!("PIVOT", "undo_pivot_overwrite pivot_id={}", pivot_id);
+
+    // 1. Pop the undo entry so Ctrl+Z doesn't replay it
+    let transaction = {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.pop_undo()
+    };
+
+    // 2. Find the pivot definition snapshot in the transaction
+    if let Some(txn) = transaction {
+        for change in &txn.changes {
+            if let crate::CellChange::CustomRestore { kind, data } = change {
+                if kind == "pivot_definition" {
+                    #[derive(serde::Deserialize)]
+                    struct PivotDefinitionSnapshot {
+                        pivot_id: PivotId,
+                        definition: PivotDefinition,
+                        #[serde(default)]
+                        overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+                        #[serde(default)]
+                        dest_sheet_idx: usize,
+                    }
+                    if let Ok(snapshot) = serde_json::from_slice::<PivotDefinitionSnapshot>(data) {
+                        if snapshot.pivot_id == pivot_id {
+                            let dest_sheet_idx = resolve_dest_sheet_index(&state, &snapshot.definition);
+                            let destination = snapshot.definition.destination;
+
+                            // Restore definition and recalculate
+                            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+                            if let Some((def, cache)) = pivot_tables.get_mut(&pivot_id) {
+                                *def = snapshot.definition;
+                                let view = safe_calculate_pivot(def, cache);
+                                store_view(&pivot_state, pivot_id, &view);
+                                drop(pivot_tables);
+
+                                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+
+                                // Restore cells that were overwritten by the pivot expansion
+                                if !snapshot.overwritten_cells.is_empty() {
+                                    let mut grids = state.grids.lock().unwrap();
+                                    if let Some(dest_grid) = grids.get_mut(snapshot.dest_sheet_idx) {
+                                        for sc in &snapshot.overwritten_cells {
+                                            dest_grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                                        }
+                                    }
+                                    let active_sheet = *state.active_sheet.lock().unwrap();
+                                    if snapshot.dest_sheet_idx == active_sheet {
+                                        let mut grid = state.grid.lock().unwrap();
+                                        for sc in &snapshot.overwritten_cells {
+                                            grid.set_cell(sc.row, sc.col, sc.cell.clone());
+                                        }
+                                    }
+                                }
+
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // No matching undo entry found — silently succeed
+    Ok(())
 }
 
 /// Updates the field configuration of an existing pivot table
@@ -449,7 +583,7 @@ pub async fn update_pivot_fields(
     emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
 
     let t1 = Instant::now();
-    let response = view_to_response(&view, &definition, &mut cache);
+    let mut response = view_to_response(&view, &definition, &mut cache);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
     let auto_fit = definition.layout.auto_fit_column_widths;
     let destination = definition.destination;
@@ -483,6 +617,10 @@ pub async fn update_pivot_fields(
         return Err("Pivot operation cancelled".into());
     }
 
+    // Save overwritten cells + count BEFORE writing pivot to grid
+    let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = saved_cells.len() as u32;
+
     // Update pivot in grid (clears old region, writes new view)
     let t2 = Instant::now();
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -507,6 +645,11 @@ pub async fn update_pivot_fields(
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     let payload_bytes = serde_json::to_string(&response).map(|s| s.len()).unwrap_or(0);
     let payload_kb = payload_bytes as f64 / 1024.0;
+
+    // Record undo snapshot AFTER successful completion (not before, to avoid
+    // stale entries when the operation is cancelled).
+    // Include saved overwritten cells so undo_pivot_overwrite can restore them.
+    record_pivot_definition_undo(&state, pivot_id, old_definition, saved_cells, dest_sheet_idx, "Pivot table field change");
 
     log_perf!(
         "PIVOT",
@@ -551,6 +694,9 @@ pub fn toggle_pivot_group(
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    // Save old definition for undo (before toggle modifies it)
+    let old_definition_for_undo = definition.clone();
 
     // Get the appropriate field list
     let fields = if request.is_row {
@@ -668,7 +814,7 @@ pub fn toggle_pivot_group(
                 let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
                 let t_resp = Instant::now();
-                let response = view_to_response(&view, definition, cache);
+                let mut response = view_to_response(&view, definition, cache);
                 let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
 
                 store_view(&pivot_state, pivot_id, &view);
@@ -676,7 +822,10 @@ pub fn toggle_pivot_group(
                 let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
                 drop(pivot_tables);
 
+                let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+                response.overwritten_cell_count = saved_cells.len() as u32;
                 finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+                record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!(
@@ -699,7 +848,7 @@ pub fn toggle_pivot_group(
             let toggle_ms = t_toggle.elapsed().as_secs_f64() * 1000.0;
 
             let t_resp = Instant::now();
-            let response = view_to_response(view, definition, cache);
+            let mut response = view_to_response(view, definition, cache);
             let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
 
             // Store updated view
@@ -708,7 +857,10 @@ pub fn toggle_pivot_group(
 
             // Clear old cells and write updated view to grid (prevents orphaned cells
             // when pivot shrinks after collapse)
+            let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
+            response.overwritten_cell_count = saved_cells.len() as u32;
             finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, view);
+            record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
             log_perf!(
@@ -731,7 +883,7 @@ pub fn toggle_pivot_group(
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
     let t_resp = Instant::now();
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
     let serialize_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
 
     // Store view for windowed cell fetching
@@ -740,7 +892,10 @@ pub fn toggle_pivot_group(
     drop(pivot_tables);
 
     // Clear old cells and write updated view to grid, then update region bounds
+    let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+    response.overwritten_cell_count = saved_cells.len() as u32;
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
@@ -845,10 +1000,30 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
 
     // Get pivot info before removing
     let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, _) = pivot_tables
+    let (definition, cache) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
-    
+
+    // Record undo snapshot for pivot deletion (undo = recreate the pivot)
+    {
+        #[derive(serde::Serialize)]
+        struct PivotFullSnapshot {
+            pivot_id: PivotId,
+            definition: PivotDefinition,
+            cache: PivotCache,
+        }
+        let snapshot = PivotFullSnapshot {
+            pivot_id,
+            definition: definition.clone(),
+            cache: cache.clone(),
+        };
+        let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Delete pivot table");
+        undo_stack.record_custom_restore("pivot_delete".to_string(), data, "Delete pivot table");
+        undo_stack.commit_transaction();
+    }
+
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
     drop(pivot_tables);
     
@@ -1270,7 +1445,7 @@ pub async fn refresh_pivot_cache(
     emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
 
     let t1 = Instant::now();
-    let response = view_to_response(&view, &definition, &mut cache);
+    let mut response = view_to_response(&view, &definition, &mut cache);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     // 5. Put updated definition + cache back
@@ -1301,6 +1476,9 @@ pub async fn refresh_pivot_cache(
         pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
         return Err("Pivot operation cancelled".into());
     }
+
+    // Count overwritten cells before writing pivot to grid
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Update pivot in grid
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -1460,6 +1638,16 @@ pub fn get_pivot_at_cell(
         }
     }).collect();
 
+    let hierarchy_configs: Vec<HierarchyConfigInfo> = definition.hierarchy_configs
+        .iter()
+        .map(|hc| HierarchyConfigInfo {
+            name: hc.name.clone(),
+            field_start: hc.field_start,
+            field_count: hc.field_count,
+            is_row: hc.is_row,
+        })
+        .collect();
+
     let field_configuration = PivotFieldConfiguration {
         row_fields,
         column_fields,
@@ -1467,6 +1655,7 @@ pub fn get_pivot_at_cell(
         filter_fields: filter_fields.clone(),
         layout,
         calculated_fields: calc_fields,
+        hierarchy_configs,
     };
 
     // Calculate filter zones from filter field configuration
@@ -1828,6 +2017,7 @@ pub async fn change_pivot_data_source(
 
     // Write to grid
     emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
+    let overwritten = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Store updated cache
@@ -1843,7 +2033,8 @@ pub async fn change_pivot_data_source(
         let (_def, cache) = pivot_tables.get(&pivot_id).unwrap();
         cache.clone()
     };
-    let response = view_to_response(&view, &definition, &mut final_cache);
+    let mut response = view_to_response(&view, &definition, &mut final_cache);
+    response.overwritten_cell_count = overwritten;
 
     log_info!(
         "PIVOT",
@@ -2029,7 +2220,7 @@ pub fn update_pivot_layout(
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     // Get destination info
     let destination = definition.destination;
@@ -2039,6 +2230,7 @@ pub fn update_pivot_layout(
     drop(pivot_tables);
 
     // Update pivot in grid
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2270,7 +2462,7 @@ pub fn add_pivot_hierarchy(
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2278,6 +2470,7 @@ pub fn add_pivot_hierarchy(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2341,7 +2534,7 @@ pub fn remove_pivot_hierarchy(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2349,6 +2542,7 @@ pub fn remove_pivot_hierarchy(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2470,7 +2664,7 @@ pub fn move_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2478,6 +2672,7 @@ pub fn move_pivot_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2518,7 +2713,7 @@ pub fn set_pivot_aggregation(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2526,6 +2721,7 @@ pub fn set_pivot_aggregation(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2565,7 +2761,7 @@ pub fn set_pivot_number_format(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2573,6 +2769,7 @@ pub fn set_pivot_number_format(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2670,7 +2867,7 @@ pub fn apply_pivot_filter(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2678,6 +2875,7 @@ pub fn apply_pivot_filter(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2725,7 +2923,7 @@ pub fn clear_pivot_filter(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2733,6 +2931,7 @@ pub fn clear_pivot_filter(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2779,7 +2978,7 @@ pub fn sort_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2787,6 +2986,7 @@ pub fn sort_pivot_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -2927,7 +3127,7 @@ pub fn set_pivot_item_visibility(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -2935,6 +3135,7 @@ pub fn set_pivot_item_visibility(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3046,7 +3247,7 @@ pub fn set_pivot_item_expanded(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -3054,6 +3255,7 @@ pub fn set_pivot_item_expanded(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3104,7 +3306,7 @@ pub fn expand_collapse_level(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -3112,6 +3314,7 @@ pub fn expand_collapse_level(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3145,7 +3348,7 @@ pub fn expand_collapse_all(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -3153,6 +3356,7 @@ pub fn expand_collapse_all(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3330,7 +3534,7 @@ pub fn group_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -3338,6 +3542,7 @@ pub fn group_pivot_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3401,7 +3606,7 @@ pub fn create_manual_group(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -3409,6 +3614,7 @@ pub fn create_manual_group(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3452,7 +3658,7 @@ pub fn ungroup_pivot_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -3460,6 +3666,7 @@ pub fn ungroup_pivot_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -3894,12 +4101,13 @@ pub async fn update_bi_pivot_fields(
 
                 let view = safe_calculate_pivot(definition, stored_cache);
                 store_view(&pivot_state, pivot_id, &view);
-                let response = view_to_response(&view, definition, stored_cache);
+                let mut response = view_to_response(&view, definition, stored_cache);
                 let destination = definition.destination;
                 let auto_fit = definition.layout.auto_fit_column_widths;
                 let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
                 drop(pivot_tables);
 
+                response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
                 if auto_fit {
                     auto_fit_pivot_columns(&state, destination, &view);
@@ -3942,7 +4150,7 @@ pub async fn update_bi_pivot_fields(
 
         let empty_cache = PivotCache::new(pivot_id, 0);
         let view = create_empty_view(pivot_id, definition.version);
-        let response = view_to_response(&view, definition, &mut empty_cache.clone());
+        let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
 
         let destination = definition.destination;
         let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
@@ -3956,6 +4164,7 @@ pub async fn update_bi_pivot_fields(
         }
         drop(pt);
 
+        response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
         finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
         return Ok(response);
     }
@@ -4009,12 +4218,13 @@ pub async fn update_bi_pivot_fields(
 
         let empty_cache = PivotCache::new(pivot_id, 0);
         let view = create_empty_view(pivot_id, definition.version);
-        let response = view_to_response(&view, definition, &mut empty_cache.clone());
+        let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
         let destination = definition.destination;
         let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
         *stored_cache = empty_cache;
         drop(pivot_tables);
 
+        response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
         finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
         return Ok(response);
     }
@@ -4372,12 +4582,13 @@ pub async fn update_bi_pivot_fields(
 
                 let empty_cache = PivotCache::new(pivot_id, 0);
                 let view = create_empty_view(pivot_id, definition.version);
-                let response = view_to_response(&view, definition, &mut empty_cache.clone());
+                let mut response = view_to_response(&view, definition, &mut empty_cache.clone());
                 let destination = definition.destination;
                 let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
                 *stored_cache = empty_cache;
                 drop(pivot_tables);
 
+                response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
                 return Ok(response);
             }
@@ -4512,28 +4723,15 @@ pub async fn update_bi_pivot_fields(
             })
             .collect();
         // Append hierarchy level fields as row dimensions.
-        // Each hierarchy's level 0 is expanded; level 1+ are collapsed so only
-        // the first level shows initially. The user expands via toggle_pivot_group.
+        // All levels start collapsed so the user expands via toggle_pivot_group.
         hierarchy_row_start = row_fields_vec.len();
-        // Build set of "first level of each hierarchy" indices
-        let mut hierarchy_first_levels = std::collections::HashSet::new();
-        {
-            let mut offset = 0usize;
-            for hm in hierarchy_metas.iter().filter(|h| h.is_row) {
-                hierarchy_first_levels.insert(offset);
-                offset += hm.field_count;
-            }
-        }
-        for (i, f) in hierarchy_row_fields.iter().enumerate() {
+        for f in hierarchy_row_fields.iter() {
             let idx = *field_to_cache_idx
                 .get(&(f.table.clone(), f.column.clone()))
                 .unwrap_or(&0);
             let name = format!("{}.{}", f.table, f.column);
             let mut pf = PivotField::new(idx, name);
-            // Collapse all items in levels deeper than the first of each hierarchy
-            if !hierarchy_first_levels.contains(&i) {
-                pf.collapsed = true;
-            }
+            pf.collapsed = true;
             pf.sort_by_field_index = resolve_sort_by(f);
             row_fields_vec.push(pf);
         }
@@ -4562,23 +4760,13 @@ pub async fn update_bi_pivot_fields(
         .collect();
     // Append hierarchy level fields as column dimensions.
     let hierarchy_col_start = col_fields_vec.len();
-    let mut col_hierarchy_first_levels = std::collections::HashSet::new();
-    {
-        let mut offset = 0usize;
-        for hm in hierarchy_metas.iter().filter(|h| !h.is_row) {
-            col_hierarchy_first_levels.insert(offset);
-            offset += hm.field_count;
-        }
-    }
-    for (i, f) in hierarchy_col_fields.iter().enumerate() {
+    for f in hierarchy_col_fields.iter() {
         let idx = *field_to_cache_idx
             .get(&(f.table.clone(), f.column.clone()))
             .unwrap_or(&0);
         let name = format!("{}.{}", f.table, f.column);
         let mut pf = PivotField::new(idx, name);
-        if !col_hierarchy_first_levels.contains(&i) {
-            pf.collapsed = true;
-        }
+        pf.collapsed = true;
         pf.sort_by_field_index = resolve_sort_by(f);
         col_fields_vec.push(pf);
     }
@@ -4754,7 +4942,7 @@ pub async fn update_bi_pivot_fields(
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
     let t_resp = Instant::now();
-    let response = view_to_response(&view, definition, stored_cache);
+    let mut response = view_to_response(&view, definition, stored_cache);
     let resp_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
     let destination = definition.destination;
     let auto_fit = definition.layout.auto_fit_column_widths;
@@ -4763,6 +4951,7 @@ pub async fn update_bi_pivot_fields(
 
     // Update grid (clear old region + write new)
     let t_grid = Instant::now();
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
     if auto_fit {
         auto_fit_pivot_columns(&state, destination, &view);
@@ -4999,7 +5188,7 @@ pub fn add_calculated_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5007,6 +5196,7 @@ pub fn add_calculated_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -5054,7 +5244,7 @@ pub fn update_calculated_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5062,6 +5252,7 @@ pub fn update_calculated_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -5099,7 +5290,7 @@ pub fn remove_calculated_field(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5107,6 +5298,7 @@ pub fn remove_calculated_field(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -5150,7 +5342,7 @@ pub fn add_calculated_item(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5158,6 +5350,7 @@ pub fn add_calculated_item(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
@@ -5195,7 +5388,7 @@ pub fn remove_calculated_item(
 
     let view = safe_calculate_pivot(definition, cache);
     store_view(&pivot_state, request.pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
+    let mut response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
     let pivot_id = definition.id;
@@ -5203,6 +5396,7 @@ pub fn remove_calculated_item(
 
     drop(pivot_tables);
 
+    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)

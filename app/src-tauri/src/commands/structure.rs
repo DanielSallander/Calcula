@@ -8,7 +8,7 @@ use crate::persistence::FileState;
 use crate::pivot::types::PivotState;
 use engine::{Cell, GridSnapshot, UndoMergeRegion};
 use once_cell::sync::Lazy;
-use pivot_engine::PivotId;
+
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use tauri::State;

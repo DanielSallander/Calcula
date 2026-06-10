@@ -555,6 +555,17 @@ export function useSpreadsheetSelection({
         emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
       }
 
+      // Notify pivot/slicer/ribbon filter extensions to refresh after undo
+      if (result.pivotChanged) {
+        window.dispatchEvent(new CustomEvent("pivot:refresh"));
+      }
+      if (result.slicerChanged) {
+        window.dispatchEvent(new Event("slicers:refresh"));
+      }
+      if (result.ribbonFilterChanged) {
+        window.dispatchEvent(new CustomEvent("filterpane:filters-refreshed"));
+      }
+
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
         const firstCell = result.updatedCells[0];
@@ -597,6 +608,17 @@ export function useSpreadsheetSelection({
       // Notify extensions about structural change so they can update their state
       if (result.structuralRestore) {
         emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
+      }
+
+      // Notify pivot/slicer/ribbon filter extensions to refresh after redo
+      if (result.pivotChanged) {
+        window.dispatchEvent(new CustomEvent("pivot:refresh"));
+      }
+      if (result.slicerChanged) {
+        window.dispatchEvent(new Event("slicers:refresh"));
+      }
+      if (result.ribbonFilterChanged) {
+        window.dispatchEvent(new CustomEvent("filterpane:filters-refreshed"));
       }
 
       // Emit event to update any listeners (e.g., formula bar)

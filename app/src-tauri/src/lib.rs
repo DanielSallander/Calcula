@@ -11,7 +11,7 @@ use engine::{
 // Engine re-exports parser AST types — they are the same types.
 // No conversion needed between parser and engine expressions.
 use engine::{
-    BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value,
+    BuiltinFunction, Expression, Value,
 };
 use parser::ast::TableSpecifier;
 
@@ -23,7 +23,7 @@ use parser::ast::TableSpecifier;
 // Retained to avoid mass-renaming across this large file.
 type EngineExpr = Expression;
 type ParserExpr = Expression;
-type EngineBuiltinFn = BuiltinFunction;
+
 type ParserBuiltinFn = BuiltinFunction;
 type ParserTableSpecifier = TableSpecifier;
 type ParserValue = Value;
@@ -3540,6 +3540,7 @@ pub fn run() {
             pivot::get_pivot_cell_window,
             pivot::cancel_pivot_operation,
             pivot::revert_pivot_operation,
+            pivot::undo_pivot_overwrite,
             pivot::delete_pivot_table,
             pivot::relocate_pivot,
             pivot::get_pivot_source_data,

@@ -375,21 +375,71 @@ async function checkPivotAtSelection(
       // uses name-based references (not cache column indices)
       const biIdx = isBiPivot ? -1 : undefined;
 
-      const initialRows: ZoneField[] = config.rowFields.map((f) => ({
-        sourceIndex: biIdx ?? f.sourceIndex,
-        name: f.name,
-        isNumeric: f.isNumeric,
-        customName: isBiPivot ? f.name : undefined,
-        isLookup: f.isLookup || false,
-      }));
+      // Reconstitute hierarchy fields: replace individual level fields with
+      // a single hierarchy ZoneField using the "Table.__hierarchy__.Name" convention.
+      const hierarchyConfigs = config.hierarchyConfigs || [];
 
-      const initialColumns: ZoneField[] = config.columnFields.map((f) => ({
-        sourceIndex: biIdx ?? f.sourceIndex,
-        name: f.name,
-        isNumeric: f.isNumeric,
-        customName: isBiPivot ? f.name : undefined,
-        isLookup: f.isLookup || false,
-      }));
+      const reconstitute = (
+        fields: typeof config.rowFields,
+        isRow: boolean,
+      ): ZoneField[] => {
+        const result: ZoneField[] = [];
+        const skipIndices = new Set<number>();
+
+        // Mark indices covered by hierarchies and emit a single hierarchy field
+        for (const hc of hierarchyConfigs) {
+          if (hc.isRow !== isRow) continue;
+          for (let i = hc.fieldStart; i < hc.fieldStart + hc.fieldCount; i++) {
+            skipIndices.add(i);
+          }
+          // Find the table from the first level field
+          const firstField = fields[hc.fieldStart];
+          if (firstField) {
+            const dotIdx = firstField.name.indexOf('.');
+            const table = dotIdx >= 0 ? firstField.name.substring(0, dotIdx) : '';
+            result.push({
+              sourceIndex: -3,
+              name: `${table}.__hierarchy__.${hc.name}`,
+              isNumeric: false,
+              customName: `${table}.__hierarchy__.${hc.name}`,
+            });
+          }
+        }
+
+        // Add non-hierarchy fields
+        for (let i = 0; i < fields.length; i++) {
+          if (skipIndices.has(i)) continue;
+          const f = fields[i];
+          result.push({
+            sourceIndex: biIdx ?? f.sourceIndex,
+            name: f.name,
+            isNumeric: f.isNumeric,
+            customName: isBiPivot ? f.name : undefined,
+            isLookup: f.isLookup || false,
+          });
+        }
+        return result;
+      };
+
+      const initialRows: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
+        ? reconstitute(config.rowFields, true)
+        : config.rowFields.map((f) => ({
+            sourceIndex: biIdx ?? f.sourceIndex,
+            name: f.name,
+            isNumeric: f.isNumeric,
+            customName: isBiPivot ? f.name : undefined,
+            isLookup: f.isLookup || false,
+          }));
+
+      const initialColumns: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
+        ? reconstitute(config.columnFields, false)
+        : config.columnFields.map((f) => ({
+            sourceIndex: biIdx ?? f.sourceIndex,
+            name: f.name,
+            isNumeric: f.isNumeric,
+            customName: isBiPivot ? f.name : undefined,
+            isLookup: f.isLookup || false,
+          }));
 
       const initialValues: ZoneField[] = config.valueFields.map((f) => ({
         sourceIndex: biIdx ?? f.sourceIndex,

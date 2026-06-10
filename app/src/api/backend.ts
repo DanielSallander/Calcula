@@ -476,6 +476,10 @@ export async function revertPivotOperation(pivotId: number): Promise<void> {
   return invoke<void>("revert_pivot_operation", { pivotId });
 }
 
+export async function undoPivotOverwrite(pivotId: number): Promise<void> {
+  return invoke<void>("undo_pivot_overwrite", { pivotId });
+}
+
 // ============================================================================
 // Clear Range Commands
 // ============================================================================

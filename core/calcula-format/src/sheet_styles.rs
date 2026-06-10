@@ -63,10 +63,7 @@ pub fn serialize_style_registry(registry: &[CellStyle]) -> Result<String, serde_
     serde_json::to_string_pretty(registry)
 }
 
-/// Deserialize a style registry from JSON.
-pub fn deserialize_style_registry(json: &str) -> Result<Vec<CellStyle>, serde_json::Error> {
-    serde_json::from_str(json)
-}
+
 
 #[cfg(test)]
 mod tests {

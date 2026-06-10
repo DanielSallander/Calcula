@@ -826,6 +826,11 @@ pub struct PivotViewResponse {
     /// For windowed responses: lightweight descriptors for ALL rows (no cells).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_descriptors: Vec<PivotRowDescriptorData>,
+    /// Number of non-empty cells outside the previous pivot region that were
+    /// overwritten by the latest layout update.  When > 0 the frontend should
+    /// ask the user for confirmation and undo if declined.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub overwritten_cell_count: u32,
 }
 
 /// Filter row metadata for frontend interaction
@@ -911,6 +916,7 @@ pub struct PivotCellData {
 }
 
 fn is_false(v: &bool) -> bool { !v }
+fn is_zero_u32(v: &u32) -> bool { *v == 0 }
 fn is_zero_u8(v: &u8) -> bool { *v == 0 }
 fn is_one_u16(v: &u16) -> bool { *v <= 1 }
 
@@ -1137,6 +1143,20 @@ pub struct PivotFieldConfiguration {
     /// Calculated fields defined on this pivot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calculated_fields: Vec<CalculatedFieldDef>,
+    /// Hierarchy configs — tells the frontend which row/column fields
+    /// belong to hierarchies so they can be reconstituted as single items.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hierarchy_configs: Vec<HierarchyConfigInfo>,
+}
+
+/// Serializable hierarchy config info for the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HierarchyConfigInfo {
+    pub name: String,
+    pub field_start: usize,
+    pub field_count: usize,
+    pub is_row: bool,
 }
 
 /// Response for pivot region check

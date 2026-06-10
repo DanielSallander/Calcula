@@ -19,7 +19,6 @@ pub struct SheetSummary {
 
 /// Information about a single column.
 pub struct ColumnInfo {
-    pub col_index: u32,
     pub letter: String,
     pub inferred_type: ColumnType,
     pub header_name: Option<String>,
@@ -33,7 +32,7 @@ pub enum ColumnType {
     Text,
     Boolean,
     Formula,
-    Date,
+
     Mixed,
     Empty,
 }
@@ -45,7 +44,7 @@ impl std::fmt::Display for ColumnType {
             ColumnType::Text => write!(f, "text"),
             ColumnType::Boolean => write!(f, "boolean"),
             ColumnType::Formula => write!(f, "formula"),
-            ColumnType::Date => write!(f, "date"),
+
             ColumnType::Mixed => write!(f, "mixed"),
             ColumnType::Empty => write!(f, "empty"),
         }
@@ -106,7 +105,6 @@ pub fn summarize_sheet(
         };
 
         columns.push(ColumnInfo {
-            col_index: col,
             letter,
             inferred_type,
             header_name,
