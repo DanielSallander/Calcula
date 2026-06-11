@@ -121,6 +121,16 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             zip.start_file(format!("{}/layout.json", base_path), options.clone())?;
             zip.write_all(layout_json.as_bytes())?;
         }
+
+        // metadata.json — merges, freeze panes, hidden rows/cols, tab color,
+        // visibility, notes, hyperlinks, page setup, gridlines. Without this
+        // file the format silently dropped all of these (BUG-0018 etc.).
+        let metadata = crate::sheet_metadata::SheetMetadata::from_sheet(sheet);
+        if !metadata.is_default() {
+            let metadata_json = serde_json::to_string_pretty(&metadata)?;
+            zip.start_file(format!("{}/metadata.json", base_path), options.clone())?;
+            zip.write_all(metadata_json.as_bytes())?;
+        }
     }
 
     // Write tables
@@ -317,7 +327,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
             SheetId::from_bytes(identity::generate_uuid_v7())
         });
 
-        sheets.push(persistence::Sheet {
+        let mut sheet = persistence::Sheet {
             id: sheet_id,
             name: sheet_entry.name.clone(),
             cells,
@@ -335,7 +345,18 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
             hyperlinks: Vec::new(),
             page_setup: None,
             show_gridlines: true,
-        });
+        };
+
+        // metadata.json — merges, freeze, hidden rows/cols, tab color,
+        // visibility, notes, hyperlinks, page setup, gridlines
+        if let Some(metadata) = read_optional_json::<crate::sheet_metadata::SheetMetadata>(
+            &mut archive,
+            &format!("{}/metadata.json", base_path),
+        )? {
+            metadata.apply_to_sheet(&mut sheet);
+        }
+
+        sheets.push(sheet);
     }
 
     // Read tables

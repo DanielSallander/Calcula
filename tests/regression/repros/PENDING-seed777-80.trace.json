@@ -1,0 +1,442 @@
+{
+  "version": 1,
+  "seed": 777,
+  "startedAt": "2026-06-11T10:02:46.113Z",
+  "actions": [
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": true,
+        "values": [
+          20,
+          13,
+          63,
+          38
+        ]
+      }
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "G4"
+      }
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": false,
+        "values": [
+          14,
+          68,
+          55,
+          92
+        ]
+      }
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "B2",
+        "value": "844"
+      }
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "ribbon.switch-tab",
+      "params": {
+        "tabName": "Home"
+      }
+    },
+    {
+      "id": "structure.insert-col",
+      "params": {
+        "col": 55
+      }
+    },
+    {
+      "id": "names.define",
+      "params": {
+        "name": "TestName_9"
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "format.italic",
+      "params": {
+        "ref": "F3"
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G10",
+        "formula": "=A1&B2"
+      }
+    },
+    {
+      "id": "merge.unmerge",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "B2"
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_16"
+      }
+    },
+    {
+      "id": "structure.resize-col",
+      "params": {
+        "col": 7,
+        "width": 118
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "B30"
+      }
+    },
+    {
+      "id": "merge.merge",
+      "params": {
+        "startRow": 60,
+        "startCol": 3,
+        "rows": 2,
+        "cols": 2
+      }
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "chart.select",
+      "params": {}
+    },
+    {
+      "id": "nav.name-box",
+      "params": {
+        "ref": "J1"
+      }
+    },
+    {
+      "id": "table.select-away",
+      "params": {}
+    },
+    {
+      "id": "freeze.set",
+      "params": {
+        "row": 1,
+        "col": 2
+      }
+    },
+    {
+      "id": "freeze.set",
+      "params": {
+        "row": 1,
+        "col": 0
+      }
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "A30",
+        "value": "-587"
+      }
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "C3",
+        "value": "-756"
+      }
+    },
+    {
+      "id": "table.select-away",
+      "params": {}
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "F3",
+        "to": "K20"
+      }
+    },
+    {
+      "id": "merge.merge",
+      "params": {
+        "startRow": 66,
+        "startCol": 3,
+        "rows": 2,
+        "cols": 2
+      }
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "F3"
+      }
+    },
+    {
+      "id": "cf.add-rule",
+      "params": {
+        "threshold": 75
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G10",
+        "formula": "=A1&B2"
+      }
+    },
+    {
+      "id": "cf.add-rule",
+      "params": {
+        "threshold": 68
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_39"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "G4"
+      }
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A30"
+      }
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "G4"
+      }
+    },
+    {
+      "id": "cell.clear",
+      "params": {
+        "ref": "E5"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "names.delete",
+      "params": {}
+    },
+    {
+      "id": "structure.resize-col",
+      "params": {
+        "col": 4,
+        "width": 61
+      }
+    },
+    {
+      "id": "cf.add-rule",
+      "params": {
+        "threshold": 80
+      }
+    },
+    {
+      "id": "filter.remove",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.escape",
+      "params": {}
+    },
+    {
+      "id": "table.select-into",
+      "params": {}
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "H11",
+        "formula": "=IF(A1>0;1;0)"
+      }
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_58"
+      }
+    },
+    {
+      "id": "table.select-away",
+      "params": {}
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "filter.remove",
+      "params": {}
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "chart.deselect",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-formula",
+      "params": {
+        "ref": "G12",
+        "formula": "=A1&B2"
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_65"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "C3",
+        "to": "K20"
+      }
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "table.select-into",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_72"
+      }
+    },
+    {
+      "id": "chart.select",
+      "params": {}
+    },
+    {
+      "id": "redo",
+      "params": {}
+    },
+    {
+      "id": "cell.click",
+      "params": {
+        "ref": "A10"
+      }
+    },
+    {
+      "id": "cell.edit",
+      "params": {
+        "ref": "B2",
+        "value": "Test76"
+      }
+    },
+    {
+      "id": "names.delete",
+      "params": {}
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "names.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "C20",
+        "value": "-981"
+      }
+    }
+  ]
+}

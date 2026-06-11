@@ -171,7 +171,11 @@ pub fn create_named_range(
         folder,
     };
 
-    named_ranges.insert(key, named_range.clone());
+    named_ranges.insert(key.clone(), named_range.clone());
+    drop(named_ranges);
+
+    // BUG-0007 (user decision: undo-everything): name creation is undoable.
+    crate::undo_commands::record_named_range_undo(&state, &key, None, "Define name");
 
     NamedRangeResult {
         success: true,
@@ -209,7 +213,10 @@ pub fn update_named_range(
         folder,
     };
 
-    named_ranges.insert(key, named_range.clone());
+    let previous = named_ranges.insert(key.clone(), named_range.clone());
+    drop(named_ranges);
+
+    crate::undo_commands::record_named_range_undo(&state, &key, previous, "Edit name");
 
     NamedRangeResult {
         success: true,
@@ -228,11 +235,20 @@ pub fn delete_named_range(
 
     let key = name.to_uppercase();
     match named_ranges.remove(&key) {
-        Some(removed) => NamedRangeResult {
-            success: true,
-            named_range: Some(removed),
-            error: None,
-        },
+        Some(removed) => {
+            drop(named_ranges);
+            crate::undo_commands::record_named_range_undo(
+                &state,
+                &key,
+                Some(removed.clone()),
+                "Delete name",
+            );
+            NamedRangeResult {
+                success: true,
+                named_range: Some(removed),
+                error: None,
+            }
+        }
         None => NamedRangeResult {
             success: false,
             named_range: None,

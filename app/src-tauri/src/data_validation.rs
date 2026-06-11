@@ -565,6 +565,10 @@ pub fn set_data_validation(
 
     let sheet_validations = validations.entry(active_sheet).or_insert_with(Vec::new);
 
+    // Pre-mutation snapshot for undo (BUG-0008: validation changes bypassed
+    // the undo system).
+    let previous = sheet_validations.clone();
+
     // Normalize coordinates
     let min_row = start_row.min(end_row);
     let max_row = start_row.max(end_row);
@@ -586,6 +590,14 @@ pub fn set_data_validation(
         validation: validation.clone(),
     };
     sheet_validations.push(vr);
+    drop(validations);
+
+    crate::undo_commands::record_validation_undo(
+        &state,
+        active_sheet,
+        previous,
+        "Set data validation",
+    );
 
     DataValidationResult {
         success: true,
@@ -606,7 +618,8 @@ pub fn clear_data_validation(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut validations = state.data_validations.lock().unwrap();
 
-    if let Some(sheet_validations) = validations.get_mut(&active_sheet) {
+    let previous = if let Some(sheet_validations) = validations.get_mut(&active_sheet) {
+        let previous = sheet_validations.clone();
         let min_row = start_row.min(end_row);
         let max_row = start_row.max(end_row);
         let min_col = start_col.min(end_col);
@@ -617,6 +630,19 @@ pub fn clear_data_validation(
             !(vr.start_row >= min_row && vr.end_row <= max_row
               && vr.start_col >= min_col && vr.end_col <= max_col)
         });
+        Some(previous)
+    } else {
+        None
+    };
+    drop(validations);
+
+    if let Some(previous) = previous {
+        crate::undo_commands::record_validation_undo(
+            &state,
+            active_sheet,
+            previous,
+            "Clear data validation",
+        );
     }
 
     DataValidationResult {

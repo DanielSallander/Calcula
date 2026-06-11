@@ -184,23 +184,73 @@ fn restore_tables(
 // ============================================================================
 
 /// Build a Workbook from the current AppState (used by save_file and export_as_package).
+///
+/// Captures ALL sheets, not just the active one (BUG-0011: the old
+/// single-sheet `Workbook::from_grid` build silently dropped every other
+/// sheet on save). The active sheet is read from the `state.grid` mirror and
+/// the active-sheet dimension/merge mirrors, which are the source of truth
+/// while a sheet is active (the `all_*` slots for the active sheet are
+/// empty — they were std::mem::take'n on switch).
 pub fn build_workbook_for_save(
     state: &State<AppState>,
     user_files_state: &State<UserFilesState>,
 ) -> Result<Workbook, String> {
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+    let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+    let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
     let tables = state.tables.lock().map_err(|e| e.to_string())?;
     let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
 
-    let dimensions = DimensionData {
-        column_widths: col_widths.clone(),
-        row_heights: row_heights.clone(),
-    };
+    let mut workbook = Workbook::new();
+    workbook.sheets.clear();
+    workbook.active_sheet = active_sheet;
 
-    let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
+    let empty_grid = engine::grid::Grid::new();
+    for i in 0..sheet_names.len() {
+        let grid_ref: &engine::Grid = if i == active_sheet {
+            &active_grid
+        } else {
+            grids.get(i).unwrap_or(&empty_grid)
+        };
+        let dimensions = DimensionData {
+            column_widths: if i == active_sheet {
+                col_widths.clone()
+            } else {
+                all_cw.get(i).cloned().unwrap_or_default()
+            },
+            row_heights: if i == active_sheet {
+                row_heights.clone()
+            } else {
+                all_rh.get(i).cloned().unwrap_or_default()
+            },
+        };
+        let id = sheet_ids.get(i).copied().unwrap_or_else(|| {
+            SheetId::from_bytes(identity::generate_uuid_v7())
+        });
+        let name = sheet_names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("Sheet{}", i + 1));
+        workbook
+            .sheets
+            .push(persistence::Sheet::from_grid(id, name, grid_ref, &styles, &dimensions));
+    }
+
+    drop(grids);
+    drop(active_grid);
+    drop(sheet_names);
+    drop(styles);
+    drop(col_widths);
+    drop(row_heights);
+    drop(all_cw);
+    drop(all_rh);
+
     workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
     workbook.charts = collect_charts_for_save(state, &sheet_ids);
     workbook.sparklines = collect_sparklines_for_save(state, &sheet_ids);
@@ -352,58 +402,68 @@ pub fn build_workbook_snapshot(state: &State<AppState>) -> Result<Workbook, Stri
 /// merged regions, freeze panes, hidden rows/cols, tab colors,
 /// sheet visibility, notes, hyperlinks, page setup, and named ranges.
 fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids: &[SheetId]) {
-    // We only have one sheet in the workbook (from_grid creates a single sheet).
-    // Populate it with data from the active sheet in AppState.
+    // Populates EVERY sheet's metadata (BUG-0011/BUG-0018: the old version
+    // only wrote sheets[0] from the active sheet's state, losing freeze
+    // panes, merges, notes etc. for all other sheets).
     if workbook.sheets.is_empty() {
         return;
     }
 
     let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_count = workbook.sheets.len();
 
+    for i in 0..sheet_count {
     // ---- Merged regions ----
-    if let Ok(regions) = state.merged_regions.lock() {
-        workbook.sheets[0].merged_regions = regions
-            .iter()
-            .map(|r| SavedMergedRegion {
-                start_row: r.start_row,
-                start_col: r.start_col,
-                end_row: r.end_row,
-                end_col: r.end_col,
-            })
-            .collect();
+    // The active sheet's merges live in the mirror; others in all_merged_regions.
+    {
+        let to_saved = |r: &crate::MergedRegion| SavedMergedRegion {
+            start_row: r.start_row,
+            start_col: r.start_col,
+            end_row: r.end_row,
+            end_col: r.end_col,
+        };
+        if i == active_sheet {
+            if let Ok(regions) = state.merged_regions.lock() {
+                workbook.sheets[i].merged_regions = regions.iter().map(to_saved).collect();
+            }
+        } else if let Ok(all_merged) = state.all_merged_regions.lock() {
+            if let Some(regions) = all_merged.get(i) {
+                workbook.sheets[i].merged_regions = regions.iter().map(to_saved).collect();
+            }
+        }
     }
 
     // ---- Freeze panes ----
     if let Ok(freeze_configs) = state.freeze_configs.lock() {
-        if let Some(fc) = freeze_configs.get(active_sheet) {
-            workbook.sheets[0].freeze_row = fc.freeze_row;
-            workbook.sheets[0].freeze_col = fc.freeze_col;
+        if let Some(fc) = freeze_configs.get(i) {
+            workbook.sheets[i].freeze_row = fc.freeze_row;
+            workbook.sheets[i].freeze_col = fc.freeze_col;
         }
     }
 
     // ---- Hidden rows/cols (from autofilter + grouping) ----
     // AutoFilter hidden rows
     if let Ok(auto_filters) = state.auto_filters.lock() {
-        if let Some(af) = auto_filters.get(&active_sheet) {
+        if let Some(af) = auto_filters.get(&i) {
             for row in &af.hidden_rows {
-                workbook.sheets[0].hidden_rows.insert(*row);
+                workbook.sheets[i].hidden_rows.insert(*row);
             }
         }
     }
     // Grouping hidden rows/cols
     if let Ok(outlines) = state.outlines.lock() {
-        if let Some(outline) = outlines.get(&active_sheet) {
+        if let Some(outline) = outlines.get(&i) {
             for group in &outline.row_groups {
                 if group.collapsed {
                     for r in group.start_row..=group.end_row {
-                        workbook.sheets[0].hidden_rows.insert(r);
+                        workbook.sheets[i].hidden_rows.insert(r);
                     }
                 }
             }
             for group in &outline.column_groups {
                 if group.collapsed {
                     for c in group.start_col..=group.end_col {
-                        workbook.sheets[0].hidden_cols.insert(c);
+                        workbook.sheets[i].hidden_cols.insert(c);
                     }
                 }
             }
@@ -412,22 +472,22 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
 
     // ---- Tab color ----
     if let Ok(tab_colors) = state.tab_colors.lock() {
-        if let Some(color) = tab_colors.get(active_sheet) {
-            workbook.sheets[0].tab_color = color.clone();
+        if let Some(color) = tab_colors.get(i) {
+            workbook.sheets[i].tab_color = color.clone();
         }
     }
 
     // ---- Sheet visibility ----
     if let Ok(vis) = state.sheet_visibility.lock() {
-        if let Some(v) = vis.get(active_sheet) {
-            workbook.sheets[0].visibility = v.clone();
+        if let Some(v) = vis.get(i) {
+            workbook.sheets[i].visibility = v.clone();
         }
     }
 
     // ---- Notes ----
     if let Ok(notes) = state.notes.lock() {
-        if let Some(sheet_notes) = notes.get(&active_sheet) {
-            workbook.sheets[0].notes = sheet_notes
+        if let Some(sheet_notes) = notes.get(&i) {
+            workbook.sheets[i].notes = sheet_notes
                 .values()
                 .map(|n| SavedNote {
                     row: n.row,
@@ -441,8 +501,8 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
 
     // ---- Hyperlinks ----
     if let Ok(hyperlinks) = state.hyperlinks.lock() {
-        if let Some(sheet_links) = hyperlinks.get(&active_sheet) {
-            workbook.sheets[0].hyperlinks = sheet_links
+        if let Some(sheet_links) = hyperlinks.get(&i) {
+            workbook.sheets[i].hyperlinks = sheet_links
                 .values()
                 .map(|h| SavedHyperlink {
                     row: h.row,
@@ -457,8 +517,8 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
 
     // ---- Page setup ----
     if let Ok(page_setups) = state.page_setups.lock() {
-        if let Some(ps) = page_setups.get(active_sheet) {
-            workbook.sheets[0].page_setup = Some(SavedPageSetup {
+        if let Some(ps) = page_setups.get(i) {
+            workbook.sheets[i].page_setup = Some(SavedPageSetup {
                 paper_size: ps.paper_size.clone(),
                 orientation: ps.orientation.clone(),
                 margin_top: ps.margin_top,
@@ -486,12 +546,13 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
 
     // ---- Gridlines visibility ----
     if let Ok(gridlines) = state.show_gridlines.lock() {
-        if let Some(&visible) = gridlines.get(active_sheet) {
-            workbook.sheets[0].show_gridlines = visible;
+        if let Some(&visible) = gridlines.get(i) {
+            workbook.sheets[i].show_gridlines = visible;
         }
     }
+    } // end per-sheet loop
 
-    // ---- Named ranges ----
+    // ---- Named ranges (workbook-level) ----
     if let Ok(named_ranges) = state.named_ranges.lock() {
         workbook.named_ranges = named_ranges
             .values()
@@ -1121,32 +1182,19 @@ pub fn save_file(
         }
     }
 
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-    let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
-    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    // Multi-sheet workbook build (BUG-0011: the old inline single-sheet
+    // Workbook::from_grid build dropped every sheet but the active one).
+    // build_workbook_for_save captures all sheets, tables, charts,
+    // sparklines, user files, theme and defaults, and runs the per-sheet
+    // metadata enrichment.
+    let mut workbook = build_workbook_for_save(&state, &user_files_state)?;
     let sheet_ids_save = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-
-    let dimensions = DimensionData {
-        column_widths: col_widths.clone(),
-        row_heights: row_heights.clone(),
-    };
-
-    let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
-    workbook.tables = collect_tables_for_save(&tables, &sheet_ids_save);
     workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
-    workbook.charts = collect_charts_for_save(&state, &sheet_ids_save);
-    workbook.sparklines = collect_sparklines_for_save(&state, &sheet_ids_save);
-    workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
-    workbook.theme = state.theme.lock().unwrap().clone();
-    workbook.default_row_height = *state.default_row_height.lock().unwrap();
-    workbook.default_column_width = *state.default_column_width.lock().unwrap();
 
     // Collect full pivot definitions from PivotState
     collect_pivot_definitions(&pivot_state, &state, &mut workbook);
@@ -1187,6 +1235,17 @@ pub fn save_file(
         }
     }
 
+    // Serialize AutoFilter state (per-sheet filters incl. criteria) into
+    // user_files (BUG-0013: filters and the table<->autofilter linkage were
+    // lost across save/reload).
+    {
+        let auto_filters = state.auto_filters.lock().map_err(|e| e.to_string())?;
+        if !auto_filters.is_empty() {
+            let json = serde_json::to_vec_pretty(&*auto_filters).map_err(|e| e.to_string())?;
+            workbook.user_files.insert("autofilters.json".to_string(), json);
+        }
+    }
+
     // Save workbook properties (update last_modified timestamp)
     {
         let mut props = state.workbook_properties.lock().unwrap();
@@ -1203,8 +1262,8 @@ pub fn save_file(
         };
     }
 
-    // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
-    enrich_workbook_metadata(&mut workbook, &state, &sheet_ids_save);
+    // Sheet-level metadata was already enriched by build_workbook_for_save.
+    drop(sheet_ids_save);
 
     let path_buf = PathBuf::from(&path);
 
@@ -1561,6 +1620,41 @@ pub fn open_file(
         } else {
             *state.writeback_layer.lock().map_err(|e| e.to_string())? =
                 calp::writeback::WritebackLayer::new();
+        }
+    }
+
+    // Restore AutoFilter state from user_files, then re-link tables
+    // (BUG-0013: saved_to_table cannot persist auto_filter_id, so the link
+    // is reconstructed here the same way table creation establishes it).
+    {
+        let mut auto_filters = state.auto_filters.lock().map_err(|e| e.to_string())?;
+        if let Some(json_bytes) = workbook.user_files.remove("autofilters.json") {
+            if let Ok(filters) =
+                serde_json::from_slice::<crate::autofilter::AutoFilterStorage>(&json_bytes)
+            {
+                *auto_filters = filters;
+            } else {
+                auto_filters.clear();
+            }
+        } else {
+            auto_filters.clear();
+        }
+
+        let mut tables_guard = state.tables.lock().map_err(|e| e.to_string())?;
+        for (sheet_index, sheet_tables) in tables_guard.iter_mut() {
+            for table in sheet_tables.values_mut() {
+                if table.style_options.show_filter_button {
+                    auto_filters.entry(*sheet_index).or_insert_with(|| {
+                        crate::autofilter::AutoFilter::new(
+                            table.start_row,
+                            table.start_col,
+                            table.end_row,
+                            table.end_col,
+                        )
+                    });
+                    table.auto_filter_id = Some(*sheet_index as u64);
+                }
+            }
         }
     }
 

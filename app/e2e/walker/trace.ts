@@ -32,12 +32,25 @@ export function createTrace(seed: number | null): ActionTrace {
   };
 }
 
-/** Write a trace to disk (atomically enough for crash forensics). */
+/** Write a trace to disk (atomically enough for crash forensics).
+ *  Windows quirk: Dropbox/antivirus can briefly lock the destination and
+ *  make rename fail with EPERM — retry, then fall back to a direct write. */
 export function saveTrace(trace: ActionTrace, filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const json = JSON.stringify(trace, null, 2);
   const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(trace, null, 2), "utf8");
-  fs.renameSync(tmp, filePath);
+  try {
+    fs.writeFileSync(tmp, json, "utf8");
+    fs.renameSync(tmp, filePath);
+    return;
+  } catch {
+    // fall through to direct write
+  }
+  try {
+    fs.writeFileSync(filePath, json, "utf8");
+  } catch {
+    // Trace flushing is best-effort; never fail the walk over it.
+  }
 }
 
 export function loadTrace(filePath: string): ActionTrace {

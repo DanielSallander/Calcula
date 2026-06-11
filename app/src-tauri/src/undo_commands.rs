@@ -40,6 +40,10 @@ pub struct UndoResult {
     pub slicer_changed: bool,
     /// Whether ribbon filter state was restored (frontend should refresh ribbon filters)
     pub ribbon_filter_changed: bool,
+    /// Whether object state was restored (charts, sparklines, tables,
+    /// autofilters, validation, named ranges, freeze panes) — frontend
+    /// should refresh the corresponding stores.
+    pub objects_changed: bool,
 }
 
 /// Get current undo/redo state
@@ -76,12 +80,26 @@ fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
     }
 }
 
-/// Rebuild all formula dependency maps from scratch by scanning all cells.
-/// Called after a structural restore (undo of insert/delete rows/cols) to fix
-/// stale dependency tracking.
-fn rebuild_all_dependencies(state: &AppState) {
+/// Rebuild all formula dependency maps from scratch by scanning all cells of
+/// the ACTIVE sheet (the state.grid mirror).
+/// Called after a structural restore (undo of insert/delete rows/cols) and
+/// after every sheet switch: the dependency maps are keyed by (row, col)
+/// without a sheet dimension, so they only ever describe one sheet — leaving
+/// them stale across switches made edits on the new sheet recalc against the
+/// previous sheet's edges (BUG-0016).
+pub(crate) fn rebuild_all_dependencies(state: &AppState) {
     let grid = state.grid.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
+    rebuild_all_dependencies_from_grid(&grid, active_sheet, state);
+}
+
+/// Same as rebuild_all_dependencies but for callers that already hold the
+/// grid lock (passing it avoids a deadlock). Locks only the dependency maps.
+pub(crate) fn rebuild_all_dependencies_from_grid(
+    grid: &engine::Grid,
+    active_sheet: usize,
+    state: &AppState,
+) {
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -91,15 +109,38 @@ fn rebuild_all_dependencies(state: &AppState) {
     let mut cross_sheet_dependents = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies = state.cross_sheet_dependencies.lock().unwrap();
 
-    // Clear all maps
+    // Clear the single-sheet maps (they describe only the active sheet).
     dependents_map.clear();
     dependencies_map.clear();
     column_dependents_map.clear();
     column_dependencies_map.clear();
     row_dependents_map.clear();
     row_dependencies_map.clear();
-    cross_sheet_dependents.clear();
-    cross_sheet_dependencies.clear();
+
+    // The cross-sheet maps are GLOBAL across sheets — only rebuild the
+    // ACTIVE sheet's edges. Wholesale clearing here would orphan every other
+    // sheet's cross-references (e.g. Sheet2!B3 = Sheet1!C9 stops updating
+    // after a switch back to Sheet1).
+    let active_keys: Vec<(usize, u32, u32)> = cross_sheet_dependencies
+        .keys()
+        .filter(|k| k.0 == active_sheet)
+        .copied()
+        .collect();
+    for key in active_keys {
+        if let Some(refs) = cross_sheet_dependencies.remove(&key) {
+            for r in refs {
+                let now_empty = if let Some(deps) = cross_sheet_dependents.get_mut(&r) {
+                    deps.remove(&key);
+                    deps.is_empty()
+                } else {
+                    false
+                };
+                if now_empty {
+                    cross_sheet_dependents.remove(&r);
+                }
+            }
+        }
+    }
 
     // Scan all cells and rebuild
     for (&(row, col), cell) in &grid.cells {
@@ -205,6 +246,7 @@ fn apply_changes(
     let mut pivot_changed = false;
     let mut slicer_changed = false;
     let mut ribbon_filter_changed = false;
+    let mut objects_changed = false;
 
     // Deferred custom restores that need to run AFTER grid locks are released
     // (pivot/slicer/ribbon_filter restores acquire their own locks and may need grid access)
@@ -291,27 +333,29 @@ fn apply_changes(
                     None => { row_heights.remove(row); }
                 }
             }
+            // The inverse keeps the SAME change variant; the apply direction
+            // (is_undo) decides the operation. Storing the opposite variant
+            // AND flipping on is_undo was a double negation: redo after undo
+            // REMOVED the merge instead of restoring it (BUG-0009).
             CellChange::AddMergeRegion(region) => {
+                inverse_transaction.add_change(CellChange::AddMergeRegion(region.clone()));
                 if is_undo {
                     // Undo adding = remove it
                     merged_regions.remove(&to_api_region(region));
-                    inverse_transaction.add_change(CellChange::RemoveMergeRegion(region.clone()));
                 } else {
                     // Redo adding = add it back
                     merged_regions.insert(to_api_region(region));
-                    inverse_transaction.add_change(CellChange::RemoveMergeRegion(region.clone()));
                 }
                 merge_changed = true;
             }
             CellChange::RemoveMergeRegion(region) => {
+                inverse_transaction.add_change(CellChange::RemoveMergeRegion(region.clone()));
                 if is_undo {
                     // Undo removing = add it back
                     merged_regions.insert(to_api_region(region));
-                    inverse_transaction.add_change(CellChange::AddMergeRegion(region.clone()));
                 } else {
                     // Redo removing = remove it
                     merged_regions.remove(&to_api_region(region));
-                    inverse_transaction.add_change(CellChange::AddMergeRegion(region.clone()));
                 }
                 merge_changed = true;
             }
@@ -352,9 +396,14 @@ fn apply_changes(
                 merge_changed = true;
             }
             CellChange::CustomRestore { kind, data } => {
-                // Pivot/slicer/ribbon_filter restores need grid access and would deadlock
-                // if called while grid locks are held. Defer them.
-                if kind.starts_with("pivot_") || kind.starts_with("slicer") || kind.starts_with("ribbon_filter") {
+                // Pivot/slicer/ribbon_filter/object restores need other state
+                // locks and would risk deadlock while grid locks are held.
+                // Defer them.
+                if kind.starts_with("pivot_")
+                    || kind.starts_with("slicer")
+                    || kind.starts_with("ribbon_filter")
+                    || kind.starts_with("obj_")
+                {
                     deferred_restores.push((kind.clone(), data.clone()));
                 } else {
                     // Handle simple metadata restores (comments, notes, hyperlinks, etc.)
@@ -391,6 +440,7 @@ fn apply_changes(
             CustomRestoreKind::Pivot => pivot_changed = true,
             CustomRestoreKind::Slicer => slicer_changed = true,
             CustomRestoreKind::RibbonFilter => ribbon_filter_changed = true,
+            CustomRestoreKind::Objects => objects_changed = true,
             CustomRestoreKind::Other => {}
         }
     }
@@ -426,6 +476,7 @@ fn apply_changes(
         pivot_changed,
         slicer_changed,
         ribbon_filter_changed,
+        objects_changed,
     }
 }
 
@@ -434,6 +485,7 @@ enum CustomRestoreKind {
     Pivot,
     Slicer,
     RibbonFilter,
+    Objects,
     Other,
 }
 
@@ -501,6 +553,11 @@ fn apply_custom_restore(
         "ribbon_filter_delete" => {
             apply_ribbon_filter_delete_restore(ribbon_filter_state, data, inverse_transaction);
             CustomRestoreKind::RibbonFilter
+        }
+        "obj_chart" | "obj_sparklines" | "obj_table" | "obj_autofilter"
+        | "obj_validation" | "obj_named_range" | "obj_freeze" => {
+            apply_object_swap_restore(state, kind, data, inverse_transaction);
+            CustomRestoreKind::Objects
         }
         _ => {
             eprintln!("[undo] Unknown custom restore kind: {}", kind);
@@ -716,6 +773,7 @@ pub fn undo(
                     pivot_changed: false,
                     slicer_changed: false,
                     ribbon_filter_changed: false,
+                    objects_changed: false,
                 };
             }
         }
@@ -749,6 +807,7 @@ pub fn redo(
                     pivot_changed: false,
                     slicer_changed: false,
                     ribbon_filter_changed: false,
+                    objects_changed: false,
                 };
             }
         }
@@ -1196,4 +1255,295 @@ fn apply_ribbon_filter_delete_restore(
 
     let mut filters = ribbon_filter_state.filters.lock().unwrap();
     filters.insert(snapshot.filter_id, snapshot.previous);
+}
+
+// ============================================================================
+// Object-state restores (obj_*) — generic SWAP semantics.
+//
+// Applying an obj_* change replaces the targeted slice of state with the
+// snapshot and records the displaced current state under the SAME kind in
+// the inverse transaction. Swap is self-inverse, so undo and redo are
+// symmetric by construction. Covers charts, sparkline groups, tables,
+// autofilters, data validation, named ranges and freeze panes
+// (BUG-0001/0002/0003/0006/0007/0008/0017: these lifecycles bypassed the
+// undo system entirely).
+// ============================================================================
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ChartObjSnapshot {
+    chart_id: identity::EntityId,
+    previous: Option<crate::api_types::ChartEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SparklinesObjSnapshot {
+    sheet_index: usize,
+    /// groups_json for the sheet, or None when the sheet had no sparklines.
+    previous: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TableObjSnapshot {
+    sheet_index: usize,
+    table_id: identity::EntityId,
+    previous: Option<crate::tables::Table>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AutoFilterObjSnapshot {
+    sheet_index: usize,
+    previous: Option<crate::autofilter::AutoFilter>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ValidationObjSnapshot {
+    sheet_index: usize,
+    previous: Vec<crate::data_validation::ValidationRange>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NamedRangeObjSnapshot {
+    /// Uppercase registry key.
+    key: String,
+    previous: Option<crate::named_ranges::NamedRange>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FreezeObjSnapshot {
+    sheet_index: usize,
+    previous: crate::sheets::FreezeConfig,
+}
+
+fn push_obj_inverse<T: serde::Serialize>(
+    inverse_transaction: &mut Transaction,
+    kind: &str,
+    snapshot: &T,
+) {
+    let data = serde_json::to_vec(snapshot).unwrap_or_default();
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: kind.to_string(),
+        data,
+    });
+}
+
+fn apply_object_swap_restore(
+    state: &AppState,
+    kind: &str,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    match kind {
+        "obj_chart" => {
+            let snap: ChartObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_chart snapshot: {}", e); return; }
+            };
+            let mut charts = state.charts.lock().unwrap();
+            let current = charts
+                .iter()
+                .position(|c| c.id == snap.chart_id)
+                .map(|i| charts.remove(i));
+            push_obj_inverse(inverse_transaction, kind, &ChartObjSnapshot {
+                chart_id: snap.chart_id,
+                previous: current,
+            });
+            if let Some(prev) = snap.previous {
+                charts.push(prev);
+            }
+        }
+        "obj_sparklines" => {
+            let snap: SparklinesObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_sparklines snapshot: {}", e); return; }
+            };
+            let mut sparklines = state.sparklines.lock().unwrap();
+            let current = sparklines
+                .iter()
+                .position(|s| s.sheet_index == snap.sheet_index)
+                .map(|i| sparklines.remove(i).groups_json);
+            push_obj_inverse(inverse_transaction, kind, &SparklinesObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            if let Some(groups_json) = snap.previous {
+                sparklines.push(crate::api_types::SparklineEntry {
+                    sheet_index: snap.sheet_index,
+                    groups_json,
+                });
+            }
+        }
+        "obj_table" => {
+            let snap: TableObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_table snapshot: {}", e); return; }
+            };
+            let mut tables = state.tables.lock().unwrap();
+            let mut table_names = state.table_names.lock().unwrap();
+            let sheet_tables = tables.entry(snap.sheet_index).or_default();
+            let current = sheet_tables.remove(&snap.table_id);
+            if let Some(ref t) = current {
+                table_names.remove(&t.name.to_uppercase());
+            }
+            push_obj_inverse(inverse_transaction, kind, &TableObjSnapshot {
+                sheet_index: snap.sheet_index,
+                table_id: snap.table_id,
+                previous: current,
+            });
+            if let Some(t) = snap.previous {
+                table_names.insert(t.name.to_uppercase(), (snap.sheet_index, snap.table_id));
+                sheet_tables.insert(snap.table_id, t);
+            }
+        }
+        "obj_autofilter" => {
+            let snap: AutoFilterObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_autofilter snapshot: {}", e); return; }
+            };
+            let mut auto_filters = state.auto_filters.lock().unwrap();
+            let current = auto_filters.remove(&snap.sheet_index);
+            push_obj_inverse(inverse_transaction, kind, &AutoFilterObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            if let Some(prev) = snap.previous {
+                auto_filters.insert(snap.sheet_index, prev);
+            }
+        }
+        "obj_validation" => {
+            let snap: ValidationObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_validation snapshot: {}", e); return; }
+            };
+            let mut validations = state.data_validations.lock().unwrap();
+            let current = validations.remove(&snap.sheet_index).unwrap_or_default();
+            push_obj_inverse(inverse_transaction, kind, &ValidationObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            if !snap.previous.is_empty() {
+                validations.insert(snap.sheet_index, snap.previous);
+            }
+        }
+        "obj_named_range" => {
+            let snap: NamedRangeObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_named_range snapshot: {}", e); return; }
+            };
+            let mut named_ranges = state.named_ranges.lock().unwrap();
+            let current = named_ranges.remove(&snap.key);
+            push_obj_inverse(inverse_transaction, kind, &NamedRangeObjSnapshot {
+                key: snap.key.clone(),
+                previous: current,
+            });
+            if let Some(prev) = snap.previous {
+                named_ranges.insert(snap.key, prev);
+            }
+        }
+        "obj_freeze" => {
+            let snap: FreezeObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_freeze snapshot: {}", e); return; }
+            };
+            let mut freeze_configs = state.freeze_configs.lock().unwrap();
+            while freeze_configs.len() <= snap.sheet_index {
+                freeze_configs.push(crate::sheets::FreezeConfig::default());
+            }
+            let current = freeze_configs[snap.sheet_index].clone();
+            push_obj_inverse(inverse_transaction, kind, &FreezeObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            freeze_configs[snap.sheet_index] = snap.previous;
+        }
+        _ => {}
+    }
+}
+
+// ============================================================================
+// Recording helpers — called by the mutating commands with the PRE-mutation
+// state. Each opens its own one-shot transaction unless the caller already
+// has one open.
+// ============================================================================
+
+fn record_object_undo(state: &AppState, kind: &str, data: Vec<u8>, description: &str) {
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let opened = !undo_stack.has_open_transaction();
+    if opened {
+        undo_stack.begin_transaction(description.to_string());
+    }
+    undo_stack.record_custom_restore(kind.to_string(), data, description);
+    if opened {
+        undo_stack.commit_transaction();
+    }
+}
+
+pub(crate) fn record_chart_undo(
+    state: &AppState,
+    chart_id: identity::EntityId,
+    previous: Option<crate::api_types::ChartEntry>,
+    description: &str,
+) {
+    let snap = ChartObjSnapshot { chart_id, previous };
+    record_object_undo(state, "obj_chart", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+pub(crate) fn record_sparklines_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Option<String>,
+    description: &str,
+) {
+    let snap = SparklinesObjSnapshot { sheet_index, previous };
+    record_object_undo(state, "obj_sparklines", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+pub(crate) fn record_table_undo(
+    state: &AppState,
+    sheet_index: usize,
+    table_id: identity::EntityId,
+    previous: Option<crate::tables::Table>,
+    description: &str,
+) {
+    let snap = TableObjSnapshot { sheet_index, table_id, previous };
+    record_object_undo(state, "obj_table", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+pub(crate) fn record_autofilter_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Option<crate::autofilter::AutoFilter>,
+    description: &str,
+) {
+    let snap = AutoFilterObjSnapshot { sheet_index, previous };
+    record_object_undo(state, "obj_autofilter", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+pub(crate) fn record_validation_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Vec<crate::data_validation::ValidationRange>,
+    description: &str,
+) {
+    let snap = ValidationObjSnapshot { sheet_index, previous };
+    record_object_undo(state, "obj_validation", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+pub(crate) fn record_named_range_undo(
+    state: &AppState,
+    key: &str,
+    previous: Option<crate::named_ranges::NamedRange>,
+    description: &str,
+) {
+    let snap = NamedRangeObjSnapshot { key: key.to_string(), previous };
+    record_object_undo(state, "obj_named_range", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+pub(crate) fn record_freeze_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: crate::sheets::FreezeConfig,
+    description: &str,
+) {
+    let snap = FreezeObjSnapshot { sheet_index, previous };
+    record_object_undo(state, "obj_freeze", serde_json::to_vec(&snap).unwrap_or_default(), description);
 }

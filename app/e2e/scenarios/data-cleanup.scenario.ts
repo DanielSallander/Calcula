@@ -77,12 +77,7 @@ defineScenario("data-cleanup", [
   },
   {
     name: "sort by line total descending",
-    behaviors: ["filter.sort-range"],
-    // BUG-0010: sorting rows that contain relative-reference formulas leaves
-    // the formulas pointing at wrong rows — full recalc then changes values.
-    // The recalc oracle is excluded here until that bug is fixed; re-enable
-    // by removing this `oracles` override.
-    oracles: ["undo", "saveReload"],
+    behaviors: ["filter.sort-range", "recalc.sort-preserves-formulas"],
     async run({ page }) {
       await invokeTauri(page, "sort_range", {
         params: {

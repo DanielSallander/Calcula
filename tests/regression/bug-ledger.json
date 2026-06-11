@@ -1,7 +1,79 @@
 {
   "version": 1,
-  "nextId": 19,
+  "nextId": 21,
   "bugs": [
+    {
+      "id": "BUG-0020",
+      "discovered": "2026-06-11",
+      "source": {
+        "kind": "soak-walk",
+        "seed": 777,
+        "runId": "fix-campaign validation"
+      },
+      "violation": {
+        "oracleId": "undo-round-trip",
+        "message": "Conditional formatting rules are not registered in the undo system — a CF rule added during the window survives undo-all. Surfaced once the walker's cf.add-rule action used the correct internally-tagged serde shape ({type: \"cellValue\", ...}); before that the action failed silently and CF was never exercised.",
+        "digestDiffPaths": [
+          "conditionalFormats."
+        ]
+      },
+      "repro": {
+        "description": "add_conditional_format, then Ctrl+Z — the rule remains. Caught by the undo round-trip oracle (seed 777, 80 actions).",
+        "trace": null,
+        "actionCount": 80
+      },
+      "triage": {
+        "verdict": "app-bug",
+        "confidence": 0.9,
+        "behaviorIds": [
+          "undo.conditional-formatting"
+        ],
+        "rootCauseHypothesis": "conditional_formatting.rs add/update/delete/reorder commands push no undo transactions. Fix with the obj_* swap pattern (snapshot the sheet's Vec<ConditionalFormatDefinition>, like obj_validation).",
+        "suggestedFixArea": "rust"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "",
+        "validatedBy": []
+      },
+      "status": "triaged"
+    },
+    {
+      "id": "BUG-0019",
+      "discovered": "2026-06-11",
+      "source": {
+        "kind": "scenario",
+        "seed": null,
+        "runId": "budget-model phase 04 (fix-campaign validation)"
+      },
+      "violation": {
+        "oracleId": "recalc-consistency",
+        "message": "Second-order cross-sheet recalculation does not cascade: with Sheet2!B3 = Sheet1!C9 and Sheet1!C9 = SUM(C4:C8), editing Sheet1!C5 updates C9 (first-order, works after the BUG-0016 fix) but Sheet2!B3 keeps the stale value — update_cell's cascade only consults cross_sheet_dependents for the directly edited cell, not for cells recalculated as dependents.",
+        "digestDiffPaths": []
+      },
+      "repro": {
+        "description": "Scenario budget-model phase 04: the commented-out B3/B4 assertions reproduce it. Sheet1: C9==SUM(C4:C8); Sheet2: B3==Sheet1!C9; edit Sheet1!C5 — B3 stays stale.",
+        "trace": null,
+        "actionCount": null
+      },
+      "triage": {
+        "verdict": "app-bug",
+        "confidence": 0.9,
+        "behaviorIds": [
+          "recalc.cross-sheet"
+        ],
+        "rootCauseHypothesis": "In commands/data.rs update_cell, the cross-sheet dependent propagation (the dep_sheet_idx block around line ~1240) runs only for the edited cell's direct cross-sheet dependents; cells recalculated in the local cascade (C9) never get their own cross_sheet_dependents looked up. Fix: after the local recalc loop, iterate the recalculated cells and propagate their cross-sheet dependents transitively.",
+        "suggestedFixArea": "rust"
+      },
+      "fix": {
+        "status": "open",
+        "filesChanged": [],
+        "diffSummary": "",
+        "validatedBy": []
+      },
+      "status": "triaged"
+    },
     {
       "id": "BUG-0018",
       "discovered": "2026-06-11",
@@ -33,12 +105,19 @@
         "rootCauseHypothesis": "open_file does not copy sheet.freeze_row/freeze_col back into state.freeze_configs (or the .cala reader drops them)."
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "core/calcula-format/src/sheet_metadata.rs",
+          "core/calcula-format/src/zip_io.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0017",
@@ -73,12 +152,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/sheets.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0016",
@@ -109,12 +195,20 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/calculation.rs",
+          "app/src-tauri/src/sheets.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Same-sheet propagation after sheet switch fixed (calculate_now mirror sync + dependency rebuild on switch). Residual second-order cross-sheet cascade tracked as BUG-0019.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0015",
@@ -220,12 +314,18 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/persistence.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0012",
@@ -292,12 +392,18 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/commands/data.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0011",
@@ -327,12 +433,18 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/persistence.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0009",
@@ -364,12 +476,18 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0007",
@@ -401,12 +519,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/named_ranges.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0008",
@@ -438,12 +563,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/data_validation.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0006",
@@ -475,12 +607,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/tables.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0005",
@@ -552,12 +691,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/autofilter.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0004",
@@ -628,12 +774,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/chart_commands.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     },
     {
       "id": "BUG-0002",
@@ -665,12 +818,19 @@
         "suggestedFixArea": "rust"
       },
       "fix": {
-        "status": "open",
-        "filesChanged": [],
-        "diffSummary": "",
-        "validatedBy": []
+        "status": "fixed",
+        "filesChanged": [
+          "app/src-tauri/src/sparkline_commands.rs",
+          "app/src-tauri/src/undo_commands.rs"
+        ],
+        "diffSummary": "Fixed in the 2026-06-11 fix campaign; validated by oracle walk (seed 424242), BUG-0009 repro replay, and the scenario suite.",
+        "validatedBy": [
+          "oracle-walk-seed-424242",
+          "scenario-suite",
+          "repro-replay"
+        ]
       },
-      "status": "open"
+      "status": "fixed"
     }
   ]
 }

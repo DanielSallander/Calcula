@@ -316,6 +316,15 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // The active-sheet mirror (state.grid) is the source of truth; grids[i]
+    // can lag behind it (see get_watch_cells note in commands/data.rs).
+    // Formula evaluation below reads the ACTIVE sheet through `grids`, so a
+    // stale grids[active] silently recalculates from old values (BUG-0016).
+    // Sync it from the mirror before evaluating.
+    if active_sheet < grids.len() {
+        grids[active_sheet] = grid.clone();
+    }
     let mut styles = state.style_registry.lock().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let locale = state.locale.lock().unwrap();

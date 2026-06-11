@@ -2882,8 +2882,9 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             let mut updated_cells = Vec::new();
             let sorted_count = rows.len() as u32;
 
-            for (new_row_idx, (_original_row, row_data)) in rows.iter().enumerate() {
+            for (new_row_idx, (original_row, row_data)) in rows.iter().enumerate() {
                 let target_row = data_start_row + new_row_idx as u32;
+                let row_delta = target_row as i32 - *original_row as i32;
 
                 for (col_offset, cell_opt) in row_data.iter().enumerate() {
                     let target_col = min_col + col_offset as u32;
@@ -2893,6 +2894,22 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                     undo_stack.record_cell_change(target_row, target_col, prev_cell);
 
                     if let Some(cell) = cell_opt {
+                        // A moved formula must keep referring to its own row:
+                        // shift relative row references by the move delta
+                        // (Excel sort semantics). Without this, the displayed
+                        // value looks right but the next recalculation
+                        // computes from the wrong rows (BUG-0010).
+                        let mut cell = cell.clone();
+                        if row_delta != 0 {
+                            if let Some(formula) = cell.formula_string() {
+                                let shifted = crate::commands::structure::shift_formula_internal(
+                                    &formula, row_delta, 0,
+                                );
+                                cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                            }
+                        }
+                        let cell = &cell;
+
                         grid.set_cell(target_row, target_col, cell.clone());
                         if active_sheet < grids.len() {
                             grids[active_sheet].set_cell(target_row, target_col, cell.clone());
@@ -2938,6 +2955,15 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             }
 
             undo_stack.commit_transaction();
+
+            // Formula cells moved (and their references were shifted) —
+            // rebuild the dependency maps so incremental recalc keeps
+            // working against the new positions (BUG-0010).
+            crate::undo_commands::rebuild_all_dependencies_from_grid(
+                &grid,
+                active_sheet,
+                &state,
+            );
 
             // Mark workbook as dirty
             if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
@@ -2987,8 +3013,9 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             let mut updated_cells = Vec::new();
             let sorted_count = cols.len() as u32;
 
-            for (new_col_idx, (_original_col, col_data)) in cols.iter().enumerate() {
+            for (new_col_idx, (original_col, col_data)) in cols.iter().enumerate() {
                 let target_col = data_start_col + new_col_idx as u32;
+                let col_delta = target_col as i32 - *original_col as i32;
 
                 for (row_offset, cell_opt) in col_data.iter().enumerate() {
                     let target_row = min_row + row_offset as u32;
@@ -2998,6 +3025,20 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                     undo_stack.record_cell_change(target_row, target_col, prev_cell);
 
                     if let Some(cell) = cell_opt {
+                        // Shift relative column references with the move
+                        // (Excel sort semantics; see the row-sort arm /
+                        // BUG-0010).
+                        let mut cell = cell.clone();
+                        if col_delta != 0 {
+                            if let Some(formula) = cell.formula_string() {
+                                let shifted = crate::commands::structure::shift_formula_internal(
+                                    &formula, 0, col_delta,
+                                );
+                                cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                            }
+                        }
+                        let cell = &cell;
+
                         grid.set_cell(target_row, target_col, cell.clone());
                         if active_sheet < grids.len() {
                             grids[active_sheet].set_cell(target_row, target_col, cell.clone());
@@ -3043,6 +3084,15 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             }
 
             undo_stack.commit_transaction();
+
+            // Formula cells moved (and their references were shifted) —
+            // rebuild the dependency maps so incremental recalc keeps
+            // working against the new positions (BUG-0010).
+            crate::undo_commands::rebuild_all_dependencies_from_grid(
+                &grid,
+                active_sheet,
+                &state,
+            );
 
             // Mark workbook as dirty
             if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }

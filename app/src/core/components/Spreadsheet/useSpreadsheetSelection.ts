@@ -565,6 +565,14 @@ export function useSpreadsheetSelection({
       if (result.ribbonFilterChanged) {
         window.dispatchEvent(new CustomEvent("filterpane:filters-refreshed"));
       }
+      if (result.objectsChanged) {
+        // Charts, sparklines, tables, autofilters, validation, named ranges
+        // or freeze panes were restored — refresh the affected stores.
+        window.dispatchEvent(new Event("charts:refresh"));
+        window.dispatchEvent(new Event("sparklines:refresh"));
+        window.dispatchEvent(new CustomEvent("app:table-definitions-updated"));
+        window.dispatchEvent(new Event("grid:refresh"));
+      }
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
@@ -619,6 +627,14 @@ export function useSpreadsheetSelection({
       }
       if (result.ribbonFilterChanged) {
         window.dispatchEvent(new CustomEvent("filterpane:filters-refreshed"));
+      }
+      if (result.objectsChanged) {
+        // Charts, sparklines, tables, autofilters, validation, named ranges
+        // or freeze panes were restored — refresh the affected stores.
+        window.dispatchEvent(new Event("charts:refresh"));
+        window.dispatchEvent(new Event("sparklines:refresh"));
+        window.dispatchEvent(new CustomEvent("app:table-definitions-updated"));
+        window.dispatchEvent(new Event("grid:refresh"));
       }
 
       // Emit event to update any listeners (e.g., formula bar)

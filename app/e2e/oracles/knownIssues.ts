@@ -28,78 +28,11 @@ export interface KnownIssue {
  * is ledgered but not yet fixed.
  */
 export const KNOWN_ISSUES: KnownIssue[] = [
-  {
-    ledgerId: "BUG-0001",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["charts."],
-    reason:
-      "Chart create/delete is not registered in the undo system — undo-all " +
-      "leaves charts behind. Found by the first oracle run (2026-06-10).",
-  },
-  {
-    ledgerId: "BUG-0002",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["sparklines."],
-    reason:
-      "Sparkline group create/delete bypasses the undo system (same opaque " +
-      "JSON storage pattern as charts). Confirmed 2026-06-11 (seed 424242).",
-  },
-  {
-    ledgerId: "BUG-0003",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["autoFilters."],
-    reason:
-      "AutoFilter mutations are not restored by undo — filter state " +
-      "survives undo-all. Found by the verification walks (2026-06-11).",
-  },
-  {
-    ledgerId: "BUG-0006",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["tables."],
-    reason:
-      "Table create/delete is not registered in the undo system — undo-all " +
-      "leaves tables behind. Found by the verification walks (2026-06-11).",
-  },
-  {
-    ledgerId: "BUG-0007",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["namedRanges."],
-    reason:
-      "Named range create/delete is not restored by undo. May be Excel-parity " +
-      "expected behavior — pending user decision (undo.named-ranges).",
-  },
-  {
-    ledgerId: "BUG-0008",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["dataValidations."],
-    reason:
-      "Data validation rules survive undo-all (Excel undoes validation " +
-      "changes). Found by the verification walks (2026-06-11).",
-  },
-  {
-    ledgerId: "BUG-0009",
-    oracleId: "undo-round-trip",
-    pathPrefixes: ["sheets[0].mergedRegions", "sheets[1].mergedRegions"],
-    reason:
-      "Redo of merge_cells does not restore the merged region. 1-action " +
-      "repro: tests/regression/repros/BUG-0009.trace.json (2026-06-11).",
-  },
-  {
-    ledgerId: "BUG-0012",
-    oracleId: "save-reload-round-trip",
-    pathPrefixes: ["sparklines."],
-    reason:
-      "Sparkline groups are lost across save/reload (not persisted or not " +
-      "restored). Found by the scenario suite (2026-06-11).",
-  },
-  {
-    ledgerId: "BUG-0013",
-    oracleId: "save-reload-round-trip",
-    pathPrefixes: ["tables."],
-    reason:
-      "Table autoFilterId linkage is lost across save/reload " +
-      "(saved_to_table hardcodes auto_filter_id: None). Found 2026-06-11.",
-  },
+  // Fix campaign 2026-06-11: suppressions for BUG-0001/2/3/6/7/8/9/12/13/
+  // 17/18 were removed after the underlying bugs were fixed (undo
+  // registration batch, merge-redo direction fix, multi-sheet save, .cala
+  // sheet metadata, autofilter persistence). If any of them resurface, the
+  // oracles will re-flag them — re-ledger rather than re-suppress blindly.
   {
     ledgerId: "BUG-0014",
     oracleId: "undo-round-trip",
@@ -119,30 +52,12 @@ export const KNOWN_ISSUES: KnownIssue[] = [
       "needs investigation. Found 2026-06-11.",
   },
   {
-    ledgerId: "BUG-0017",
+    ledgerId: "BUG-0020",
     oracleId: "undo-round-trip",
-    pathPrefixes: [
-      "sheets[0].freezeRow",
-      "sheets[0].freezeCol",
-      "sheets[1].freezeRow",
-      "sheets[1].freezeCol",
-    ],
+    pathPrefixes: ["conditionalFormats."],
     reason:
-      "Redo of set_freeze_panes does not restore the freeze (same redo-path " +
-      "class as BUG-0009 merge redo). Found 2026-06-11.",
-  },
-  {
-    ledgerId: "BUG-0018",
-    oracleId: "save-reload-round-trip",
-    pathPrefixes: [
-      "sheets[0].freezeRow",
-      "sheets[0].freezeCol",
-      "sheets[1].freezeRow",
-      "sheets[1].freezeCol",
-    ],
-    reason:
-      "Freeze panes are lost across save/reload (load path does not restore " +
-      "freeze_configs). Found 2026-06-11.",
+      "Conditional formatting rules are not undo-registered (surfaced once " +
+      "the walker's CF action used the correct serde tag). Found 2026-06-11.",
   },
 ];
 

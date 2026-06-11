@@ -816,6 +816,13 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.events.on(AppEvents.AFTER_NEW, reloadCharts),
   );
+  // Undo/redo of chart operations restores backend chart state — re-pull it
+  // (dispatched by the core undo handler when UndoResult.objectsChanged).
+  const handleChartsRefresh = () => { void reloadCharts(); };
+  window.addEventListener("charts:refresh", handleChartsRefresh);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("charts:refresh", handleChartsRefresh);
+  });
 
   // Dynamic data ranges: re-render charts when table definitions change
   // (e.g., table auto-expands when new rows are added)

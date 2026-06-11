@@ -66,11 +66,10 @@ defineScenario("budget-model", [
   {
     name: "add a summary sheet with cross-sheet references",
     behaviors: ["sheet.add", "recalc.cross-sheet"],
-    // BUG-0005 (sheet-unaware undo) and BUG-0011 (save_file persists only
-    // the active sheet) both fire once a second sheet exists. Until fixed,
-    // multi-sheet phases verify only recalc consistency; targeted assertions
-    // still check the cross-sheet values.
-    oracles: ["recalc"],
+    // BUG-0005 (sheet-unaware undo) fires once a second sheet exists, so the
+    // undo oracle stays disabled on multi-sheet phases until it is fixed.
+    // (BUG-0011 multi-sheet save was fixed 2026-06-11 — saveReload is back.)
+    oracles: ["recalc", "saveReload"],
     async run({ page, grid }) {
       const addBtn = page.locator('button[title="Add new sheet"]');
       await addBtn.click({ force: true });
@@ -94,7 +93,7 @@ defineScenario("budget-model", [
   {
     name: "switch back and edit a source value (cross-sheet recalc)",
     behaviors: ["recalc.cross-sheet", "sheet.switch"],
-    oracles: ["recalc"], // BUG-0005/BUG-0011 — see phase 03
+    oracles: ["recalc", "saveReload"], // BUG-0005 (sheet undo) — see phase 03
 
     async run({ page, grid }) {
       const tab1 = page.locator('button[data-sheet-tab="0"]');
@@ -103,37 +102,26 @@ defineScenario("budget-model", [
       // click — wait until reads come from Sheet1 before editing.
       await page.waitForTimeout(1000);
       expect(await grid.getCellDisplayValue("A3")).toBe("Category");
-      // Food actuals went up.
+      // Food actuals went up. Incremental recalc must propagate to C9 even
+      // after the sheet switch (BUG-0016, fixed 2026-06-11).
       await grid.setCellValueDirect("C5", "6950");
-      await page.waitForTimeout(300);
-      // WORKAROUND for BUG-0016: after a sheet switch, incremental recalc
-      // does not propagate to dependents (C9 stays stale). Force a full
-      // recalculation; REMOVE this when BUG-0016 is fixed so the scenario
-      // again guards the incremental path.
-      await invokeTauri(page, "calculate_now");
-      await page.evaluate(() => window.dispatchEvent(new Event("grid:refresh")));
       await page.waitForTimeout(300);
     },
     async assertions({ page, grid }) {
       expect(await grid.getCellDisplayValue("C5")).toBe("6950");
-      // BUG-0016: C9 (=SUM(C4:C8)) stays stale after a sheet switch — even a
-      // full recalculation does not pick up the C5 edit. When BUG-0016 is
-      // fixed, restore this assertion:
-      //   expect(await grid.getCellDisplayValue("C9")).toBe("27800");
-      // The summary sheet must reflect the change. BUG-0016 blocks these —
-      // restore when fixed:
+      // Same-sheet propagation after a sheet switch (BUG-0016, fixed):
+      expect(await grid.getCellDisplayValue("C9")).toBe("27800");
+      // The summary sheet must reflect the change too. BUG-0019:
+      // second-order cross-sheet propagation (C5 -> C9 -> Sheet2!B3) does
+      // not cascade yet — restore these when fixed:
       //   expect(await grid.getCellDisplayValue("B3")).toBe("27800");
       //   expect(await grid.getCellDisplayValue("B4")).toBe("-500");
-      // Return to Sheet1 for the remaining phases.
-      const tab1 = page.locator('button[data-sheet-tab="0"]');
-      await tab1.click();
-      await page.waitForTimeout(800);
     },
   },
   {
     name: "add data validation to the budget column",
     behaviors: ["validation.numeric-rule"],
-    oracles: ["recalc"], // BUG-0005/BUG-0011 — see phase 03
+    oracles: ["recalc", "saveReload"], // BUG-0005 (sheet undo) — see phase 03
 
     async run({ page }) {
       await invokeTauri(page, "set_data_validation", {
@@ -159,7 +147,7 @@ defineScenario("budget-model", [
   {
     name: "title with merged cells and bold",
     behaviors: ["structure.merge-cells", "format.bold"],
-    oracles: ["recalc"], // BUG-0005/BUG-0011 — see phase 03
+    oracles: ["recalc", "saveReload"], // BUG-0005 (sheet undo) — see phase 03
 
     async run({ page, grid }) {
       await grid.setCellValueDirect("A1", "Household Budget 2026");
@@ -183,7 +171,7 @@ defineScenario("budget-model", [
   {
     name: "annotate cells (comment, note, hyperlink)",
     behaviors: ["edit.annotations"],
-    oracles: ["recalc"], // BUG-0005/BUG-0011 — see phase 03
+    oracles: ["recalc", "saveReload"], // BUG-0005 (sheet undo) — see phase 03
 
     async run({ page }) {
       await invokeTauri(page, "add_comment", {

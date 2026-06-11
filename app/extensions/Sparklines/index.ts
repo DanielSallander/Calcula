@@ -209,6 +209,17 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubAfterNew);
 
+  // 5c. Undo/redo of sparkline operations restores backend state — re-pull
+  // (dispatched by the core undo handler when UndoResult.objectsChanged).
+  const handleSparklinesRefresh = () => {
+    invalidateDataCache();
+    loadFromBackend(getActiveSheetIndex());
+  };
+  window.addEventListener("sparklines:refresh", handleSparklinesRefresh);
+  cleanupFns.push(() => {
+    window.removeEventListener("sparklines:refresh", handleSparklinesRefresh);
+  });
+
   // 6. Subscribe to selection changes for the contextual Sparkline ribbon tab
   const unsubSelection = ExtensionRegistry.onSelectionChange(handleSelectionChange);
   cleanupFns.push(unsubSelection);

@@ -142,6 +142,7 @@ pub fn set_show_gridlines(state: State<AppState>, visible: bool) {
 
 #[tauri::command]
 pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult, String> {
+    let (result, switched) = {
     let sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
@@ -200,16 +201,32 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
         *merged_regions = std::mem::take(&mut all_merged_regions[index]);
     }
 
+    let switched = old_index != index;
     *active_sheet = index;
 
-    Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
-        active_index: index,
-    })
+    (
+        SheetsResult {
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            active_index: index,
+        },
+        switched,
+    )
+    }; // drop all locks before rebuilding dependency maps
+
+    // The dependency maps are keyed by (row, col) without a sheet dimension —
+    // they only ever describe ONE sheet. Rebuild them for the newly active
+    // sheet, otherwise edits here recalc against the previous sheet's edges
+    // (BUG-0016: stale dependents -> silently wrong totals).
+    if switched {
+        crate::undo_commands::rebuild_all_dependencies(&state);
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsResult, String> {
+    let result = {
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
@@ -266,6 +283,13 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
         scroll_areas.push(None);
     }
     {
+        // Keep page_setups parallel to the sheet list — open_file
+        // materializes a default for every sheet, so a missing entry here
+        // shows up as a save/reload digest diff.
+        let mut page_setups = state.page_setups.lock().unwrap();
+        page_setups.push(crate::api_types::PageSetup::default());
+    }
+    {
         let mut sheet_ids = state.sheet_ids.lock().unwrap();
         sheet_ids.push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
     }
@@ -294,14 +318,22 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     *active_sheet = new_index;
     *current_grid = new_grid;
 
-    Ok(SheetsResult {
+    SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: *active_sheet,
-    })
+    }
+    }; // drop all locks before rebuilding dependency maps
+
+    // The new (empty) sheet is now active — rebuild the single-sheet
+    // dependency maps for it (see set_active_sheet / BUG-0016).
+    crate::undo_commands::rebuild_all_dependencies(&state);
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, index: usize) -> Result<SheetsResult, String> {
+    let result = {
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
@@ -518,10 +550,17 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
         }
     }
 
-    Ok(SheetsResult {
+    SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: *active_sheet,
-    })
+    }
+    }; // drop all locks before rebuilding dependency maps
+
+    // The active sheet (or its index) changed — rebuild the single-sheet
+    // dependency maps (see set_active_sheet / BUG-0016).
+    crate::undo_commands::rebuild_all_dependencies(&state);
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -592,15 +631,23 @@ pub fn set_freeze_panes(
         freeze_configs.push(FreezeConfig::default());
     }
 
+    // Pre-mutation snapshot for undo (BUG-0017; user decision:
+    // undo-everything, deliberately better than Excel here).
+    let previous = freeze_configs[active_sheet].clone();
+
     freeze_configs[active_sheet] = FreezeConfig {
         freeze_row,
         freeze_col,
     };
 
-    Ok(SheetsResult {
+    let result = SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: active_sheet,
-    })
+    };
+    drop(freeze_configs);
+    crate::undo_commands::record_freeze_undo(&state, active_sheet, previous, "Freeze panes");
+
+    Ok(result)
 }
 
 #[tauri::command]

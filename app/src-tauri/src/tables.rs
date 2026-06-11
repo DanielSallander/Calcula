@@ -582,8 +582,10 @@ pub fn create_table(
     };
 
     // Create an AutoFilter for the table range if show_filter_button is enabled
+    let mut autofilter_prev: Option<Option<AutoFilter>> = None;
     if table.style_options.show_filter_button {
         let mut auto_filters = state.auto_filters.lock().unwrap();
+        autofilter_prev = Some(auto_filters.get(&active_sheet).cloned());
         let auto_filter = AutoFilter::new(min_row, min_col, max_row, max_col);
         auto_filters.insert(active_sheet, auto_filter);
         // Store a reference ID (using the sheet index as the AutoFilter is per-sheet)
@@ -596,6 +598,28 @@ pub fn create_table(
         .entry(active_sheet)
         .or_insert_with(HashMap::new)
         .insert(table.id, table.clone());
+
+    // Record undo (BUG-0006: table creation bypassed the undo system).
+    // One transaction covers both the table and the autofilter it created.
+    // Drop storage locks first; the recorder takes the undo-stack lock.
+    drop(tables);
+    drop(table_names);
+    let opened_transaction = {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        let opened = !undo_stack.has_open_transaction();
+        if opened {
+            undo_stack.begin_transaction("Create table".to_string());
+        }
+        opened
+    };
+    crate::undo_commands::record_table_undo(&state, active_sheet, table.id, None, "Create table");
+    if let Some(prev) = autofilter_prev {
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, prev, "Create table");
+    }
+    if opened_transaction {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.commit_transaction();
+    }
 
     TableResult::ok(table)
 }
@@ -622,6 +646,17 @@ pub fn delete_table(
 
     // Remove from name registry
     table_names.remove(&table.name.to_uppercase());
+
+    // Record undo (BUG-0006): the snapshot restores the deleted table.
+    drop(tables);
+    drop(table_names);
+    crate::undo_commands::record_table_undo(
+        &state,
+        active_sheet,
+        table_id,
+        Some(table),
+        "Delete table",
+    );
 
     TableResult::ok_empty()
 }

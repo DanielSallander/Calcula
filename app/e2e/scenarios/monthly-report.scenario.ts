@@ -60,11 +60,7 @@ defineScenario("monthly-report", [
   },
   {
     name: "sort data by sales descending",
-    behaviors: ["filter.sort-range"],
-    // BUG-0010: sorting rows containing relative-reference formulas leaves
-    // formulas inconsistent; full recalc changes values. Re-enable the
-    // recalc oracle here once fixed.
-    oracles: ["undo", "saveReload"],
+    behaviors: ["filter.sort-range", "recalc.sort-preserves-formulas"],
     async run({ page }) {
       // Sort the data block (not the header, not the totals row).
       await invokeTauri(page, "sort_range", {

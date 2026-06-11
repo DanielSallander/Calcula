@@ -835,6 +835,10 @@ export interface UndoState {
   canRedo: boolean;
   undoDescription: string | null;
   redoDescription: string | null;
+  /** Number of transactions available to undo (used by test oracles). */
+  undoDepth: number;
+  /** Number of transactions available to redo (used by test oracles). */
+  redoDepth: number;
 }
 
 export interface UndoResult {
@@ -848,6 +852,9 @@ export interface UndoResult {
   pivotChanged: boolean;
   slicerChanged: boolean;
   ribbonFilterChanged: boolean;
+  /** Object state restored (charts, sparklines, tables, autofilters,
+   *  validation, named ranges, freeze panes) — stores must refresh. */
+  objectsChanged: boolean;
 }
 
 /**

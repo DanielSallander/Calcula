@@ -433,12 +433,24 @@ pub fn get_workbook_state_digest(
                 .insert(sheet.to_string(), to_value_or_null(ranges));
         }
     }
+    // Note/comment ids and timestamps are regenerated on reload (the .cala
+    // format stores only position/text/author) — strip them so the digest
+    // compares semantic content, not volatile identity.
+    fn strip_volatile(mut value: Value) -> Value {
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("id");
+            obj.remove("createdAt");
+            obj.remove("updatedAt");
+            obj.remove("modifiedAt");
+        }
+        value
+    }
     if let Ok(comments) = state.comments.lock() {
         for (sheet, sheet_comments) in comments.iter() {
             for ((row, col), comment) in sheet_comments.iter() {
                 digest.comments.insert(
                     sheet_cell_key(*sheet, *row, *col),
-                    to_value_or_null(comment),
+                    strip_volatile(to_value_or_null(comment)),
                 );
             }
         }
@@ -446,9 +458,10 @@ pub fn get_workbook_state_digest(
     if let Ok(notes) = state.notes.lock() {
         for (sheet, sheet_notes) in notes.iter() {
             for ((row, col), note) in sheet_notes.iter() {
-                digest
-                    .notes
-                    .insert(sheet_cell_key(*sheet, *row, *col), to_value_or_null(note));
+                digest.notes.insert(
+                    sheet_cell_key(*sheet, *row, *col),
+                    strip_volatile(to_value_or_null(note)),
+                );
             }
         }
     }
@@ -463,9 +476,15 @@ pub fn get_workbook_state_digest(
     }
     if let Ok(auto_filters) = state.auto_filters.lock() {
         for (sheet, af) in auto_filters.iter() {
+            let mut value = to_value_or_null(af);
+            // hidden_rows is a HashSet — its JSON order is nondeterministic.
+            // Sort for a canonical digest.
+            if let Some(rows) = value.get_mut("hiddenRows").and_then(|v| v.as_array_mut()) {
+                rows.sort_by_key(|v| v.as_u64().unwrap_or(0));
+            }
             digest
                 .auto_filters
-                .insert(sheet.to_string(), to_value_or_null(af));
+                .insert(sheet.to_string(), value);
         }
     }
     if let Ok(outlines) = state.outlines.lock() {

@@ -958,6 +958,10 @@ pub fn apply_auto_filter(
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.lock().unwrap();
 
+    // Pre-mutation snapshot for undo (BUG-0003: autofilter changes bypassed
+    // the undo system).
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
+
     // Normalize coordinates
     let start_row = params.start_row.min(params.end_row);
     let end_row = params.start_row.max(params.end_row);
@@ -995,13 +999,17 @@ pub fn apply_auto_filter(
     let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
     let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-    AutoFilterResult {
+    let result = AutoFilterResult {
         success: true,
         auto_filter: Some((&*auto_filter).into()),
         error: None,
         hidden_rows,
         visible_rows,
-    }
+    };
+    drop(auto_filters);
+    drop(grids);
+    crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Apply AutoFilter");
+    result
 }
 
 /// Clear filter criteria for a specific column.
@@ -1017,6 +1025,7 @@ pub fn clear_column_criteria(
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.lock().unwrap();
 
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         auto_filter.column_filters.remove(&column_index);
 
@@ -1029,13 +1038,17 @@ pub fn clear_column_criteria(
         let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
         let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows,
             visible_rows,
-        }
+        };
+        drop(auto_filters);
+        drop(grids);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Clear column filter");
+        result
     } else {
         AutoFilterResult {
             success: false,
@@ -1055,19 +1068,23 @@ pub fn clear_auto_filter_criteria(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut auto_filters = state.auto_filters.lock().unwrap();
 
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         auto_filter.column_filters.clear();
         auto_filter.hidden_rows.clear();
 
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows: Vec::new(),
             visible_rows: all_rows,
-        }
+        };
+        drop(auto_filters);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Clear filter criteria");
+        result
     } else {
         AutoFilterResult {
             success: false,
@@ -1091,6 +1108,8 @@ pub fn reapply_auto_filter(
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.lock().unwrap();
 
+    // Pre-mutation snapshot for undo (BUG-0003).
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         // Recompute hidden rows
         if active_sheet < grids.len() {
@@ -1101,13 +1120,17 @@ pub fn reapply_auto_filter(
         let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
         let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows,
             visible_rows,
-        }
+        };
+        drop(auto_filters);
+        drop(grids);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Filter");
+        result
     } else {
         AutoFilterResult {
             success: false,
@@ -1129,6 +1152,14 @@ pub fn remove_auto_filter(
 
     if let Some(auto_filter) = auto_filters.remove(&active_sheet) {
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
+
+        drop(auto_filters);
+        crate::undo_commands::record_autofilter_undo(
+            &state,
+            active_sheet,
+            Some(auto_filter),
+            "Remove AutoFilter",
+        );
 
         AutoFilterResult {
             success: true,
@@ -1320,6 +1351,8 @@ pub fn set_column_filter_values(
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.lock().unwrap();
 
+    // Pre-mutation snapshot for undo (BUG-0003).
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let mut filter_values = values;
         if include_blanks {
@@ -1347,13 +1380,17 @@ pub fn set_column_filter_values(
         let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
         let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows,
             visible_rows,
-        }
+        };
+        drop(auto_filters);
+        drop(grids);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Filter");
+        result
     } else {
         AutoFilterResult {
             success: false,
@@ -1381,6 +1418,8 @@ pub fn set_column_custom_filter(
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.lock().unwrap();
 
+    // Pre-mutation snapshot for undo (BUG-0003).
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
             filter_on: FilterOn::Custom,
@@ -1404,13 +1443,17 @@ pub fn set_column_custom_filter(
         let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
         let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows,
             visible_rows,
-        }
+        };
+        drop(auto_filters);
+        drop(grids);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Filter");
+        result
     } else {
         AutoFilterResult {
             success: false,
@@ -1452,6 +1495,8 @@ pub fn set_column_top_bottom_filter(
         };
     }
 
+    // Pre-mutation snapshot for undo (BUG-0003).
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
             filter_on,
@@ -1473,13 +1518,17 @@ pub fn set_column_top_bottom_filter(
         let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
         let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows,
             visible_rows,
-        }
+        };
+        drop(auto_filters);
+        drop(grids);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Filter");
+        result
     } else {
         AutoFilterResult {
             success: false,
@@ -1505,6 +1554,8 @@ pub fn set_column_dynamic_filter(
     let locale = state.locale.lock().unwrap();
     let theme = state.theme.lock().unwrap();
 
+    // Pre-mutation snapshot for undo (BUG-0003).
+    let undo_previous = auto_filters.get(&active_sheet).cloned();
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
             filter_on: FilterOn::Dynamic,
@@ -1526,13 +1577,17 @@ pub fn set_column_dynamic_filter(
         let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
         let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
 
-        AutoFilterResult {
+        let result = AutoFilterResult {
             success: true,
             auto_filter: Some((&*auto_filter).into()),
             error: None,
             hidden_rows,
             visible_rows,
-        }
+        };
+        drop(auto_filters);
+        drop(grids);
+        crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Filter");
+        result
     } else {
         AutoFilterResult {
             success: false,
