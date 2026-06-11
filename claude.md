@@ -2,6 +2,18 @@
 
 Calcula is an ambitious open-source spreadsheet application (Excel alternative) built for high performance and extensibility using a microkernel architecture.
 
+## Project Vision
+
+Calcula exists to bring back the customizability that made Excel great -- formulas, VBA, add-ins: the ability to build your own solution to any specific problem, today, yourself. The industry's move toward Power BI -- itself a genuinely good tool -- took that away: users are locked to the vendor's visuals and data model, with no custom scripting, waiting for Microsoft to ship a feature instead of building it.
+
+At the same time, Calcula must fix the legitimate downsides that got VBA shunned and Excel files distrusted. These are requirements every feature is held to:
+
+- **Security:** Custom code must run sandboxed, with tiered access levels -- never with full machine access like VBA macros. (Current state: tiered access levels and the QuickJS notebook sandbox are implemented; full isolation of object scripts is still being hardened)
+- **Transparency:** Custom code must be visible and auditable. The user must always know where code resides and what it can touch -- never hidden inside a binary file. Scripts arriving in distributed packages must not run without explicit consent. (Current state: consent dialog exists but provenance wiring is pending; pulled scripts are forced to restricted access meanwhile)
+- **Distribution:** Excel's model of emailing copies of files is replaced by `.calp` packages: publish/subscribe report distribution, plus two-way data collection via writeback
+
+Every feature decision should serve this vision: maximum user customizability, with the security and transparency that Excel/VBA never had.
+
 ## Tech Stack
 
 - **OS:** Windows 11

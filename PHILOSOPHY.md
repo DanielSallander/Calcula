@@ -4,6 +4,18 @@
 
 A spreadsheet is not a single application -- it is a *platform*. Formatting, charts, pivot tables, data validation, sorting -- these are all applications that happen to run on a grid. Calcula treats them that way. The grid is the kernel. Everything else is a guest.
 
+## Never Wait for the Vendor
+
+Excel's greatest gift was that a user with a specific problem could build a specific solution -- with formulas, with VBA, with add-ins -- without asking anyone's permission. The industry's drift toward locked-down BI tools took that away: closed visual galleries, closed data models, and feature requests that wait years on a vendor's roadmap. Calcula's measure of success is the opposite: when a user hits a wall, the platform offers them a way *through* it -- a script, a function, an extension -- today, not in a future release.
+
+## Power Without Hidden Code
+
+VBA did not fail because it was powerful; it failed because the power was invisible. Code hid inside binary files, ran with the full authority of the machine, and a recipient could never quite know what a workbook would do when opened. Calcula keeps the power and removes the darkness: custom code is written in TypeScript, lives where it can be seen and audited, must run inside a tiered sandbox, and must cross no trust boundary without explicit consent. You should never have to wonder *where the code is* or *what it can touch*.
+
+## Distribution is Part of the Model
+
+A spreadsheet that can only be shared by emailing copies of itself will always end in twelve versions of the truth. Calcula treats distribution as an engine capability, not an afterthought: workbooks are published as versioned packages, consumers subscribe to updates, local changes live in override layers -- and data flows back upstream through audited writeback. Sharing a model and collecting data are part of the spreadsheet itself, not chores delegated to an inbox.
+
 ## Independence Through Boundaries
 
 Every layer in Calcula exists in deliberate isolation. The Core knows nothing about what runs on top of it. Extensions know nothing about each other. The API is a narrow, typed contract -- the only door between worlds. This is not defensive programming; it is the architecture itself. If a boundary would need to be violated to build a feature, the boundary is improved instead.

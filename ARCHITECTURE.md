@@ -2,6 +2,10 @@
 
 Calcula follows a strict **Microkernel Architecture**. This document outlines the boundaries and rules that keep the project maintainable and extensible.
 
+## Why a Microkernel
+
+The architecture is the founding vision made structural. Calcula promises Excel-grade customizability (build your own feature instead of waiting for a vendor) without VBA's failure modes (invisible code, unrestricted machine access). A microkernel delivers both at once: extensions and scripts get real power, but only through a narrow, typed, auditable API boundary -- so user code can be trusted because what it can touch is known by contract, not by hope. See `PHILOSOPHY.md` for the full reasoning.
+
 ## The Four Layers
 
 1. **The Brain (Backend):** Rust-based logic. Handles the Cell Dependency Graph and Persistence.

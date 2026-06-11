@@ -10,11 +10,30 @@
 
 Excel may be the most successful "programming language" ever written. Hundreds of millions of people use it daily, and an enormous amount of the world's business logic lives inside `.xlsx` files.
 
-But the spreadsheet itself, the engine, the grid, the formula model, has barely changed in three decades. It is closed, monolithic, and impossible to extend without a vendor's permission.
+But the spreadsheet itself, the engine, the grid, the formula model, has barely changed in three decades. It is closed and monolithic: you can script on top of it, but you cannot change what the engine itself *is* without a vendor's permission.
 
 **What happens if we build one the other way around?**
 
 Calcula is an attempt to answer that: a spreadsheet engine where the core knows nothing about formatting, pivot tables, or charts, and where every feature is an extension you can replace, rewrite, or rip out.
+
+## Why Calcula Exists
+
+Calcula was born from a specific frustration.
+
+What made Excel beloved was not the grid -- it was the *customizability*. Formulas, VBA, add-ins: if you had a specific problem, you could build a specific solution, yourself, today. That power is what turned the spreadsheet into the most successful end-user programming environment in history.
+
+Then the industry moved on. The center of gravity shifted to Power BI, and VBA became something to apologize for -- old, insecure, quietly deprecated in spirit. Power BI is a genuinely good tool, but it trades that power away: you are locked to the vendor's visuals and the vendor's data model. There is no escape hatch for the problem the vendor didn't anticipate. When you hit the wall, you don't build the feature -- you wait for Microsoft to ship it.
+
+**Calcula exists to bring that customizability back.** A spreadsheet where the user is never stuck waiting on a roadmap, because the platform itself is programmable -- from formula functions to whole extensions to per-object scripts.
+
+But going back to Excel's model wholesale would repeat its mistakes, because the criticisms of VBA are fair:
+
+- **Security.** Macros run with the full power of the machine, which made them one of history's favorite malware vectors.
+- **Opacity.** Custom code hides inside the file. Open someone else's workbook and you simply don't know where code lives, what it touches, or when it runs.
+
+Calcula's scripting model is designed against both failure modes: TypeScript instead of VBA, **tiered access levels** instead of unrestricted machine access, and scripts that are **visible and auditable** instead of buried in a binary blob -- with explicit consent for scripts arriving in distributed packages as the standard the implementation is held to. The same principle extends to the architecture itself: extensions get real power, but only through a narrow, typed, inspectable API.
+
+And there is one more Excel weakness Calcula refuses to inherit: **distribution**. Sharing a workbook has always meant emailing a copy and losing control of it. Calcula's `.calp` package system replaces that with publish/subscribe report distribution -- and turns the channel two-way, so packages can also *collect* data from recipients through writeback. Both are described below.
 
 ## The Architecture
 
@@ -74,7 +93,7 @@ In traditional spreadsheets, data flows one way: someone builds a model, distrib
 - Recipients fill in their data and **submit changes** back to the source
 - **Draft auto-save** ensures nothing is lost mid-entry
 - A full **audit trail** tracks every submission: who changed what, and when
-- **Commit guards** prevent conflicting edits
+- **Commit guards** validate entries against the region's declared schema; per-subscriber slots make submissions conflict-free by construction
 
 This turns a spreadsheet from a read-only report into a two-way data collection tool, without giving up control of the model.
 
@@ -88,12 +107,12 @@ Excel scatters filtering across individual tables and pivot tables, each with it
 
 ### Scriptable Objects
 
-Every object in Calcula (charts, slicers, pivot tables) can carry its own TypeScript code:
+Scriptable Objects are Calcula's answer to VBA, built on the security and transparency principles described above. Every object in Calcula (charts, slicers, pivot tables) can carry its own TypeScript code:
 
 - **Per-object lifecycle hooks** let a chart react to its own data changes, a slicer run logic on selection, or a pivot table transform its output
 - **Script notebooks** provide a Jupyter-style environment inside the spreadsheet for exploration and prototyping
 - A **template library** lets you save and reuse scripted objects across workbooks
-- **Tiered sandbox** controls what scripts can access, with a consent dialog for distributed packages
+- **Tiered access levels** control what scripts can access; scripts arriving in distributed packages are forced to restricted mode (consent prompting is being wired up)
 
 ### Pivot DSL
 
@@ -103,7 +122,7 @@ Pivot tables can be configured through a text-based **domain-specific language**
 
 Where Excel offers COM add-ins bolted onto a monolithic core, Calcula's extension system is the architecture:
 
-- **57 built-in extensions**, each running through the same public API that third-party extensions use
+- **68 built-in extensions**, each running through the same public API that third-party extensions use
 - No backdoor access: the formatting extension has the same privileges as a plugin you write yourself
 - Extensions can register commands, inject UI, add formula functions, subscribe to events, and intercept rendering
 - Swap out the charting engine, replace the formula evaluator, or add an entirely new data type, all without forking
@@ -185,7 +204,7 @@ Calcula is under active development. Here is an honest summary of where things s
 | Area | Status |
 | --- | --- |
 | Extension host and lifecycle management | Working |
-| 57 built-in extensions loaded through public API | Working |
+| 68 built-in extensions loaded through public API | Working |
 | Command registry, UI injection, event subscriptions | Working |
 | Style interceptors and rendering pipeline hooks | Working |
 | Edit guards and commit guards | Working |
