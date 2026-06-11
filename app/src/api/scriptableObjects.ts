@@ -914,6 +914,21 @@ async function getLib() {
   return _libModule;
 }
 
+// Active sheet index tracked for event payloads: CELL_VALUES_CHANGED carries
+// no sheet index, and UI edits always target the active sheet, so the active
+// index at event time identifies the edited sheet.
+let activeSheetIndexForEvents = 0;
+onAppEvent(AppEvents.SHEET_CHANGED, (detail) => {
+  const d = detail as { sheetIndex?: number } | undefined;
+  if (d && typeof d.sheetIndex === "number") {
+    activeSheetIndexForEvents = d.sheetIndex;
+  }
+});
+
+// Each cell onRender registration needs its own interceptor slot — a fixed id
+// would let two cell scripts silently clobber each other's renderer.
+let cellRendererSeq = 0;
+
 let _backendModule: typeof import("./backend") | null = null;
 async function getBackend() {
   if (!_backendModule) {
@@ -1177,22 +1192,38 @@ function buildSheetContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Sh
     onDataChange(handler) {
       return tracked(cleanupFns, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
         const d = detail as { changes: Array<{ row: number; col: number; oldValue?: string; newValue: string }> };
-        handler({ sheetIndex: 0, changes: d.changes });
+        handler({ sheetIndex: activeSheetIndexForEvents, changes: d.changes });
       }));
     },
 
-    async getCellValue(row, col, _sheetIndex?) {
+    async getCellValue(row, col, sheetIndex?) {
       try {
         const lib = await getLib();
+        if (sheetIndex !== undefined) {
+          const active = await lib.getActiveSheet();
+          if (sheetIndex !== active) {
+            const results = await lib.getWatchCells([[sheetIndex, row, col]]);
+            return results[0]?.display ?? "";
+          }
+        }
         const cellData = await lib.getCell(row, col);
         return cellData?.display ?? "";
       } catch {
         return "";
       }
     },
-    async setCellValue(row, col, value, _sheetIndex?) {
+    async setCellValue(row, col, value, sheetIndex?) {
       try {
         const lib = await getLib();
+        if (sheetIndex !== undefined) {
+          const active = await lib.getActiveSheet();
+          if (sheetIndex !== active) {
+            // update_cell_on_sheets handles non-active sheets; the active
+            // sheet goes through the regular update path below.
+            await lib.updateCellOnSheets([sheetIndex], row, col, value);
+            return;
+          }
+        }
         await lib.updateCell(row, col, value);
       } catch (e) {
         console.error("[SheetContext] setCellValue failed:", e);
@@ -1215,7 +1246,7 @@ function buildCellContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Cel
           handler({
             row: change.row,
             col: change.col,
-            sheetIndex: 0,
+            sheetIndex: activeSheetIndexForEvents,
             oldValue: change.oldValue,
             newValue: change.newValue,
             formula: change.formula,
@@ -1246,7 +1277,7 @@ function buildCellContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Cel
     onRender(handler) {
       // Register as a style interceptor so it runs during rendering
       const unsub = registerStyleInterceptor(
-        `objectscript-cell-renderer`,
+        `objectscript-cell-renderer-${++cellRendererSeq}`,
         (cellValue, _baseStyle, coords) => {
           const result = handler({
             row: coords.row,
@@ -1379,7 +1410,9 @@ function buildSlicerContext(
     async clearSelection() {
       const store = getSlicerStoreService();
       if (store) {
-        await store.setSelectedItems(instanceId, null);
+        // Empty set = nothing selected (filter excludes all items).
+        // selectAll passes null = no filter (all items). The two are distinct.
+        await store.setSelectedItems(instanceId, []);
       }
     },
     async selectAll() {
@@ -1442,7 +1475,52 @@ function buildChartContext(
     instanceId,
 
     onDataChange(handler) {
-      return tracked(cleanupFns, onAppEvent(AppEvents.DATA_CHANGED, handler));
+      // Resolve the chart's source range from its spec so cell edits outside
+      // the range don't fire. String sources (A1 refs / named ranges) cannot
+      // be resolved here and fall back to any-change behavior.
+      const getSourceRange = () => {
+        const store = getChartStoreService();
+        const chart = store?.getChartById(instanceId);
+        if (!chart) return null;
+        try {
+          const spec = JSON.parse(chart.specJson) as { data?: unknown };
+          const d = spec.data as
+            | { sheetIndex?: number; startRow?: number; startCol?: number; endRow?: number; endCol?: number }
+            | string
+            | undefined;
+          if (
+            d && typeof d === "object" &&
+            typeof d.startRow === "number" && typeof d.endRow === "number" &&
+            typeof d.startCol === "number" && typeof d.endCol === "number"
+          ) {
+            return d as { sheetIndex?: number; startRow: number; startCol: number; endRow: number; endCol: number };
+          }
+        } catch { /* unparseable spec — fall back to any-change */ }
+        return null;
+      };
+      const unsubCells = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
+        const range = getSourceRange();
+        if (range) {
+          if (range.sheetIndex !== undefined && range.sheetIndex !== activeSheetIndexForEvents) return;
+          const d = detail as { changes?: Array<{ row: number; col: number }> };
+          const hit = d.changes?.some(
+            (c) =>
+              c.row >= range.startRow && c.row <= range.endRow &&
+              c.col >= range.startCol && c.col <= range.endCol,
+          );
+          if (!hit) return;
+        }
+        handler(undefined);
+      });
+      cleanupFns.push(unsubCells);
+      // Bulk operations (sort, import, recalc) signal through DATA_CHANGED
+      // without per-cell coordinates — always forward those.
+      const unsubBulk = onAppEvent(AppEvents.DATA_CHANGED, handler);
+      cleanupFns.push(unsubBulk);
+      return () => {
+        unsubCells();
+        unsubBulk();
+      };
     },
     onClick(handler) {
       return tracked(cleanupFns, onAppEvent("chart:clicked", (detail) => {

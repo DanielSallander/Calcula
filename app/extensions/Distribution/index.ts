@@ -34,11 +34,26 @@ import {
   getRegionForCell,
 } from "./lib/writebackStore";
 import { registerCommitGuard } from "@api/commitGuards";
-import { saveWritebackDraft, refreshData, type SubmissionValue } from "@api/distribution";
+import {
+  saveWritebackDraft,
+  refreshData,
+  getSheetIdForIndex,
+  type SubmissionValue,
+} from "@api/distribution";
 import { emitAppEvent } from "@api/events";
+import { ExtensionRegistry } from "@api";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+
+// Current grid selection (normalized), tracked for the writeback designation
+// flow: the menu action snapshots it into the dialog payload.
+let currentSelection: {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+} | null = null;
 
 function activate(context: ExtensionContext): void {
   if (isActivated) return;
@@ -112,7 +127,30 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:designateWriteback",
     label: "Designate Writeback Region...",
-    action: () => context.ui.dialogs.show(DESIGNATE_WRITEBACK_DIALOG_ID),
+    action: async () => {
+      if (!currentSelection) {
+        context.ui.notifications.showToast(
+          "Select the cell range to designate first, then run this command again.",
+          { type: "info", duration: 4000 },
+        );
+        return;
+      }
+      try {
+        const sheetId = await getSheetIdForIndex(getActiveSheetIndex());
+        context.ui.dialogs.show(DESIGNATE_WRITEBACK_DIALOG_ID, {
+          sheetId,
+          startRow: currentSelection.startRow,
+          endRow: currentSelection.endRow,
+          startCol: currentSelection.startCol,
+          endCol: currentSelection.endCol,
+        });
+      } catch (err) {
+        context.ui.notifications.showToast(
+          `Cannot designate writeback region: ${err}`,
+          { type: "error", duration: 5000 },
+        );
+      }
+    },
     order: 904,
   });
 
@@ -177,6 +215,19 @@ function activate(context: ExtensionContext): void {
     },
   );
   cleanupFns.push(unsubSheetChanged);
+
+  // Track grid selection for the writeback designation menu action
+  const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
+    currentSelection = sel
+      ? {
+          startRow: Math.min(sel.startRow, sel.endRow),
+          startCol: Math.min(sel.startCol, sel.endCol),
+          endRow: Math.max(sel.startRow, sel.endRow),
+          endCol: Math.max(sel.startCol, sel.endCol),
+        }
+      : null;
+  });
+  cleanupFns.push(unsubSelection);
 
   // Load writeback snapshot on file open / new
   const unsubAfterOpen = context.events.on(AppEvents.AFTER_OPEN, () => {

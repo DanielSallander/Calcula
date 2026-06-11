@@ -352,6 +352,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: None,
             data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -393,6 +394,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: None,
             data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
         };
 
         let result = publish(&reg, &request).unwrap();
@@ -420,6 +422,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: None,
             data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
         };
 
         publish(&reg, &request).unwrap();
@@ -444,6 +447,8 @@ mod tests {
                 published_by: "tester".to_string(),
                 writeback_regions: None,
                 object_scripts: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
             };
             publish(&reg, &request).unwrap();
         }

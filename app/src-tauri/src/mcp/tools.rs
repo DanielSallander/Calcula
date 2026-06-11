@@ -280,6 +280,12 @@ pub fn execute_script(
     handle: &AppHandle,
     code: &str,
 ) -> Result<String, String> {
+    // External MCP clients are script execution too — same security gate.
+    // ("prompt" without a session approval refuses: the MCP path is headless
+    // and cannot show a confirmation; approve in-app or set level to enabled.)
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_script_security(&script_state)?;
+
     let state = handle.state::<AppState>();
 
     // Clone data for isolated execution (same pattern as scripting/commands.rs)

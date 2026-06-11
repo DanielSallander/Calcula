@@ -8,6 +8,73 @@ use tauri::State;
 use crate::AppState;
 use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptResponse, WorkbookScript};
 
+/// Key under which the once-per-session "prompt" approval is stored in
+/// `ScriptState.permission_grants`.
+const SESSION_APPROVAL_KEY: &str = "__session__";
+
+/// Error sentinel for the "prompt" security level: the frontend keys on this
+/// to show a confirmation and retry after `grant_script_session_approval`.
+pub const SCRIPT_PROMPT_REQUIRED: &str = "SCRIPT_PROMPT_REQUIRED";
+/// Error sentinel for the "disabled" security level.
+pub const SCRIPTS_DISABLED: &str = "SCRIPTS_DISABLED";
+
+/// Check the global script security level before executing any script.
+/// - "enabled": run freely.
+/// - "prompt": require the once-per-session approval granted via
+///   `grant_script_session_approval` after the user confirms in the UI.
+/// - "disabled": always refuse.
+/// Every script execution path (run_script, notebook cells, MCP) must call
+/// this — a stored security setting that gates nothing is worse than none.
+pub(crate) fn check_script_security(script_state: &ScriptState) -> Result<(), String> {
+    let level = script_state
+        .security_level
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    match level.as_str() {
+        "enabled" => Ok(()),
+        "disabled" => Err(format!(
+            "{}: Script execution is disabled (Script Security setting)",
+            SCRIPTS_DISABLED
+        )),
+        _ => {
+            let grants = script_state
+                .permission_grants
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let approved = grants
+                .get(SESSION_APPROVAL_KEY)
+                .map(|perms| perms.iter().any(|p| p == "execute"))
+                .unwrap_or(false);
+            if approved {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: Script execution requires confirmation (Script Security setting is 'prompt')",
+                    SCRIPT_PROMPT_REQUIRED
+                ))
+            }
+        }
+    }
+}
+
+/// Grant session-wide script execution approval. The "prompt" security level
+/// asks once per session; the frontend calls this after the user confirms.
+#[tauri::command]
+pub fn grant_script_session_approval(
+    script_state: State<ScriptState>,
+) -> Result<(), String> {
+    let mut grants = script_state
+        .permission_grants
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let entry = grants.entry(SESSION_APPROVAL_KEY.to_string()).or_default();
+    if !entry.iter().any(|p| p == "execute") {
+        entry.push("execute".to_string());
+    }
+    Ok(())
+}
+
 /// Execute a script against the current spreadsheet state.
 ///
 /// 1. Clones the relevant AppState data (grids, styles, sheet names)
@@ -17,9 +84,11 @@ use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptRespon
 #[tauri::command]
 pub fn run_script(
     state: State<AppState>,
-    _script_state: State<ScriptState>,
+    script_state: State<ScriptState>,
     request: RunScriptRequest,
 ) -> Result<RunScriptResponse, String> {
+    check_script_security(&script_state)?;
+
     // 1. Clone data from AppState for isolated execution
     let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();

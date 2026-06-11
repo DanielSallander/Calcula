@@ -5,8 +5,7 @@ import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
 import { refreshPreview, refreshApply, type RefreshPreview } from "@api";
 
-export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
-  const registryPath = (data as Record<string, unknown>)?.registryPath as string || "";
+export function RefreshPreviewDialog({ onClose }: DialogProps) {
   const [preview, setPreview] = useState<RefreshPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
@@ -16,7 +15,7 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
   useEffect(() => {
     (async () => {
       try {
-        const p = await refreshPreview(registryPath);
+        const p = await refreshPreview();
         setPreview(p);
       } catch (err: unknown) {
         setError(String(err));
@@ -24,13 +23,13 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
         setLoading(false);
       }
     })();
-  }, [registryPath]);
+  }, []);
 
   const handleApply = async () => {
     setApplying(true);
     setError(null);
     try {
-      const r = await refreshApply(registryPath);
+      const r = await refreshApply();
       setResult(
         `Refreshed ${r.subscriptionsRefreshed} subscription(s). ` +
         `${r.sheetsAdded} added, ${r.sheetsUpdated} updated, ${r.sheetsRemoved} removed. ` +
@@ -52,6 +51,20 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
       <div style={{ padding: "16px", width: "450px" }}>
         <h3 style={{ margin: "0 0 12px 0" }}>Refresh Complete</h3>
         <p>{result}</p>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button onClick={onClose}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Show preview errors before the no-updates state — a failed preview must
+  // not render as "all up to date".
+  if (error && !preview) {
+    return (
+      <div style={{ padding: "16px", width: "450px" }}>
+        <h3 style={{ margin: "0 0 12px 0" }}>Refresh Failed</h3>
+        <div style={{ color: "red", marginBottom: "12px", fontSize: "12px" }}>{error}</div>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button onClick={onClose}>Close</button>
         </div>

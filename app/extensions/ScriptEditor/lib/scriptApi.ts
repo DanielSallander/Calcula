@@ -15,8 +15,36 @@ import type {
 // ============================================================================
 
 /**
+ * Handle the security-level gate around a script execution call.
+ * When the level is "prompt", the backend refuses with a sentinel error until
+ * the user approves script execution once for the session; this helper shows
+ * the confirmation, grants the session approval, and retries.
+ */
+export async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("SCRIPT_PROMPT_REQUIRED")) {
+      const ok = window.confirm(
+        "This workbook wants to run a script.\n\n" +
+        "Allow script execution for this session?\n" +
+        "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",
+      );
+      if (ok) {
+        await invokeBackend<void>("grant_script_session_approval");
+        return run();
+      }
+    }
+    throw err;
+  }
+}
+
+/**
  * Execute a JavaScript source string against the current spreadsheet data.
  * The script runs in an isolated QuickJS runtime with access to the Calcula API.
+ * Honors the Script Security level: refuses when "disabled", confirms once
+ * per session when "prompt".
  *
  * @param source - The script source code
  * @param filename - Display name for error messages (defaults to "script.js")
@@ -37,7 +65,9 @@ export async function runScript(
     cellBookmarksJson,
     viewBookmarksJson,
   };
-  return invokeBackend<RunScriptResponse>("run_script", { request });
+  return withScriptSecurityPrompt(() =>
+    invokeBackend<RunScriptResponse>("run_script", { request }),
+  );
 }
 
 // ============================================================================

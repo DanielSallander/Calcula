@@ -86,9 +86,16 @@ function exec(cmd, options = {}) {
 
 function runRustTests() {
   log("Phase 1: Rust backend tests (cargo test)");
-  const result = exec("cargo test --workspace 2>&1", {
-    cwd: path.join(PROJECT_ROOT, "core"),
-    timeout: 300_000, // 5 min
+  // cargo must run under the MSVC environment (setup-rust-env.ps1): in a plain
+  // shell Git's link.exe shadows MSVC's and the build fails to link, which made
+  // this phase fail environmentally and let real test rot go unnoticed.
+  const coreDir = path.join(PROJECT_ROOT, "core");
+  const psCmd =
+    `powershell -ExecutionPolicy Bypass -Command "& '${SETUP_RUST_ENV}' | Out-Null; ` +
+    `Set-Location '${coreDir}'; cargo test --workspace 2>&1; exit $LASTEXITCODE"`;
+  const result = exec(psCmd, {
+    cwd: coreDir,
+    timeout: 600_000, // 10 min — full workspace test compile can exceed 5
   });
   log(result.success ? "  [PASS] Rust tests passed" : "  [FAIL] Rust tests failed");
   return {

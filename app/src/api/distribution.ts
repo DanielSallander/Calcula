@@ -198,12 +198,12 @@ export function importOverrides(patchJson: string): Promise<number> {
   return invokeBackend("calp_import_overrides", { patchJson });
 }
 
-export function refreshPreview(registryPath: string): Promise<RefreshPreview> {
-  return invokeBackend("calp_refresh_preview", { registryPath });
+export function refreshPreview(): Promise<RefreshPreview> {
+  return invokeBackend("calp_refresh_preview");
 }
 
-export function refreshApply(registryPath: string): Promise<RefreshResult> {
-  return invokeBackend("calp_refresh_apply", { registryPath });
+export function refreshApply(): Promise<RefreshResult> {
+  return invokeBackend("calp_refresh_apply");
 }
 
 export function detach(): Promise<void> {
@@ -410,6 +410,11 @@ export function updateWritebackRegion(region: WritebackRegionDeclaration): Promi
 /** Look up the CellId at a position without minting. */
 export function getCellId(sheetId: string, row: number, col: number): Promise<string | null> {
   return invokeBackend("calp_get_cell_id", { sheetId, row, col });
+}
+
+/** Resolve the stable SheetId for a workbook sheet index. */
+export function getSheetIdForIndex(sheetIndex: number): Promise<string> {
+  return invokeBackend("calp_get_sheet_id", { sheetIndex });
 }
 
 // ============================================================================

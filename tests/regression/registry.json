@@ -772,16 +772,11 @@
       "tier": 4,
       "category": "BI",
       "description": "PostgreSQL connections, in-memory model, BI pivots",
-      "coverage": "partial",
+      "coverage": "none",
       "unitTests": [],
-      "e2eTests": [
-        "e2e/tests/bi.spec.ts"
-      ],
-      "screenshots": [
-        "bi-connections-listed",
-        "bi-no-region-at-cell"
-      ],
-      "notes": "A live PostgreSQL database is not available in the nightly run, so E2E drives only the database-free command surface: bi_get_connections (array shape), bi_get_connection (error for unknown id), bi_create_connection (rejects a missing model file), and bi_get_region_at_cell (null for an ordinary cell). bi_connect/bi_query/bi_bind_table/bi_insert_result require a real database and are not covered."
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "No automated test coverage. A prior registry entry cited e2e/tests/bi.spec.ts and two screenshots that were never committed to the repo (corrected 2026-06-11, vision-gap-review P0.5). A database-free spec covering bi_get_connections, bi_get_connection (unknown id error), bi_create_connection (missing model file rejection), and bi_get_region_at_cell remains to be written."
     },
     {
       "id": "feat.distribution",
@@ -796,16 +791,9 @@
         "core/calp/src/overrides.rs",
         "core/calp/src/writeback.rs (38 tests)"
       ],
-      "e2eTests": [
-        "e2e/tests/distribution.spec.ts"
-      ],
-      "screenshots": [
-        "distribution-audit-enabled",
-        "distribution-audit-cleared",
-        "distribution-writeback-region",
-        "distribution-overrides-empty"
-      ],
-      "notes": "Rust unit tests cover the calp crate. E2E drives the in-memory command surface (calp_set_audit_enabled/get/clear audit log, calp_add/get_draft/remove writeback regions, calp_get_overrides). Filesystem-backed publish/pull is excluded from the nightly run."
+      "e2eTests": [],
+      "screenshots": [],
+      "notes": "Rust unit tests cover the calp crate (revived 2026-06-11 after E0063 rot, vision-gap-review P0.4). NO e2e coverage: a prior registry entry cited e2e/tests/distribution.spec.ts and four screenshots that were never committed to the repo (corrected 2026-06-11, P0.5). The full lifecycle spec (publish -> subscribe -> edit -> refresh -> writeback -> GATHER) is roadmap item D10 in docs/design/vision-gap-review.md. The 2,260-line calp_commands.rs Tauri layer has zero tests."
     },
     {
       "id": "feat.scripting",

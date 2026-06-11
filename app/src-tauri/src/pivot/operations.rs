@@ -1331,6 +1331,9 @@ pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotSt
                     Some(&styles),
                     &empty_user_files,
                     Some(&pivot_data_fn),
+                    // GATHER lookup is not threaded into pivot-internal recalc;
+                    // GATHER cells refresh through update_cell/calculate_now.
+                    None,
                 )
             }
             Err(_) => CellValue::Error(engine::CellError::Value),

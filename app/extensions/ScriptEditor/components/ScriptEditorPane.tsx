@@ -4,7 +4,11 @@
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import type { TaskPaneViewProps } from "@api";
-import { runScript } from "../lib/scriptApi";
+import {
+  runScript,
+  getScriptSecurityLevel,
+  setScriptSecurityLevel,
+} from "../lib/scriptApi";
 import { openAdvancedEditor } from "../lib/openEditorWindow";
 import type { RunScriptResponse } from "../types";
 
@@ -171,6 +175,7 @@ export function ScriptEditorPane(
   const [source, setSource] = useState(DEFAULT_SCRIPT);
   const [isRunning, setIsRunning] = useState(false);
   const [consoleLines, setConsoleLines] = useState<ConsoleEntry[]>([]);
+  const [securityLevel, setSecurityLevel] = useState<string>("prompt");
   const consoleEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -178,6 +183,24 @@ export function ScriptEditorPane(
   useEffect(() => {
     consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [consoleLines]);
+
+  // Load the current Script Security level so the pane shows which mode is active
+  useEffect(() => {
+    getScriptSecurityLevel().then(setSecurityLevel).catch(() => {});
+  }, []);
+
+  const handleSecurityChange = useCallback(
+    async (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const level = e.target.value;
+      setSecurityLevel(level);
+      try {
+        await setScriptSecurityLevel(level);
+      } catch (err) {
+        console.error("[ScriptEditor] Failed to set security level:", err);
+      }
+    },
+    [],
+  );
 
   const handleRun = useCallback(async () => {
     if (isRunning || !source.trim()) return;
@@ -309,6 +332,20 @@ export function ScriptEditorPane(
       React.createElement(
         "div",
         { style: { display: "flex", gap: 6, alignItems: "center" } },
+        React.createElement(
+          "select",
+          {
+            value: securityLevel,
+            onChange: handleSecurityChange,
+            title:
+              "Script Security: 'disabled' blocks all script execution, " +
+              "'prompt' asks once per session, 'enabled' runs without asking",
+            style: { fontSize: 11 },
+          },
+          React.createElement("option", { value: "disabled" }, "Scripts: disabled"),
+          React.createElement("option", { value: "prompt" }, "Scripts: prompt"),
+          React.createElement("option", { value: "enabled" }, "Scripts: enabled"),
+        ),
         React.createElement(
           "button",
           {

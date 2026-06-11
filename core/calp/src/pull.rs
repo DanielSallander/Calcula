@@ -287,6 +287,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: None,
             data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
         };
         publish::publish(reg, &request).unwrap();
         wb
@@ -360,6 +361,8 @@ mod tests {
                 published_by: "tester".to_string(),
                 writeback_regions: None,
                 object_scripts: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
             };
             publish::publish(&reg, &request).unwrap();
         }

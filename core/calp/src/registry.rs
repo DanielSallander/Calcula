@@ -349,6 +349,7 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            data_sources: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -419,6 +420,7 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            data_sources: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -469,6 +471,7 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            data_sources: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -507,6 +510,7 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            data_sources: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();

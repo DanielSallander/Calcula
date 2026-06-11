@@ -140,6 +140,9 @@ fn run_cell_internal(
     cell_id: &str,
     source: &str,
 ) -> Result<NotebookCellResponse, String> {
+    // Notebook cells are script execution — same security gate as run_script.
+    super::commands::check_script_security(script_state)?;
+
     // 1. Clone current AppState data
     let grids = app_state.grids.lock().map_err(|e| e.to_string())?.clone();
     let style_registry = app_state.style_registry.lock().map_err(|e| e.to_string())?.clone();

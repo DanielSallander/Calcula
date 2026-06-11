@@ -128,6 +128,7 @@ fn evaluate_single_formula(
     styles: &engine::StyleRegistry,
     user_files: &std::collections::HashMap<String, Vec<u8>>,
     pivot_data_fn: &dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>,
+    gather_fn: &dyn Fn(&str) -> engine::GatherRegionData,
     tables_map: &crate::tables::TableStorage,
     table_names_map: &crate::tables::TableNameRegistry,
     named_ranges_map: &std::collections::HashMap<String, crate::named_ranges::NamedRange>,
@@ -174,6 +175,7 @@ fn evaluate_single_formula(
                 Some(styles),
                 user_files,
                 Some(pivot_data_fn),
+                Some(gather_fn),
             )
         }
         Err(_) => engine::CellValue::Error(engine::CellError::Value),
@@ -348,6 +350,14 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
         )
     };
 
+    // Pre-fetch writeback submissions once per recalculation pass so GATHER
+    // formulas see current data (empty map, no registry I/O, when the
+    // workbook has no writeback regions).
+    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
     let mut updated_cells = Vec::new();
 
     // Collect all cells with formulas
@@ -376,7 +386,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
         let result = evaluate_single_formula(
             *row, *col, formula,
             &grids, &sheet_names, active_sheet,
-            &styles, &user_files, &pivot_data_fn,
+            &styles, &user_files, &pivot_data_fn, &gather_fn,
             &tables_map, &table_names_map, &named_ranges_map,
             &row_heights, &column_widths,
         );
@@ -453,7 +463,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                     let new_result = evaluate_single_formula(
                         *row, *col, formula,
                         &grids, &sheet_names, active_sheet,
-                        &styles, &user_files, &pivot_data_fn,
+                        &styles, &user_files, &pivot_data_fn, &gather_fn,
                         &tables_map, &table_names_map, &named_ranges_map,
                         &row_heights, &column_widths,
                     );

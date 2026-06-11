@@ -2672,7 +2672,8 @@ pub fn evaluate_formula_with_context_and_files(
     evaluator.evaluate(ast).to_cell_value()
 }
 
-/// Like `evaluate_formula_with_context_and_files` but with pivot data lookup support.
+/// Like `evaluate_formula_with_context_and_files` but with pivot data lookup
+/// and GATHER writeback-submission lookup support.
 pub fn evaluate_formula_with_pivot(
     grids: &[Grid],
     sheet_names: &[String],
@@ -2682,26 +2683,13 @@ pub fn evaluate_formula_with_pivot(
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
     pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+    gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
 ) -> CellValue {
-    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
-        return CellValue::Error(CellError::Ref);
-    }
-
-    let current_grid = &grids[current_sheet_index];
-    let current_sheet_name = &sheet_names[current_sheet_index];
-    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
-    let reader = |path: &str| -> Option<String> {
-        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
-    };
-    let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
-    if let Some(sr) = style_registry {
-        evaluator.set_styles(sr);
-    }
-    evaluator.set_file_reader(&reader);
-    if let Some(pf) = pivot_data_fn {
-        evaluator.set_pivot_data_fn(pf);
-    }
-    evaluator.evaluate(ast).to_cell_value()
+    evaluate_formula_raw_with_files_and_pivot(
+        grids, sheet_names, current_sheet_index, ast, eval_ctx,
+        style_registry, user_files, pivot_data_fn, gather_fn,
+    )
+    .to_cell_value()
 }
 
 /// Evaluates a formula AST with context, returning the raw EvalResult.
@@ -3802,6 +3790,7 @@ pub fn run() {
             scripting::run_script,
             scripting::get_script_security_level,
             scripting::set_script_security_level,
+            scripting::grant_script_session_approval,
             scripting::list_scripts,
             scripting::get_script,
             scripting::save_script,
@@ -3964,6 +3953,7 @@ pub fn run() {
             calp_commands::calp_get_writeback_regions,
             calp_commands::calp_get_subscriber_identity,
             calp_commands::calp_get_cell_id,
+            calp_commands::calp_get_sheet_id,
             calp_commands::calp_get_writeback_draft_regions,
             calp_commands::calp_add_writeback_region,
             calp_commands::calp_remove_writeback_region,

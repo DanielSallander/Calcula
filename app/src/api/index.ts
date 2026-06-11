@@ -1257,6 +1257,7 @@ export {
   refreshData,
   saveDataSourceConfig,
   getDataSources,
+  getSheetIdForIndex,
 } from "./distribution";
 
 export type {

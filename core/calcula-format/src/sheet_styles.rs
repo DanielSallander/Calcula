@@ -63,6 +63,14 @@ pub fn serialize_style_registry(registry: &[CellStyle]) -> Result<String, serde_
     serde_json::to_string_pretty(registry)
 }
 
+/// Deserialize a style registry from JSON (inverse of [`serialize_style_registry`]).
+/// Production reads go through `read_optional_json` in zip_io; this function
+/// pins the registry format contract and is exercised by the roundtrip test.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn deserialize_style_registry(json: &str) -> Result<Vec<CellStyle>, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
 
 
 #[cfg(test)]

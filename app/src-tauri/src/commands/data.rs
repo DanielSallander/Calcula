@@ -562,6 +562,13 @@ pub fn update_cell(
         )
     };
 
+    // Pre-fetch writeback submissions so GATHER formulas see current data
+    // (empty map, no registry I/O, when the workbook has no writeback regions).
+    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
     let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
@@ -795,7 +802,7 @@ pub fn update_cell(
                     Some(&styles),
                     &user_files,
                     Some(&pivot_data_fn),
-                    None,
+                    Some(&gather_fn),
                 );
 
                 // Clear any previous spill range for this cell
@@ -1588,6 +1595,13 @@ pub fn update_cells_batch(
         )
     };
 
+    // Pre-fetch writeback submissions so GATHER formulas see current data
+    // (empty map, no registry I/O, when the workbook has no writeback regions).
+    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
     // Only open a new undo transaction if one isn't already open
     // (e.g. the frontend may have called beginUndoTransaction for cut+paste)
     let opened_transaction = !undo_stack.has_open_transaction();
@@ -1810,7 +1824,7 @@ pub fn update_cells_batch(
                         Some(&styles),
                         &user_files,
                         Some(&pivot_data_fn),
-                        None,
+                        Some(&gather_fn),
                     );
 
                     // Clear any previous spill range for this cell
@@ -3982,6 +3996,13 @@ pub fn fill_range(
         )
     };
 
+    // Pre-fetch writeback submissions so GATHER formulas see current data
+    // (empty map, no registry I/O, when the workbook has no writeback regions).
+    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
     let perf_t1_locks = Instant::now();
 
     // Source range dimensions
@@ -4166,7 +4187,7 @@ pub fn fill_range(
                                 Some(&styles),
                                 &user_files,
                                 Some(&pivot_data_fn),
-                                None,
+                                Some(&gather_fn),
                             );
 
                             // For fill, we take the simple scalar result (no spill handling)

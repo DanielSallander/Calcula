@@ -49,20 +49,50 @@ export async function deleteNotebook(id: string): Promise<void> {
 // Notebook Cell Execution
 // ============================================================================
 
+/**
+ * Handle the Script Security gate around notebook execution calls. When the
+ * level is "prompt", the backend refuses with a sentinel error until the user
+ * approves script execution once for the session; this shows the confirmation,
+ * grants the session approval, and retries.
+ */
+async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("SCRIPT_PROMPT_REQUIRED")) {
+      const ok = window.confirm(
+        "This notebook wants to run a script cell.\n\n" +
+        "Allow script execution for this session?\n" +
+        "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",
+      );
+      if (ok) {
+        await invokeBackend<void>("grant_script_session_approval");
+        return run();
+      }
+    }
+    throw err;
+  }
+}
+
 /** Run a single notebook cell. */
 export async function runNotebookCell(
   request: RunNotebookCellRequest,
 ): Promise<NotebookCellResponse> {
-  return invokeBackend<NotebookCellResponse>("notebook_run_cell", { request });
+  return withScriptSecurityPrompt(() =>
+    invokeBackend<NotebookCellResponse>("notebook_run_cell", { request }),
+  );
 }
 
 /** Run all cells in a notebook sequentially. */
 export async function runAllCells(
   notebookId: string,
 ): Promise<NotebookCellResponse[]> {
-  return invokeBackend<NotebookCellResponse[]>("notebook_run_all", {
-    notebookId,
-  });
+  return withScriptSecurityPrompt(() =>
+    invokeBackend<NotebookCellResponse[]>("notebook_run_all", {
+      notebookId,
+    }),
+  );
 }
 
 /** Rewind to just before a specific cell. */
@@ -76,9 +106,11 @@ export async function rewindNotebook(
 export async function runFromCell(
   request: RewindNotebookRequest,
 ): Promise<NotebookCellResponse[]> {
-  return invokeBackend<NotebookCellResponse[]>("notebook_run_from", {
-    request,
-  });
+  return withScriptSecurityPrompt(() =>
+    invokeBackend<NotebookCellResponse[]>("notebook_run_from", {
+      request,
+    }),
+  );
 }
 
 /** Reset the notebook runtime (destroy session and checkpoints). */

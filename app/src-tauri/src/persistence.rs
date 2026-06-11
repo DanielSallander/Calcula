@@ -1623,6 +1623,12 @@ pub fn open_file(
         }
     }
 
+    // Rebuild the in-memory writeback index/declarations from the restored
+    // subscriptions' registry manifests. Without this, writeback regions
+    // (guards, tints, GATHER data) stay inert after reopening a subscribed
+    // workbook until the next pull/refresh.
+    crate::calp_commands::rebuild_writeback_index(&state);
+
     // Restore AutoFilter state from user_files, then re-link tables
     // (BUG-0013: saved_to_table cannot persist auto_filter_id, so the link
     // is reconstructed here the same way table creation establishes it).
@@ -1906,6 +1912,13 @@ pub fn new_file(
     // Reset writeback layer
     *state.writeback_layer.lock().map_err(|e| e.to_string())? =
         calp::writeback::WritebackLayer::new();
+
+    // Reset writeback index/declarations (otherwise the previous workbook's
+    // regions stay active in the new workbook)
+    *state.writeback_index.lock().map_err(|e| e.to_string())? =
+        calp::WritebackIndex::default();
+    state.writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
+    state.writeback_draft_regions.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();

@@ -252,7 +252,7 @@ pub fn calp_pull(
     }
 
     // Rebuild writeback index from updated subscriptions
-    rebuild_writeback_index(&state, Some(&params.registry_path));
+    rebuild_writeback_index(&state);
 
     // Auto-load embedded BI models from the pulled package.
     // This creates BI connections so that BI pivots have a live engine to query.
@@ -444,40 +444,102 @@ pub fn calp_import_overrides(
     Ok(count)
 }
 
+/// Resolve a subscription's registry filesystem path from its stored URL.
+/// Subscriptions store URLs like `file://C:\path\to\registry`.
+fn subscription_registry_path(sub: &calp::manifest::Subscription) -> &str {
+    sub.registry_url.strip_prefix("file://").unwrap_or(&sub.registry_url)
+}
+
+/// Group refreshable subscriptions by registry path, preserving each
+/// subscription's index into the workbook subscription list. Dev and
+/// channel subscriptions are skipped (they refresh through their own flows).
+fn group_subscriptions_by_registry(
+    subs: &[calp::manifest::Subscription],
+) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, sub) in subs.iter().enumerate() {
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+        let path = subscription_registry_path(sub).to_string();
+        if let Some(group) = groups.iter_mut().find(|(p, _)| *p == path) {
+            group.1.push(i);
+        } else {
+            groups.push((path, vec![i]));
+        }
+    }
+    groups
+}
+
 /// Compute a preview of what a refresh would change, without applying anything.
+/// Each subscription is resolved against its own stored registry URL, so
+/// workbooks subscribed to multiple registries refresh correctly.
 #[tauri::command]
 pub fn calp_refresh_preview(
     state: State<AppState>,
-    registry_path: String,
 ) -> Result<calp::refresh::RefreshPreview, String> {
-    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
-        .map_err(|e| e.to_string())?;
-
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
 
-    calp::refresh::compute_preview(&registry, &subs.subscriptions, &layer)
-        .map_err(|e| e.to_string())
+    let mut merged = calp::refresh::RefreshPreview {
+        subscription_previews: Vec::new(),
+        total_cells_changed: 0,
+        total_sheets_added: 0,
+        total_sheets_removed: 0,
+        total_overrides_conflicted: 0,
+        total_overrides_auto_cleared: 0,
+    };
+
+    for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
+        let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+            .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+        let group: Vec<_> = indices.iter()
+            .map(|&i| subs.subscriptions[i].clone())
+            .collect();
+        let preview = calp::refresh::compute_preview(&registry, &group, &layer)
+            .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+
+        merged.subscription_previews.extend(preview.subscription_previews);
+        merged.total_cells_changed += preview.total_cells_changed;
+        merged.total_sheets_added += preview.total_sheets_added;
+        merged.total_sheets_removed += preview.total_sheets_removed;
+        merged.total_overrides_conflicted += preview.total_overrides_conflicted;
+        merged.total_overrides_auto_cleared += preview.total_overrides_auto_cleared;
+    }
+
+    Ok(merged)
 }
 
 /// Apply the refresh after the user has confirmed the preview.
 /// Pulls new versions for all subscriptions that have updates and materializes
-/// new/updated sheets into the workbook grids.
+/// new/updated sheets into the workbook grids. Each subscription is pulled
+/// from its own stored registry URL.
 #[tauri::command]
 pub fn calp_refresh_apply(
     state: State<AppState>,
-    registry_path: String,
 ) -> Result<calp::refresh::RefreshResult, String> {
-    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
-        .map_err(|e| e.to_string())?;
-
     let now = chrono::Utc::now().to_rfc3339();
 
     // Pull new versions for all subscriptions that have updates.
     let payloads = {
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-        calp::refresh::pull_all_updates(&registry, &subs.subscriptions)
-            .map_err(|e| e.to_string())?
+        let mut all_payloads = Vec::new();
+        for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
+            let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+                .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+            let group: Vec<_> = indices.iter()
+                .map(|&i| subs.subscriptions[i].clone())
+                .collect();
+            let group_payloads = calp::refresh::pull_all_updates(&registry, &group)
+                .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+            for mut payload in group_payloads {
+                // pull_all_updates indexed into the group slice; remap back to
+                // the workbook subscription index.
+                payload.subscription_index = indices[payload.subscription_index];
+                all_payloads.push(payload);
+            }
+        }
+        all_payloads
     };
 
     // Materialize new/updated sheets into grids.
@@ -555,7 +617,7 @@ pub fn calp_refresh_apply(
     // Rebuild writeback index from updated subscriptions
     drop(subs);
     drop(layer);
-    rebuild_writeback_index(&state, Some(&registry_path));
+    rebuild_writeback_index(&state);
 
     // Handle writeback region changes: invalidate drafts for removed/incompatible regions
     {
@@ -880,8 +942,10 @@ pub fn calp_get_writeback_regions(
 }
 
 /// Rebuild the writeback index from the version manifests of all active subscriptions.
-/// Called internally after pull, refresh, and detach.
-fn rebuild_writeback_index(state: &AppState, registry_path: Option<&str>) {
+/// Each subscription's manifest is read from its own stored registry URL.
+/// Called internally after pull and refresh, and after workbook load (the
+/// index is in-memory only and would otherwise be stale-empty after reopen).
+pub(crate) fn rebuild_writeback_index(state: &AppState) {
     let subs = match state.subscriptions.lock() {
         Ok(s) => s,
         Err(_) => return,
@@ -889,20 +953,21 @@ fn rebuild_writeback_index(state: &AppState, registry_path: Option<&str>) {
 
     let mut all_decls = Vec::new();
 
-    if let Some(path) = registry_path {
-        if let Ok(registry) = calp::registry::LocalRegistry::open(std::path::Path::new(path)) {
-            for sub in &subs.subscriptions {
-                // Skip dev and file-channel subscriptions (no writeback in those)
-                if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
-                    continue;
-                }
-                if let Ok(ver_manifest) = registry.get_version_manifest(
-                    &sub.package_name, &sub.resolved_version,
-                ) {
-                    if let Some(ref wb_regions) = ver_manifest.writeback_regions {
-                        all_decls.extend(wb_regions.iter().cloned());
-                    }
-                }
+    for sub in &subs.subscriptions {
+        // Skip dev and file-channel subscriptions (no writeback in those)
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+        let registry_path = subscription_registry_path(sub);
+        let registry = match calp::registry::LocalRegistry::open(std::path::Path::new(registry_path)) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if let Ok(ver_manifest) = registry.get_version_manifest(
+            &sub.package_name, &sub.resolved_version,
+        ) {
+            if let Some(ref wb_regions) = ver_manifest.writeback_regions {
+                all_decls.extend(wb_regions.iter().cloned());
             }
         }
     }
@@ -928,6 +993,21 @@ fn rebuild_writeback_index(state: &AppState, registry_path: Option<&str>) {
 // ============================================================================
 // Phase 12: Author UI — Writeback Region Designation
 // ============================================================================
+
+/// Resolve the stable SheetId for a workbook sheet index.
+/// Used by the frontend to build region selectors for the active sheet
+/// (e.g., when designating a writeback region from the current selection).
+#[tauri::command]
+pub fn calp_get_sheet_id(
+    state: State<AppState>,
+    sheet_index: usize,
+) -> Result<String, String> {
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    sheet_ids
+        .get(sheet_index)
+        .map(|id| id.to_string())
+        .ok_or_else(|| format!("No sheet at index {}", sheet_index))
+}
 
 /// Get all draft writeback regions for the current workbook.
 #[tauri::command]
@@ -1172,6 +1252,19 @@ pub fn calp_submit_region(
 /// so GATHER functions can look it up synchronously during evaluation.
 pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
     let mut result = std::collections::HashMap::new();
+
+    // Fast path: no writeback regions known to this workbook — skip all
+    // registry I/O. This is called on every cell edit and recalculation pass,
+    // so it must be free for ordinary workbooks. (Declarations are rebuilt at
+    // pull, refresh, and workbook open.)
+    if state
+        .writeback_declarations
+        .lock()
+        .map(|d| d.is_empty())
+        .unwrap_or(true)
+    {
+        return result;
+    }
 
     let subs = match state.subscriptions.lock() {
         Ok(s) => s,
