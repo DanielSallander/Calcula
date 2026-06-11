@@ -25,11 +25,11 @@ export interface SlicerStyleOverrides {
 
 // ---- Registry ----
 
-const itemRenderers = new Map<number, SlicerItemRendererFn>();
-const styleOverrides = new Map<number, SlicerStyleOverrides>();
+const itemRenderers = new Map<string, SlicerItemRendererFn>();
+const styleOverrides = new Map<string, SlicerStyleOverrides>();
 
 /** Register a custom item renderer for a specific slicer. */
-export function setSlicerItemRenderer(slicerId: number, renderer: SlicerItemRendererFn | null): () => void {
+export function setSlicerItemRenderer(slicerId: string, renderer: SlicerItemRendererFn | null): () => void {
   if (renderer) {
     itemRenderers.set(slicerId, renderer);
   } else {
@@ -39,12 +39,12 @@ export function setSlicerItemRenderer(slicerId: number, renderer: SlicerItemRend
 }
 
 /** Get the custom item renderer for a slicer (or null for default). */
-export function getSlicerItemRenderer(slicerId: number): SlicerItemRendererFn | null {
+export function getSlicerItemRenderer(slicerId: string): SlicerItemRendererFn | null {
   return itemRenderers.get(slicerId) ?? null;
 }
 
 /** Set a style override property for a slicer. */
-export function setSlicerStyleOverride(slicerId: number, name: string, value: string): void {
+export function setSlicerStyleOverride(slicerId: string, name: string, value: string): void {
   let overrides = styleOverrides.get(slicerId);
   if (!overrides) {
     overrides = {};
@@ -54,7 +54,7 @@ export function setSlicerStyleOverride(slicerId: number, name: string, value: st
 }
 
 /** Get all style overrides for a slicer. */
-export function getSlicerStyleOverrides(slicerId: number): SlicerStyleOverrides | null {
+export function getSlicerStyleOverrides(slicerId: string): SlicerStyleOverrides | null {
   return styleOverrides.get(slicerId) ?? null;
 }
 

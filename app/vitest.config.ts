@@ -3,14 +3,31 @@ import path from "path";
 
 export default defineConfig({
   resolve: {
-    alias: {
-      "@api": path.resolve(__dirname, "./src/api"),
-      "@core": path.resolve(__dirname, "./src/core"),
-      "@shell": path.resolve(__dirname, "./src/shell"),
-    },
+    alias: [
+      { find: "@api", replacement: path.resolve(__dirname, "./src/api") },
+      { find: "@core", replacement: path.resolve(__dirname, "./src/core") },
+      { find: "@shell", replacement: path.resolve(__dirname, "./src/shell") },
+      // Real monaco crashes jsdom and is too slow to import in tests
+      {
+        find: "@monaco-editor/react",
+        replacement: path.resolve(__dirname, "./test-stubs/monaco-editor-react.tsx"),
+      },
+      {
+        find: /^monaco-editor\/esm\/.*\?worker$/,
+        replacement: path.resolve(__dirname, "./test-stubs/monaco-worker.ts"),
+      },
+      {
+        find: /^monaco-editor$/,
+        replacement: path.resolve(__dirname, "./test-stubs/monaco-editor.ts"),
+      },
+    ],
   },
   test: {
     include: ["src/**/*.test.ts", "extensions/**/*.test.ts"],
     environment: "jsdom",
+    setupFiles: ["./vitest.setup.ts"],
+    // The api/lib barrel pulls in every extension; a cold dynamic import of it
+    // can exceed vitest's 5s default inside jsdom.
+    testTimeout: 30000,
   },
 });

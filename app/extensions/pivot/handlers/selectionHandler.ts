@@ -33,10 +33,10 @@ let cachedRegions: PivotRegionData[] = [];
 
 /** The currently active pivot ID (set when selection is inside a pivot region).
  *  Exported so ribbon tabs can read it directly on mount without waiting for events. */
-let activePivotId: number | null = null;
+let activePivotId: string | null = null;
 
 /** Get the currently active pivot ID. */
-export function getActivePivotId(): number | null {
+export function getActivePivotId(): string | null {
   return activePivotId;
 }
 

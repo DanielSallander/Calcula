@@ -3,6 +3,8 @@
 //          Runs randomized action sequences and checks UI invariants after
 //          each action. Any failure prints the seed for deterministic replay.
 
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import {
   ALL_INVARIANTS,
@@ -10,6 +12,7 @@ import {
   InvariantRunner,
   formatReport,
 } from "../invariants";
+import { OracleBattery } from "../oracles";
 import { resetToNewWorkbook } from "../helpers/screenshots";
 
 // ============================================================================
@@ -21,6 +24,16 @@ const ACTIONS_PER_RUN = 75;
 
 /** Time to wait for UI to settle after each action (ms) */
 const SETTLE_MS = 250;
+
+/** Run the semantic oracle battery (undo/save-reload/recalc round-trips)
+ *  every N actions */
+const ORACLE_EVERY_N_ACTIONS = 25;
+
+/** Temp dir for the save/reload oracle's .cala files */
+const ORACLE_TMP_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../results/oracle-tmp"
+);
 
 // ============================================================================
 // Tests
@@ -45,6 +58,8 @@ test.describe("State consistency (invariant monkey testing)", () => {
       actionGenerator: createActionGenerator({ seed }),
       maxActions: ACTIONS_PER_RUN,
       settleTimeMs: SETTLE_MS,
+      oracleBattery: new OracleBattery({ tmpDir: ORACLE_TMP_DIR }),
+      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
     });
 
     const result = await runner.run();
@@ -84,6 +99,8 @@ test.describe("State consistency (invariant monkey testing)", () => {
       }),
       maxActions: 50,
       settleTimeMs: SETTLE_MS,
+      oracleBattery: new OracleBattery({ tmpDir: ORACLE_TMP_DIR }),
+      oracleEveryNActions: ORACLE_EVERY_N_ACTIONS,
     });
 
     const result = await runner.run();

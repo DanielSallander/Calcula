@@ -10,7 +10,7 @@ import { PIVOT_HEADER_FILTER_OVERLAY_ID } from "../manifest";
  * Opens the header filter dropdown overlay for the given zone.
  */
 export async function handleOpenHeaderFilterMenu(detail: {
-  pivotId: number;
+  pivotId: string;
   zone: 'row' | 'column';
   anchorX: number;
   anchorY: number;

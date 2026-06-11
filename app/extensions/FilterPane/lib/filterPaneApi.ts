@@ -15,12 +15,12 @@ export async function createRibbonFilter(
   return invokeBackend<RibbonFilter>("create_ribbon_filter", { params });
 }
 
-export async function deleteRibbonFilter(filterId: number): Promise<void> {
+export async function deleteRibbonFilter(filterId: string): Promise<void> {
   return invokeBackend<void>("delete_ribbon_filter", { filterId });
 }
 
 export async function updateRibbonFilter(
-  filterId: number,
+  filterId: string,
   params: UpdateRibbonFilterParams,
 ): Promise<RibbonFilter> {
   return invokeBackend<RibbonFilter>("update_ribbon_filter", {
@@ -30,7 +30,7 @@ export async function updateRibbonFilter(
 }
 
 export async function updateRibbonFilterSelection(
-  filterId: number,
+  filterId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
   return invokeBackend<void>("update_ribbon_filter_selection", {
@@ -44,23 +44,23 @@ export async function getAllRibbonFilters(): Promise<RibbonFilter[]> {
 }
 
 export async function getRibbonFilter(
-  filterId: number,
+  filterId: string,
 ): Promise<RibbonFilter> {
   return invokeBackend<RibbonFilter>("get_ribbon_filter", { filterId });
 }
 
 export async function getRibbonFilterItems(
-  filterId: number,
+  filterId: string,
 ): Promise<SlicerItem[]> {
   return invokeBackend<SlicerItem[]>("get_ribbon_filter_items", { filterId });
 }
 
-export async function clearRibbonFilter(filterId: number): Promise<void> {
+export async function clearRibbonFilter(filterId: string): Promise<void> {
   return invokeBackend<void>("clear_ribbon_filter", { filterId });
 }
 
 export async function setRibbonFilterItemSelected(
-  filterId: number,
+  filterId: string,
   value: string,
   selected: boolean,
 ): Promise<void> {
@@ -76,7 +76,7 @@ export async function setRibbonFilterItemSelected(
 // ============================================================================
 
 export interface SlicerInfo {
-  id: number;
+  id: string;
   name: string;
   fieldName: string;
 }
@@ -90,7 +90,7 @@ export async function getAllSlicers(): Promise<SlicerInfo[]> {
 // ============================================================================
 
 export interface BiConnectionInfo {
-  id: number;
+  id: string;
   name: string;
   description: string;
   isConnected: boolean;
@@ -117,13 +117,13 @@ export async function getBiConnections(): Promise<BiConnectionInfo[]> {
 }
 
 export async function getBiModelInfo(
-  connectionId: number,
+  connectionId: string,
 ): Promise<BiModelInfo> {
   return invokeBackend<BiModelInfo>("bi_get_model_info", { connectionId });
 }
 
 export async function getBiColumnValues(
-  connectionId: number,
+  connectionId: string,
   table: string,
   column: string,
 ): Promise<string[]> {
@@ -141,7 +141,7 @@ export interface BiCrossFilter {
 }
 
 export async function getBiColumnAvailableValues(
-  connectionId: number,
+  connectionId: string,
   table: string,
   column: string,
   crossFilters: BiCrossFilter[],

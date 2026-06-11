@@ -49,7 +49,7 @@ function makeZoneField(overrides: Partial<ZoneField> = {}): ZoneField {
   };
 }
 
-function mockView(pivotId: number, version = 1, extra: Partial<PivotViewResponse> = {}): PivotViewResponse {
+function mockView(pivotId: string, version = 1, extra: Partial<PivotViewResponse> = {}): PivotViewResponse {
   return {
     pivotId,
     version,

@@ -21,7 +21,7 @@ import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID, SLICER_CONN
 // ============================================================================
 
 /** The slicer ID that was right-clicked (set during contextmenu, consumed by menu) */
-let contextSlicerId: number | null = null;
+let contextSlicerId: string | null = null;
 let activeMenuElement: HTMLDivElement | null = null;
 
 // ============================================================================
@@ -79,7 +79,7 @@ export function closeSlicerContextMenu(): void {
 function hitTestSlicerAt(
   canvasX: number,
   canvasY: number,
-): { slicerId: number } | null {
+): { slicerId: string } | null {
   const slicers = getAllSlicers();
   const gridState = getGridStateSnapshot();
   if (!gridState) return null;
@@ -126,7 +126,7 @@ interface MenuItem {
   checked?: boolean;
 }
 
-function showContextMenu(clientX: number, clientY: number, slicerId: number): void {
+function showContextMenu(clientX: number, clientY: number, slicerId: string): void {
   const slicer = getSlicerById(slicerId);
   if (!slicer) return;
 

@@ -58,14 +58,14 @@ interface CachedChart {
   height: number;
 }
 
-const chartCanvasCache = new Map<number, CachedChart>();
-const chartVersions = new Map<number, number>();
-const pendingRenders = new Set<number>();
+const chartCanvasCache = new Map<string, CachedChart>();
+const chartVersions = new Map<string, number>();
+const pendingRenders = new Set<string>();
 
 /**
  * Invalidate a specific chart's cache so it re-renders on the next frame.
  */
-export function invalidateChartCache(chartId: number): void {
+export function invalidateChartCache(chartId: string): void {
   chartVersions.set(chartId, (chartVersions.get(chartId) ?? 0) + 1);
 }
 
@@ -81,7 +81,7 @@ export function invalidateAllChartCaches(): void {
 /**
  * Remove a chart from the cache entirely.
  */
-export function removeChartFromCache(chartId: number): void {
+export function removeChartFromCache(chartId: string): void {
   chartCanvasCache.delete(chartId);
   chartVersions.delete(chartId);
   pendingRenders.delete(chartId);
@@ -109,12 +109,12 @@ interface CachedChartData {
   quickAccessButtons?: QuickAccessButton[];
 }
 
-const chartDataCache = new Map<number, CachedChartData>();
+const chartDataCache = new Map<string, CachedChartData>();
 
 /**
  * Get cached chart data for hit-testing. Returns null if not yet rendered.
  */
-export function getCachedChartData(chartId: number): CachedChartData | null {
+export function getCachedChartData(chartId: string): CachedChartData | null {
   return chartDataCache.get(chartId) ?? null;
 }
 
@@ -132,7 +132,7 @@ let cachedColHeaderHeight = 24;
  * Uses cached viewport params from the most recent render call.
  */
 export function getChartLocalCoords(
-  chartId: number,
+  chartId: string,
   canvasX: number,
   canvasY: number,
 ): { localX: number; localY: number } | null {
@@ -153,7 +153,7 @@ export function getChartLocalCoords(
 // ============================================================================
 
 let hoverState: {
-  chartId: number;
+  chartId: string;
   hitResult: ChartHitResult;
   canvasX: number;
   canvasY: number;
@@ -217,7 +217,7 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
 
   for (const region of regions) {
     if (!region.floating) continue;
-    const chartId = region.data?.chartId as number;
+    const chartId = region.data?.chartId as string;
     if (chartId == null) continue;
 
     // Compute canvas bounds for this chart
@@ -277,7 +277,7 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
   if (!foundHover) {
     for (const region of regions) {
       if (!region.floating) continue;
-      const chartId = region.data?.chartId as number;
+      const chartId = region.data?.chartId as string;
       if (chartId == null || !isChartSelected(chartId)) continue;
 
       const cachedData = chartDataCache.get(chartId);
@@ -338,7 +338,7 @@ export function handleChartMouseLeave(): void {
  */
 export function renderChart(overlayCtx: OverlayRenderContext): void {
   const { ctx, region } = overlayCtx;
-  const chartId = region.data?.chartId as number;
+  const chartId = region.data?.chartId as string;
   if (chartId == null) return;
 
   const chart = getChartById(chartId);
@@ -503,7 +503,7 @@ export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
 
     // Extended bounds: check quick access buttons area to the right
     // (only when this chart is selected)
-    const chartId = hitCtx.region.data?.chartId as number;
+    const chartId = hitCtx.region.data?.chartId as string;
     if (chartId != null && isChartSelected(chartId)) {
       return isInQuickAccessArea(
         hitCtx.canvasX,
@@ -532,7 +532,7 @@ export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
 // ============================================================================
 
 async function renderChartAsync(
-  chartId: number,
+  chartId: string,
   pxWidth: number,
   pxHeight: number,
   logicalWidth: number,

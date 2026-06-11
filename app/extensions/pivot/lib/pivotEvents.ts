@@ -28,7 +28,7 @@ export type PivotEventType = (typeof PivotEvents)[keyof typeof PivotEvents];
 
 /** Payload for pivot:progress Tauri events from the backend. */
 export interface PivotProgressEvent {
-  pivotId: number;
+  pivotId: string;
   stage: string;
   stageIndex: number;
   totalStages: number;

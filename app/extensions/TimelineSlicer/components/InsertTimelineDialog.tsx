@@ -15,7 +15,7 @@ import { createTimelineAsync } from "../lib/timelineSlicerStore";
 // ============================================================================
 
 interface PivotSource {
-  id: number;
+  id: string;
   name: string;
   sheetIndex: number;
   dateFields: string[];
@@ -157,7 +157,7 @@ export function InsertTimelineDialog({
   const [error, setError] = useState<string | null>(null);
   const [activeSheetIndex, setActiveSheetIndex] = useState(0);
 
-  const preselectedSourceId = data?.sourceId as number | undefined;
+  const preselectedSourceId = data?.sourceId as string | undefined;
 
   useEffect(() => {
     if (isOpen) {
@@ -184,7 +184,7 @@ export function InsertTimelineDialog({
       const sheetsResult = await getSheets();
       setActiveSheetIndex(sheetsResult.activeIndex);
 
-      const pivots = await getAllPivotTables<Array<{ id: number; name: string; sheetIndex: number }>>();
+      const pivots = await getAllPivotTables<Array<{ id: string; name: string; sheetIndex: number }>>();
       const pivotSources: PivotSource[] = [];
 
       for (const p of pivots) {

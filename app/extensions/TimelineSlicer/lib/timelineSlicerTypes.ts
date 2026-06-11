@@ -16,7 +16,7 @@ export interface TimelineSlicer {
   width: number;
   height: number;
   sourceType: TimelineSourceType;
-  sourceId: number;
+  sourceId: string;
   fieldName: string;
   level: TimelineLevel;
   selectionStart: string | null;
@@ -26,7 +26,7 @@ export interface TimelineSlicer {
   showScrollbar: boolean;
   stylePreset: string;
   scrollPosition: number;
-  connectedPivotIds: number[];
+  connectedPivotIds: string[];
 }
 
 export interface TimelinePeriod {
@@ -54,7 +54,7 @@ export interface CreateTimelineParams {
   y: number;
   width?: number;
   height?: number;
-  sourceId: number;
+  sourceId: string;
   fieldName: string;
   level?: TimelineLevel;
   stylePreset?: string;
@@ -78,5 +78,5 @@ export interface UpdateTimelineSelectionParams {
 
 export interface UpdateTimelineConnectionsParams {
   timelineId: number;
-  connectedPivotIds: number[];
+  connectedPivotIds: string[];
 }

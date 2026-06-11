@@ -200,7 +200,7 @@ const styles = {
 // ============================================================================
 
 export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.ReactElement | null {
-  const pivotId = data?.pivotId as number | undefined;
+  const pivotId = data?.pivotId as string | undefined;
   const fieldIndex = data?.fieldIndex as number | undefined;
 
   const [mode, setMode] = useState<GroupMode>("date");

@@ -23,7 +23,7 @@ import { CHART_DESIGN_TAB_ID, ChartDesignTabDefinition } from "../manifest";
 // State
 // ============================================================================
 
-let currentChartId: number | null = null;
+let currentChartId: string | null = null;
 
 let subSelection: ChartSubSelection = { level: "none" };
 
@@ -32,7 +32,7 @@ let designTabRegistered = false;
 
 /** Pending click state for deferred click detection. */
 let pendingClick: {
-  chartId: number;
+  chartId: string;
   canvasX: number;
   canvasY: number;
 } | null = null;
@@ -46,7 +46,7 @@ let pendingClick: {
  * For the first click (chart not yet selected), sets to Level 1.
  * For subsequent clicks, sets pendingClick for deferred processing.
  */
-export function selectChart(chartId: number): void {
+export function selectChart(chartId: string): void {
   if (currentChartId !== chartId) {
     // First click on this chart: select it (Level 1)
     currentChartId = chartId;
@@ -94,14 +94,14 @@ export function handleSelectionChange(
 /**
  * Check if a specific chart is currently selected (any level).
  */
-export function isChartSelected(chartId: number): boolean {
+export function isChartSelected(chartId: string): boolean {
   return currentChartId === chartId;
 }
 
 /**
  * Get the ID of the currently selected chart.
  */
-export function getCurrentChartId(): number | null {
+export function getCurrentChartId(): string | null {
   return currentChartId;
 }
 
@@ -129,7 +129,7 @@ export function getSubSelection(): ChartSubSelection {
  * - Level 3 (dataPoint) + different series bar hit -> Level 2 (new series)
  * - Level 2/3 + non-bar hit -> Level 1 (chart)
  */
-export function advanceSelection(chartId: number, hitResult: ChartHitResult): void {
+export function advanceSelection(chartId: string, hitResult: ChartHitResult): void {
   if (currentChartId !== chartId) return;
 
   // Axis click -> select the axis
@@ -191,7 +191,7 @@ export function resetSubSelection(): void {
 /**
  * Set a pending click. Called on floatingObject:selected for already-selected charts.
  */
-export function setPendingClick(chartId: number, canvasX: number, canvasY: number): void {
+export function setPendingClick(chartId: string, canvasX: number, canvasY: number): void {
   pendingClick = { chartId, canvasX, canvasY };
 }
 
@@ -207,7 +207,7 @@ export function clearPendingClick(): void {
  * Consume and return the pending click (if any).
  * Called on mouseup to determine if a click occurred.
  */
-export function consumePendingClick(): { chartId: number; canvasX: number; canvasY: number } | null {
+export function consumePendingClick(): { chartId: string; canvasX: number; canvasY: number } | null {
   const click = pendingClick;
   pendingClick = null;
   return click;

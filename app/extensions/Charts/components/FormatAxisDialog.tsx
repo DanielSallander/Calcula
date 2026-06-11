@@ -152,7 +152,7 @@ const s = {
 // ============================================================================
 
 export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactElement {
-  const chartId = data?.chartId as number | undefined;
+  const chartId = data?.chartId as string | undefined;
   const axisType = data?.axisType as "x" | "y" | undefined;
 
   const chart = chartId != null ? getChartById(chartId) : undefined;

@@ -181,7 +181,7 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
   // ----- Connection State -----
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [selectedConnectionId, setSelectedConnectionId] = useState<
-    number | null
+    string | null
   >(null);
   const [modelInfo, setModelInfo] = useState<BiModelInfo | null>(null);
 
@@ -220,7 +220,7 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
   // ----- Handlers -----
 
   const handleSelectConnection = useCallback(
-    async (connId: number) => {
+    async (connId: string) => {
       setSelectedConnectionId(connId);
       setTablesBound(false);
       setInserted(false);
@@ -435,7 +435,7 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
           style={styles.select}
           value={selectedConnectionId ?? ""}
           onChange={(e) => {
-            const id = Number(e.target.value);
+            const id = e.target.value;
             if (id) handleSelectConnection(id);
           }}
           disabled={loading}

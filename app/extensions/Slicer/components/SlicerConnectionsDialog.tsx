@@ -16,7 +16,7 @@ import type { Slicer, SlicerSourceType, SlicerConnection } from "../lib/slicerTy
 
 interface ConnectionTarget {
   type: SlicerSourceType;
-  id: number;
+  id: string;
   name: string;
   hasField: boolean; // Whether this source has the slicer's field name
 }
@@ -30,7 +30,7 @@ export function SlicerConnectionsDialog({
   onClose,
   data,
 }: DialogProps): React.ReactElement | null {
-  const slicerId = data?.slicerId as number | undefined;
+  const slicerId = data?.slicerId as string | undefined;
 
   const [slicer, setSlicer] = useState<Slicer | null>(null);
   const [targets, setTargets] = useState<ConnectionTarget[]>([]);
@@ -39,7 +39,7 @@ export function SlicerConnectionsDialog({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const connKey = (type: SlicerSourceType, id: number) => `${type}:${id}`;
+  const connKey = (type: SlicerSourceType, id: string) => `${type}:${id}`;
 
   // Load slicer and compatible targets when dialog opens
   useEffect(() => {
@@ -66,7 +66,7 @@ export function SlicerConnectionsDialog({
       // Always load all pivot tables
       try {
         const pivots = await getAllPivotTables<
-          Array<{ id: number; name: string; sourceRange: string }>
+          Array<{ id: string; name: string; sourceRange: string }>
         >();
 
         for (const pv of pivots) {
@@ -102,7 +102,7 @@ export function SlicerConnectionsDialog({
       try {
         const tables = await invokeBackend<
           Array<{
-            id: number;
+            id: string;
             name: string;
             sheetIndex: number;
             columns: Array<{ name: string }>;
@@ -138,7 +138,7 @@ export function SlicerConnectionsDialog({
     }
   };
 
-  const handleToggle = (type: SlicerSourceType, id: number) => {
+  const handleToggle = (type: SlicerSourceType, id: string) => {
     const key = connKey(type, id);
     setConnectedKeys((prev) => {
       const next = new Set(prev);
@@ -159,7 +159,7 @@ export function SlicerConnectionsDialog({
   const buildConnections = (): SlicerConnection[] =>
     Array.from(connectedKeys).map((key) => {
       const [type, id] = key.split(":");
-      return { sourceType: type as SlicerSourceType, sourceId: Number(id) };
+      return { sourceType: type as SlicerSourceType, sourceId: id };
     });
 
   const handleOk = async () => {

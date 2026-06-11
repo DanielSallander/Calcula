@@ -12,7 +12,7 @@ import { getAllSlicers as fetchAllSlicers, type SlicerInfo } from "../lib/filter
 
 /** Resolve a pivot field's index from its name. */
 async function resolveFieldIndex(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
 ): Promise<number> {
   try {
@@ -31,7 +31,7 @@ async function resolveFieldIndex(
 }
 
 export interface FilterDropdownProps {
-  filterId: number;
+  filterId: string;
   fieldName: string;
   items: SlicerItem[];
   selectedItems: string[] | null;
@@ -40,8 +40,8 @@ export interface FilterDropdownProps {
   onClose: () => void;
   onDelete: () => void;
   connectionMode: ConnectionMode;
-  crossFilterTargets: number[];
-  crossFilterSlicerTargets: number[];
+  crossFilterTargets: string[];
+  crossFilterSlicerTargets: string[];
   advancedFilter: AdvancedFilter | null;
   fieldDataType: FieldDataType;
   connectedSources?: SlicerConnection[];
@@ -101,10 +101,10 @@ export function FilterDropdown({
     new Set(connectedSheets ?? []),
   );
 
-  const [localCrossTargets, setLocalCrossTargets] = useState<Set<number>>(
+  const [localCrossTargets, setLocalCrossTargets] = useState<Set<string>>(
     new Set(crossFilterTargets),
   );
-  const [localCrossSlicerTargets, setLocalCrossSlicerTargets] = useState<Set<number>>(
+  const [localCrossSlicerTargets, setLocalCrossSlicerTargets] = useState<Set<string>>(
     new Set(crossFilterSlicerTargets),
   );
   const [availableSlicers, setAvailableSlicers] = useState<SlicerInfo[]>([]);
@@ -112,7 +112,7 @@ export function FilterDropdown({
   // For manual mode: list of all available pivots + tables
   interface SourceEntry {
     type: "pivot" | "table";
-    id: number;
+    id: string;
     name: string;
   }
   const [availableSources, setAvailableSources] = useState<SourceEntry[]>([]);
@@ -139,7 +139,7 @@ export function FilterDropdown({
       const entries: SourceEntry[] = [];
       try {
         const pivots = await getAllPivotTables<
-          Array<{ id: number; name: string; sourceRange: string }>
+          Array<{ id: string; name: string; sourceRange: string }>
         >();
         for (const pv of pivots) {
           entries.push({ type: "pivot", id: pv.id, name: pv.name });
@@ -147,7 +147,7 @@ export function FilterDropdown({
       } catch { /* no pivots */ }
       try {
         const tables = await invokeBackend<
-          Array<{ id: number; name: string; sheetIndex: number }>
+          Array<{ id: string; name: string; sheetIndex: number }>
         >("get_all_tables", {});
         for (const t of tables) {
           entries.push({ type: "table", id: t.id, name: t.name });
@@ -172,7 +172,7 @@ export function FilterDropdown({
     if (localMode === "manual") {
       updates.connectedSources = Array.from(localConnections).map((key) => {
         const [type, id] = key.split(":");
-        return { sourceType: type as "pivot" | "table", sourceId: Number(id) };
+        return { sourceType: type as "pivot" | "table", sourceId: id };
       });
     }
     await updateFilterAsync(filterId, updates);
@@ -185,10 +185,10 @@ export function FilterDropdown({
         try {
           if (type === "pivot") {
             // Clear pivot filter for this field
-            const fieldIndex = await resolveFieldIndex(Number(id), fieldName);
+            const fieldIndex = await resolveFieldIndex(id, fieldName);
             if (fieldIndex >= 0) {
               await invokeBackend("clear_pivot_filter", {
-                request: { pivotId: Number(id), fieldIndex },
+                request: { pivotId: id, fieldIndex },
               });
               window.dispatchEvent(new Event("pivot:refresh"));
             }
@@ -640,7 +640,7 @@ function FilterSettingsPanel({
   singleSelect: initSingleSelect,
   onClose,
 }: {
-  filterId: number;
+  filterId: string;
   hideNoData: boolean;
   indicateNoData: boolean;
   sortNoDataLast: boolean;
@@ -829,7 +829,7 @@ function AdvancedFilterPanel({
   onApply,
   onClose,
 }: {
-  filterId: number;
+  filterId: string;
   currentFilter: AdvancedFilter | null;
   fieldDataType: FieldDataType;
   items: SlicerItem[];

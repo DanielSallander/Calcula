@@ -34,7 +34,7 @@ import type { PivotViewResponse } from "./pivot-api";
 // ============================================================================
 
 /** Minimal valid PivotViewResponse for testing. */
-function makeView(pivotId: number, version = 1): PivotViewResponse {
+function makeView(pivotId: string, version = 1): PivotViewResponse {
   return {
     pivotId,
     version,

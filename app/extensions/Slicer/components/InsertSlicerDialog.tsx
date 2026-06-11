@@ -31,7 +31,7 @@ interface BiModelInfo {
 
 interface DataSource {
   type: SlicerSourceType;
-  id: number;
+  id: string;
   name: string;
   sheetIndex: number;
   fields: string[];
@@ -110,7 +110,7 @@ function parseBiValueFieldRef(name: string): BiValueFieldRef {
  * by calling update_bi_pivot_fields.
  */
 async function ensureBiFieldsInPivot(
-  pivotId: number,
+  pivotId: string,
   selectedFieldKeys: string[], // "table.column" format
   biModel: BiModelInfo,
 ): Promise<void> {
@@ -206,7 +206,7 @@ export function InsertSlicerDialog({
 
   // Pre-select a specific source if passed via dialog data
   const preselectedSourceType = data?.sourceType as SlicerSourceType | undefined;
-  const preselectedSourceId = data?.sourceId as number | undefined;
+  const preselectedSourceId = data?.sourceId as string | undefined;
 
   // Load available data sources when dialog opens
   useEffect(() => {
@@ -266,7 +266,7 @@ export function InsertSlicerDialog({
       try {
         const pivots = await getAllPivotTables<
           Array<{
-            id: number;
+            id: string;
             name: string;
             sourceRange: string;
           }>

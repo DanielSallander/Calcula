@@ -230,7 +230,7 @@ export function PivotOptionsDialog({
   onClose,
   data,
 }: PivotOptionsDialogProps): React.ReactElement | null {
-  const pivotId = data?.pivotId as number | undefined;
+  const pivotId = data?.pivotId as string | undefined;
 
   const [activeTab, setActiveTab] = useState<TabId>("totals");
   const [loading, setLoading] = useState(false);

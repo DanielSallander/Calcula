@@ -4234,8 +4234,8 @@ pub async fn update_bi_pivot_fields(
         let bi_meta = pivot_state.bi_metadata.lock()
             .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
         let meta = bi_meta.get(&pivot_id);
-        log_info!("CALP-DIAG", "update_bi_pivot_fields: pivot_id={}, bi_metadata exists={}, connection_id={}",
-            pivot_id, meta.is_some(), meta.map(|m| m.connection_id).unwrap_or(999));
+        log_info!("CALP-DIAG", "update_bi_pivot_fields: pivot_id={}, bi_metadata exists={}, connection_id={:?}",
+            pivot_id, meta.is_some(), meta.map(|m| m.connection_id));
         meta.map(|m| m.connection_id)
             .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?
     };

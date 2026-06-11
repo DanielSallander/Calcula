@@ -77,7 +77,7 @@ export type { UnlistenFn };
 // Re-export pivot-specific types that extensions need
 // These are defined here to keep the API surface clean
 
-export type PivotId = number;
+export type PivotId = string;
 
 /**
  * Create a new pivot table.
@@ -454,29 +454,29 @@ export async function updateBiPivotFields<TRequest, TResponse>(
 }
 
 export async function setBiLookupColumns(
-  pivotId: number,
+  pivotId: string,
   lookupColumns: string[]
 ): Promise<void> {
   return invoke<void>("set_bi_lookup_columns", { pivotId, lookupColumns });
 }
 
 export async function getPivotCellWindow<TResponse>(
-  pivotId: number,
+  pivotId: string,
   startRow: number,
   rowCount: number
 ): Promise<TResponse> {
   return invoke<TResponse>("get_pivot_cell_window", { pivotId, startRow, rowCount });
 }
 
-export async function cancelPivotOperation(pivotId: number): Promise<void> {
+export async function cancelPivotOperation(pivotId: string): Promise<void> {
   return invoke<void>("cancel_pivot_operation", { pivotId });
 }
 
-export async function revertPivotOperation(pivotId: number): Promise<void> {
+export async function revertPivotOperation(pivotId: string): Promise<void> {
   return invoke<void>("revert_pivot_operation", { pivotId });
 }
 
-export async function undoPivotOverwrite(pivotId: number): Promise<void> {
+export async function undoPivotOverwrite(pivotId: string): Promise<void> {
   return invoke<void>("undo_pivot_overwrite", { pivotId });
 }
 
@@ -2370,7 +2370,7 @@ export const DEFAULT_TABLE_STYLE_OPTIONS: TableStyleOptions = {
  * A column in a table.
  */
 export interface TableColumn {
-  id: number;
+  id: string;
   name: string;
   totalsRowFunction: TotalsRowFunction;
   totalsRowFormula?: string;
@@ -2381,7 +2381,7 @@ export interface TableColumn {
  * A table definition.
  */
 export interface Table {
-  id: number;
+  id: string;
   name: string;
   sheetIndex: number;
   startRow: number;
@@ -2449,7 +2449,7 @@ export interface CreateTableParams {
  * Parameters for resizing a table.
  */
 export interface ResizeTableParams {
-  tableId: number;
+  tableId: string;
   startRow: number;
   startCol: number;
   endRow: number;
@@ -2460,7 +2460,7 @@ export interface ResizeTableParams {
  * Parameters for updating table style.
  */
 export interface UpdateTableStyleParams {
-  tableId: number;
+  tableId: string;
   styleOptions?: TableStyleOptions;
   styleName?: string;
 }
@@ -2469,7 +2469,7 @@ export interface UpdateTableStyleParams {
  * Parameters for setting totals row function.
  */
 export interface SetTotalsRowFunctionParams {
-  tableId: number;
+  tableId: string;
   columnName: string;
   function: TotalsRowFunction;
   customFormula?: string;
@@ -2489,7 +2489,7 @@ export async function createTable(params: CreateTableParams): Promise<TableResul
  * @param tableId - ID of the table to delete
  * @returns Result
  */
-export async function deleteTable(tableId: number): Promise<TableResult> {
+export async function deleteTable(tableId: string): Promise<TableResult> {
   return invoke<TableResult>("delete_table", { tableId });
 }
 
@@ -2500,7 +2500,7 @@ export async function deleteTable(tableId: number): Promise<TableResult> {
  * @returns Result with the updated table
  */
 export async function renameTable(
-  tableId: number,
+  tableId: string,
   newName: string
 ): Promise<TableResult> {
   return invoke<TableResult>("rename_table", { tableId, newName });
@@ -2525,7 +2525,7 @@ export async function updateTableStyle(
  * @returns Result with the updated table
  */
 export async function addTableColumn(
-  tableId: number,
+  tableId: string,
   columnName: string,
   position?: number
 ): Promise<TableResult> {
@@ -2539,7 +2539,7 @@ export async function addTableColumn(
  * @returns Result with the updated table
  */
 export async function removeTableColumn(
-  tableId: number,
+  tableId: string,
   columnName: string
 ): Promise<TableResult> {
   return invoke<TableResult>("remove_table_column", { tableId, columnName });
@@ -2553,7 +2553,7 @@ export async function removeTableColumn(
  * @returns Result with the updated table
  */
 export async function renameTableColumn(
-  tableId: number,
+  tableId: string,
   oldName: string,
   newName: string
 ): Promise<TableResult> {
@@ -2578,7 +2578,7 @@ export async function setTotalsRowFunction(
  * @returns Result with the updated table
  */
 export async function toggleTotalsRow(
-  tableId: number,
+  tableId: string,
   show: boolean
 ): Promise<TableResult> {
   return invoke<TableResult>("toggle_totals_row", { tableId, show });
@@ -2598,7 +2598,7 @@ export async function resizeTable(params: ResizeTableParams): Promise<TableResul
  * @param tableId - ID of the table
  * @returns Result
  */
-export async function convertToRange(tableId: number): Promise<TableResult> {
+export async function convertToRange(tableId: string): Promise<TableResult> {
   return invoke<TableResult>("convert_to_range", { tableId });
 }
 
@@ -2618,7 +2618,7 @@ export async function checkTableAutoExpand(
  * Auto-fills empty names and deduplicates conflicting names.
  */
 export async function enforceTableHeader(
-  tableId: number,
+  tableId: string,
   columnIndex: number,
   newValue: string
 ): Promise<TableResult> {
@@ -2633,7 +2633,7 @@ export async function enforceTableHeader(
  * @returns TableResult with updated table
  */
 export async function setCalculatedColumn(
-  tableId: number,
+  tableId: string,
   columnName: string,
   formula: string
 ): Promise<TableResult> {
@@ -2645,7 +2645,7 @@ export async function setCalculatedColumn(
  * @param tableId - ID of the table
  * @returns The table or null if not found
  */
-export async function getTable(tableId: number): Promise<Table | null> {
+export async function getTable(tableId: string): Promise<Table | null> {
   return invoke<Table | null>("get_table", { tableId });
 }
 
@@ -2699,7 +2699,7 @@ export async function resolveStructuredReference(
  * @returns The converted formula string (e.g., "=[@Price]+[@Qty]")
  */
 export async function convertFormulaToTableRefs(
-  tableId: number,
+  tableId: string,
   formula: string,
   formulaRow: number,
 ): Promise<string> {
@@ -3186,7 +3186,7 @@ export async function removeComputedProperty(
 // ---------------------------------------------------------------------------
 
 export interface ConnectionInfo {
-  id: number;
+  id: string;
   name: string;
   description: string;
   connectionType: string;
@@ -3209,7 +3209,7 @@ export interface CreateConnectionRequest {
 }
 
 export interface UpdateConnectionRequest {
-  id: number;
+  id: string;
   name?: string;
   description?: string;
   connectionString?: string;
@@ -3287,7 +3287,7 @@ export interface BiQueryResult {
 }
 
 export interface BiInsertRequest {
-  connectionId: number;
+  connectionId: string;
   sheetIndex: number;
   startRow: number;
   startCol: number;
@@ -3310,7 +3310,7 @@ export interface BiRegionInfo {
 }
 
 export interface BiConnectRequest {
-  connectionId: number;
+  connectionId: string;
 }
 
 export interface BiBindRequest {
@@ -3332,7 +3332,7 @@ export async function biCreateConnection(
 
 /** Delete a connection by ID. */
 export async function biDeleteConnection(
-  connectionId: number,
+  connectionId: string,
 ): Promise<void> {
   return invoke<void>("bi_delete_connection", { connectionId });
 }
@@ -3351,7 +3351,7 @@ export async function biGetConnections(): Promise<ConnectionInfo[]> {
 
 /** Get a single connection by ID. */
 export async function biGetConnection(
-  connectionId: number,
+  connectionId: string,
 ): Promise<ConnectionInfo> {
   return invoke<ConnectionInfo>("bi_get_connection", { connectionId });
 }
@@ -3369,14 +3369,14 @@ export async function biConnect(
 
 /** Disconnect a connection (keeps model loaded). */
 export async function biDisconnect(
-  connectionId: number,
+  connectionId: string,
 ): Promise<ConnectionInfo> {
   return invoke<ConnectionInfo>("bi_disconnect", { connectionId });
 }
 
 /** Bind a model table to a database schema/table on a specific connection. */
 export async function biBindTable(
-  connectionId: number,
+  connectionId: string,
   request: BiBindRequest,
 ): Promise<string> {
   return invoke<string>("bi_bind_table", { connectionId, request });
@@ -3388,7 +3388,7 @@ export async function biBindTable(
 
 /** Execute a BI query on a specific connection. */
 export async function biQuery(
-  connectionId: number,
+  connectionId: string,
   request: BiQueryRequest,
 ): Promise<BiQueryResult> {
   return invoke<BiQueryResult>("bi_query", { connectionId, request });
@@ -3409,14 +3409,14 @@ export async function biInsertResult(
 
 /** Refresh all queries on a connection. */
 export async function biRefreshConnection(
-  connectionId: number,
+  connectionId: string,
 ): Promise<BiQueryResult[]> {
   return invoke<BiQueryResult[]>("bi_refresh_connection", { connectionId });
 }
 
 /** Refresh all in-memory tables on a connection (regardless of TTL). */
 export async function biRefreshAllInMemory(
-  connectionId: number,
+  connectionId: string,
 ): Promise<string[]> {
   return invoke<string[]>("bi_refresh_all_in_memory", { connectionId });
 }
@@ -3436,7 +3436,7 @@ export async function biSaveAllCaches(): Promise<number> {
 
 /** Get model info for a specific connection. */
 export async function biGetModelInfo(
-  connectionId: number,
+  connectionId: string,
 ): Promise<BiModelInfo | null> {
   return invoke<BiModelInfo | null>("bi_get_model_info", { connectionId });
 }
@@ -3937,7 +3937,7 @@ export async function solverRevert(
 
 /** Generate one sheet per filter value for a pivot table's filter field. */
 export async function showReportFilterPages(
-  pivotId: number,
+  pivotId: string,
   filterFieldIndex: number,
 ): Promise<string[]> {
   return invoke<string[]>("show_report_filter_pages", { pivotId, filterFieldIndex });
@@ -4058,7 +4058,7 @@ export async function setWorkbookProperties(
 
 /** Request to save a pivot layout. */
 export interface SavePivotLayoutRequest {
-  id?: number;
+  id?: string;
   name: string;
   dslText: string;
   description?: string;
@@ -4070,7 +4070,7 @@ export interface SavePivotLayoutRequest {
 
 /** Response from loading a pivot layout. */
 export interface PivotLayoutResponse {
-  id: number;
+  id: string;
   name: string;
   dslText: string;
   description?: string;
@@ -4083,8 +4083,8 @@ export interface PivotLayoutResponse {
 }
 
 /** Save (create or update) a pivot layout. Returns the layout ID. */
-export async function savePivotLayout(request: SavePivotLayoutRequest): Promise<number> {
-  return invoke<number>("save_pivot_layout", { request });
+export async function savePivotLayout(request: SavePivotLayoutRequest): Promise<string> {
+  return invoke<string>("save_pivot_layout", { request });
 }
 
 /** Get all saved pivot layouts. */
@@ -4093,6 +4093,6 @@ export async function getPivotLayouts(): Promise<PivotLayoutResponse[]> {
 }
 
 /** Delete a pivot layout by ID. */
-export async function deletePivotLayout(id: number): Promise<void> {
+export async function deletePivotLayout(id: string): Promise<void> {
   return invoke<void>("delete_pivot_layout", { id });
 }

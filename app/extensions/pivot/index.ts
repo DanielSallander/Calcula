@@ -14,6 +14,10 @@ import {
   notifyMenusChanged,
   columnToLetter,
   registerPivotStoreService,
+  getBiConnectionService,
+  openTaskPane,
+  clearTaskPaneManuallyClosed,
+  addTaskPaneContextKey,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 
@@ -70,8 +74,10 @@ import {
   shiftCachedRegionsForRowInsert,
   shiftCachedRegionsForColDelete,
   shiftCachedRegionsForRowDelete,
+  ensureDesignTabRegistered,
+  setJustCreatedPivot,
 } from "./handlers/selectionHandler";
-import type { PivotRegionData } from "./types";
+import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
@@ -94,8 +100,6 @@ import { drawPivotCell, DEFAULT_PIVOT_THEME, createPivotTheme } from "./renderin
 import type { PivotCellDrawResult, PivotTheme } from "./rendering/pivot";
 import { getThemeOverridesForStyle, DEFAULT_PIVOT_STYLE_ID } from "./components/PivotTableStylesGallery";
 
-import { getConnections } from "../BusinessIntelligence/lib/bi-api";
-
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
 export { cachePivotView, getCachedPivotView };
 
@@ -104,13 +108,13 @@ export { cachePivotView, getCachedPivotView };
 // ============================================================================
 
 /** Maps pivotId -> styleId (selected in the Design tab gallery). */
-const pivotStyleMap = new Map<number, string>();
+const pivotStyleMap = new Map<string, string>();
 
 /** Maps styleId -> resolved PivotTheme (cached to avoid recomputing each frame). */
 const resolvedThemeCache = new Map<string, PivotTheme>();
 
 /** Get the PivotTheme for a given pivot, based on its selected style. */
-function getThemeForPivot(pivotId: number): PivotTheme {
+function getThemeForPivot(pivotId: string): PivotTheme {
   const styleId = pivotStyleMap.get(pivotId) || DEFAULT_PIVOT_STYLE_ID;
   if (!styleId) return DEFAULT_PIVOT_THEME;
 
@@ -136,7 +140,7 @@ interface StoredIconBounds {
   gridCol: number;
   isExpanded: boolean;
   isRow: boolean;
-  pivotId: number;
+  pivotId: string;
 }
 
 /** Map of icon bounds keyed by "pivotId-gridRow-gridCol", updated every render. */
@@ -151,7 +155,7 @@ interface StoredHeaderFilterBounds {
   width: number;
   height: number;
   zone: 'row' | 'column';
-  pivotId: number;
+  pivotId: string;
 }
 
 /** Map of header filter button bounds keyed by "pivotId-zone", updated every render. */
@@ -163,7 +167,7 @@ interface StoredFilterDropdownBounds {
   width: number;
   height: number;
   fieldIndex: number;
-  pivotId: number;
+  pivotId: string;
   gridRow: number;
   gridCol: number;
 }
@@ -172,7 +176,7 @@ interface StoredFilterDropdownBounds {
 const overlayFilterDropdownBounds = new Map<string, StoredFilterDropdownBounds>();
 
 /** Map of cancel button bounds keyed by pivotId, updated every render. */
-const overlayCancelBounds = new Map<number, { x: number; y: number; width: number; height: number }>();
+const overlayCancelBounds = new Map<string, { x: number; y: number; width: number; height: number }>();
 
 /** Clear all stored icon bounds (called at start of each render cycle). */
 function clearOverlayIconBounds(): void {
@@ -183,7 +187,7 @@ function clearOverlayIconBounds(): void {
 }
 
 /** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
-const gridRegionsCache = new Map<number, { startRow: number; startCol: number; endRow: number; endCol: number }>();
+const gridRegionsCache = new Map<string, { startRow: number; startCol: number; endRow: number; endCol: number }>();
 
 /** Cached reference to the grid canvas element, captured during overlay rendering. */
 let cachedCanvasElement: HTMLCanvasElement | null = null;
@@ -197,7 +201,7 @@ let hoveredFilterFieldIndex = -1;
  * max(old, new) bounds so stale cells from the frontend cache aren't visible
  * while refreshCells() is still in flight.
  */
-const transitionBounds = new Map<number, { endRow: number; endCol: number }>();
+const transitionBounds = new Map<string, { endRow: number; endCol: number }>();
 let transitionCleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
@@ -213,7 +217,7 @@ let isRefreshingPivotRegions = false;
  * Updated during refreshPivotRegions. Used by the overlay to draw a connection badge.
  * null = not a BI pivot, true = connected, false = disconnected.
  */
-const biConnectionStatus = new Map<number, boolean | null>();
+const biConnectionStatus = new Map<string, boolean | null>();
 
 /**
  * Version counter for structural changes (row/column insert/delete).
@@ -280,7 +284,7 @@ async function refreshPivotViewCache(regions: PivotRegionData[], allowCachedHit 
 // ============================================================================
 
 /** Draw a loading overlay on top of the (dimmed) previous pivot view. */
-function drawLoadingOverlay(overlayCtx: OverlayRenderContext, pivotId: number): void {
+function drawLoadingOverlay(overlayCtx: OverlayRenderContext, pivotId: string): void {
   const loadingState = getLoadingState(pivotId);
   if (!loadingState) return;
 
@@ -381,8 +385,11 @@ function drawLoadingOverlay(overlayCtx: OverlayRenderContext, pivotId: number): 
  * Called from refreshPivotRegions (non-blocking).
  */
 function updateBiConnectionStatus(regions: PivotRegionData[]): void {
-  // Fire-and-forget: fetch connections and check which pivots are BI-connected
-  getConnections().then(conns => {
+  // Fire-and-forget: fetch connections and check which pivots are BI-connected.
+  // The connection service is registered by the BusinessIntelligence extension.
+  const biService = getBiConnectionService();
+  if (!biService) return;
+  biService.getConnections().then(conns => {
     const connMap = new Map(conns.map(c => [c.id, c.isConnected]));
 
     // For each pivot region, check if it has BI metadata via getPivotAtCell
@@ -411,7 +418,7 @@ function updateBiConnectionStatus(regions: PivotRegionData[]): void {
  * Draw a small connection status badge in the top-right area of a BI pivot.
  * Green = connected, orange = disconnected. Non-BI pivots show nothing.
  */
-function drawBiConnectionBadge(overlayCtx: OverlayRenderContext, pivotId: number): void {
+function drawBiConnectionBadge(overlayCtx: OverlayRenderContext, pivotId: string): void {
   const status = biConnectionStatus.get(pivotId);
   if (status === null || status === undefined) return; // not a BI pivot
 
@@ -450,7 +457,7 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   const canvasWidth = ctx.canvas.width / (window.devicePixelRatio || 1);
   const canvasHeight = ctx.canvas.height / (window.devicePixelRatio || 1);
 
-  const pivotId = (region.data?.pivotId as number) ?? 0;
+  const pivotId = (region.data?.pivotId as string) ?? "";
   const theme = getThemeForPivot(pivotId);
 
   // Pre-compute whether each zone has active filters (for header filter icon)
@@ -998,8 +1005,8 @@ function shiftPivotRegionsForColDelete(col: number, count: number): void {
   replaceGridRegionsByType("pivot", shifted);
   gridRegionsCache.clear();
   for (const r of shifted) {
-    const pivotId = Number(r.id.replace("pivot-", ""));
-    if (!isNaN(pivotId)) {
+    const pivotId = r.id.replace("pivot-", "");
+    if (pivotId) {
       gridRegionsCache.set(pivotId, {
         startRow: r.startRow,
         startCol: r.startCol,
@@ -1030,8 +1037,8 @@ function shiftPivotRegionsForRowDelete(row: number, count: number): void {
   replaceGridRegionsByType("pivot", shifted);
   gridRegionsCache.clear();
   for (const r of shifted) {
-    const pivotId = Number(r.id.replace("pivot-", ""));
-    if (!isNaN(pivotId)) {
+    const pivotId = r.id.replace("pivot-", "");
+    if (pivotId) {
       gridRegionsCache.set(pivotId, {
         startRow: r.startRow,
         startCol: r.startCol,
@@ -1046,7 +1053,7 @@ function shiftPivotRegionsForRowDelete(row: number, count: number): void {
 let cleanupFunctions: Array<() => void> = [];
 
 /** Cache for pivot field names (used by scriptable objects store service). */
-const pivotFieldsCache = new Map<number, { rows: string[]; columns: string[]; values: string[]; filters: string[] }>();
+const pivotFieldsCache = new Map<string, { rows: string[]; columns: string[]; values: string[]; filters: string[] }>();
 
 import { isGenerateGetPivotDataEnabled, setGenerateGetPivotData } from "./lib/getPivotDataToggle";
 import { getLocaleSettings } from "@api/locale";
@@ -1060,7 +1067,7 @@ function activate(context: ExtensionContext): void {
 
   // Register pivot store service for scriptable objects
   registerPivotStoreService({
-    getPivotFields(pivotId: number) {
+    getPivotFields(pivotId: string) {
       // Use getPivotHierarchies which returns field info async, but
       // since the interface expects sync, we return a cached/empty default
       // and the actual data is fetched when scripts call getFields()
@@ -1079,8 +1086,26 @@ function activate(context: ExtensionContext): void {
         .catch(() => {});
       return pivotFieldsCache.get(pivotId) ?? empty;
     },
-    async refreshPivot(pivotId: number) {
+    async refreshPivot(pivotId: string) {
       await refreshPivotCache(pivotId);
+    },
+    openBiPivotEditor(pivotId: string, biModel: BiPivotModelInfo) {
+      clearTaskPaneManuallyClosed(PIVOT_PANE_ID);
+      addTaskPaneContextKey("pivot");
+      ensureDesignTabRegistered();
+
+      const paneData: PivotEditorViewData = {
+        pivotId,
+        sourceFields: [],
+        initialRows: [],
+        initialColumns: [],
+        initialValues: [],
+        initialFilters: [],
+        initialLayout: {},
+        biModel,
+      };
+      openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
+      setJustCreatedPivot(true);
     },
   });
 
@@ -1517,7 +1542,7 @@ function activate(context: ExtensionContext): void {
           drawPivotPlaceholderText(ctx);
         } else {
           // Draw styled pivot cells with Excel-like appearance
-          const pivotId = ctx.region.data?.pivotId as number | undefined;
+          const pivotId = ctx.region.data?.pivotId as string | undefined;
           if (pivotId !== undefined) {
             const cachedView = getCachedPivotView(pivotId);
             if (cachedView) {
@@ -1643,7 +1668,7 @@ function activate(context: ExtensionContext): void {
 
   // Subscribe to events
   cleanupFunctions.push(
-    context.events.on<{ pivotId: number }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
+    context.events.on<{ pivotId: string }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
   );
 
   cleanupFunctions.push(
@@ -1654,14 +1679,14 @@ function activate(context: ExtensionContext): void {
       col: number;
       anchorX: number;
       anchorY: number;
-      pivotId?: number;
+      pivotId?: string;
     }>(PivotEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
   );
 
   // Subscribe to header filter menu events (Row Labels / Column Labels)
   cleanupFunctions.push(
     context.events.on<{
-      pivotId: number;
+      pivotId: string;
       zone: 'row' | 'column';
       anchorX: number;
       anchorY: number;
@@ -1823,7 +1848,7 @@ function activate(context: ExtensionContext): void {
 
   // Track pivot style changes from the Design tab
   cleanupFunctions.push(
-    context.events.on<{ pivotId: number; layout: { styleId?: string } }>(
+    context.events.on<{ pivotId: string; layout: { styleId?: string } }>(
       PivotEvents.PIVOT_LAYOUT_STATE,
       (detail) => {
         if (detail.layout.styleId !== undefined) {
@@ -1837,7 +1862,7 @@ function activate(context: ExtensionContext): void {
     )
   );
   cleanupFunctions.push(
-    context.events.on<{ pivotId: number; layout: { styleId?: string } }>(
+    context.events.on<{ pivotId: string; layout: { styleId?: string } }>(
       PivotEvents.PIVOT_LAYOUT_CHANGED,
       (detail) => {
         if (detail.layout.styleId !== undefined) {

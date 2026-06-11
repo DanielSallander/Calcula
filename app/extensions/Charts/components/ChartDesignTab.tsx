@@ -392,7 +392,7 @@ export function ChartDesignTab({
   const groupDefs = useMemo(() => GROUP_DEFS, []);
   const collapsed = useRibbonCollapse(containerRef, groupDefs, 0);
 
-  const [chartId, setChartId] = useState<number | null>(null);
+  const [chartId, setChartId] = useState<string | null>(null);
   const [spec, setSpec] = useState<ChartSpec | null>(null);
 
   // Refresh state from store
@@ -784,7 +784,7 @@ export function ChartDesignTab({
             className={s.actionBtn}
             onClick={() => {
               if (isPivot) {
-                const pivotId = (spec.data as { pivotId: number }).pivotId;
+                const pivotId = (spec.data as { pivotId: string }).pivotId;
                 showDialog(CHART_DIALOG_ID, { pivotId, editChartId: chartId });
               } else {
                 showDialog(CHART_DIALOG_ID, { editChartId: chartId });

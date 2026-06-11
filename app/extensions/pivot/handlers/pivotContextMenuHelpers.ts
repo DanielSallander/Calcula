@@ -23,7 +23,7 @@ import type { PivotRegionData } from "../types";
  * Check if a cell is inside a cached pivot region and return the pivotId.
  * Returns null if the cell is not in any pivot region.
  */
-export function getPivotIdFromContext(ctx: GridMenuContext): number | null {
+export function getPivotIdFromContext(ctx: GridMenuContext): string | null {
   if (!ctx.clickedCell) return null;
   const region = findPivotRegionAtCell(ctx.clickedCell.row, ctx.clickedCell.col);
   return region ? region.pivotId : null;

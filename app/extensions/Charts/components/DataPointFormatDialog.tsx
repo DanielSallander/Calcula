@@ -117,7 +117,7 @@ const s = {
 // ============================================================================
 
 export function DataPointFormatDialog({ onClose, data }: DialogProps): React.ReactElement {
-  const chartId = data?.chartId as number | undefined;
+  const chartId = data?.chartId as string | undefined;
   const seriesIndex = data?.seriesIndex as number | undefined;
   const categoryIndex = data?.categoryIndex as number | undefined;
   const isPieOrDonut = data?.isPieOrDonut as boolean | undefined;

@@ -28,7 +28,7 @@ import { fetchPivotChartFields } from "./pivotChartDataReader";
  * @returns The file path where the image was saved, or null if cancelled.
  */
 export async function exportChartAsImage(
-  chartId: number,
+  chartId: string,
   filename?: string,
 ): Promise<string | null> {
   const chart = getChartById(chartId);

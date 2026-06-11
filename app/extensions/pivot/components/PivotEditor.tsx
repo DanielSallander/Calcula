@@ -11,8 +11,7 @@ import { SaveLoadToolbar } from './SaveLoadToolbar';
 import { usePivotEditorState } from './usePivotEditorState';
 import { buildSourceSignature } from '../lib/namedConfigs';
 import { pivot, savePivotLayout } from '@api/pivot';
-import { openTaskPane } from '@api';
-import { getConnections, connect, updateConnection } from '../../BusinessIntelligence/lib/bi-api';
+import { openTaskPane, getBiConnectionService } from '@api';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import type {
@@ -52,7 +51,7 @@ interface PivotEditorProps {
 
 /** Banner showing BI connection status with connect action */
 function BiConnectionBanner({ connectionId, onConnected }: {
-  connectionId: number;
+  connectionId: string;
   onConnected: () => void;
 }) {
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
@@ -60,7 +59,7 @@ function BiConnectionBanner({ connectionId, onConnected }: {
   const [isConnecting, setIsConnecting] = useState(false);
 
   useEffect(() => {
-    getConnections().then(conns => {
+    getBiConnectionService()?.getConnections().then(conns => {
       const conn = conns.find(c => c.id === connectionId);
       if (conn) {
         setIsConnected(conn.isConnected);
@@ -70,8 +69,10 @@ function BiConnectionBanner({ connectionId, onConnected }: {
   }, [connectionId]);
 
   const handleConnect = useCallback(async () => {
+    const biService = getBiConnectionService();
+    if (!biService) return;
     try {
-      const conns = await getConnections();
+      const conns = await biService.getConnections();
       const conn = conns.find(c => c.id === connectionId);
       if (!conn) return;
 
@@ -82,11 +83,11 @@ function BiConnectionBanner({ connectionId, onConnected }: {
           `Connect to ${conn.name}\nServer: ${server}\nDatabase: ${db}\n\nEnter password:`,
         );
         if (password === null) return;
-        await updateConnection({ id: connectionId, connectionString: `__PASSWORD_ONLY__:${password}` });
+        await biService.updateConnection({ id: connectionId, connectionString: `__PASSWORD_ONLY__:${password}` });
       }
 
       setIsConnecting(true);
-      await connect(connectionId);
+      await biService.connect(connectionId);
       setIsConnected(true);
       onConnected();
     } catch (err) {
@@ -662,7 +663,7 @@ export function PivotEditor({
         </div>
       ) : (
       <>
-      {isBiPivot && biModel && (
+      {isBiPivot && biModel && biModel.connectionId && (
         <BiConnectionBanner
           connectionId={biModel.connectionId}
           onConnected={() => {

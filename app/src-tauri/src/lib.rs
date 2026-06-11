@@ -81,6 +81,7 @@ pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
+pub mod state_digest;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -3455,6 +3456,8 @@ pub fn run() {
             undo_commands::undo,
             undo_commands::redo,
             undo_commands::clear_undo_history,
+            // Testing oracle commands
+            state_digest::get_workbook_state_digest,
             // Logging commands
             logging::log_frontend,
             logging::log_frontend_atomic,

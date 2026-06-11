@@ -6,7 +6,7 @@ export type SlicerSourceType = "table" | "pivot";
 /** A typed reference to a pivot or table that a slicer filters. */
 export interface SlicerConnection {
   sourceType: SlicerSourceType;
-  sourceId: number;
+  sourceId: string;
 }
 
 /** Selection behavior mode for a slicer. */
@@ -16,7 +16,7 @@ export type SlicerSelectionMode = "standard" | "single" | "multi";
 export type SlicerArrangement = "grid" | "horizontal" | "vertical";
 
 export interface Slicer {
-  id: number;
+  id: string;
   name: string;
   headerText: string | null;
   sheetIndex: number;
@@ -26,7 +26,7 @@ export interface Slicer {
   height: number;
   sourceType: SlicerSourceType;
   /** The pivot/table ID used as the data source for fetching slicer items. */
-  cacheSourceId: number;
+  cacheSourceId: string;
   fieldName: string;
   selectedItems: string[] | null;
   showHeader: boolean;
@@ -62,7 +62,7 @@ export interface CreateSlicerParams {
   height?: number;
   sourceType: SlicerSourceType;
   /** The pivot/table ID used as the data source for fetching slicer items. */
-  cacheSourceId: number;
+  cacheSourceId: string;
   fieldName: string;
   /** Initial Report Connections (pivots/tables this slicer filters). */
   connectedSources: SlicerConnection[];
@@ -96,8 +96,8 @@ export interface UpdateSlicerParams {
 // ============================================================================
 
 export interface SlicerComputedPropertyData {
-  id: number;
-  slicerId: number;
+  id: string;
+  slicerId: string;
   attribute: string;
   formula: string;
   currentValue?: string;

@@ -142,11 +142,11 @@ export function CreateChartDialog({
   const gridState = useGridState();
 
   // Pivot mode: when opened with a pivotId, hide the Data tab and use pivot data source
-  const pivotId = (dialogData?.pivotId as number) ?? null;
+  const pivotId = (dialogData?.pivotId as string) ?? null;
   const isPivotMode = pivotId != null;
 
   // Edit mode: when opened with an editChartId, pre-populate from existing chart
-  const editChartId = (dialogData?.editChartId as number) ?? null;
+  const editChartId = (dialogData?.editChartId as string) ?? null;
   const isEditMode = editChartId != null;
 
   // Active tab

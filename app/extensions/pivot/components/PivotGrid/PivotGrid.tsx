@@ -20,7 +20,7 @@ import { FilterDropdown } from '../FilterDropdown';
 // =============================================================================
 
 export interface PivotGridProps {
-  pivotId: number;
+  pivotId: string;
   theme?: Partial<PivotTheme>;
   defaultRowHeight?: number;
   defaultColumnWidth?: number;

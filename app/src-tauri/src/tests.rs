@@ -102,9 +102,9 @@ fn test_parse_cell_input() {
     let cell = parse_cell_input("false", &locale);
     assert!(matches!(cell.value, CellValue::Boolean(false)));
 
-    // Formula (value is Empty until evaluated)
+    // Formula (value is Empty until evaluated; formula_string() renders without "=")
     let cell = parse_cell_input("=A1+B1", &locale);
-    assert_eq!(cell.formula_string(), Some("=A1+B1".to_string()));
+    assert_eq!(cell.formula_string(), Some("A1+B1".to_string()));
 
     // Percentage
     let cell = parse_cell_input("50%", &locale);
@@ -562,8 +562,10 @@ fn test_go_to_special_errors() {
     {
         let mut grid = state.grid.lock().unwrap();
         grid.set_cell(0, 0, Cell::new_number(10.0));
-        grid.set_cell(0, 1, Cell { value: CellValue::Error(CellError::Div0), formula: Some("=1/0".to_string()), ..Cell::default() });
-        grid.set_cell(1, 0, Cell { value: CellValue::Error(CellError::Value), formula: None, ..Cell::default() });
+        let mut div0_cell = Cell { value: CellValue::Error(CellError::Div0), ..Cell::default() };
+        div0_cell.ast = parser::parse("=1/0").ok().map(Box::new);
+        grid.set_cell(0, 1, div0_cell);
+        grid.set_cell(1, 0, Cell { value: CellValue::Error(CellError::Value), ..Cell::default() });
         grid.set_cell(1, 1, Cell::new_text("ok".to_string()));
     }
 

@@ -126,7 +126,7 @@ export const chartSpecJsonSchema: object = {
       required: ["type", "pivotId"],
       properties: {
         type: { type: "string", const: "pivot", description: "Discriminant tag. Must be \"pivot\"." },
-        pivotId: { type: "integer", minimum: 0, description: "The pivot table ID to read data from." },
+        pivotId: { type: "string", description: "The pivot table ID (UUID string) to read data from." },
         includeSubtotals: { type: "boolean", description: "Whether to include subtotal rows as chart categories. Default: false." },
         includeGrandTotal: { type: "boolean", description: "Whether to include grand total row as a chart category. Default: false." },
       },
@@ -1287,7 +1287,7 @@ export function generateSpecReference(): string {
   lines.push("1. **DataRangeRef object**: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 }");
   lines.push("2. **A1 reference**: \"Sheet1!A1:D10\" or \"A1:D10\"");
   lines.push("3. **Named range**: \"SalesData\"");
-  lines.push("4. **PivotDataSource**: { type: \"pivot\", pivotId: 1 } — reads from a pivot table's aggregated output");
+  lines.push("4. **PivotDataSource**: { type: \"pivot\", pivotId: \"<pivot uuid>\" } — reads from a pivot table's aggregated output");
 
   return lines.join("\n");
 }

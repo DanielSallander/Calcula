@@ -9,6 +9,7 @@ import {
   TaskPaneExtensions,
   removeTaskPaneContextKey,
   registerCommitGuard,
+  registerBiConnectionService,
   IconConnections,
   IconGetData,
 } from "@api";
@@ -20,7 +21,7 @@ import {
   ConnectionsPaneDefinition,
   CONNECTIONS_PANE_ID,
 } from "./manifest";
-import { getRegionAtCell } from "./lib/bi-api";
+import { getRegionAtCell, getConnections, connect, updateConnection } from "./lib/bi-api";
 import { ModelDialog } from "./components/ModelDialog";
 
 const MODEL_DIALOG_ID = "bi:modelDialog";
@@ -43,6 +44,10 @@ function activate(context: ExtensionContext): void {
   }
 
   console.log("[BI Extension] Activating...");
+
+  // 0. Register the connection service so other extensions (e.g. Pivot's
+  //    connection banner/badge) access connections via the API layer.
+  registerBiConnectionService({ getConnections, connect, updateConnection });
 
   // 1. Register manifest
   ExtensionRegistry.registerAddIn(BiManifest);

@@ -18,7 +18,7 @@ import { applyRibbonFilter, clearRibbonFilter } from "./filterPaneFilterBridge";
 let cachedFilters: RibbonFilter[] = [];
 
 /** Cached items per filter (filter id -> items). Refreshed on demand. */
-const itemsCache = new Map<number, SlicerItem[]>();
+const itemsCache = new Map<string, SlicerItem[]>();
 
 /** Simple mutex to serialize BI engine access (take/put pattern can't handle concurrency). */
 let biMutex: Promise<void> = Promise.resolve();
@@ -37,11 +37,11 @@ export function getAllFilters(): RibbonFilter[] {
   return cachedFilters.sort((a, b) => a.order - b.order);
 }
 
-export function getFilterById(id: number): RibbonFilter | undefined {
+export function getFilterById(id: string): RibbonFilter | undefined {
   return cachedFilters.find((f) => f.id === id);
 }
 
-export function getCachedItems(filterId: number): SlicerItem[] | undefined {
+export function getCachedItems(filterId: string): SlicerItem[] | undefined {
   return itemsCache.get(filterId);
 }
 
@@ -68,7 +68,7 @@ export async function createFilterAsync(
   }
 }
 
-export async function deleteFilterAsync(filterId: number): Promise<boolean> {
+export async function deleteFilterAsync(filterId: string): Promise<boolean> {
   try {
     // Clear applied filter before deleting
     const filter = getFilterById(filterId);
@@ -89,7 +89,7 @@ export async function deleteFilterAsync(filterId: number): Promise<boolean> {
 }
 
 export async function updateFilterAsync(
-  filterId: number,
+  filterId: string,
   params: UpdateRibbonFilterParams,
 ): Promise<RibbonFilter | null> {
   try {
@@ -106,7 +106,7 @@ export async function updateFilterAsync(
 }
 
 export async function updateFilterSelectionAsync(
-  filterId: number,
+  filterId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
   try {
@@ -145,7 +145,7 @@ export async function updateFilterSelectionAsync(
 // Item management
 // ============================================================================
 
-export async function refreshFilterItems(filterId: number): Promise<void> {
+export async function refreshFilterItems(filterId: string): Promise<void> {
   try {
     const filter = cachedFilters.find((f) => f.id === filterId);
 
@@ -242,11 +242,11 @@ function parseBiFieldName(fieldName: string): [string, string] {
 /** Refresh items for sibling filters (those affected by this filter's selection).
  *  Includes: filters sharing connected sources + BI filters on the same connection.
  *  Also dispatches slicer refresh events for targeted slicers. */
-async function refreshSiblingFilterItems(filterId: number): Promise<void> {
+async function refreshSiblingFilterItems(filterId: string): Promise<void> {
   const filter = cachedFilters.find((f) => f.id === filterId);
   if (!filter) return;
 
-  const siblingIds = new Set<number>();
+  const siblingIds = new Set<string>();
 
   // Siblings sharing connected sources (table/pivot cross-filtering)
   const connected = filter.connectedSources ?? [];

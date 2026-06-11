@@ -233,6 +233,8 @@ export interface ActivityViewProps {
   onClose?: () => void;
   /** Any additional data passed to the view */
   data?: Record<string, unknown>;
+  /** Current placement when hosted by the panel system ("sidebar" or "ribbon"). */
+  placement?: PanelPlacement;
 }
 
 /**

@@ -84,7 +84,7 @@ export function SlicerSettingsDialog({
   onClose,
   data,
 }: DialogProps): React.ReactElement | null {
-  const slicerId = data?.slicerId as number | undefined;
+  const slicerId = data?.slicerId as string | undefined;
 
   // Selection settings
   const [singleSelect, setSingleSelect] = useState(false);

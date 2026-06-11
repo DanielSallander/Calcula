@@ -75,7 +75,7 @@ async function createTestConnection(name: string): Promise<ConnectionInfo> {
 }
 
 /** Connect to DB and bind all model tables to the BI schema */
-async function connectAndBind(connectionId: number): Promise<ConnectionInfo> {
+async function connectAndBind(connectionId: string): Promise<ConnectionInfo> {
   const connected = await biConnect({ connectionId });
   // Bind all model tables to the BI schema
   for (const table of MODEL_TABLES) {
@@ -144,7 +144,7 @@ export const biEngineIntegrationSuite: TestSuite = {
         const conn = await createTestConnection("BiTest_LoadModel");
 
         expectNotNull(conn, "Connection should be created");
-        assertTrue(conn.id >= 1, `Connection ID should be >= 1, got ${conn.id}`);
+        assertTrue(typeof conn.id === "string" && conn.id.length > 0, `Connection ID should be non-empty, got ${conn.id}`);
         assertTrue(conn.tableCount > 0, `Should have tables, got ${conn.tableCount}`);
         assertTrue(conn.measureCount > 0, `Should have measures, got ${conn.measureCount}`);
         assertEqual(conn.isConnected, false, "Should not be connected to DB yet");

@@ -228,7 +228,7 @@ export function SlicerComputedPropertiesDialog({
   onClose,
   data,
 }: DialogProps): React.ReactElement | null {
-  const slicerId = data?.slicerId as number | undefined;
+  const slicerId = data?.slicerId as string | undefined;
 
   const [properties, setProperties] = useState<SlicerComputedPropertyData[]>([]);
   const [availableAttrs, setAvailableAttrs] = useState<string[]>([]);
@@ -274,7 +274,7 @@ export function SlicerComputedPropertiesDialog({
   }, [slicerId, properties, availableAttrs, handleSlicerChanged]);
 
   const handleAttributeChange = useCallback(
-    async (propId: number, newAttribute: string) => {
+    async (propId: string, newAttribute: string) => {
       const result = await updateSlicerComputedProperty(propId, newAttribute, undefined);
       setProperties(result.properties);
       if (result.slicerChanged) handleSlicerChanged();
@@ -283,7 +283,7 @@ export function SlicerComputedPropertiesDialog({
   );
 
   const handleFormulaCommit = useCallback(
-    async (propId: number, newFormula: string) => {
+    async (propId: string, newFormula: string) => {
       const result = await updateSlicerComputedProperty(propId, undefined, newFormula);
       setProperties(result.properties);
       if (result.slicerChanged) handleSlicerChanged();
@@ -292,7 +292,7 @@ export function SlicerComputedPropertiesDialog({
   );
 
   const handleRemove = useCallback(
-    async (propId: number) => {
+    async (propId: string) => {
       const result = await removeSlicerComputedProperty(propId);
       setProperties(result.properties);
     },
@@ -396,9 +396,9 @@ function PropertyRow({
   prop: SlicerComputedPropertyData;
   availableAttrs: string[];
   usedAttrs: Set<string>;
-  onAttributeChange: (propId: number, attr: string) => void;
-  onFormulaCommit: (propId: number, formula: string) => void;
-  onRemove: (propId: number) => void;
+  onAttributeChange: (propId: string, attr: string) => void;
+  onFormulaCommit: (propId: string, formula: string) => void;
+  onRemove: (propId: string) => void;
 }) {
   const [formula, setFormula] = useState(prop.formula);
   const inputRef = React.useRef<HTMLInputElement>(null);

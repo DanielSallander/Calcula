@@ -1704,6 +1704,10 @@ fn resolve_specifier(table: &Table, specifier: &str) -> Option<ResolvedStructure
 mod tests {
     use super::*;
 
+    fn test_id() -> identity::EntityId {
+        identity::EntityId::from_bytes(identity::generate_uuid_v7())
+    }
+
     #[test]
     fn test_totals_row_function_default() {
         assert_eq!(TotalsRowFunction::default(), TotalsRowFunction::None);
@@ -1721,8 +1725,9 @@ mod tests {
 
     #[test]
     fn test_table_column_new() {
-        let col = TableColumn::new(1, "Sales".to_string());
-        assert_eq!(col.id, 1);
+        let id = test_id();
+        let col = TableColumn::new(id, "Sales".to_string());
+        assert_eq!(col.id, id);
         assert_eq!(col.name, "Sales");
         assert_eq!(col.totals_row_function, TotalsRowFunction::None);
     }
@@ -1730,7 +1735,7 @@ mod tests {
     #[test]
     fn test_table_contains() {
         let table = Table {
-            id: 1,
+            id: test_id(),
             name: "Table1".to_string(),
             sheet_index: 0,
             start_row: 5,
@@ -1753,7 +1758,7 @@ mod tests {
     #[test]
     fn test_table_data_rows() {
         let table = Table {
-            id: 1,
+            id: test_id(),
             name: "Table1".to_string(),
             sheet_index: 0,
             start_row: 0,
@@ -1815,7 +1820,7 @@ mod tests {
     #[test]
     fn test_table_get_column_by_name() {
         let table = Table {
-            id: 1,
+            id: test_id(),
             name: "Table1".to_string(),
             sheet_index: 0,
             start_row: 0,
@@ -1823,9 +1828,9 @@ mod tests {
             end_row: 10,
             end_col: 2,
             columns: vec![
-                TableColumn::new(0, "Name".to_string()),
-                TableColumn::new(1, "Amount".to_string()),
-                TableColumn::new(2, "Total".to_string()),
+                TableColumn::new(test_id(), "Name".to_string()),
+                TableColumn::new(test_id(), "Amount".to_string()),
+                TableColumn::new(test_id(), "Total".to_string()),
             ],
             style_options: TableStyleOptions::default(),
             style_name: "TableStyleMedium2".to_string(),

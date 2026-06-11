@@ -50,6 +50,10 @@ pub struct UndoState {
     pub can_redo: bool,
     pub undo_description: Option<String>,
     pub redo_description: Option<String>,
+    /// Number of transactions available to undo (used by test oracles).
+    pub undo_depth: usize,
+    /// Number of transactions available to redo (used by test oracles).
+    pub redo_depth: usize,
 }
 
 /// Convert engine::UndoMergeRegion to api_types::MergedRegion
@@ -168,6 +172,8 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
         can_redo: undo_stack.can_redo(),
         undo_description: undo_stack.undo_description().map(String::from),
         redo_description: undo_stack.redo_description().map(String::from),
+        undo_depth: undo_stack.undo_depth(),
+        redo_depth: undo_stack.redo_depth(),
     }
 }
 

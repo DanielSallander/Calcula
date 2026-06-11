@@ -19,7 +19,7 @@ export interface CreatePivotDialogProps {
   /** Callback when dialog is closed */
   onClose: () => void;
   /** Callback when pivot table is created successfully */
-  onCreated?: (pivotId: number) => void;
+  onCreated?: (pivotId: string) => void;
   /** Current selection from grid (0-indexed) */
   selection?: {
     startRow: number;

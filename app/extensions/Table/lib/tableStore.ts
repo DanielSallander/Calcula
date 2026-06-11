@@ -89,7 +89,7 @@ export async function createTableAsync(params: {
 /**
  * Delete a table via the backend.
  */
-export async function deleteTableAsync(tableId: number): Promise<boolean> {
+export async function deleteTableAsync(tableId: string): Promise<boolean> {
   const result = await backendDeleteTable(tableId);
   if (result.success) {
     await refreshCache();
@@ -100,7 +100,7 @@ export async function deleteTableAsync(tableId: number): Promise<boolean> {
 /**
  * Convert a table to a normal range via the backend.
  */
-export async function convertToRangeAsync(tableId: number): Promise<boolean> {
+export async function convertToRangeAsync(tableId: string): Promise<boolean> {
   const result = await backendConvertToRange(tableId);
   if (result.success) {
     await refreshCache();
@@ -112,7 +112,7 @@ export async function convertToRangeAsync(tableId: number): Promise<boolean> {
  * Update table style options via the backend.
  */
 export async function updateTableStyleAsync(
-  tableId: number,
+  tableId: string,
   options: Partial<TableStyleOptions>,
 ): Promise<Table | null> {
   // Merge with current options
@@ -135,7 +135,7 @@ export async function updateTableStyleAsync(
  * Toggle the totals row via the backend.
  */
 export async function toggleTotalsRowAsync(
-  tableId: number,
+  tableId: string,
   show: boolean,
 ): Promise<Table | null> {
   const result = await backendToggleTotalsRow(tableId, show);
@@ -150,7 +150,7 @@ export async function toggleTotalsRowAsync(
  * Resize a table via the backend.
  */
 export async function resizeTableAsync(
-  tableId: number,
+  tableId: string,
   startRow: number,
   startCol: number,
   endRow: number,
@@ -188,7 +188,7 @@ export async function checkAutoExpand(
  * Enforce header uniqueness after user edits a header cell.
  */
 export async function enforceHeaderAsync(
-  tableId: number,
+  tableId: string,
   columnIndex: number,
   newValue: string,
 ): Promise<Table | null> {
@@ -204,7 +204,7 @@ export async function enforceHeaderAsync(
  * Set a calculated column formula that auto-fills to all data rows.
  */
 export async function setCalculatedColumnAsync(
-  tableId: number,
+  tableId: string,
   columnName: string,
   formula: string,
 ): Promise<Table | null> {
@@ -235,7 +235,7 @@ export async function setCalculatedColumnAsync(
  * Same-row cell references within the table range become [@ColumnName] syntax.
  */
 export async function convertFormulaToTableRefsAsync(
-  tableId: number,
+  tableId: string,
   formula: string,
   formulaRow: number,
 ): Promise<string> {
@@ -279,7 +279,7 @@ export function getTableAtCell(
 /**
  * Find a table by its ID (from cache).
  */
-export function getTableById(tableId: number): Table | null {
+export function getTableById(tableId: string): Table | null {
   return cachedTables.find((t) => t.id === tableId) ?? null;
 }
 
@@ -299,9 +299,9 @@ export function getAllTables(): Table[] {
  */
 export function createTable(
   def: { sheetIndex: number; startRow: number; startCol: number; endRow: number; endCol: number; hasHeaders: boolean },
-): { tableId: number; name: string } {
+): { tableId: string; name: string } {
   // Fire-and-forget async call; return placeholder for legacy callers
-  const placeholder = { tableId: -1, name: "Table" };
+  const placeholder = { tableId: "", name: "Table" };
   createTableAsync(def).catch(console.error);
   return placeholder as any;
 }
@@ -309,7 +309,7 @@ export function createTable(
 /**
  * @deprecated Use deleteTableAsync instead
  */
-export function deleteTable(tableId: number): void {
+export function deleteTable(tableId: string): void {
   deleteTableAsync(tableId).catch(console.error);
 }
 
@@ -317,7 +317,7 @@ export function deleteTable(tableId: number): void {
  * @deprecated Use updateTableStyleAsync instead
  */
 export function updateTableOptions(
-  tableId: number,
+  tableId: string,
   options: Partial<TableStyleOptions>,
 ): void {
   updateTableStyleAsync(tableId, options).catch(console.error);
@@ -327,7 +327,7 @@ export function updateTableOptions(
  * @deprecated Use resizeTableAsync instead
  */
 export function resizeTable(
-  tableId: number,
+  tableId: string,
   endRow: number,
   endCol: number,
 ): void {

@@ -18,7 +18,7 @@ import type { Slicer } from "../lib/slicerTypes";
 // ============================================================================
 
 /** Set of currently selected slicer IDs (supports multi-select). */
-const selectedSlicerIds = new Set<number>();
+const selectedSlicerIds = new Set<string>();
 let optionsTabRegistered = false;
 
 // ============================================================================
@@ -30,7 +30,7 @@ let optionsTabRegistered = false;
  * Shows the contextual ribbon tab and broadcasts the slicer state.
  * @param additive If true (Ctrl+click), toggle the slicer in/out of the selection set.
  */
-export function selectSlicer(slicerId: number, additive = false): void {
+export function selectSlicer(slicerId: string, additive = false): void {
   const slicer = getSlicerById(slicerId);
   if (!slicer) return;
 
@@ -105,9 +105,9 @@ export function deselectSlicer(): void {
  * Get the currently selected slicer ID (primary/last-clicked).
  * For backward compatibility — returns the last selected slicer.
  */
-export function getSelectedSlicerId(): number | null {
+export function getSelectedSlicerId(): string | null {
   if (selectedSlicerIds.size === 0) return null;
-  let last: number | null = null;
+  let last: string | null = null;
   for (const id of selectedSlicerIds) {
     last = id;
   }
@@ -117,14 +117,14 @@ export function getSelectedSlicerId(): number | null {
 /**
  * Get all currently selected slicer IDs.
  */
-export function getSelectedSlicerIds(): ReadonlySet<number> {
+export function getSelectedSlicerIds(): ReadonlySet<string> {
   return selectedSlicerIds;
 }
 
 /**
  * Check if a specific slicer is selected.
  */
-export function isSlicerSelected(slicerId: number): boolean {
+export function isSlicerSelected(slicerId: string): boolean {
   return selectedSlicerIds.has(slicerId);
 }
 

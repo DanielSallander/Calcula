@@ -147,7 +147,7 @@ const styles = {
 // ============================================================================
 
 export function QuickAccessPopup({ onClose, data }: OverlayProps): React.ReactElement | null {
-  const chartId = data?.chartId as number | undefined;
+  const chartId = data?.chartId as string | undefined;
   const buttonType = data?.buttonType as string | undefined;
   const screenX = data?.screenX as number | undefined;
   const screenY = data?.screenY as number | undefined;
@@ -414,7 +414,7 @@ function FiltersPanel({
   updateSpec,
 }: {
   spec: ChartSpec;
-  chartId: number;
+  chartId: string;
   updateSpec: (u: Partial<ChartSpec>) => void;
 }): React.ReactElement {
   const cachedData = getCachedChartData(chartId);

@@ -5,7 +5,7 @@
 import type { PivotViewResponse, PivotRowData, PivotCellWindowResponse } from "./pivot-api";
 
 /** Cache of the latest PivotViewResponse for each pivot table. */
-const pivotViewCache = new Map<number, PivotViewResponse>();
+const pivotViewCache = new Map<string, PivotViewResponse>();
 
 /**
  * Tracks which pivotIds were just cached by updatePivotFields/togglePivotGroup.
@@ -13,13 +13,13 @@ const pivotViewCache = new Map<number, PivotViewResponse>();
  * ensuring that other refresh paths (filters, dialogs, context menu) always
  * fetch fresh data from the backend.
  */
-const freshCacheIds = new Set<number>();
+const freshCacheIds = new Set<string>();
 
 /**
  * Store a PivotViewResponse in the cache and mark it as fresh.
  * Called by updatePivotFields/togglePivotGroup after IPC completes.
  */
-export function cachePivotView(pivotId: number, view: PivotViewResponse): void {
+export function cachePivotView(pivotId: string, view: PivotViewResponse): void {
   pivotViewCache.set(pivotId, view);
   freshCacheIds.add(pivotId);
   // Seed cell window cache with the initial window from the response
@@ -40,14 +40,14 @@ export function cachePivotView(pivotId: number, view: PivotViewResponse): void {
  * Check if the cache for a pivotId was freshly populated (by updatePivotFields
  * or togglePivotGroup) and hasn't been consumed yet.
  */
-export function isCacheFresh(pivotId: number): boolean {
+export function isCacheFresh(pivotId: string): boolean {
   return freshCacheIds.has(pivotId);
 }
 
 /**
  * Consume the freshness flag after refreshPivotViewCache uses it.
  */
-export function consumeFreshFlag(pivotId: number): void {
+export function consumeFreshFlag(pivotId: string): void {
   freshCacheIds.delete(pivotId);
 }
 
@@ -56,7 +56,7 @@ export function consumeFreshFlag(pivotId: number): void {
  * Used by refreshPivotViewCache's fallback getPivotView path — this avoids
  * polluting the fresh flag which would incorrectly cause the NEXT refresh to skip.
  */
-export function setCachedPivotView(pivotId: number, view: PivotViewResponse): void {
+export function setCachedPivotView(pivotId: string, view: PivotViewResponse): void {
   pivotViewCache.set(pivotId, view);
   // Also seed cell window cache for windowed responses
   if (view.isWindowed) {
@@ -75,21 +75,21 @@ export function setCachedPivotView(pivotId: number, view: PivotViewResponse): vo
  * Get a cached PivotViewResponse by pivotId (synchronous).
  * Used by context menu helpers for synchronous cell type checks.
  */
-export function getCachedPivotView(pivotId: number): PivotViewResponse | undefined {
+export function getCachedPivotView(pivotId: string): PivotViewResponse | undefined {
   return pivotViewCache.get(pivotId);
 }
 
 /**
  * Get the cached version for a pivotId, or -1 if not cached.
  */
-export function getCachedPivotVersion(pivotId: number): number {
+export function getCachedPivotVersion(pivotId: string): number {
   return pivotViewCache.get(pivotId)?.version ?? -1;
 }
 
 /**
  * Delete a cached view.
  */
-export function deleteCachedPivotView(pivotId: number): void {
+export function deleteCachedPivotView(pivotId: string): void {
   pivotViewCache.delete(pivotId);
   cellWindowCaches.delete(pivotId);
   loadingPivots.delete(pivotId);
@@ -101,17 +101,17 @@ export function deleteCachedPivotView(pivotId: number): void {
 // ============================================================================
 
 /** Monotonically increasing operation sequence per pivot. */
-const operationSeq = new Map<number, number>();
+const operationSeq = new Map<string, number>();
 
 /** Promise of the currently in-flight operation per pivot. */
-const inflightOps = new Map<number, Promise<unknown>>();
+const inflightOps = new Map<string, Promise<unknown>>();
 
 /**
  * Start a new operation for a pivot. Returns the sequence number.
  * If an operation is already in flight, it will be implicitly superseded
  * (its sequence check will fail when it completes).
  */
-export function startOperation(pivotId: number): number {
+export function startOperation(pivotId: string): number {
   const seq = (operationSeq.get(pivotId) ?? 0) + 1;
   operationSeq.set(pivotId, seq);
   return seq;
@@ -121,7 +121,7 @@ export function startOperation(pivotId: number): number {
  * Check if the given sequence is still the latest operation for this pivot.
  * Returns false if a newer operation has superseded it.
  */
-export function isCurrentOperation(pivotId: number, seq: number): boolean {
+export function isCurrentOperation(pivotId: string, seq: number): boolean {
   return operationSeq.get(pivotId) === seq;
 }
 
@@ -130,14 +130,14 @@ export function isCurrentOperation(pivotId: number, seq: number): boolean {
  * The caller should await this before starting a new IPC to avoid
  * concurrent backend operations on the same resource (e.g., BI engine Mutex).
  */
-export function getInflightOperation(pivotId: number): Promise<unknown> | undefined {
+export function getInflightOperation(pivotId: string): Promise<unknown> | undefined {
   return inflightOps.get(pivotId);
 }
 
 /**
  * Register an in-flight operation promise. Automatically clears when it settles.
  */
-export function setInflightOperation(pivotId: number, promise: Promise<unknown>): void {
+export function setInflightOperation(pivotId: string, promise: Promise<unknown>): void {
   inflightOps.set(pivotId, promise);
   promise.finally(() => {
     // Only clear if this is still the registered promise (not replaced by a newer one)
@@ -151,20 +151,20 @@ export function setInflightOperation(pivotId: number, promise: Promise<unknown>)
 // USER CANCELLATION (suppresses result caching after frontend cancel)
 // ============================================================================
 
-const userCancelledPivots = new Set<number>();
+const userCancelledPivots = new Set<string>();
 
 /** Mark a pivot as user-cancelled so incoming results are suppressed. */
-export function markUserCancelled(pivotId: number): void {
+export function markUserCancelled(pivotId: string): void {
   userCancelledPivots.add(pivotId);
 }
 
 /** Check if a pivot operation was cancelled by the user. */
-export function isUserCancelled(pivotId: number): boolean {
+export function isUserCancelled(pivotId: string): boolean {
   return userCancelledPivots.has(pivotId);
 }
 
 /** Clear the user-cancelled flag (after the operation's Promise settles). */
-export function clearUserCancelled(pivotId: number): void {
+export function clearUserCancelled(pivotId: string): void {
   userCancelledPivots.delete(pivotId);
 }
 
@@ -179,11 +179,11 @@ interface PivotLoadingState {
   startedAt: number;
 }
 
-const loadingPivots = new Map<number, PivotLoadingState>();
+const loadingPivots = new Map<string, PivotLoadingState>();
 
 /** Mark a pivot as loading with a stage description and optional step info. */
 export function setLoading(
-  pivotId: number,
+  pivotId: string,
   stage: string,
   stageIndex = 0,
   totalStages = 0,
@@ -199,17 +199,17 @@ export function setLoading(
 }
 
 /** Clear loading state for a pivot. */
-export function clearLoading(pivotId: number): void {
+export function clearLoading(pivotId: string): void {
   loadingPivots.delete(pivotId);
 }
 
 /** Check if a pivot is currently loading. */
-export function isLoading(pivotId: number): boolean {
+export function isLoading(pivotId: string): boolean {
   return loadingPivots.has(pivotId);
 }
 
 /** Get loading state details (for rendering the indicator). */
-export function getLoadingState(pivotId: number): PivotLoadingState | undefined {
+export function getLoadingState(pivotId: string): PivotLoadingState | undefined {
   return loadingPivots.get(pivotId);
 }
 
@@ -217,16 +217,16 @@ export function getLoadingState(pivotId: number): PivotLoadingState | undefined 
 // PREVIOUS VIEW PRESERVATION (for cancellation reversion)
 // ============================================================================
 
-const previousViews = new Map<number, PivotViewResponse>();
+const previousViews = new Map<string, PivotViewResponse>();
 
 /** Save the current cached view before starting an operation (for cancel reversion). */
-export function preserveCurrentView(pivotId: number): void {
+export function preserveCurrentView(pivotId: string): void {
   const current = pivotViewCache.get(pivotId);
   if (current) previousViews.set(pivotId, current);
 }
 
 /** Restore the previous view on cancel/error. Returns the restored view or undefined. */
-export function restorePreviousView(pivotId: number): PivotViewResponse | undefined {
+export function restorePreviousView(pivotId: string): PivotViewResponse | undefined {
   const prev = previousViews.get(pivotId);
   if (prev) {
     pivotViewCache.set(pivotId, prev);
@@ -236,7 +236,7 @@ export function restorePreviousView(pivotId: number): PivotViewResponse | undefi
 }
 
 /** Clear the previous view backup after successful completion. */
-export function clearPreviousView(pivotId: number): void {
+export function clearPreviousView(pivotId: string): void {
   previousViews.delete(pivotId);
 }
 
@@ -295,9 +295,9 @@ class CellWindowCache {
   }
 }
 
-const cellWindowCaches = new Map<number, CellWindowCache>();
+const cellWindowCaches = new Map<string, CellWindowCache>();
 
-function getOrCreateCellWindowCache(pivotId: number): CellWindowCache {
+function getOrCreateCellWindowCache(pivotId: string): CellWindowCache {
   let cache = cellWindowCaches.get(pivotId);
   if (!cache) {
     cache = new CellWindowCache();
@@ -307,13 +307,13 @@ function getOrCreateCellWindowCache(pivotId: number): CellWindowCache {
 }
 
 /** Get the cell window cache for a pivot (if windowed). */
-export function getCellWindowCache(pivotId: number): CellWindowCache | undefined {
+export function getCellWindowCache(pivotId: string): CellWindowCache | undefined {
   return cellWindowCaches.get(pivotId);
 }
 
 /** Fetch function type for cell window loading (avoids circular import). */
 export type CellWindowFetcher = (
-  pivotId: number,
+  pivotId: string,
   startRow: number,
   rowCount: number
 ) => Promise<PivotCellWindowResponse>;
@@ -324,7 +324,7 @@ export type CellWindowFetcher = (
  * @param fetchFn - The IPC fetch function (getPivotCellWindow from pivot-api)
  */
 export function ensureCellWindow(
-  pivotId: number,
+  pivotId: string,
   version: number,
   startRow: number,
   rowCount: number,

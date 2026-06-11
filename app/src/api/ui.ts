@@ -688,6 +688,8 @@ export interface PanelService {
   closePanel(panelId: string): void;
   getPlacement(panelId: string): PanelPlacement;
   setPlacement(panelId: string, placement: PanelPlacement): void;
+  setBadge(panelId: string, text: string): void;
+  getBadge(panelId: string): string;
   onRegistryChange(listener: () => void): () => void;
 }
 
@@ -739,6 +741,19 @@ export const PanelExtensions = {
 
   setPlacement(panelId: string, placement: PanelPlacement): void {
     panelService?.setPlacement(panelId, placement);
+  },
+
+  /**
+   * Set a badge on a panel's tab/icon (e.g., a notification count).
+   * Works for ribbon tabs and sidebar icons. Pass null or "" to clear.
+   */
+  setBadge(panelId: string, text: string | null): void {
+    panelService?.setBadge(panelId, text || "");
+  },
+
+  /** Get the current badge text for a panel ("" if none). */
+  getBadge(panelId: string): string {
+    return panelService?.getBadge(panelId) ?? "";
   },
 
   onRegistryChange(listener: () => void): () => void {

@@ -15,7 +15,7 @@ use super::engine_registry::{EngineRegistry, ModelKey};
 // Connection ID
 // ---------------------------------------------------------------------------
 
-pub type ConnectionId = u64;
+pub type ConnectionId = identity::EntityId;
 
 // ---------------------------------------------------------------------------
 // BI Application State (multi-connection)
@@ -27,8 +27,6 @@ pub type ConnectionId = u64;
 pub struct BiState {
     /// All connections, keyed by ConnectionId.
     pub connections: Mutex<HashMap<ConnectionId, Connection>>,
-    /// Auto-incrementing ID for new connections.
-    pub next_connection_id: Mutex<ConnectionId>,
     /// Shared engine registry — multiple connections using the same model share one Engine.
     pub engine_registry: EngineRegistry,
 }
@@ -37,7 +35,6 @@ impl BiState {
     pub fn new() -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
-            next_connection_id: Mutex::new(1),
             engine_registry: EngineRegistry::new(),
         }
     }
@@ -114,7 +111,7 @@ impl std::fmt::Display for ConnectionType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInfo {
-    pub id: u64,
+    pub id: ConnectionId,
     pub name: String,
     pub description: String,
     pub connection_type: String,
@@ -201,7 +198,7 @@ pub struct CreateConnectionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateConnectionRequest {
-    pub id: u64,
+    pub id: ConnectionId,
     pub name: Option<String>,
     pub description: Option<String>,
     pub connection_string: Option<String>,
@@ -210,7 +207,7 @@ pub struct UpdateConnectionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BiConnectRequest {
-    pub connection_id: u64,
+    pub connection_id: ConnectionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,7 +255,7 @@ pub struct BiCrossFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BiInsertRequest {
-    pub connection_id: u64,
+    pub connection_id: ConnectionId,
     pub sheet_index: usize,
     pub start_row: u32,
     pub start_col: u32,

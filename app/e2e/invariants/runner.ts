@@ -8,6 +8,8 @@ import type { Invariant } from "./invariants";
 import type { ActionGenerator } from "./actionGenerator";
 import type { RunResult } from "./reporter";
 import { captureSnapshot, installErrorTracking } from "./stateSnapshot";
+import type { OracleBattery } from "../oracles";
+import type { OracleBaseline } from "../oracles/types";
 
 // ============================================================================
 // Runner Options
@@ -24,6 +26,15 @@ export interface RunnerOptions {
   settleTimeMs?: number;
   /** Log each action to console as it executes (default: true) */
   verbose?: boolean;
+  /**
+   * Semantic oracle battery (undo round-trip, recalc consistency, save/reload
+   * round-trip). When set, the battery runs every `oracleEveryNActions`
+   * actions and at the end of the run; oracle violations fail the run like
+   * invariant violations.
+   */
+  oracleBattery?: OracleBattery;
+  /** Checkpoint cadence for the oracle battery (default: 25) */
+  oracleEveryNActions?: number;
 }
 
 // ============================================================================
@@ -33,7 +44,9 @@ export interface RunnerOptions {
 export class InvariantRunner {
   private page: Page;
   private grid: GridHelper;
-  private options: Required<RunnerOptions>;
+  private options: Required<Omit<RunnerOptions, "oracleBattery">> & {
+    oracleBattery: OracleBattery | null;
+  };
 
   constructor(page: Page, grid: GridHelper, options: RunnerOptions) {
     this.page = page;
@@ -44,17 +57,31 @@ export class InvariantRunner {
       maxActions: options.maxActions ?? 75,
       settleTimeMs: options.settleTimeMs ?? 250,
       verbose: options.verbose ?? true,
+      oracleBattery: options.oracleBattery ?? null,
+      oracleEveryNActions: options.oracleEveryNActions ?? 25,
     };
   }
 
   async run(): Promise<RunResult> {
-    const { invariants, actionGenerator, maxActions, settleTimeMs, verbose } =
-      this.options;
+    const {
+      invariants,
+      actionGenerator,
+      maxActions,
+      settleTimeMs,
+      verbose,
+      oracleBattery,
+      oracleEveryNActions,
+    } = this.options;
     const actionHistory: string[] = [];
     const seed = actionGenerator.seed;
 
     // Install console/exception tracking
     installErrorTracking(this.page);
+
+    // Oracle baseline for the first checkpoint window
+    let oracleBaseline: OracleBaseline | null = oracleBattery
+      ? await oracleBattery.begin(this.page)
+      : null;
 
     // Capture initial snapshot
     let snapshot = await captureSnapshot(this.page);
@@ -158,6 +185,52 @@ export class InvariantRunner {
           allViolations: violations,
           failingSnapshot: snapshot,
         };
+      }
+
+      // Run the semantic oracle battery at checkpoints (and on the last step)
+      const checkpointDue =
+        oracleBattery !== null &&
+        oracleBaseline !== null &&
+        (step % oracleEveryNActions === 0 || step === maxActions);
+      if (checkpointDue) {
+        if (verbose) {
+          console.log(`  [oracle checkpoint] after step ${step}`);
+        }
+        try {
+          const result = await oracleBattery!.checkpoint(
+            this.page,
+            oracleBaseline!
+          );
+          oracleBaseline = result.nextBaseline;
+          if (result.violations.length > 0) {
+            return {
+              passed: false,
+              seed,
+              totalActions: step,
+              failedAtStep: step,
+              actionHistory,
+              violation: result.violations[0],
+              allViolations: result.violations,
+              failingSnapshot: snapshot,
+            };
+          }
+        } catch (err) {
+          const msg = (err as Error).message ?? String(err);
+          return {
+            passed: false,
+            seed,
+            totalActions: step,
+            failedAtStep: step,
+            actionHistory,
+            violation: {
+              invariantId: "oracle-infrastructure",
+              message: `Oracle battery failed to run: ${msg}`,
+              details: { error: msg },
+            },
+            allViolations: [],
+            failingSnapshot: snapshot,
+          };
+        }
       }
     }
 

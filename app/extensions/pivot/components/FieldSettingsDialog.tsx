@@ -210,7 +210,7 @@ export function FieldSettingsDialog({
   onClose,
   data,
 }: FieldSettingsDialogProps): React.ReactElement | null {
-  const pivotId = data?.pivotId as number | undefined;
+  const pivotId = data?.pivotId as string | undefined;
   const fieldIndex = data?.fieldIndex as number | undefined;
   const axis = data?.axis as "row" | "column" | "filter" | undefined;
 

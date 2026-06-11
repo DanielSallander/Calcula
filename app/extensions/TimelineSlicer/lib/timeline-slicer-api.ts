@@ -98,7 +98,7 @@ export async function getTimelineSelectedItems(
 }
 
 export async function getPivotDateFields(
-  pivotId: number,
+  pivotId: string,
 ): Promise<string[]> {
   return invokeBackend<string[]>("get_pivot_date_fields", { pivotId });
 }

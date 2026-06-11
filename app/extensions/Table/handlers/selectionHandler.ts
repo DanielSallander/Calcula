@@ -21,7 +21,7 @@ import { TableEvents } from "../lib/tableEvents";
 // State
 // ============================================================================
 
-let currentTableId: number | null = null;
+let currentTableId: string | null = null;
 let lastCheckedSelection: { row: number; col: number } | null = null;
 
 /** Whether the contextual table ribbon tab is currently registered. */
@@ -257,7 +257,7 @@ export function initClickInterceptor(): () => void {
 /**
  * Get the ID of the table the selection is currently within.
  */
-export function getCurrentTableId(): number | null {
+export function getCurrentTableId(): string | null {
   return currentTableId;
 }
 

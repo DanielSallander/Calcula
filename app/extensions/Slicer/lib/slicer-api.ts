@@ -14,19 +14,19 @@ export async function createSlicer(params: CreateSlicerParams): Promise<Slicer> 
   return invokeBackend<Slicer>("create_slicer", { params });
 }
 
-export async function deleteSlicer(slicerId: number): Promise<void> {
+export async function deleteSlicer(slicerId: string): Promise<void> {
   return invokeBackend<void>("delete_slicer", { slicerId });
 }
 
 export async function updateSlicer(
-  slicerId: number,
+  slicerId: string,
   params: UpdateSlicerParams,
 ): Promise<Slicer> {
   return invokeBackend<Slicer>("update_slicer", { slicerId, params });
 }
 
 export async function updateSlicerPosition(
-  slicerId: number,
+  slicerId: string,
   x: number,
   y: number,
   width: number,
@@ -42,7 +42,7 @@ export async function updateSlicerPosition(
 }
 
 export async function updateSlicerSelection(
-  slicerId: number,
+  slicerId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
   return invokeBackend<void>("update_slicer_selection", {
@@ -59,20 +59,20 @@ export async function getSlicersForSheet(sheetIndex: number): Promise<Slicer[]> 
   return invokeBackend<Slicer[]>("get_slicers_for_sheet", { sheetIndex });
 }
 
-export async function getSlicer(slicerId: number): Promise<Slicer> {
+export async function getSlicer(slicerId: string): Promise<Slicer> {
   return invokeBackend<Slicer>("get_slicer", { slicerId });
 }
 
-export async function getSlicerItems(slicerId: number): Promise<SlicerItem[]> {
+export async function getSlicerItems(slicerId: string): Promise<SlicerItem[]> {
   return invokeBackend<SlicerItem[]>("get_slicer_items", { slicerId });
 }
 
-export async function clearSlicerFilter(slicerId: number): Promise<void> {
+export async function clearSlicerFilter(slicerId: string): Promise<void> {
   return invokeBackend<void>("clear_slicer_filter", { slicerId });
 }
 
 export async function setSlicerItemSelected(
-  slicerId: number,
+  slicerId: string,
   value: string,
   selected: boolean,
 ): Promise<void> {
@@ -88,7 +88,7 @@ export async function setSlicerItemSelected(
 // ============================================================================
 
 export async function getSlicerComputedProperties(
-  slicerId: number,
+  slicerId: string,
 ): Promise<SlicerComputedPropertyResult> {
   return invokeBackend<SlicerComputedPropertyResult>(
     "get_slicer_computed_properties",
@@ -101,7 +101,7 @@ export async function getSlicerAvailableAttributes(): Promise<string[]> {
 }
 
 export async function addSlicerComputedProperty(
-  slicerId: number,
+  slicerId: string,
   attribute: string,
   formula: string,
 ): Promise<SlicerComputedPropertyResult> {
@@ -112,7 +112,7 @@ export async function addSlicerComputedProperty(
 }
 
 export async function updateSlicerComputedProperty(
-  propId: number,
+  propId: string,
   attribute?: string,
   formula?: string,
 ): Promise<SlicerComputedPropertyResult> {
@@ -123,7 +123,7 @@ export async function updateSlicerComputedProperty(
 }
 
 export async function removeSlicerComputedProperty(
-  propId: number,
+  propId: string,
 ): Promise<SlicerComputedPropertyResult> {
   return invokeBackend<SlicerComputedPropertyResult>(
     "remove_slicer_computed_property",
@@ -132,7 +132,7 @@ export async function removeSlicerComputedProperty(
 }
 
 export async function getSlicerComputedAttributes(
-  slicerId: number,
+  slicerId: string,
 ): Promise<string[]> {
   return invokeBackend<string[]>("get_slicer_computed_attributes", { slicerId });
 }

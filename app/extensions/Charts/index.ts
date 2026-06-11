@@ -180,15 +180,15 @@ function activate(context: ExtensionContext): void {
 
   // Register chart store service for scriptable objects
   registerChartStoreService({
-    getChartById(id: number) {
+    getChartById(id: string) {
       const chart = getChartById(id);
       if (!chart) return null;
       return { specJson: JSON.stringify(chart.spec) };
     },
-    updateChartSpec(chartId: number, specUpdates: Record<string, unknown>) {
+    updateChartSpec(chartId: string, specUpdates: Record<string, unknown>) {
       updateChartSpec(chartId, specUpdates as Partial<import("./types").ChartSpec>);
     },
-    setStyleProperty(chartId: number, name: string, value: string) {
+    setStyleProperty(chartId: string, name: string, value: string) {
       // Canvas-style override stored in chart spec as custom properties
       updateChartSpec(chartId, { [`_style_${name}`]: value } as Partial<import("./types").ChartSpec>);
     },
@@ -231,7 +231,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.filter.set",
     name: "Set Chart Filters",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number; hiddenSeries?: number[]; hiddenCategories?: number[] };
+      const args = ctx as unknown as { chartId: string; hiddenSeries?: number[]; hiddenCategories?: number[] };
       updateChartSpec(args.chartId, {
         filters: { hiddenSeries: args.hiddenSeries ?? [], hiddenCategories: args.hiddenCategories ?? [] },
       });
@@ -245,7 +245,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.filter.clear",
     name: "Clear Chart Filters",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number };
+      const args = ctx as unknown as { chartId: string };
       updateChartSpec(args.chartId, { filters: undefined });
       invalidateChartCache(args.chartId);
       syncChartRegions();
@@ -257,7 +257,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.filter.toggleSeries",
     name: "Toggle Chart Series Visibility",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number; seriesIndex: number };
+      const args = ctx as unknown as { chartId: string; seriesIndex: number };
       const chart = getChartById(args.chartId);
       if (!chart) return;
       const current = chart.spec.filters ?? { hiddenSeries: [], hiddenCategories: [] };
@@ -276,7 +276,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.filter.toggleCategory",
     name: "Toggle Chart Category Visibility",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number; categoryIndex: number };
+      const args = ctx as unknown as { chartId: string; categoryIndex: number };
       const chart = getChartById(args.chartId);
       if (!chart) return;
       const current = chart.spec.filters ?? { hiddenSeries: [], hiddenCategories: [] };
@@ -295,7 +295,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.setDataPointOverride",
     name: "Set Data Point Override",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number; seriesIndex: number; categoryIndex: number; color?: string; opacity?: number; exploded?: boolean };
+      const args = ctx as unknown as { chartId: string; seriesIndex: number; categoryIndex: number; color?: string; opacity?: number; exploded?: boolean };
       const chart = getChartById(args.chartId);
       if (!chart) return;
       const overrides = [...(chart.spec.dataPointOverrides ?? [])];
@@ -320,7 +320,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.clearDataPointOverrides",
     name: "Clear Data Point Overrides",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number };
+      const args = ctx as unknown as { chartId: string };
       updateChartSpec(args.chartId, { dataPointOverrides: undefined });
       invalidateChartCache(args.chartId);
       syncChartRegions();
@@ -332,7 +332,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.formatAxis",
     name: "Format Chart Axis",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number; axisType: "x" | "y"; updates: Record<string, unknown> };
+      const args = ctx as unknown as { chartId: string; axisType: "x" | "y"; updates: Record<string, unknown> };
       const axisKey = args.axisType === "x" ? "xAxis" : "yAxis";
       const chart = getChartById(args.chartId);
       if (!chart) return;
@@ -349,7 +349,7 @@ function activate(context: ExtensionContext): void {
     name: "Set Chart Gradient Fill",
     execute: async (ctx) => {
       const args = ctx as unknown as {
-        chartId: number;
+        chartId: string;
         target: "bars" | "plotBackground" | "chartBackground";
         gradient: { type: "linear" | "radial"; direction?: string; stops: Array<{ offset: number; color: string }> };
       };
@@ -390,7 +390,7 @@ function activate(context: ExtensionContext): void {
     id: "chart.applyStyle",
     name: "Apply Chart Style Preset",
     execute: async (ctx) => {
-      const args = ctx as unknown as { chartId: number; presetId: string };
+      const args = ctx as unknown as { chartId: string; presetId: string };
       const { getPresetById, buildPresetUpdates } = await import("./lib/chartStylePresets");
       const preset = getPresetById(args.presetId);
       if (!preset) return;
@@ -490,7 +490,7 @@ function activate(context: ExtensionContext): void {
   const handleFloatingSelected = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "chart") return;
-    const chartId = detail.data?.chartId as number;
+    const chartId = detail.data?.chartId as string;
     if (chartId == null) return;
 
     if (isChartSelected(chartId)) {
@@ -526,7 +526,7 @@ function activate(context: ExtensionContext): void {
   const handleMovePreview = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "chart") return;
-    const chartId = detail.data?.chartId as number;
+    const chartId = detail.data?.chartId as string;
     if (chartId != null) {
       // Clear pending click - this is a drag, not a click
       clearPendingClick();
@@ -544,7 +544,7 @@ function activate(context: ExtensionContext): void {
   const handleMoveComplete = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "chart") return;
-    const chartId = detail.data?.chartId as number;
+    const chartId = detail.data?.chartId as string;
     if (chartId != null) {
       // Clear pending click - move completed, not a click
       clearPendingClick();
@@ -566,7 +566,7 @@ function activate(context: ExtensionContext): void {
   const handleResizePreview = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "chart") return;
-    const chartId = detail.data?.chartId as number;
+    const chartId = detail.data?.chartId as string;
     if (chartId != null) {
       resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
       syncChartRegions();
@@ -582,7 +582,7 @@ function activate(context: ExtensionContext): void {
   const handleResizeComplete = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "chart") return;
-    const chartId = detail.data?.chartId as number;
+    const chartId = detail.data?.chartId as string;
     if (chartId != null) {
       resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
       syncChartRegions();
@@ -1081,7 +1081,7 @@ function findClickedFieldButton(
  * Opens the appropriate pivot filter dropdown depending on the field area.
  */
 function handlePivotFieldButtonClick(
-  chartId: number,
+  chartId: string,
   button: PivotChartFieldButton,
   canvasX: number,
   canvasY: number,
@@ -1129,7 +1129,7 @@ function handlePivotFieldButtonClick(
  * Toggles the popup panel and dispatches a custom event for the overlay component.
  */
 function handleQuickAccessButtonClick(
-  chartId: number,
+  chartId: string,
   buttonType: QuickAccessButtonType,
   canvasX: number,
   canvasY: number,

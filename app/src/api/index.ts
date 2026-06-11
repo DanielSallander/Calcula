@@ -508,6 +508,12 @@ export {
   useIsActivityBarOpen,
   useActiveActivityViewId,
   ActivityBarExtensions,
+  // Panel API (location-agnostic panels)
+  PanelExtensions,
+  registerPanel,
+  unregisterPanel,
+  openPanel,
+  closePanel,
 } from "./ui";
 
 // ============================================================================
@@ -1422,12 +1428,18 @@ export {
   registerSlicerStoreService,
   registerChartStoreService,
   registerPivotStoreService,
+  registerBiConnectionService,
+  getSlicerStoreService,
+  getChartStoreService,
+  getPivotStoreService,
+  getBiConnectionService,
 } from "./componentStoreRegistry";
 
 export type {
   ISlicerStoreService,
   IChartStoreService,
   IPivotStoreService,
+  IBiConnectionService,
 } from "./componentStoreRegistry";
 
 export {

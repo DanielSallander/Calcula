@@ -81,7 +81,7 @@ let gridContainer: HTMLElement | null = null;
 
 /** Pending click: set on floatingObject:selected, consumed on mouseup.
  *  deferNarrow: when true, mouseup should narrow multi-selection to this single slicer. */
-let pendingClick: { slicerId: number; deferNarrow?: boolean } | null = null;
+let pendingClick: { slicerId: string; deferNarrow?: boolean } | null = null;
 
 /** Track last mousedown modifier state (since floatingObject:selected doesn't carry it). */
 let lastMousedownCtrl = false;
@@ -90,7 +90,7 @@ let lastMousedownCtrl = false;
  * Snapshot of all selected slicers' positions at drag start.
  * Used to compute deltas for multi-move.
  */
-let dragStartPositions: Map<number, { x: number; y: number }> | null = null;
+let dragStartPositions: Map<string, { x: number; y: number }> | null = null;
 
 // ============================================================================
 // Activation
@@ -101,7 +101,7 @@ function activate(context: ExtensionContext): void {
 
   // Register slicer store service for scriptable objects
   registerSlicerStoreService({
-    getSlicerById(id: number) {
+    getSlicerById(id: string) {
       const s = getSlicerById(id);
       if (!s) return undefined;
       return {
@@ -112,14 +112,14 @@ function activate(context: ExtensionContext): void {
         columns: s.columns,
       };
     },
-    getSelectedItems(slicerId: number) {
+    getSelectedItems(slicerId: string) {
       const s = getSlicerById(slicerId);
       return s?.selectedItems ?? [];
     },
-    async setSelectedItems(slicerId: number, items: string[] | null) {
+    async setSelectedItems(slicerId: string, items: string[] | null) {
       await updateSlicerSelectionAsync(slicerId, items);
     },
-    getCachedItems(slicerId: number) {
+    getCachedItems(slicerId: string) {
       const items = getCachedItems(slicerId);
       return items?.map((item) => ({ text: item.value, hasData: item.hasData }));
     },
@@ -173,7 +173,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "slicer") return;
 
-    const slicerId = detail.data?.slicerId as number;
+    const slicerId = detail.data?.slicerId as string;
     if (slicerId == null) return;
 
     const alreadySelected = isSlicerSelected(slicerId);
@@ -214,7 +214,7 @@ function activate(context: ExtensionContext): void {
     // Clear pending click — this was a drag, not a click
     pendingClick = null;
 
-    const primaryId = detail.data?.slicerId as number;
+    const primaryId = detail.data?.slicerId as string;
     if (primaryId == null) return;
 
     const primaryStart = dragStartPositions?.get(primaryId);
@@ -257,7 +257,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "slicer") return;
 
-    const primaryId = detail.data?.slicerId as number;
+    const primaryId = detail.data?.slicerId as string;
     if (primaryId == null) return;
 
     const primaryStart = dragStartPositions?.get(primaryId);
@@ -288,7 +288,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "slicer") return;
 
-    const slicerId = detail.data?.slicerId as number;
+    const slicerId = detail.data?.slicerId as string;
     if (slicerId == null) return;
 
     updateCachedSlicerBounds(slicerId, detail.x, detail.y, detail.width, detail.height);
@@ -304,7 +304,7 @@ function activate(context: ExtensionContext): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "slicer") return;
 
-    const slicerId = detail.data?.slicerId as number;
+    const slicerId = detail.data?.slicerId as string;
     if (slicerId == null) return;
 
     updateSlicerPositionAsync(
@@ -452,7 +452,7 @@ function activate(context: ExtensionContext): void {
 
   const handleSelectionChanged = (e: Event) => {
     const detail = (e as CustomEvent).detail;
-    const slicerId = detail?.slicerId as number;
+    const slicerId = detail?.slicerId as string;
     if (slicerId == null) return;
 
     const slicer = getSlicerById(slicerId);
@@ -492,7 +492,7 @@ function activate(context: ExtensionContext): void {
 
   const handleSlicerDeleted = (e: Event) => {
     const detail = (e as CustomEvent).detail;
-    const deletedId = detail?.slicerId as number | undefined;
+    const deletedId = detail?.slicerId as string | undefined;
     if (deletedId != null && isSlicerSelected(deletedId)) {
       deselectSlicer();
     }
@@ -584,7 +584,7 @@ function deactivate(): void {
  * Called from the mouseup handler with coordinates from the mouse event.
  */
 function handleSlicerClickAt(
-  slicerId: number,
+  slicerId: string,
   canvasX: number,
   canvasY: number,
   ctrlHeld: boolean,
@@ -644,7 +644,7 @@ function handleSlicerClickAt(
  * - "multi": click = toggle (like Ctrl+click in standard mode)
  */
 function handleItemClick(
-  slicerId: number,
+  slicerId: string,
   _itemIndex: number,
   itemValue: string,
   ctrlHeld: boolean,

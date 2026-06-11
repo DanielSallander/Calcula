@@ -20,7 +20,7 @@ import { ensureBiFieldInPivotCache } from "./slicerFilterBridge";
 let cachedSlicers: Slicer[] = [];
 
 /** Cached items per slicer (slicer id -> items). Refreshed on demand. */
-const itemsCache = new Map<number, SlicerItem[]>();
+const itemsCache = new Map<string, SlicerItem[]>();
 
 // ============================================================================
 // Accessors
@@ -30,7 +30,7 @@ export function getAllSlicers(): Slicer[] {
   return cachedSlicers;
 }
 
-export function getSlicerById(id: number): Slicer | undefined {
+export function getSlicerById(id: string): Slicer | undefined {
   return cachedSlicers.find((s) => s.id === id);
 }
 
@@ -38,7 +38,7 @@ export function getSlicersForSheet(sheetIndex: number): Slicer[] {
   return cachedSlicers.filter((s) => s.sheetIndex === sheetIndex);
 }
 
-export function getCachedItems(slicerId: number): SlicerItem[] | undefined {
+export function getCachedItems(slicerId: string): SlicerItem[] | undefined {
   return itemsCache.get(slicerId);
 }
 
@@ -64,7 +64,7 @@ export async function createSlicerAsync(
   }
 }
 
-export async function deleteSlicerAsync(slicerId: number): Promise<boolean> {
+export async function deleteSlicerAsync(slicerId: string): Promise<boolean> {
   try {
     await api.deleteSlicer(slicerId);
     itemsCache.delete(slicerId);
@@ -78,7 +78,7 @@ export async function deleteSlicerAsync(slicerId: number): Promise<boolean> {
 }
 
 export async function updateSlicerAsync(
-  slicerId: number,
+  slicerId: string,
   params: UpdateSlicerParams,
 ): Promise<Slicer | null> {
   try {
@@ -93,7 +93,7 @@ export async function updateSlicerAsync(
 }
 
 export async function updateSlicerPositionAsync(
-  slicerId: number,
+  slicerId: string,
   x: number,
   y: number,
   width: number,
@@ -116,7 +116,7 @@ export async function updateSlicerPositionAsync(
 }
 
 export async function updateSlicerSelectionAsync(
-  slicerId: number,
+  slicerId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
   try {
@@ -144,7 +144,7 @@ export async function updateSlicerSelectionAsync(
  * Used for live drag preview rendering.
  */
 export function updateCachedSlicerPosition(
-  slicerId: number,
+  slicerId: string,
   x: number,
   y: number,
 ): void {
@@ -161,7 +161,7 @@ export function updateCachedSlicerPosition(
  * Used for live resize preview rendering.
  */
 export function updateCachedSlicerBounds(
-  slicerId: number,
+  slicerId: string,
   x: number,
   y: number,
   width: number,
@@ -181,7 +181,7 @@ export function updateCachedSlicerBounds(
 // Item fetching
 // ============================================================================
 
-export async function refreshSlicerItems(slicerId: number): Promise<SlicerItem[]> {
+export async function refreshSlicerItems(slicerId: string): Promise<SlicerItem[]> {
   try {
     const items = await api.getSlicerItems(slicerId);
     itemsCache.set(slicerId, items);

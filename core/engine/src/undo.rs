@@ -297,6 +297,16 @@ impl UndoStack {
         !self.undo_stack.is_empty()
     }
 
+    /// Number of transactions available to undo.
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Number of transactions available to redo.
+    pub fn redo_depth(&self) -> usize {
+        self.redo_stack.len()
+    }
+
     /// Check if redo is available.
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()

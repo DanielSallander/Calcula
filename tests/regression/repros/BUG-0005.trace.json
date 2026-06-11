@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "seed": 424242,
+  "startedAt": "2026-06-11T05:02:12.161Z",
+  "actions": [
+    {
+      "id": "chart.deselect",
+      "params": {}
+    },
+    {
+      "id": "table.select-away",
+      "params": {}
+    },
+    {
+      "id": "table.create",
+      "params": {}
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "slicer.create",
+      "params": {
+        "name": "Slicer_5"
+      }
+    },
+    {
+      "id": "ribbon.switch-tab",
+      "params": {
+        "tabName": "View"
+      }
+    },
+    {
+      "id": "clipboard.copy-paste",
+      "params": {
+        "from": "F3",
+        "to": "J20"
+      }
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    },
+    {
+      "id": "table.delete",
+      "params": {}
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "sort.range",
+      "params": {
+        "ascending": true,
+        "values": [
+          51,
+          23,
+          86,
+          11
+        ]
+      }
+    },
+    {
+      "id": "structure.delete-row",
+      "params": {
+        "row": 49
+      }
+    },
+    {
+      "id": "cell.edit",
+      "params": {
+        "ref": "B15",
+        "value": "Test14"
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "cell.edit-number",
+      "params": {
+        "ref": "G4",
+        "value": "-404"
+      }
+    },
+    {
+      "id": "ribbon.switch-tab",
+      "params": {
+        "tabName": "Data"
+      }
+    },
+    {
+      "id": "sparkline.create",
+      "params": {}
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "chart.deselect",
+      "params": {}
+    },
+    {
+      "id": "slicer.delete",
+      "params": {}
+    },
+    {
+      "id": "note.add",
+      "params": {
+        "text": "Note 23",
+        "row": 10,
+        "col": 4
+      }
+    },
+    {
+      "id": "chart.create",
+      "params": {
+        "title": "Chart_24"
+      }
+    },
+    {
+      "id": "chart.delete",
+      "params": {}
+    },
+    {
+      "id": "cell.clear",
+      "params": {
+        "ref": "H5"
+      }
+    },
+    {
+      "id": "sparkline.select-into",
+      "params": {}
+    },
+    {
+      "id": "chart.select",
+      "params": {}
+    },
+    {
+      "id": "cf.delete-rule",
+      "params": {}
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "H5"
+      }
+    },
+    {
+      "id": "structure.resize-row",
+      "params": {
+        "row": 7,
+        "height": 74
+      }
+    },
+    {
+      "id": "undo",
+      "params": {}
+    },
+    {
+      "id": "note.add",
+      "params": {
+        "text": "Note 33",
+        "row": 3,
+        "col": 4
+      }
+    },
+    {
+      "id": "format.bold",
+      "params": {
+        "ref": "A30"
+      }
+    },
+    {
+      "id": "sheet.add",
+      "params": {}
+    },
+    {
+      "id": "merge.merge",
+      "params": {
+        "startRow": 66,
+        "startCol": 1,
+        "rows": 2,
+        "cols": 2
+      }
+    },
+    {
+      "id": "cf.delete-rule",
+      "params": {}
+    },
+    {
+      "id": "structure.delete-col",
+      "params": {
+        "col": 58
+      }
+    },
+    {
+      "id": "slicer.click-away",
+      "params": {}
+    },
+    {
+      "id": "filter.apply",
+      "params": {}
+    }
+  ]
+}

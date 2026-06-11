@@ -14,7 +14,7 @@ import { PivotEvents } from "../lib/pivotEvents";
  * Needed to pass the apply callback to the overlay.
  */
 let currentFilterState: {
-  pivotId: number;
+  pivotId: string;
   fieldIndex: number;
   fieldName: string;
 } | null = null;
@@ -30,7 +30,7 @@ export async function handleOpenFilterMenu(detail: {
   col: number;
   anchorX: number;
   anchorY: number;
-  pivotId?: number;
+  pivotId?: string;
 }): Promise<void> {
   const { fieldIndex, fieldName, row, col, anchorX, anchorY } = detail;
 

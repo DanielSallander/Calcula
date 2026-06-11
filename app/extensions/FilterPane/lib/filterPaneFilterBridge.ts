@@ -74,7 +74,7 @@ function parseBiValueFieldRef(name: string): BiValueFieldRef {
  * This avoids multiple rebuilds that would wipe each other's filters.
  */
 async function ensureBiFieldsInPivotCache(
-  pivotId: number,
+  pivotId: string,
   fieldNames: string[],
 ): Promise<boolean> {
   // Only BI pivots use "table.column" format
@@ -164,7 +164,7 @@ async function resolveConnections(
   // Get all pivots
   try {
     const pivots = await getAllPivotTables<
-      Array<{ id: number; name: string; sourceRange: string }>
+      Array<{ id: string; name: string; sourceRange: string }>
     >();
 
     if (filter.connectionMode === "workbook") {
@@ -177,7 +177,7 @@ async function resolveConnections(
       for (const pv of pivots) {
         try {
           const biMeta = await invokeBackend<{
-            connectionId: number;
+            connectionId: string;
             sheetIndex: number;
           } | null>("get_pivot_bi_metadata", { pivotId: pv.id });
           if (biMeta && sheetSet.has(biMeta.sheetIndex)) {
@@ -196,7 +196,7 @@ async function resolveConnections(
   // Get all tables
   try {
     const tables = await invokeBackend<
-      Array<{ id: number; name: string; sheetIndex: number }>
+      Array<{ id: string; name: string; sheetIndex: number }>
     >("get_all_tables", {});
 
     if (filter.connectionMode === "workbook") {
@@ -240,7 +240,7 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
     );
 
     // Collect pivot IDs we're applying to
-    const affectedPivotIds = new Set<number>();
+    const affectedPivotIds = new Set<string>();
 
     // Show loading overlay on affected pivots
     for (const conn of connected) {
@@ -381,13 +381,13 @@ export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
 // ============================================================================
 
 async function applyTableFilterForSource(
-  tableId: number,
+  tableId: string,
   fieldName: string,
   selectedItems: string[] | null,
 ): Promise<void> {
   // Find all tables across all sheets to get the correct sheet index
   const allSheetTables: Array<{
-    id: number;
+    id: string;
     sheetIndex: number;
     columns: Array<{ name: string }>;
     styleOptions: { headerRow: boolean; showFilterButton: boolean };
@@ -398,7 +398,7 @@ async function applyTableFilterForSource(
     try {
       const tables = await invokeBackend<
         Array<{
-          id: number;
+          id: string;
           sheetIndex: number;
           columns: Array<{ name: string }>;
           styleOptions: { headerRow: boolean; showFilterButton: boolean };
@@ -428,7 +428,7 @@ async function applyTableFilterForSource(
 }
 
 async function resolveFieldIndex(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
 ): Promise<number> {
   try {
@@ -447,7 +447,7 @@ async function resolveFieldIndex(
 }
 
 async function applyPivotFilterForSource(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
   selectedItems: string[] | null,
 ): Promise<void> {

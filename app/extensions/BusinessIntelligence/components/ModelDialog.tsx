@@ -10,25 +10,19 @@ import {
   useGridState,
   columnToLetter,
   openTaskPane,
-  clearTaskPaneManuallyClosed,
   addTaskPaneContextKey,
+  getPivotStoreService,
 } from "@api";
 import { pivot } from "@api/pivot";
+import type { BiPivotModelInfo } from "@api/pivot";
 import { createConnection, connect, getModelInfo } from "../lib/bi-api";
-import { PIVOT_PANE_ID } from "../../Pivot/manifest";
 import { CONNECTIONS_PANE_ID } from "../manifest";
-import {
-  ensureDesignTabRegistered,
-  setJustCreatedPivot,
-} from "../../Pivot/handlers/selectionHandler";
 import type { BiModelInfo, ConnectionInfo } from "../types";
-import type { PivotEditorViewData } from "../../Pivot/types";
-import type { BiPivotModelInfo } from "../../Pivot/lib/pivot-api";
 
 /** Convert BiModelInfo to BiPivotModelInfo (for pivot field list). */
 function toBiPivotModelInfo(
   info: BiModelInfo,
-  connectionId: number,
+  connectionId: string,
 ): BiPivotModelInfo {
   const numericTypes = new Set([
     "integer",
@@ -267,25 +261,9 @@ export function ModelDialog({
 
       const biModel = toBiPivotModelInfo(modelInfo, createdConnection.id);
 
-      clearTaskPaneManuallyClosed(PIVOT_PANE_ID);
-      addTaskPaneContextKey("pivot");
-      ensureDesignTabRegistered();
-
-      const paneData: PivotEditorViewData = {
-        pivotId,
-        sourceFields: [],
-        initialRows: [],
-        initialColumns: [],
-        initialValues: [],
-        initialFilters: [],
-        initialLayout: {},
-        biModel,
-      };
-      openTaskPane(
-        PIVOT_PANE_ID,
-        paneData as unknown as Record<string, unknown>,
-      );
-      setJustCreatedPivot(true);
+      // Open the Pivot editor pane via the IoC service registered by the
+      // Pivot extension (extensions must not import each other directly).
+      getPivotStoreService()?.openBiPivotEditor(pivotId, biModel);
 
       onClose();
     } catch (err) {

@@ -59,7 +59,7 @@ async function createSmallTable(
   ctx: { setCells: (u: Array<{ row: number; col: number; value: string }>) => Promise<void>; settle: () => Promise<void> },
   name: string,
   colOffset: number = 0,
-): Promise<number> {
+): Promise<string> {
   const r0 = A.row, c0 = A.col + colOffset;
   await ctx.setCells([
     { row: r0, col: c0, value: "Name" },

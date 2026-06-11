@@ -224,7 +224,7 @@ export const pivotTablesSuite: TestSuite = {
           name: "TestPivot",
         });
         expectNotNull(view, "createPivotTable should return a view");
-        assertTrue(view.pivotId >= 1, "Pivot ID should be >= 1");
+        assertTrue(typeof view.pivotId === "string" && view.pivotId.length > 0, "Pivot ID should be non-empty");
 
         // Empty pivot (no fields) should have minimal output
         assertEqual(view.rowCount >= 0, true, "rowCount should be non-negative");
@@ -681,7 +681,7 @@ export const pivotTablesSuite: TestSuite = {
         // Check destination cell
         const region = await getPivotAtCell(A.row + DEST_ROW_OFFSET, A.col + DEST_COL_OFFSET);
         expectNotNull(region, "Destination cell should be inside pivot region");
-        assertTrue(region!.pivotId >= 1, "Pivot region should have a valid pivot ID");
+        assertTrue(typeof region!.pivotId === "string" && region!.pivotId.length > 0, "Pivot region should have a valid pivot ID");
       },
     },
     {

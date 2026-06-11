@@ -1357,11 +1357,12 @@ pub fn extract_connection_spec_info(model_json: &serde_json::Value) -> Connectio
 fn load_embedded_data_sources(
     data_sources: &[calp::pull::PulledDataSource],
     bi_state: &BiState,
-) -> std::collections::HashMap<String, u64> {
+) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
     use crate::bi::types::{Connection, ConnectionType};
     use crate::bi::engine_registry::ModelKey;
 
-    let mut ds_to_conn: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut ds_to_conn: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+        std::collections::HashMap::new();
 
     for ds in data_sources {
         let model_path = ds.model_path.to_string_lossy().to_string();
@@ -1420,12 +1421,7 @@ fn load_embedded_data_sources(
             bi_state.engine_registry.get_or_create(&model_key, engine);
 
         // Allocate a connection ID and register the connection
-        let conn_id = {
-            let mut next_id = bi_state.next_connection_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        let conn_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
         // Build bindings from the package definition
         let bindings: Vec<crate::bi::types::BiBindRequest> = ds.definition.bindings.iter().map(|b| {
@@ -1488,7 +1484,7 @@ fn restore_pulled_pivots(
     state: &AppState,
     pivot_state: &crate::pivot::types::PivotState,
     sheet_offset: usize,
-    embedded_connection_ids: &std::collections::HashMap<String, u64>,
+    embedded_connection_ids: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
 ) {
     use pivot_engine::{PivotCache, PivotDefinition};
     use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid, update_pivot_region};
@@ -1585,7 +1581,7 @@ fn restore_pulled_pivots(
     // Restore BI pivot metadata, resolving connection_id from embedded data sources
     if !bi_pivot_metadata.is_empty() {
         // Use the first embedded connection ID if available
-        let default_conn_id = embedded_connection_ids.values().next().copied().unwrap_or(0);
+        let default_conn_id = embedded_connection_ids.values().next().copied().unwrap_or_default();
         crate::log_info!("CALP-DIAG", "Restoring BI metadata: {} entries, embedded_connection_ids={:?}, default_conn_id={}",
             bi_pivot_metadata.len(), embedded_connection_ids, default_conn_id);
 
@@ -1650,8 +1646,8 @@ fn capture_bi_data_sources(
         // Parse server and database from connection string (PostgreSQL key=value format)
         let (server, database) = parse_pg_connection_info(&conn.connection_string);
 
-        // Generate a stable ID for this data source
-        let ds_id = format!("{:016x}", conn.id);
+        // The connection's EntityId (canonical UUID string) is the stable data source ID
+        let ds_id = conn.id.to_string();
 
         // Convert bindings
         let bindings: Vec<calp::PackageBinding> = conn.bindings.iter().map(|b| {

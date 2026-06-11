@@ -68,7 +68,25 @@ export default defineConfig({
       name: "invariant",
       testDir: "./e2e/tests",
       testMatch: "**/state-consistency.spec.ts",
-      timeout: 120_000,
+      // Oracle checkpoints (digest + undo/redo round-trip + recalc +
+      // periodic save/reload) add real time per run.
+      timeout: 300_000,
+    },
+    {
+      // Soak walks: long random action sequences with semantic oracles and
+      // in-spec trace minimization. Driven by SOAK_* env vars; see
+      // e2e/soak/soak-walk.spec.ts. Run via tests/soak/soak-runner.mjs.
+      name: "soak",
+      testDir: "./e2e/soak",
+      testMatch: "**/*.spec.ts",
+      timeout: Number(process.env.SOAK_TIMEOUT_MS ?? 1_800_000),
+    },
+    {
+      // Real-user workflow scenarios with oracle checkpoints per phase.
+      name: "scenario",
+      testDir: "./e2e/scenarios",
+      testMatch: "**/*.scenario.ts",
+      timeout: 300_000,
     },
   ],
 });

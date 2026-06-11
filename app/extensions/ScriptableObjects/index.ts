@@ -383,7 +383,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   for (const eventName of componentCreationEvents) {
     cleanupFunctions.push(
       onAppEvent(eventName, async (detail) => {
-        const d = detail as { id?: number; slicerId?: number; chartId?: number; pivotId?: number; name?: string };
+        const d = detail as { id?: string; slicerId?: string; chartId?: string; pivotId?: string; name?: string };
         const instanceId = String(d.id ?? d.slicerId ?? d.chartId ?? d.pivotId ?? "");
         const objectType = eventName.split(":")[0] as ScriptableObjectType;
         const objectName = d.name || `${objectType} ${instanceId}`;

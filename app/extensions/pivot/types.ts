@@ -31,13 +31,17 @@ export interface ZoneField {
   numberFormat?: string;
   baseField?: string;
   baseItem?: string;
+  /** Whether this is a LOOKUP (attribute) field rather than GROUP. BI pivots only. */
+  isLookup?: boolean;
+  /** Items hidden by the filter (filter fields only). */
+  hiddenItems?: string[];
 }
 
 /**
  * Data passed to the PivotEditorView component.
  */
 export interface PivotEditorViewData {
-  pivotId: number;
+  pivotId: string;
   sourceFields: SourceField[];
   initialRows: ZoneField[];
   initialColumns: ZoneField[];
@@ -53,7 +57,7 @@ export interface PivotEditorViewData {
  * Pivot region data for rendering.
  */
 export interface PivotRegionData {
-  pivotId: number;
+  pivotId: string;
   name: string;
   startRow: number;
   startCol: number;

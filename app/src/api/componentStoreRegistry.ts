@@ -1,26 +1,30 @@
 //! FILENAME: app/src/api/componentStoreRegistry.ts
-// PURPOSE: IoC registry for component object stores (Slicer, Chart, Pivot).
-// CONTEXT: The API layer cannot import from extensions. Extensions register their
-//          store functions here at activation time, and the scriptable object
-//          contexts use these registered functions to access component data.
+// PURPOSE: IoC registry for component object stores (Slicer, Chart, Pivot, BI).
+// CONTEXT: The API layer cannot import from extensions, and extensions must not
+//          import each other. Extensions register their store/service functions
+//          here at activation time; consumers (scriptable object contexts, other
+//          extensions) access them through these registered functions.
+
+import type { BiPivotModelInfo } from "./pivot";
+import type { ConnectionInfo, UpdateConnectionRequest } from "./backend";
 
 // ============================================================================
 // Slicer Store Interface
 // ============================================================================
 
 export interface ISlicerStoreService {
-  getSlicerById(id: number): { name: string; selectedItems: string[] | null; fieldName: string; sourceType: string; columns: number } | undefined;
-  getSelectedItems(slicerId: number): string[];
-  setSelectedItems(slicerId: number, items: string[] | null): Promise<void>;
-  getCachedItems(slicerId: number): Array<{ text: string; hasData: boolean }> | undefined;
+  getSlicerById(id: string): { name: string; selectedItems: string[] | null; fieldName: string; sourceType: string; columns: number } | undefined;
+  getSelectedItems(slicerId: string): string[];
+  setSelectedItems(slicerId: string, items: string[] | null): Promise<void>;
+  getCachedItems(slicerId: string): Array<{ text: string; hasData: boolean }> | undefined;
   /** Register a custom item renderer for a slicer. Returns cleanup function. */
-  setItemRenderer(slicerId: number, renderer: ((
+  setItemRenderer(slicerId: string, renderer: ((
     item: { text: string; selected: boolean; hasData: boolean; index: number },
     ctx: CanvasRenderingContext2D,
     bounds: { x: number; y: number; width: number; height: number },
   ) => void) | null): () => void;
   /** Set a canvas-style property override on a slicer. */
-  setStyleProperty(slicerId: number, name: string, value: string): void;
+  setStyleProperty(slicerId: string, name: string, value: string): void;
 }
 
 // ============================================================================
@@ -28,10 +32,10 @@ export interface ISlicerStoreService {
 // ============================================================================
 
 export interface IChartStoreService {
-  getChartById(id: number): { specJson: string } | null;
-  updateChartSpec(chartId: number, specUpdates: Record<string, unknown>): void;
+  getChartById(id: string): { specJson: string } | null;
+  updateChartSpec(chartId: string, specUpdates: Record<string, unknown>): void;
   /** Set a canvas-style property override on a chart. */
-  setStyleProperty(chartId: number, name: string, value: string): void;
+  setStyleProperty(chartId: string, name: string, value: string): void;
 }
 
 // ============================================================================
@@ -39,8 +43,27 @@ export interface IChartStoreService {
 // ============================================================================
 
 export interface IPivotStoreService {
-  getPivotFields(pivotId: number): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
-  refreshPivot(pivotId: number): Promise<void>;
+  getPivotFields(pivotId: string): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
+  refreshPivot(pivotId: string): Promise<void>;
+  /** Open the Pivot editor pane for a freshly created BI-backed pivot.
+   *  Used by the BusinessIntelligence extension after create_pivot_from_bi_model. */
+  openBiPivotEditor(pivotId: string, biModel: BiPivotModelInfo): void;
+}
+
+// ============================================================================
+// BI Connection Service Interface
+// ============================================================================
+
+/** Access to BI connections, registered by the BusinessIntelligence extension.
+ *  Lets other extensions (e.g. Pivot's connection banner/badge) read and manage
+ *  connections without importing the BI extension directly. */
+export interface IBiConnectionService {
+  /** Get all connections (cached by the BI extension). */
+  getConnections(): Promise<ConnectionInfo[]>;
+  /** Connect a connection to its database. */
+  connect(connectionId: string): Promise<ConnectionInfo>;
+  /** Update connection properties (e.g. provide credentials). */
+  updateConnection(request: UpdateConnectionRequest): Promise<ConnectionInfo>;
 }
 
 // ============================================================================
@@ -50,6 +73,7 @@ export interface IPivotStoreService {
 let slicerStore: ISlicerStoreService | null = null;
 let chartStore: IChartStoreService | null = null;
 let pivotStore: IPivotStoreService | null = null;
+let biConnectionService: IBiConnectionService | null = null;
 
 export function registerSlicerStoreService(service: ISlicerStoreService): void {
   slicerStore = service;
@@ -63,6 +87,10 @@ export function registerPivotStoreService(service: IPivotStoreService): void {
   pivotStore = service;
 }
 
+export function registerBiConnectionService(service: IBiConnectionService): void {
+  biConnectionService = service;
+}
+
 export function getSlicerStoreService(): ISlicerStoreService | null {
   return slicerStore;
 }
@@ -73,4 +101,8 @@ export function getChartStoreService(): IChartStoreService | null {
 
 export function getPivotStoreService(): IPivotStoreService | null {
   return pivotStore;
+}
+
+export function getBiConnectionService(): IBiConnectionService | null {
+  return biConnectionService;
 }

@@ -322,7 +322,7 @@ describe("cache reads during writes", () => {
     expect(cache).toBeDefined();
 
     let fetchCount = 0;
-    const mockFetch = async (pivotId: number, startRow: number, rowCount: number) => {
+    const mockFetch = async (pivotId: string, startRow: number, rowCount: number) => {
       fetchCount++;
       return {
         version: 5,

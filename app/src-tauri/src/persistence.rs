@@ -1084,7 +1084,7 @@ fn restore_pivot_definitions(
         };
 
         bi_metadata.insert(saved.pivot_id, BiPivotMetadata {
-            connection_id: 0, // placeholder — resolved when user connects to BI
+            connection_id: crate::bi::types::ConnectionId::ZERO, // placeholder — resolved when user connects to BI
             model_tables: saved.model_tables,
             measures: saved.measures,
             hierarchies: saved.hierarchies,
@@ -1789,6 +1789,9 @@ pub fn new_file(
 
     // Clear chart state
     state.charts.lock().unwrap().clear();
+
+    // Clear sparkline state (BUG-0004: sparklines survived File > New)
+    state.sparklines.lock().unwrap().clear();
 
     // Clear script/notebook state
     script_state.workbook_scripts.lock().unwrap().clear();

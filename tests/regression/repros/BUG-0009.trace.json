@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "seed": 777,
+  "startedAt": "2026-06-11T05:12:15.427Z",
+  "actions": [
+    {
+      "id": "merge.merge",
+      "params": {
+        "startRow": 60,
+        "startCol": 3,
+        "rows": 2,
+        "cols": 2
+      }
+    }
+  ]
+}

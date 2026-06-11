@@ -19,6 +19,14 @@ export function RibbonContainer(): React.ReactElement {
   const [isMinimized, setIsMinimized] = useState(false);
   const prevTabIdsRef = useRef<Set<string>>(new Set());
 
+  // Re-render when panel registry changes (badge updates, placement moves)
+  const [, setPanelRegistryVersion] = useState(0);
+  useEffect(() => {
+    return panelRegistry.onRegistryChange(() => {
+      setPanelRegistryVersion((v) => v + 1);
+    });
+  }, []);
+
   // Listen for Ctrl+F1 toggle ribbon minimize
   useEffect(() => {
     return onAppEvent(AppEvents.RIBBON_TOGGLE_MINIMIZE, () => {
@@ -175,12 +183,14 @@ export function RibbonContainer(): React.ReactElement {
         {tabs.map((tab) => {
           const isActive = activeTabId === tab.id;
           const accentColor = tab.color;
+          const badge = panelRegistry.getBadge(tab.id);
           return (
             <button
               key={tab.id}
               onClick={() => handleTabClick(tab.id)}
               onContextMenu={(e) => handleTabContextMenu(e, tab.id)}
               style={{
+                position: "relative",
                 padding: "6px 16px",
                 border: "none",
                 backgroundColor: isActive ? "#fff" : "transparent",
@@ -199,6 +209,31 @@ export function RibbonContainer(): React.ReactElement {
               }}
             >
               {tab.label}
+              {badge && (
+                <span
+                  style={{
+                    position: "absolute",
+                    bottom: 2,
+                    right: 2,
+                    minWidth: 13,
+                    height: 13,
+                    padding: "0 3px",
+                    borderRadius: 7,
+                    backgroundColor: "#0078d4",
+                    color: "#fff",
+                    fontSize: 9,
+                    fontWeight: 600,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    lineHeight: 1,
+                    boxSizing: "border-box",
+                    pointerEvents: "none",
+                  }}
+                >
+                  {badge}
+                </span>
+              )}
             </button>
           );
         })}

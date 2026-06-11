@@ -44,7 +44,7 @@ export async function readPivotChartData(
  * Returns suggested series definitions and category configuration.
  */
 export async function autoDetectPivotSeries(
-  pivotId: number,
+  pivotId: string,
 ): Promise<{
   series: ChartSeries[];
   title: string | null;
@@ -267,7 +267,7 @@ function cellToNumber(cell: PivotCellData): number {
  * Returns info about row, column, and filter fields currently assigned in the pivot.
  */
 export async function fetchPivotChartFields(
-  pivotId: number,
+  pivotId: string,
 ): Promise<PivotChartFieldInfo[]> {
   try {
     const hierarchies = await pivot.getHierarchies(pivotId);

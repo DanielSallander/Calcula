@@ -10,6 +10,9 @@ import {
   FILTER_PANE_TAB_ID,
 } from "./manifest";
 import { refreshCache, clearCache } from "./lib/filterPaneStore";
+import { registerFilterBadge } from "./lib/filterBadge";
+
+let unregisterBadge: (() => void) | null = null;
 
 // ============================================================================
 // Extension Module
@@ -38,6 +41,9 @@ function activate(context: ExtensionContext): void {
   };
   window.addEventListener("sheet:activated", handleSheetChange);
 
+  // Track applied filters and show count badge on the Filters tab
+  unregisterBadge = registerFilterBadge();
+
   // Initial cache load
   refreshCache();
 
@@ -46,6 +52,8 @@ function activate(context: ExtensionContext): void {
 
 function deactivate(): void {
   console.log("[FilterPane Extension] Deactivating...");
+  unregisterBadge?.();
+  unregisterBadge = null;
   ExtensionRegistry.unregisterRibbonTab(FILTER_PANE_TAB_ID);
   clearCache();
 }

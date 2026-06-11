@@ -1366,26 +1366,26 @@ function buildSlicerContext(
     getSelectedItems() {
       const store = getSlicerStoreService();
       if (store) {
-        return store.getSelectedItems(Number(instanceId));
+        return store.getSelectedItems(instanceId);
       }
       return [];
     },
     async setSelectedItems(items) {
       const store = getSlicerStoreService();
       if (store) {
-        await store.setSelectedItems(Number(instanceId), items);
+        await store.setSelectedItems(instanceId, items);
       }
     },
     async clearSelection() {
       const store = getSlicerStoreService();
       if (store) {
-        await store.setSelectedItems(Number(instanceId), null);
+        await store.setSelectedItems(instanceId, null);
       }
     },
     async selectAll() {
       const store = getSlicerStoreService();
       if (store) {
-        await store.setSelectedItems(Number(instanceId), null);
+        await store.setSelectedItems(instanceId, null);
       }
     },
 
@@ -1393,7 +1393,7 @@ function buildSlicerContext(
       itemRenderer(renderer) {
         const store = getSlicerStoreService();
         if (store) {
-          const unsub = store.setItemRenderer(Number(instanceId), renderer);
+          const unsub = store.setItemRenderer(instanceId, renderer);
           cleanupFns.push(unsub);
           return unsub;
         }
@@ -1402,7 +1402,7 @@ function buildSlicerContext(
       setProperty(name, value) {
         const store = getSlicerStoreService();
         if (store) {
-          store.setStyleProperty(Number(instanceId), name, value);
+          store.setStyleProperty(instanceId, name, value);
         }
       },
     },
@@ -1410,17 +1410,17 @@ function buildSlicerContext(
     properties: {
       get fieldName() {
         const store = getSlicerStoreService();
-        const slicer = store?.getSlicerById(Number(instanceId));
+        const slicer = store?.getSlicerById(instanceId);
         return slicer?.fieldName ?? "";
       },
       get sourceType() {
         const store = getSlicerStoreService();
-        const slicer = store?.getSlicerById(Number(instanceId));
+        const slicer = store?.getSlicerById(instanceId);
         return slicer?.sourceType ?? "";
       },
       get columns() {
         const store = getSlicerStoreService();
-        const slicer = store?.getSlicerById(Number(instanceId));
+        const slicer = store?.getSlicerById(instanceId);
         return slicer?.columns ?? 1;
       },
     },
@@ -1464,7 +1464,7 @@ function buildChartContext(
     getSpec() {
       const store = getChartStoreService();
       if (store) {
-        const chart = store.getChartById(Number(instanceId));
+        const chart = store.getChartById(instanceId);
         if (chart) {
           try {
             return JSON.parse(chart.specJson);
@@ -1476,7 +1476,7 @@ function buildChartContext(
     async updateSpec(patch) {
       const store = getChartStoreService();
       if (store) {
-        store.updateChartSpec(Number(instanceId), patch);
+        store.updateChartSpec(instanceId, patch);
       }
     },
 
@@ -1484,7 +1484,7 @@ function buildChartContext(
       setProperty(name, value) {
         const store = getChartStoreService();
         if (store) {
-          store.setStyleProperty(Number(instanceId), name, value);
+          store.setStyleProperty(instanceId, name, value);
         }
       },
     },
@@ -1533,14 +1533,14 @@ function buildPivotContext(
     getFields() {
       const store = getPivotStoreService();
       if (store) {
-        return store.getPivotFields(Number(instanceId));
+        return store.getPivotFields(instanceId);
       }
       return { rows: [], columns: [], values: [], filters: [] };
     },
     async refresh() {
       const store = getPivotStoreService();
       if (store) {
-        await store.refreshPivot(Number(instanceId));
+        await store.refreshPivot(instanceId);
       }
     },
   };

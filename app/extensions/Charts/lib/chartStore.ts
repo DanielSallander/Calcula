@@ -19,7 +19,7 @@ import type { ChartDefinition, ChartSpec } from "../types";
 
 /** Matches Rust ChartEntry (api_types.rs). */
 interface ChartEntry {
-  id: number;
+  id: string;
   sheetIndex: number;
   specJson: string;
 }
@@ -28,7 +28,8 @@ interface ChartEntry {
 // Store State
 // ============================================================================
 
-let nextChartId = 1;
+/** Counter used only for default display names ("Chart 1", "Chart 2", ...). */
+let nextChartNumber = 1;
 let charts: ChartDefinition[] = [];
 
 /** Active sheet index used for filtering which charts to render. */
@@ -60,7 +61,7 @@ function fromEntry(entry: ChartEntry): ChartDefinition {
 // ============================================================================
 
 /** Chart IDs that have been mutated but not yet persisted. */
-const dirtyChartIds = new Set<number>();
+const dirtyChartIds = new Set<string>();
 
 /** Timer handle for the debounced save. */
 let saveTimer: number | null = null;
@@ -69,7 +70,7 @@ let saveTimer: number | null = null;
  * Mark a chart as dirty and schedule a debounced persist.
  * Multiple calls within 300ms are batched into a single flush.
  */
-function scheduleSave(chartId: number): void {
+function scheduleSave(chartId: string): void {
   dirtyChartIds.add(chartId);
   if (saveTimer !== null) clearTimeout(saveTimer);
   saveTimer = window.setTimeout(flushDirtyCharts, 300);
@@ -117,18 +118,12 @@ export async function loadChartsFromBackend(): Promise<void> {
   try {
     const entries = await invokeBackend<ChartEntry[]>("get_charts");
     charts = entries.map(fromEntry);
-    // Set nextChartId to one past the highest existing ID
-    let maxId = 0;
-    for (const chart of charts) {
-      if (chart.chartId > maxId) {
-        maxId = chart.chartId;
-      }
-    }
-    nextChartId = maxId + 1;
+    // Set the display-name counter past the number of existing charts
+    nextChartNumber = charts.length + 1;
   } catch {
     // If backend call fails (e.g., fresh app), start with empty store
     charts = [];
-    nextChartId = 1;
+    nextChartNumber = 1;
   }
 }
 
@@ -150,10 +145,10 @@ export function createChart(
     height: number;
   },
 ): ChartDefinition {
-  const id = nextChartId++;
+  const id = crypto.randomUUID();
   const chart: ChartDefinition = {
     chartId: id,
-    name: `Chart ${id}`,
+    name: `Chart ${nextChartNumber++}`,
     sheetIndex: placement.sheetIndex,
     x: placement.x,
     y: placement.y,
@@ -170,7 +165,7 @@ export function createChart(
 /**
  * Find a chart by its ID.
  */
-export function getChartById(chartId: number): ChartDefinition | null {
+export function getChartById(chartId: string): ChartDefinition | null {
   return charts.find((c) => c.chartId === chartId) ?? null;
 }
 
@@ -185,7 +180,7 @@ export function getAllCharts(): ChartDefinition[] {
  * Update the spec for an existing chart.
  */
 export function updateChartSpec(
-  chartId: number,
+  chartId: string,
   specUpdates: Partial<ChartSpec>,
 ): void {
   const chart = charts.find((c) => c.chartId === chartId);
@@ -199,7 +194,7 @@ export function updateChartSpec(
 /**
  * Delete a chart from the store.
  */
-export function deleteChart(chartId: number): void {
+export function deleteChart(chartId: string): void {
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
     // Push to trash for undo (keep max 10)
@@ -235,7 +230,7 @@ export function canUndoDeleteChart(): boolean {
  * Move a chart to a new pixel position.
  */
 export function moveChart(
-  chartId: number,
+  chartId: string,
   x: number,
   y: number,
 ): void {
@@ -252,7 +247,7 @@ export function moveChart(
  * Resize a chart (full bounds update to support all corner resize).
  */
 export function resizeChart(
-  chartId: number,
+  chartId: string,
   x: number,
   y: number,
   width: number,
@@ -294,7 +289,7 @@ export function resetChartStore(): void {
   }
   dirtyChartIds.clear();
   charts = [];
-  nextChartId = 1;
+  nextChartNumber = 1;
   activeSheetIndex = 0;
   removeGridRegionsByType("chart");
 }

@@ -23,7 +23,7 @@ export interface SaveLoadToolbarProps {
   sourceTableName?: string;
   currentDslText: string;
   currentSaveAsName?: string;
-  pivotId?: number;
+  pivotId?: string;
   onLoadDsl: (dslText: string) => void;
 }
 
@@ -141,7 +141,7 @@ export function SaveLoadToolbar({
     }
   }, [mismatchDialog, onLoadDsl]);
 
-  const handleDelete = useCallback(async (id: number) => {
+  const handleDelete = useCallback(async (id: string) => {
     try {
       await deletePivotLayout(id);
       await refreshLayouts();

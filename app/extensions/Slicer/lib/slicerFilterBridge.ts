@@ -81,7 +81,7 @@ function parseBiValueFieldRef(name: string): BiValueFieldRef {
  * in the cache).
  */
 export async function ensureBiFieldInPivotCache(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
 ): Promise<boolean> {
   // Only BI pivots use "table.column" format
@@ -255,13 +255,13 @@ export async function applySlicerFilter(slicer: Slicer): Promise<void> {
  * Apply a table filter to a specific table source.
  */
 async function applyTableFilterForSource(
-  tableId: number,
+  tableId: string,
   fieldName: string,
   selectedItems: string[] | null,
   sheetIndex: number,
 ): Promise<void> {
   const tables = await invokeBackend<Array<{
-    id: number;
+    id: string;
     columns: Array<{ name: string }>;
     styleOptions: { headerRow: boolean; showFilterButton: boolean };
   }>>("get_tables_for_sheet", { sheetIndex });
@@ -292,7 +292,7 @@ async function applyTableFilterForSource(
  * Resolve a pivot field's source index from its name.
  */
 async function resolveFieldIndex(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
 ): Promise<number> {
   try {
@@ -316,7 +316,7 @@ async function resolveFieldIndex(
  * Apply a pivot filter to an additional connected pivot table.
  */
 async function applyPivotFilterForSource(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
   selectedItems: string[] | null,
   _sheetIndex: number,

@@ -34,7 +34,7 @@ import type { PivotViewResponse } from "./pivot-api";
 // Helpers
 // ============================================================================
 
-function makePivotView(pivotId: number, version = 1): PivotViewResponse {
+function makePivotView(pivotId: string, version = 1): PivotViewResponse {
   return {
     pivotId,
     version,

@@ -8,12 +8,11 @@ import type { TaskPaneViewProps } from "@api";
 import {
   useGridState,
   columnToLetter,
-  openTaskPane,
-  clearTaskPaneManuallyClosed,
-  addTaskPaneContextKey,
+  getPivotStoreService,
   DialogExtensions,
 } from "@api";
 import { pivot } from "@api/pivot";
+import type { BiPivotModelInfo } from "@api/pivot";
 import {
   getConnections,
   connect,
@@ -23,14 +22,7 @@ import {
   getModelInfo,
   updateConnection,
 } from "../lib/bi-api";
-import { PIVOT_PANE_ID } from "../../Pivot/manifest";
-import {
-  ensureDesignTabRegistered,
-  setJustCreatedPivot,
-} from "../../Pivot/handlers/selectionHandler";
 import type { ConnectionInfo, BiModelInfo } from "../types";
-import type { PivotEditorViewData } from "../../Pivot/types";
-import type { BiPivotModelInfo } from "../../Pivot/lib/pivot-api";
 
 const MODEL_DIALOG_ID = "bi:modelDialog";
 
@@ -41,7 +33,7 @@ const MODEL_DIALOG_ID = "bi:modelDialog";
 /** Convert BiModelInfo (from BI connection) to BiPivotModelInfo (for pivot field list). */
 function toBiPivotModelInfo(
   info: BiModelInfo,
-  connectionId: number,
+  connectionId: string,
 ): BiPivotModelInfo {
   const numericTypes = new Set([
     "integer",
@@ -234,7 +226,7 @@ export function ConnectionsPane(
   const gridState = useGridState();
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [loading, setLoading] = useState(false);
-  const [loadingId, setLoadingId] = useState<number | null>(null);
+  const [loadingId, setLoadingId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
   const [statusType, setStatusType] = useState<"info" | "error" | "success">(
     "info",
@@ -267,7 +259,7 @@ export function ConnectionsPane(
   }, []);
 
   const handleConnect = useCallback(
-    async (connectionId: number) => {
+    async (connectionId: string) => {
       try {
         // If the connection has no database URL (e.g., embedded from a package),
         // either auto-connect (Integrated) or prompt for credentials.
@@ -305,7 +297,7 @@ export function ConnectionsPane(
   );
 
   const handleDisconnect = useCallback(
-    async (connectionId: number) => {
+    async (connectionId: string) => {
       try {
         setLoadingId(connectionId);
         await disconnect(connectionId);
@@ -321,7 +313,7 @@ export function ConnectionsPane(
   );
 
   const handleRefresh = useCallback(
-    async (connectionId: number) => {
+    async (connectionId: string) => {
       try {
         setLoadingId(connectionId);
         setStatus("Refreshing...");
@@ -374,7 +366,7 @@ export function ConnectionsPane(
   );
 
   const handleDelete = useCallback(
-    async (connectionId: number, connectionName: string) => {
+    async (connectionId: string, connectionName: string) => {
       if (
         !window.confirm(
           `Delete connection "${connectionName}"? This will also remove any associated BI regions.`,
@@ -397,7 +389,7 @@ export function ConnectionsPane(
   );
 
   const handleNewPivot = useCallback(
-    async (connectionId: number) => {
+    async (connectionId: string) => {
       try {
         setLoadingId(connectionId);
         setStatus("Creating pivot table...");
@@ -424,25 +416,9 @@ export function ConnectionsPane(
 
         const biModel = toBiPivotModelInfo(modelInfo, connectionId);
 
-        clearTaskPaneManuallyClosed(PIVOT_PANE_ID);
-        addTaskPaneContextKey("pivot");
-        ensureDesignTabRegistered();
-
-        const paneData: PivotEditorViewData = {
-          pivotId,
-          sourceFields: [],
-          initialRows: [],
-          initialColumns: [],
-          initialValues: [],
-          initialFilters: [],
-          initialLayout: {},
-          biModel,
-        };
-        openTaskPane(
-          PIVOT_PANE_ID,
-          paneData as unknown as Record<string, unknown>,
-        );
-        setJustCreatedPivot(true);
+        // Open the Pivot editor pane via the IoC service registered by the
+        // Pivot extension (extensions must not import each other directly).
+        getPivotStoreService()?.openBiPivotEditor(pivotId, biModel);
 
         setStatus(`Pivot table created from connection`, "success");
       } catch (err) {

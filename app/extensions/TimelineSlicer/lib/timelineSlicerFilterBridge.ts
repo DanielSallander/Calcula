@@ -44,7 +44,7 @@ export async function applyTimelineFilter(
  * Apply a filter on a specific pivot table's date field.
  */
 async function applyPivotFilter(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
   selectedItems: string[] | null,
 ): Promise<void> {
@@ -83,7 +83,7 @@ async function applyPivotFilter(
  * Resolve a pivot field's source index from its name.
  */
 async function resolveFieldIndex(
-  pivotId: number,
+  pivotId: string,
   fieldName: string,
 ): Promise<number> {
   try {

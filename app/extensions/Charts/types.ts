@@ -463,7 +463,7 @@ export interface PivotDataSource {
   /** Discriminant tag. */
   type: "pivot";
   /** The pivot table ID to read data from. */
-  pivotId: number;
+  pivotId: string;
   /** Whether to include subtotal rows as categories. Default: false. */
   includeSubtotals?: boolean;
   /** Whether to include grand total row as a category. Default: false. */
@@ -985,8 +985,8 @@ export interface ChartSpec {
 
 /** A chart definition persisted in the store. */
 export interface ChartDefinition {
-  /** Unique chart ID. */
-  chartId: number;
+  /** Unique chart ID (UUID string). */
+  chartId: string;
   /** Display name (e.g., "Chart 1"). */
   name: string;
   /** Sheet index where the chart is rendered. */

@@ -40,7 +40,7 @@ import type {
 let cachedConnections: ConnectionInfo[] | null = null;
 let cachedQueryResult: BiQueryResult | null = null;
 let cachedQueryRequest: BiQueryRequest | null = null;
-let cachedActiveConnectionId: number | null = null;
+let cachedActiveConnectionId: string | null = null;
 
 export function getCachedConnections(): ConnectionInfo[] | null {
   return cachedConnections;
@@ -54,11 +54,11 @@ export function getCachedQueryRequest(): BiQueryRequest | null {
   return cachedQueryRequest;
 }
 
-export function getCachedActiveConnectionId(): number | null {
+export function getCachedActiveConnectionId(): string | null {
   return cachedActiveConnectionId;
 }
 
-export function setCachedActiveConnectionId(id: number | null): void {
+export function setCachedActiveConnectionId(id: string | null): void {
   cachedActiveConnectionId = id;
 }
 
@@ -74,7 +74,7 @@ export async function createConnection(
   return conn;
 }
 
-export async function deleteConnection(connectionId: number): Promise<void> {
+export async function deleteConnection(connectionId: string): Promise<void> {
   await apiDeleteConnection(connectionId);
   cachedConnections = null;
   if (cachedActiveConnectionId === connectionId) {
@@ -97,7 +97,7 @@ export async function getConnections(): Promise<ConnectionInfo[]> {
 }
 
 export async function getConnection(
-  connectionId: number,
+  connectionId: string,
 ): Promise<ConnectionInfo> {
   return apiGetConnection(connectionId);
 }
@@ -106,20 +106,20 @@ export async function getConnection(
 // Connect / Disconnect / Bind
 // ---------------------------------------------------------------------------
 
-export async function connect(connectionId: number): Promise<ConnectionInfo> {
+export async function connect(connectionId: string): Promise<ConnectionInfo> {
   const conn = await apiConnect({ connectionId });
   cachedConnections = null;
   return conn;
 }
 
-export async function disconnect(connectionId: number): Promise<ConnectionInfo> {
+export async function disconnect(connectionId: string): Promise<ConnectionInfo> {
   const conn = await apiDisconnect(connectionId);
   cachedConnections = null;
   return conn;
 }
 
 export async function bindTable(
-  connectionId: number,
+  connectionId: string,
   request: BiBindRequest,
 ): Promise<string> {
   return apiBindTable(connectionId, request);
@@ -130,7 +130,7 @@ export async function bindTable(
 // ---------------------------------------------------------------------------
 
 export async function query(
-  connectionId: number,
+  connectionId: string,
   request: BiQueryRequest,
 ): Promise<BiQueryResult> {
   const result = await apiQuery(connectionId, request);
@@ -150,7 +150,7 @@ export async function insertResult(
 }
 
 export async function refreshConnection(
-  connectionId: number,
+  connectionId: string,
 ): Promise<BiQueryResult[]> {
   const results = await apiRefreshConnection(connectionId);
   cachedConnections = null;
@@ -163,7 +163,7 @@ export async function refreshConnection(
  * Returns names of tables that were refreshed.
  */
 export async function refreshAllInMemory(
-  connectionId: number,
+  connectionId: string,
 ): Promise<string[]> {
   return apiRefreshAllInMemory(connectionId);
 }
@@ -173,7 +173,7 @@ export async function refreshAllInMemory(
 // ---------------------------------------------------------------------------
 
 export async function getModelInfo(
-  connectionId: number,
+  connectionId: string,
 ): Promise<BiModelInfo | null> {
   return apiGetModelInfo(connectionId);
 }

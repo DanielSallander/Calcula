@@ -67,6 +67,8 @@ export interface LogicalState {
   sparklineGroups: SparklineGroupInfo[];
   selection: SelectionInfo | null;
   activeSheet: number;
+  /** Number of sheets in the workbook (1 if the query fails). */
+  sheetCount: number;
   isEditing: boolean;
 }
 
@@ -168,10 +170,11 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
     const gridState = (window as any).__CALCULA_GRID_STATE__;
 
     // Fetch backend state in parallel
-    const [slicers, charts, tables] = await Promise.all([
+    const [slicers, charts, tables, sheetsResult] = await Promise.all([
       tauri.core.invoke("get_all_slicers").catch(() => []),
       tauri.core.invoke("get_charts").catch(() => []),
       tauri.core.invoke("get_all_tables", {}).catch(() => []),
+      tauri.core.invoke("get_sheets").catch(() => null),
     ]);
 
     // Pivot regions from frontend cache (no backend command for "get all pivots")
@@ -231,6 +234,7 @@ async function captureLogicalState(page: Page): Promise<LogicalState> {
       })),
       selection,
       activeSheet: gridState?.activeSheet ?? 0,
+      sheetCount: (sheetsResult as any)?.sheets?.length ?? 1,
       isEditing: gridState?.editing === true,
     };
   });

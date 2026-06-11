@@ -73,7 +73,7 @@ function mockRow(
   return { viewRow, rowType, depth, visible: true, cells };
 }
 
-function mockView(pivotId: number, version = 1, overrides: Partial<PivotViewResponse> = {}): PivotViewResponse {
+function mockView(pivotId: string, version = 1, overrides: Partial<PivotViewResponse> = {}): PivotViewResponse {
   return {
     pivotId,
     version,
@@ -618,7 +618,7 @@ describe('Pivot cache management (deep)', () => {
     cachePivotView(PID, windowedView);
 
     let fetchCalled = false;
-    const fetchFn = async (_pivotId: number, startRow: number, _rowCount: number) => {
+    const fetchFn = async (_pivotId: string, startRow: number, _rowCount: number) => {
       fetchCalled = true;
       return {
         pivotId: PID,

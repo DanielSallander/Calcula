@@ -71,7 +71,7 @@ const styles = {
 // ============================================================================
 
 export function AxisContextMenu({ onClose, data }: OverlayProps): React.ReactElement | null {
-  const chartId = data?.chartId as number | undefined;
+  const chartId = data?.chartId as string | undefined;
   const axisType = data?.axisType as "x" | "y" | undefined;
   const screenX = data?.screenX as number | undefined;
   const screenY = data?.screenY as number | undefined;

@@ -31,7 +31,7 @@ export {
 
 // --- Pivot-specific types below ---
 
-export type PivotId = number;
+export type PivotId = string;
 
 // Show values as matching ShowValuesAs enum
 export type ShowValuesAs =
@@ -133,7 +133,7 @@ export interface BiPivotModelInfo {
   /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
   lookupColumns?: string[];
   /** The connection ID this pivot is associated with (BI pivots only) */
-  connectionId?: number;
+  connectionId?: string;
   /** Hierarchies defined in the BI model (drill-down paths). */
   hierarchies?: BiHierarchyMeta[];
 }

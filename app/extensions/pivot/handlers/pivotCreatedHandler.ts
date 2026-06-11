@@ -15,7 +15,7 @@ import { setJustCreatedPivot, ensureDesignTabRegistered } from "./selectionHandl
  * Handle the pivot:created event.
  * Loads source fields and opens the pivot editor pane.
  */
-export async function handlePivotCreated(detail: { pivotId: number }): Promise<void> {
+export async function handlePivotCreated(detail: { pivotId: string }): Promise<void> {
   const { pivotId } = detail;
 
   console.log("[Pivot Extension] Pivot created:", pivotId);

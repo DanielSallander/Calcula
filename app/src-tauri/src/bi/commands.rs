@@ -497,12 +497,7 @@ pub async fn bi_create_connection(
     }
 
     // Generate ID
-    let id = {
-        let mut next_id = bi_state.next_connection_id.lock().unwrap();
-        let id = *next_id;
-        *next_id += 1;
-        id
-    };
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
     // Prefer connectionSpecs from model, fall back to parsing the connection string
     let (target, _auth) = parse_connection_string(&request.connection_string);

@@ -47,9 +47,9 @@ fn letter_to_col_index(letters: &str) -> u32 {
 /// Convert an A1-style cell reference to R1C1-style.
 ///
 /// - `$A$1` (both absolute) -> `R1C1`
-/// - `A1` (both relative, from base_row=2, base_col=2) -> `R[-1]C[-1]`
-/// - `$A1` (col absolute, row relative) -> `R[-1]C1`
-/// - `A$1` (col relative, row absolute) -> `R1C[-1]`
+/// - `A1` (both relative, from base_row=2, base_col=2) -> `R[-2]C[-2]`
+/// - `$A1` (col absolute, row relative, from base_row=2) -> `R[-2]C1`
+/// - `A$1` (col relative, row absolute, from base_col=2) -> `R1C[-2]`
 ///
 /// `base_row` and `base_col` are 0-based.
 /// The row in A1 notation is 1-based; internally we convert.
@@ -400,8 +400,8 @@ mod tests {
 
     #[test]
     fn test_a1_to_r1c1_mixed() {
-        // $A1 (col absolute, row relative) from base (2,2)
-        assert_eq!(a1_to_r1c1("$A1", 2, 2), "R[-1]C1");
+        // $A1 (col absolute, row relative) from base (2,2): row 0 - base 2 = -2
+        assert_eq!(a1_to_r1c1("$A1", 2, 2), "R[-2]C1");
         // A$1 (row absolute, col relative) from base (2,2)
         assert_eq!(a1_to_r1c1("A$1", 2, 2), "R1C[-2]");
     }
@@ -421,12 +421,8 @@ mod tests {
 
     #[test]
     fn test_r1c1_to_a1_mixed() {
-        // R1C[-2] -> absolute row 1, relative col -2 from base col 2 = col 0 = A
-        assert_eq!(r1c1_to_a1("R1C[-2]", 2, 2), "$A1");
-        // Wait, that's wrong. R1 = absolute row, C[-2] = relative col.
-        // A1 form: col is relative (no $), row is absolute ($).
-        // Col = base_col(2) + (-2) = 0 -> A, Row = 1 (absolute) -> $1
-        // Result: A$1
+        // R1 = absolute row, C[-2] = relative col.
+        // Col = base_col(2) + (-2) = 0 -> A (no $), Row = 1 (absolute) -> $1
         assert_eq!(r1c1_to_a1("R1C[-2]", 2, 2), "A$1");
     }
 

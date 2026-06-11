@@ -23,7 +23,6 @@
  *   CDP_PORT      - WebView2 CDP port (default: 9222)
  */
 
-import { execSync, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -31,16 +30,19 @@ import {
   selectTests, updateHistory, saveHistory,
   logSamplingReport, parsePlaywrightResults,
 } from "./test-sampler.mjs";
+import { timestamp, log, execCmd, ensureDir, findFiles } from "./lib/exec.mjs";
+import {
+  launchApp as launchAppLib,
+  waitForCDP,
+  killApp as killAppLib,
+} from "./lib/app-lifecycle.mjs";
+import { CLAUDE_CMD, revertForbiddenChanges as revertForbiddenChangesLib } from "./lib/claude.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const APP_DIR = path.join(PROJECT_ROOT, "app");
 const RESULTS_DIR = path.join(APP_DIR, "e2e", "results");
 const REPORT_FILE = path.join(RESULTS_DIR, "regression-report.html");
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-opus-4-8";
-const CLAUDE_EFFORT = process.env.CLAUDE_EFFORT || "max";
-const CLAUDE_BASE = process.env.CLAUDE_CMD || "claude";
-const CLAUDE_CMD = `${CLAUDE_BASE} --model ${CLAUDE_MODEL} --effort ${CLAUDE_EFFORT}`;
 
 // ---------------------------------------------------------------------------
 // Parse CLI arguments
@@ -58,7 +60,10 @@ const SKIP_RUST = args["skip-rust"] === "true";
 const ONLY = args.only || null; // "visual", "e2e", "unit", or null for all
 const MAX_FILES_PER_ITERATION = parseInt(args["max-files"] || "10", 10);
 const E2E_MANUAL = args["e2e-manual"] === "true"; // use already-running app for E2E
-const EXPAND_COVERAGE = args["expand"] !== "false"; // auto-create new scenarios when green (default: true)
+// Registry-driven coverage expansion is OFF by default: it generated narrow
+// single-feature specs. The soak runner's behavior-corpus expansion replaces
+// it (tests/soak/soak-runner.mjs). Pass --expand=true to re-enable.
+const EXPAND_COVERAGE = args["expand"] === "true";
 const EXPAND_ITERATIONS = parseInt(args["expand-iterations"] || "5", 10);
 const ALLOW_APP_FIXES = args["allow-app-fixes"] === "true";
 const SAMPLE_SIZE = parseInt(args["sample-size"] || "100", 10);
@@ -69,36 +74,10 @@ const FULL_SWEEP = args["full-sweep"] === "true";
 // Utility functions
 // ---------------------------------------------------------------------------
 
-function timestamp() {
-  return new Date().toISOString().replace("T", " ").replace(/\.\d+Z/, "");
-}
-
-function log(msg) {
-  console.log(`[${timestamp()}] ${msg}`);
-}
-
+// timestamp/log/ensureDir/findFiles come from ./lib/exec.mjs.
+// exec keeps its historical default cwd (APP_DIR) via this thin wrapper.
 function exec(cmd, options = {}) {
-  const opts = {
-    cwd: APP_DIR,
-    stdio: "pipe",
-    timeout: 600_000, // 10 min default
-    encoding: "utf-8",
-    ...options,
-  };
-  try {
-    const result = execSync(cmd, opts);
-    return { success: true, output: result?.toString() || "", code: 0 };
-  } catch (err) {
-    return {
-      success: false,
-      output: (err.stdout?.toString() || "") + "\n" + (err.stderr?.toString() || ""),
-      code: err.status || 1,
-    };
-  }
-}
-
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return execCmd(cmd, { cwd: APP_DIR, ...options });
 }
 
 // ---------------------------------------------------------------------------
@@ -154,98 +133,18 @@ const SETUP_RUST_ENV = path.join(PROJECT_ROOT, "core", "setup-rust-env.ps1");
  *
  * Returns the PID of the PowerShell process (for cleanup).
  */
+// App lifecycle delegates to ./lib/app-lifecycle.mjs (shared with the soak
+// runner). The wrappers keep the original zero-arg call sites.
 function launchApp() {
-  log("  Launching Calcula with CDP on port " + CDP_PORT + "...");
-
-  // Kill any leftover processes on the CDP port
-  try {
-    execSync(`powershell -Command "Get-NetTCPConnection -LocalPort ${CDP_PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`, { stdio: "ignore" });
-  } catch { /* no process on port */ }
-
-  // Launch via PowerShell so MSVC env vars are properly set
-  const psScript = `
-    & '${SETUP_RUST_ENV}'
-    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=${CDP_PORT}'
-    Set-Location '${APP_DIR}'
-    yarn tauri dev
-  `;
-
-  const child = spawn("powershell", ["-NoProfile", "-Command", psScript], {
-    cwd: APP_DIR,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
-    shell: false,
+  return launchAppLib({
+    appDir: APP_DIR,
+    setupRustEnvPath: SETUP_RUST_ENV,
+    cdpPort: CDP_PORT,
   });
-
-  // Only log key build milestones (not every line)
-  const logMilestone = (data) => {
-    const line = data.toString();
-    if (line.includes("Compiling") || line.includes("Finished") ||
-        line.includes("Running") || line.includes("VITE") ||
-        line.includes("ready in") || line.includes("error")) {
-      process.stdout.write(`  [tauri] ${line.trim()}\n`);
-    }
-  };
-  child.stdout?.on("data", logMilestone);
-  child.stderr?.on("data", logMilestone);
-
-  child.on("error", (err) => {
-    log("  Failed to start Tauri: " + err.message);
-  });
-
-  return child;
 }
 
-/**
- * Wait for CDP to become available on the given port.
- * Uses Node's http module (not PowerShell) for reliable async polling.
- */
-async function waitForCDP(port, timeoutMs) {
-  const http = await import("http");
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    const ready = await new Promise((resolve) => {
-      const req = http.get(`http://localhost:${port}/json/version`, (res) => {
-        let body = "";
-        res.on("data", (d) => (body += d.toString()));
-        res.on("end", () => resolve(res.statusCode === 200));
-      });
-      req.on("error", () => resolve(false));
-      req.setTimeout(3000, () => { req.destroy(); resolve(false); });
-    });
-
-    if (ready) {
-      log(`  CDP ready on port ${port} (took ${Math.round((Date.now() - start) / 1000)}s)`);
-      return true;
-    }
-
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-
-  log(`  CDP not ready after ${Math.round(timeoutMs / 1000)}s`);
-  return false;
-}
-
-/**
- * Kill the app process tree, orphaned app.exe processes, and anything on the CDP port.
- */
 function killApp(child) {
-  // Kill the spawned process tree
-  if (child && child.pid) {
-    log("  Stopping Calcula (PID " + child.pid + ")...");
-    try {
-      execSync(`taskkill /F /T /PID ${child.pid}`, { stdio: "ignore" });
-    } catch { /* already gone */ }
-  }
-  // Kill ALL app.exe processes (the Tauri binary) — catches orphans from prior runs
-  try {
-    execSync(`taskkill /F /IM app.exe`, { stdio: "ignore" });
-  } catch { /* none running */ }
-  // Also kill anything still on the CDP port
-  try {
-    execSync(`powershell -Command "Get-NetTCPConnection -LocalPort ${CDP_PORT} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`, { stdio: "ignore" });
-  } catch { /* nothing on port */ }
+  killAppLib(child, CDP_PORT);
 }
 
 /**
@@ -375,20 +274,7 @@ function collectFailures(results) {
   return report;
 }
 
-function findFiles(dir, suffix) {
-  const results = [];
-  if (!fs.existsSync(dir)) return results;
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...findFiles(fullPath, suffix));
-    } else if (entry.name.endsWith(suffix)) {
-      results.push(fullPath);
-    }
-  }
-  return results;
-}
+// findFiles comes from ./lib/exec.mjs.
 
 // ---------------------------------------------------------------------------
 // Claude Code auto-fix
@@ -511,27 +397,10 @@ function invokeClaudeCodeFix(failureReport, iteration) {
 }
 
 function revertForbiddenChanges() {
-  const FORBIDDEN = [
-    "tests/regression/regression-runner.mjs",
-    "tests/regression/validate-baselines.mjs",
-    "tests/regression/test-sampler.mjs",
-    "tests/regression/suggested-scenarios.md",
-    "tests/regression/README.md",
-    "app/package.json",
-    ".gitignore",
-  ];
-  if (!ALLOW_APP_FIXES) {
-    FORBIDDEN.push("app/src/");
-    FORBIDDEN.push("core/");
-  }
-  const status = exec("git status --porcelain", { cwd: PROJECT_ROOT });
-  for (const line of status.output.trim().split("\n").filter(Boolean)) {
-    const filePath = line.trim().replace(/^[MADRCU? ]+\s+/, "");
-    if (FORBIDDEN.some((p) => filePath.startsWith(p) || filePath === p)) {
-      log(`  Reverting unauthorized change: ${filePath}`);
-      exec(`git checkout -- "${filePath}"`, { cwd: PROJECT_ROOT });
-    }
-  }
+  revertForbiddenChangesLib({
+    projectRoot: PROJECT_ROOT,
+    allowAppFixes: ALLOW_APP_FIXES,
+  });
 }
 
 function checkForChanges(iteration) {

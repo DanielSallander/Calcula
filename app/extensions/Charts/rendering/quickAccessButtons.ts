@@ -29,7 +29,7 @@ export interface QuickAccessButton {
 }
 
 /** State tracking which button popup is open */
-let activePopup: { chartId: number; buttonType: QuickAccessButtonType; screenX: number; screenY: number } | null = null;
+let activePopup: { chartId: string; buttonType: QuickAccessButtonType; screenX: number; screenY: number } | null = null;
 
 // ============================================================================
 // Button Layout
@@ -286,7 +286,7 @@ export function closePopup(): void {
  * Returns the new popup state.
  */
 export function togglePopup(
-  chartId: number,
+  chartId: string,
   buttonType: QuickAccessButtonType,
   screenX: number,
   screenY: number,

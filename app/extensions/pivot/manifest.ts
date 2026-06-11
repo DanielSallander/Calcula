@@ -89,7 +89,7 @@ function CreatePivotDialogWrapper(props: DialogProps): React.ReactElement {
   return React.createElement(CreatePivotDialog, {
     isOpen: props.isOpen,
     onClose: props.onClose,
-    onCreated: (pivotId: number) => {
+    onCreated: (pivotId: string) => {
       // Emit pivot created event using the canonical event name
       emitAppEvent(PivotEvents.PIVOT_CREATED, { pivotId });
       props.onClose();
@@ -213,7 +213,7 @@ function HeaderFilterDropdownWrapper(props: OverlayProps): React.ReactElement {
   return React.createElement(PivotHeaderFilterDropdown, {
     zone: (data.zone as 'row' | 'column') ?? 'row',
     fields: (data.fields as HeaderFieldSummary[]) ?? [],
-    pivotId: (data.pivotId as number) ?? 0,
+    pivotId: (data.pivotId as string) ?? "",
     anchorRect: props.anchorRect ?? { x: 0, y: 0, width: 260, height: 0 },
     onClose: props.onClose,
     onApply,

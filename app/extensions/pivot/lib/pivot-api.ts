@@ -28,6 +28,7 @@ import {
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { emitAppEvent, AppEvents } from "@api";
 import { ask } from "@tauri-apps/plugin-dialog";
+import type { BiHierarchyMeta } from "@api/backend";
 import type { CalculatedFieldDef, ValueColumnRefDef } from '../components/types';
 
 /**
@@ -40,13 +41,13 @@ import type { CalculatedFieldDef, ValueColumnRefDef } from '../components/types'
 const TOTAL_STAGES = 4;
 
 /** Set loading state AND trigger an overlay redraw so the indicator appears immediately. */
-function setLoading(pivotId: number, stage: string, stageIndex = 0, totalStages = TOTAL_STAGES): void {
+function setLoading(pivotId: string, stage: string, stageIndex = 0, totalStages = TOTAL_STAGES): void {
   _setLoading(pivotId, stage, stageIndex, totalStages);
   requestOverlayRedraw();
 }
 
 /** Clear loading state AND trigger an overlay redraw to remove the indicator. */
-function clearLoading(pivotId: number): void {
+function clearLoading(pivotId: string): void {
   _clearLoading(pivotId);
   requestOverlayRedraw();
 }
@@ -144,7 +145,7 @@ import {
 // Types
 // ============================================================================
 
-export type PivotId = number;
+export type PivotId = string;
 
 /** Sort order for pivot fields */
 export type SortOrder = "asc" | "desc" | "manual" | "source";
@@ -262,6 +263,8 @@ export interface ValueFieldConfig {
   showValuesAs?: ShowValuesAs;
   /** Show as rule with base field/item (Excel-compatible form) */
   showAs?: ShowAsRule;
+  /** User-provided custom display name override. */
+  customName?: string;
 }
 
 /** Layout configuration */
@@ -491,6 +494,17 @@ export interface PivotFieldConfiguration {
   filterFields: ZoneFieldInfo[];
   layout: LayoutConfig;
   calculatedFields?: { name: string; formula: string; numberFormat?: string }[];
+  /** Hierarchy configs — which row/column fields belong to hierarchies
+   *  so the frontend can reconstitute them as single items. */
+  hierarchyConfigs?: HierarchyConfigInfo[];
+}
+
+/** Hierarchy config info (mirrors HierarchyConfigInfo in pivot/types.rs). */
+export interface HierarchyConfigInfo {
+  name: string;
+  fieldStart: number;
+  fieldCount: number;
+  isRow: boolean;
 }
 
 /** Info about a filter dropdown cell position */
@@ -504,11 +518,13 @@ export interface FilterZoneInfo {
 /** BI model info for the hierarchical field list */
 export interface BiPivotModelInfo {
   /** The connection ID this pivot is associated with. */
-  connectionId: number;
+  connectionId: string;
   tables: BiModelTable[];
   measures: BiMeasureFieldInfo[];
   /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
   lookupColumns?: string[];
+  /** Hierarchies defined in the BI model (drill-down paths). */
+  hierarchies?: BiHierarchyMeta[];
 }
 
 export interface BiModelTable {
@@ -549,7 +565,7 @@ export interface CreatePivotFromBiModelRequest {
   destinationSheet?: number;
   name?: string;
   /** The connection ID to use for this BI pivot. */
-  connectionId: number;
+  connectionId: string;
 }
 
 /** Request to update BI pivot field assignments */
@@ -1883,14 +1899,14 @@ export async function cancelPivotOperation(pivotId: PivotId): Promise<void> {
 // ============================================================================
 
 export interface CalculatedFieldRequest {
-  pivotId: number;
+  pivotId: string;
   name: string;
   formula: string;
   numberFormat?: string;
 }
 
 export interface UpdateCalculatedFieldRequest {
-  pivotId: number;
+  pivotId: string;
   fieldIndex: number;
   name: string;
   formula: string;
@@ -1898,19 +1914,19 @@ export interface UpdateCalculatedFieldRequest {
 }
 
 export interface RemoveCalculatedFieldRequest {
-  pivotId: number;
+  pivotId: string;
   fieldIndex: number;
 }
 
 export interface CalculatedItemRequest {
-  pivotId: number;
+  pivotId: string;
   fieldIndex: number;
   name: string;
   formula: string;
 }
 
 export interface RemoveCalculatedItemRequest {
-  pivotId: number;
+  pivotId: string;
   itemIndex: number;
 }
 

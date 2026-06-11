@@ -26,7 +26,7 @@ import {
 import type { PivotViewResponse } from './pivot-api';
 
 /** Minimal PivotViewResponse stub. */
-function mockView(pivotId: number, version = 1): PivotViewResponse {
+function mockView(pivotId: string, version = 1): PivotViewResponse {
   return {
     pivotId,
     version,

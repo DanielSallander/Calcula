@@ -19,14 +19,14 @@ import type { SlicerSourceType, SlicerConnection } from "../lib/filterPaneTypes"
 
 interface DataSource {
   type: SlicerSourceType;
-  id: number;
+  id: string;
   name: string;
   sheetIndex: number;
   fields: string[];
   /** Map of field name -> data type */
   fieldTypes?: Map<string, string>;
   /** For biConnection sources: the connection ID */
-  connectionId?: number;
+  connectionId?: string;
 }
 
 // ============================================================================
@@ -78,7 +78,7 @@ export function AddFilterDialog({
       // Fetch all pivots
       try {
         const pivots = await getAllPivotTables<
-          Array<{ id: number; name: string; sourceRange: string }>
+          Array<{ id: string; name: string; sourceRange: string }>
         >();
         for (const pv of pivots) {
           try {

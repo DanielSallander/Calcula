@@ -7,16 +7,16 @@ export type SlicerSourceType = "table" | "pivot" | "biConnection";
 
 export interface SlicerConnection {
   sourceType: SlicerSourceType;
-  sourceId: number;
+  sourceId: string;
 }
 
 export type FieldDataType = "text" | "number" | "date" | "unknown";
 
 export interface RibbonFilter {
-  id: number;
+  id: string;
   name: string;
   sourceType: SlicerSourceType;
-  cacheSourceId: number;
+  cacheSourceId: string;
   fieldName: string;
   fieldDataType: FieldDataType;
   connectionMode: ConnectionMode;
@@ -24,8 +24,8 @@ export interface RibbonFilter {
   connectedSheets: number[];
   displayMode: RibbonFilterDisplayMode;
   selectedItems: string[] | null;
-  crossFilterTargets: number[];
-  crossFilterSlicerTargets: number[];
+  crossFilterTargets: string[];
+  crossFilterSlicerTargets: string[];
   advancedFilter: AdvancedFilter | null;
   hideNoData: boolean;
   indicateNoData: boolean;
@@ -46,7 +46,7 @@ export interface SlicerItem {
 export interface CreateRibbonFilterParams {
   name: string;
   sourceType: SlicerSourceType;
-  cacheSourceId: number;
+  cacheSourceId: string;
   fieldName: string;
   fieldDataType?: FieldDataType;
   connectionMode?: ConnectionMode;
@@ -65,8 +65,8 @@ export interface UpdateRibbonFilterParams {
   connectionMode?: ConnectionMode;
   connectedSources?: SlicerConnection[];
   connectedSheets?: number[];
-  crossFilterTargets?: number[];
-  crossFilterSlicerTargets?: number[];
+  crossFilterTargets?: string[];
+  crossFilterSlicerTargets?: string[];
   advancedFilter?: AdvancedFilter | null;
   hideNoData?: boolean;
   indicateNoData?: boolean;

@@ -190,9 +190,12 @@ const noConsoleErrors: Invariant = {
 // Export
 // ============================================================================
 
+import { CHEAP_INVARIANTS } from "../oracles/cheapInvariants";
+
 /** All invariants to check after each action. */
 export const ALL_INVARIANTS: Invariant[] = [
   contextualRibbonTabConsistency,
   noJsExceptions,
   noConsoleErrors,
+  ...CHEAP_INVARIANTS,
 ];

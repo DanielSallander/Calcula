@@ -189,18 +189,18 @@ function computeLayout(slicer: Slicer, itemCount: number, viewportW: number, vie
 // Scroll State
 // ============================================================================
 
-const scrollOffsets = new Map<number, number>();
+const scrollOffsets = new Map<string, number>();
 
-export function getScrollOffset(slicerId: number): number {
+export function getScrollOffset(slicerId: string): number {
   return scrollOffsets.get(slicerId) ?? 0;
 }
 
-export function setScrollOffset(slicerId: number, offset: number): void {
+export function setScrollOffset(slicerId: string, offset: number): void {
   const max = getMaxScrollOffset(slicerId);
   scrollOffsets.set(slicerId, Math.max(0, Math.min(offset, max)));
 }
 
-export function getMaxScrollOffset(slicerId: number): number {
+export function getMaxScrollOffset(slicerId: string): number {
   const slicer = getSlicerById(slicerId);
   if (!slicer) return 0;
 
@@ -227,7 +227,7 @@ export function resetScrollOffsets(): void {
 // ============================================================================
 
 export function renderSlicer(ctx: OverlayRenderContext): void {
-  const slicerId = ctx.region.data?.slicerId as number | undefined;
+  const slicerId = ctx.region.data?.slicerId as string | undefined;
   if (slicerId == null) return;
 
   const slicer = getSlicerById(slicerId);
@@ -571,7 +571,7 @@ export function getSlicerHitDetail(
   canvasX: number,
   canvasY: number,
   bounds: { x: number; y: number; width: number; height: number },
-  slicerId: number,
+  slicerId: string,
 ): SlicerHitResult | null {
   const slicer = getSlicerById(slicerId);
   if (!slicer) return null;
@@ -645,7 +645,7 @@ export function getSlicerHitDetail(
 export const getSlicerCursor: OverlayCursorFn = (ctx) => {
   if (!ctx.floatingCanvasBounds) return null;
 
-  const slicerId = ctx.region.data?.slicerId as number | undefined;
+  const slicerId = ctx.region.data?.slicerId as string | undefined;
   if (slicerId == null) return null;
 
   const hit = getSlicerHitDetail(
