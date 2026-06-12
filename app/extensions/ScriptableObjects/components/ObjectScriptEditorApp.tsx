@@ -454,12 +454,44 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
   }, [activeScript, source]);
 
-  // Toggle access level
-  const handleToggleAccess = useCallback(() => {
+  // Toggle access level. The backend is authoritative: distributed scripts
+  // cannot be escalated, so the local state and the cross-window event are
+  // only updated AFTER the save succeeds — otherwise a rejected escalation
+  // would still mount with the unlocked API for the session.
+  const handleToggleAccess = useCallback(async () => {
     if (!activeScript) return;
+    if (activeScript.provenance === "distributed") {
+      setConsoleEntries((prev) => [
+        ...prev,
+        {
+          id: ++consoleIdRef.current,
+          level: "error",
+          message: "Distributed scripts cannot change access level. Copy the script to a local one to take ownership.",
+          scriptId: activeScript.id,
+          timestamp: Date.now(),
+        },
+      ]);
+      setShowConsole(true);
+      return;
+    }
     const newLevel: ScriptAccessLevel = activeScript.accessLevel === "restricted" ? "unlocked" : "restricted";
     const updated = { ...activeScript, accessLevel: newLevel };
-    saveObjectScript(updated).catch(console.error);
+    try {
+      await saveObjectScript(updated);
+    } catch (e) {
+      setConsoleEntries((prev) => [
+        ...prev,
+        {
+          id: ++consoleIdRef.current,
+          level: "error",
+          message: `Failed to change access level: ${e}`,
+          scriptId: activeScript.id,
+          timestamp: Date.now(),
+        },
+      ]);
+      setShowConsole(true);
+      return;
+    }
     emitToggleAccess(updated).catch(console.error);
     setScripts((prev) => prev.map((s) => s.id === updated.id ? updated : s));
   }, [activeScript]);

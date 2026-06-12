@@ -596,6 +596,7 @@ dependencies = [
  "engine-connectors",
  "engine-core",
  "engine-query",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -2127,6 +2128,7 @@ name = "engine-core"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "chrono",
  "datafusion",
  "serde",
  "serde_json",

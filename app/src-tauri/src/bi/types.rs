@@ -85,15 +85,30 @@ pub struct Connection {
 }
 
 /// Supported connection types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// SqlServer connections are stored faithfully (the type from a package
+/// manifest or model spec is preserved), but live connect support currently
+/// exists for PostgreSQL only — connect attempts on other types surface a
+/// clear error instead of silently treating them as PostgreSQL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionType {
     PostgreSQL,
+    SqlServer,
 }
 
 impl ConnectionType {
     pub fn as_str(&self) -> &str {
         match self {
             ConnectionType::PostgreSQL => "PostgreSQL",
+            ConnectionType::SqlServer => "SqlServer",
+        }
+    }
+
+    /// Parse a connection type string (from a package manifest or a model's
+    /// connectionSpecs connectorType). Unknown values default to PostgreSQL.
+    pub fn parse_or_default(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "sqlserver" | "sql server" | "mssql" => ConnectionType::SqlServer,
+            _ => ConnectionType::PostgreSQL,
         }
     }
 }

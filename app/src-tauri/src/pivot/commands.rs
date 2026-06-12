@@ -4024,6 +4024,9 @@ pub async fn create_pivot_from_bi_model(
     // Store BI metadata
     let bi_meta = BiPivotMetadata {
         connection_id,
+        // On the authoring machine the live connection UUID is the package
+        // data source id used at publish time.
+        data_source_id: Some(connection_id.to_string()),
         model_tables,
         measures,
         hierarchies,

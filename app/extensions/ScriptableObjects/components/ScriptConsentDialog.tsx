@@ -180,7 +180,8 @@ export default function ScriptConsentDialog({
 
           <p style={{ fontSize: 11, color: "#888" }}>
             You can inspect the script source code before allowing execution.
-            This choice applies for the current session only.
+            Allowing is remembered with this workbook; if the package updates
+            any script's code, you will be asked again.
           </p>
         </div>
 

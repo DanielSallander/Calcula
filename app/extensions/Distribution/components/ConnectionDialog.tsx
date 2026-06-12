@@ -42,7 +42,7 @@ export function ConnectionDialog({ onClose, data }: DialogProps & { data?: Conne
       } else {
         emitAppEvent(AppEvents.SHEET_CHANGED, {});
         setStatus(
-          `Refreshed: ${result.queriesExecuted} queries, ${result.cellsUpdated} cells updated`
+          `${result.sourcesRefreshed} data source(s) connected and verified`
         );
         setTimeout(() => onClose(), 1000);
       }

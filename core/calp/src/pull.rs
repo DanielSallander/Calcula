@@ -159,6 +159,10 @@ pub fn pull(
             // SECURITY: Force all distributed scripts to restricted mode.
             // Subscribers control their own access level.
             script.access_level = persistence::ScriptAccessLevel::Restricted;
+            // Mark provenance so the consent gate fires before mounting and
+            // the script cannot masquerade as locally-authored.
+            script.provenance = persistence::ScriptProvenance::Distributed;
+            script.package_name = Some(request.package_name.clone());
             pulled_scripts.push(script);
         }
     }

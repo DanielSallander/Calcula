@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
-import { refreshPreview, refreshApply, type RefreshPreview } from "@api";
+import { refreshPreview, refreshApply, calculateNow, type RefreshPreview } from "@api";
 
 export function RefreshPreviewDialog({ onClose }: DialogProps) {
   const [preview, setPreview] = useState<RefreshPreview | null>(null);
@@ -30,6 +30,14 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
     setError(null);
     try {
       const r = await refreshApply();
+      // Recalculate (re-overlaid formula overrides have empty values until
+      // evaluated) and refetch grid data so the refreshed content shows.
+      try {
+        await calculateNow();
+      } catch (err) {
+        console.error("[Distribution] Recalc after refresh failed:", err);
+      }
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
       setResult(
         `Refreshed ${r.subscriptionsRefreshed} subscription(s). ` +
         `${r.sheetsAdded} added, ${r.sheetsUpdated} updated, ${r.sheetsRemoved} removed. ` +

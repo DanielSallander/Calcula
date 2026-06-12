@@ -8,7 +8,7 @@ use tauri::State;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use persistence::{SavedObjectScript, ScriptableObjectType, ScriptAccessLevel};
+use persistence::{SavedObjectScript, ScriptableObjectType, ScriptAccessLevel, ScriptProvenance};
 
 // ============================================================================
 // API Types (serialized to/from frontend)
@@ -23,6 +23,10 @@ pub struct ObjectScriptSummary {
     pub object_type: String,
     pub instance_id: Option<String>,
     pub access_level: String,
+    #[serde(default)]
+    pub provenance: Option<String>,
+    #[serde(default)]
+    pub package_name: Option<String>,
 }
 
 /// Full object script definition for the frontend.
@@ -36,6 +40,12 @@ pub struct ObjectScriptData {
     pub source: String,
     pub access_level: String,
     pub description: Option<String>,
+    /// "local" | "distributed". Read-only over IPC: save_object_script
+    /// preserves the stored provenance regardless of what the frontend sends.
+    #[serde(default)]
+    pub provenance: Option<String>,
+    #[serde(default)]
+    pub package_name: Option<String>,
 }
 
 // ============================================================================
@@ -94,6 +104,13 @@ fn string_to_access_level(s: &str) -> Result<ScriptAccessLevel, String> {
     }
 }
 
+fn provenance_to_string(p: &ScriptProvenance) -> String {
+    match p {
+        ScriptProvenance::Local => "local".to_string(),
+        ScriptProvenance::Distributed => "distributed".to_string(),
+    }
+}
+
 fn to_summary(s: &SavedObjectScript) -> ObjectScriptSummary {
     ObjectScriptSummary {
         id: s.id.clone(),
@@ -101,6 +118,8 @@ fn to_summary(s: &SavedObjectScript) -> ObjectScriptSummary {
         object_type: object_type_to_string(&s.object_type),
         instance_id: s.instance_id.clone(),
         access_level: access_level_to_string(&s.access_level),
+        provenance: Some(provenance_to_string(&s.provenance)),
+        package_name: s.package_name.clone(),
     }
 }
 
@@ -113,6 +132,8 @@ fn to_data(s: &SavedObjectScript) -> ObjectScriptData {
         source: s.source.clone(),
         access_level: access_level_to_string(&s.access_level),
         description: s.description.clone(),
+        provenance: Some(provenance_to_string(&s.provenance)),
+        package_name: s.package_name.clone(),
     }
 }
 
@@ -125,6 +146,12 @@ fn from_data(d: &ObjectScriptData) -> Result<SavedObjectScript, String> {
         source: d.source.clone(),
         access_level: string_to_access_level(&d.access_level)?,
         description: d.description.clone(),
+        // Provenance is server-authoritative: never taken from the payload.
+        // save_object_script copies it from the stored entry (or Local for
+        // new scripts) so a frontend save cannot launder a distributed
+        // script into a local one.
+        provenance: ScriptProvenance::Local,
+        package_name: None,
     })
 }
 
@@ -173,18 +200,35 @@ pub fn get_object_script_by_target(
 }
 
 /// Save (create or update) an object script.
+/// Provenance is preserved from the stored entry — a frontend save can never
+/// flip a distributed script back to local. Distributed scripts also cannot
+/// be escalated to unlocked through this command.
 #[tauri::command]
 pub fn save_object_script(
     state: State<AppState>,
     script: ObjectScriptData,
 ) -> Result<(), String> {
-    let saved = from_data(&script)?;
+    let mut saved = from_data(&script)?;
     let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
 
     // Update if exists, otherwise push new
     if let Some(existing) = scripts.iter_mut().find(|s| s.id == saved.id) {
+        saved.provenance = existing.provenance.clone();
+        saved.package_name = existing.package_name.clone();
+        if saved.provenance == ScriptProvenance::Distributed
+            && saved.access_level == ScriptAccessLevel::Unlocked
+            && existing.access_level != ScriptAccessLevel::Unlocked
+        {
+            return Err(
+                "Distributed scripts cannot be escalated to unlocked access. \
+                 Copy the script to a local one to take ownership of it."
+                    .to_string(),
+            );
+        }
         *existing = saved;
     } else {
+        // New scripts are always local-authored (pull materializes
+        // distributed scripts directly into state, not through this command).
         scripts.push(saved);
     }
     Ok(())

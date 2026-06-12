@@ -8,6 +8,9 @@ import {
   revertOverride,
   acceptUpstream,
   keepOverride,
+  calculateNow,
+  onAppEvent,
+  AppEvents,
   type OverrideLayer,
   type CellOverride,
   type OverrideValue,
@@ -112,6 +115,20 @@ export function OverridesPane() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Cell edits on subscribed sheets create/update overrides backend-side —
+  // refetch (debounced) so the pane reflects them live while open.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = onAppEvent(AppEvents.CELL_VALUES_CHANGED, () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { refresh(); }, 400);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsub();
+    };
+  }, [refresh]);
+
   if (loading || !layer) {
     return <div style={{ padding: "12px" }}>Loading...</div>;
   }
@@ -120,13 +137,26 @@ export function OverridesPane() {
   const conflicts = allOverrides.filter((o) => o.conflict);
   const nonConflicts = allOverrides.filter((o) => !o.conflict);
 
+  // Reverting / accepting writes the resolved value into the grid backend-side.
+  // Recalculate dependents and refetch grid data so the change is visible.
+  const refreshGridAfterResolve = async () => {
+    try {
+      await calculateNow();
+    } catch (err) {
+      console.error("[Distribution] Recalc after resolve failed:", err);
+    }
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+  };
+
   const handleRevert = async (ovr: CellOverride) => {
     await revertOverride(ovr.sheetId, ovr.cellId);
+    await refreshGridAfterResolve();
     refresh();
   };
 
   const handleAcceptUpstream = async (ovr: CellOverride) => {
     await acceptUpstream(ovr.sheetId, ovr.cellId);
+    await refreshGridAfterResolve();
     refresh();
   };
 

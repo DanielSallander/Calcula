@@ -2,7 +2,7 @@
 //! Object script definitions serialization for the .cala format.
 //! Each object script is stored as object_scripts/script_{id}.json.
 
-use persistence::{SavedObjectScript, ScriptableObjectType, ScriptAccessLevel};
+use persistence::{SavedObjectScript, ScriptableObjectType, ScriptAccessLevel, ScriptProvenance};
 use serde::{Deserialize, Serialize};
 
 /// JSON-friendly object script definition for the .cala format.
@@ -19,6 +19,12 @@ pub struct ObjectScriptDef {
     pub access_level: ObjectScriptAccessLevelDef,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Origin of the script: local (default) or distributed via .calp.
+    #[serde(default)]
+    pub provenance: ObjectScriptProvenanceDef,
+    /// For distributed scripts: the source package name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
 }
 
 /// Object type in the .cala JSON format.
@@ -51,6 +57,20 @@ pub enum ObjectScriptAccessLevelDef {
 impl Default for ObjectScriptAccessLevelDef {
     fn default() -> Self {
         ObjectScriptAccessLevelDef::Restricted
+    }
+}
+
+/// Script provenance in the .cala JSON format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ObjectScriptProvenanceDef {
+    Local,
+    Distributed,
+}
+
+impl Default for ObjectScriptProvenanceDef {
+    fn default() -> Self {
+        ObjectScriptProvenanceDef::Local
     }
 }
 
@@ -116,6 +136,24 @@ impl From<&ObjectScriptAccessLevelDef> for ScriptAccessLevel {
     }
 }
 
+impl From<&ScriptProvenance> for ObjectScriptProvenanceDef {
+    fn from(p: &ScriptProvenance) -> Self {
+        match p {
+            ScriptProvenance::Local => ObjectScriptProvenanceDef::Local,
+            ScriptProvenance::Distributed => ObjectScriptProvenanceDef::Distributed,
+        }
+    }
+}
+
+impl From<&ObjectScriptProvenanceDef> for ScriptProvenance {
+    fn from(p: &ObjectScriptProvenanceDef) -> Self {
+        match p {
+            ObjectScriptProvenanceDef::Local => ScriptProvenance::Local,
+            ObjectScriptProvenanceDef::Distributed => ScriptProvenance::Distributed,
+        }
+    }
+}
+
 impl From<&SavedObjectScript> for ObjectScriptDef {
     fn from(s: &SavedObjectScript) -> Self {
         ObjectScriptDef {
@@ -126,6 +164,8 @@ impl From<&SavedObjectScript> for ObjectScriptDef {
             source: s.source.clone(),
             access_level: ObjectScriptAccessLevelDef::from(&s.access_level),
             description: s.description.clone(),
+            provenance: ObjectScriptProvenanceDef::from(&s.provenance),
+            package_name: s.package_name.clone(),
         }
     }
 }
@@ -140,6 +180,8 @@ impl From<&ObjectScriptDef> for SavedObjectScript {
             source: d.source.clone(),
             access_level: ScriptAccessLevel::from(&d.access_level),
             description: d.description.clone(),
+            provenance: ScriptProvenance::from(&d.provenance),
+            package_name: d.package_name.clone(),
         }
     }
 }

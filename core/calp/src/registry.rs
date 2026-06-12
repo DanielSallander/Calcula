@@ -182,6 +182,11 @@ impl LocalRegistry {
     // -----------------------------------------------------------------------
 
     /// Save a submission to the registry (creates submitter directory if needed).
+    ///
+    /// The filename is the logical submission SLOT — (region, cell) within the
+    /// submitter's directory — not the per-save submission id. Re-submitting a
+    /// cell therefore REPLACES the prior file instead of accumulating
+    /// duplicates that would double-count in GATHER aggregation.
     pub fn save_submission(
         &self,
         package_name: &str,
@@ -191,7 +196,10 @@ impl LocalRegistry {
         let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id);
         fs::create_dir_all(&sub_dir)?;
 
-        let path = sub_dir.join(format!("{}.json", submission.id));
+        let path = sub_dir.join(format!(
+            "{}_{}_{}.json",
+            submission.region_id, submission.cell_row, submission.cell_col
+        ));
         let content = serde_json::to_string_pretty(submission)?;
         fs::write(&path, content)?;
         Ok(())
@@ -524,5 +532,31 @@ mod tests {
 
         let r2_subs = reg.load_region_submissions("pkg", "1.0.0", "r2").unwrap();
         assert_eq!(r2_subs.len(), 1);
+    }
+
+    #[test]
+    fn resubmission_replaces_prior_file_no_double_count() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        // Same logical slot (region r1, cell 0,0, submitter alice), two
+        // submit cycles with different submission ids and values.
+        let mut first = make_test_submission("r1", "alice");
+        first.id = "sub-rev-1".to_string();
+        reg.save_submission("pkg", "1.0.0", &first).unwrap();
+
+        let mut second = make_test_submission("r1", "alice");
+        second.id = "sub-rev-2".to_string();
+        second.value = crate::writeback::SubmissionValue::Number { value: 99.0 };
+        reg.save_submission("pkg", "1.0.0", &second).unwrap();
+
+        // The slot-keyed filename means the second submit REPLACED the first.
+        let subs = reg.load_region_submissions("pkg", "1.0.0", "r1").unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].id, "sub-rev-2");
+        assert!(matches!(
+            subs[0].value,
+            crate::writeback::SubmissionValue::Number { value } if value == 99.0
+        ));
     }
 }

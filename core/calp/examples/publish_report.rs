@@ -26,7 +26,7 @@ use pivot_engine::{
 };
 
 use calp::publish::{publish, ExcludedRegion, PublishDataSource, PublishRequest};
-use calp::{PackageBinding, PackageQuery, PackageQueryRequest, PackageColumnRef, QueryPlacement};
+use calp::PackageBinding;
 use calp::registry::LocalRegistry;
 use calp::version::SemVer;
 use identity::SheetId;
@@ -403,6 +403,9 @@ fn build_bi_pivot_metadata(pivot_id: PivotId, model_or_bundle: &serde_json::Valu
         "modelTables": model_tables,
         "measures": measures,
         "lookupColumns": [],
+        // Routes the pivot to its data source on pull (matches the ds_id in
+        // load_bi_data_source below).
+        "dataSourceId": "bi-sales-model",
     })
 }
 
@@ -449,28 +452,6 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
 
     let ds_id = "bi-sales-model".to_string();
 
-    // Define a query that matches our pivot layout
-    let query = PackageQuery {
-        id: "sales-by-category-territory".to_string(),
-        name: "Sales by Category & Territory".to_string(),
-        data_source_id: ds_id.clone(),
-        request: PackageQueryRequest {
-            measures: vec!["[fact_sales].[linetotal]".to_string()],
-            group_by: vec![
-                PackageColumnRef { table: "dim_product".to_string(), column: "categoryname".to_string() },
-                PackageColumnRef { table: "dim_territory".to_string(), column: "territorygroup".to_string() },
-            ],
-            filters: vec![],
-        },
-        placement: QueryPlacement {
-            sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
-            start_row: 0,
-            start_col: 0,
-            include_headers: true,
-        },
-        extra: HashMap::new(),
-    };
-
     Some(PublishDataSource {
         id: ds_id,
         name: "Adventure Works Sales Model".to_string(),
@@ -479,7 +460,6 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
         database: String::new(),
         model_json: bundle, // embed full ModelBundle (includes connectionSpecs)
         bindings,
-        queries: vec![query],
     })
 }
 
@@ -524,7 +504,7 @@ fn main() {
     // Prepare data sources (needed before pivot definition to determine source type)
     let data_sources: Vec<PublishDataSource> = match data_source {
         Some(ds) => {
-            println!("BI model embedded: {} ({} bindings, {} queries)", ds.name, ds.bindings.len(), ds.queries.len());
+            println!("BI model embedded: {} ({} bindings)", ds.name, ds.bindings.len());
             vec![ds]
         }
         None => {

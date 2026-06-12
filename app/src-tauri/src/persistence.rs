@@ -1037,6 +1037,16 @@ fn collect_pivot_definitions(
             measures: meta.measures.clone(),
             lookup_columns: meta.lookup_columns.iter().cloned().collect(),
             hierarchies: meta.hierarchies.clone(),
+            // Prefer the carried package data source id; fall back to the
+            // live connection UUID (which IS the package ds id at publish
+            // time on the authoring machine). Never write the ZERO placeholder.
+            data_source_id: meta.data_source_id.clone().or_else(|| {
+                if meta.connection_id.is_zero() {
+                    None
+                } else {
+                    Some(meta.connection_id.to_string())
+                }
+            }),
         };
         match serde_json::to_value(&saved) {
             Ok(json) => workbook.bi_pivot_metadata.push(json),
@@ -1146,6 +1156,9 @@ fn restore_pivot_definitions(
 
         bi_metadata.insert(saved.pivot_id, BiPivotMetadata {
             connection_id: crate::bi::types::ConnectionId::ZERO, // placeholder — resolved when user connects to BI
+            // Preserve the package data source id across load — deriving it
+            // from connection_id would write ZERO on the next save.
+            data_source_id: saved.data_source_id,
             model_tables: saved.model_tables,
             measures: saved.measures,
             hierarchies: saved.hierarchies,
@@ -1629,6 +1642,20 @@ pub fn open_file(
     // workbook until the next pull/refresh.
     crate::calp_commands::rebuild_writeback_index(&state);
 
+    // Re-seed the id registry from the restored override layer. The registry
+    // is in-memory only; without this, the first edit of an overridden cell
+    // after reopen would mint a NEW CellId and create a duplicate override
+    // for the same cell.
+    {
+        let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        if !layer.overrides.is_empty() {
+            let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            for ovr in &layer.overrides {
+                id_reg.register_cell_with_id(ovr.sheet_id, ovr.position, ovr.cell_id);
+            }
+        }
+    }
+
     // Restore AutoFilter state from user_files, then re-link tables
     // (BUG-0013: saved_to_table cannot persist auto_filter_id, so the link
     // is reconstructed here the same way table creation establishes it).
@@ -1896,6 +1923,12 @@ pub fn new_file(
     // Clear script/notebook state
     script_state.workbook_scripts.lock().unwrap().clear();
     script_state.workbook_notebooks.lock().unwrap().clear();
+
+    // Clear object scripts — otherwise the previous workbook's scripts
+    // (including distributed ones) leak into the new workbook and get saved
+    // with it. Same family as the writeback-index leak fixed in Wave 0.
+    state.object_scripts.lock().unwrap().clear();
+    state.pivot_layouts.lock().unwrap().clear();
 
     // Clear subscription metadata
     *state.subscriptions.lock().map_err(|e| e.to_string())? =

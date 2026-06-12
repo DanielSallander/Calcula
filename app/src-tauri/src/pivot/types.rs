@@ -1498,7 +1498,11 @@ pub struct BiValueFieldRef {
 }
 
 /// Serializable BI pivot metadata for persistence in .cala/.calp files.
-/// Does NOT include connection_id (runtime-only, resolved from BiState on load).
+/// Does NOT include a runtime connection_id, but records which package data
+/// source the pivot belongs to (the publisher's connection UUID string —
+/// capture_bi_data_sources uses conn.id.to_string() as the package data
+/// source id), so pull can route each pivot to ITS data source instead of
+/// assigning every pivot the first embedded connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedBiPivotMetadata {
@@ -1508,6 +1512,9 @@ pub struct SavedBiPivotMetadata {
     pub lookup_columns: Vec<String>,
     #[serde(default)]
     pub hierarchies: Vec<BiHierarchyMeta>,
+    /// Package data source id this pivot queries (publisher connection UUID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
 }
 
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
@@ -1515,6 +1522,11 @@ pub struct SavedBiPivotMetadata {
 pub struct BiPivotMetadata {
     /// The connection ID this pivot is associated with.
     pub connection_id: crate::bi::types::ConnectionId,
+    /// The PACKAGE data source id this pivot queries. Stable across
+    /// save/reload and machines (connection_id is runtime-local and resets
+    /// to ZERO on load); carried so publish/pull route the pivot to its own
+    /// data source.
+    pub data_source_id: Option<String>,
     /// All tables from the BI model with column metadata
     pub model_tables: Vec<BiModelTableMeta>,
     /// Model measures

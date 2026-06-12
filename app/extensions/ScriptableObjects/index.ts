@@ -16,6 +16,7 @@ import {
   showToast,
 } from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
+import { loadConsents, recordConsent, isConsentCurrent } from "./lib/consentStore";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import React, { Suspense } from "react";
@@ -79,12 +80,14 @@ export const ScriptableObjectEvents = {
 // Activation
 // ============================================================================
 
-/** Track which packages have been consented to run scripts. */
+/** Track which packages have been consented to run scripts (this session). */
 const consentedPackages = new Set<string>();
 
 /**
  * Load, register, and mount all scripts. For distributed scripts,
- * check if the user has consented to run them.
+ * check if the user has consented to run them — either in this session or
+ * via a persisted consent in the workbook (keyed by script source hash, so
+ * upstream script changes re-prompt).
  */
 async function loadAndMountScripts(): Promise<void> {
   const scripts = await loadAllObjectScripts();
@@ -101,6 +104,8 @@ async function loadAndMountScripts(): Promise<void> {
 
   // For distributed scripts, group by package and check consent
   if (distributedScripts.length > 0) {
+    const persistedConsents = await loadConsents();
+
     const byPackage = new Map<string, typeof distributedScripts>();
     for (const script of distributedScripts) {
       const pkg = script.packageName || "unknown";
@@ -114,7 +119,18 @@ async function loadAndMountScripts(): Promise<void> {
         ObjectScriptManager.registerScript(script);
       }
 
-      // Only mount if user has consented (or auto-consent for this session)
+      // Hydrate session consent from the persisted record when the package's
+      // current script sources still match what was consented to.
+      if (!consentedPackages.has(pkg)) {
+        try {
+          if (await isConsentCurrent(persistedConsents, pkg, pkgScripts)) {
+            consentedPackages.add(pkg);
+          }
+        } catch (e) {
+          console.warn("[ScriptableObjects] Consent check failed:", e);
+        }
+      }
+
       if (consentedPackages.has(pkg)) {
         for (const script of pkgScripts) {
           await ObjectScriptManager.mountScript(script.id);
@@ -134,6 +150,26 @@ async function loadAndMountScripts(): Promise<void> {
 }
 
 async function activate(context: ExtensionContext): Promise<void> {
+  // ---- Consent dialog + listeners FIRST ----
+  // loadAndMountScripts emits SCRIPT_CONSENT_NEEDED synchronously; if the
+  // dialog/listeners register after the initial load, a workbook that
+  // already contains distributed scripts at activation loses its consent
+  // prompt for the whole session.
+  context.ui.dialogs.register({
+    id: "scriptable-objects.consent",
+    title: "Script Security",
+    component: ScriptConsentDialog,
+    width: 460,
+    height: 400,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.consent"));
+
+  cleanupFunctions.push(
+    onAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, (detail) => {
+      context.ui.dialogs.show("scriptable-objects.consent", detail as Record<string, unknown>);
+    }),
+  );
+
   // ---- Load object scripts from backend on startup ----
   try {
     await loadAndMountScripts();
@@ -154,6 +190,19 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
+  // ---- Re-load scripts when a .calp pull materializes new ones ----
+  // Without this, freshly pulled distributed scripts would not appear (or
+  // prompt for consent) until the workbook is saved and reopened.
+  cleanupFunctions.push(
+    onAppEvent("calp:scripts-pulled", async () => {
+      try {
+        await loadAndMountScripts();
+      } catch (e) {
+        console.warn("[ScriptableObjects] Failed to load pulled scripts:", e);
+      }
+    }),
+  );
+
   // ---- Handle consent responses ----
   cleanupFunctions.push(
     onAppEvent("scriptable-objects:consent-granted", async (detail) => {
@@ -166,6 +215,16 @@ async function activate(context: ExtensionContext): Promise<void> {
         if (!ObjectScriptManager.isScriptMounted(script.id)) {
           await ObjectScriptManager.mountScript(script.id);
         }
+      }
+      // Persist the consent in the workbook (durable once the file is saved),
+      // keyed by source hash so changed scripts re-prompt.
+      try {
+        await recordConsent(
+          packageName,
+          scripts.map((s) => ({ id: s.id, source: s.source })),
+        );
+      } catch (e) {
+        console.warn("[ScriptableObjects] Failed to persist consent:", e);
       }
       showToast(`Scripts from "${packageName}" enabled.`, { type: "success" });
     }),
@@ -194,23 +253,6 @@ async function activate(context: ExtensionContext): Promise<void> {
   cleanupFunctions.push(
     onAppEvent(AppEvents.AFTER_NEW, () => {
       resetObjectScriptManager();
-    }),
-  );
-
-  // ---- Register consent dialog ----
-  context.ui.dialogs.register({
-    id: "scriptable-objects.consent",
-    title: "Script Security",
-    component: ScriptConsentDialog,
-    width: 460,
-    height: 400,
-  });
-  cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.consent"));
-
-  // Show consent dialog when distributed scripts need approval
-  cleanupFunctions.push(
-    onAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, (detail) => {
-      context.ui.dialogs.show("scriptable-objects.consent", detail as Record<string, unknown>);
     }),
   );
 

@@ -329,6 +329,87 @@ pub fn calp_browse_registry(
     Ok(packages)
 }
 
+/// What a package version contains, surfaced BEFORE pulling so the user can
+/// review (and explicitly accept) incoming scripts, data sources, and
+/// writeback regions instead of having them materialized silently.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageInspection {
+    pub package_name: String,
+    pub resolved_version: String,
+    pub sheets: Vec<SheetInfo>,
+    pub scripts: Vec<InspectedScript>,
+    pub data_sources: Vec<InspectedDataSource>,
+    pub writeback_region_count: usize,
+    pub table_count: usize,
+    pub named_range_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectedScript {
+    pub name: String,
+    pub object_type: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectedDataSource {
+    pub name: String,
+    pub connection_type: String,
+    pub server: String,
+    pub database: String,
+}
+
+/// Inspect a package version's contents without materializing anything.
+#[tauri::command]
+pub fn calp_inspect_package(
+    registry_path: String,
+    package_name: String,
+    version_pin: String,
+) -> Result<PackageInspection, String> {
+    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let pin = VersionPin::parse(&version_pin).map_err(|e| e.to_string())?;
+    let resolved = registry
+        .resolve_version(&package_name, &pin)
+        .map_err(|e| e.to_string())?;
+    let version = resolved.to_string();
+
+    let manifest = registry
+        .get_version_manifest(&package_name, &version)
+        .map_err(|e| e.to_string())?;
+
+    Ok(PackageInspection {
+        package_name,
+        resolved_version: version,
+        sheets: manifest.sheets.iter().map(|s| SheetInfo {
+            name: s.name.clone(),
+            description: s.description.clone(),
+        }).collect(),
+        scripts: manifest.object_scripts.iter().map(|s| InspectedScript {
+            name: s.name.clone(),
+            object_type: s.object_type.clone(),
+            description: s.description.clone(),
+        }).collect(),
+        data_sources: manifest.data_sources.iter().map(|ds| InspectedDataSource {
+            name: ds.name.clone(),
+            connection_type: ds.connection_type.clone(),
+            server: ds.server.clone(),
+            database: ds.database.clone(),
+        }).collect(),
+        writeback_region_count: manifest
+            .writeback_regions
+            .as_ref()
+            .map(|r| r.len())
+            .unwrap_or(0),
+        table_count: manifest.tables.len(),
+        named_range_count: manifest.named_ranges.len(),
+    })
+}
+
 /// Get subscription metadata for the current workbook.
 #[tauri::command]
 pub fn calp_get_subscriptions(
@@ -347,7 +428,95 @@ pub fn calp_get_overrides(
     Ok(layer.clone())
 }
 
-/// Revert a single override, restoring the upstream value for that cell.
+/// Materialize an OverrideValue into a grid cell, preserving the cell's style.
+/// Formula cells get their AST set with an Empty value — the caller is
+/// responsible for triggering a recalculation pass afterwards.
+fn write_override_value(grid: &mut engine::Grid, row: u32, col: u32, value: &calp::OverrideValue) {
+    let style_index = grid.get_cell(row, col).map(|c| c.style_index).unwrap_or(0);
+    match value {
+        calp::OverrideValue::Empty => {
+            grid.clear_cell(row, col);
+        }
+        calp::OverrideValue::Value { display } => {
+            let cell_value = if display.is_empty() {
+                engine::CellValue::Empty
+            } else if let Ok(n) = display.parse::<f64>() {
+                engine::CellValue::Number(n)
+            } else if display == "TRUE" {
+                engine::CellValue::Boolean(true)
+            } else if display == "FALSE" {
+                engine::CellValue::Boolean(false)
+            } else {
+                engine::CellValue::Text(display.clone())
+            };
+            grid.set_cell(row, col, engine::Cell {
+                ast: None,
+                value: cell_value,
+                style_index,
+                rich_text: None,
+            });
+        }
+        calp::OverrideValue::Formula { formula } => {
+            grid.set_cell(row, col, engine::Cell {
+                ast: parser::parse(formula).ok().map(Box::new),
+                value: engine::CellValue::Empty,
+                style_index,
+                rich_text: None,
+            });
+        }
+    }
+}
+
+/// Write an OverrideValue into the workbook grids at the cell's current
+/// position. Returns true if a cell was written.
+fn apply_override_value_to_grid(
+    state: &AppState,
+    sheet_id: SheetId,
+    cell_id: CellId,
+    fallback_position: (u32, u32),
+    value: &calp::OverrideValue,
+) -> bool {
+    let position = state
+        .id_registry
+        .lock()
+        .ok()
+        .and_then(|reg| reg.cell_position(sheet_id, cell_id))
+        .unwrap_or(fallback_position);
+
+    let sheet_index = {
+        let sheet_ids = match state.sheet_ids.lock() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        match sheet_ids.iter().position(|id| *id == sheet_id) {
+            Some(i) => i,
+            None => return false,
+        }
+    };
+
+    {
+        let mut grids = match state.grids.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        match grids.get_mut(sheet_index) {
+            Some(grid) => write_override_value(grid, position.0, position.1, value),
+            None => return false,
+        }
+    }
+
+    // Keep the active-sheet mirror in sync.
+    let active = state.active_sheet.lock().map(|a| *a).unwrap_or(usize::MAX);
+    if active == sheet_index {
+        if let Ok(mut grid) = state.grid.lock() {
+            write_override_value(&mut grid, position.0, position.1, value);
+        }
+    }
+    true
+}
+
+/// Revert a single override, restoring the upstream (baseline) value for
+/// that cell in the grid.
 #[tauri::command]
 pub fn calp_revert_override(
     state: State<AppState>,
@@ -358,11 +527,29 @@ pub fn calp_revert_override(
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let cid = CellId::parse(&cell_id)
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
-    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
-    Ok(layer.remove_override(sid, cid))
+
+    let restore = {
+        let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let restore = layer
+            .get(sid, cid)
+            .map(|ovr| (ovr.baseline.clone(), ovr.position));
+        if restore.is_some() {
+            layer.remove_override(sid, cid);
+        }
+        restore
+    };
+
+    match restore {
+        Some((baseline, position)) => {
+            apply_override_value_to_grid(&state, sid, cid, position, &baseline);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
-/// Accept the upstream value for a conflicted cell (discards the override).
+/// Accept the upstream value for a conflicted cell: discards the override and
+/// writes the new upstream value into the grid.
 #[tauri::command]
 pub fn calp_accept_upstream(
     state: State<AppState>,
@@ -373,8 +560,28 @@ pub fn calp_accept_upstream(
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let cid = CellId::parse(&cell_id)
         .ok_or_else(|| format!("Invalid cell_id: {}", cell_id))?;
-    let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
-    Ok(layer.accept_upstream(sid, cid))
+
+    let restore = {
+        let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let restore = layer.get(sid, cid).map(|ovr| {
+            // For a conflicted override the value to accept is the new
+            // upstream; otherwise the baseline is the upstream value.
+            let value = ovr.upstream_new.clone().unwrap_or_else(|| ovr.baseline.clone());
+            (value, ovr.position)
+        });
+        if restore.is_some() {
+            layer.accept_upstream(sid, cid);
+        }
+        restore
+    };
+
+    match restore {
+        Some((upstream, position)) => {
+            apply_override_value_to_grid(&state, sid, cid, position, &upstream);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// Keep the consumer's override for a conflicted cell (rebases onto new upstream baseline).
@@ -442,6 +649,183 @@ pub fn calp_import_overrides(
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
     patch.apply_to(&mut layer);
     Ok(count)
+}
+
+// ============================================================================
+// Override capture — subscriber edits to subscribed sheets
+// ============================================================================
+
+/// Canonical string form of an engine cell value for override comparison.
+/// Must stay in sync with `override_value_from_saved` so a captured baseline
+/// compares meaningfully against upstream values from pulled payloads
+/// (SavedCellValue::from_value uses the same conventions, incl. `{:?}` errors).
+fn override_display(value: &engine::CellValue) -> String {
+    match value {
+        engine::CellValue::Empty => String::new(),
+        engine::CellValue::Number(n) => n.to_string(),
+        engine::CellValue::Text(s) => s.clone(),
+        engine::CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        engine::CellValue::Error(e) => format!("{:?}", e),
+        other => format!("{:?}", other),
+    }
+}
+
+/// Canonical OverrideValue for an engine cell (None = absent/cleared cell).
+fn override_value_from_cell(cell: Option<&engine::Cell>) -> calp::OverrideValue {
+    match cell {
+        None => calp::OverrideValue::Empty,
+        Some(c) => {
+            if let Some(formula) = c.formula_string() {
+                calp::OverrideValue::Formula { formula }
+            } else if matches!(c.value, engine::CellValue::Empty) {
+                calp::OverrideValue::Empty
+            } else {
+                calp::OverrideValue::Value { display: override_display(&c.value) }
+            }
+        }
+    }
+}
+
+/// Canonical OverrideValue for a pulled payload cell (None = absent cell).
+/// Mirror of `override_value_from_cell` for persistence::SavedCell.
+pub(crate) fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -> calp::OverrideValue {
+    match cell {
+        None => calp::OverrideValue::Empty,
+        Some(c) => {
+            if let Some(ref formula) = c.formula {
+                calp::OverrideValue::Formula { formula: formula.clone() }
+            } else {
+                match &c.value {
+                    persistence::SavedCellValue::Empty => calp::OverrideValue::Empty,
+                    persistence::SavedCellValue::Number(n) => {
+                        calp::OverrideValue::Value { display: n.to_string() }
+                    }
+                    persistence::SavedCellValue::Text(s) => {
+                        calp::OverrideValue::Value { display: s.clone() }
+                    }
+                    persistence::SavedCellValue::Boolean(b) => calp::OverrideValue::Value {
+                        display: if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+                    },
+                    // SavedCellValue::Error already stores the engine error's
+                    // Debug string (persistence from_value) — same form as
+                    // override_display's `{:?}` of CellError. Wrapping it in
+                    // another Debug would make every error-cell override a
+                    // permanent spurious conflict.
+                    persistence::SavedCellValue::Error(s) => {
+                        calp::OverrideValue::Value { display: s.clone() }
+                    }
+                    other => calp::OverrideValue::Value { display: format!("{:?}", other) },
+                }
+            }
+        }
+    }
+}
+
+/// Record consumer-side overrides for committed edits on a subscribed sheet.
+/// Called by the cell write paths (update_cell, update_cells_batch, fill_range)
+/// after the grid mutation succeeds; `edits` carries (row, col, pre, post)
+/// cell states. Cheap no-op when the sheet isn't part of any subscription.
+/// Writeback cells are excluded (they route to the draft layer instead).
+pub(crate) fn record_subscription_override_edits(
+    state: &AppState,
+    sheet_index: usize,
+    edits: &[(u32, u32, Option<engine::Cell>, Option<engine::Cell>)],
+) {
+    if edits.is_empty() {
+        return;
+    }
+
+    // Resolve the local sheet id for this index.
+    let sheet_id = {
+        let sheet_ids = match state.sheet_ids.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        match sheet_ids.get(sheet_index) {
+            Some(&sid) => sid,
+            None => return,
+        }
+    };
+
+    // Only sheets that belong to a subscription get overrides.
+    {
+        let subs = match state.subscriptions.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let subscribed = subs.subscriptions.iter()
+            .any(|sub| sub.sheets.iter().any(|s| s.local_sheet_id == sheet_id));
+        if !subscribed {
+            return;
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let wb_index = state.writeback_index.lock().ok();
+    // LOCK ORDER: override_layer BEFORE id_registry — calp_refresh_apply and
+    // the workbook-load path acquire them in that order; inverting it here
+    // would be an ABBA deadlock under concurrent commands.
+    let mut layer = match state.override_layer.lock() {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let mut id_reg = match state.id_registry.lock() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    for (row, col, pre, post) in edits {
+        if let Some(ref idx) = wb_index {
+            if idx.contains(sheet_id, *row, *col) {
+                continue;
+            }
+        }
+
+        let pre_value = override_value_from_cell(pre.as_ref());
+        let post_value = override_value_from_cell(post.as_ref());
+        if pre_value == post_value {
+            continue;
+        }
+
+        let cell_id = id_reg.cell_id_at(sheet_id, (*row, *col));
+
+        let restored_baseline = layer
+            .get(sheet_id, cell_id)
+            .map(|existing| post_value == existing.baseline);
+        match restored_baseline {
+            Some(true) => {
+                // Consumer restored the upstream value — the override is gone.
+                layer.remove_override(sheet_id, cell_id);
+            }
+            Some(false) => {
+                if let Some(existing) = layer.get_mut(sheet_id, cell_id) {
+                    existing.current = post_value;
+                    existing.position = (*row, *col);
+                    existing.modified_at = now.clone();
+                    // A new edit on a conflicted cell supersedes the conflict
+                    // decision implicitly: keep the conflict flag so the user
+                    // still resolves it in the Overrides pane.
+                }
+            }
+            None => {
+                // First edit of this cell: the pre-edit state IS the upstream
+                // value (no override existed, so the cell was unmodified).
+                layer.set_override(calp::CellOverride {
+                    sheet_id,
+                    cell_id,
+                    position: (*row, *col),
+                    baseline: pre_value,
+                    current: post_value,
+                    created_at: now.clone(),
+                    modified_at: now.clone(),
+                    author: String::new(),
+                    conflict: false,
+                    upstream_new: None,
+                    extra: std::collections::HashMap::new(),
+                });
+            }
+        }
+    }
 }
 
 /// Resolve a subscription's registry filesystem path from its stored URL.
@@ -543,7 +927,7 @@ pub fn calp_refresh_apply(
     };
 
     // Materialize new/updated sheets into grids.
-    {
+    let active_grid_after_materialize = {
         let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
@@ -601,7 +985,82 @@ pub fn calp_refresh_apply(
                 }
             }
         }
+
+        // Snapshot the active sheet ONLY when it was actually refreshed.
+        // state.grid is the authoritative mirror for the active sheet and
+        // grids[active] can legitimately lag behind it (BUG-0016) — an
+        // unconditional sync would regress unrefreshed active-sheet content.
+        // (sheet_ids and subs are the guards already held by this block.)
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let active_was_refreshed = sheet_ids.get(active).map_or(false, |active_sid| {
+            payloads.iter().any(|payload| {
+                let sub = match subs.subscriptions.get(payload.subscription_index) {
+                    Some(s) => s,
+                    None => return false,
+                };
+                payload.pull_result.sheets.iter().any(|pulled| {
+                    sub.sheets.iter().any(|s| {
+                        s.package_sheet_id == pulled.package_sheet_id
+                            && s.local_sheet_id == *active_sid
+                    })
+                })
+            })
+        });
+        if active_was_refreshed {
+            grids.get(active).cloned()
+        } else {
+            None
+        }
+    };
+
+    // Sync the active-sheet mirror: state.grid is the read path for the
+    // active sheet, and calculate_now copies it back over grids[active] —
+    // without this sync a refreshed active sheet reverts on the next recalc.
+    if let Some(grid) = active_grid_after_materialize {
+        *state.grid.lock().map_err(|e| e.to_string())? = grid;
     }
+
+    // Capture the pre-refresh writeback declarations BEFORE the index is
+    // rebuilt below, so removed/incompatible regions are actually detected.
+    let old_decls = state.writeback_declarations.lock()
+        .map(|d| d.clone()).unwrap_or_default();
+
+    // Build the upstream-value map for the override rebase: for every
+    // override on a refreshed sheet, the new upstream value at the override's
+    // current local position. Package payloads are coordinate-keyed (no
+    // per-cell ids yet), so matching is positional — correct when upstream
+    // updates values in place; upstream row/column insertions are a known
+    // limitation until packages carry cell-level ids.
+    let (upstream_values, refreshed_sheet_ids) = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+
+        let mut values: std::collections::HashMap<(SheetId, CellId), calp::OverrideValue> =
+            std::collections::HashMap::new();
+        let mut sheets: std::collections::HashSet<SheetId> = std::collections::HashSet::new();
+        for payload in &payloads {
+            let sub = &subs.subscriptions[payload.subscription_index];
+            for pulled in &payload.pull_result.sheets {
+                let Some(sheet_sub) = sub.sheets.iter()
+                    .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+                else { continue };
+                let local_sid = sheet_sub.local_sheet_id;
+                sheets.insert(local_sid);
+                for ovr in layer.overrides_for_sheet(local_sid) {
+                    let pos = id_reg
+                        .cell_position(local_sid, ovr.cell_id)
+                        .unwrap_or(ovr.position);
+                    let upstream_cell = pulled.sheet.cells.get(&pos);
+                    values.insert(
+                        (local_sid, ovr.cell_id),
+                        override_value_from_saved(upstream_cell),
+                    );
+                }
+            }
+        }
+        (values, sheets)
+    };
 
     // Apply refresh: update subscription metadata and rebase overrides.
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
@@ -611,20 +1070,34 @@ pub fn calp_refresh_apply(
         payloads,
         &mut subs.subscriptions,
         &mut layer,
+        &upstream_values,
         &now,
     );
+
+    // Re-overlay surviving overrides onto the refreshed grids: the wholesale
+    // grid replacement above wrote pristine upstream content, which would
+    // otherwise silently discard the subscriber's local modifications.
+    // Conflicted overrides keep showing the local value; the Overrides pane
+    // is where the user resolves them.
+    let to_overlay: Vec<calp::CellOverride> = layer.overrides.iter()
+        .filter(|o| refreshed_sheet_ids.contains(&o.sheet_id))
+        .cloned()
+        .collect();
 
     // Rebuild writeback index from updated subscriptions
     drop(subs);
     drop(layer);
+
+    for ovr in &to_overlay {
+        apply_override_value_to_grid(&state, ovr.sheet_id, ovr.cell_id, ovr.position, &ovr.current);
+    }
+
     rebuild_writeback_index(&state);
 
     // Handle writeback region changes: invalidate drafts for removed/incompatible regions
     {
-        let old_decls = state.writeback_declarations.lock()
-            .map(|d| d.clone()).unwrap_or_default();
-
-        // Reload new declarations (rebuild_writeback_index just updated them)
+        // Reload new declarations (rebuild_writeback_index just updated them);
+        // old_decls was captured before the rebuild.
         let new_decls = state.writeback_declarations.lock()
             .map(|d| d.clone()).unwrap_or_default();
 
@@ -1083,8 +1556,126 @@ pub fn calp_update_writeback_region(
 // Phase 14: Writeback Submission
 // ============================================================================
 
+/// Get the cached subscriber identity, loading/creating it on first use.
+pub(crate) fn get_subscriber_identity(state: &AppState) -> Result<calp::SubmitterIdentity, String> {
+    {
+        let cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
+        if let Some(ref id) = *cached {
+            return Ok(id.clone());
+        }
+    }
+    let profile_dir = {
+        let local_app_data = std::env::var("LOCALAPPDATA")
+            .unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(local_app_data).join("Calcula")
+    };
+    let id = calp::identity_provider::load_or_create(&profile_dir)?;
+    let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
+    *cached = Some(id.clone());
+    Ok(id)
+}
+
+/// Resolve the subscription that declares the given writeback region.
+/// Returns (package_name, resolved_version, registry_path). This is what
+/// makes multi-subscription workbooks submit to the right package — the
+/// region id is looked up in each subscription's version manifest.
+fn owning_subscription_for_region(
+    state: &AppState,
+    region_id: &str,
+) -> Result<(String, String, String), String> {
+    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    for sub in &subs.subscriptions {
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+        let registry_path = subscription_registry_path(sub).to_string();
+        let Ok(registry) =
+            calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        else {
+            continue;
+        };
+        let Ok(manifest) =
+            registry.get_version_manifest(&sub.package_name, &sub.resolved_version)
+        else {
+            continue;
+        };
+        if let Some(ref regions) = manifest.writeback_regions {
+            if regions.iter().any(|r| r.id == region_id) {
+                return Ok((
+                    sub.package_name.clone(),
+                    sub.resolved_version.clone(),
+                    registry_path,
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "No subscription declares writeback region '{}'",
+        region_id
+    ))
+}
+
+/// True when the given deadline (ISO 8601, or datetime-local "YYYY-MM-DDTHH:MM")
+/// has passed relative to `now` (RFC 3339).
+fn deadline_passed(deadline: &str, now: &str) -> bool {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    let now_parsed = DateTime::parse_from_rfc3339(now).map(|d| d.with_timezone(&Utc));
+    let deadline_parsed = DateTime::parse_from_rfc3339(deadline)
+        .map(|d| d.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(deadline, "%Y-%m-%dT%H:%M").map(|n| n.and_utc())
+        });
+    match (now_parsed, deadline_parsed) {
+        (Ok(n), Ok(d)) => n >= d,
+        // Unparseable deadline: fall back to lexicographic comparison, which
+        // is correct for identically-formatted UTC timestamps.
+        _ => now >= deadline,
+    }
+}
+
+/// Enforce a region's lifecycle policy for a new draft/submission.
+/// `already_submitted` says whether this submitter already has a submitted
+/// value for the cell in question.
+fn check_lifecycle_policy(
+    decl: &calp::WritebackRegionDeclaration,
+    already_submitted: bool,
+    now: &str,
+) -> Result<(), String> {
+    use calp::writeback::LifecyclePolicy;
+    match &decl.lifecycle {
+        None | Some(LifecyclePolicy::Always) => Ok(()),
+        Some(LifecyclePolicy::UntilDeadline { deadline }) => {
+            if let Some(deadline) = deadline {
+                if deadline_passed(deadline, now) {
+                    return Err(format!(
+                        "The submission deadline for this region has passed ({}).",
+                        deadline
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Some(LifecyclePolicy::Never) => {
+            if already_submitted {
+                Err("This region is one-shot: the value was already submitted and cannot be changed.".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        Some(LifecyclePolicy::RequiresUnlock) => {
+            if already_submitted {
+                Err("This value was submitted and is locked. Ask the publisher to unlock it (publisher unlock is not yet supported).".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Save a writeback draft for a cell in a writeback region.
 /// Auto-mints a CellId if the cell doesn't have one yet.
+/// Enforces the region's schema and lifecycle policy; regions with the
+/// `immediate` submission policy are auto-submitted to the registry on save.
 #[tauri::command]
 pub fn calp_save_writeback_draft(
     state: State<AppState>,
@@ -1105,16 +1696,37 @@ pub fn calp_save_writeback_draft(
         }
     }
 
-    // Validate value against the region's schema (if one is defined)
-    {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Look up the region declaration once for schema + policy enforcement.
+    let decl = {
         let decls = state.writeback_declarations.lock().map_err(|e| e.to_string())?;
-        if let Some(decl) = decls.iter().find(|d| d.id == region_id) {
-            if let Some(ref schema) = decl.schema {
-                schema.validate(&value).map_err(|msg| {
-                    format!("Schema validation failed: {}", msg)
-                })?;
-            }
+        decls.iter().find(|d| d.id == region_id).cloned()
+    };
+
+    if let Some(ref decl) = decl {
+        // Validate value against the region's schema (if one is defined)
+        if let Some(ref schema) = decl.schema {
+            schema.validate(&value).map_err(|msg| {
+                format!("Schema validation failed: {}", msg)
+            })?;
         }
+
+        // Enforce the lifecycle policy (deadline / one-shot / locked)
+        let already_submitted = {
+            let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+            wb_layer.drafts.iter().any(|d| {
+                d.region_id == region_id
+                    && d.cell_row == row
+                    && d.cell_col == col
+                    && matches!(
+                        d.state,
+                        calp::writeback::SubmissionState::Submitted
+                            | calp::writeback::SubmissionState::Approved
+                    )
+            })
+        };
+        check_lifecycle_policy(decl, already_submitted, &now)?;
     }
 
     // Get or mint a CellId for this cell
@@ -1124,26 +1736,7 @@ pub fn calp_save_writeback_draft(
     };
 
     // Get subscriber identity
-    let submitter = {
-        let cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
-        match cached.as_ref() {
-            Some(id) => id.clone(),
-            None => {
-                drop(cached);
-                let profile_dir = {
-                    let local_app_data = std::env::var("LOCALAPPDATA")
-                        .unwrap_or_else(|_| ".".to_string());
-                    std::path::PathBuf::from(local_app_data).join("Calcula")
-                };
-                let id = calp::identity_provider::load_or_create(&profile_dir)?;
-                let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
-                *cached = Some(id.clone());
-                id
-            }
-        }
-    };
-
-    let now = chrono::Utc::now().to_rfc3339();
+    let submitter = get_subscriber_identity(&state)?;
     let submission_id = {
         let bytes = identity::generate_uuid_v7();
         format!(
@@ -1156,7 +1749,7 @@ pub fn calp_save_writeback_draft(
 
     let submission = calp::writeback::WritebackSubmission {
         id: submission_id,
-        region_id,
+        region_id: region_id.clone(),
         cell_row: row,
         cell_col: col,
         cell_id: Some(cell_id),
@@ -1169,8 +1762,20 @@ pub fn calp_save_writeback_draft(
         extra: std::collections::HashMap::new(),
     };
 
-    let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
-    wb_layer.set_draft(submission);
+    let auto_submit = matches!(
+        decl.as_ref().and_then(|d| d.submission_policy.clone()),
+        Some(calp::writeback::SubmissionPolicy::Immediate)
+    );
+
+    {
+        let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        wb_layer.set_draft(submission);
+    }
+
+    // `immediate` regions go straight to the registry — saving IS submitting.
+    if auto_submit {
+        submit_region_internal(&state, &region_id)?;
+    }
 
     Ok(())
 }
@@ -1184,50 +1789,60 @@ pub fn calp_get_writeback_layer(
     Ok(layer.clone())
 }
 
-/// Submit all drafts for a region to the registry.
-#[tauri::command]
-pub fn calp_submit_region(
-    state: State<AppState>,
-    region_id: String,
-    registry_path: String,
-) -> Result<usize, String> {
+/// Submit all drafts for a region to the registry of the subscription that
+/// actually declares the region.
+///
+/// Registry writes happen FIRST; local drafts are only advanced to Submitted
+/// after every write succeeded. Advancing first would permanently mark values
+/// as submitted that the registry never received (retry would be a no-op
+/// because submit_region only advances Draft-state entries).
+fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, String> {
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Get the resolved version from subscriptions
-    let resolved_version = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-        subs.subscriptions.first()
-            .map(|s| s.resolved_version.clone())
-            .ok_or_else(|| "No active subscription".to_string())?
+    // Resolve the OWNING subscription for this region (not subscriptions[0]).
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(state, region_id)?;
+
+    // Snapshot the drafts to submit, as they would look once submitted.
+    let to_submit: Vec<calp::writeback::WritebackSubmission> = {
+        let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        wb_layer
+            .drafts
+            .iter()
+            .filter(|d| {
+                d.region_id == region_id
+                    && matches!(d.state, calp::writeback::SubmissionState::Draft)
+            })
+            .map(|d| {
+                let mut s = d.clone();
+                s.state = calp::writeback::SubmissionState::Submitted;
+                s.submitted_at = Some(now.clone());
+                s.updated_at = now.clone();
+                s
+            })
+            .collect()
     };
 
-    let package_name = {
-        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-        subs.subscriptions.first()
-            .map(|s| s.package_name.clone())
-            .ok_or_else(|| "No active subscription".to_string())?
-    };
-
-    // Advance drafts to submitted
-    let submitted = {
-        let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
-        wb_layer.submit_region(&region_id, &now)
-    };
-
-    if submitted.is_empty() {
+    if to_submit.is_empty() {
         return Ok(0);
     }
 
-    // Write to registry
+    // Write to registry BEFORE mutating local state.
     let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
 
-    for sub in &submitted {
+    for sub in &to_submit {
         registry.save_submission(&package_name, &resolved_version, sub)
             .map_err(|e| e.to_string())?;
     }
 
-    let count = submitted.len();
+    // All writes succeeded — advance the local drafts.
+    {
+        let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        wb_layer.submit_region(region_id, &now);
+    }
+
+    let count = to_submit.len();
 
     // Audit log
     {
@@ -1245,6 +1860,68 @@ pub fn calp_submit_region(
     }
 
     Ok(count)
+}
+
+/// Submit all drafts for a region. The owning subscription's registry is
+/// resolved from the region id — no registry path parameter needed.
+#[tauri::command]
+pub fn calp_submit_region(
+    state: State<AppState>,
+    region_id: String,
+) -> Result<usize, String> {
+    submit_region_internal(&state, &region_id)
+}
+
+/// Approve or reject a submitted writeback value (publisher action).
+/// Rewrites the submission's registry file with the new state; `on_approval`
+/// regions only aggregate Approved submissions in GATHER.
+#[tauri::command]
+pub fn calp_set_submission_state(
+    state: State<AppState>,
+    region_id: String,
+    submitter_id: String,
+    cell_row: u32,
+    cell_col: u32,
+    new_state: String,
+) -> Result<(), String> {
+    let target_state = match new_state.as_str() {
+        "approved" => calp::writeback::SubmissionState::Approved,
+        "rejected" => calp::writeback::SubmissionState::Rejected,
+        "submitted" => calp::writeback::SubmissionState::Submitted,
+        _ => {
+            return Err(format!(
+                "Invalid submission state '{}'. Must be 'approved', 'rejected', or 'submitted'",
+                new_state
+            ))
+        }
+    };
+
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(&state, &region_id)?;
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let submissions = registry
+        .load_submissions(&package_name, &resolved_version, &submitter_id)
+        .map_err(|e| e.to_string())?;
+    let mut submission = submissions
+        .into_iter()
+        .find(|s| s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col)
+        .ok_or_else(|| {
+            format!(
+                "No submission found for region '{}' cell ({}, {}) by submitter '{}'",
+                region_id, cell_row, cell_col, submitter_id
+            )
+        })?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    submission.state = target_state;
+    submission.updated_at = now;
+
+    registry
+        .save_submission(&package_name, &resolved_version, &submission)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Build a GatherRegionData map from the current subscriptions for formula evaluation.
@@ -1298,14 +1975,123 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
             None => continue,
         };
 
+        // Strictly OLDER versions of the package, for lenient carry-forward.
+        // (A subscriber pinned behind must not aggregate submissions made
+        // against newer versions.)
+        let resolved_semver = calp::SemVer::parse(&sub.resolved_version).ok();
+        let older_versions: Vec<String> = registry
+            .get_package_manifest(&sub.package_name)
+            .map(|m| {
+                m.versions
+                    .iter()
+                    .map(|v| v.version.clone())
+                    .filter(|v| match (&resolved_semver, calp::SemVer::parse(v)) {
+                        (Some(resolved), Ok(candidate)) => candidate < *resolved,
+                        _ => false,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // The reader's own identity, for visibility enforcement.
+        let own_identity = get_subscriber_identity(state).ok();
+
         // Load submissions for each region
         for region in regions {
-            let submissions = match registry.load_region_submissions(
+            let mut submissions = match registry.load_region_submissions(
                 &sub.package_name, &sub.resolved_version, &region.id,
             ) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+
+            // Lenient version binding: submissions made against earlier
+            // versions of the same region carry forward instead of being
+            // silently dropped on every version bump. Newest wins per
+            // (submitter, cell) slot.
+            let lenient = !matches!(
+                region.version_binding,
+                Some(calp::writeback::VersionBinding::Strict)
+            );
+            if lenient && !older_versions.is_empty() {
+                let mut slots: std::collections::HashMap<(String, u32, u32), usize> =
+                    submissions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| ((s.submitter.id.clone(), s.cell_row, s.cell_col), i))
+                        .collect();
+                for version in &older_versions {
+                    let Ok(older) = registry.load_region_submissions(
+                        &sub.package_name, version, &region.id,
+                    ) else {
+                        continue;
+                    };
+                    for candidate in older {
+                        let key = (
+                            candidate.submitter.id.clone(),
+                            candidate.cell_row,
+                            candidate.cell_col,
+                        );
+                        match slots.get(&key) {
+                            Some(&i) => {
+                                if candidate.updated_at > submissions[i].updated_at {
+                                    submissions[i] = candidate;
+                                }
+                            }
+                            None => {
+                                submissions.push(candidate);
+                                slots.insert(key, submissions.len() - 1);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Approval gating: rejected submissions never count; under
+            // on_approval only Approved submissions join the aggregate.
+            let require_approval = matches!(
+                region.submission_policy,
+                Some(calp::writeback::SubmissionPolicy::OnApproval)
+            );
+            submissions.retain(|s| match s.state {
+                calp::writeback::SubmissionState::Rejected
+                | calp::writeback::SubmissionState::Draft => false,
+                calp::writeback::SubmissionState::Submitted => !require_approval,
+                calp::writeback::SubmissionState::Approved => true,
+            });
+
+            // A cleared cell is "no submission", not a zero — counting it
+            // would skew AVERAGE/COUNT/SUBMITTERS aggregates.
+            submissions.retain(|s| !matches!(s.value, calp::writeback::SubmissionValue::Empty));
+
+            // Visibility enforcement. NOTE: the policy docs say "publisher
+            // sees all", but without authenticated identities (roadmap D8)
+            // every gatherer is a subscriber, so the policy applies to all.
+            match region.visibility {
+                Some(calp::writeback::VisibilityPolicy::OwnOnly) => {
+                    submissions.retain(|s| {
+                        own_identity
+                            .as_ref()
+                            .map(|own| s.submitter.id == own.id)
+                            .unwrap_or(false)
+                    });
+                }
+                Some(calp::writeback::VisibilityPolicy::OwnPlusAggregate) => {
+                    // Values flow (aggregates need them) but other
+                    // submitters' identities are anonymized.
+                    for s in submissions.iter_mut() {
+                        let is_own = own_identity
+                            .as_ref()
+                            .map(|own| s.submitter.id == own.id)
+                            .unwrap_or(false);
+                        if !is_own {
+                            s.submitter.display_name = "(anonymous)".to_string();
+                            s.submitter.id = String::new();
+                        }
+                    }
+                }
+                _ => {}
+            }
 
             let gather_subs: Vec<engine::GatherSubmission> = submissions.iter().map(|s| {
                 engine::GatherSubmission {
@@ -1346,21 +2132,7 @@ pub fn calp_get_cell_id(
 pub fn calp_get_subscriber_identity(
     state: State<AppState>,
 ) -> Result<calp::SubmitterIdentity, String> {
-    let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
-    if let Some(ref identity) = *cached {
-        return Ok(identity.clone());
-    }
-
-    // Load or create from the user profile directory
-    let profile_dir = {
-        let local_app_data = std::env::var("LOCALAPPDATA")
-            .unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(local_app_data).join("Calcula")
-    };
-
-    let identity = calp::identity_provider::load_or_create(&profile_dir)?;
-    *cached = Some(identity.clone());
-    Ok(identity)
+    get_subscriber_identity(&state)
 }
 
 /// Suggest the next version for a package given a bump type ("major", "minor", "patch").
@@ -1530,11 +2302,20 @@ fn load_embedded_data_sources(
         let conn_database = if !spec_info.database.is_empty() { spec_info.database.clone() } else { ds.definition.database.clone() };
         let conn_preferred_auth = spec_info.preferred_auth.clone();
 
+        // Derive the connection type from the model's connectionSpecs,
+        // falling back to the package manifest. (Previously hardcoded to
+        // PostgreSQL regardless of what the package declared.)
+        let conn_type = if !spec_info.connector_type.is_empty() {
+            ConnectionType::parse_or_default(&spec_info.connector_type)
+        } else {
+            ConnectionType::parse_or_default(&ds.definition.connection_type)
+        };
+
         let connection = Connection {
             id: conn_id,
             name: ds.definition.name.clone(),
             description: format!("Embedded model from package ({})", ds.definition.id),
-            connection_type: ConnectionType::PostgreSQL,
+            connection_type: conn_type,
             connection_string: String::new(), // subscriber provides credentials via Connect
             server: conn_server.clone(),
             database: conn_database.clone(),
@@ -1673,18 +2454,30 @@ fn restore_pulled_pivots(
 
     // Restore BI pivot metadata, resolving connection_id from embedded data sources
     if !bi_pivot_metadata.is_empty() {
-        // Use the first embedded connection ID if available
-        let default_conn_id = embedded_connection_ids.values().next().copied().unwrap_or_default();
-        crate::log_info!("CALP-DIAG", "Restoring BI metadata: {} entries, embedded_connection_ids={:?}, default_conn_id={}",
-            bi_pivot_metadata.len(), embedded_connection_ids, default_conn_id);
+        crate::log_info!("CALP-DIAG", "Restoring BI metadata: {} entries, embedded_connection_ids={:?}",
+            bi_pivot_metadata.len(), embedded_connection_ids);
 
         if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {
             for meta_json in bi_pivot_metadata {
                 if let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) {
-                    crate::log_info!("CALP-DIAG", "  BI metadata: pivot_id={}, tables={}, measures={}, assigned connection_id={}",
-                        saved.pivot_id, saved.model_tables.len(), saved.measures.len(), default_conn_id);
+                    // Route each pivot to ITS package data source. Packages
+                    // published before data_source_id existed fall back to
+                    // the first embedded connection (single-source packages
+                    // are unaffected; multi-source ones should republish).
+                    let conn_id = saved
+                        .data_source_id
+                        .as_deref()
+                        .and_then(|id| embedded_connection_ids.get(id))
+                        .copied()
+                        .or_else(|| embedded_connection_ids.values().next().copied())
+                        .unwrap_or_default();
+                    crate::log_info!("CALP-DIAG", "  BI metadata: pivot_id={}, tables={}, measures={}, data_source_id={:?}, assigned connection_id={}",
+                        saved.pivot_id, saved.model_tables.len(), saved.measures.len(), saved.data_source_id, conn_id);
                     bi_meta.insert(saved.pivot_id, BiPivotMetadata {
-                        connection_id: default_conn_id,
+                        connection_id: conn_id,
+                        // Keep the PACKAGE data source id so re-saves and
+                        // re-publishes keep routing this pivot correctly.
+                        data_source_id: saved.data_source_id.clone(),
                         model_tables: saved.model_tables,
                         measures: saved.measures,
                         hierarchies: saved.hierarchies,
@@ -1702,24 +2495,21 @@ fn restore_pulled_pivots(
 // ============================================================================
 
 /// Extract active BI connections from BiState as publishable data sources.
-/// For each connection that has active queries, captures: model JSON, bindings,
-/// queries with grid placements, and server/database (without credentials).
+/// Captures each connected source's model JSON, bindings, and server/database
+/// (without credentials) so subscribers can refresh BI pivots against live
+/// data. The deprecated query-region path (direct cell insertion) is gone —
+/// BI data flows to subscribers through pivots (and CUBE formulas, planned).
 fn capture_bi_data_sources(
-    state: &AppState,
+    _state: &AppState,
     bi_state: &BiState,
 ) -> Result<Vec<calp::publish::PublishDataSource>, String> {
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
 
     let mut data_sources = Vec::new();
 
     for conn in connections.values() {
-        // Only include connections that have active queries (data in the grid)
-        if conn.active_queries.is_empty() {
-            continue;
-        }
-
-        // Get the engine and serialize the model
+        // Get the engine and serialize the model. Connections without a
+        // loaded engine have nothing to embed.
         let model_json = match &conn.engine {
             Some(engine_arc) => {
                 match engine_arc.try_lock() {
@@ -1751,43 +2541,6 @@ fn capture_bi_data_sources(
             }
         }).collect();
 
-        // Convert active queries to package queries
-        let queries: Vec<calp::PackageQuery> = conn.active_queries.iter().map(|(entity_id, aq)| {
-            let sheet_id = sheet_ids.get(aq.sheet_index)
-                .copied()
-                .unwrap_or_else(|| identity::SheetId::from_bytes(identity::generate_uuid_v7()));
-
-            calp::PackageQuery {
-                id: entity_id.to_string(),
-                name: format!("Query {}", entity_id),
-                data_source_id: ds_id.clone(),
-                request: calp::PackageQueryRequest {
-                    measures: aq.request.measures.clone(),
-                    group_by: aq.request.group_by.iter().map(|g| {
-                        calp::PackageColumnRef {
-                            table: g.table.clone(),
-                            column: g.column.clone(),
-                        }
-                    }).collect(),
-                    filters: aq.request.filters.iter().map(|f| {
-                        calp::PackageFilter {
-                            table: f.table.clone(),
-                            column: f.column.clone(),
-                            operator: f.operator.clone(),
-                            value: f.value.clone(),
-                        }
-                    }).collect(),
-                },
-                placement: calp::QueryPlacement {
-                    sheet_id,
-                    start_row: aq.start_row,
-                    start_col: aq.start_col,
-                    include_headers: true,
-                },
-                extra: std::collections::HashMap::new(),
-            }
-        }).collect();
-
         data_sources.push(calp::publish::PublishDataSource {
             id: ds_id,
             name: conn.name.clone(),
@@ -1796,7 +2549,6 @@ fn capture_bi_data_sources(
             database,
             model_json,
             bindings,
-            queries,
         });
     }
 
@@ -1836,8 +2588,6 @@ pub fn parse_pg_connection_info(connection_string: &str) -> (String, String) {
 #[serde(rename_all = "camelCase")]
 pub struct DataRefreshResponse {
     pub sources_refreshed: usize,
-    pub queries_executed: usize,
-    pub cells_updated: usize,
     /// Data sources that could not auto-connect (need manual configuration).
     pub needs_configuration: Vec<DataSourceNeedsConfig>,
 }
@@ -1852,13 +2602,16 @@ pub struct DataSourceNeedsConfig {
     pub connection_type: String,
 }
 
-/// Refresh all data sources for the current workbook's subscriptions.
+/// Verify connectivity for all subscription data sources.
 ///
 /// For each data source:
 /// 1. Check subscriber's saved connection config
 /// 2. If none, try building SSPI connection string and testing it
-/// 3. If connection works: load model, bind tables, execute queries, write cells
+/// 3. If connection works: load model and bind tables (verifies the source)
 /// 4. If connection fails: add to needs_configuration list
+///
+/// BI data reaches the grid through pivots (and CUBE formulas, planned) —
+/// the deprecated query-region direct cell insertion path was removed.
 #[tauri::command]
 pub async fn calp_refresh_data(
     state: State<'_, AppState>,
@@ -1867,8 +2620,6 @@ pub async fn calp_refresh_data(
     use calp::data_refresh;
 
     let mut sources_refreshed = 0usize;
-    let mut queries_executed = 0usize;
-    let mut cells_updated = 0usize;
     let mut needs_config = Vec::new();
 
     // Collect data sources from all subscriptions
@@ -1920,8 +2671,6 @@ pub async fn calp_refresh_data(
     if subscription_data.is_empty() {
         return Ok(DataRefreshResponse {
             sources_refreshed: 0,
-            queries_executed: 0,
-            cells_updated: 0,
             needs_configuration: Vec::new(),
         });
     }
@@ -1964,133 +2713,41 @@ pub async fn calp_refresh_data(
             default_ttl_secs: 3600,
         });
 
-        // Try to connect to the database
+        // Live connect supports PostgreSQL only — don't funnel other source
+        // types into a credentials prompt that can never succeed.
+        if crate::bi::types::ConnectionType::parse_or_default(&ds.connection_type)
+            != crate::bi::types::ConnectionType::PostgreSQL
+        {
+            crate::log_warn!(
+                "CALP",
+                "Data source '{}' is type '{}' — live connect is not yet supported for it, skipping",
+                ds.name, ds.connection_type
+            );
+            continue;
+        }
+
+        // Try to connect to the database. On failure, surface the source in
+        // needs_configuration so the ConnectionDialog can prompt the user
+        // (stale saved config and missing-SSPI cases both end up here).
         let (target, auth) = crate::bi::commands::parse_connection_string(&connection_string);
         let connector_idx = match engine.add_postgres(target, auth).await {
             Ok(idx) => idx,
             Err(_e) => {
-                // Connection failed — if this was a saved config, it's stale;
-                // if SSPI, the user likely needs to configure manually.
-                if saved_conn.is_none() {
-                    needs_config.push(DataSourceNeedsConfig {
-                        data_source_id: ds.id.clone(),
-                        name: ds.name.clone(),
-                        server: ds.server.clone(),
-                        database: ds.database.clone(),
-                        connection_type: ds.connection_type.clone(),
-                    });
-                } else {
-                    needs_config.push(DataSourceNeedsConfig {
-                        data_source_id: ds.id.clone(),
-                        name: ds.name.clone(),
-                        server: ds.server.clone(),
-                        database: ds.database.clone(),
-                        connection_type: ds.connection_type.clone(),
-                    });
-                }
+                needs_config.push(DataSourceNeedsConfig {
+                    data_source_id: ds.id.clone(),
+                    name: ds.name.clone(),
+                    server: ds.server.clone(),
+                    database: ds.database.clone(),
+                    connection_type: ds.connection_type.clone(),
+                });
                 continue;
             }
         };
 
-        // Bind tables
+        // Bind tables to verify the model is queryable against this source.
         for binding in &ds.bindings {
             let source_binding = bi_engine::SourceBinding::new(&binding.schema, &binding.source_table);
             engine.bind_table(&binding.model_table, connector_idx, source_binding);
-        }
-
-        // Execute queries and write results to grid
-        for query in &ds.queries {
-            // Build engine query request from package query
-            let query_request = bi_engine::QueryRequest {
-                measures: query.request.measures.clone(),
-                group_by: query.request.group_by.iter()
-                    .map(|g| bi_engine::ColumnRef::new(&g.table, &g.column))
-                    .collect(),
-                filters: query.request.filters.iter()
-                    .map(|f| bi_engine::FilterCondition {
-                        column: f.column.clone(),
-                        operator: match f.operator.as_str() {
-                            "=" | "eq" => bi_engine::FilterOperator::Equal,
-                            "!=" | "ne" => bi_engine::FilterOperator::NotEqual,
-                            ">" | "gt" => bi_engine::FilterOperator::GreaterThan,
-                            "<" | "lt" => bi_engine::FilterOperator::LessThan,
-                            ">=" | "gte" => bi_engine::FilterOperator::GreaterThanOrEqual,
-                            "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
-                            _ => bi_engine::FilterOperator::Equal,
-                        },
-                        value: f.value.clone(),
-                    })
-                    .collect(),
-                lookups: vec![],
-            };
-
-            let (batches, _refreshed) = match engine.query_auto_refresh(query_request).await {
-                Ok(result) => result,
-                Err(e) => {
-                    crate::log_warn!("CALP", "Query {} failed: {}", query.id, e);
-                    continue;
-                }
-            };
-
-            // Convert to result
-            let result = crate::bi::commands::batches_to_result(&batches);
-
-            // Find the sheet index for this query's placement
-            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-            let sheet_index = sheet_ids.iter()
-                .position(|sid| *sid == query.placement.sheet_id);
-
-            let sheet_index = match sheet_index {
-                Some(idx) => idx,
-                None => {
-                    crate::log_warn!("CALP", "Sheet not found for query {} placement", query.id);
-                    continue;
-                }
-            };
-
-            // Write cells to grid
-            let start_row = query.placement.start_row;
-            let start_col = query.placement.start_col;
-            let header_offset = if query.placement.include_headers { 1u32 } else { 0u32 };
-
-            {
-                let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
-                let grid = grids.get_mut(sheet_index)
-                    .ok_or_else(|| format!("Sheet index {} out of range", sheet_index))?;
-
-                if query.placement.include_headers {
-                    let bold_style_idx = {
-                        let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-                        styles.get_or_create(engine::CellStyle::new().with_bold(true))
-                    };
-                    for (col_idx, col_name) in result.columns.iter().enumerate() {
-                        let mut cell = engine::Cell::new_text(col_name.clone());
-                        cell.style_index = bold_style_idx;
-                        grid.set_cell(start_row, start_col + col_idx as u32, cell);
-                    }
-                }
-
-                for (row_idx, row) in result.rows.iter().enumerate() {
-                    let grid_row = start_row + header_offset + row_idx as u32;
-                    for (col_idx, value) in row.iter().enumerate() {
-                        let grid_col = start_col + col_idx as u32;
-                        let cell = match value {
-                            Some(s) => {
-                                if let Ok(num) = s.parse::<f64>() {
-                                    engine::Cell::new_number(num)
-                                } else {
-                                    engine::Cell::new_text(s.clone())
-                                }
-                            }
-                            None => engine::Cell::new(),
-                        };
-                        grid.set_cell(grid_row, grid_col, cell);
-                        cells_updated += 1;
-                    }
-                }
-            }
-
-            queries_executed += 1;
         }
 
         sources_refreshed += 1;
@@ -2098,8 +2755,6 @@ pub async fn calp_refresh_data(
 
     Ok(DataRefreshResponse {
         sources_refreshed,
-        queries_executed,
-        cells_updated,
         needs_configuration: needs_config,
     })
 }
@@ -2190,7 +2845,6 @@ pub fn calp_get_data_sources(
                 connection_type: ds.connection_type.clone(),
                 server: ds.server.clone(),
                 database: ds.database.clone(),
-                query_count: ds.queries.len(),
                 is_configured,
                 package_name: sub.package_name.clone(),
             });
@@ -2208,7 +2862,6 @@ pub struct DataSourceInfo {
     pub connection_type: String,
     pub server: String,
     pub database: String,
-    pub query_count: usize,
     pub is_configured: bool,
     pub package_name: String,
 }

@@ -662,6 +662,13 @@ pub fn update_cell(
             accounting_layout: None,
         });
 
+        // Record subscriber override for the cleared cell (subscribed sheets only)
+        crate::calp_commands::record_subscription_override_edits(
+            &state,
+            active_sheet,
+            &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
+        );
+
         // Record undo after successful change
         undo_stack.record_cell_change(row, col, previous_cell);
 
@@ -973,6 +980,13 @@ pub fn update_cell(
         rich_text: None,
         accounting_layout: None,
     });
+
+    // Record subscriber override for the edited cell (subscribed sheets only)
+    crate::calp_commands::record_subscription_override_edits(
+        &state,
+        active_sheet,
+        &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
+    );
 
     // Record undo after successful change
     undo_stack.record_cell_change(row, col, previous_cell);
@@ -1614,6 +1628,8 @@ pub fn update_cells_batch(
 
     let mut updated_cells = Vec::new();
     let mut cells_needing_recalc: Vec<(u32, u32)> = Vec::new();
+    // Pre/post cell states collected for subscriber override capture.
+    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
 
     // Build merge lookup once for efficiency
     let merge_lookup: HashMap<(u32, u32), &MergedRegion> = merged_regions
@@ -1689,6 +1705,7 @@ pub fn update_cells_batch(
                 accounting_layout: None,
             });
 
+            override_edits.push((row, col, previous_cell.clone(), grid.get_cell(row, col).cloned()));
             undo_stack.record_cell_change(row, col, previous_cell);
             cells_needing_recalc.push((row, col));
             continue;
@@ -1981,9 +1998,13 @@ pub fn update_cells_batch(
             accounting_layout: None,
         });
 
+        override_edits.push((row, col, previous_cell.clone(), grid.get_cell(row, col).cloned()));
         undo_stack.record_cell_change(row, col, previous_cell);
         cells_needing_recalc.push((row, col));
     }
+
+    // Record subscriber overrides for all edited cells (subscribed sheets only)
+    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
 
     let perf_t2_processed = Instant::now();
 
@@ -2320,6 +2341,15 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
         &mut row_dependents_map,
     );
 
+    // Record subscriber override for the cleared cell (subscribed sheets only)
+    if previous_cell.is_some() {
+        crate::calp_commands::record_subscription_override_edits(
+            &state,
+            active_sheet,
+            &[(row, col, previous_cell.clone(), grid.get_cell(row, col).cloned())],
+        );
+    }
+
     // Record undo if there was actually a cell to clear
     if previous_cell.is_some() {
         undo_stack.record_cell_change(row, col, previous_cell);
@@ -2386,11 +2416,15 @@ pub fn clear_range(
         ));
     }
 
+    // Pre/post cell states collected for subscriber override capture.
+    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
+
     // Clear each cell
     for (row, col) in cells_to_clear {
         // Record previous state for undo
         let previous_cell = grid.get_cell(row, col).cloned();
         if previous_cell.is_some() {
+            override_edits.push((row, col, previous_cell.clone(), None));
             undo_stack.record_cell_change(row, col, previous_cell);
         }
 
@@ -2426,6 +2460,9 @@ pub fn clear_range(
             &mut row_dependents_map,
         );
     }
+
+    // Record subscriber overrides for all cleared cells (subscribed sheets only)
+    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
 
     // Commit undo transaction
     if count > 0 {
@@ -2535,6 +2572,9 @@ pub fn clear_range_with_options(
         ));
     }
 
+    // Pre/post cell states collected for subscriber override capture.
+    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
+
     for (row, col) in cells_in_range {
         // Record previous state for undo
         let previous_cell = grid.get_cell(row, col).cloned();
@@ -2543,6 +2583,7 @@ pub fn clear_range_with_options(
             ClearApplyTo::All | ClearApplyTo::ResetContents => {
                 // Clear everything - same as existing clear_range
                 if previous_cell.is_some() {
+                    override_edits.push((row, col, previous_cell.clone(), None));
                     undo_stack.record_cell_change(row, col, previous_cell);
                 }
                 grid.clear_cell(row, col);
@@ -2611,6 +2652,8 @@ pub fn clear_range_with_options(
                     let style_index = cell.style_index;
                     let mut new_cell = engine::Cell::new();
                     new_cell.style_index = style_index;
+
+                    override_edits.push((row, col, previous_cell.clone(), Some(new_cell.clone())));
 
                     grid.set_cell(row, col, new_cell.clone());
                     if active_sheet < grids.len() {
@@ -2764,6 +2807,9 @@ pub fn clear_range_with_options(
             }
         }
     }
+
+    // Record subscriber overrides for all cleared cells (subscribed sheets only)
+    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
 
     if count > 0 {
         undo_stack.commit_transaction();
@@ -4038,6 +4084,8 @@ pub fn fill_range(
 
     let mut updated_cells: Vec<CellData> = Vec::new();
     let mut cells_needing_recalc: Vec<(u32, u32)> = Vec::new();
+    // Pre/post cell states collected for subscriber override capture.
+    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
 
     // Iterate over target range
     for tr in target_start_row..=target_end_row {
@@ -4048,6 +4096,7 @@ pub fn fill_range(
 
             // Record previous state for undo
             let previous_cell = grid.get_cell(tr, tc).cloned();
+            let pre_for_override = previous_cell.clone();
             undo_stack.record_cell_change(tr, tc, previous_cell);
 
             // Find the source cell
@@ -4291,9 +4340,13 @@ pub fn fill_range(
                 });
             }
 
+            override_edits.push((tr, tc, pre_for_override, grid.get_cell(tr, tc).cloned()));
             cells_needing_recalc.push((tr, tc));
         }
     }
+
+    // Record subscriber overrides for all filled cells (subscribed sheets only)
+    crate::calp_commands::record_subscription_override_edits(&state, active_sheet, &override_edits);
 
     let perf_t2_processed = Instant::now();
 

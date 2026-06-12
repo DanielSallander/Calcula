@@ -23,7 +23,6 @@ pub struct PublishDataSource {
     /// The BI DataModel as JSON (will be written to models/{id}/model.json).
     pub model_json: serde_json::Value,
     pub bindings: Vec<PackageBinding>,
-    pub queries: Vec<PackageQuery>,
 }
 
 /// A rectangular region of cells to exclude from published sheet data.
@@ -160,7 +159,6 @@ pub fn publish(
             database: ds.database.clone(),
             model_path: format!("models/{}/model.json", ds.id),
             bindings: ds.bindings.clone(),
-            queries: ds.queries.clone(),
             extra: std::collections::HashMap::new(),
         }).collect(),
         extra: std::collections::HashMap::new(),
@@ -236,7 +234,12 @@ pub fn publish(
         let scripts_dir = registry.scripts_dir(&request.package_name, &version_str);
         fs::create_dir_all(&scripts_dir)?;
         for script in &scripts_to_publish {
-            let def = calcula_format::features::object_scripts::ObjectScriptDef::from(*script);
+            let mut def = calcula_format::features::object_scripts::ObjectScriptDef::from(*script);
+            // Packages ship provenance-clean: the subscriber stamps
+            // provenance at pull time. This also covers re-publishing a
+            // workbook that itself contains pulled (distributed) scripts.
+            def.provenance = Default::default();
+            def.package_name = None;
             fs::write(
                 scripts_dir.join(format!("{}.json", script.id)),
                 serde_json::to_string_pretty(&def)?,

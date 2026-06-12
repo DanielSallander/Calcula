@@ -9,7 +9,6 @@ import {
   getWritebackLayer,
   submitRegion,
   getWritebackDraftRegions,
-  getSubscriptions,
   type WritebackRegionEntry,
   type WritebackLayer as WritebackLayerType,
   type WritebackRegionDeclaration,
@@ -19,28 +18,21 @@ export function WritebackPane() {
   const [regions, setRegions] = useState<WritebackRegionEntry[]>([]);
   const [draftRegions, setDraftRegions] = useState<WritebackRegionDeclaration[]>([]);
   const [writebackLayer, setWritebackLayer] = useState<WritebackLayerType | null>(null);
-  const [registryPath, setRegistryPath] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [regs, layer, drafts, subs] = await Promise.all([
+      const [regs, layer, drafts] = await Promise.all([
         getWritebackRegions(),
         getWritebackLayer(),
         getWritebackDraftRegions(),
-        getSubscriptions(),
       ]);
       setRegions(regs);
       setWritebackLayer(layer);
       setDraftRegions(drafts);
-
-      // Extract registry path from first subscription
-      if (subs.subscriptions.length > 0) {
-        const url = subs.subscriptions[0].registryUrl;
-        setRegistryPath(url.replace("file://", ""));
-      }
     } catch (err) {
       console.error("[WritebackPane] refresh error:", err);
     } finally {
@@ -53,21 +45,21 @@ export function WritebackPane() {
   }, [refresh]);
 
   const handleSubmit = useCallback(async (regionId: string) => {
-    if (!registryPath) {
-      console.warn("[WritebackPane] No registry path available");
-      return;
-    }
     setSubmitting(regionId);
+    setSubmitError(null);
     try {
-      const count = await submitRegion(regionId, registryPath);
+      // The backend resolves the owning subscription's registry from the
+      // region id — no registry path needed here.
+      const count = await submitRegion(regionId);
       console.log(`[WritebackPane] Submitted ${count} values for region ${regionId}`);
       await refresh();
     } catch (err) {
       console.error("[WritebackPane] submit error:", err);
+      setSubmitError(String(err));
     } finally {
       setSubmitting(null);
     }
-  }, [registryPath, refresh]);
+  }, [refresh]);
 
   if (loading) {
     return <div style={{ padding: 16 }}>Loading...</div>;
@@ -89,16 +81,22 @@ export function WritebackPane() {
       {hasSubscriberRegions && (
         <>
           <h4 style={{ marginTop: 0 }}>Subscribed Writeback Regions</h4>
+          {submitError && (
+            <div style={{ color: "red", fontSize: 11, marginBottom: 8 }}>{submitError}</div>
+          )}
           {regions.map((region, idx) => {
+            // Match drafts by region id — bounds-only matching confused
+            // overlapping coordinates across different sheets/regions.
             const draftsForRegion = writebackLayer?.drafts.filter(
-              (d) => d.cellRow >= region.rowStart && d.cellRow <= region.rowEnd
-                  && d.cellCol >= region.colStart && d.cellCol <= region.colEnd
+              (d) => d.regionId === region.regionId
             ) ?? [];
             const draftCount = draftsForRegion.filter((d) => d.state === "draft").length;
-            const submittedCount = draftsForRegion.filter((d) => d.state === "submitted").length;
+            const submittedCount = draftsForRegion.filter(
+              (d) => d.state === "submitted" || d.state === "approved"
+            ).length;
 
             return (
-              <div key={idx} style={{
+              <div key={region.regionId || idx} style={{
                 border: "1px solid #ddd", borderRadius: 4, padding: 8, marginBottom: 8,
               }}>
                 <div style={{ fontSize: 12, fontWeight: 600 }}>
@@ -111,12 +109,7 @@ export function WritebackPane() {
                 </div>
                 {draftCount > 0 && (
                   <button
-                    onClick={() => {
-                      // Find the region_id — we need to match by position
-                      // For now, use the first draft's region_id
-                      const firstDraft = draftsForRegion.find((d) => d.state === "draft");
-                      if (firstDraft) handleSubmit(firstDraft.regionId);
-                    }}
+                    onClick={() => handleSubmit(region.regionId)}
                     disabled={submitting !== null}
                     style={{ marginTop: 4, fontSize: 11 }}
                   >

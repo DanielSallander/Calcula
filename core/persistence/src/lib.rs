@@ -934,6 +934,22 @@ impl Default for ScriptAccessLevel {
     }
 }
 
+/// Where an object script came from. Distributed scripts (materialized from a
+/// .calp package) require explicit user consent before mounting and cannot be
+/// silently escalated or laundered back to local.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ScriptProvenance {
+    Local,
+    Distributed,
+}
+
+impl Default for ScriptProvenance {
+    fn default() -> Self {
+        ScriptProvenance::Local
+    }
+}
+
 /// A script attached to a scriptable object (primitive or component).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedObjectScript {
@@ -950,6 +966,12 @@ pub struct SavedObjectScript {
     pub access_level: ScriptAccessLevel,
     /// Optional description.
     pub description: Option<String>,
+    /// Origin of the script: local (default) or distributed via a .calp package.
+    #[serde(default)]
+    pub provenance: ScriptProvenance,
+    /// For distributed scripts: the package the script arrived from.
+    #[serde(default)]
+    pub package_name: Option<String>,
 }
 
 // ============================================================================

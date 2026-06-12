@@ -3,7 +3,12 @@
 // CONTEXT: Used by the ScriptableObjects extension to persist scripts in the backend.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "./scriptableObjects";
+import type {
+  ObjectScriptDefinition,
+  ScriptableObjectType,
+  ScriptAccessLevel,
+  ScriptProvenance,
+} from "./scriptableObjects";
 
 // ============================================================================
 // Backend API Types (match Rust serialization)
@@ -15,6 +20,8 @@ interface ObjectScriptSummary {
   objectType: string;
   instanceId: string | null;
   accessLevel: string;
+  provenance?: string | null;
+  packageName?: string | null;
 }
 
 interface ObjectScriptData {
@@ -25,6 +32,9 @@ interface ObjectScriptData {
   source: string;
   accessLevel: string;
   description: string | null;
+  /** "local" | "distributed" — read-only; the backend preserves stored provenance on save. */
+  provenance?: string | null;
+  packageName?: string | null;
 }
 
 // ============================================================================
@@ -62,6 +72,10 @@ export async function saveObjectScript(script: ObjectScriptDefinition): Promise<
     source: script.source,
     accessLevel: script.accessLevel,
     description: script.description ?? null,
+    // Sent for type completeness; the backend ignores these and preserves
+    // the stored provenance (anti-laundering guard).
+    provenance: script.provenance ?? null,
+    packageName: script.packageName ?? null,
   };
   return invoke<void>("save_object_script", { script: data });
 }
@@ -92,6 +106,8 @@ export async function loadAllObjectScripts(): Promise<ObjectScriptDefinition[]> 
         source: data.source,
         accessLevel: data.accessLevel as ScriptAccessLevel,
         description: data.description ?? undefined,
+        provenance: (data.provenance as ScriptProvenance | null) ?? undefined,
+        packageName: data.packageName ?? undefined,
       });
     } catch (e) {
       console.warn(`[ObjectScripts] Failed to load script "${summary.name}":`, e);

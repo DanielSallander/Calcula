@@ -504,11 +504,14 @@ pub async fn bi_create_connection(
     let server = if !model_conn_spec.server.is_empty() { model_conn_spec.server } else { target.host.clone() };
     let database = if !model_conn_spec.database.is_empty() { model_conn_spec.database } else { target.database.clone() };
     let preferred_auth = if !model_conn_spec.preferred_auth.is_empty() { model_conn_spec.preferred_auth } else { "UsernamePassword".to_string() };
+    // Honor the model's declared connector type — hardcoding PostgreSQL here
+    // would defeat the not-yet-supported guards at the connect sites.
+    let connection_type = ConnectionType::parse_or_default(&model_conn_spec.connector_type);
     let connection = Connection {
         id,
         name: request.name,
         description: request.description.unwrap_or_default(),
-        connection_type: ConnectionType::PostgreSQL,
+        connection_type,
         connection_string: request.connection_string,
         server,
         database,
@@ -712,6 +715,21 @@ pub async fn bi_connect(
         return Err("No database URL configured. Use 'Add Connection' with a PostgreSQL connection string to enable live data refresh.".to_string());
     };
 
+    // Live connect currently supports PostgreSQL only. SqlServer-typed
+    // connections (from package manifests/models) are stored faithfully but
+    // cannot connect yet — fail clearly instead of misrouting to PostgreSQL.
+    {
+        let connections = bi_state.connections.lock().unwrap();
+        if let Some(conn) = connections.get(&connection_id) {
+            if conn.connection_type != ConnectionType::PostgreSQL {
+                return Err(format!(
+                    "Connection type '{}' is not yet supported for live connect (PostgreSQL only).",
+                    conn.connection_type.as_str()
+                ));
+            }
+        }
+    }
+
     // Lock the shared engine for async database connection
     let idx = {
         let mut engine = engine_arc.lock().await;
@@ -723,9 +741,12 @@ pub async fn bi_connect(
     {
         let mut engine = engine_arc.lock().await;
         match engine.refresh_stale().await {
-            Ok(refreshed) => {
-                if !refreshed.is_empty() {
-                    log_info!("BI", "Refreshed stale tables after connect: {}", refreshed.join(", "));
+            Ok(report) => {
+                if !report.refreshed.is_empty() {
+                    log_info!("BI", "Refreshed stale tables after connect: {}", report.refreshed.join(", "));
+                }
+                for failure in &report.failures {
+                    log_info!("BI", "Stale-table refresh failed for {}: {}", failure.table, failure.detail);
                 }
             }
             Err(e) => {
@@ -1675,6 +1696,12 @@ pub async fn auto_connect_bi_connection(
         let connections = bi_state.connections.lock().unwrap();
         let conn = connections.get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        if conn.connection_type != ConnectionType::PostgreSQL {
+            return Err(format!(
+                "Connection type '{}' is not yet supported for live connect (PostgreSQL only).",
+                conn.connection_type.as_str()
+            ));
+        }
         conn.engine.clone()
             .ok_or("No model loaded for this connection.")?
     };

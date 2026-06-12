@@ -177,10 +177,11 @@ function activate(context: ExtensionContext): void {
             dataSources: result.needsConfiguration,
           });
         } else if (result.sourcesRefreshed > 0) {
-          // Data refreshed successfully — notify the grid
+          // Data sources verified — notify the grid (pivot refresh pulls
+          // the actual data through the BI connections)
           emitAppEvent(AppEvents.SHEET_CHANGED, {});
           context.ui.notifications.showToast(
-            `Refreshed ${result.queriesExecuted} queries, ${result.cellsUpdated} cells updated`,
+            `${result.sourcesRefreshed} data source(s) connected and verified`,
             { type: "success", duration: 3000 },
           );
         } else {
@@ -282,20 +283,19 @@ function activate(context: ExtensionContext): void {
       submissionValue = { type: "text", value: trimmed };
     }
 
-    // Save as draft — if schema validation fails, keep the user in edit mode
+    // Save as draft — if the backend rejects (schema validation, lifecycle
+    // deadline, one-shot/locked regions), keep the user in edit mode. Falling
+    // through to "allow" on a rejection would display a value that was never
+    // saved as a draft and will never be submitted.
     try {
       await saveWritebackDraft(region.regionId, region.sheetId, row, col, submissionValue);
       // Refresh the writeback snapshot to update visual state
       refreshAndUpdateInterceptor();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("Schema validation failed")) {
-        // Show the validation error and let the user correct the value
-        console.warn("[Distribution] Writeback validation error:", msg);
-        context.ui.notifications.showToast(msg, { type: "warning", duration: 5000 });
-        return { action: "retry" as const };
-      }
-      console.error("[Distribution] Failed to save writeback draft:", err);
+      console.warn("[Distribution] Writeback draft rejected:", msg);
+      context.ui.notifications.showToast(msg, { type: "warning", duration: 5000 });
+      return { action: "retry" as const };
     }
 
     // Allow the normal commit to proceed so the cell displays the value

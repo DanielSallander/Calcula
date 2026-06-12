@@ -865,6 +865,8 @@ mod tests {
             source: "function setup(cell) { cell.onEdit(() => {}); }".to_string(),
             access_level: persistence::ScriptAccessLevel::Restricted,
             description: Some("Test cell script".to_string()),
+            provenance: persistence::ScriptProvenance::Local,
+            package_name: None,
         });
         workbook.object_scripts.push(persistence::SavedObjectScript {
             id: "os-2".to_string(),
@@ -874,6 +876,8 @@ mod tests {
             source: "function setup(slicer) { slicer.onSelectionChange(() => {}); }".to_string(),
             access_level: persistence::ScriptAccessLevel::Unlocked,
             description: None,
+            provenance: persistence::ScriptProvenance::Distributed,
+            package_name: Some("test-pkg".to_string()),
         });
 
         let dir = tempfile::tempdir().unwrap();

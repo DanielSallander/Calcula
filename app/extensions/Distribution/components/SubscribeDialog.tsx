@@ -4,6 +4,7 @@
 import React, { useState } from "react";
 import type { DialogProps } from "@api";
 import { pullPackage, emitAppEvent, AppEvents } from "@api";
+import { inspectPackage, type PackageInspection } from "@api/distribution";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getConnections, connect, updateConnection } from "../../BusinessIntelligence/lib/bi-api";
 import { pivot } from "@api/pivot";
@@ -14,6 +15,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const [versionPin, setVersionPin] = useState("latest");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [inspection, setInspection] = useState<PackageInspection | null>(null);
 
   const handleBrowse = async () => {
     try {
@@ -30,6 +32,22 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     }
   };
 
+  // Step 1: inspect the package and show its contents for review.
+  // Nothing is materialized until the user explicitly accepts.
+  const handleReview = async () => {
+    setError(null);
+    setStatus("Inspecting package...");
+    try {
+      const result = await inspectPackage(registryPath, packageName, versionPin);
+      setInspection(result);
+      setStatus(null);
+    } catch (err: unknown) {
+      setError(String(err));
+      setStatus(null);
+    }
+  };
+
+  // Step 2: the user reviewed the contents and accepted — pull for real.
   const handlePull = async () => {
     setError(null);
     setStatus("Pulling...");
@@ -44,8 +62,18 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       // Notify the app that sheets have changed so UI refreshes
       emitAppEvent(AppEvents.SHEET_CHANGED, {});
 
+      // Let the ScriptableObjects extension register the pulled scripts and
+      // run the consent flow in this session (not only after save/reopen).
+      if (result.scriptsPulled > 0) {
+        emitAppEvent("calp:scripts-pulled", { packageName: result.packageName });
+      }
+
       setStatus(
-        `Pulled ${result.packageName} v${result.resolvedVersion}: ${result.sheetsPulled} sheet(s)`
+        `Pulled ${result.packageName} v${result.resolvedVersion}: ` +
+        `${result.sheetsPulled} sheet(s)` +
+        (result.scriptsPulled > 0
+          ? `, ${result.scriptsPulled} script(s) (restricted, consent required)`
+          : "")
       );
 
       // Check for disconnected BI connections — try cached credentials first,
@@ -118,6 +146,73 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     padding: "4px 6px", border: "1px solid #ccc", borderRadius: "3px", fontSize: "13px",
   };
 
+  // Review step: show what the package contains before anything lands.
+  if (inspection) {
+    return (
+      <div style={{ padding: "16px", width: "420px" }}>
+        <h3 style={{ margin: "0 0 12px 0" }}>
+          Review: {inspection.packageName} v{inspection.resolvedVersion}
+        </h3>
+
+        <div style={{ fontSize: "12px", marginBottom: "8px" }}>
+          <strong>Sheets ({inspection.sheets.length})</strong>
+          {inspection.sheets.map((s, i) => (
+            <div key={i} style={{ marginLeft: 8 }}>
+              {s.name}{s.description ? ` — ${s.description}` : ""}
+            </div>
+          ))}
+        </div>
+
+        {inspection.scripts.length > 0 && (
+          <div style={{
+            fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
+            backgroundColor: "#fff3cd", borderRadius: 4,
+          }}>
+            <strong>Scripts ({inspection.scripts.length})</strong> — executable code.
+            Scripts arrive in restricted mode and ask for consent before running.
+            {inspection.scripts.map((s, i) => (
+              <div key={i} style={{ marginLeft: 8 }}>
+                {s.name} ({s.objectType}){s.description ? ` — ${s.description}` : ""}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {inspection.dataSources.length > 0 && (
+          <div style={{ fontSize: "12px", marginBottom: "8px" }}>
+            <strong>Data sources ({inspection.dataSources.length})</strong>
+            {inspection.dataSources.map((d, i) => (
+              <div key={i} style={{ marginLeft: 8 }}>
+                {d.name} ({d.connectionType}: {d.server}/{d.database})
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ fontSize: "12px", marginBottom: "12px", color: "#666" }}>
+          {inspection.writebackRegionCount > 0 && (
+            <div>{inspection.writebackRegionCount} writeback region(s) — cells you can fill in and submit back</div>
+          )}
+          {inspection.tableCount > 0 && <div>{inspection.tableCount} table(s)</div>}
+          {inspection.namedRangeCount > 0 && <div>{inspection.namedRangeCount} named range(s)</div>}
+        </div>
+
+        {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}
+        {status && <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+          <button onClick={() => { setInspection(null); setStatus(null); setError(null); }}>
+            Back
+          </button>
+          <button onClick={onClose}>Cancel</button>
+          <button onClick={handlePull} style={{ fontWeight: 600 }}>
+            Accept and Subscribe
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: "16px", width: "400px" }}>
       <h3 style={{ margin: "0 0 12px 0" }}>Subscribe to Package</h3>
@@ -148,7 +243,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
         <button onClick={onClose}>Cancel</button>
-        <button onClick={handlePull} style={{ fontWeight: 600 }}>Subscribe</button>
+        <button onClick={handleReview} style={{ fontWeight: 600 }}>Review Contents...</button>
       </div>
     </div>
   );

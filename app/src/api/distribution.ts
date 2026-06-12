@@ -36,6 +36,33 @@ export interface PullResponse {
   resolvedVersion: string;
   sheetsPulled: number;
   tablesPulled: number;
+  /** Number of object scripts materialized (restricted, consent-gated). */
+  scriptsPulled: number;
+}
+
+/** Contents of a package version, for pre-pull review. */
+export interface PackageInspection {
+  packageName: string;
+  resolvedVersion: string;
+  sheets: SheetInfo[];
+  scripts: InspectedScript[];
+  dataSources: InspectedDataSource[];
+  writebackRegionCount: number;
+  tableCount: number;
+  namedRangeCount: number;
+}
+
+export interface InspectedScript {
+  name: string;
+  objectType: string;
+  description: string | null;
+}
+
+export interface InspectedDataSource {
+  name: string;
+  connectionType: string;
+  server: string;
+  database: string;
 }
 
 export interface PackageInfo {
@@ -168,6 +195,15 @@ export function pullPackage(params: PullParams): Promise<PullResponse> {
 
 export function browseRegistry(registryPath: string): Promise<PackageInfo[]> {
   return invokeBackend("calp_browse_registry", { registryPath });
+}
+
+/** Inspect a package version's contents without materializing anything. */
+export function inspectPackage(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+): Promise<PackageInspection> {
+  return invokeBackend("calp_inspect_package", { registryPath, packageName, versionPin });
 }
 
 export function getSubscriptions(): Promise<SubscriptionManifest> {
@@ -463,9 +499,27 @@ export function getWritebackLayer(): Promise<WritebackLayer> {
   return invokeBackend("calp_get_writeback_layer");
 }
 
-/** Submit all drafts for a region to the registry. Returns count submitted. */
-export function submitRegion(regionId: string, registryPath: string): Promise<number> {
-  return invokeBackend("calp_submit_region", { regionId, registryPath });
+/** Submit all drafts for a region to the registry of the subscription that
+ * declares the region. Returns count submitted. */
+export function submitRegion(regionId: string): Promise<number> {
+  return invokeBackend("calp_submit_region", { regionId });
+}
+
+/** Approve, reject, or reset a submitted writeback value (publisher action). */
+export function setSubmissionState(
+  regionId: string,
+  submitterId: string,
+  cellRow: number,
+  cellCol: number,
+  newState: "approved" | "rejected" | "submitted",
+): Promise<void> {
+  return invokeBackend("calp_set_submission_state", {
+    regionId,
+    submitterId,
+    cellRow,
+    cellCol,
+    newState,
+  });
 }
 
 // ============================================================================
@@ -484,8 +538,6 @@ export interface DataSourceNeedsConfig {
 /** Result of a data refresh operation. */
 export interface DataRefreshResponse {
   sourcesRefreshed: number;
-  queriesExecuted: number;
-  cellsUpdated: number;
   needsConfiguration: DataSourceNeedsConfig[];
 }
 
@@ -496,7 +548,6 @@ export interface DataSourceInfo {
   connectionType: string;
   server: string;
   database: string;
-  queryCount: number;
   isConfigured: boolean;
   packageName: string;
 }

@@ -269,18 +269,24 @@ pub fn pull_all_updates(
 /// Apply refresh payloads and rebase overrides.
 /// This is called after the user confirms the preview.
 ///
+/// `upstream_values` maps each existing override's (sheet_id, cell_id) to the
+/// NEW upstream value for that cell, so the rebase can mark conflicts and
+/// auto-clear overrides that now match upstream. The caller builds this map
+/// from the pulled payloads (the Tauri layer resolves override positions via
+/// the identity registry).
+///
 /// Returns: updated subscriptions, structural conflicts, and the rebase results.
 pub fn apply_refresh(
     payloads: Vec<RefreshPayload>,
     subscriptions: &mut Vec<Subscription>,
     override_layer: &mut OverrideLayer,
+    upstream_values: &HashMap<(SheetId, CellId), OverrideValue>,
     now: &str,
 ) -> RefreshResult {
     let mut sheets_added = 0;
     let mut sheets_removed = 0;
     let mut sheets_updated = 0;
     let mut structural_conflicts = Vec::new();
-    let upstream_values: HashMap<(SheetId, CellId), OverrideValue> = HashMap::new();
 
     for payload in &payloads {
         let sub = &mut subscriptions[payload.subscription_index];
@@ -318,14 +324,26 @@ pub fn apply_refresh(
             }
         }
 
-        // Update subscription metadata
+        // Update subscription metadata. Preserve the existing local sheet
+        // mapping for sheets that were already subscribed: pull() minted
+        // fresh local ids, but the materialized grids, the override layer,
+        // and the workbook's sheet list keep using the original ones.
+        let mut new_sheets = pull.subscription.sheets.clone();
+        for new_sheet in new_sheets.iter_mut() {
+            if let Some(old) = sub.sheets.iter()
+                .find(|s| s.package_sheet_id == new_sheet.package_sheet_id)
+            {
+                new_sheet.local_sheet_id = old.local_sheet_id;
+                new_sheet.local_name = old.local_name.clone();
+            }
+        }
         sub.resolved_version = pull.resolved_version.to_string();
         sub.resolved_at = now.to_string();
-        sub.sheets = pull.subscription.sheets.clone();
+        sub.sheets = new_sheets;
     }
 
-    // Rebase overrides
-    let (conflicts_created, overrides_cleared) = override_layer.rebase(&upstream_values);
+    // Rebase overrides against the new upstream values
+    let (conflicts_created, overrides_cleared) = override_layer.rebase(upstream_values);
 
     RefreshResult {
         subscriptions_refreshed: payloads.len(),
@@ -488,10 +506,62 @@ mod tests {
         let payloads = pull_all_updates(&reg, &subs).unwrap();
         let mut layer = OverrideLayer::new();
 
-        let result = apply_refresh(payloads, &mut subs, &mut layer, "2026-01-02T00:00:00Z");
+        let result = apply_refresh(
+            payloads, &mut subs, &mut layer, &HashMap::new(), "2026-01-02T00:00:00Z",
+        );
 
         assert_eq!(result.subscriptions_refreshed, 1);
         assert_eq!(subs[0].resolved_version, "1.1.0");
+    }
+
+    #[test]
+    fn apply_refresh_detects_conflicts_and_preserves_local_sheet_ids() {
+        let dir = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir);
+
+        // Subscribe at 1.0.0
+        let pull_result = pull::pull(&reg, &PullRequest {
+            package_name: "test-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::parse("^1.0").unwrap(),
+            now: "2026-01-01T00:00:00Z".to_string(),
+        }).unwrap();
+        let mut subs = vec![pull_result.subscription.clone()];
+        // Pin behind so 1.1.0 counts as an update
+        subs[0].resolved_version = "1.0.0".to_string();
+        let original_local_id = subs[0].sheets[0].local_sheet_id;
+
+        // Consumer overrides a cell; upstream 1.1.0 changed the same cell.
+        let mut layer = OverrideLayer::new();
+        let cell_id = identity::CellId::from_bytes(identity::generate_uuid_v7());
+        layer.set_override(crate::overrides::CellOverride {
+            sheet_id: original_local_id,
+            cell_id,
+            position: (0, 0),
+            baseline: OverrideValue::Value { display: "100".to_string() },
+            current: OverrideValue::Value { display: "999".to_string() },
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            modified_at: "2026-01-01T00:00:00Z".to_string(),
+            author: String::new(),
+            conflict: false,
+            upstream_new: None,
+            extra: HashMap::new(),
+        });
+
+        let payloads = pull_all_updates(&reg, &subs).unwrap();
+        // New upstream value differs from the override's baseline -> conflict.
+        let mut upstream = HashMap::new();
+        upstream.insert(
+            (original_local_id, cell_id),
+            OverrideValue::Value { display: "150".to_string() },
+        );
+
+        let result = apply_refresh(payloads, &mut subs, &mut layer, &upstream, "2026-01-02T00:00:00Z");
+
+        assert_eq!(result.conflicts_created, 1);
+        assert!(layer.get(original_local_id, cell_id).unwrap().conflict);
+        // The pre-existing sheet keeps its original local id across refresh.
+        assert_eq!(subs[0].sheets[0].local_sheet_id, original_local_id);
     }
 
     #[test]
