@@ -32,7 +32,7 @@ import {
   deleteTemplate,
 } from "../lib/templateManager";
 import type { TemplateSummary } from "../lib/templateManager";
-import { validateScript } from "../lib/scriptWorker";
+import { hostValidateScript } from "@api";
 import { getBreakpoints, toggleBreakpoint, clearBreakpoints, instrumentSource } from "../lib/debugger";
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 
@@ -540,15 +540,16 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
   const handleSave = useCallback(async () => {
     if (!activeScript) return;
 
-    // Validate script in Web Worker before mounting
-    const validation = await validateScript(activeScript.id, source);
+    // Validate script in a scratch worker before mounting (syntax only —
+    // nothing user-authored executes)
+    const validation = await hostValidateScript(source);
     if (!validation.valid) {
       setConsoleEntries((prev) => [
         ...prev,
         {
           id: ++consoleIdRef.current,
           level: "error",
-          message: `Compilation error: ${validation.error}${validation.stack ? "\n" + validation.stack : ""}`,
+          message: `Compilation error: ${validation.error}`,
           scriptId: activeScript.id,
           timestamp: Date.now(),
         },

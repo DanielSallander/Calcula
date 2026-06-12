@@ -1,9 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 
 // ============================================================================
 // Facade Completeness Tests
 // Verify the API layer provides everything extensions need.
 // ============================================================================
+
+// Warm the module graph ONCE with a generous budget: under full-suite load
+// the first dynamic import of the @api barrel can starve past per-test
+// timeouts (worker pool saturation), and a timed-out import poisons every
+// later import of the same module in this file. After this, per-test
+// imports resolve from the module cache.
+beforeAll(async () => {
+  await import("../index");
+}, 120_000);
 
 describe("API Facade Completeness", () => {
   // --------------------------------------------------------------------------

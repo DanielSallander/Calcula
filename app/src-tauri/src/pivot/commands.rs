@@ -4487,6 +4487,7 @@ pub async fn update_bi_pivot_fields(
         group_by: query_group_by,
         filters: vec![],
         lookups: query_lookups,
+        ..Default::default()
     };
 
     log_info!(

@@ -1,7 +1,14 @@
 //! FILENAME: app/src/api/__tests__/api-surface-stability.test.ts
 // PURPOSE: Verify public API surface stability — catch accidental breaking changes.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
+
+// Warm the module graph ONCE with a generous budget (see the matching note
+// in facade-completeness.test.ts): a starved first import under full-suite
+// load poisons every later import of the same module in this file.
+beforeAll(async () => {
+  await import("../index");
+}, 120_000);
 
 // ============================================================================
 // events.ts exports

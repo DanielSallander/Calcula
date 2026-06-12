@@ -178,6 +178,7 @@ import {
   brokerCall,
   brokerCallSync,
   BrokerError,
+  buildHandleFromDefinition,
   callExposed,
   clearExposed,
   hostCallExposed,
@@ -188,6 +189,12 @@ import {
   scriptSubscribeEventName,
   type ScriptHandle,
 } from "./scriptHost/broker";
+import {
+  hostMountScript,
+  hostUnmountScript,
+  hostResetAll,
+  workerRealmAvailable,
+} from "./scriptHost/host";
 
 /**
  * Call an exposed method on another script from TRUSTED host code
@@ -752,6 +759,27 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         );
       }
 
+      if (useWorkerRealm()) {
+        // Worker realm (sandbox Phase 3): the script executes in its own
+        // Worker with no ambient authority; every privileged call comes
+        // back as an RPC through the broker. Unmount = terminate.
+        await hostMountScript({
+          id: definition.id,
+          name: definition.name,
+          objectType: definition.objectType,
+          instanceId: definition.instanceId,
+          source: definition.source,
+          accessLevel: definition.accessLevel,
+          provenance: definition.provenance,
+          packageName: definition.packageName,
+          apiVersion: SCRIPT_API_VERSION,
+        });
+        mounted.cleanupFns.push(() => hostUnmountScript(definition.id));
+        mountedScripts.set(scriptId, mounted);
+        return;
+      }
+
+      // Legacy main-thread path (test environments + dual-run soak A/B).
       // Host-side identity for the broker: tier/origin/grants from the
       // authoritative definition, registered for the transparency panel.
       const handle = buildScriptHandle(definition);
@@ -909,24 +937,28 @@ async function getBackend() {
 /**
  * Build the host-side identity for a script. Tier/origin/grants come from
  * the authoritative definition — never from anything the script supplies.
+ * (Single source of truth lives in the broker; both mount paths use it.)
  */
 function buildScriptHandle(definition: ObjectScriptDefinition): ScriptHandle {
-  const isDistributed = definition.provenance === "distributed";
-  // ui.html is auto-granted for local scripts; distributed scripts get it
-  // through consent (Phase 4). Other capabilities arrive with Phase 4.
-  const grants = new Set<"net.fetch" | "bi.query" | "storage" | "ui.html">();
-  if (!isDistributed) {
-    grants.add("ui.html");
+  return buildHandleFromDefinition(definition);
+}
+
+/**
+ * Whether scripts execute in their own worker realms (the Phase 3 default)
+ * or on the main thread (the legacy path, kept for the dual-run soak —
+ * set localStorage "calcula.scriptWorker" = "0" to A/B against it; the
+ * legacy path is deleted when the soak gate passes). Test environments
+ * (jsdom) have no Worker and use the legacy path automatically.
+ */
+function useWorkerRealm(): boolean {
+  if (!workerRealmAvailable()) {
+    return false;
   }
-  return {
-    scriptId: definition.id,
-    scriptName: definition.name,
-    tier: definition.accessLevel === "unlocked" ? "unlocked" : "restricted",
-    objectType: definition.objectType,
-    instanceId: definition.instanceId,
-    origin: isDistributed ? (definition.packageName || "(unknown package)") : "local",
-    grants,
-  };
+  try {
+    return window.localStorage.getItem("calcula.scriptWorker") !== "0";
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -1931,4 +1963,5 @@ export function resetObjectScriptManager(): void {
   mountedScripts.clear();
   changeListeners.clear();
   clearExposed();
+  hostResetAll();
 }

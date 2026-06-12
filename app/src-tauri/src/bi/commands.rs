@@ -397,6 +397,8 @@ fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
             })
             .collect(),
         lookups: vec![],
+        // Defaults absorb engine-lib additions (order_by/limit/totals, ...).
+        ..Default::default()
     }
 }
 
@@ -970,6 +972,7 @@ pub async fn bi_get_column_values(
         group_by: vec![bi_engine::ColumnRef::new(&table, &column)],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
@@ -1059,6 +1062,7 @@ pub async fn bi_get_column_available_values(
         group_by,
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;

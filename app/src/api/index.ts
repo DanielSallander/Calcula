@@ -1426,6 +1426,15 @@ export { getAuditTail, getAuditTotal, onAudit, clearAudit } from "./scriptHost/a
 export type { AuditEntry } from "./scriptHost/auditRing";
 export { listMountedHandles, listExposed, BrokerError } from "./scriptHost/broker";
 export type { ScriptHandle, RpcErrorCode } from "./scriptHost/broker";
+export {
+  hostValidateScript,
+  listFaultedScripts,
+  getShapeBitmap,
+  hasShapeBitmapRenderer,
+  getSlicerItemBitmap,
+  hasSlicerItemBitmapRenderer,
+} from "./scriptHost/host";
+export { getCellRenderStats } from "./scriptHost/renderCache";
 
 export {
   getScaffoldTemplate,

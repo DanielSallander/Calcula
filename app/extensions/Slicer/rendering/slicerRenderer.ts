@@ -15,6 +15,7 @@ import { isSlicerSelected } from "../handlers/selectionHandler";
 import { SLICER_STYLES_BY_ID } from "../components/SlicerStylesGallery";
 import type { Slicer, SlicerItem } from "../lib/slicerTypes";
 import { getSlicerItemRenderer, getSlicerStyleOverrides } from "./customRenderers";
+import { getSlicerItemBitmap, hasSlicerItemBitmapRenderer } from "@api";
 
 // ============================================================================
 // Style Constants
@@ -360,8 +361,33 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
       c.fillStyle = allSelected ? effColors.selectedFg : effColors.itemFg;
       c.fillText(SELECT_ALL_LABEL, ix + 8, iy + cellH / 2, cellW - 16);
     } else if (item) {
-      // Use custom renderer if registered
-      if (customRenderer) {
+      // Worker-realm scripts provide cached bitmaps instead of functions
+      // (sandbox design §6.2): blit inside a clip so a script can never
+      // paint outside its item region. Missing bitmap = single-flight
+      // request already queued; fall through to default rendering this
+      // frame (graceful degradation).
+      let bitmapDrawn = false;
+      if (hasSlicerItemBitmapRenderer(String(slicer.id))) {
+        const bmp = getSlicerItemBitmap(
+          String(slicer.id),
+          { text: item.value, selected: item.selected, hasData: item.hasData },
+          cellW,
+          cellH - 2,
+          window.devicePixelRatio || 1,
+        );
+        if (bmp) {
+          c.save();
+          c.beginPath();
+          c.rect(ix, iy + 1, cellW, cellH - 2);
+          c.clip();
+          c.drawImage(bmp, ix, iy + 1, cellW, cellH - 2);
+          c.restore();
+          bitmapDrawn = true;
+        }
+      }
+      if (bitmapDrawn) {
+        // bitmap covers the item
+      } else if (customRenderer) {
         customRenderer(
           { text: item.value, selected: item.selected, hasData: item.hasData, index: vi - selectAllOffset },
           c,

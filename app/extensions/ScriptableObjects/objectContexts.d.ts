@@ -134,8 +134,18 @@ declare interface CellContext extends BaseObjectContext {
   /**
    * Register a custom cell renderer that runs for every visible cell.
    * Return a style override object to modify appearance, or null to use default.
+   *
+   * MUST be a pure function of its cell argument (value + coordinates):
+   * results are cached and re-evaluated only when the cell changes. A
+   * renderer reading outside state degrades to stale styling — call
+   * render.invalidate() after changing such state to force re-evaluation.
    */
   onRender(handler: (cell: { row: number; col: number; sheetIndex: number; value: string; formula?: string | null }) => { textColor?: string; backgroundColor?: string; bold?: boolean; italic?: boolean } | null): () => void;
+  /** Cache controls for onRender. */
+  render: {
+    /** Clear this script's cached render results and repaint. */
+    invalidate(): void;
+  };
 }
 
 /** Context for Row-level scripts (applies to all rows). */

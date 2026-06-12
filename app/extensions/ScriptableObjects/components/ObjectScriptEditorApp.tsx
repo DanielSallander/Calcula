@@ -31,7 +31,7 @@ import {
   deleteTemplate,
 } from "../lib/templateManager";
 import type { TemplateSummary } from "../lib/templateManager";
-import { validateScript } from "../lib/scriptWorker";
+import { hostValidateScript } from "@api";
 import { getBreakpoints, toggleBreakpoint, instrumentSource } from "../lib/debugger";
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 import {
@@ -402,15 +402,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const handleSave = useCallback(async () => {
     if (!activeScript) return;
 
-    // Validate script
-    const validation = await validateScript(activeScript.id, source);
+    // Validate script (scratch worker, syntax only)
+    const validation = await hostValidateScript(source);
     if (!validation.valid) {
       setConsoleEntries((prev) => [
         ...prev,
         {
           id: ++consoleIdRef.current,
           level: "error",
-          message: `Compilation error: ${validation.error}${validation.stack ? "\n" + validation.stack : ""}`,
+          message: `Compilation error: ${validation.error}`,
           scriptId: activeScript.id,
           timestamp: Date.now(),
         },

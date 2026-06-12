@@ -60,6 +60,39 @@ export class BrokerError extends Error {
   }
 }
 
+/**
+ * Build the host-side identity for a script from its authoritative
+ * definition — never from anything the script supplies. Single source of
+ * truth for tier/origin/grant derivation (used by both the legacy
+ * main-thread mount path and the worker host).
+ */
+export function buildHandleFromDefinition(definition: {
+  id: string;
+  name: string;
+  objectType: string;
+  instanceId: string | null;
+  accessLevel: string;
+  provenance?: string;
+  packageName?: string;
+}): ScriptHandle {
+  const isDistributed = definition.provenance === "distributed";
+  // ui.html is auto-granted for local scripts; distributed scripts get it
+  // through consent (Phase 4). Other capabilities arrive with Phase 4.
+  const grants = new Set<CapabilityId>();
+  if (!isDistributed) {
+    grants.add("ui.html");
+  }
+  return {
+    scriptId: definition.id,
+    scriptName: definition.name,
+    tier: definition.accessLevel === "unlocked" ? "unlocked" : "restricted",
+    objectType: definition.objectType,
+    instanceId: definition.instanceId,
+    origin: isDistributed ? (definition.packageName || "(unknown package)") : "local",
+    grants,
+  };
+}
+
 // ============================================================================
 // Policy check (shared by sync + async dispatch)
 // ============================================================================

@@ -100,6 +100,9 @@ function setup(cell) {
   // });
 
   // == Custom Rendering ==
+  // onRender must be a PURE function of its cell argument — results are
+  // cached and re-evaluated only when the cell changes. If it reads outside
+  // state, call cell.render.invalidate() after changing that state.
   // cell.onRender(({ row, col, sheetIndex, value }) => {
   //   // Return style overrides for cells matching a condition
   //   if (value === "ERROR") {

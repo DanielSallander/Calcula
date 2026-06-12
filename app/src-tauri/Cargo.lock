@@ -597,9 +597,11 @@ dependencies = [
  "engine-core",
  "engine-query",
  "futures",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2149,6 +2151,7 @@ dependencies = [
  "futures",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

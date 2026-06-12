@@ -13,6 +13,7 @@ import {
   overlaySheetToCanvas,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
+import { getShapeBitmap, hasShapeBitmapRenderer } from "@api";
 import { getDesignMode } from "../lib/designMode";
 import { resolveControlProperties } from "../lib/controlApi";
 import { isFloatingControlSelected, getSelectedFloatingControls } from "../Button/floatingSelection";
@@ -421,7 +422,21 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     };
   }
 
-  // Check for custom canvas renderer from shape script
+  // Worker-realm scripts provide cached bitmaps instead of functions
+  // (sandbox design §6.2): blit inside the existing clip — a script can
+  // never paint outside its region. Missing bitmap = single-flight request
+  // queued; skip the custom layer this frame (graceful degradation).
+  if (hasShapeBitmapRenderer(controlId)) {
+    const bmp = getShapeBitmap(controlId, shapeWidth, shapeHeight, window.devicePixelRatio || 1);
+    if (bmp) {
+      ctx.drawImage(bmp, canvasX, canvasY, shapeWidth, shapeHeight);
+    }
+    drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
+    ctx.restore();
+    return;
+  }
+
+  // Check for custom canvas renderer from shape script (legacy main-thread path)
   const customRenderer = customCanvasRenderers.get(controlId);
   if (customRenderer) {
     try {
