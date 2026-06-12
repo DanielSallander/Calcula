@@ -31,7 +31,7 @@ use std::io::{self, BufRead, Write as _};
 use std::time::Instant;
 
 use arrow::util::pretty::pretty_format_batches;
-use engine::*;
+use bi_engine::*;
 
 const SCHEMA: &str = "BI";
 
@@ -429,8 +429,8 @@ async fn main() {
     let auth = test_auth();
     println!(
         "Connecting to {}:{}...",
-        target.host(),
-        target.port().unwrap_or(5432)
+        target.host,
+        target.port.unwrap_or(5432)
     );
     let mut engine = Engine::new(base_model.clone());
 

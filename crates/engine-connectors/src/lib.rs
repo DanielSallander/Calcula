@@ -13,6 +13,7 @@
 
 pub mod arrow_convert;
 pub mod auth;
+pub(crate) mod decimal;
 pub mod error;
 pub mod postgres;
 pub mod sqlserver;

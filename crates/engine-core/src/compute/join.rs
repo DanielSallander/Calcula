@@ -9,6 +9,7 @@ use datafusion::logical_expr::col;
 use datafusion::prelude::{DataFrame, JoinType as DfJoinType, SessionContext};
 
 use crate::compute::aggregate::AggregateOp;
+use crate::compute::sql_util::quote_ident_double;
 use crate::error::EngineResult;
 use crate::model::relationship::Relationship;
 use crate::store::TableData;
@@ -207,27 +208,29 @@ async fn aggregate_over_relationship_pre_agg(
     ctx.register_batch("to_t", to_batch)?;
 
     // Step 1: Compute boundary values per group from dimension.
-    let mut bounds_select = vec![format!("to_t.\"{group_by_column}\"")];
+    let group_by_quoted = quote_ident_double(group_by_column);
+    let mut bounds_select = vec![format!("to_t.{group_by_quoted}")];
     let mut where_conditions: Vec<String> = Vec::new();
 
     for (ci, cond) in relationship.conditions().iter().enumerate() {
-        let dim_col = cond.to_column();
-        let fact_col = cond.from_column();
+        let dim_col = quote_ident_double(cond.to_column());
+        let fact_col = quote_ident_double(cond.from_column());
         let boundary_agg = cond.operator().boundary_aggregate();
+        // Internal alias generated here — not model-derived, safe to embed.
         let boundary_alias = format!("__b_{ci}");
 
         bounds_select.push(format!(
-            "{boundary_agg}(to_t.\"{dim_col}\") AS \"{boundary_alias}\""
+            "{boundary_agg}(to_t.{dim_col}) AS \"{boundary_alias}\""
         ));
 
         let op = cond.operator().as_sql();
         where_conditions.push(format!(
-            "from_t.\"{fact_col}\" {op} __bounds.\"{boundary_alias}\""
+            "from_t.{fact_col} {op} __bounds.\"{boundary_alias}\""
         ));
     }
 
     let bounds_sql = format!(
-        "SELECT {} FROM to_t GROUP BY to_t.\"{group_by_column}\"",
+        "SELECT {} FROM to_t GROUP BY to_t.{group_by_quoted}",
         bounds_select.join(", ")
     );
 
@@ -237,22 +240,24 @@ async fn aggregate_over_relationship_pre_agg(
     ctx.register_batch("__bounds", bounds_result)?;
 
     // Step 2: CROSS JOIN fact × bounds, filter by boundary.
+    let agg_col_quoted = quote_ident_double(aggregate_column);
     let agg_sql = match operation {
-        AggregateOp::Sum => format!("SUM(from_t.\"{aggregate_column}\")"),
-        AggregateOp::Count => format!("COUNT(from_t.\"{aggregate_column}\")"),
+        AggregateOp::Sum => format!("SUM(from_t.{agg_col_quoted})"),
+        AggregateOp::Count => format!("COUNT(from_t.{agg_col_quoted})"),
         AggregateOp::CountRows => "COUNT(*)".to_string(),
-        AggregateOp::Min => format!("MIN(from_t.\"{aggregate_column}\")"),
-        AggregateOp::Max => format!("MAX(from_t.\"{aggregate_column}\")"),
-        AggregateOp::Average => format!("AVG(from_t.\"{aggregate_column}\")"),
+        AggregateOp::Min => format!("MIN(from_t.{agg_col_quoted})"),
+        AggregateOp::Max => format!("MAX(from_t.{agg_col_quoted})"),
+        AggregateOp::Average => format!("AVG(from_t.{agg_col_quoted})"),
         AggregateOp::DistinctCount => {
-            format!("COUNT(DISTINCT from_t.\"{aggregate_column}\")")
+            format!("COUNT(DISTINCT from_t.{agg_col_quoted})")
         }
-        _ => format!("{operation}(from_t.\"{aggregate_column}\")"),
+        _ => format!("{operation}(from_t.{agg_col_quoted})"),
     };
 
     let main_sql = format!(
-        "SELECT __bounds.\"{group_by_column}\", {agg_sql} AS \"{operation}({aggregate_column})\" FROM from_t CROSS JOIN __bounds WHERE {} GROUP BY __bounds.\"{group_by_column}\"",
-        where_conditions.join(" AND ")
+        "SELECT __bounds.{group_by_quoted}, {agg_sql} AS {agg_alias} FROM from_t CROSS JOIN __bounds WHERE {} GROUP BY __bounds.{group_by_quoted}",
+        where_conditions.join(" AND "),
+        agg_alias = quote_ident_double(&format!("{operation}({aggregate_column})"))
     );
 
     let main_df = ctx.sql(&main_sql).await?;

@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// A ragged hierarchy has branches where some intermediate levels are
 /// null. This enum determines the presentation strategy for those gaps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RaggedBehavior {
     /// Null levels appear as empty cells (default, matches Power BI).
+    #[default]
     ShowBlanks,
     /// Skip blank levels — the branch appears shorter in the output.
     HideMembers,
@@ -37,12 +38,6 @@ pub enum RaggedBehavior {
     RepeatParent,
     /// Treat rows with incomplete paths as leaf nodes at their natural level.
     ShowAsLeaf,
-}
-
-impl Default for RaggedBehavior {
-    fn default() -> Self {
-        Self::ShowBlanks
-    }
 }
 
 /// A single level within a hierarchy.
@@ -70,6 +65,14 @@ pub struct HierarchyLevel {
     display_name: Option<String>,
     #[serde(default)]
     optional: bool,
+    /// A custom value that marks "this branch stops here" at this level.
+    ///
+    /// When set, the engine treats this value as a hierarchy stopper —
+    /// semantically equivalent to NULL for ragged hierarchy purposes.
+    /// Only valid on optional levels; the builder rejects stopper values
+    /// on required levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopper_value: Option<String>,
 }
 
 impl HierarchyLevel {
@@ -79,6 +82,7 @@ impl HierarchyLevel {
             column: column.into(),
             display_name: None,
             optional: false,
+            stopper_value: None,
         }
     }
 
@@ -91,6 +95,28 @@ impl HierarchyLevel {
     /// Mark this level as optional (blanks expected in ragged hierarchies).
     pub fn with_optional(mut self, optional: bool) -> Self {
         self.optional = optional;
+        self
+    }
+
+    /// Set a custom stopper value for this optional level.
+    ///
+    /// When a row contains this value at this level, the engine treats
+    /// the branch as stopping here — equivalent to NULL for ragged
+    /// hierarchy purposes. This is only valid on optional levels;
+    /// model validation rejects stopper values on required levels.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use engine_core::model::hierarchy::HierarchyLevel;
+    ///
+    /// let level = HierarchyLevel::new("state")
+    ///     .with_optional(true)
+    ///     .with_stopper_value("#");
+    /// assert_eq!(level.stopper_value(), Some("#"));
+    /// ```
+    pub fn with_stopper_value(mut self, value: impl Into<String>) -> Self {
+        self.stopper_value = Some(value.into());
         self
     }
 
@@ -107,6 +133,11 @@ impl HierarchyLevel {
     /// Returns whether this level is optional (blanks expected).
     pub fn is_optional(&self) -> bool {
         self.optional
+    }
+
+    /// Returns the custom stopper value, if set.
+    pub fn stopper_value(&self) -> Option<&str> {
+        self.stopper_value.as_deref()
     }
 }
 
@@ -274,6 +305,20 @@ mod tests {
     }
 
     #[test]
+    fn hierarchy_level_stopper_value() {
+        let level = HierarchyLevel::new("state")
+            .with_optional(true)
+            .with_stopper_value("#");
+        assert_eq!(level.stopper_value(), Some("#"));
+    }
+
+    #[test]
+    fn hierarchy_level_no_stopper_value() {
+        let level = HierarchyLevel::new("state").with_optional(true);
+        assert_eq!(level.stopper_value(), None);
+    }
+
+    #[test]
     fn hierarchy_level_serde_defaults() {
         // Deserialize without optional fields — should get defaults.
         let json = r#"{"column":"state"}"#;
@@ -281,6 +326,25 @@ mod tests {
         assert_eq!(level.column(), "state");
         assert_eq!(level.display_name(), None);
         assert!(!level.is_optional());
+        assert_eq!(level.stopper_value(), None);
+    }
+
+    #[test]
+    fn hierarchy_level_stopper_value_serde_roundtrip() {
+        let level = HierarchyLevel::new("state")
+            .with_optional(true)
+            .with_stopper_value("#");
+        let json = serde_json::to_string(&level).unwrap();
+        assert!(json.contains("\"stopper_value\":\"#\""));
+        let deserialized: HierarchyLevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.stopper_value(), Some("#"));
+    }
+
+    #[test]
+    fn hierarchy_level_stopper_value_omitted_when_none() {
+        let level = HierarchyLevel::new("state").with_optional(true);
+        let json = serde_json::to_string(&level).unwrap();
+        assert!(!json.contains("stopper_value"));
     }
 
     #[test]

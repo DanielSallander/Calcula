@@ -240,14 +240,56 @@ fn tokenize(input: &str) -> EngineResult<Vec<Token>> {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Maximum nesting depth for expression parsing.
+///
+/// Generous for real-world measures (which rarely nest beyond a dozen levels)
+/// while staying far below native stack exhaustion. Without this limit, a
+/// hostile model file (e.g. a `lookup_resolution` string of ~100k nested
+/// parentheses, parsed lazily at query time) would overflow the stack and
+/// abort the host process.
+const MAX_PARSE_DEPTH: usize = 128;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Current recursion depth, guarded by [`MAX_PARSE_DEPTH`].
+    ///
+    /// Each `Parser` is constructed fresh per input string, so the depth
+    /// always starts at zero for every parse.
+    depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Increment the recursion depth, failing once nesting exceeds
+    /// [`MAX_PARSE_DEPTH`].
+    ///
+    /// Called on entry to every parser function that can recurse back into
+    /// itself: `parse_atom` (all grammar nesting — parenthesized expressions,
+    /// function-call arguments, IF/SWITCH arms, context arguments, VAR/RETURN
+    /// bindings and QUERY aggregates all re-enter through it) and
+    /// `parse_condition` (direct self-recursion on AND/OR chains). Guarding
+    /// these two choke points bounds native stack usage for arbitrary input.
+    fn enter_recursion(&mut self) -> EngineResult<()> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(EngineError::InvalidData(format!(
+                "expression nesting too deep (max {MAX_PARSE_DEPTH} levels)"
+            )));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Decrement the recursion depth on exit from a guarded parser function.
+    fn exit_recursion(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -326,7 +368,18 @@ impl Parser {
     }
 
     /// Parse an atom: number, string, parenthesized expression, column ref, or function call.
+    ///
+    /// Depth-guarded: all mutually recursive grammar productions re-enter the
+    /// parser through this function, so the guard here bounds nesting for the
+    /// whole grammar (see [`Parser::enter_recursion`]).
     fn parse_atom(&mut self) -> EngineResult<Expression> {
+        self.enter_recursion()?;
+        let result = self.parse_atom_inner();
+        self.exit_recursion();
+        result
+    }
+
+    fn parse_atom_inner(&mut self) -> EngineResult<Expression> {
         match self.peek().cloned() {
             Some(Token::Number(n)) => {
                 self.advance()?;
@@ -648,7 +701,18 @@ impl Parser {
     ///
     /// This extends `parse_expression` with comparison and logical operators,
     /// used for KEEP condition arguments.
+    ///
+    /// Depth-guarded: AND/OR chaining recurses directly into `parse_condition`
+    /// without passing through `parse_atom`, so it needs its own guard
+    /// (see [`Parser::enter_recursion`]).
     fn parse_condition(&mut self) -> EngineResult<Expression> {
+        self.enter_recursion()?;
+        let result = self.parse_condition_inner();
+        self.exit_recursion();
+        result
+    }
+
+    fn parse_condition_inner(&mut self) -> EngineResult<Expression> {
         let left = self.parse_expression()?;
 
         // Check for IN keyword: `table[col] IN {val1, val2}` or `table[col] IN var[col]`.
@@ -4433,5 +4497,73 @@ mod tests {
             ],
         };
         assert_eq!(inlist.to_sql_string(), "\"color\" IN ('Blue', 'Red')");
+    }
+
+    // -----------------------------------------------------------------------
+    // Recursion depth limit (DoS protection against hostile model files)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_deeply_nested_parens_returns_error_instead_of_stack_overflow() {
+        // A hostile model file can embed ~100k nested parens in a
+        // lookup_resolution string parsed lazily at query time; this must
+        // fail cleanly with an error, not abort the host process.
+        let n = 100_000;
+        let input = format!("{}1{}", "(".repeat(n), ")".repeat(n));
+        let err =
+            parse_measure_expression(&input).expect_err("deeply nested parens must be rejected");
+        assert!(
+            err.to_string().contains("nesting too deep"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_deeply_nested_function_calls_return_error_instead_of_stack_overflow() {
+        // Function-argument parsing is a distinct re-entry path from parens.
+        let n = 100_000;
+        let input = format!("{}SUM(t[c]){}", "ABS(".repeat(n), ")".repeat(n));
+        let err = parse_measure_expression(&input)
+            .expect_err("deeply nested function calls must be rejected");
+        assert!(
+            err.to_string().contains("nesting too deep"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_deep_and_chain_in_keep_returns_error_instead_of_stack_overflow() {
+        // AND/OR chaining recurses through parse_condition, not parse_atom,
+        // so it exercises the second guard point.
+        let n = 100_000;
+        let chain = vec!["d[y] = 1"; n].join(" AND ");
+        let input = format!("SUM(f[x], KEEP(d, {chain}))");
+        let err = parse_measure_expression(&input).expect_err("deep AND chain must be rejected");
+        assert!(
+            err.to_string().contains("nesting too deep"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_nesting_just_below_limit_succeeds() {
+        let n = 50;
+        let input = format!("{}SUM(t[c]){}", "(".repeat(n), ")".repeat(n));
+        let expr = parse_measure_expression(&input).unwrap();
+        assert!(matches!(expr, Expression::Aggregate { .. }));
+    }
+
+    #[test]
+    fn parse_realistic_expression_unaffected_by_depth_limit() {
+        let expr = parse_measure_expression(
+            "SUM(Sales[amount], KEEP(dim, dim[year] = 2024, dim[month] = 1))",
+        )
+        .unwrap();
+        assert!(expr.has_context_ops());
+        if let Expression::Keep { filters, .. } = &expr {
+            assert_eq!(filters.len(), 2);
+        } else {
+            panic!("expected Keep expression");
+        }
     }
 }

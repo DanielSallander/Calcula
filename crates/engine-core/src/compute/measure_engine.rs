@@ -16,6 +16,7 @@ use crate::compute::context::{
 };
 use crate::compute::evaluate::materialize_calculated_columns;
 use crate::compute::expression::{expand_global_variables, expand_measure_refs, Expression};
+use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use crate::error::EngineResult;
 use crate::model::schema::DataModel;
 use crate::store::ColumnStore;
@@ -99,7 +100,10 @@ impl<'a> MeasureEngine<'a> {
             .await?;
 
         let expr_sql = stripped_expr.to_sql_string();
-        let mut sql = format!("SELECT {expr_sql} AS \"{}\" FROM t", measure.name());
+        let mut sql = format!(
+            "SELECT {expr_sql} AS {} FROM t",
+            quote_ident_double(measure.name())
+        );
 
         // Classify cross-table filters into direct JOINs and EXISTS subqueries.
         let mut exists_parts: Vec<String> = Vec::new();
@@ -303,7 +307,7 @@ impl<'a> MeasureEngine<'a> {
                     .map(|f| {
                         let op = f.operator.as_sql();
                         let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                        format!("__d.\"{}\" {op} {val}", f.column)
+                        format!("__d.{} {op} {val}", quote_ident_double(&f.column))
                     })
                     .collect();
                 let dim_lower = table_name.to_lowercase();
@@ -345,13 +349,16 @@ impl<'a> MeasureEngine<'a> {
 
         for tc in group_by {
             let tbl = tc.table.to_lowercase();
-            let qualified = format!("{tbl}.\"{}\"", tc.column);
+            let qualified = format!("{tbl}.{}", quote_ident_double(&tc.column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
         }
 
         let expr_sql = stripped_expr.to_sql_string();
-        select_parts.push(format!("{expr_sql} AS \"{}\"", measure.name()));
+        select_parts.push(format!(
+            "{expr_sql} AS {}",
+            quote_ident_double(measure.name())
+        ));
 
         let select_clause = select_parts.join(", ");
         let mut sql = format!("SELECT {select_clause} FROM {fact_lower}");
@@ -386,7 +393,7 @@ impl<'a> MeasureEngine<'a> {
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                format!("{tbl}.\"{}\" {op} {val}", f.column)
+                format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
             })
             .collect();
         let in_conditions = self
@@ -507,7 +514,7 @@ impl<'a> MeasureEngine<'a> {
         let first_table = &sub_results[0];
         let group_cols: Vec<String> = group_by
             .iter()
-            .map(|tc| format!("\"{}\"", tc.column))
+            .map(|tc| quote_ident_double(&tc.column))
             .collect();
 
         let mut from_clause = first_table.clone();
@@ -530,7 +537,10 @@ impl<'a> MeasureEngine<'a> {
             .iter()
             .map(|c| format!("{first_table}.{c}"))
             .collect();
-        select_parts.push(format!("{result_sql} AS \"{measure_name}\""));
+        select_parts.push(format!(
+            "{result_sql} AS {}",
+            quote_ident_double(measure_name)
+        ));
 
         let combine_sql = format!("SELECT {} FROM {}", select_parts.join(", "), from_clause);
 
@@ -830,7 +840,7 @@ impl<'a> MeasureEngine<'a> {
 
         for tc in group_by {
             if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
-                let qualified = format!("{dim_lower}.\"{}\"", tc.column);
+                let qualified = format!("{dim_lower}.{}", quote_ident_double(&tc.column));
                 bounds_select.push(qualified.clone());
                 bounds_group.push(qualified);
             }
@@ -850,12 +860,14 @@ impl<'a> MeasureEngine<'a> {
             let boundary_agg = cond.operator().boundary_aggregate();
             let boundary_alias = format!("__b_{ci}");
             bounds_select.push(format!(
-                "{boundary_agg}({dim_lower}.\"{dim_col}\") AS \"{boundary_alias}\""
+                "{boundary_agg}({dim_lower}.{}) AS \"{boundary_alias}\"",
+                quote_ident_double(dim_col)
             ));
 
             let op = cond.operator().as_sql();
             where_conditions.push(format!(
-                "{fact_lower}.\"{fact_col}\" {op} {bounds_name}.\"{boundary_alias}\""
+                "{fact_lower}.{} {op} {bounds_name}.\"{boundary_alias}\"",
+                quote_ident_double(fact_col)
             ));
         }
 
@@ -885,23 +897,23 @@ impl<'a> MeasureEngine<'a> {
 
         for tc in group_by {
             if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
-                let qualified = format!("{bounds_name}.\"{}\"", tc.column);
+                let qualified = format!("{bounds_name}.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             } else if tc.table == fact_table {
-                let qualified = format!("{fact_lower}.\"{}\"", tc.column);
+                let qualified = format!("{fact_lower}.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             } else {
                 let tbl = tc.table.to_lowercase();
-                let qualified = format!("{tbl}.\"{}\"", tc.column);
+                let qualified = format!("{tbl}.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             }
         }
 
         let expr_sql = stripped_expr.to_sql_string();
-        main_select.push(format!("{expr_sql} AS \"{alias}\""));
+        main_select.push(format!("{expr_sql} AS {}", quote_ident_double(alias)));
 
         let mut main_from = format!("{fact_lower} CROSS JOIN {bounds_name}");
 
@@ -953,7 +965,7 @@ impl<'a> MeasureEngine<'a> {
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                format!("{tbl}.\"{}\" {op} {val}", f.column)
+                format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
             })
             .collect();
 
@@ -1001,13 +1013,13 @@ impl<'a> MeasureEngine<'a> {
 
         for tc in group_by {
             let tbl = tc.table.to_lowercase();
-            let qualified = format!("{tbl}.\"{}\"", tc.column);
+            let qualified = format!("{tbl}.{}", quote_ident_double(&tc.column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
         }
 
         let expr_sql = stripped_expr.to_sql_string();
-        select_parts.push(format!("{expr_sql} AS \"{alias}\""));
+        select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(alias)));
 
         let mut sql = format!("SELECT {} FROM {fact_lower}", select_parts.join(", "));
 
@@ -1051,7 +1063,7 @@ impl<'a> MeasureEngine<'a> {
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                format!("{tbl}.\"{}\" {op} {val}", f.column)
+                format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
             })
             .collect();
 
@@ -1127,7 +1139,7 @@ impl<'a> MeasureEngine<'a> {
         // Only include unsafe dim columns in the bounds query.
         for tc in group_by {
             if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
-                let qualified = format!("{dim_lower}.\"{}\"", tc.column);
+                let qualified = format!("{dim_lower}.{}", quote_ident_double(&tc.column));
                 bounds_select.push(qualified.clone());
                 bounds_group.push(qualified);
             }
@@ -1147,12 +1159,14 @@ impl<'a> MeasureEngine<'a> {
             let boundary_agg = cond.operator().boundary_aggregate();
             let boundary_alias = format!("__b_{ci}");
             bounds_select.push(format!(
-                "{boundary_agg}({dim_lower}.\"{dim_col}\") AS \"{boundary_alias}\""
+                "{boundary_agg}({dim_lower}.{}) AS \"{boundary_alias}\"",
+                quote_ident_double(dim_col)
             ));
 
             let op = cond.operator().as_sql();
             where_conditions.push(format!(
-                "{fact_lower}.\"{fact_col}\" {op} __bounds.\"{boundary_alias}\""
+                "{fact_lower}.{} {op} __bounds.\"{boundary_alias}\"",
+                quote_ident_double(fact_col)
             ));
         }
 
@@ -1184,17 +1198,17 @@ impl<'a> MeasureEngine<'a> {
         for tc in group_by {
             if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
                 // Unsafe dim columns come from __bounds.
-                let qualified = format!("__bounds.\"{}\"", tc.column);
+                let qualified = format!("__bounds.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             } else if tc.table == fact_table {
-                let qualified = format!("{fact_lower}.\"{}\"", tc.column);
+                let qualified = format!("{fact_lower}.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             } else {
                 // Safe dim columns come from their joined table.
                 let tbl = tc.table.to_lowercase();
-                let qualified = format!("{tbl}.\"{}\"", tc.column);
+                let qualified = format!("{tbl}.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             }
@@ -1202,7 +1216,10 @@ impl<'a> MeasureEngine<'a> {
 
         // Measure aggregate.
         let expr_sql = stripped_expr.to_sql_string();
-        main_select.push(format!("{expr_sql} AS \"{measure_name}\""));
+        main_select.push(format!(
+            "{expr_sql} AS {}",
+            quote_ident_double(measure_name)
+        ));
 
         let mut main_from = format!("{fact_lower} CROSS JOIN __bounds");
 
@@ -1256,7 +1273,7 @@ impl<'a> MeasureEngine<'a> {
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                format!("{tbl}.\"{}\" {op} {val}", f.column)
+                format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
             })
             .collect();
 
@@ -1362,7 +1379,10 @@ impl<'a> MeasureEngine<'a> {
         let result_sql = inlined.to_sql_string();
         let from_table = query_binding_names[0].to_lowercase();
 
-        let mut sql = format!("SELECT {result_sql} AS \"{measure_name}\" FROM {from_table}");
+        let mut sql = format!(
+            "SELECT {result_sql} AS {} FROM {from_table}",
+            quote_ident_double(measure_name)
+        );
 
         // Apply intermediate table filters as WHERE clause.
         let where_clause = build_intermediate_where(&intermediate_filters, &binding_schemas);
@@ -1474,12 +1494,15 @@ impl<'a> MeasureEngine<'a> {
 
         // Map outer group-by columns to the intermediate table.
         for tc in group_by {
-            let qualified = format!("{from_table}.\"{}\"", tc.column);
+            let qualified = format!("{from_table}.{}", quote_ident_double(&tc.column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
         }
 
-        select_parts.push(format!("{result_sql} AS \"{measure_name}\""));
+        select_parts.push(format!(
+            "{result_sql} AS {}",
+            quote_ident_double(measure_name)
+        ));
 
         let select_clause = select_parts.join(", ");
         let mut sql = format!("SELECT {select_clause} FROM {from_table}");
@@ -1549,7 +1572,7 @@ impl<'a> MeasureEngine<'a> {
 
         for (table, column) in group_by {
             let tbl = table.to_lowercase();
-            let qualified = format!("{tbl}.\"{column}\"");
+            let qualified = format!("{tbl}.{}", quote_ident_double(column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
         }
@@ -1564,13 +1587,13 @@ impl<'a> MeasureEngine<'a> {
 
             if effective.is_empty() {
                 let sql = stripped.to_sql_string();
-                select_parts.push(format!("{sql} AS \"{alias}\""));
+                select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
             } else {
                 // Build CASE WHEN for per-aggregate context filters.
                 let condition = self.build_where_clause(&effective, fact_table);
                 let measure_table = &fact_lower;
                 let sql = stripped.to_case_when_sql(&condition, measure_table);
-                select_parts.push(format!("{sql} AS \"{alias}\""));
+                select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
 
                 // Track additional dimension tables needed for filter JOINs.
                 for f in &effective {
@@ -1659,7 +1682,7 @@ impl<'a> MeasureEngine<'a> {
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                format!("{tbl}.\"{}\" {op} {val}", f.column)
+                format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
             })
             .collect();
         conditions.join(" AND ")
@@ -1712,7 +1735,7 @@ impl<'a> MeasureEngine<'a> {
                     .map(|f| {
                         let op = f.operator.as_sql();
                         let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                        format!("__d.\"{}\" {op} {val}", f.column)
+                        format!("__d.{} {op} {val}", quote_ident_double(&f.column))
                     })
                     .collect();
 
@@ -1758,8 +1781,10 @@ impl<'a> MeasureEngine<'a> {
             }
 
             // Build the subquery: SELECT var_tbl."col" FROM var_tbl WHERE <filters>
-            let mut subquery =
-                format!("SELECT {var_lower}.\"{}\" FROM {var_lower}", inf.var_column);
+            let mut subquery = format!(
+                "SELECT {var_lower}.{} FROM {var_lower}",
+                quote_ident_double(&inf.var_column)
+            );
 
             if !inf.var_filters.is_empty() {
                 let where_parts: Vec<String> = inf
@@ -1768,7 +1793,7 @@ impl<'a> MeasureEngine<'a> {
                     .map(|f| {
                         let op = f.operator.as_sql();
                         let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                        format!("{var_lower}.\"{}\" {op} {val}", f.column)
+                        format!("{var_lower}.{} {op} {val}", quote_ident_double(&f.column))
                     })
                     .collect();
                 subquery.push_str(" WHERE ");
@@ -1781,7 +1806,10 @@ impl<'a> MeasureEngine<'a> {
             } else {
                 inf.table.to_lowercase()
             };
-            conditions.push(format!("{fact_prefix}.\"{}\" IN ({subquery})", inf.column));
+            conditions.push(format!(
+                "{fact_prefix}.{} IN ({subquery})",
+                quote_ident_double(&inf.column)
+            ));
         }
 
         Ok(conditions)
@@ -1823,7 +1851,7 @@ fn build_intermediate_where(
             let tbl = f.table.to_lowercase();
             let op = f.operator.as_sql();
             let val = format_intermediate_value(&tbl, &f.column, &f.value, schemas);
-            format!("{tbl}.\"{}\" {op} {val}", f.column)
+            format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
         })
         .collect();
     parts.join(" AND ")
@@ -1857,7 +1885,7 @@ fn format_intermediate_value(
         .unwrap_or(true); // fallback: quote if unsure
 
     if needs_quoting {
-        format!("'{}'", value.replace('\'', "''"))
+        sql_quote_literal(value)
     } else {
         value.to_string()
     }

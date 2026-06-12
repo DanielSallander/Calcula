@@ -15,6 +15,7 @@ use engine_core::compute::context::{
 use engine_core::compute::expression::{expand_global_variables, expand_measure_refs, Expression};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
+use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use engine_core::error::EngineError;
 use engine_core::model::DataModel;
 use engine_core::store::InMemoryCache;
@@ -545,7 +546,7 @@ impl QueryExecutor {
 
         for dim in group_by {
             let dim_table = dim.table.to_lowercase();
-            let qualified = format!("{dim_table}.\"{}\"", dim.column);
+            let qualified = format!("{dim_table}.{}", quote_ident_double(&dim.column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
         }
@@ -650,7 +651,7 @@ impl QueryExecutor {
                     &mut context_join_tables,
                     &mut override_joins,
                 )?;
-                format!("{expr_sql} AS \"{name}\"")
+                format!("{expr_sql} AS {}", quote_ident_double(name))
             } else {
                 // Standard path: resolve the whole expression as a unit.
                 let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
@@ -690,29 +691,31 @@ impl QueryExecutor {
                     // Use the measure's own table for column qualification.
                     let measure_table = &measure.table().to_lowercase();
                     let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table);
-                    format!("{expr_sql} AS \"{name}\"")
+                    format!("{expr_sql} AS {}", quote_ident_double(name))
                 } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
+                    let col = quote_ident_double(col);
+                    let name = quote_ident_double(name);
                     match op {
-                        AggregateOp::Sum => format!("SUM({fact}.\"{col}\") AS \"{name}\""),
+                        AggregateOp::Sum => format!("SUM({fact}.{col}) AS {name}"),
                         AggregateOp::Count => {
-                            format!("COUNT({fact}.\"{col}\") AS \"{name}\"")
+                            format!("COUNT({fact}.{col}) AS {name}")
                         }
                         AggregateOp::Average => {
-                            format!("AVG({fact}.\"{col}\") AS \"{name}\"")
+                            format!("AVG({fact}.{col}) AS {name}")
                         }
-                        AggregateOp::Min => format!("MIN({fact}.\"{col}\") AS \"{name}\""),
-                        AggregateOp::Max => format!("MAX({fact}.\"{col}\") AS \"{name}\""),
+                        AggregateOp::Min => format!("MIN({fact}.{col}) AS {name}"),
+                        AggregateOp::Max => format!("MAX({fact}.{col}) AS {name}"),
                         AggregateOp::DistinctCount => {
-                            format!("COUNT(DISTINCT {fact}.\"{col}\") AS \"{name}\"")
+                            format!("COUNT(DISTINCT {fact}.{col}) AS {name}")
                         }
-                        AggregateOp::CountRows => format!("COUNT(*) AS \"{name}\""),
+                        AggregateOp::CountRows => format!("COUNT(*) AS {name}"),
                         // Statistical aggregates: use Display for function name
-                        _ => format!("{op}({fact}.\"{col}\") AS \"{name}\""),
+                        _ => format!("{op}({fact}.{col}) AS {name}"),
                     }
                 } else {
                     let expr_sql = stripped_expr.to_sql_string();
-                    format!("{expr_sql} AS \"{name}\"")
+                    format!("{expr_sql} AS {}", quote_ident_double(name))
                 }
             };
             select_parts.push(sql_fragment);
@@ -879,7 +882,7 @@ impl QueryExecutor {
             if !case_when_measures.is_empty() {
                 let having_parts: Vec<String> = case_when_measures
                     .iter()
-                    .map(|m| format!("\"{m}\" IS NOT NULL"))
+                    .map(|m| format!("{} IS NOT NULL", quote_ident_double(m)))
                     .collect();
                 sql.push_str(" HAVING ");
                 sql.push_str(&having_parts.join(" OR "));
@@ -1039,14 +1042,14 @@ impl QueryExecutor {
         // Include safe dim GROUP BY columns.
         for dim in &safe_group_by {
             let dim_lower = dim.table.to_lowercase();
-            let qualified = format!("{dim_lower}.\"{}\"", dim.column);
+            let qualified = format!("{dim_lower}.{}", quote_ident_double(&dim.column));
             s1_select.push(qualified.clone());
             s1_group.push(qualified);
         }
 
         // Include fact-side join key columns for unsafe dims.
         for key_col in &fact_join_keys {
-            let qualified = format!("{fact_table}.\"{key_col}\"");
+            let qualified = format!("{fact_table}.{}", quote_ident_double(key_col));
             if !s1_group.contains(&qualified) {
                 s1_select.push(qualified.clone());
                 s1_group.push(qualified);
@@ -1073,7 +1076,7 @@ impl QueryExecutor {
             if let Some((op, col)) = stripped.as_simple_aggregate() {
                 let alias = format!("__pre_{i}");
                 let fact_lower = measure.table().to_lowercase();
-                let col_ref = format!("{fact_lower}.\"{col}\"");
+                let col_ref = format!("{fact_lower}.{}", quote_ident_double(col));
 
                 let (s1_agg, s2_agg) = match op {
                     AggregateOp::Sum => {
@@ -1084,12 +1087,18 @@ impl QueryExecutor {
                                 format!(
                                     "SUM(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                                 ),
-                                format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "SUM(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         } else {
                             (
                                 format!("SUM({col_ref}) AS \"{alias}\""),
-                                format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "SUM(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         }
                     }
@@ -1115,7 +1124,10 @@ impl QueryExecutor {
                         } else {
                             format!("COUNT({col_ref}) AS \"{alias}\"")
                         };
-                        (s1, format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""))
+                        (
+                            s1,
+                            format!("SUM(__pre_agg.\"{alias}\") AS {}", quote_ident_double(name)),
+                        )
                     }
                     AggregateOp::Min => {
                         if has_context {
@@ -1125,12 +1137,18 @@ impl QueryExecutor {
                                 format!(
                                     "MIN(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                                 ),
-                                format!("MIN(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "MIN(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         } else {
                             (
                                 format!("MIN({col_ref}) AS \"{alias}\""),
-                                format!("MIN(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "MIN(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         }
                     }
@@ -1142,12 +1160,18 @@ impl QueryExecutor {
                                 format!(
                                     "MAX(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                                 ),
-                                format!("MAX(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "MAX(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         } else {
                             (
                                 format!("MAX({col_ref}) AS \"{alias}\""),
-                                format!("MAX(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "MAX(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         }
                     }
@@ -1169,7 +1193,8 @@ impl QueryExecutor {
                             s1_select.push(format!("COUNT({col_ref}) AS \"{cnt_alias}\""));
                         }
                         s2_measure_parts.push(format!(
-                            "CAST(SUM(__pre_agg.\"{sum_alias}\") AS DOUBLE) / NULLIF(SUM(__pre_agg.\"{cnt_alias}\"), 0) AS \"{name}\""
+                            "CAST(SUM(__pre_agg.\"{sum_alias}\") AS DOUBLE) / NULLIF(SUM(__pre_agg.\"{cnt_alias}\"), 0) AS {}",
+                            quote_ident_double(name)
                         ));
                         pre_agg_aliases.push((name.to_string(), op));
                         continue;
@@ -1199,7 +1224,10 @@ impl QueryExecutor {
                         // as a placeholder. This gives correct results when the
                         // join key is unique in the fact table (pre-aggregation
                         // preserves the exact distinct count per key group).
-                        s2_measure_parts.push(format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""));
+                        s2_measure_parts.push(format!(
+                            "SUM(__pre_agg.\"{alias}\") AS {}",
+                            quote_ident_double(name)
+                        ));
                         pre_agg_aliases.push((name.to_string(), op));
                         continue;
                     }
@@ -1215,12 +1243,18 @@ impl QueryExecutor {
                                 format!(
                                     "{fn_name}(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                                 ),
-                                format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                "SUM(__pre_agg.\"{alias}\") AS {}",
+                                quote_ident_double(name)
+                            ),
                             )
                         } else {
                             (
                                 format!("{fn_name}({col_ref}) AS \"{alias}\""),
-                                format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""),
+                                format!(
+                                    "SUM(__pre_agg.\"{alias}\") AS {}",
+                                    quote_ident_double(name)
+                                ),
                             )
                         }
                     }
@@ -1234,7 +1268,10 @@ impl QueryExecutor {
                 let alias = format!("__pre_{i}");
                 let expr_sql = stripped.to_sql_string();
                 s1_select.push(format!("{expr_sql} AS \"{alias}\""));
-                s2_measure_parts.push(format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""));
+                s2_measure_parts.push(format!(
+                    "SUM(__pre_agg.\"{alias}\") AS {}",
+                    quote_ident_double(name)
+                ));
                 pre_agg_aliases.push((name.to_string(), AggregateOp::Sum));
             }
         }
@@ -1289,12 +1326,12 @@ impl QueryExecutor {
             if unsafe_dim_tables.contains(&dim.table) {
                 // Unsafe dim: reference from the dim table.
                 let dim_lower = dim.table.to_lowercase();
-                let qualified = format!("{dim_lower}.\"{}\"", dim.column);
+                let qualified = format!("{dim_lower}.{}", quote_ident_double(&dim.column));
                 s2_select.push(qualified.clone());
                 s2_group.push(qualified);
             } else {
                 // Safe dim: reference from __pre_agg (it was GROUP BY in Stage 1).
-                let qualified = format!("__pre_agg.\"{}\"", dim.column);
+                let qualified = format!("__pre_agg.{}", quote_ident_double(&dim.column));
                 s2_select.push(qualified.clone());
                 s2_group.push(qualified);
             }
@@ -1394,7 +1431,7 @@ impl QueryExecutor {
 
             for dim in group_by {
                 let dim_table = dim.table.to_lowercase();
-                let qualified = format!("{dim_table}.\"{}\"", dim.column);
+                let qualified = format!("{dim_table}.{}", quote_ident_double(&dim.column));
                 select_parts.push(qualified.clone());
                 group_parts.push(qualified);
             }
@@ -1402,22 +1439,29 @@ impl QueryExecutor {
             for measure in normal_measures {
                 if let Some((op, col)) = measure.expression().as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
+                    let col = quote_ident_double(col);
                     let agg_sql = match op {
-                        AggregateOp::Sum => format!("SUM({fact}.\"{col}\")"),
-                        AggregateOp::Count => format!("COUNT({fact}.\"{col}\")"),
-                        AggregateOp::Average => format!("AVG({fact}.\"{col}\")"),
-                        AggregateOp::Min => format!("MIN({fact}.\"{col}\")"),
-                        AggregateOp::Max => format!("MAX({fact}.\"{col}\")"),
+                        AggregateOp::Sum => format!("SUM({fact}.{col})"),
+                        AggregateOp::Count => format!("COUNT({fact}.{col})"),
+                        AggregateOp::Average => format!("AVG({fact}.{col})"),
+                        AggregateOp::Min => format!("MIN({fact}.{col})"),
+                        AggregateOp::Max => format!("MAX({fact}.{col})"),
                         AggregateOp::DistinctCount => {
-                            format!("COUNT(DISTINCT {fact}.\"{col}\")")
+                            format!("COUNT(DISTINCT {fact}.{col})")
                         }
                         AggregateOp::CountRows => "COUNT(*)".to_string(),
-                        _ => format!("{op}({fact}.\"{col}\")"),
+                        _ => format!("{op}({fact}.{col})"),
                     };
-                    select_parts.push(format!("{agg_sql} AS \"{}\"", measure.name()));
+                    select_parts.push(format!(
+                        "{agg_sql} AS {}",
+                        quote_ident_double(measure.name())
+                    ));
                 } else {
                     let expr_sql = measure.expression().to_sql_string();
-                    select_parts.push(format!("{expr_sql} AS \"{}\"", measure.name()));
+                    select_parts.push(format!(
+                        "{expr_sql} AS {}",
+                        quote_ident_double(measure.name())
+                    ));
                 }
             }
 
@@ -1514,7 +1558,7 @@ impl QueryExecutor {
                     || dim.table.eq_ignore_ascii_case(fact_model_name)
                 {
                     let tbl = dim.table.to_lowercase();
-                    let qualified = format!("{tbl}.\"{}\"", dim.column);
+                    let qualified = format!("{tbl}.{}", quote_ident_double(&dim.column));
                     bounds_select.push(qualified.clone());
                     bounds_group.push(qualified);
                 }
@@ -1535,13 +1579,15 @@ impl QueryExecutor {
                 let boundary_agg = cond.operator().boundary_aggregate();
                 let boundary_alias = format!("__b_{ci}");
                 bounds_select.push(format!(
-                    "{boundary_agg}({dim_lower}.\"{dim_col}\") AS \"{boundary_alias}\""
+                    "{boundary_agg}({dim_lower}.{}) AS \"{boundary_alias}\"",
+                    quote_ident_double(dim_col)
                 ));
 
                 // Build WHERE condition for fact table against boundary.
                 let op = cond.operator().as_sql();
                 where_conditions.push(format!(
-                    "{fact_table}.\"{fact_col}\" {op} {bounds_alias}.\"{boundary_alias}\""
+                    "{fact_table}.{} {op} {bounds_alias}.\"{boundary_alias}\"",
+                    quote_ident_double(fact_col)
                 ));
             }
 
@@ -1569,7 +1615,7 @@ impl QueryExecutor {
             let mut main_group: Vec<String> = Vec::new();
 
             for dim in group_by {
-                let qualified = format!("{bounds_alias}.\"{}\"", dim.column);
+                let qualified = format!("{bounds_alias}.{}", quote_ident_double(&dim.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             }
@@ -1577,7 +1623,7 @@ impl QueryExecutor {
             // Measure aggregate.
             let measure_name = measure.name();
             if let Some((op, col)) = stripped.as_simple_aggregate() {
-                let col_ref = format!("{fact_table}.\"{col}\"");
+                let col_ref = format!("{fact_table}.{}", quote_ident_double(col));
                 let agg_sql = match op {
                     AggregateOp::Sum => format!("SUM({col_ref})"),
                     AggregateOp::Count => format!("COUNT({col_ref})"),
@@ -1588,10 +1634,13 @@ impl QueryExecutor {
                     AggregateOp::CountRows => "COUNT(*)".to_string(),
                     _ => format!("{op}({col_ref})"),
                 };
-                main_select.push(format!("{agg_sql} AS \"{measure_name}\""));
+                main_select.push(format!("{agg_sql} AS {}", quote_ident_double(measure_name)));
             } else {
                 let expr_sql = stripped.to_sql_string();
-                main_select.push(format!("{expr_sql} AS \"{measure_name}\""));
+                main_select.push(format!(
+                    "{expr_sql} AS {}",
+                    quote_ident_double(measure_name)
+                ));
             }
 
             let main_sql = format!(
@@ -1634,7 +1683,7 @@ impl QueryExecutor {
         // --- Part C: combine via FULL OUTER JOIN ---
         let group_cols: Vec<String> = group_by
             .iter()
-            .map(|d| format!("\"{}\"", d.column))
+            .map(|d| quote_ident_double(&d.column))
             .collect();
 
         if !has_normal && override_table_names.is_empty() {
@@ -1658,17 +1707,20 @@ impl QueryExecutor {
 
         if has_normal {
             for m in normal_measures {
-                combine_select.push(format!("{normal_table_name}.\"{}\"", m.name()));
+                combine_select.push(format!(
+                    "{normal_table_name}.{}",
+                    quote_ident_double(m.name())
+                ));
             }
         }
 
         let start_idx = if has_normal { 0 } else { 1 };
         for (tbl, mname) in &override_table_names[start_idx..] {
-            combine_select.push(format!("{tbl}.\"{mname}\""));
+            combine_select.push(format!("{tbl}.{}", quote_ident_double(mname)));
         }
         if !has_normal && !override_table_names.is_empty() {
             let (tbl, mname) = &override_table_names[0];
-            combine_select.push(format!("{tbl}.\"{mname}\""));
+            combine_select.push(format!("{tbl}.{}", quote_ident_double(mname)));
         }
 
         let combine_select_clause = combine_select.join(", ");
@@ -1763,7 +1815,7 @@ impl QueryExecutor {
 
             for dim in &reachable_group_by {
                 let dim_table = dim.table.to_lowercase();
-                let qualified = format!("{dim_table}.\"{}\"", dim.column);
+                let qualified = format!("{dim_table}.{}", quote_ident_double(&dim.column));
                 select_parts.push(qualified.clone());
                 group_parts.push(qualified);
             }
@@ -1797,7 +1849,7 @@ impl QueryExecutor {
                         &mut context_join_tables,
                         &mut override_joins,
                     )?;
-                    format!("{expr_sql} AS \"{name}\"")
+                    format!("{expr_sql} AS {}", quote_ident_double(name))
                 } else {
                     let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
                     let effective = eval_ctx.effective_filters(&[]);
@@ -1831,24 +1883,26 @@ impl QueryExecutor {
                         );
                         let measure_table = &measure.table().to_lowercase();
                         let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table);
-                        format!("{expr_sql} AS \"{name}\"")
+                        format!("{expr_sql} AS {}", quote_ident_double(name))
                     } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                         let fact = measure.table().to_lowercase();
+                        let col = quote_ident_double(col);
+                        let name = quote_ident_double(name);
                         match op {
-                            AggregateOp::Sum => format!("SUM({fact}.\"{col}\") AS \"{name}\""),
-                            AggregateOp::Count => format!("COUNT({fact}.\"{col}\") AS \"{name}\""),
-                            AggregateOp::Average => format!("AVG({fact}.\"{col}\") AS \"{name}\""),
-                            AggregateOp::Min => format!("MIN({fact}.\"{col}\") AS \"{name}\""),
-                            AggregateOp::Max => format!("MAX({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::Sum => format!("SUM({fact}.{col}) AS {name}"),
+                            AggregateOp::Count => format!("COUNT({fact}.{col}) AS {name}"),
+                            AggregateOp::Average => format!("AVG({fact}.{col}) AS {name}"),
+                            AggregateOp::Min => format!("MIN({fact}.{col}) AS {name}"),
+                            AggregateOp::Max => format!("MAX({fact}.{col}) AS {name}"),
                             AggregateOp::DistinctCount => {
-                                format!("COUNT(DISTINCT {fact}.\"{col}\") AS \"{name}\"")
+                                format!("COUNT(DISTINCT {fact}.{col}) AS {name}")
                             }
-                            AggregateOp::CountRows => format!("COUNT(*) AS \"{name}\""),
-                            _ => format!("{op}({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::CountRows => format!("COUNT(*) AS {name}"),
+                            _ => format!("{op}({fact}.{col}) AS {name}"),
                         }
                     } else {
                         let expr_sql = stripped_expr.to_sql_string();
-                        format!("{expr_sql} AS \"{name}\"")
+                        format!("{expr_sql} AS {}", quote_ident_double(name))
                     }
                 };
                 select_parts.push(sql_fragment);
@@ -1938,7 +1992,7 @@ impl QueryExecutor {
                 if !case_when_measures.is_empty() {
                     let having_parts: Vec<String> = case_when_measures
                         .iter()
-                        .map(|m| format!("\"{m}\" IS NOT NULL"))
+                        .map(|m| format!("{} IS NOT NULL", quote_ident_double(m)))
                         .collect();
                     sql.push_str(" HAVING ");
                     sql.push_str(&having_parts.join(" OR "));
@@ -1995,7 +2049,7 @@ impl QueryExecutor {
                 // Find which group table has this measure.
                 for (gi, (_, measures)) in measure_groups.iter().enumerate() {
                     if measures.iter().any(|m| m.name() == name) {
-                        select_parts.push(format!("__group_{gi}.\"{name}\""));
+                        select_parts.push(format!("__group_{gi}.{}", quote_ident_double(name)));
                         break;
                     }
                 }
@@ -2057,15 +2111,20 @@ impl QueryExecutor {
                             .iter()
                             .any(|c| c.table == dim.table && c.column == dim.column)
                     })
-                    .map(|(gi, _)| format!("__group_{gi}.\"{col_name}\""))
+                    .map(|(gi, _)| format!("__group_{gi}.{}", quote_ident_double(col_name)))
                     .collect();
 
                 if sources.len() == 1 {
-                    select_parts.push(format!("{} AS \"{col_name}\"", sources[0]));
+                    select_parts.push(format!(
+                        "{} AS {}",
+                        sources[0],
+                        quote_ident_double(col_name)
+                    ));
                 } else {
                     select_parts.push(format!(
-                        "COALESCE({}) AS \"{col_name}\"",
-                        sources.join(", ")
+                        "COALESCE({}) AS {}",
+                        sources.join(", "),
+                        quote_ident_double(col_name)
                     ));
                 }
             }
@@ -2073,7 +2132,7 @@ impl QueryExecutor {
             for name in &measure_names {
                 for (gi, (_, measures)) in measure_groups.iter().enumerate() {
                     if measures.iter().any(|m| m.name() == name) {
-                        select_parts.push(format!("__group_{gi}.\"{name}\""));
+                        select_parts.push(format!("__group_{gi}.{}", quote_ident_double(name)));
                         break;
                     }
                 }
@@ -2110,7 +2169,10 @@ impl QueryExecutor {
                 } else {
                     let on_parts: Vec<String> = shared_cols
                         .iter()
-                        .map(|col| format!("__group_0.\"{col}\" = {gt}.\"{col}\""))
+                        .map(|col| {
+                            let col = quote_ident_double(col);
+                            format!("__group_0.{col} = {gt}.{col}")
+                        })
                         .collect();
                     sql.push_str(&format!(
                         " FULL OUTER JOIN {gt} ON {}",
@@ -2176,12 +2238,16 @@ impl QueryExecutor {
 
         // Add all existing columns from aggregation result.
         for field in schema.fields() {
-            select_parts.push(format!("__agg_result.\"{}\"", field.name()));
+            select_parts.push(format!("__agg_result.{}", quote_ident_double(field.name())));
         }
 
         // Add lookup columns with resolution expressions.
         for spec in lookup_specs {
-            select_parts.push(format!("{} AS \"{}\"", spec.resolution_sql, spec.column));
+            select_parts.push(format!(
+                "{} AS {}",
+                spec.resolution_sql,
+                quote_ident_double(&spec.column)
+            ));
         }
 
         let select_clause = select_parts.join(", ");
@@ -2196,7 +2262,9 @@ impl QueryExecutor {
                 .unwrap_or(key_col);
 
             sql.push_str(&format!(
-                " JOIN {dim_lower} ON __agg_result.\"{agg_key_col}\" = {dim_lower}.\"{key_col}\""
+                " JOIN {dim_lower} ON __agg_result.{} = {dim_lower}.{}",
+                quote_ident_double(agg_key_col),
+                quote_ident_double(key_col)
             ));
         }
 
@@ -2204,7 +2272,7 @@ impl QueryExecutor {
         let group_parts: Vec<String> = schema
             .fields()
             .iter()
-            .map(|f| format!("__agg_result.\"{}\"", f.name()))
+            .map(|f| format!("__agg_result.{}", quote_ident_double(f.name())))
             .collect();
         sql.push_str(&format!(" GROUP BY {}", group_parts.join(", ")));
 
@@ -2391,12 +2459,12 @@ impl QueryExecutor {
             let mut sql_group_parts: Vec<String> = Vec::new();
 
             for dim in group_by {
-                let qualified = format!("{from_table}.\"{}\"", dim.column);
+                let qualified = format!("{from_table}.{}", quote_ident_double(&dim.column));
                 select_parts.push(qualified.clone());
                 sql_group_parts.push(qualified);
             }
 
-            select_parts.push(format!("{result_sql} AS \"{name}\""));
+            select_parts.push(format!("{result_sql} AS {}", quote_ident_double(name)));
             let select_clause = select_parts.join(", ");
             let mut sql = format!("SELECT {select_clause} FROM {from_table}");
 
@@ -2512,7 +2580,7 @@ impl QueryExecutor {
             // Include outer GROUP BY columns in SELECT.
             for dim in group_by {
                 let col_lower = dim.column.to_lowercase();
-                select_parts.push(format!("\"{col_lower}\""));
+                select_parts.push(quote_ident_double(&col_lower));
             }
 
             // Build the window function expression.
@@ -2648,7 +2716,7 @@ fn build_window_sql(
     let order_clause: Vec<String> = info
         .order_by
         .iter()
-        .map(|(_, col)| format!("\"{}\"", col.to_lowercase()))
+        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
         .collect();
     let order_sql = order_clause.join(", ");
 
@@ -2656,12 +2724,12 @@ fn build_window_sql(
     let mut partition_cols: Vec<String> = info
         .partition_by
         .iter()
-        .map(|(_, col)| format!("\"{}\"", col.to_lowercase()))
+        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
         .collect();
     // Add outer group-by columns to PARTITION BY if not already in ORDER BY or PARTITION BY.
     for dim in outer_group_by {
         let col_lower = dim.column.to_lowercase();
-        let col_quoted = format!("\"{col_lower}\"");
+        let col_quoted = quote_ident_double(&col_lower);
         if !partition_cols.contains(&col_quoted) && !order_clause.contains(&col_quoted) {
             partition_cols.push(col_quoted);
         }
@@ -2695,41 +2763,46 @@ fn build_window_sql(
         };
 
         format!(
-            "{func_name}(\"__val\") OVER ({partition_sql}ORDER BY {order_sql} {frame_sql}) AS \"{measure_name}\""
+            "{func_name}(\"__val\") OVER ({partition_sql}ORDER BY {order_sql} {frame_sql}) AS {}",
+            quote_ident_double(measure_name)
         )
     } else if let Some(delta) = info.delta {
         // OFFSET: LAG/LEAD("__val", N) OVER (...)
         if delta < 0 {
             format!(
-                "LAG(\"__val\", {}) OVER ({partition_sql}ORDER BY {order_sql}) AS \"{measure_name}\"",
-                delta.unsigned_abs()
+                "LAG(\"__val\", {}) OVER ({partition_sql}ORDER BY {order_sql}) AS {}",
+                delta.unsigned_abs(),
+                quote_ident_double(measure_name)
             )
         } else {
             format!(
-                "LEAD(\"__val\", {delta}) OVER ({partition_sql}ORDER BY {order_sql}) AS \"{measure_name}\""
+                "LEAD(\"__val\", {delta}) OVER ({partition_sql}ORDER BY {order_sql}) AS {}",
+                quote_ident_double(measure_name)
             )
         }
     } else if let Some(position) = info.position {
         // INDEX: NTH_VALUE("__val", N) OVER (...) with full frame.
         if position >= 1 {
             format!(
-                "NTH_VALUE(\"__val\", {position}) OVER ({partition_sql}ORDER BY {order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS \"{measure_name}\""
+                "NTH_VALUE(\"__val\", {position}) OVER ({partition_sql}ORDER BY {order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS {}",
+                quote_ident_double(measure_name)
             )
         } else {
             // Negative position: from end. Use NTH_VALUE with reversed ordering.
             let reverse_order: Vec<String> = info
                 .order_by
                 .iter()
-                .map(|(_, col)| format!("\"{}\" DESC", col.to_lowercase()))
+                .map(|(_, col)| format!("{} DESC", quote_ident_double(&col.to_lowercase())))
                 .collect();
             let rev_order_sql = reverse_order.join(", ");
             let abs_pos = position.unsigned_abs();
             format!(
-                "NTH_VALUE(\"__val\", {abs_pos}) OVER ({partition_sql}ORDER BY {rev_order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS \"{measure_name}\""
+                "NTH_VALUE(\"__val\", {abs_pos}) OVER ({partition_sql}ORDER BY {rev_order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS {}",
+                quote_ident_double(measure_name)
             )
         }
     } else {
-        format!("\"__val\" AS \"{measure_name}\"")
+        format!("\"__val\" AS {}", quote_ident_double(measure_name))
     }
 }
 
@@ -2786,7 +2859,7 @@ async fn materialize_query_in_pipeline(
 
     for (table, column) in group_by {
         let tbl = table.to_lowercase();
-        let qualified = format!("{tbl}.\"{column}\"");
+        let qualified = format!("{tbl}.{}", quote_ident_double(column));
         select_parts.push(qualified.clone());
         group_parts.push(qualified);
     }
@@ -2802,11 +2875,11 @@ async fn materialize_query_in_pipeline(
 
         if effective.is_empty() {
             let sql = stripped.to_sql_string();
-            select_parts.push(format!("{sql} AS \"{alias}\""));
+            select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
         } else {
             let condition = build_condition_sql(&effective, &fact_lower, fact_table, model);
             let sql = stripped.to_case_when_sql(&condition, &fact_lower);
-            select_parts.push(format!("{sql} AS \"{alias}\""));
+            select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
 
             // Track dimension tables needed for CASE WHEN filter JOINs.
             for f in &effective {
@@ -2880,7 +2953,7 @@ async fn materialize_query_in_pipeline(
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, model);
-                format!("{tbl}.\"{}\" {op} {val}", f.column)
+                format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
             })
             .collect();
         sql.push_str(" WHERE ");
@@ -2917,7 +2990,7 @@ fn build_intermediate_where(
             let tbl = f.table.to_lowercase();
             let op = f.operator.as_sql();
             let val = format_intermediate_value(&tbl, &f.column, &f.value, schemas);
-            format!("{tbl}.\"{}\" {op} {val}", f.column)
+            format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
         })
         .collect();
     parts.join(" AND ")
@@ -2947,7 +3020,7 @@ fn format_intermediate_value(
         })
         .unwrap_or(true);
     if needs_quoting {
-        format!("'{}'", value.replace('\'', "''"))
+        sql_quote_literal(value)
     } else {
         value.to_string()
     }
@@ -3101,7 +3174,7 @@ fn build_condition_sql_impl(
             };
             let op = f.operator.as_sql();
             let val = format_filter_value(&f.table, &f.column, &f.value, model);
-            format!("{tbl}.\"{}\" {op} {val}", f.column)
+            format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))
         })
         .collect();
 
@@ -3146,9 +3219,9 @@ fn qualify_condition_sql(expr: &Expression) -> String {
             column,
         } => {
             let tbl = table_or_var.to_lowercase();
-            format!("{tbl}.\"{column}\"")
+            format!("{tbl}.{}", quote_ident_double(column))
         }
-        Expression::ColumnRef(name) => format!("\"{name}\""),
+        Expression::ColumnRef(name) => quote_ident_double(name),
         Expression::Comparison { left, op, right } => {
             format!(
                 "({} {} {})",
@@ -3210,12 +3283,11 @@ async fn filter_cached_batch(
     let mut conditions = Vec::new();
     for filter in filters {
         // Quote the value as a string literal for the WHERE clause.
-        let escaped = filter.value.replace('\'', "''");
         conditions.push(format!(
-            "CAST(\"{}\" AS TEXT) {} '{}'",
-            filter.column,
+            "CAST({} AS TEXT) {} {}",
+            quote_ident_double(&filter.column),
             filter.operator.as_sql(),
-            escaped
+            sql_quote_literal(&filter.value)
         ));
     }
 

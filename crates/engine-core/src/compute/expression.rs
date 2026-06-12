@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::compute::aggregate::AggregateOp;
+use crate::error::{EngineError, EngineResult};
 use crate::model::context::ClearTarget;
+use crate::model::schema::validate_identifier;
 
 /// Comparison operators for filter predicates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +74,16 @@ impl FilterPredicate {
             value: value.into(),
         }
     }
+
+    /// Validate this predicate for safe SQL rendering.
+    ///
+    /// The table name is rendered as a raw (unquoted, lowercased) SQL
+    /// qualifier by the measure engine and pipeline. The column is always
+    /// quoted with `quote_ident_double` and the value with
+    /// `sql_quote_literal`, so only the table needs checking here.
+    pub fn validate(&self) -> EngineResult<()> {
+        validate_identifier(&self.table, "filter table")
+    }
 }
 
 /// A path through relationships for explicit traversal.
@@ -123,6 +135,17 @@ impl InPredicate {
             var_name: var_name.into(),
             var_column: var_column.into(),
         }
+    }
+
+    /// Validate this predicate for safe SQL rendering.
+    ///
+    /// The table name and the variable name are rendered as raw (unquoted,
+    /// lowercased) SQL identifiers when the IN-subquery is built. The column
+    /// names are always quoted with `quote_ident_double`, so only the table
+    /// and variable names need checking here.
+    pub fn validate(&self) -> EngineResult<()> {
+        validate_identifier(&self.table, "IN-predicate table")?;
+        validate_identifier(&self.var_name, "IN-predicate variable")
     }
 }
 
@@ -231,6 +254,72 @@ pub enum DateTimeFunction {
     MonthName,
     /// Months between two dates: `MONTHS_BETWEEN(start, end)`.
     MonthsBetween,
+}
+
+// --- Date/time interval keyword allow-lists ---
+//
+// The SQL renderers in [`DateTimeFunction::to_sql_strs`] interpolate these
+// interval keywords into SQL **raw** (unquoted), so only allow-listed
+// keywords are safe. The parser enforces the same lists inline in
+// `parser.rs` (`parse_datediff_call`, `parse_dateadd_call`,
+// `parse_datetrunc_call`, `parse_lastday_call`); it matches the keywords
+// literally, so the lists are duplicated there. When adding a keyword,
+// update BOTH locations — the
+// `validate_interval_allow_lists_match_parser` test exercises the sync.
+
+/// Interval keywords accepted by `DATEDIFF(start, end, interval)`.
+///
+/// Mirrors the parser allow-list in `parser.rs::parse_datediff_call`.
+pub(crate) const DATEDIFF_INTERVALS: [&str; 7] = [
+    "DAY", "MONTH", "YEAR", "QUARTER", "HOUR", "MINUTE", "SECOND",
+];
+
+/// Interval keywords accepted by `DATEADD(date, n, interval)`.
+///
+/// Mirrors the parser allow-list in `parser.rs::parse_dateadd_call`.
+pub(crate) const DATEADD_INTERVALS: [&str; 7] = [
+    "DAY", "MONTH", "YEAR", "QUARTER", "HOUR", "MINUTE", "SECOND",
+];
+
+/// Interval keywords accepted by `DATE_TRUNC(date, interval)`.
+///
+/// Mirrors the parser allow-list in `parser.rs::parse_datetrunc_call`.
+pub(crate) const DATE_TRUNC_INTERVALS: [&str; 8] = [
+    "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "HOUR", "MINUTE", "SECOND",
+];
+
+/// Interval keywords accepted by `LAST_DAY(date [, interval])`.
+///
+/// Mirrors the parser allow-list in `parser.rs::parse_lastday_call`.
+pub(crate) const LAST_DAY_INTERVALS: [&str; 4] = ["YEAR", "QUARTER", "MONTH", "WEEK"];
+
+/// Check the interval argument of a date/time function against its
+/// allow-list.
+///
+/// The interval must be a `LiteralString` matching one of the allowed
+/// keywords (case-insensitive), because the renderers interpolate it into
+/// SQL raw. A missing argument is fine — the renderers fall back to a
+/// built-in default keyword.
+fn validate_interval_keyword(
+    function: DateTimeFunction,
+    args: &[Expression],
+    interval_index: usize,
+    allowed: &[&str],
+) -> EngineResult<()> {
+    match args.get(interval_index) {
+        None => Ok(()),
+        Some(Expression::LiteralString(s)) if allowed.iter().any(|a| a.eq_ignore_ascii_case(s)) => {
+            Ok(())
+        }
+        Some(Expression::LiteralString(s)) => Err(EngineError::InvalidExpression(format!(
+            "{function}: invalid interval '{s}' — expected one of {}",
+            allowed.join(", ")
+        ))),
+        Some(_) => Err(EngineError::InvalidExpression(format!(
+            "{function}: interval argument must be a literal keyword (one of {})",
+            allowed.join(", ")
+        ))),
+    }
 }
 
 impl ScalarFunction {
@@ -1489,6 +1578,301 @@ impl Expression {
         }
     }
 
+    /// Validate this expression tree for safe SQL rendering.
+    ///
+    /// Expressions normally come from the measure parser, which enforces
+    /// allow-lists (e.g. the DATEDIFF/DATEADD/DATE_TRUNC/LAST_DAY interval
+    /// keywords) before building the tree. Model files, however, can contain
+    /// hand-written or tampered JSON that deserializes directly into an
+    /// `Expression`, bypassing the parser entirely. This method re-checks
+    /// every string field that the SQL renderers interpolate **without**
+    /// routing through the quoting helpers in [`crate::compute::sql_util`]:
+    ///
+    /// - Date/time interval keywords must be literal strings from the same
+    ///   allow-lists the parser enforces — [`DateTimeFunction::to_sql_strs`]
+    ///   splices them into SQL raw.
+    /// - Table names rendered as raw (unquoted, lowercased) SQL qualifiers:
+    ///   `QualifiedColumnRef::table_or_var`, `TableRef`, `Query` group-by
+    ///   tables, `Window`/`Offset`/`Index`/`RankWindow` ORDER BY /
+    ///   PARTITION BY tables, filter-predicate tables, and table-variable
+    ///   references.
+    /// - `Block` binding names, which become registered table names that
+    ///   appear raw in FROM clauses when a binding is a QUERY.
+    ///
+    /// Column names, literals, and output aliases are exempt: every renderer
+    /// routes them through `quote_ident_double` / `sql_quote_literal`.
+    ///
+    /// Called for every model-level expression during
+    /// `DataModelBuilder::build()`, which `DataModel::validate()` delegates
+    /// to — so models deserialized from JSON are covered before any SQL is
+    /// generated.
+    pub fn validate(&self) -> EngineResult<()> {
+        match self {
+            // Leaves that are either quoted at render time (ColumnRef via
+            // quote_ident_double, LiteralString via sql_quote_literal),
+            // rendered as plain literals, or resolved/expanded against the
+            // model before any SQL is generated (MeasureRef, IsInScope).
+            Expression::ColumnRef(_)
+            | Expression::LiteralFloat(_)
+            | Expression::LiteralInt(_)
+            | Expression::LiteralString(_)
+            | Expression::LiteralBool(_)
+            | Expression::Blank
+            | Expression::MeasureRef(_)
+            | Expression::IsInScope { .. } => Ok(()),
+            // Table references are rendered as raw (unquoted) qualifiers.
+            Expression::TableRef(name) => validate_identifier(name, "table reference"),
+            Expression::QualifiedColumnRef { table_or_var, .. } => {
+                validate_identifier(table_or_var, "table reference")
+            }
+            Expression::BinaryOp { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::And(left, right)
+            | Expression::Or(left, right)
+            | Expression::Xor(left, right) => {
+                left.validate()?;
+                right.validate()
+            }
+            Expression::Aggregate { operand, .. } => operand.validate(),
+            Expression::Not(inner) | Expression::IsBlank(inner) => inner.validate(),
+            Expression::Keep {
+                expr,
+                filters,
+                variables,
+                conditions,
+                in_predicates,
+            } => {
+                expr.validate()?;
+                for f in filters {
+                    f.validate()?;
+                }
+                for v in variables {
+                    validate_identifier(v, "table variable reference")?;
+                }
+                for c in conditions {
+                    c.validate()?;
+                }
+                for p in in_predicates {
+                    p.validate()?;
+                }
+                Ok(())
+            }
+            Expression::KeepIn { expr, predicates } => {
+                expr.validate()?;
+                for p in predicates {
+                    p.validate()?;
+                }
+                Ok(())
+            }
+            // Context operations whose extra fields are pure lookup keys
+            // (clear targets, traversal paths, context/relationship names)
+            // that are resolved against the model, never rendered raw.
+            Expression::Clear { expr, .. }
+            | Expression::Reset { expr }
+            | Expression::ClearInner { expr, .. }
+            | Expression::ClearOuter { expr, .. }
+            | Expression::ResetInner { expr }
+            | Expression::ResetOuter { expr }
+            | Expression::Traverse { expr, .. }
+            | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
+            | Expression::ClearExcept { expr, .. } => expr.validate(),
+            Expression::Block { bindings, result } => {
+                for (name, binding_expr) in bindings {
+                    // QUERY bindings are materialized and registered under
+                    // the binding name, which then appears raw in FROM
+                    // clauses of the second-stage SQL.
+                    validate_identifier(name, "variable binding")?;
+                    binding_expr.validate()?;
+                }
+                result.validate()
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.validate()?;
+                then_expr.validate()?;
+                else_expr.validate()
+            }
+            Expression::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                expr.validate()?;
+                for (val, result) in cases {
+                    val.validate()?;
+                    result.validate()?;
+                }
+                if let Some(d) = default {
+                    d.validate()?;
+                }
+                Ok(())
+            }
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
+                numerator.validate()?;
+                denominator.validate()?;
+                if let Some(alt) = alternate {
+                    alt.validate()?;
+                }
+                Ok(())
+            }
+            Expression::Coalesce(exprs)
+            | Expression::Greatest(exprs)
+            | Expression::Least(exprs) => {
+                for e in exprs {
+                    e.validate()?;
+                }
+                Ok(())
+            }
+            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+                for arg in args {
+                    arg.validate()?;
+                }
+                Ok(())
+            }
+            Expression::DateTimeFunc { function, args } => {
+                match function {
+                    DateTimeFunction::DateDiff => {
+                        validate_interval_keyword(*function, args, 2, &DATEDIFF_INTERVALS)?
+                    }
+                    DateTimeFunction::DateAdd => {
+                        validate_interval_keyword(*function, args, 2, &DATEADD_INTERVALS)?
+                    }
+                    DateTimeFunction::DateTrunc => {
+                        validate_interval_keyword(*function, args, 1, &DATE_TRUNC_INTERVALS)?
+                    }
+                    DateTimeFunction::LastDay => {
+                        validate_interval_keyword(*function, args, 1, &LAST_DAY_INTERVALS)?
+                    }
+                    // The remaining date/time functions take only expression
+                    // arguments, which render through the normal (escaped)
+                    // renderers.
+                    DateTimeFunction::Year
+                    | DateTimeFunction::Month
+                    | DateTimeFunction::Day
+                    | DateTimeFunction::Quarter
+                    | DateTimeFunction::Date
+                    | DateTimeFunction::Today
+                    | DateTimeFunction::Now
+                    | DateTimeFunction::EoMonth
+                    | DateTimeFunction::DayOfWeek
+                    | DateTimeFunction::DayOfYear
+                    | DateTimeFunction::WeekNum
+                    | DateTimeFunction::DayName
+                    | DateTimeFunction::MonthName
+                    | DateTimeFunction::MonthsBetween => {}
+                }
+                for arg in args {
+                    arg.validate()?;
+                }
+                Ok(())
+            }
+            Expression::IfError { expr, alternate } => {
+                expr.validate()?;
+                alternate.validate()
+            }
+            Expression::Iterate { expression, .. } => expression.validate(),
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                operand.validate()?;
+                percentile.validate()
+            }
+            Expression::Query {
+                aggregates,
+                group_by,
+            } => {
+                // Aggregate output aliases are quoted at render time;
+                // group-by tables are rendered as raw qualifiers and JOIN
+                // targets.
+                for (agg_expr, _alias) in aggregates {
+                    agg_expr.validate()?;
+                }
+                for (table, _column) in group_by {
+                    validate_identifier(table, "group-by table")?;
+                }
+                Ok(())
+            }
+            Expression::HasOneValue { column } => column.validate(),
+            Expression::SelectedValue { column, alternate } => {
+                column.validate()?;
+                if let Some(alt) = alternate {
+                    alt.validate()?;
+                }
+                Ok(())
+            }
+            Expression::FirstValue { column, order_by } => {
+                column.validate()?;
+                order_by.validate()
+            }
+            // Frame boundaries, deltas, and positions are numeric; ORDER BY
+            // and PARTITION BY columns are quoted at render time, but their
+            // tables are rendered as raw qualifiers during materialization.
+            Expression::Window {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            }
+            | Expression::Offset {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            }
+            | Expression::Index {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            } => {
+                inner.validate()?;
+                for (table, _column) in order_by.iter().chain(partition_by.iter()) {
+                    validate_identifier(table, "window table")?;
+                }
+                Ok(())
+            }
+            Expression::RankWindow {
+                order_by,
+                partition_by,
+                ..
+            } => {
+                for (table, _column) in order_by.iter().chain(partition_by.iter()) {
+                    validate_identifier(table, "window table")?;
+                }
+                Ok(())
+            }
+            Expression::InList { expr, values } => {
+                expr.validate()?;
+                for v in values {
+                    v.validate()?;
+                }
+                Ok(())
+            }
+            Expression::NullIf { expr, value } => {
+                expr.validate()?;
+                value.validate()
+            }
+            Expression::CountIf { condition } => condition.validate(),
+            Expression::ListAgg { column, delimiter } => {
+                column.validate()?;
+                delimiter.validate()
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                value.validate()?;
+                sort_by.validate()
+            }
+        }
+    }
+
     /// Returns `true` if this expression contains any `Aggregate` nodes.
     pub fn has_aggregate(&self) -> bool {
         match self {
@@ -2352,8 +2736,10 @@ impl Expression {
     /// as `FUNC(operand)`. `DistinctCount` renders as `COUNT(DISTINCT operand)`.
     pub fn to_sql_string(&self) -> String {
         match self {
-            Expression::ColumnRef(name) => format!("\"{name}\""),
-            Expression::QualifiedColumnRef { column, .. } => format!("\"{column}\""),
+            Expression::ColumnRef(name) => crate::compute::sql_util::quote_ident_double(name),
+            Expression::QualifiedColumnRef { column, .. } => {
+                crate::compute::sql_util::quote_ident_double(column)
+            }
             Expression::TableRef(_) => String::new(),
             Expression::MeasureRef(name) => {
                 panic!("MeasureRef '{name}' must be expanded before SQL generation")
@@ -2367,7 +2753,7 @@ impl Expression {
                     "FALSE".to_string()
                 }
             }
-            Expression::LiteralString(s) => format!("'{}'", s.replace('\'', "''")),
+            Expression::LiteralString(s) => crate::compute::sql_util::sql_quote_literal(s),
             Expression::BinaryOp { left, op, right } => {
                 let left_sql = left.to_sql_string();
                 let right_sql = right.to_sql_string();
@@ -4242,14 +4628,20 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
 /// column reference individually so the result is `fact_table."price" * fact_table."qty"`.
 fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
     match operand {
-        Expression::ColumnRef(name) => format!("{fact_table}.\"{name}\""),
+        Expression::ColumnRef(name) => format!(
+            "{fact_table}.{}",
+            crate::compute::sql_util::quote_ident_double(name)
+        ),
         Expression::QualifiedColumnRef {
             table_or_var,
             column,
             ..
         } => {
             let tbl = table_or_var.to_lowercase();
-            format!("{tbl}.\"{column}\"")
+            format!(
+                "{tbl}.{}",
+                crate::compute::sql_util::quote_ident_double(column)
+            )
         }
         Expression::BinaryOp { left, op, right } => {
             let l = qualify_operand_sql(left, fact_table);
@@ -5998,6 +6390,206 @@ mod tests {
             assert_eq!(f.from, -2);
         } else {
             panic!("expected Window after deserialization");
+        }
+    }
+
+    // --- validate() tests ---
+
+    #[test]
+    fn validate_accepts_benign_measure_expression() {
+        let e = agg(
+            AggregateOp::Sum,
+            qualified_col("Sales", "price").multiply(qualified_col("Sales", "quantity")),
+        );
+        assert!(e.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_benign_date_trunc_interval() {
+        let e = datetime_fn(
+            DateTimeFunction::DateTrunc,
+            vec![col("sold_at"), lit_str("MONTH")],
+        );
+        assert!(e.validate().is_ok());
+        // The renderer lowercases the interval; case must not matter.
+        let e = datetime_fn(
+            DateTimeFunction::DateTrunc,
+            vec![col("sold_at"), lit_str("month")],
+        );
+        assert!(e.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_date_trunc_interval() {
+        let e = datetime_fn(
+            DateTimeFunction::DateTrunc,
+            vec![col("sold_at"), lit_str("MONTH'); DROP TABLE x; --")],
+        );
+        let err = e.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid interval"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_hostile_dateadd_interval() {
+        let e = datetime_fn(
+            DateTimeFunction::DateAdd,
+            vec![col("d"), lit_int(1), lit_str("DAY' * 1); DROP TABLE x; --")],
+        );
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_datediff_interval() {
+        let e = datetime_fn(
+            DateTimeFunction::DateDiff,
+            vec![col("a"), col("b"), lit_str("FORTNIGHT")],
+        );
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_last_day_interval() {
+        // SECOND is valid for DATE_TRUNC but not LAST_DAY — per-function lists.
+        let e = datetime_fn(DateTimeFunction::LastDay, vec![col("d"), lit_str("SECOND")]);
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_literal_interval_argument() {
+        // A column ref in the interval slot would be rendered raw after
+        // quote-stripping — must be rejected.
+        let e = datetime_fn(
+            DateTimeFunction::DateTrunc,
+            vec![col("sold_at"), col("evil' , x); --")],
+        );
+        let err = e.validate().unwrap_err().to_string();
+        assert!(err.contains("literal keyword"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_missing_interval_argument() {
+        // Renderers fall back to a safe built-in default keyword.
+        let e = datetime_fn(DateTimeFunction::DateTrunc, vec![col("sold_at")]);
+        assert!(e.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_interval_nested_in_expression() {
+        // The walk must recurse into nested expressions.
+        let e = agg(
+            AggregateOp::Max,
+            if_expr(
+                lit_bool(true),
+                datetime_fn(
+                    DateTimeFunction::DateTrunc,
+                    vec![col("d"), lit_str("MONTH'); DROP TABLE x; --")],
+                ),
+                blank(),
+            ),
+        );
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_qualified_table_reference() {
+        let e = agg(
+            AggregateOp::Sum,
+            qualified_col("sales\"; DROP TABLE x; --", "amount"),
+        );
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_query_group_by_table() {
+        let e = Expression::Query {
+            aggregates: vec![(agg(AggregateOp::Sum, col("amount")), "total".into())],
+            group_by: vec![("dim; DROP TABLE x; --".into(), "city".into())],
+        };
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_window_order_by_table() {
+        let e = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim'; DROP TABLE x; --".into(), "month".into())],
+            vec![],
+            None,
+        );
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostile_keep_filter_table() {
+        let e = keep(
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+            vec![FilterPredicate::new(
+                "dim\" ON 1=1; --",
+                "year",
+                ComparisonOp::Equal,
+                "2014",
+            )],
+        );
+        assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_keep_filter_with_quote_in_value() {
+        // Values are escaped at render time via sql_quote_literal —
+        // a quote in the value is data, not an injection.
+        let e = keep(
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+            vec![FilterPredicate::new(
+                "Products",
+                "name",
+                ComparisonOp::Equal,
+                "O'Brien'); DROP TABLE x; --",
+            )],
+        );
+        assert!(e.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_interval_allow_lists_match_parser() {
+        // Every keyword in the validator allow-lists must be accepted by the
+        // parser, and every parsed expression must pass validation. If the
+        // parser's inline lists in parser.rs gain a keyword, add it to the
+        // consts in this file too.
+        use crate::compute::parser::parse_measure_expression;
+
+        for kw in DATEDIFF_INTERVALS {
+            let text = format!("MAX(DATEDIFF(fact[d1], fact[d2], {kw}))");
+            let parsed = parse_measure_expression(&text)
+                .unwrap_or_else(|e| panic!("parser rejected DATEDIFF interval {kw}: {e}"));
+            assert!(
+                parsed.validate().is_ok(),
+                "validator rejected DATEDIFF {kw}"
+            );
+        }
+        for kw in DATEADD_INTERVALS {
+            let text = format!("MAX(DATEADD(fact[d], 1, {kw}))");
+            let parsed = parse_measure_expression(&text)
+                .unwrap_or_else(|e| panic!("parser rejected DATEADD interval {kw}: {e}"));
+            assert!(parsed.validate().is_ok(), "validator rejected DATEADD {kw}");
+        }
+        for kw in DATE_TRUNC_INTERVALS {
+            let text = format!("MAX(DATE_TRUNC(fact[d], {kw}))");
+            let parsed = parse_measure_expression(&text)
+                .unwrap_or_else(|e| panic!("parser rejected DATE_TRUNC interval {kw}: {e}"));
+            assert!(
+                parsed.validate().is_ok(),
+                "validator rejected DATE_TRUNC {kw}"
+            );
+        }
+        for kw in LAST_DAY_INTERVALS {
+            let text = format!("MAX(LAST_DAY(fact[d], {kw}))");
+            let parsed = parse_measure_expression(&text)
+                .unwrap_or_else(|e| panic!("parser rejected LAST_DAY interval {kw}: {e}"));
+            assert!(
+                parsed.validate().is_ok(),
+                "validator rejected LAST_DAY {kw}"
+            );
         }
     }
 }

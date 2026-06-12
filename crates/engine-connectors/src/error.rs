@@ -30,6 +30,14 @@ pub enum ConnectorError {
     #[error("Arrow conversion error: {0}")]
     ArrowConversion(String),
 
+    /// A decimal value could not be rescaled to the target Arrow decimal
+    /// representation without overflowing 128 bits.
+    #[error("Decimal value '{value}' overflows the target Arrow Decimal128 representation")]
+    DecimalOverflow {
+        /// The source value that overflowed, formatted as text.
+        value: String,
+    },
+
     /// An error from the sqlx library.
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
@@ -53,6 +61,17 @@ pub enum ConnectorError {
     /// The requested authentication method is not supported by this connector.
     #[error("Authentication method not supported: {0}")]
     AuthMethodNotSupported(String),
+
+    /// A connection parameter holds a value that cannot be represented in the
+    /// underlying wire protocol (for example, an embedded NUL byte).
+    #[error("Invalid connection parameter '{parameter}': {reason}")]
+    InvalidConnectionParameter {
+        /// Name of the offending parameter (e.g. `"host"`, `"database"`,
+        /// `"username"`, `"password"`).
+        parameter: String,
+        /// Why the value was rejected.
+        reason: String,
+    },
 }
 
 /// Convenience result type for connector operations.

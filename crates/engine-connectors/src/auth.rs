@@ -23,6 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{ConnectorError, ConnectorResult};
+
 /// How to authenticate to a data source.
 ///
 /// This enum is connector-agnostic. Not every auth method is supported by
@@ -102,6 +104,20 @@ pub struct ConnectionTarget {
 
     /// Whether to trust the server's TLS certificate without validation.
     /// Useful for development environments with self-signed certificates.
+    ///
+    /// **PostgreSQL:** when `true`, the connection's ssl-mode is forced to
+    /// `require` — TLS is mandatory, but the server certificate is *not*
+    /// verified. When `false` (default), sqlx's default applies: ssl-mode
+    /// `prefer` (or the `PGSSLMODE` environment variable when set), meaning
+    /// TLS is attempted with silent plaintext fallback and no certificate
+    /// verification — unchanged from previous releases.
+    ///
+    /// **SQL Server:** when `true`, the server's TLS certificate is accepted
+    /// without validation (`TrustServerCertificate` semantics).
+    ///
+    /// Stricter verification modes (`verify-ca` / `verify-full`, custom CA
+    /// bundles) are future work: they require a dedicated CA / encryption
+    /// policy field on [`ConnectionTarget`].
     #[serde(default)]
     pub trust_server_certificate: bool,
 }
@@ -213,6 +229,23 @@ pub trait ConnectorAuth {
     fn supported_auth_methods() -> Vec<AuthMethodKind>;
 }
 
+/// Validate that a connection parameter contains no embedded NUL byte.
+///
+/// NUL bytes cannot be represented in the PostgreSQL startup message
+/// (NUL-terminated strings) and are meaningless in TDS strings; allowing
+/// them through could truncate or restructure protocol messages. Connectors
+/// call this on every host / database / credential value before passing it
+/// to the driver's typed configuration builder.
+pub(crate) fn validate_no_nul(parameter: &str, value: &str) -> ConnectorResult<()> {
+    if value.contains('\0') {
+        return Err(ConnectorError::InvalidConnectionParameter {
+            parameter: parameter.to_string(),
+            reason: "value contains an embedded NUL byte".to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +316,22 @@ mod tests {
         let json = serde_json::to_string_pretty(&spec).unwrap();
         let restored: ConnectionSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(spec, restored);
+    }
+
+    #[test]
+    fn validate_no_nul_accepts_clean_value() {
+        assert!(validate_no_nul("host", "db.example.com").is_ok());
+        assert!(validate_no_nul("password", "p@ss;w0rd/?#=").is_ok());
+    }
+
+    #[test]
+    fn validate_no_nul_rejects_embedded_nul_byte() {
+        let err = validate_no_nul("password", "p\0w").unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::InvalidConnectionParameter { ref parameter, .. }
+                if parameter == "password"
+        ));
     }
 
     #[test]

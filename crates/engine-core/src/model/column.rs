@@ -20,9 +20,24 @@ pub struct Column {
     ///
     /// Examples: `"MIN(col)"`, `"IF(DISTINCTCOUNT(col) > 1, \"*\", MIN(col))"`
     ///
-    /// If `None`, defaults to `MIN(column_name)`.
+    /// If `None`, the model-level `default_lookup_resolution` is used when
+    /// set (it references the lookup column via the `__column` placeholder).
+    /// Otherwise the built-in fallback applies: for `String` columns,
+    /// SELECTEDVALUE-style semantics
+    /// (`CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE '#' END`);
+    /// for all other column types, `MIN(col)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lookup_resolution: Option<String>,
+    /// Optional column name used for sorting this column's values.
+    ///
+    /// When this column appears in a GROUP BY or on a pivot table axis,
+    /// results should be ordered by the sort-by column instead of by this
+    /// column's own values. Both columns must belong to the same table.
+    ///
+    /// Classic example: a "MonthName" column sorted by a "MonthNumber" column
+    /// so that month names appear in calendar order rather than alphabetical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sort_by_column: Option<String>,
 }
 
 impl Column {
@@ -33,6 +48,7 @@ impl Column {
             data_type,
             nullable: true,
             lookup_resolution: None,
+            sort_by_column: None,
         }
     }
 
@@ -43,6 +59,7 @@ impl Column {
             data_type,
             nullable: false,
             lookup_resolution: None,
+            sort_by_column: None,
         }
     }
 
@@ -59,6 +76,21 @@ impl Column {
     /// Returns the lookup resolution expression, if set.
     pub fn lookup_resolution(&self) -> Option<&str> {
         self.lookup_resolution.as_deref()
+    }
+
+    /// Set the sort-by column for this column.
+    ///
+    /// When this column appears in a GROUP BY or on a pivot table axis,
+    /// results should be ordered by the named column instead. Both columns
+    /// must belong to the same table (validated at model build time).
+    pub fn with_sort_by(mut self, column: impl Into<String>) -> Self {
+        self.sort_by_column = Some(column.into());
+        self
+    }
+
+    /// Returns the sort-by column name, if set.
+    pub fn sort_by_column(&self) -> Option<&str> {
+        self.sort_by_column.as_deref()
     }
 
     /// Returns the column name.

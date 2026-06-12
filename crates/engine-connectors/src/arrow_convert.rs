@@ -8,11 +8,12 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType as ArrowDataType, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::postgres::PgRow;
 use sqlx::{Column as SqlxColumn, Row, TypeInfo};
 
+use crate::decimal::decimal_to_i128;
 use crate::error::{ConnectorError, ConnectorResult};
 
 /// Maximum rows per `RecordBatch` when converting large result sets.
@@ -97,9 +98,18 @@ fn build_column_array(
         }
         ArrowDataType::Float64 => {
             let mut builder = Float64Builder::with_capacity(rows.len());
-            for row in rows {
-                let val: Option<f64> = row.try_get(col_idx).map_err(sqlx_get_err)?;
-                builder.append_option(val);
+            // real (FLOAT4) must be decoded as f32, then widened to f64:
+            // sqlx's f64 decoder only accepts the FLOAT8 wire type.
+            if pg_type == "FLOAT4" {
+                for row in rows {
+                    let val: Option<f32> = row.try_get(col_idx).map_err(sqlx_get_err)?;
+                    builder.append_option(val.map(f64::from));
+                }
+            } else {
+                for row in rows {
+                    let val: Option<f64> = row.try_get(col_idx).map_err(sqlx_get_err)?;
+                    builder.append_option(val);
+                }
             }
             Ok(Arc::new(builder.finish()))
         }
@@ -110,7 +120,7 @@ fn build_column_array(
                 let val: Option<Decimal> = row.try_get(col_idx).map_err(sqlx_get_err)?;
                 match val {
                     Some(d) => {
-                        let i128_val = decimal_to_i128(&d, *scale);
+                        let i128_val = decimal_to_i128(&d, *scale)?;
                         builder.append_value(i128_val);
                     }
                     None => builder.append_null(),
@@ -160,14 +170,23 @@ fn build_column_array(
         }
         ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => {
             let mut builder = TimestampMicrosecondBuilder::with_capacity(rows.len());
-            for row in rows {
-                let val: Option<NaiveDateTime> = row.try_get(col_idx).map_err(sqlx_get_err)?;
-                match val {
-                    Some(dt) => {
-                        let micros = dt.and_utc().timestamp_micros();
-                        builder.append_value(micros);
+            // timestamptz must be decoded as DateTime<Utc>: sqlx's
+            // NaiveDateTime decoder only accepts the TIMESTAMP wire type.
+            if pg_type == "TIMESTAMPTZ" {
+                for row in rows {
+                    let val: Option<DateTime<Utc>> = row.try_get(col_idx).map_err(sqlx_get_err)?;
+                    builder.append_option(val.map(|dt| dt.timestamp_micros()));
+                }
+            } else {
+                for row in rows {
+                    let val: Option<NaiveDateTime> = row.try_get(col_idx).map_err(sqlx_get_err)?;
+                    match val {
+                        Some(dt) => {
+                            let micros = dt.and_utc().timestamp_micros();
+                            builder.append_value(micros);
+                        }
+                        None => builder.append_null(),
                     }
-                    None => builder.append_null(),
                 }
             }
             Ok(Arc::new(builder.finish()))
@@ -175,23 +194,6 @@ fn build_column_array(
         other => Err(ConnectorError::ArrowConversion(format!(
             "unsupported Arrow type: {other:?}"
         ))),
-    }
-}
-
-/// Convert a `rust_decimal::Decimal` to an `i128` value at the given Arrow scale.
-///
-/// Arrow stores decimals as `i128` values scaled by `10^scale`. For example,
-/// the value `123.45` at scale 2 is stored as `12345`.
-fn decimal_to_i128(d: &Decimal, target_scale: i8) -> i128 {
-    let raw = d.mantissa();
-    let d_scale = d.scale() as i8;
-    let diff = target_scale - d_scale;
-    if diff > 0 {
-        raw * 10i128.pow(diff as u32)
-    } else if diff < 0 {
-        raw / 10i128.pow((-diff) as u32)
-    } else {
-        raw
     }
 }
 

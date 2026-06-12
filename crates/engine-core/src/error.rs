@@ -138,9 +138,31 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// A column's sort_by_column reference is invalid.
+    #[error("Invalid sort_by_column on '{table}.{column}': {reason}")]
+    InvalidSortByColumn {
+        /// The table name.
+        table: String,
+        /// The column that has the invalid sort_by_column setting.
+        column: String,
+        /// Description of the validation failure.
+        reason: String,
+    },
+
     /// An expression is invalid or used in an unsupported way.
     #[error("Invalid expression: {0}")]
     InvalidExpression(String),
+
+    /// A model identifier (table, column, calculated-column, or measure name)
+    /// contains characters that are unsafe to interpolate into quoted SQL
+    /// identifiers or derived file names.
+    #[error("Invalid identifier '{name}': {reason}")]
+    InvalidIdentifier {
+        /// The offending identifier.
+        name: String,
+        /// Description of why the identifier was rejected.
+        reason: String,
+    },
 
     /// Attempted an in-memory operation on a DirectQuery table.
     #[error("Table '{0}' is not configured for in-memory storage")]
@@ -160,6 +182,35 @@ pub enum EngineError {
     /// An in-memory table was queried before its first refresh.
     #[error("Table '{0}' has not been refreshed yet — call refresh_table() before querying")]
     TableNotCached(String),
+
+    /// A model-supplied `SourceQuery` poll SQL was rejected before execution,
+    /// either by validation (not a single SELECT statement) or by host policy.
+    ///
+    /// Model files are shared between users, so the SQL embedded in a
+    /// `SourceQuery` refresh strategy crosses a trust boundary and must be
+    /// validated before it is sent to a connector.
+    #[error("Source query for table '{table}' rejected: {reason}")]
+    SourceQueryRejected {
+        /// The table whose connector would have executed the query.
+        table: String,
+        /// Why the query was rejected.
+        reason: String,
+    },
+
+    /// A model file was written by a newer engine than the one loading it.
+    ///
+    /// Raised by model-loading paths *before* structural deserialization
+    /// when the file's `format_version` exceeds the running engine's
+    /// supported version. Refusing the load up front (instead of partially
+    /// deserializing and silently dropping unknown content) protects
+    /// newer-format models from being destroyed by a subsequent save.
+    #[error("Model file format version {found} is newer than this engine supports (max {supported}). Update the application to open this model.")]
+    ModelFormatTooNew {
+        /// The format version declared in the file.
+        found: u32,
+        /// The maximum format version this engine supports.
+        supported: u32,
+    },
 
     /// An aggregation was attempted on an unsupported column type.
     #[error("Aggregation '{operation}' is not supported on column type '{column_type}'")]

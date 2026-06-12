@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compute::expression::{ComparisonOp, Expression, FilterPredicate, RelationshipPath};
+use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use crate::error::{EngineError, EngineResult};
 use crate::model::context::{ClearTarget, ContextOp};
 use crate::model::relationship::Relationship;
@@ -86,7 +87,10 @@ impl ResolvedFilter {
     pub fn to_sql_condition(&self, table_alias: &str, model: &DataModel) -> String {
         let op = self.operator.as_sql();
         let val = format_filter_value(&self.table, &self.column, &self.value, model);
-        format!("{table_alias}.\"{}\" {op} {val}", self.column)
+        format!(
+            "{table_alias}.{} {op} {val}",
+            quote_ident_double(&self.column)
+        )
     }
 }
 
@@ -104,7 +108,7 @@ pub fn format_filter_value(table: &str, column: &str, value: &str, model: &DataM
         .unwrap_or(true);
 
     if needs_quoting {
-        format!("'{value}'")
+        sql_quote_literal(value)
     } else {
         value.to_string()
     }
@@ -1083,6 +1087,36 @@ mod tests {
             ))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn format_filter_value_escapes_injection_payload() {
+        let model = test_model();
+        let rendered = format_filter_value("Sales", "region", "x'); DROP TABLE t; --", &model);
+        assert_eq!(rendered, "'x''); DROP TABLE t; --'");
+        assert!(rendered.contains("''"));
+        assert!(!rendered.contains("x');"));
+    }
+
+    #[test]
+    fn format_filter_value_leaves_numeric_values_bare() {
+        let model = test_model();
+        let rendered = format_filter_value("Sales", "amount", "42.5", &model);
+        assert_eq!(rendered, "42.5");
+    }
+
+    #[test]
+    fn to_sql_condition_escapes_embedded_identifier_quote() {
+        let model = test_model();
+        let filter = ResolvedFilter {
+            table: "Sales".into(),
+            column: "evil\"name".into(),
+            operator: ComparisonOp::Equal,
+            value: "US".into(),
+            source: FilterSource::Query,
+        };
+        let sql = filter.to_sql_condition("t", &model);
+        assert_eq!(sql, "t.\"evil\"\"name\" = 'US'");
     }
 
     fn test_model_with_contexts() -> DataModel {

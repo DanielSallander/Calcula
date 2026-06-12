@@ -27,6 +27,11 @@ pub struct Measure {
     expression: Expression,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<String>,
+    /// Original human-readable expression text, when the measure was
+    /// created from text. The source is the authoritative definition;
+    /// the expression AST acts as a cache of its last successful parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
     /// Fact table inferred from the expression's qualified column refs.
     #[serde(skip)]
     cached_table: String,
@@ -43,6 +48,8 @@ impl<'de> Deserialize<'de> for Measure {
             expression: Expression,
             #[serde(default)]
             group: Option<String>,
+            #[serde(default)]
+            source: Option<String>,
         }
         let f = Fields::deserialize(deserializer)?;
         let cached_table = infer_fact_table(&f.expression).unwrap_or_default();
@@ -50,6 +57,7 @@ impl<'de> Deserialize<'de> for Measure {
             name: f.name,
             expression: f.expression,
             group: f.group,
+            source: f.source,
             cached_table,
         })
     }
@@ -67,6 +75,7 @@ impl Measure {
             name: name.into(),
             expression,
             group: None,
+            source: None,
             cached_table,
         }
     }
@@ -92,6 +101,22 @@ impl Measure {
         self
     }
 
+    /// Attach the original expression source text to this measure.
+    ///
+    /// The source text is the authoritative, human-readable definition of
+    /// the measure: hosts display and edit it, and model loading re-parses
+    /// it through the current parser (see
+    /// [`DataModel::reparse_measures_from_source`](crate::model::schema::DataModel::reparse_measures_from_source)),
+    /// so the stored expression AST acts only as a cache of the last
+    /// successful parse. Callers that build a measure by parsing text
+    /// (e.g. via `parse_measure_expression`) should attach that text here;
+    /// measures built programmatically from [`Expression`] values have no
+    /// source.
+    pub fn with_source(mut self, text: impl Into<String>) -> Self {
+        self.source = Some(text.into());
+        self
+    }
+
     /// Returns the measure name.
     pub fn name(&self) -> &str {
         &self.name
@@ -108,6 +133,28 @@ impl Measure {
     /// Returns the expression tree.
     pub fn expression(&self) -> &Expression {
         &self.expression
+    }
+
+    /// Returns the original expression source text, if the measure was
+    /// created from text.
+    ///
+    /// `None` for measures built programmatically from [`Expression`]
+    /// values. When present, the source is the authoritative definition
+    /// and the expression tree is a cache of its last successful parse.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// Replace the expression tree, recomputing the cached fact table.
+    ///
+    /// Crate-internal on purpose: it is exposed only through
+    /// `DataModel::reparse_measures_from_source`, which keeps the
+    /// source-text/AST pairing consistent. A general-purpose public
+    /// setter would let hosts desynchronize a measure's `source` from
+    /// its expression.
+    pub(crate) fn set_expression(&mut self, expression: Expression) {
+        self.cached_table = infer_fact_table(&expression).unwrap_or_default();
+        self.expression = expression;
     }
 
     /// Returns the measure group name, if any.
@@ -308,5 +355,29 @@ mod tests {
         assert_eq!(restored.name(), "Total");
         assert_eq!(restored.table(), "Sales");
         assert!(restored.is_simple_aggregate());
+    }
+
+    #[test]
+    fn source_text_round_trips_through_serde() {
+        let m = sum_measure("Total", "Sales", "amount").with_source("SUM(Sales[amount])");
+        assert_eq!(m.source(), Some("SUM(Sales[amount])"));
+
+        let json = serde_json::to_string(&m).unwrap();
+        let restored: Measure = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.source(), Some("SUM(Sales[amount])"));
+        assert_eq!(restored.name(), "Total");
+        assert_eq!(restored.table(), "Sales");
+    }
+
+    #[test]
+    fn absent_source_stays_none_through_serde() {
+        let m = sum_measure("Total", "Sales", "amount");
+        assert_eq!(m.source(), None);
+
+        let json = serde_json::to_string(&m).unwrap();
+        // skip_serializing_if keeps legacy-compatible output: no field at all.
+        assert!(!json.contains("\"source\""));
+        let restored: Measure = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.source(), None);
     }
 }

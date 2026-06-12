@@ -4,6 +4,37 @@ use engine_core::types::DataType;
 
 use crate::error::{ConnectorError, ConnectorResult};
 
+/// Default scale for decimal columns whose scale is not reported by the
+/// database (e.g. unconstrained PostgreSQL `NUMERIC`, where
+/// `information_schema` reports NULL precision and scale).
+///
+/// Defaulting to 0 would silently drop every fractional digit, so we default
+/// to a fraction-preserving scale matching the inferred-schema paths, which
+/// hardcode `Decimal128(38, 10)`.
+const DEFAULT_DECIMAL_SCALE: i32 = 10;
+
+/// Maximum precision supported by Arrow `Decimal128`.
+const MAX_DECIMAL_PRECISION: i32 = 38;
+
+/// Build a [`DataType::Decimal`] from database-reported precision/scale
+/// metadata, applying safe defaults for unconstrained decimals.
+///
+/// Precision is clamped to `1..=38` (Arrow `Decimal128` limits); scale
+/// defaults to [`DEFAULT_DECIMAL_SCALE`] when unreported and is clamped so
+/// that it never exceeds the capped precision.
+fn decimal_type_from_metadata(
+    numeric_precision: Option<i32>,
+    numeric_scale: Option<i32>,
+) -> DataType {
+    let precision = numeric_precision
+        .unwrap_or(MAX_DECIMAL_PRECISION)
+        .clamp(1, MAX_DECIMAL_PRECISION);
+    let scale = numeric_scale
+        .unwrap_or(DEFAULT_DECIMAL_SCALE)
+        .clamp(-MAX_DECIMAL_PRECISION, precision);
+    DataType::Decimal(precision as u8, scale as i8)
+}
+
 /// Map a PostgreSQL type name (from `information_schema` or `pg_type`) to an
 /// engine [`DataType`].
 ///
@@ -20,11 +51,7 @@ pub fn pg_type_to_engine_type(
         "bigint" | "int8" | "serial" | "bigserial" => Ok(DataType::Int64),
         "double precision" | "float8" => Ok(DataType::Float64),
         "real" | "float4" => Ok(DataType::Float64),
-        "numeric" | "decimal" => {
-            let precision = numeric_precision.unwrap_or(38).min(38) as u8;
-            let scale = numeric_scale.unwrap_or(0) as i8;
-            Ok(DataType::Decimal(precision, scale))
-        }
+        "numeric" | "decimal" => Ok(decimal_type_from_metadata(numeric_precision, numeric_scale)),
         "text" | "varchar" | "character varying" | "char" | "character" | "name" | "uuid"
         | "xml" | "json" | "jsonb" | "citext" => Ok(DataType::String),
         "boolean" | "bool" => Ok(DataType::Boolean),
@@ -57,9 +84,7 @@ pub fn sqlserver_type_to_engine_type(
         "bigint" => Ok(DataType::Int64),
         "float" | "real" => Ok(DataType::Float64),
         "decimal" | "numeric" | "money" | "smallmoney" => {
-            let precision = numeric_precision.unwrap_or(38).min(38) as u8;
-            let scale = numeric_scale.unwrap_or(0) as i8;
-            Ok(DataType::Decimal(precision, scale))
+            Ok(decimal_type_from_metadata(numeric_precision, numeric_scale))
         }
         "nvarchar" | "varchar" | "nchar" | "char" | "ntext" | "text" | "uniqueidentifier"
         | "xml" => Ok(DataType::String),
@@ -126,10 +151,40 @@ mod tests {
     }
 
     #[test]
-    fn numeric_defaults_to_38_0_when_unspecified() {
+    fn unconstrained_numeric_defaults_to_fraction_preserving_scale() {
+        // Unconstrained NUMERIC reports NULL precision/scale. Defaulting the
+        // scale to 0 would silently truncate every fractional digit.
         assert_eq!(
             pg_type_to_engine_type("numeric", "col", None, None).unwrap(),
-            DataType::Decimal(38, 0)
+            DataType::Decimal(38, 10)
+        );
+        assert_eq!(
+            sqlserver_type_to_engine_type("decimal", "col", None, None).unwrap(),
+            DataType::Decimal(38, 10)
+        );
+    }
+
+    #[test]
+    fn numeric_precision_capped_and_scale_clamped_to_precision() {
+        // Precision beyond Decimal128's 38-digit limit is capped, and the
+        // scale must never exceed the capped precision.
+        assert_eq!(
+            pg_type_to_engine_type("numeric", "col", Some(50), Some(45)).unwrap(),
+            DataType::Decimal(38, 38)
+        );
+        // Scale larger than a small precision is clamped to the precision.
+        assert_eq!(
+            pg_type_to_engine_type("numeric", "col", Some(5), Some(12)).unwrap(),
+            DataType::Decimal(5, 5)
+        );
+    }
+
+    #[test]
+    fn numeric_with_explicit_zero_scale_is_preserved() {
+        // numeric(10) declares scale 0 explicitly — that must be honored.
+        assert_eq!(
+            pg_type_to_engine_type("numeric", "col", Some(10), Some(0)).unwrap(),
+            DataType::Decimal(10, 0)
         );
     }
 

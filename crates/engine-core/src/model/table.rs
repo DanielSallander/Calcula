@@ -48,6 +48,11 @@ pub enum RefreshStrategy {
 
     /// Refresh once daily after a specific wall-clock time (local time).
     /// Useful for tables fed by nightly ETL jobs.
+    ///
+    /// Out-of-range values (hour > 23 or minute > 59) are clamped to the
+    /// valid range at evaluation time because strategies deserialized from
+    /// model files bypass construction-time checks. Hosts can call
+    /// [`RefreshStrategy::validate`] to detect out-of-range values eagerly.
     DailyAfter {
         /// Hour (0–23) in local time.
         hour: u8,
@@ -63,6 +68,14 @@ pub enum RefreshStrategy {
     /// The result is compared as a string against the previously stored
     /// fingerprint. If different (or if no fingerprint is stored yet), the
     /// table is refreshed.
+    ///
+    /// # Security
+    ///
+    /// Model files are shared between users, so this SQL crosses a trust
+    /// boundary. The engine validates it with
+    /// [`RefreshStrategy::validate_source_query_sql`] before execution
+    /// (exactly one statement, SELECT only), and hosts can disable
+    /// model-supplied SQL entirely via the engine's source-query policy.
     ///
     /// # Example
     ///
@@ -84,6 +97,112 @@ impl RefreshStrategy {
     /// and cannot be evaluated against cached data alone.
     pub fn requires_io(&self) -> bool {
         matches!(self, Self::SourceQuery { .. })
+    }
+
+    /// Validate this strategy's parameters.
+    ///
+    /// Checks that [`DailyAfter`](Self::DailyAfter) `hour` is 0–23 and
+    /// `minute` is 0–59. Other strategies always pass.
+    ///
+    /// Construction goes through the infallible builder method
+    /// [`Table::with_refresh_strategy`] (and model files bypass construction
+    /// entirely), so out-of-range values cannot be rejected at build time
+    /// without breaking the builder pattern. Evaluation clamps them
+    /// defensively; this method lets hosts surface the problem eagerly.
+    pub fn validate(&self) -> EngineResult<()> {
+        match self {
+            Self::DailyAfter { hour, minute } => {
+                if *hour > 23 || *minute > 59 {
+                    Err(EngineError::InvalidData(format!(
+                        "Invalid DailyAfter refresh strategy: hour must be 0-23 and \
+                         minute 0-59 (got {hour}:{minute:02})"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Validate that a [`SourceQuery`](Self::SourceQuery) poll SQL is safe to
+    /// send to a connector.
+    ///
+    /// Model files are shared between users, so the poll SQL crosses a trust
+    /// boundary: on SQL Server the connector executes it as a raw T-SQL
+    /// batch, which would otherwise allow multi-statement payloads like
+    /// `SELECT 1; DROP TABLE x;`. This check requires the SQL to parse as
+    /// **exactly one** statement, and that statement must be a plain query
+    /// (`SELECT`, including CTE-wrapped selects). DML, DDL, multi-statement
+    /// batches, `SELECT ... INTO`, and data-modifying CTEs are rejected with
+    /// [`EngineError::SourceQueryRejected`].
+    ///
+    /// `table` is used only for error reporting (the table whose connector
+    /// would run the query).
+    pub fn validate_source_query_sql(table: &str, sql: &str) -> EngineResult<()> {
+        use datafusion::sql::sqlparser::ast::Statement;
+        use datafusion::sql::sqlparser::dialect::GenericDialect;
+        use datafusion::sql::sqlparser::parser::Parser;
+
+        let reject = |reason: String| EngineError::SourceQueryRejected {
+            table: table.to_string(),
+            reason,
+        };
+
+        let statements = Parser::parse_sql(&GenericDialect {}, sql)
+            .map_err(|e| reject(format!("SQL parse error: {e}")))?;
+
+        if statements.len() != 1 {
+            return Err(reject(format!(
+                "expected exactly one SQL statement, found {}",
+                statements.len()
+            )));
+        }
+
+        match &statements[0] {
+            Statement::Query(query) if query_is_read_only(query) => Ok(()),
+            Statement::Query(_) => Err(reject(
+                "query contains a data-modifying construct (e.g. SELECT INTO or a \
+                 writing CTE), which is not permitted for source-query polling"
+                    .to_string(),
+            )),
+            _ => Err(reject(
+                "only a single SELECT statement is permitted for source-query polling".to_string(),
+            )),
+        }
+    }
+}
+
+/// Returns `true` if the query (including its CTEs) contains only read-only
+/// constructs. Used by [`RefreshStrategy::validate_source_query_sql`].
+fn query_is_read_only(query: &datafusion::sql::sqlparser::ast::Query) -> bool {
+    if let Some(with) = &query.with {
+        if !with
+            .cte_tables
+            .iter()
+            .all(|cte| query_is_read_only(&cte.query))
+        {
+            return false;
+        }
+    }
+    set_expr_is_read_only(&query.body)
+}
+
+/// Returns `true` if a set expression is read-only (no `SELECT INTO`, no
+/// embedded INSERT/UPDATE set expressions). Unknown/future variants are
+/// conservatively treated as not read-only.
+fn set_expr_is_read_only(expr: &datafusion::sql::sqlparser::ast::SetExpr) -> bool {
+    use datafusion::sql::sqlparser::ast::SetExpr;
+
+    match expr {
+        SetExpr::Select(select) => select.into.is_none(),
+        SetExpr::Query(query) => query_is_read_only(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_is_read_only(left) && set_expr_is_read_only(right)
+        }
+        SetExpr::Values(_) => true,
+        // INSERT/UPDATE set expressions and any future variants: reject.
+        _ => false,
     }
 }
 
@@ -145,6 +264,15 @@ impl Table {
                 table: self.name.clone(),
                 column: name.to_string(),
             })
+    }
+
+    /// Returns the effective sort column name for a given column.
+    ///
+    /// If the column has a `sort_by_column` set, returns that column name.
+    /// Otherwise returns the column's own name (natural sort).
+    pub fn sort_column_for<'a>(&'a self, column_name: &'a str) -> EngineResult<&'a str> {
+        let col = self.column(column_name)?;
+        Ok(col.sort_by_column().unwrap_or(column_name))
     }
 
     /// Convert this table definition to an Arrow schema.
@@ -434,6 +562,96 @@ mod tests {
         )
         .unwrap();
         assert_ne!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn validate_source_query_accepts_plain_select() {
+        assert!(RefreshStrategy::validate_source_query_sql(
+            "products",
+            "SELECT MAX(loaded_at) FROM etl_log WHERE table_name = 'products'"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_source_query_accepts_cte_wrapped_select() {
+        assert!(RefreshStrategy::validate_source_query_sql(
+            "products",
+            "WITH latest AS (SELECT MAX(loaded_at) AS v FROM etl_log) SELECT v FROM latest"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_source_query_rejects_multi_statement_batch() {
+        let result =
+            RefreshStrategy::validate_source_query_sql("products", "SELECT 1; DROP TABLE x;");
+        assert!(matches!(
+            result.unwrap_err(),
+            EngineError::SourceQueryRejected { table, .. } if table == "products"
+        ));
+    }
+
+    #[test]
+    fn validate_source_query_rejects_ddl() {
+        assert!(matches!(
+            RefreshStrategy::validate_source_query_sql("t", "DROP TABLE users").unwrap_err(),
+            EngineError::SourceQueryRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_source_query_rejects_dml() {
+        for sql in [
+            "UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "INSERT INTO t VALUES (1)",
+        ] {
+            assert!(
+                matches!(
+                    RefreshStrategy::validate_source_query_sql("t", sql),
+                    Err(EngineError::SourceQueryRejected { .. })
+                ),
+                "expected rejection for: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_source_query_rejects_select_into() {
+        assert!(
+            RefreshStrategy::validate_source_query_sql("t", "SELECT * INTO backup FROM users")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_source_query_rejects_empty_and_garbage() {
+        assert!(RefreshStrategy::validate_source_query_sql("t", "").is_err());
+        assert!(RefreshStrategy::validate_source_query_sql("t", "not sql at all").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_daily_after() {
+        assert!(RefreshStrategy::DailyAfter {
+            hour: 24,
+            minute: 0
+        }
+        .validate()
+        .is_err());
+        assert!(RefreshStrategy::DailyAfter {
+            hour: 6,
+            minute: 60
+        }
+        .validate()
+        .is_err());
+        assert!(RefreshStrategy::DailyAfter {
+            hour: 23,
+            minute: 59
+        }
+        .validate()
+        .is_ok());
+        assert!(RefreshStrategy::Interval { secs: 60 }.validate().is_ok());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 
 use crate::compute::expression::Expression;
+use crate::compute::sql_util::quote_ident_double;
 use crate::error::EngineResult;
 use crate::model::calculated_column::CalculatedColumn;
 
@@ -70,7 +71,7 @@ pub async fn materialize_calculated_columns(
     let mut select_parts: Vec<String> = vec!["*".to_string()];
     for cc in calculated_columns {
         let expr_sql = cc.expression().to_sql_string();
-        select_parts.push(format!("{expr_sql} AS \"{}\"", cc.name()));
+        select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(cc.name())));
     }
 
     let sql = format!("SELECT {} FROM t", select_parts.join(", "));

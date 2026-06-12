@@ -9,6 +9,7 @@ pub mod measure;
 pub mod measure_engine;
 pub mod parser;
 pub mod plan;
+pub mod sql_util;
 
 pub use aggregate::{
     average_column, compute_aggregate, compute_aggregates, count_column, distinct_count_column,
@@ -32,3 +33,4 @@ pub use measure::{
 };
 pub use measure_engine::MeasureEngine;
 pub use plan::{ExecutionPlan, PlanDuration, PlanNode, PlanOperation, PlanProperty, PlanValue};
+pub use sql_util::{quote_ident_bracket, quote_ident_double, sql_quote_literal};

@@ -4,12 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
+use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use engine_core::model::{Column, Table};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
 
 use crate::arrow_convert::rows_to_record_batches;
-use crate::auth::{AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
+use crate::auth::{validate_no_nul, AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::traits::{Connector, FetchRequest, JoinAggregationRequest, SourceTable};
 use crate::type_mapping::pg_type_to_engine_type;
@@ -36,20 +37,31 @@ impl ConnectorAuth for PostgresConnector {
 impl PostgresConnector {
     /// Connect to a PostgreSQL database.
     ///
-    /// Builds the connection URL from the given target and auth method.
+    /// Connection parameters are applied through sqlx's typed
+    /// [`PgConnectOptions`] builder — no connection URL is ever assembled, so
+    /// hostile values in a [`ConnectionTarget`] (which may come from a shared
+    /// model file) cannot restructure the connection or inject options.
     /// Uses port **5432** when `target.port` is `None`.
     ///
     /// # Auth method handling
     ///
-    /// - [`AuthMethod::UsernamePassword`]: embeds credentials in the URL.
+    /// - [`AuthMethod::UsernamePassword`]: passes credentials to the builder.
     /// - [`AuthMethod::EnvironmentVariable`]: resolves env vars at call time.
-    /// - [`AuthMethod::Integrated`]: connects without credentials (relies on
-    ///   server-side GSSAPI/SSPI/peer authentication).
+    /// - [`AuthMethod::Integrated`][]: returns
+    ///   [`ConnectorError::AuthMethodNotSupported`].
+    ///
+    /// # TLS behavior
+    ///
+    /// - `target.trust_server_certificate == false` (default): sqlx's default
+    ///   ssl-mode applies (`prefer`, or the `PGSSLMODE` environment variable
+    ///   when set) — unchanged from previous releases.
+    /// - `target.trust_server_certificate == true`: ssl-mode is forced to
+    ///   `require` (TLS mandatory, server certificate not verified).
     pub async fn connect(target: ConnectionTarget, auth: AuthMethod) -> ConnectorResult<Self> {
-        let url = Self::build_connection_url(target, auth)?;
+        let options = Self::build_connect_options(&target, auth)?;
         let pool = PgPoolOptions::new()
             .max_connections(DEFAULT_MAX_CONNECTIONS)
-            .connect(&url)
+            .connect_with(options)
             .await
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
         Ok(Self {
@@ -58,17 +70,22 @@ impl PostgresConnector {
         })
     }
 
-    /// Build a PostgreSQL connection URL from a target and auth method.
-    fn build_connection_url(target: ConnectionTarget, auth: AuthMethod) -> ConnectorResult<String> {
+    /// Build typed PostgreSQL connection options from a target and auth
+    /// method.
+    ///
+    /// Every value goes through a dedicated [`PgConnectOptions`] setter, so
+    /// URL metacharacters (`@`, `/`, `?`, `#`, …) in any field are treated as
+    /// literal text and cannot alter the connection structure. Values that
+    /// the wire protocol cannot represent (embedded NUL bytes) are rejected
+    /// with [`ConnectorError::InvalidConnectionParameter`].
+    fn build_connect_options(
+        target: &ConnectionTarget,
+        auth: AuthMethod,
+    ) -> ConnectorResult<PgConnectOptions> {
         let port = target.port.unwrap_or(5432);
 
-        let url = match auth {
-            AuthMethod::UsernamePassword { username, password } => {
-                format!(
-                    "postgresql://{}:{}@{}:{}/{}",
-                    username, password, target.host, port, target.database
-                )
-            }
+        let (username, password) = match auth {
+            AuthMethod::UsernamePassword { username, password } => (username, password),
             AuthMethod::EnvironmentVariable {
                 username_var,
                 password_var,
@@ -85,10 +102,7 @@ impl PostgresConnector {
                         password_var
                     ))
                 })?;
-                format!(
-                    "postgresql://{}:{}@{}:{}/{}",
-                    username, password, target.host, port, target.database
-                )
+                (username, password)
             }
             AuthMethod::Integrated => {
                 return Err(ConnectorError::AuthMethodNotSupported(
@@ -97,7 +111,42 @@ impl PostgresConnector {
             }
         };
 
-        Ok(url)
+        validate_no_nul("host", &target.host)?;
+        validate_no_nul("database", &target.database)?;
+        validate_no_nul("username", &username)?;
+        validate_no_nul("password", &password)?;
+
+        let mut options = PgConnectOptions::new()
+            .host(&target.host)
+            .port(port)
+            .database(&target.database)
+            .username(&username)
+            .password(&password);
+
+        if let Some(mode) = Self::ssl_mode_override(target.trust_server_certificate) {
+            options = options.ssl_mode(mode);
+        }
+
+        Ok(options)
+    }
+
+    /// Map [`ConnectionTarget::trust_server_certificate`] to an ssl-mode
+    /// override.
+    ///
+    /// - `true` → [`PgSslMode::Require`]: TLS is mandatory, but the server
+    ///   certificate is not verified.
+    /// - `false` → `None`: sqlx's default applies (`prefer`, or the
+    ///   `PGSSLMODE` environment variable when set), matching the behavior
+    ///   of previous releases.
+    ///
+    /// Stricter modes (`verify-ca` / `verify-full`) are future work — they
+    /// require a CA / encryption policy field on [`ConnectionTarget`].
+    fn ssl_mode_override(trust_server_certificate: bool) -> Option<PgSslMode> {
+        if trust_server_certificate {
+            Some(PgSslMode::Require)
+        } else {
+            None
+        }
     }
 
     /// Close the connection pool gracefully.
@@ -176,13 +225,17 @@ impl PostgresConnector {
     /// Build SQL for an aggregate query from a `FetchRequest`.
     fn build_aggregate_sql(request: &FetchRequest) -> (String, Vec<String>) {
         let schema_name = request.schema.as_deref().unwrap_or("public");
-        let table_ref = format!("\"{schema_name}\".\"{table}\"", table = request.table);
+        let table_ref = format!(
+            "{}.{}",
+            quote_ident_double(schema_name),
+            quote_ident_double(&request.table)
+        );
 
         // SELECT group_by columns + aggregate expressions.
         let mut select_parts: Vec<String> = request
             .group_by
             .iter()
-            .map(|c| format!("\"{c}\""))
+            .map(|c| quote_ident_double(c))
             .collect();
 
         for agg in &request.aggregates {
@@ -191,11 +244,19 @@ impl PostgresConnector {
             let default_alias = format!("{}_{}", func.to_lowercase(), col);
             let alias = agg.alias.as_deref().unwrap_or(&default_alias);
             if agg.function == crate::traits::AggregateFunction::CountDistinct {
-                select_parts.push(format!("{func}(DISTINCT \"{col}\") AS \"{alias}\""));
+                select_parts.push(format!(
+                    "{func}(DISTINCT {}) AS {}",
+                    quote_ident_double(col),
+                    quote_ident_double(alias)
+                ));
             } else if agg.function == crate::traits::AggregateFunction::CountAll {
-                select_parts.push(format!("COUNT(*) AS \"{alias}\""));
+                select_parts.push(format!("COUNT(*) AS {}", quote_ident_double(alias)));
             } else {
-                select_parts.push(format!("{func}(\"{col}\") AS \"{alias}\""));
+                select_parts.push(format!(
+                    "{func}({}) AS {}",
+                    quote_ident_double(col),
+                    quote_ident_double(alias)
+                ));
             }
         }
 
@@ -211,8 +272,8 @@ impl PostgresConnector {
                 params.push(filter.value.clone());
                 let param_idx = params.len();
                 conditions.push(format!(
-                    "\"{}\"::text {} ${}",
-                    filter.column,
+                    "{}::text {} ${}",
+                    quote_ident_double(&filter.column),
                     filter.operator.as_sql(),
                     param_idx
                 ));
@@ -231,7 +292,7 @@ impl PostgresConnector {
             let group_clause: Vec<String> = request
                 .group_by
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| quote_ident_double(c))
                 .collect();
             sql.push_str(" GROUP BY ");
             sql.push_str(&group_clause.join(", "));
@@ -268,7 +329,7 @@ impl PostgresConnector {
         for chunk in values.chunks(500) {
             let rows: Vec<String> = chunk
                 .iter()
-                .map(|v| format!("('{}')", v.replace('\'', "''")))
+                .map(|v| format!("({})", sql_quote_literal(v)))
                 .collect();
             let insert_sql = format!("INSERT INTO \"{name}\" (val) VALUES {}", rows.join(", "));
             if conn.execute(insert_sql.as_str()).await.is_err() {
@@ -305,8 +366,8 @@ impl PostgresConnector {
             params.push(filter.value.clone());
             let param_idx = params.len();
             conditions.push(format!(
-                "\"{}\"::text {} ${}",
-                filter.column,
+                "{}::text {} ${}",
+                quote_ident_double(&filter.column),
                 filter.operator.as_sql(),
                 param_idx
             ));
@@ -324,8 +385,9 @@ impl PostgresConnector {
                 {
                     Some(temp_name) => {
                         conditions.push(format!(
-                            "\"{}\"::text IN (SELECT val FROM \"{}\")",
-                            in_filter.column, temp_name
+                            "{}::text IN (SELECT val FROM \"{}\")",
+                            quote_ident_double(&in_filter.column),
+                            temp_name
                         ));
                         temp_tables.push(temp_name);
                     }
@@ -351,11 +413,15 @@ impl PostgresConnector {
                 request
                     .columns
                     .iter()
-                    .map(|c| format!("\"{c}\""))
+                    .map(|c| quote_ident_double(c))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let table_ref = format!("\"{schema_name}\".\"{table}\"", table = request.table);
+            let table_ref = format!(
+                "{}.{}",
+                quote_ident_double(schema_name),
+                quote_ident_double(&request.table)
+            );
             let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
             if !conditions.is_empty() {
                 sql.push_str(" WHERE ");
@@ -416,12 +482,16 @@ impl PostgresConnector {
         _params: &[String],
     ) -> String {
         let schema_name = request.schema.as_deref().unwrap_or("public");
-        let table_ref = format!("\"{schema_name}\".\"{table}\"", table = request.table);
+        let table_ref = format!(
+            "{}.{}",
+            quote_ident_double(schema_name),
+            quote_ident_double(&request.table)
+        );
 
         let mut select_parts: Vec<String> = request
             .group_by
             .iter()
-            .map(|c| format!("\"{c}\""))
+            .map(|c| quote_ident_double(c))
             .collect();
 
         for agg in &request.aggregates {
@@ -430,11 +500,19 @@ impl PostgresConnector {
             let default_alias = format!("{}_{}", func.to_lowercase(), col);
             let alias = agg.alias.as_deref().unwrap_or(&default_alias);
             if agg.function == crate::traits::AggregateFunction::CountDistinct {
-                select_parts.push(format!("{func}(DISTINCT \"{col}\") AS \"{alias}\""));
+                select_parts.push(format!(
+                    "{func}(DISTINCT {}) AS {}",
+                    quote_ident_double(col),
+                    quote_ident_double(alias)
+                ));
             } else if agg.function == crate::traits::AggregateFunction::CountAll {
-                select_parts.push(format!("COUNT(*) AS \"{alias}\""));
+                select_parts.push(format!("COUNT(*) AS {}", quote_ident_double(alias)));
             } else {
-                select_parts.push(format!("{func}(\"{col}\") AS \"{alias}\""));
+                select_parts.push(format!(
+                    "{func}({}) AS {}",
+                    quote_ident_double(col),
+                    quote_ident_double(alias)
+                ));
             }
         }
 
@@ -450,7 +528,7 @@ impl PostgresConnector {
             let group_clause: Vec<String> = request
                 .group_by
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| quote_ident_double(c))
                 .collect();
             sql.push_str(" GROUP BY ");
             sql.push_str(&group_clause.join(", "));
@@ -606,12 +684,16 @@ impl Connector for PostgresConnector {
             request
                 .columns
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| quote_ident_double(c))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
 
-        let table_ref = format!("\"{schema_name}\".\"{table}\"", table = request.table);
+        let table_ref = format!(
+            "{}.{}",
+            quote_ident_double(schema_name),
+            quote_ident_double(&request.table)
+        );
         let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
 
         // Append WHERE clause from filters.
@@ -625,8 +707,8 @@ impl Connector for PostgresConnector {
                 params.push(filter.value.clone());
                 let param_idx = params.len();
                 conditions.push(format!(
-                    "\"{}\"::text {} ${}",
-                    filter.column,
+                    "{}::text {} ${}",
+                    quote_ident_double(&filter.column),
                     filter.operator.as_sql(),
                     param_idx
                 ));
@@ -679,7 +761,11 @@ impl Connector for PostgresConnector {
     }
 
     async fn row_count(&self, schema: &str, table_name: &str) -> ConnectorResult<usize> {
-        let sql = format!("SELECT COUNT(*) AS cnt FROM \"{schema}\".\"{table_name}\"");
+        let sql = format!(
+            "SELECT COUNT(*) AS cnt FROM {}.{}",
+            quote_ident_double(schema),
+            quote_ident_double(table_name)
+        );
         let row = sqlx::query(&sql).fetch_one(&self.pool).await?;
         let count: i64 = row.try_get("cnt")?;
         Ok(count as usize)
@@ -712,7 +798,11 @@ impl Connector for PostgresConnector {
         let mut group_by_parts: Vec<String> = Vec::new();
 
         for col in &request.group_by {
-            let qualified = format!("\"{}\".\"{}\"", col.table, col.column);
+            let qualified = format!(
+                "{}.{}",
+                quote_ident_double(&col.table),
+                quote_ident_double(&col.column)
+            );
             select_parts.push(qualified.clone());
             group_by_parts.push(qualified);
         }
@@ -727,35 +817,45 @@ impl Connector for PostgresConnector {
                 &request.table_map,
                 &request.group_by,
             )?;
-            select_parts.push(format!("{expr_sql} AS \"{}\"", m.alias));
+            select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(&m.alias)));
         }
 
         // Build FROM + JOINs.
         let mut sql = format!(
-            "SELECT {} FROM \"{}\".\"{}\"",
+            "SELECT {} FROM {}.{}",
             select_parts.join(", "),
-            request.fact_schema,
-            request.fact_table
+            quote_ident_double(&request.fact_schema),
+            quote_ident_double(&request.fact_table)
         );
 
         for join in &request.joins {
             sql.push_str(&format!(
-                " JOIN \"{}\".\"{}\" ON \"{}\".\"{}\" = \"{}\".\"{}\"",
-                join.dim_schema,
-                join.dim_table,
-                request.fact_table,
-                join.fact_column,
-                join.dim_table,
-                join.dim_column,
+                " JOIN {}.{} ON {}.{} = {}.{}",
+                quote_ident_double(&join.dim_schema),
+                quote_ident_double(&join.dim_table),
+                quote_ident_double(&request.fact_table),
+                quote_ident_double(&join.fact_column),
+                quote_ident_double(&join.dim_table),
+                quote_ident_double(&join.dim_column),
             ));
         }
 
-        // WHERE clause.
+        // WHERE clause. Filter values are bound as parameters (like
+        // `build_aggregate_sql`) so a value can never terminate the SQL string.
+        let mut params: Vec<String> = Vec::new();
         if !request.filters.is_empty() {
             let where_parts: Vec<String> = request
                 .filters
                 .iter()
-                .map(|f| format!("\"{}\" {} '{}'", f.column, f.operator.as_sql(), f.value))
+                .map(|f| {
+                    params.push(f.value.clone());
+                    format!(
+                        "{}::text {} ${}",
+                        quote_ident_double(&f.column),
+                        f.operator.as_sql(),
+                        params.len()
+                    )
+                })
                 .collect();
             sql.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
         }
@@ -765,17 +865,21 @@ impl Connector for PostgresConnector {
             sql.push_str(&format!(" GROUP BY {}", group_by_parts.join(", ")));
         }
 
-        self.execute_query(&sql).await
+        self.execute_query_with_params(&sql, &params).await
     }
 }
 
 /// Build an inline `"col"::text IN ('v1', 'v2', ...)` condition for PostgreSQL.
+///
+/// Values are escaped with [`sql_quote_literal`] and the column is escaped
+/// with [`quote_ident_double`] so neither can break out of the IN list.
 fn build_inline_in_pg(column: &str, values: &[String]) -> String {
-    let quoted: Vec<String> = values
-        .iter()
-        .map(|v| format!("'{}'", v.replace('\'', "''")))
-        .collect();
-    format!("\"{}\"::text IN ({})", column, quoted.join(", "))
+    let quoted: Vec<String> = values.iter().map(|v| sql_quote_literal(v)).collect();
+    format!(
+        "{}::text IN ({})",
+        quote_ident_double(column),
+        quoted.join(", ")
+    )
 }
 
 /// Map a pg_type base type name (e.g., `"bool"`, `"int4"`) back to
@@ -834,6 +938,7 @@ fn pg_type_name_to_arrow(
 mod pg_dialect {
     use engine_core::compute::aggregate::AggregateOp;
     use engine_core::compute::expression::Expression;
+    use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
 
     use super::ConnectorResult;
 
@@ -862,13 +967,17 @@ mod pg_dialect {
                 column,
             } => {
                 let src = source_table(table_or_var, table_map);
-                Ok(format!("\"{src}\".\"{column}\""))
+                Ok(format!(
+                    "{}.{}",
+                    quote_ident_double(&src),
+                    quote_ident_double(column)
+                ))
             }
-            Expression::ColumnRef(name) => Ok(format!("\"{name}\"")),
+            Expression::ColumnRef(name) => Ok(quote_ident_double(name)),
             Expression::LiteralFloat(v) => Ok(format!("{v}")),
             Expression::LiteralInt(v) => Ok(format!("{v}")),
             Expression::LiteralBool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
-            Expression::LiteralString(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+            Expression::LiteralString(s) => Ok(sql_quote_literal(s)),
             Expression::Blank => Ok("NULL".to_string()),
 
             Expression::Aggregate { operation, operand } => {
@@ -1159,10 +1268,11 @@ mod pg_dialect {
             .map(|f| {
                 let src = source_table(&f.table, table_map);
                 Ok(format!(
-                    "\"{src}\".\"{}\" {} '{}'",
-                    f.column,
+                    "{}.{} {} {}",
+                    quote_ident_double(&src),
+                    quote_ident_double(&f.column),
                     f.operator.as_sql(),
-                    f.value
+                    sql_quote_literal(&f.value)
                 ))
             })
             .collect::<ConnectorResult<Vec<_>>>()?;
@@ -1234,7 +1344,13 @@ mod pg_dialect {
                             }
                         })
                     })
-                    .map(|col| format!("\"{}\".\"{}\"", col.table, col.column))
+                    .map(|col| {
+                        format!(
+                            "{}.{}",
+                            quote_ident_double(&col.table),
+                            quote_ident_double(&col.column)
+                        )
+                    })
                     .collect();
                 let over = if partition_cols.is_empty() {
                     "OVER ()".to_string()
@@ -1259,7 +1375,13 @@ mod pg_dialect {
                             except_columns.contains(&col.column)
                         }
                     })
-                    .map(|col| format!("\"{}\".\"{}\"", col.table, col.column))
+                    .map(|col| {
+                        format!(
+                            "{}.{}",
+                            quote_ident_double(&col.table),
+                            quote_ident_double(&col.column)
+                        )
+                    })
                     .collect();
                 let over = if partition_cols.is_empty() {
                     "OVER ()".to_string()
@@ -1317,46 +1439,188 @@ mod pg_dialect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::{AggregateExpr, AggregateFunction};
 
     #[test]
-    fn build_url_username_password() {
+    fn build_inline_in_pg_escapes_injection_payload() {
+        let cond = build_inline_in_pg("color", &["x'); DROP TABLE t; --".to_string()]);
+        assert_eq!(cond, "\"color\"::text IN ('x''); DROP TABLE t; --')");
+        assert!(cond.contains("''"));
+        assert!(!cond.contains("IN ('x');"));
+    }
+
+    #[test]
+    fn build_inline_in_pg_escapes_embedded_identifier_quote() {
+        let cond = build_inline_in_pg("evil\"name", &["a".to_string()]);
+        assert!(cond.starts_with("\"evil\"\"name\"::text IN"));
+    }
+
+    #[test]
+    fn pg_dialect_keep_filter_value_injection_is_escaped() {
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression::{ComparisonOp, Expression, FilterPredicate};
+
+        let expr = Expression::Aggregate {
+            operation: AggregateOp::Sum,
+            operand: Box::new(Expression::Keep {
+                expr: Box::new(Expression::ColumnRef("linetotal".into())),
+                filters: vec![FilterPredicate::new(
+                    "Products",
+                    "category",
+                    ComparisonOp::Equal,
+                    "x'); DROP TABLE t; --",
+                )],
+                variables: vec![],
+                conditions: vec![],
+                in_predicates: vec![],
+            }),
+        };
+        let table_map = vec![("Products".to_string(), "product".to_string())];
+        let sql = pg_dialect::expr_to_sql(&expr, &table_map).unwrap();
+        assert!(sql.contains("'x''); DROP TABLE t; --'"), "{sql}");
+        assert!(!sql.contains("= 'x');"), "{sql}");
+    }
+
+    #[test]
+    fn build_aggregate_sql_escapes_identifier_quotes() {
+        let request = FetchRequest {
+            schema: Some("public".into()),
+            table: "evil\"table".into(),
+            aggregates: vec![AggregateExpr {
+                column: "evil\"col".into(),
+                function: AggregateFunction::Sum,
+                alias: Some("total".into()),
+            }],
+            ..Default::default()
+        };
+        let (sql, _params) = PostgresConnector::build_aggregate_sql(&request);
+        assert!(sql.contains("\"evil\"\"table\""), "{sql}");
+        assert!(sql.contains("SUM(\"evil\"\"col\")"), "{sql}");
+    }
+
+    #[test]
+    fn build_aggregate_sql_unchanged_for_clean_names() {
+        let request = FetchRequest {
+            schema: Some("sales".into()),
+            table: "orders".into(),
+            aggregates: vec![AggregateExpr {
+                column: "amount".into(),
+                function: AggregateFunction::Sum,
+                alias: Some("total".into()),
+            }],
+            ..Default::default()
+        };
+        let (sql, params) = PostgresConnector::build_aggregate_sql(&request);
+        assert_eq!(
+            sql,
+            "SELECT SUM(\"amount\") AS \"total\" FROM \"sales\".\"orders\""
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn build_connect_options_username_password() {
         let target = ConnectionTarget::new("dbhost", "analytics").with_port(5433);
         let auth = AuthMethod::UsernamePassword {
             username: "alice".into(),
             password: "secret".into(),
         };
-        let url = PostgresConnector::build_connection_url(target, auth).unwrap();
-        assert_eq!(url, "postgresql://alice:secret@dbhost:5433/analytics");
+        let options = PostgresConnector::build_connect_options(&target, auth).unwrap();
+        assert_eq!(options.get_host(), "dbhost");
+        assert_eq!(options.get_port(), 5433);
+        assert_eq!(options.get_username(), "alice");
+        assert_eq!(options.get_database(), Some("analytics"));
     }
 
     #[test]
-    fn build_url_default_port() {
+    fn build_connect_options_default_port() {
         let target = ConnectionTarget::new("host", "db");
         let auth = AuthMethod::UsernamePassword {
             username: "u".into(),
             password: "p".into(),
         };
-        let url = PostgresConnector::build_connection_url(target, auth).unwrap();
-        assert!(url.contains(":5432/"));
+        let options = PostgresConnector::build_connect_options(&target, auth).unwrap();
+        assert_eq!(options.get_port(), 5432);
     }
 
     #[test]
-    fn build_url_integrated_returns_error() {
+    fn build_connect_options_integrated_returns_error() {
         let target = ConnectionTarget::new("kerberos-host", "warehouse");
         let err =
-            PostgresConnector::build_connection_url(target, AuthMethod::Integrated).unwrap_err();
+            PostgresConnector::build_connect_options(&target, AuthMethod::Integrated).unwrap_err();
         assert!(err.to_string().contains("not supported"));
     }
 
     #[test]
-    fn build_url_env_var_missing() {
+    fn build_connect_options_env_var_missing() {
         let target = ConnectionTarget::new("host", "db");
         let auth = AuthMethod::EnvironmentVariable {
             username_var: "__CALCULA_TEST_NONEXISTENT_USER__".into(),
             password_var: "__CALCULA_TEST_NONEXISTENT_PASS__".into(),
         };
-        let err = PostgresConnector::build_connection_url(target, auth).unwrap_err();
+        let err = PostgresConnector::build_connect_options(&target, auth).unwrap_err();
         assert!(err.to_string().contains("environment variable"));
+    }
+
+    #[test]
+    fn build_connect_options_hostile_password_does_not_alter_host_or_database() {
+        let target = ConnectionTarget::new("db.example.com", "mydb");
+        let auth = AuthMethod::UsernamePassword {
+            username: "user".into(),
+            password: "p@evil.com/x?sslmode=disable#".into(),
+        };
+        let options = PostgresConnector::build_connect_options(&target, auth).unwrap();
+        assert_eq!(options.get_host(), "db.example.com");
+        assert_eq!(options.get_port(), 5432);
+        assert_eq!(options.get_database(), Some("mydb"));
+        assert_eq!(options.get_username(), "user");
+    }
+
+    #[test]
+    fn build_connect_options_hostile_database_stays_literal() {
+        let target = ConnectionTarget::new("host", "db?sslmode=disable&host=evil");
+        let auth = AuthMethod::UsernamePassword {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let options = PostgresConnector::build_connect_options(&target, auth).unwrap();
+        assert_eq!(options.get_host(), "host");
+        assert_eq!(options.get_database(), Some("db?sslmode=disable&host=evil"));
+    }
+
+    #[test]
+    fn build_connect_options_trust_server_certificate_forces_require() {
+        let target = ConnectionTarget::new("host", "db").with_trust_server_certificate(true);
+        let auth = AuthMethod::UsernamePassword {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let options = PostgresConnector::build_connect_options(&target, auth).unwrap();
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Require));
+    }
+
+    #[test]
+    fn ssl_mode_override_maps_trust_flag() {
+        assert!(matches!(
+            PostgresConnector::ssl_mode_override(true),
+            Some(PgSslMode::Require)
+        ));
+        assert!(PostgresConnector::ssl_mode_override(false).is_none());
+    }
+
+    #[test]
+    fn build_connect_options_nul_byte_in_password_is_rejected() {
+        let target = ConnectionTarget::new("host", "db");
+        let auth = AuthMethod::UsernamePassword {
+            username: "u".into(),
+            password: "p\0w".into(),
+        };
+        let err = PostgresConnector::build_connect_options(&target, auth).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorError::InvalidConnectionParameter { ref parameter, .. }
+                if parameter == "password"
+        ));
     }
 
     #[test]

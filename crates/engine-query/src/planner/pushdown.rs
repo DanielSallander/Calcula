@@ -6,7 +6,10 @@ use engine_connectors::{
 use engine_core::compute::expression::{ComparisonOp, Expression, FilterPredicate};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::parser::parse_measure_expression;
+use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
+use engine_core::model::schema::apply_lookup_placeholder;
 use engine_core::model::DataModel;
+use engine_core::types::DataType;
 
 use crate::error::{QueryError, QueryResult};
 use crate::registry::SourceRegistry;
@@ -1299,6 +1302,7 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
 /// Convert an expression to SQL with table-qualified column references for pushdown.
 ///
 /// Uses source bindings to translate model column refs into `"source_table"."column"`.
+#[allow(dead_code)]
 fn expression_to_source_sql(
     expr: &Expression,
     model: &DataModel,
@@ -1312,13 +1316,17 @@ fn expression_to_source_sql(
             column,
         } => {
             let binding = registry.binding_for(table_or_var)?;
-            Ok(format!("\"{}\".\"{}\"", binding.table, column))
+            Ok(format!(
+                "{}.{}",
+                quote_ident_double(&binding.table),
+                quote_ident_double(column)
+            ))
         }
-        Expression::ColumnRef(name) => Ok(format!("\"{name}\"")),
+        Expression::ColumnRef(name) => Ok(quote_ident_double(name)),
         Expression::LiteralFloat(v) => Ok(format!("{v}")),
         Expression::LiteralInt(v) => Ok(format!("{v}")),
         Expression::LiteralBool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
-        Expression::LiteralString(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        Expression::LiteralString(s) => Ok(sql_quote_literal(s)),
         Expression::Blank => Ok("NULL".to_string()),
 
         Expression::Aggregate { operation, operand } => {
@@ -1337,11 +1345,15 @@ fn expression_to_source_sql(
                         .iter()
                         .map(|f| {
                             let binding = registry.binding_for(&f.table)?;
-                            let qualified_col = format!("\"{}\".\"{}\"", binding.table, f.column);
+                            let qualified_col = format!(
+                                "{}.{}",
+                                quote_ident_double(&binding.table),
+                                quote_ident_double(&f.column)
+                            );
                             Ok(format!(
-                                "{qualified_col} {} '{}'",
+                                "{qualified_col} {} {}",
                                 f.operator.as_sql(),
-                                f.value
+                                sql_quote_literal(&f.value)
                             ))
                         })
                         .collect::<QueryResult<Vec<_>>>()?;
@@ -1501,9 +1513,17 @@ fn expression_to_source_sql(
                 .iter()
                 .map(|f| {
                     let binding = registry.binding_for(&f.table)?;
-                    let qualified_col = format!("\"{}\".\"{}\"", binding.table, f.column);
+                    let qualified_col = format!(
+                        "{}.{}",
+                        quote_ident_double(&binding.table),
+                        quote_ident_double(&f.column)
+                    );
                     let op_sql = f.operator.as_sql();
-                    Ok(format!("{qualified_col} {} '{}'", op_sql, f.value))
+                    Ok(format!(
+                        "{qualified_col} {} {}",
+                        op_sql,
+                        sql_quote_literal(&f.value)
+                    ))
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
 
@@ -1628,6 +1648,7 @@ fn expression_to_source_sql(
 ///
 /// Wraps aggregates with `AGG(CASE WHEN condition THEN col END)` using
 /// source-qualified column references.
+#[allow(dead_code)]
 fn expression_to_case_when_source_sql(
     expr: &Expression,
     condition: &str,
@@ -1692,6 +1713,7 @@ fn expression_to_case_when_source_sql(
 /// CLEAR is translated to a window function: the inner aggregate result is
 /// wrapped in `SUM(inner_agg) OVER (PARTITION BY non-cleared-columns)`.
 /// This produces the aggregate value ignoring the cleared dimension's grouping.
+#[allow(dead_code)]
 fn expression_to_source_sql_with_clear(
     expr: &Expression,
     model: &DataModel,
@@ -1720,9 +1742,13 @@ fn expression_to_source_sql_with_clear(
                     })
                 })
                 .map(|col_ref| {
-                    registry
-                        .binding_for(&col_ref.table)
-                        .map(|b| format!("\"{}\".\"{}\"", b.table, col_ref.column))
+                    registry.binding_for(&col_ref.table).map(|b| {
+                        format!(
+                            "{}.{}",
+                            quote_ident_double(&b.table),
+                            quote_ident_double(&col_ref.column)
+                        )
+                    })
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
 
@@ -1774,9 +1800,13 @@ fn expression_to_source_sql_with_clear(
                     }
                 })
                 .map(|col_ref| {
-                    registry
-                        .binding_for(&col_ref.table)
-                        .map(|b| format!("\"{}\".\"{}\"", b.table, col_ref.column))
+                    registry.binding_for(&col_ref.table).map(|b| {
+                        format!(
+                            "{}.{}",
+                            quote_ident_double(&b.table),
+                            quote_ident_double(&col_ref.column)
+                        )
+                    })
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
 
@@ -1910,7 +1940,13 @@ fn build_join_aggregation_request(
 /// For each `LookupColumn`:
 /// - Validates the table and column exist in the model.
 /// - Auto-infers the key column from `group_by` if not specified.
-/// - Reads the column's `lookup_resolution` expression, then the model default, then SELECTEDVALUE semantics.
+/// - Builds the resolution SQL using the first match in the chain:
+///   1. the column's own `lookup_resolution` expression;
+///   2. the model-level `default_lookup_resolution`, with the `__column`
+///      placeholder rewritten to the lookup column;
+///   3. the built-in fallback — SELECTEDVALUE-style semantics
+///      (`CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE '#' END`)
+///      for `String` columns, plain `MIN(col)` for all other types.
 /// - Returns a `LookupSpec` with the SQL fragment for the post-aggregation step.
 fn resolve_lookups(
     lookups: &[crate::request::LookupColumn],
@@ -1986,23 +2022,17 @@ fn resolve_lookups(
             }
         };
 
-        // Build resolution SQL.
+        // Build resolution SQL: per-column expression → model default
+        // (with `__column` placeholder) → built-in fallback.
         let table_alias = lookup.table.to_lowercase();
         let col_name = &lookup.column;
         let resolution_sql = match col.lookup_resolution() {
             Some(expr_text) => render_resolution_sql(expr_text, &table_alias, col_name)?,
             None => match model.default_lookup_resolution() {
-                Some(default_expr) => render_resolution_sql(default_expr, &table_alias, col_name)?,
-                None => {
-                    // Built-in fallback: SELECTEDVALUE semantics —
-                    // return the actual value when unique, '#' when ambiguous.
-                    format!(
-                        "CASE WHEN COUNT(DISTINCT {alias}.\"{col}\") = 1 \
-                         THEN MIN({alias}.\"{col}\") ELSE '#' END",
-                        alias = table_alias,
-                        col = col_name
-                    )
+                Some(default_expr) => {
+                    render_default_resolution_sql(default_expr, &table_alias, col_name)?
                 }
+                None => built_in_resolution_sql(&table_alias, col_name, col.data_type()),
             },
         };
 
@@ -2043,6 +2073,47 @@ fn render_resolution_sql(
     Ok(qualified_sql(&parsed, table_alias))
 }
 
+/// Render the model-level default lookup resolution for a specific column.
+///
+/// The model default is column-generic: the reserved bare identifier
+/// `__column` (case-insensitive) stands for the lookup column it is applied
+/// to. The expression is parsed, every placeholder reference is rewritten to
+/// the actual column, and the result is rendered with the dimension table
+/// alias. Defaults that omit the placeholder (or table-qualify it) are
+/// rejected — `DataModelBuilder::build()` enforces the same rule, so this
+/// only fires for models that bypassed validation.
+fn render_default_resolution_sql(
+    default_expr: &str,
+    table_alias: &str,
+    column_name: &str,
+) -> QueryResult<String> {
+    let parsed = parse_measure_expression(default_expr).map_err(|e| {
+        QueryError::InvalidQuery(format!("Invalid default_lookup_resolution expression: {e}"))
+    })?;
+    let rewritten = apply_lookup_placeholder(&parsed, column_name)?;
+    Ok(qualified_sql(&rewritten, table_alias))
+}
+
+/// Built-in lookup resolution fallback (no per-column expression, no model
+/// default).
+///
+/// `String` columns get SELECTEDVALUE-style semantics: the actual value when
+/// the group maps to exactly one distinct value, `'#'` when ambiguous. All
+/// other data types keep plain `MIN(col)` — mixing `MIN(col)` with the
+/// string literal `'#'` in one CASE would give the branches incompatible
+/// types.
+fn built_in_resolution_sql(table_alias: &str, column_name: &str, data_type: &DataType) -> String {
+    let col = quote_ident_double(column_name);
+    if matches!(data_type, DataType::String) {
+        format!(
+            "CASE WHEN COUNT(DISTINCT {table_alias}.{col}) = 1 \
+             THEN MIN({table_alias}.{col}) ELSE '#' END"
+        )
+    } else {
+        format!("MIN({table_alias}.{col})")
+    }
+}
+
 /// Render an expression to SQL, qualifying bare `ColumnRef` nodes with the table alias.
 ///
 /// `ColumnRef("col")` → `table."col"` instead of just `"col"`.
@@ -2050,13 +2121,15 @@ fn render_resolution_sql(
 /// prefixed with the dimension table alias.
 fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
     match expr {
-        Expression::ColumnRef(name) => format!("{table_alias}.\"{name}\""),
+        Expression::ColumnRef(name) => {
+            format!("{table_alias}.{}", quote_ident_double(name))
+        }
         Expression::QualifiedColumnRef { column, .. } => {
-            format!("{table_alias}.\"{column}\"")
+            format!("{table_alias}.{}", quote_ident_double(column))
         }
         Expression::LiteralFloat(v) => format!("{v}"),
         Expression::LiteralInt(v) => format!("{v}"),
-        Expression::LiteralString(s) => format!("'{}'", s.replace('\'', "''")),
+        Expression::LiteralString(s) => sql_quote_literal(s),
         Expression::LiteralBool(b) => {
             if *b {
                 "TRUE".to_string()
@@ -2344,6 +2417,45 @@ mod tests {
             }
             other => panic!("Expected PushedAggregation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn keep_filter_value_injection_is_escaped_in_source_sql() {
+        use engine_core::compute::aggregate::AggregateOp;
+
+        let model = test_model_star_schema();
+        let registry = mock_registry_star(0);
+
+        let expr = Expression::Aggregate {
+            operation: AggregateOp::Sum,
+            operand: Box::new(Expression::Keep {
+                expr: Box::new(Expression::ColumnRef("amount".into())),
+                filters: vec![FilterPredicate::new(
+                    "Products",
+                    "category",
+                    ComparisonOp::Equal,
+                    "x'); DROP TABLE t; --",
+                )],
+                variables: vec![],
+                conditions: vec![],
+                in_predicates: vec![],
+            }),
+        };
+
+        let sql = expression_to_source_sql(&expr, &model, &registry).unwrap();
+        // The embedded quote is doubled so the literal cannot terminate early.
+        assert!(sql.contains("'x''); DROP TABLE t; --'"), "{sql}");
+        assert!(!sql.contains("= 'x');"), "{sql}");
+    }
+
+    #[test]
+    fn identifier_with_embedded_quote_is_escaped_in_source_sql() {
+        let model = test_model_star_schema();
+        let registry = mock_registry_star(0);
+
+        let expr = Expression::ColumnRef("evil\"name".into());
+        let sql = expression_to_source_sql(&expr, &model, &registry).unwrap();
+        assert_eq!(sql, "\"evil\"\"name\"");
     }
 
     #[test]
@@ -3058,6 +3170,7 @@ mod tests {
                 Column::new("category_id", DataType::Int32),
                 Column::new("category_name", DataType::String),
                 Column::new("subcategory", DataType::String),
+                Column::new("weight", DataType::Float64),
             ],
         )
         .unwrap();
@@ -3161,12 +3274,27 @@ mod tests {
         let lookups = vec![LookupColumn::new("Products", "category_name")];
         let specs = resolve_lookups(&lookups, &group_by, &model).unwrap();
 
-        // Default: CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE '#' END
+        // String column default:
+        // CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE '#' END
         let sql = &specs[0].resolution_sql;
-        assert!(
-            sql.contains("COUNT(DISTINCT") && sql.contains("MIN(") && sql.contains("'#'"),
-            "Expected SELECTEDVALUE semantics, got: {sql}"
+        assert_eq!(
+            sql,
+            "CASE WHEN COUNT(DISTINCT products.\"category_name\") = 1 \
+             THEN MIN(products.\"category_name\") ELSE '#' END"
         );
+    }
+
+    #[test]
+    fn resolve_lookups_non_string_column_gets_min_fallback() {
+        use crate::request::LookupColumn;
+        let model = lookup_model();
+        let group_by = vec![ColumnRef::new("Products", "category_id")];
+        let lookups = vec![LookupColumn::new("Products", "weight")];
+        let specs = resolve_lookups(&lookups, &group_by, &model).unwrap();
+
+        // Non-string columns must NOT get the '#' CASE branch — MIN(float)
+        // and '#' would have incompatible types.
+        assert_eq!(specs[0].resolution_sql, "MIN(products.\"weight\")");
     }
 
     #[test]
@@ -3185,7 +3313,7 @@ mod tests {
 
         let model = DataModel::builder()
             .add_table(products)
-            .default_lookup_resolution("MAX(category_name)")
+            .default_lookup_resolution("MAX(__column)")
             .build()
             .unwrap();
 
@@ -3193,8 +3321,76 @@ mod tests {
         let lookups = vec![LookupColumn::new("Products", "category_name")];
         let specs = resolve_lookups(&lookups, &group_by, &model).unwrap();
 
-        // Model default overrides the built-in MIN fallback.
+        // Model default overrides the built-in fallback; the `__column`
+        // placeholder is rewritten to the actual lookup column.
         assert_eq!(specs[0].resolution_sql, "MAX(products.\"category_name\")");
+    }
+
+    #[test]
+    fn resolve_lookups_model_default_applies_to_each_column() {
+        use crate::request::LookupColumn;
+        let model = {
+            let products = Table::new(
+                "Products",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("category_id", DataType::Int32),
+                    Column::new("category_name", DataType::String),
+                    Column::new("subcategory", DataType::String),
+                ],
+            )
+            .unwrap();
+            DataModel::builder()
+                .add_table(products)
+                .default_lookup_resolution("MAX(__column)")
+                .build()
+                .unwrap()
+        };
+
+        let group_by = vec![ColumnRef::new("Products", "category_id")];
+        let lookups = vec![
+            LookupColumn::new("Products", "category_name"),
+            LookupColumn::new("Products", "subcategory"),
+        ];
+        let specs = resolve_lookups(&lookups, &group_by, &model).unwrap();
+
+        // Each lookup resolves ITS OWN column — the placeholder must not
+        // pin the default to one hard-coded column.
+        assert_eq!(specs[0].resolution_sql, "MAX(products.\"category_name\")");
+        assert_eq!(specs[1].resolution_sql, "MAX(products.\"subcategory\")");
+    }
+
+    #[test]
+    fn model_default_without_placeholder_rejected_at_build() {
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category_name", DataType::String),
+            ],
+        )
+        .unwrap();
+
+        let result = DataModel::builder()
+            .add_table(products)
+            .default_lookup_resolution("MAX(category_name)")
+            .build();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("__column"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_model_default_rejected_at_build() {
+        let products = Table::new("Products", vec![Column::new("id", DataType::Int64)]).unwrap();
+
+        let result = DataModel::builder()
+            .add_table(products)
+            .default_lookup_resolution("MAX(")
+            .build();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("does not parse"), "got: {err}");
     }
 
     #[test]
@@ -3214,7 +3410,7 @@ mod tests {
 
         let model = DataModel::builder()
             .add_table(products)
-            .default_lookup_resolution("MAX(category_name)")
+            .default_lookup_resolution("MAX(__column)")
             .build()
             .unwrap();
 
@@ -3288,6 +3484,8 @@ mod tests {
             "category_name",
         )
         .unwrap();
+        assert!(sql.contains("COUNT(DISTINCT products.\"category_name\")"));
+        assert!(sql.contains("'*'"));
     }
 
     #[test]
@@ -3298,6 +3496,8 @@ mod tests {
             "category_name",
         )
         .unwrap();
+        assert!(sql.contains("COUNT(DISTINCT products.\"category_name\")"));
+        assert!(sql.contains("'Multiple'"));
     }
 
     #[test]
@@ -3319,6 +3519,8 @@ mod tests {
         )
         .unwrap();
         // After inlining: IF(DISTINCTCOUNT(name) > 1, "*", MIN(name))
+        assert!(sql.contains("COUNT(DISTINCT products.\"name\")"));
+        assert!(sql.contains("MIN(products.\"name\")"));
     }
 
     #[test]

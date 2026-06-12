@@ -10,8 +10,9 @@ use arrow::datatypes::{DataType as ArrowDataType, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use tiberius::Row as TibRow;
+use tiberius::{ColumnType as TibColumnType, Row as TibRow};
 
+use crate::decimal::{decimal_to_i128, f64_to_scaled_i128};
 use crate::error::{ConnectorError, ConnectorResult};
 
 /// Maximum rows per `RecordBatch` when converting large result sets.
@@ -43,8 +44,17 @@ fn chunk_to_record_batch(rows: &[TibRow], schema: &Schema) -> ConnectorResult<Re
     let num_cols = schema.fields().len();
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(num_cols);
 
+    // Get TDS column types from the first row so each column is decoded with
+    // the type tiberius actually delivers (its `FromSql` impls are strict:
+    // e.g. `i32` does not match a smallint's `ColumnData::I16`).
+    let col_types: Vec<TibColumnType> = rows[0].columns().iter().map(|c| c.column_type()).collect();
+
     for (col_idx, field) in schema.fields().iter().enumerate() {
-        let array = build_column_array(rows, col_idx, field.data_type())?;
+        let col_type = col_types
+            .get(col_idx)
+            .copied()
+            .unwrap_or(TibColumnType::Null);
+        let array = build_column_array(rows, col_idx, field.data_type(), col_type)?;
         columns.push(array);
     }
 
@@ -52,19 +62,40 @@ fn chunk_to_record_batch(rows: &[TibRow], schema: &Schema) -> ConnectorResult<Re
 }
 
 /// Build a single Arrow array from a column of tiberius rows.
+///
+/// The `col_type` parameter is the TDS column type reported by the server,
+/// used to choose the correct tiberius decode type (mirroring the `pg_type`
+/// dispatch in `arrow_convert`).
 fn build_column_array(
     rows: &[TibRow],
     col_idx: usize,
     arrow_type: &ArrowDataType,
+    col_type: TibColumnType,
 ) -> ConnectorResult<ArrayRef> {
     match arrow_type {
         ArrowDataType::Int32 => {
             let mut builder = Int32Builder::with_capacity(rows.len());
-            for row in rows {
-                // tiberius may return i16 for smallint, i32 for int.
-                // Try i32 first, then fall back to i16 widened.
-                let val: Option<i32> = row.try_get(col_idx).map_err(tib_get_err)?;
-                builder.append_option(val);
+            match col_type {
+                // smallint arrives as ColumnData::I16; decode i16, widen.
+                TibColumnType::Int2 => {
+                    for row in rows {
+                        let val: Option<i16> = row.try_get(col_idx).map_err(tib_get_err)?;
+                        builder.append_option(val.map(i32::from));
+                    }
+                }
+                // tinyint arrives as ColumnData::U8; decode u8, widen.
+                TibColumnType::Int1 => {
+                    for row in rows {
+                        let val: Option<u8> = row.try_get(col_idx).map_err(tib_get_err)?;
+                        builder.append_option(val.map(i32::from));
+                    }
+                }
+                _ => {
+                    for row in rows {
+                        let val: Option<i32> = row.try_get(col_idx).map_err(tib_get_err)?;
+                        builder.append_option(val);
+                    }
+                }
             }
             Ok(Arc::new(builder.finish()))
         }
@@ -78,32 +109,65 @@ fn build_column_array(
         }
         ArrowDataType::Float64 => {
             let mut builder = Float64Builder::with_capacity(rows.len());
-            for row in rows {
-                let val: Option<f64> = row.try_get(col_idx).map_err(tib_get_err)?;
-                builder.append_option(val);
+            // real arrives as ColumnData::F32; decode f32, widen to f64.
+            if col_type == TibColumnType::Float4 {
+                for row in rows {
+                    let val: Option<f32> = row.try_get(col_idx).map_err(tib_get_err)?;
+                    builder.append_option(val.map(f64::from));
+                }
+            } else {
+                for row in rows {
+                    let val: Option<f64> = row.try_get(col_idx).map_err(tib_get_err)?;
+                    builder.append_option(val);
+                }
             }
             Ok(Arc::new(builder.finish()))
         }
         ArrowDataType::Decimal128(precision, scale) => {
             let mut builder = Decimal128Builder::with_capacity(rows.len());
             builder = builder.with_precision_and_scale(*precision, *scale)?;
-            for row in rows {
-                let val: Option<Decimal> = row.try_get(col_idx).map_err(tib_get_err)?;
-                match val {
-                    Some(d) => {
-                        let i128_val = decimal_to_i128(&d, *scale);
-                        builder.append_value(i128_val);
+            match col_type {
+                // money/smallmoney arrive as ColumnData::F64 (tiberius
+                // decodes the raw fixed-point integer divided by 1e4), so
+                // they cannot be read as rust_decimal::Decimal.
+                TibColumnType::Money | TibColumnType::Money4 => {
+                    for row in rows {
+                        let val: Option<f64> = row.try_get(col_idx).map_err(tib_get_err)?;
+                        match val {
+                            Some(v) => builder.append_value(f64_to_scaled_i128(v, *scale)?),
+                            None => builder.append_null(),
+                        }
                     }
-                    None => builder.append_null(),
+                }
+                _ => {
+                    for row in rows {
+                        let val: Option<Decimal> = row.try_get(col_idx).map_err(tib_get_err)?;
+                        match val {
+                            Some(d) => {
+                                let i128_val = decimal_to_i128(&d, *scale)?;
+                                builder.append_value(i128_val);
+                            }
+                            None => builder.append_null(),
+                        }
+                    }
                 }
             }
             Ok(Arc::new(builder.finish()))
         }
         ArrowDataType::Utf8 => {
             let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
-            for row in rows {
-                let val: Option<&str> = row.try_get(col_idx).map_err(tib_get_err)?;
-                builder.append_option(val);
+            // uniqueidentifier arrives as ColumnData::Guid and cannot be
+            // decoded as &str; decode the Uuid and render it as text.
+            if col_type == TibColumnType::Guid {
+                for row in rows {
+                    let val: Option<tiberius::Uuid> = row.try_get(col_idx).map_err(tib_get_err)?;
+                    builder.append_option(val.map(|u| u.to_string()));
+                }
+            } else {
+                for row in rows {
+                    let val: Option<&str> = row.try_get(col_idx).map_err(tib_get_err)?;
+                    builder.append_option(val);
+                }
             }
             Ok(Arc::new(builder.finish()))
         }
@@ -132,15 +196,26 @@ fn build_column_array(
         }
         ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => {
             let mut builder = TimestampMicrosecondBuilder::with_capacity(rows.len());
-            for row in rows {
-                let val: Option<chrono::NaiveDateTime> =
-                    row.try_get(col_idx).map_err(tib_get_err)?;
-                match val {
-                    Some(dt) => {
-                        let micros = dt.and_utc().timestamp_micros();
-                        builder.append_value(micros);
+            // datetimeoffset arrives as ColumnData::DateTimeOffset, which
+            // tiberius only decodes via DateTime<Utc> (normalizing to UTC);
+            // NaiveDateTime does not match it.
+            if col_type == TibColumnType::DatetimeOffsetn {
+                for row in rows {
+                    let val: Option<chrono::DateTime<chrono::Utc>> =
+                        row.try_get(col_idx).map_err(tib_get_err)?;
+                    builder.append_option(val.map(|dt| dt.timestamp_micros()));
+                }
+            } else {
+                for row in rows {
+                    let val: Option<chrono::NaiveDateTime> =
+                        row.try_get(col_idx).map_err(tib_get_err)?;
+                    match val {
+                        Some(dt) => {
+                            let micros = dt.and_utc().timestamp_micros();
+                            builder.append_value(micros);
+                        }
+                        None => builder.append_null(),
                     }
-                    None => builder.append_null(),
                 }
             }
             Ok(Arc::new(builder.finish()))
@@ -148,20 +223,6 @@ fn build_column_array(
         other => Err(ConnectorError::ArrowConversion(format!(
             "unsupported Arrow type: {other:?}"
         ))),
-    }
-}
-
-/// Convert a `rust_decimal::Decimal` to an `i128` value at the given Arrow scale.
-fn decimal_to_i128(d: &Decimal, target_scale: i8) -> i128 {
-    let raw = d.mantissa();
-    let d_scale = d.scale() as i8;
-    let diff = target_scale - d_scale;
-    if diff > 0 {
-        raw * 10i128.pow(diff as u32)
-    } else if diff < 0 {
-        raw / 10i128.pow((-diff) as u32)
-    } else {
-        raw
     }
 }
 

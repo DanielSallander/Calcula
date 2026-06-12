@@ -429,6 +429,24 @@ fn array_value_as_string(array: &dyn arrow::array::Array, row: usize) -> Option<
         Some(arr.value(row).to_string())
     } else if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
         Some(arr.value(row).to_string())
+    } else if let Some(arr) = array
+        .as_any()
+        .downcast_ref::<DictionaryArray<arrow::datatypes::Int32Type>>()
+    {
+        // The batch optimizer dictionary-encodes low-cardinality string
+        // columns; group-by output then carries Dictionary(Int32, Utf8).
+        let values = arr
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("dictionary values should be Utf8");
+        let key = arr.key(row).expect("non-null row checked above");
+        let s = values.value(key).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     } else {
         panic!("unsupported group column type: {:?}", array.data_type());
     }

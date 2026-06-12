@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::compute::expression::Expression;
 use crate::compute::measure::{Measure, MeasureGroup};
 use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
@@ -12,12 +13,32 @@ use crate::model::relationship::Relationship;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
 
+/// Current version of the model-file (JSON) format written by this engine.
+///
+/// **Versioning policy:** bump this constant whenever the serialized model
+/// gains content that older engines must not silently drop or destroy —
+/// for example a new semantically meaningful struct field, or a new enum
+/// variant in a persisted expression tree. Loaders compare a file's
+/// `format_version` against this value and refuse files that are newer
+/// ([`EngineError::ModelFormatTooNew`]) instead of partially deserializing
+/// them; save paths always write the current version. Purely additive
+/// metadata that older engines may safely ignore does not require a bump.
+///
+/// Version history:
+/// - `0` — legacy files without a `format_version` field.
+/// - `1` — `format_version` introduced; measures may carry `source` text.
+pub const MODEL_FORMAT_VERSION: u32 = 1;
+
 /// A data model consisting of tables and relationships between them.
 ///
 /// Supports star and snowflake schema patterns where fact tables connect
 /// to dimension tables via foreign-key relationships.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataModel {
+    /// On-disk format version. Legacy files without the field load as `0`;
+    /// models built via [`DataModelBuilder`] carry [`MODEL_FORMAT_VERSION`].
+    #[serde(default)]
+    format_version: u32,
     tables: Vec<Table>,
     relationships: Vec<Relationship>,
     measures: Vec<Measure>,
@@ -50,6 +71,16 @@ impl DataModel {
             hierarchies: Vec::new(),
             default_lookup_resolution: None,
         }
+    }
+
+    /// Returns the model-file format version this model was built or
+    /// loaded with.
+    ///
+    /// Models constructed via [`DataModel::builder`] carry the current
+    /// [`MODEL_FORMAT_VERSION`]; models deserialized from legacy files
+    /// (no `format_version` field) report `0`.
+    pub fn format_version(&self) -> u32 {
+        self.format_version
     }
 
     /// Returns all tables in the model.
@@ -161,6 +192,19 @@ impl DataModel {
             .collect()
     }
 
+    /// Returns the effective sort column name for a column in a table.
+    ///
+    /// If the column has a `sort_by_column` set, returns that column name.
+    /// Otherwise returns the column's own name (natural sort).
+    pub fn sort_column_for<'a>(
+        &'a self,
+        table_name: &str,
+        column_name: &'a str,
+    ) -> EngineResult<&'a str> {
+        let table = self.table(table_name)?;
+        table.sort_column_for(column_name)
+    }
+
     /// Returns the model-level default lookup resolution expression, if set.
     ///
     /// When a column has no per-column `lookup_resolution`, this expression is
@@ -234,6 +278,36 @@ impl DataModel {
         Ok(())
     }
 
+    /// Re-parse every measure that carries source text, replacing its
+    /// stored expression tree with the freshly parsed one.
+    ///
+    /// A measure's source text (see [`Measure::source`]) is the
+    /// authoritative, human-readable definition; the serialized expression
+    /// AST acts as a cache of the last successful parse. Calling this
+    /// after deserializing a model re-applies the *current* parser's
+    /// grammar and validation to each measure. If a measure's source no
+    /// longer parses (e.g. it uses syntax from a newer engine), the
+    /// stored AST is kept unchanged so the model still loads — the
+    /// measure simply behaves as it last parsed. Measures without source
+    /// text (built programmatically from expression values) are left
+    /// untouched.
+    ///
+    /// This lives on `DataModel` rather than as a public expression
+    /// setter on [`Measure`]: the swap must recompute the measure's
+    /// cached fact table, and a general-purpose public setter would let
+    /// hosts desynchronize a measure's source text from its AST.
+    pub fn reparse_measures_from_source(&mut self) {
+        for measure in &mut self.measures {
+            let Some(text) = measure.source() else {
+                continue;
+            };
+            let reparsed = crate::compute::parser::parse_measure_expression(text);
+            if let Ok(expression) = reparsed {
+                measure.set_expression(expression);
+            }
+        }
+    }
+
     /// Find the active relationship between two tables (searches both directions).
     ///
     /// Returns the first **active** relationship where one table is on the "from"
@@ -275,6 +349,125 @@ impl DataModel {
                 ))
             })
     }
+}
+
+/// Characters rejected in model identifiers.
+///
+/// These can break out of quoted SQL identifiers (`"`, `[`, `]`, `'`, `;`)
+/// or escape file/path contexts (`\`, `/`). Names with inner spaces, single
+/// dots, unicode letters, or parentheses remain legal — BI models
+/// legitimately use names like "Sales Amount".
+const FORBIDDEN_IDENTIFIER_CHARS: [char; 7] = ['"', '[', ']', '\'', ';', '\\', '/'];
+
+/// Validate a model identifier (table, column, calculated-column, or
+/// measure name) before it can reach SQL generation or file naming.
+///
+/// Rejects names that are empty/whitespace-only, have leading or trailing
+/// whitespace, contain control characters, contain any of
+/// [`FORBIDDEN_IDENTIFIER_CHARS`], or contain the path-traversal sequence
+/// `..`.
+///
+/// Also used by `Expression::validate()` for table references embedded in
+/// expression trees, which are rendered as raw (unquoted) SQL qualifiers.
+pub(crate) fn validate_identifier(name: &str, kind: &str) -> EngineResult<()> {
+    let invalid = |reason: String| EngineError::InvalidIdentifier {
+        name: name.to_string(),
+        reason,
+    };
+    if name.trim().is_empty() {
+        return Err(invalid(format!(
+            "{kind} name must not be empty or whitespace-only"
+        )));
+    }
+    if name != name.trim() {
+        return Err(invalid(format!(
+            "{kind} name must not have leading or trailing whitespace"
+        )));
+    }
+    if name.contains("..") {
+        return Err(invalid(format!(
+            "{kind} name must not contain the sequence '..'"
+        )));
+    }
+    for c in name.chars() {
+        if c < '\u{20}' || c == '\u{7f}' {
+            return Err(invalid(format!(
+                "{kind} name must not contain control characters"
+            )));
+        }
+        if FORBIDDEN_IDENTIFIER_CHARS.contains(&c) {
+            return Err(invalid(format!("{kind} name must not contain '{c}'")));
+        }
+    }
+    Ok(())
+}
+
+/// Reserved placeholder identifier for the model-level default lookup
+/// resolution expression
+/// ([`DataModelBuilder::default_lookup_resolution`]).
+///
+/// In the default expression, the bare identifier `__column`
+/// (case-insensitive) stands for the lookup column the expression is being
+/// applied to. It is rewritten to the actual column at query time via
+/// [`apply_lookup_placeholder`].
+pub const LOOKUP_COLUMN_PLACEHOLDER: &str = "__column";
+
+/// Rewrite the [`LOOKUP_COLUMN_PLACEHOLDER`] in a parsed model-level default
+/// lookup resolution expression to a reference to `column_name`.
+///
+/// The placeholder must appear as a bare identifier — a table-qualified
+/// `dim[__column]` cannot be rewritten and is rejected. An expression that
+/// does not reference the placeholder at all is also rejected: it would
+/// silently resolve the same hard-coded column for every lookup it is
+/// applied to.
+pub fn apply_lookup_placeholder(
+    expression: &Expression,
+    column_name: &str,
+) -> EngineResult<Expression> {
+    // Collect the exact spellings used for the placeholder: the comparison
+    // is case-insensitive, but substitution matches names exactly.
+    let spellings: Vec<String> = expression
+        .column_references()
+        .iter()
+        .filter(|r| r.eq_ignore_ascii_case(LOOKUP_COLUMN_PLACEHOLDER))
+        .map(|r| (*r).to_string())
+        .collect();
+    if spellings.is_empty() {
+        return Err(EngineError::InvalidLookup {
+            table: "(model)".to_string(),
+            column: "default_lookup_resolution".to_string(),
+            reason: format!(
+                "expression must reference the lookup column via the \
+                 '{LOOKUP_COLUMN_PLACEHOLDER}' placeholder, \
+                 e.g. \"MAX({LOOKUP_COLUMN_PLACEHOLDER})\""
+            ),
+        });
+    }
+
+    let env: std::collections::HashMap<String, Expression> = spellings
+        .into_iter()
+        .map(|s| (s, Expression::ColumnRef(column_name.to_string())))
+        .collect();
+    let rewritten = expression.substitute_vars(&env);
+
+    // A table-qualified placeholder (`dim[__column]`) is not substituted by
+    // `substitute_vars` — reject it instead of silently rendering a
+    // reference to a non-existent "__column" column.
+    if rewritten
+        .column_references()
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(LOOKUP_COLUMN_PLACEHOLDER))
+    {
+        return Err(EngineError::InvalidLookup {
+            table: "(model)".to_string(),
+            column: "default_lookup_resolution".to_string(),
+            reason: format!(
+                "the '{LOOKUP_COLUMN_PLACEHOLDER}' placeholder must be a bare \
+                 identifier (not table-qualified)"
+            ),
+        });
+    }
+    Ok(rewritten)
 }
 
 /// Builder for constructing a [`DataModel`] incrementally.
@@ -348,9 +541,19 @@ impl DataModelBuilder {
 
     /// Set the model-level default lookup resolution expression.
     ///
-    /// This expression is used for lookup columns that don't have a per-column
-    /// `lookup_resolution` set. If not specified, the built-in fallback is
-    /// `MIN(col)`.
+    /// This expression is used for lookup columns that don't have a
+    /// per-column `lookup_resolution` set. It must reference the lookup
+    /// column via the reserved bare identifier
+    /// [`__column`](LOOKUP_COLUMN_PLACEHOLDER) (case-insensitive), which is
+    /// rewritten to the actual column at query time — e.g.
+    /// `"MAX(__column)"` or `"SELECTEDVALUE(__column, \"*\")"`. Expressions
+    /// without the placeholder are rejected at build time, since they would
+    /// resolve the same hard-coded column for every lookup.
+    ///
+    /// If not specified, the built-in fallback applies: for `String`
+    /// columns, SELECTEDVALUE-style semantics
+    /// (`CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE '#' END`);
+    /// for all other column types, `MIN(col)`.
     pub fn default_lookup_resolution(mut self, expr: impl Into<String>) -> Self {
         self.default_lookup_resolution = Some(expr.into());
         self
@@ -364,6 +567,76 @@ impl DataModelBuilder {
     /// - All referenced tables and columns exist
     /// - Join column types are compatible
     pub fn build(self) -> EngineResult<DataModel> {
+        // 0. Identifier validation. Table, column, calculated-column, and
+        // measure names are later interpolated into quoted SQL identifiers
+        // (and table names into cache file names), so characters that can
+        // break out of those contexts are rejected up front. Table-variable,
+        // context, global-variable, and hierarchy names are intentionally
+        // not validated here: they are pure lookup keys that resolve to
+        // (already validated) tables and columns before any SQL is built.
+        for table in &self.tables {
+            validate_identifier(table.name(), "table")?;
+            for col in table.columns() {
+                validate_identifier(col.name(), "column")?;
+            }
+        }
+        for cc in &self.calculated_columns {
+            validate_identifier(cc.name(), "calculated column")?;
+        }
+        for measure in &self.measures {
+            validate_identifier(measure.name(), "measure")?;
+        }
+
+        // 0b. Expression AST validation. Measures, calculated columns, and
+        // global variables can be deserialized straight from model JSON,
+        // bypassing the parser's allow-lists (most critically the date/time
+        // interval keywords that the SQL renderers splice in raw). Validate
+        // every expression tree — and the filter predicates embedded in
+        // context definitions and table variables — before any SQL can be
+        // generated from them.
+        for measure in &self.measures {
+            measure.expression().validate()?;
+        }
+        for cc in &self.calculated_columns {
+            cc.expression().validate()?;
+        }
+        for gv in &self.global_variables {
+            gv.expression().validate()?;
+        }
+        for ctx in &self.contexts {
+            use crate::model::context::ContextOp;
+            for op in ctx.operations() {
+                match op {
+                    ContextOp::Keep(filters) => {
+                        for f in filters {
+                            f.validate()?;
+                        }
+                    }
+                    ContextOp::KeepIn(predicates) => {
+                        for p in predicates {
+                            p.validate()?;
+                        }
+                    }
+                    // These operations carry only lookup keys (table /
+                    // column / context / relationship names) that are
+                    // resolved against the model, never rendered raw.
+                    ContextOp::Clear(_)
+                    | ContextOp::ClearInner(_)
+                    | ContextOp::ClearOuter(_)
+                    | ContextOp::Reset
+                    | ContextOp::ResetInner
+                    | ContextOp::ResetOuter
+                    | ContextOp::Inherit(_)
+                    | ContextOp::UseRelationship(_) => {}
+                }
+            }
+        }
+        for var in &self.table_variables {
+            for f in var.filters() {
+                f.validate()?;
+            }
+        }
+
         // 1. Table name uniqueness.
         let mut seen_tables = std::collections::HashSet::new();
         for table in &self.tables {
@@ -372,6 +645,80 @@ impl DataModelBuilder {
                     "Duplicate table '{}'",
                     table.name()
                 )));
+            }
+        }
+
+        // 1b. Validate sort_by_column references within each table.
+        for table in &self.tables {
+            for col in table.columns() {
+                if let Some(sort_col) = col.sort_by_column() {
+                    // Sort-by column must not reference itself.
+                    if sort_col == col.name() {
+                        return Err(EngineError::InvalidSortByColumn {
+                            table: table.name().to_string(),
+                            column: col.name().to_string(),
+                            reason: "column cannot sort by itself".to_string(),
+                        });
+                    }
+                    // Sort-by column must exist in the same table.
+                    let target =
+                        table
+                            .column(sort_col)
+                            .map_err(|_| EngineError::InvalidSortByColumn {
+                                table: table.name().to_string(),
+                                column: col.name().to_string(),
+                                reason: format!(
+                                    "sort_by_column '{}' not found in table '{}'",
+                                    sort_col,
+                                    table.name()
+                                ),
+                            })?;
+                    // Circular: A sorts by B, B sorts by A.
+                    if let Some(target_sort) = target.sort_by_column() {
+                        if target_sort == col.name() {
+                            return Err(EngineError::InvalidSortByColumn {
+                                table: table.name().to_string(),
+                                column: col.name().to_string(),
+                                reason: format!(
+                                    "circular sort_by_column: '{}' and '{}' sort by each other",
+                                    col.name(),
+                                    sort_col
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1c. Lookup resolution expressions must parse, and the model-level
+        // default must be column-generic (reference the `__column`
+        // placeholder). Catching this at build time keeps bad expressions in
+        // shared model files from failing only at query time.
+        if let Some(default_expr) = &self.default_lookup_resolution {
+            let parsed =
+                crate::compute::parser::parse_measure_expression(default_expr).map_err(|e| {
+                    EngineError::InvalidLookup {
+                        table: "(model)".to_string(),
+                        column: "default_lookup_resolution".to_string(),
+                        reason: format!("expression does not parse: {e}"),
+                    }
+                })?;
+            // Probe the placeholder rewrite with a dummy column name; this
+            // rejects defaults that omit the placeholder or qualify it.
+            apply_lookup_placeholder(&parsed, "__probe")?;
+        }
+        for table in &self.tables {
+            for col in table.columns() {
+                if let Some(expr_text) = col.lookup_resolution() {
+                    crate::compute::parser::parse_measure_expression(expr_text).map_err(|e| {
+                        EngineError::InvalidLookup {
+                            table: table.name().to_string(),
+                            column: col.name().to_string(),
+                            reason: format!("lookup_resolution does not parse: {e}"),
+                        }
+                    })?;
+                }
             }
         }
 
@@ -853,6 +1200,19 @@ impl DataModelBuilder {
                 }
             }
 
+            // Stopper values are only valid on optional levels.
+            for level in hierarchy.levels() {
+                if level.stopper_value().is_some() && !level.is_optional() {
+                    return Err(EngineError::InvalidHierarchy {
+                        name: hierarchy.name().to_string(),
+                        reason: format!(
+                            "level '{}' has a stopper_value but is not optional",
+                            level.column()
+                        ),
+                    });
+                }
+            }
+
             // First and last levels must not be optional.
             if hierarchy.levels().first().unwrap().is_optional() {
                 return Err(EngineError::InvalidHierarchy {
@@ -869,6 +1229,12 @@ impl DataModelBuilder {
         }
 
         let model = DataModel {
+            // Freshly built models always carry the current format version
+            // (deserialized legacy models keep their stored value; note
+            // that `DataModel::validate()` only borrows the rebuilt model
+            // for validation and never copies this field back, so
+            // validating a legacy model does not alter its version).
+            format_version: MODEL_FORMAT_VERSION,
             tables: self.tables,
             relationships: self.relationships,
             measures: self.measures,
@@ -1788,6 +2154,185 @@ mod tests {
         assert!(tampered.validate().is_err());
     }
 
+    // --- Expression AST validation (step 0b) tests ---
+
+    /// JSON for a measure whose expression carries a DATE_TRUNC interval.
+    /// Hand-constructed (not produced by the parser) to emulate a hostile
+    /// or tampered model file.
+    fn date_trunc_measure_json(interval: &str) -> String {
+        format!(
+            r#"{{
+                "name": "FirstOfMonth",
+                "expression": {{
+                    "Aggregate": {{
+                        "operation": "Max",
+                        "operand": {{
+                            "DateTimeFunc": {{
+                                "function": "DateTrunc",
+                                "args": [
+                                    {{"QualifiedColumnRef": {{"table_or_var": "Sales", "column": "amount"}}}},
+                                    {{"LiteralString": "{interval}"}}
+                                ]
+                            }}
+                        }}
+                    }}
+                }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn build_rejects_deserialized_measure_with_hostile_interval() {
+        // The custom Measure Deserialize accepts any Expression tree —
+        // the parser's interval allow-list is bypassed entirely.
+        let measure: Measure =
+            serde_json::from_str(&date_trunc_measure_json("MONTH'); DROP TABLE x; --")).unwrap();
+
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(measure)
+            .build();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid interval"), "got: {err}");
+    }
+
+    #[test]
+    fn build_accepts_deserialized_measure_with_benign_interval() {
+        let measure: Measure = serde_json::from_str(&date_trunc_measure_json("MONTH")).unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(measure)
+            .build()
+            .unwrap();
+        assert_eq!(model.measures().len(), 1);
+    }
+
+    #[test]
+    fn validate_rejects_full_model_json_with_hostile_interval() {
+        // Round-trip a valid model through JSON, splice in a hostile
+        // measure, and confirm DataModel::validate() (which delegates to
+        // build()) rejects it.
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .build()
+            .unwrap();
+
+        let mut json: serde_json::Value = serde_json::to_value(&model).unwrap();
+        let hostile: serde_json::Value =
+            serde_json::from_str(&date_trunc_measure_json("MONTH'); DROP TABLE x; --")).unwrap();
+        json["measures"].as_array_mut().unwrap().push(hostile);
+
+        let tampered: DataModel = serde_json::from_value(json).unwrap();
+        let err = tampered.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid interval"), "got: {err}");
+    }
+
+    #[test]
+    fn build_rejects_context_filter_with_hostile_table() {
+        use crate::compute::expression::{ComparisonOp, FilterPredicate};
+        use crate::model::context::ContextOp;
+
+        let ctx = ContextDefinition::new(
+            "ctx_evil",
+            vec![ContextOp::Keep(vec![FilterPredicate::new(
+                "dim\" ON 1=1; --",
+                "year",
+                ComparisonOp::Equal,
+                "2014",
+            )])],
+        );
+
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .add_context(ctx)
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_rejects_table_variable_filter_with_hostile_table() {
+        use crate::compute::expression::{ComparisonOp, FilterPredicate};
+
+        let tv = TableVariable::new(
+            "evil_var",
+            "Sales",
+            vec![FilterPredicate::new(
+                "Sales'; DROP TABLE x; --",
+                "region",
+                ComparisonOp::Equal,
+                "US",
+            )],
+        );
+
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .add_table_variable(tv)
+            .build();
+        assert!(result.is_err());
+    }
+
+    // --- Lookup resolution validation (step 1c) tests ---
+
+    #[test]
+    fn build_rejects_model_default_lookup_without_placeholder() {
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .default_lookup_resolution("MAX(category_name)")
+            .build();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("__column"), "got: {err}");
+    }
+
+    #[test]
+    fn build_rejects_unparseable_model_default_lookup() {
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .default_lookup_resolution("MAX(")
+            .build();
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("does not parse"), "got: {err}");
+    }
+
+    #[test]
+    fn build_accepts_model_default_lookup_with_placeholder() {
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .default_lookup_resolution("MAX(__column)")
+            .build()
+            .unwrap();
+        assert_eq!(model.default_lookup_resolution(), Some("MAX(__column)"));
+    }
+
+    #[test]
+    fn build_rejects_unparseable_column_lookup_resolution() {
+        let table = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("name", DataType::String).with_lookup_resolution("MIN(name"),
+            ],
+        )
+        .unwrap();
+
+        let result = DataModel::builder().add_table(table).build();
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("lookup_resolution does not parse"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_lookup_placeholder_rewrites_case_insensitively() {
+        let parsed = crate::compute::parser::parse_measure_expression("MAX(__COLUMN)").unwrap();
+        let rewritten = apply_lookup_placeholder(&parsed, "category_name").unwrap();
+        assert_eq!(rewritten.column_references(), vec!["category_name"]);
+    }
+
     // --- Global variable tests ---
 
     #[test]
@@ -2270,6 +2815,189 @@ mod tests {
     }
 
     #[test]
+    fn accepts_hierarchy_with_stopper_value_on_optional_level() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "Geography",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country"),
+                HierarchyLevel::new("state")
+                    .with_optional(true)
+                    .with_stopper_value("#"),
+                HierarchyLevel::new("city"),
+            ],
+        );
+
+        let model = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            model.hierarchies()[0].levels()[1].stopper_value(),
+            Some("#")
+        );
+    }
+
+    #[test]
+    fn rejects_hierarchy_with_stopper_value_on_required_level() {
+        use crate::model::hierarchy::HierarchyLevel;
+
+        let h = Hierarchy::new(
+            "Geography",
+            "dim_geography",
+            vec![
+                HierarchyLevel::new("country").with_stopper_value("#"),
+                HierarchyLevel::new("state"),
+                HierarchyLevel::new("city"),
+            ],
+        );
+
+        let err = DataModel::builder()
+            .add_table(dim_geography_table())
+            .add_hierarchy(h)
+            .build()
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("stopper_value") && err.to_string().contains("not optional"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- Sort-by column tests ---
+
+    #[test]
+    fn sort_by_column_accepted() {
+        let table = Table::new(
+            "dim_date",
+            vec![
+                Column::new("month_number", DataType::Int32),
+                Column::new("month_name", DataType::String).with_sort_by("month_number"),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder().add_table(table).build().unwrap();
+
+        let col = model
+            .table("dim_date")
+            .unwrap()
+            .column("month_name")
+            .unwrap();
+        assert_eq!(col.sort_by_column(), Some("month_number"));
+    }
+
+    #[test]
+    fn sort_by_column_missing_target_rejected() {
+        let table = Table::new(
+            "dim_date",
+            vec![Column::new("month_name", DataType::String).with_sort_by("nonexistent")],
+        )
+        .unwrap();
+
+        let result = DataModel::builder().add_table(table).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn sort_by_column_self_reference_rejected() {
+        let table = Table::new(
+            "dim_date",
+            vec![Column::new("month_name", DataType::String).with_sort_by("month_name")],
+        )
+        .unwrap();
+
+        let result = DataModel::builder().add_table(table).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sort by itself"));
+    }
+
+    #[test]
+    fn sort_by_column_circular_rejected() {
+        let table = Table::new(
+            "dim_date",
+            vec![
+                Column::new("a", DataType::String).with_sort_by("b"),
+                Column::new("b", DataType::String).with_sort_by("a"),
+            ],
+        )
+        .unwrap();
+
+        let result = DataModel::builder().add_table(table).build();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("circular"));
+    }
+
+    #[test]
+    fn sort_column_for_returns_sort_column() {
+        let table = Table::new(
+            "dim_date",
+            vec![
+                Column::new("month_number", DataType::Int32),
+                Column::new("month_name", DataType::String).with_sort_by("month_number"),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder().add_table(table).build().unwrap();
+
+        // Column with sort_by returns the sort column.
+        assert_eq!(
+            model.sort_column_for("dim_date", "month_name").unwrap(),
+            "month_number"
+        );
+        // Column without sort_by returns itself.
+        assert_eq!(
+            model.sort_column_for("dim_date", "month_number").unwrap(),
+            "month_number"
+        );
+    }
+
+    #[test]
+    fn sort_by_column_serde_roundtrip() {
+        let table = Table::new(
+            "dim_date",
+            vec![
+                Column::new("month_number", DataType::Int32),
+                Column::new("month_name", DataType::String).with_sort_by("month_number"),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder().add_table(table).build().unwrap();
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        assert!(json.contains("sort_by_column"));
+        assert!(json.contains("month_number"));
+
+        let restored: DataModel = serde_json::from_str(&json).unwrap();
+        let col = restored
+            .table("dim_date")
+            .unwrap()
+            .column("month_name")
+            .unwrap();
+        assert_eq!(col.sort_by_column(), Some("month_number"));
+        assert!(restored.validate().is_ok());
+    }
+
+    #[test]
+    fn sort_by_column_omitted_from_json_when_none() {
+        let table = Table::new("t", vec![Column::new("a", DataType::Int32)]).unwrap();
+
+        let model = DataModel::builder().add_table(table).build().unwrap();
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("sort_by_column"));
+    }
+
+    #[test]
     fn serde_backward_compat_no_hierarchies() {
         let json = r#"{
             "tables": [],
@@ -2316,5 +3044,198 @@ mod tests {
         assert!(rh.levels()[1].is_optional());
         assert_eq!(rh.ragged_behavior(), RaggedBehavior::RepeatParent);
         assert!(restored.validate().is_ok());
+    }
+
+    // --- Identifier validation tests ---
+
+    #[test]
+    fn build_rejects_table_name_with_double_quote() {
+        let table = Table::new("evil\"t", vec![Column::new("a", DataType::Int32)]).unwrap();
+        let result = DataModel::builder().add_table(table).build();
+        assert!(matches!(
+            result,
+            Err(EngineError::InvalidIdentifier { ref name, .. }) if name == "evil\"t"
+        ));
+    }
+
+    #[test]
+    fn build_rejects_column_name_with_bracket() {
+        let table = Table::new("t", vec![Column::new("c]x", DataType::Int32)]).unwrap();
+        let result = DataModel::builder().add_table(table).build();
+        assert!(matches!(
+            result,
+            Err(EngineError::InvalidIdentifier { ref name, .. }) if name == "c]x"
+        ));
+    }
+
+    #[test]
+    fn build_rejects_table_name_with_traversal_sequence() {
+        let table = Table::new("..\\x", vec![Column::new("a", DataType::Int32)]).unwrap();
+        let result = DataModel::builder().add_table(table).build();
+        assert!(matches!(result, Err(EngineError::InvalidIdentifier { .. })));
+    }
+
+    #[test]
+    fn build_rejects_empty_and_whitespace_table_names() {
+        for bad in ["", "   ", " Sales", "Sales ", "\tSales"] {
+            let table = Table::new(bad, vec![Column::new("a", DataType::Int32)]).unwrap();
+            let result = DataModel::builder().add_table(table).build();
+            assert!(
+                matches!(result, Err(EngineError::InvalidIdentifier { .. })),
+                "expected rejection of table name {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_rejects_table_name_with_control_character() {
+        let table = Table::new("Sa\x07les", vec![Column::new("a", DataType::Int32)]).unwrap();
+        let result = DataModel::builder().add_table(table).build();
+        assert!(matches!(result, Err(EngineError::InvalidIdentifier { .. })));
+    }
+
+    #[test]
+    fn build_rejects_measure_name_with_quote() {
+        // Measure names are interpolated into SQL as quoted aliases
+        // (`... AS "name"`), so they must obey the same rules.
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(crate::compute::measure::sum_measure(
+                "Rev\"enue",
+                "Sales",
+                "amount",
+            ))
+            .build();
+        assert!(matches!(
+            model,
+            Err(EngineError::InvalidIdentifier { ref name, .. }) if name == "Rev\"enue"
+        ));
+    }
+
+    #[test]
+    fn build_rejects_calculated_column_name_with_semicolon() {
+        let cc = CalculatedColumn::new(
+            "margin;drop",
+            "Sales",
+            crate::compute::expression::Expression::ColumnRef("amount".to_string()),
+            DataType::Float64,
+        );
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .add_calculated_column(cc)
+            .build();
+        assert!(matches!(
+            result,
+            Err(EngineError::InvalidIdentifier { ref name, .. }) if name == "margin;drop"
+        ));
+    }
+
+    #[test]
+    fn build_accepts_legitimate_bi_names() {
+        // Spaces, single dots, unicode letters, parentheses, and hyphens are
+        // all legal in BI model names.
+        let table = Table::new(
+            "Sales Amount",
+            vec![
+                Column::new("Unit Price (USD)", DataType::Float64),
+                Column::new("Försäljning", DataType::Float64),
+                Column::new("v1.2 metric", DataType::Float64),
+                Column::new("net-amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let result = DataModel::builder()
+            .add_table(table)
+            .add_table(Table::new("fact_sales", vec![Column::new("id", DataType::Int64)]).unwrap())
+            .build();
+        assert!(result.is_ok());
+    }
+
+    // --- Format version tests ---
+
+    #[test]
+    fn built_model_has_current_format_version() {
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .build()
+            .unwrap();
+        assert_eq!(model.format_version(), MODEL_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn legacy_json_without_format_version_deserializes_as_zero_and_validates() {
+        let json = r#"{
+            "tables": [],
+            "relationships": [],
+            "measures": [],
+            "calculated_columns": [],
+            "measure_groups": []
+        }"#;
+        let model: DataModel = serde_json::from_str(json).unwrap();
+        assert_eq!(model.format_version(), 0);
+        model.validate().unwrap();
+        // Validation rebuilds via the builder but must not alter the
+        // original model's stored version.
+        assert_eq!(model.format_version(), 0);
+    }
+
+    // --- Measure re-parse tests ---
+
+    #[test]
+    fn reparse_measures_from_source_replaces_expression_when_source_parses() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::sum_measure;
+
+        // Stored AST is SUM(amount); the source text says COUNT(id).
+        let mut model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("M", "Sales", "amount").with_source("COUNT(Sales[id])"))
+            .build()
+            .unwrap();
+
+        model.reparse_measures_from_source();
+
+        let m = model.measure("M").unwrap();
+        assert_eq!(m.simple_operation(), Some(AggregateOp::Count));
+        assert_eq!(m.simple_column(), Some("id"));
+        assert_eq!(m.table(), "Sales");
+    }
+
+    #[test]
+    fn reparse_measures_from_source_keeps_ast_when_source_is_invalid() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::sum_measure;
+
+        let mut model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("M", "Sales", "amount").with_source("NOT ((( PARSEABLE"))
+            .build()
+            .unwrap();
+
+        model.reparse_measures_from_source();
+
+        let m = model.measure("M").unwrap();
+        assert_eq!(m.simple_operation(), Some(AggregateOp::Sum));
+        assert_eq!(m.simple_column(), Some("amount"));
+        // Source is preserved for the host to display and fix.
+        assert_eq!(m.source(), Some("NOT ((( PARSEABLE"));
+    }
+
+    #[test]
+    fn reparse_measures_from_source_leaves_sourceless_measures_untouched() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::sum_measure;
+
+        let mut model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("M", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        model.reparse_measures_from_source();
+
+        let m = model.measure("M").unwrap();
+        assert_eq!(m.simple_operation(), Some(AggregateOp::Sum));
+        assert_eq!(m.source(), None);
     }
 }

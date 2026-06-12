@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use arrow::util::pretty::pretty_format_batches;
-use engine::*;
+use bi_engine::*;
 
 const SCHEMA: &str = "BI";
 
@@ -176,8 +176,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!(
         "Connecting to {}:{}...",
-        target.host(),
-        target.port().unwrap_or(5432)
+        target.host,
+        target.port.unwrap_or(5432)
     );
     let mut engine = Engine::new(model);
     let pg_idx = engine.add_postgres(target, auth).await?;
