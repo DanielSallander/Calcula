@@ -51,18 +51,22 @@ declare interface BaseObjectContext {
   /**
    * Expose a custom method that other scripts or extensions can call.
    * The method becomes callable from other scripts via callMethod().
+   * Pass { public: true } to allow calls from scripts of a different
+   * tier or package; otherwise only same-trust scripts can call it.
    * @returns Cleanup function to unregister.
    */
-  expose(name: string, handler: (...args: any[]) => any): () => void;
+  expose(name: string, handler: (...args: any[]) => any, options?: { public?: boolean }): () => void;
   /**
-   * Call a method exposed by another object's script.
+   * Call a method exposed by another object's script. Asynchronous: await
+   * the result. Cross-tier or cross-package calls require the target to
+   * have been exposed with { public: true }.
    * @param targetType The object type (e.g., "slicer", "workbook").
    * @param targetInstanceId The instance ID (null for primitives).
    * @param methodName The method name registered via expose().
    * @param args Arguments to pass.
-   * @returns The return value, or undefined if the method is not found.
+   * @returns Promise of the return value, or undefined if the method is not found.
    */
-  callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: any[]): any;
+  callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: any[]): Promise<any>;
   /** Log to the script console (visible in the Code tab output panel). */
   log(...args: any[]): void;
   /** Show a toast notification to the user. */

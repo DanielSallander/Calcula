@@ -147,6 +147,23 @@ export interface FillCompletedPayload {
 export type AppEventName = (typeof AppEvents)[keyof typeof AppEvents];
 
 // ============================================================================
+// User-script event namespacing (sandbox design §5, R5)
+// ============================================================================
+
+/**
+ * Namespace prefix for events emitted by object scripts. Force-prefixing on
+ * BOTH emit and subscribe (symmetric) means scripts using their own custom
+ * names see no behavior change, while internal control events (e.g.
+ * shape:setCanvasRenderer) can never be forged or observed by scripts.
+ */
+export const USERSCRIPT_EVENT_PREFIX = "userscript:";
+
+/** Apply the userscript namespace to a custom event name (idempotent). */
+export function namespaceUserEvent(name: string): string {
+  return name.startsWith(USERSCRIPT_EVENT_PREFIX) ? name : USERSCRIPT_EVENT_PREFIX + name;
+}
+
+// ============================================================================
 // Event Emitter/Listener Functions
 // ============================================================================
 

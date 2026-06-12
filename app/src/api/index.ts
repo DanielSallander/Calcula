@@ -1416,6 +1416,17 @@ export type {
   ScriptProvenance,
 } from "./scriptableObjects";
 
+// ============================================================================
+// Script Host (tier broker, allowlist, audit — transparency surface)
+// ============================================================================
+
+export { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS } from "./scriptHost/allowlist";
+export type { MethodPolicy, Tier as ScriptTierName, CapabilityId, MethodClass } from "./scriptHost/allowlist";
+export { getAuditTail, getAuditTotal, onAudit, clearAudit } from "./scriptHost/auditRing";
+export type { AuditEntry } from "./scriptHost/auditRing";
+export { listMountedHandles, listExposed, BrokerError } from "./scriptHost/broker";
+export type { ScriptHandle, RpcErrorCode } from "./scriptHost/broker";
+
 export {
   getScaffoldTemplate,
   getContextDocumentation,

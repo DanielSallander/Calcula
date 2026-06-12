@@ -190,14 +190,14 @@ function activate(context: ExtensionContext): void {
     if (!target) {
       showToast("No bookmarks", { variant: "info" });
     }
-  });
+  }, { scriptSafe: true });
 
   context.commands.register("bookmarks.prev", () => {
     const target = navigateToPrevBookmark();
     if (!target) {
       showToast("No bookmarks", { variant: "info" });
     }
-  });
+  }, { scriptSafe: true });
 
   context.commands.register("bookmarks.removeAll", () => {
     const count = getBookmarkCount();

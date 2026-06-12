@@ -22,6 +22,11 @@ import { emitAppEvent, onAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import React, { Suspense } from "react";
 import ObjectScriptManagerPane from "./components/ObjectScriptManagerPane";
+import {
+  MountedScriptsSection,
+  PolicyTableSection,
+  ActivitySection,
+} from "./components/PermissionsPanel";
 import ScriptConsentDialog from "./components/ScriptConsentDialog";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
@@ -61,6 +66,33 @@ const manifest = {
 // ============================================================================
 
 const cleanupFunctions: Array<() => void> = [];
+
+// ============================================================================
+// Script Permissions panel (transparency surface)
+// ============================================================================
+
+const PERMISSIONS_PANEL_ID = "scriptable-objects.permissions";
+
+/** SVG shield icon for the Script Permissions panel */
+const ShieldIcon = React.createElement(
+  "svg",
+  {
+    width: 24,
+    height: 24,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  },
+  // Shield outline
+  React.createElement("path", {
+    d: "M12 3 L19 6 V11 C19 15.5 16 19.5 12 21 C8 19.5 5 15.5 5 11 V6 Z",
+  }),
+  // Checkmark
+  React.createElement("path", { d: "M9 11.5 L11.2 13.7 L15 9.5" }),
+);
 
 // ============================================================================
 // Custom Events
@@ -358,6 +390,35 @@ async function activate(context: ExtensionContext): Promise<void> {
     closable: true,
   });
   cleanupFunctions.push(() => context.ui.taskPanes.unregister("scriptable-objects.manager"));
+
+  // ---- Register the Script Permissions transparency panel ----
+  // Sections-based panel API (design §8): mounted scripts, the tier/method
+  // policy table rendered directly from ALLOWLIST, and the broker audit tail.
+  context.ui.panels.register({
+    id: PERMISSIONS_PANEL_ID,
+    title: "Script Permissions",
+    icon: ShieldIcon,
+    sections: [
+      {
+        id: `${PERMISSIONS_PANEL_ID}.mounted`,
+        label: "Mounted scripts",
+        component: MountedScriptsSection,
+      },
+      {
+        id: `${PERMISSIONS_PANEL_ID}.policy`,
+        label: "What scripts can do",
+        component: PolicyTableSection,
+      },
+      {
+        id: `${PERMISSIONS_PANEL_ID}.activity`,
+        label: "Activity",
+        component: ActivitySection,
+      },
+    ],
+    defaultPlacement: "sidebar",
+    priority: 8,
+  });
+  cleanupFunctions.push(() => context.ui.panels.unregister(PERMISSIONS_PANEL_ID));
 
   // ---- Cross-window event bridge: Object Script Editor separate window ----
 

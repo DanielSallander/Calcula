@@ -315,7 +315,7 @@ function activate(context: ExtensionContext): void {
   // 1. Register command
   context.commands.register("flashfill.execute", async () => {
     await executeFlashFill();
-  });
+  }, { scriptSafe: true });
 
   // 2. Register Data menu item
   registerMenuItem("data", {

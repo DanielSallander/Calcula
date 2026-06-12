@@ -327,10 +327,11 @@ describe("ObjectScriptManager", () => {
         }
       `);
 
-      // Script 2: cell script that calls the workbook's greet method
+      // Script 2: cell script that calls the workbook's greet method.
+      // callMethod returns a Promise (sandbox design R7) — scripts await it.
       const s2 = makeScript("cell", `
-        function setup(ctx) {
-          const result = ctx.callMethod("workbook", null, "greet", "World");
+        async function setup(ctx) {
+          const result = await ctx.callMethod("workbook", null, "greet", "World");
           globalThis.__testCallResult.value = result;
         }
       `);
@@ -348,8 +349,8 @@ describe("ObjectScriptManager", () => {
       (globalThis as Record<string, unknown>).__testMissing = { value: "not-set" };
 
       const script = makeScript("workbook", `
-        function setup(ctx) {
-          const result = ctx.callMethod("slicer", "999", "nonExistent");
+        async function setup(ctx) {
+          const result = await ctx.callMethod("slicer", "999", "nonExistent");
           globalThis.__testMissing.value = result;
         }
       `);
@@ -358,6 +359,43 @@ describe("ObjectScriptManager", () => {
 
       expect((globalThis as Record<string, unknown>).__testMissing).toEqual({ value: undefined });
       delete (globalThis as Record<string, unknown>).__testMissing;
+    });
+
+    it("denies cross-tier callMethod unless the target is public", async () => {
+      (globalThis as Record<string, unknown>).__testCrossTier = { value: "not-set" };
+
+      // Unlocked workbook script exposes a private and a public method.
+      const target = makeScript("workbook", `
+        function setup(ctx) {
+          ctx.expose("privateMethod", () => "secret");
+          ctx.expose("publicMethod", () => "open", { public: true });
+        }
+      `);
+      target.accessLevel = "unlocked";
+
+      // Restricted cell script (different tier) tries both.
+      const caller = makeScript("cell", `
+        async function setup(ctx) {
+          let privateResult = "denied";
+          try {
+            privateResult = await ctx.callMethod("workbook", null, "privateMethod");
+          } catch (e) {
+            privateResult = "denied:" + e.code;
+          }
+          const publicResult = await ctx.callMethod("workbook", null, "publicMethod");
+          globalThis.__testCrossTier.value = { privateResult, publicResult };
+        }
+      `);
+
+      ObjectScriptManager.registerScript(target);
+      ObjectScriptManager.registerScript(caller);
+      await ObjectScriptManager.mountScript(target.id);
+      await ObjectScriptManager.mountScript(caller.id);
+
+      expect((globalThis as Record<string, unknown>).__testCrossTier).toEqual({
+        value: { privateResult: "denied:PermissionDenied", publicResult: "open" },
+      });
+      delete (globalThis as Record<string, unknown>).__testCrossTier;
     });
 
     it("cleans up exposed methods on unmount", async () => {

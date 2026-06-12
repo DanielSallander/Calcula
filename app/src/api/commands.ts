@@ -58,11 +58,24 @@ export const CoreCommands = {
 // Command Registry Interface
 // ============================================================================
 
+/** Registration options for commands. */
+export interface CommandOptions {
+  /**
+   * Opt-in flag: object scripts may only execute commands registered with
+   * scriptSafe: true (sandbox design §5, R6). Opt-in (not opt-out) so every
+   * future command fails closed for scripts unless its author deliberately
+   * audits it. UI/menu execution is unaffected by this flag.
+   */
+  scriptSafe?: boolean;
+}
+
 export interface ICommandRegistry {
   execute(commandId: string, args?: unknown): Promise<void>;
-  register(commandId: string, handler: (args?: unknown) => void | Promise<void>): void;
+  register(commandId: string, handler: (args?: unknown) => void | Promise<void>, options?: CommandOptions): void;
   unregister(commandId: string): void;
   has(commandId: string): boolean;
+  /** Whether object scripts may execute this command (scriptSafe opt-in). */
+  isScriptSafe(commandId: string): boolean;
   /** Return all registered command IDs (local handlers + grid command bridge). */
   getAll(): string[];
 }
@@ -92,6 +105,30 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
   [CoreCommands.FILL_LEFT]: "fillLeft",
 };
 
+/**
+ * Grid-bridge commands object scripts may execute: workbook data-plane
+ * operations whose reach is equivalent to the unlocked cell APIs. The
+ * clipboard group (cut/copy/paste*) is deliberately absent — clipboard
+ * contents are ambient-world data.
+ */
+const SCRIPT_SAFE_GRID_COMMANDS: ReadonlySet<string> = new Set([
+  CoreCommands.CLEAR_CONTENTS,
+  CoreCommands.CLEAR_FORMATTING,
+  CoreCommands.CLEAR_COMMENTS,
+  CoreCommands.CLEAR_HYPERLINKS,
+  CoreCommands.CLEAR_ALL,
+  CoreCommands.INSERT_ROW,
+  CoreCommands.INSERT_COLUMN,
+  CoreCommands.DELETE_ROW,
+  CoreCommands.DELETE_COLUMN,
+  CoreCommands.MERGE_CELLS,
+  CoreCommands.UNMERGE_CELLS,
+  CoreCommands.FILL_DOWN,
+  CoreCommands.FILL_RIGHT,
+  CoreCommands.FILL_UP,
+  CoreCommands.FILL_LEFT,
+]);
+
 // ============================================================================
 // CommandRegistry Implementation
 // ============================================================================
@@ -100,17 +137,24 @@ type CommandHandler = (args?: unknown) => void | Promise<void>;
 
 class CommandRegistryImpl implements ICommandRegistry {
   private handlers: Map<string, CommandHandler> = new Map();
+  private scriptSafeIds: Set<string> = new Set();
 
   /**
    * Register a command handler.
    * @param commandId The command ID (use CoreCommands.* for well-known commands)
    * @param handler The handler function
+   * @param options Registration options (scriptSafe opt-in for object scripts)
    */
-  register(commandId: string, handler: CommandHandler): void {
+  register(commandId: string, handler: CommandHandler, options?: CommandOptions): void {
     if (this.handlers.has(commandId)) {
       console.warn(`[CommandRegistry] Overwriting handler for command: ${commandId}`);
     }
     this.handlers.set(commandId, handler);
+    if (options?.scriptSafe) {
+      this.scriptSafeIds.add(commandId);
+    } else {
+      this.scriptSafeIds.delete(commandId);
+    }
     console.log(`[CommandRegistry] Registered command: ${commandId}`);
   }
 
@@ -120,8 +164,25 @@ class CommandRegistryImpl implements ICommandRegistry {
    */
   unregister(commandId: string): void {
     if (this.handlers.delete(commandId)) {
+      this.scriptSafeIds.delete(commandId);
       console.log(`[CommandRegistry] Unregistered command: ${commandId}`);
     }
+  }
+
+  /**
+   * Whether object scripts may execute this command. Grid-bridge commands
+   * are data-plane operations (equivalent reach to the unlocked cell APIs)
+   * and count as scriptSafe, EXCEPT the clipboard group — clipboard contents
+   * are ambient-world data a script should not be able to read or replace.
+   */
+  isScriptSafe(commandId: string): boolean {
+    if (this.scriptSafeIds.has(commandId)) {
+      return true;
+    }
+    if (SCRIPT_SAFE_GRID_COMMANDS.has(commandId)) {
+      return true;
+    }
+    return false;
   }
 
   /**

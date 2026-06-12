@@ -94,8 +94,10 @@ export interface BaseObjectContext {
    * Expose a custom method that other scripts or extensions can call.
    * @param name Method name
    * @param handler The method implementation
+   * @param options Pass { public: true } to allow calls from scripts of a
+   *                different tier or package (defaults to same-trust only).
    */
-  expose(name: string, handler: (...args: unknown[]) => unknown): CleanupFn;
+  expose(name: string, handler: (...args: unknown[]) => unknown, options?: { public?: boolean }): CleanupFn;
 
   /**
    * Log to the script console (visible in the Code tab output panel).
@@ -109,13 +111,15 @@ export interface BaseObjectContext {
 
   /**
    * Call a method exposed by another object's script.
+   * Cross-tier or cross-package calls require the target to have been
+   * exposed with `{ public: true }`.
    * @param targetType The object type (e.g., "slicer", "workbook").
    * @param targetInstanceId The instance ID (null for primitives).
    * @param methodName The method name registered via expose().
    * @param args Arguments to pass.
-   * @returns The return value, or undefined if the method is not found.
+   * @returns Promise of the return value, or undefined if the method is not found.
    */
-  callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: unknown[]): unknown;
+  callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: unknown[]): Promise<unknown>;
 
   /** The current script API version. Scripts can check this for compatibility. */
   readonly apiVersion: string;
@@ -166,35 +170,29 @@ export interface UnlockedAPI {
 // Inter-Script Communication
 // ============================================================================
 
-/**
- * Global registry of methods exposed by object scripts.
- * Keyed by "{objectType}:{instanceId}:{methodName}" for components,
- * or "{objectType}:::{methodName}" for primitives.
- */
-const globalExposedMethods = new Map<string, (...args: unknown[]) => unknown>();
+// Exposed methods live in the broker's host registry (scriptHost/broker.ts),
+// which carries owner identity and the public flag for cross-tier policy.
+// The host-side helpers below remain for trusted (extension/test) callers.
 
-function exposedMethodKey(objectType: string, instanceId: string | null, methodName: string): string {
-  return `${objectType}:${instanceId || ""}:${methodName}`;
-}
-
-/** Register a method in the global exposed methods registry. */
-function registerExposedMethod(
-  objectType: string,
-  instanceId: string | null,
-  methodName: string,
-  handler: (...args: unknown[]) => unknown,
-): CleanupFn {
-  const key = exposedMethodKey(objectType, instanceId, methodName);
-  globalExposedMethods.set(key, handler);
-  return () => globalExposedMethods.delete(key);
-}
+import {
+  brokerCall,
+  brokerCallSync,
+  BrokerError,
+  callExposed,
+  clearExposed,
+  hostCallExposed,
+  listExposed,
+  registerExposed,
+  registerMountedHandle,
+  scriptEmitEventName,
+  scriptSubscribeEventName,
+  type ScriptHandle,
+} from "./scriptHost/broker";
 
 /**
- * Call an exposed method on another script.
- * @param targetType The object type of the target script.
- * @param targetInstanceId The instance ID (null for primitives).
- * @param methodName The method name registered via expose().
- * @param args Arguments to pass to the method.
+ * Call an exposed method on another script from TRUSTED host code
+ * (extensions, tests). Host callers are not subject to the cross-tier
+ * public:true policy — that policy governs script-to-script calls.
  * @returns The return value of the method, or undefined if not found.
  */
 export function callExposedMethod(
@@ -203,27 +201,16 @@ export function callExposedMethod(
   methodName: string,
   ...args: unknown[]
 ): unknown {
-  const key = exposedMethodKey(targetType, targetInstanceId, methodName);
-  const handler = globalExposedMethods.get(key);
-  if (!handler) {
-    console.warn(`[ObjectScriptManager] Method not found: ${key}`);
-    return undefined;
-  }
-  return handler(...args);
+  return hostCallExposed(targetType, targetInstanceId, methodName, args);
 }
 
 /** List all exposed methods (for debugging/inspection). */
 export function listExposedMethods(): Array<{ objectType: string; instanceId: string | null; methodName: string }> {
-  const result: Array<{ objectType: string; instanceId: string | null; methodName: string }> = [];
-  for (const key of globalExposedMethods.keys()) {
-    const parts = key.split(":");
-    result.push({
-      objectType: parts[0],
-      instanceId: parts[1] || null,
-      methodName: parts.slice(2).join(":"),
-    });
-  }
-  return result;
+  return listExposed().map((m) => ({
+    objectType: m.objectType,
+    instanceId: m.instanceId,
+    methodName: m.methodName,
+  }));
 }
 
 // ============================================================================
@@ -765,8 +752,13 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         );
       }
 
+      // Host-side identity for the broker: tier/origin/grants from the
+      // authoritative definition, registered for the transparency panel.
+      const handle = buildScriptHandle(definition);
+      mounted.cleanupFns.push(registerMountedHandle(handle));
+
       // Build the context for this object type
-      const context = buildObjectContext(definition, mounted.cleanupFns);
+      const context = buildObjectContext(definition, handle, mounted.cleanupFns);
 
       // Execute the script in a sandboxed function
       const setupFn = compileObjectScript(definition.source, definition.objectType);
@@ -915,62 +907,124 @@ async function getBackend() {
 }
 
 /**
- * Build the unlocked API — full extension-level access to cells, sheets, events, commands.
- * Only constructed when accessLevel === "unlocked".
+ * Build the host-side identity for a script. Tier/origin/grants come from
+ * the authoritative definition — never from anything the script supplies.
  */
-function buildUnlockedAPI(cleanupFns: CleanupFn[]): UnlockedAPI {
+function buildScriptHandle(definition: ObjectScriptDefinition): ScriptHandle {
+  const isDistributed = definition.provenance === "distributed";
+  // ui.html is auto-granted for local scripts; distributed scripts get it
+  // through consent (Phase 4). Other capabilities arrive with Phase 4.
+  const grants = new Set<"net.fetch" | "bi.query" | "storage" | "ui.html">();
+  if (!isDistributed) {
+    grants.add("ui.html");
+  }
   return {
-    async getCellValue(row: number, col: number): Promise<string> {
-      const lib = await getLib();
-      const cell = await lib.getCell(row, col);
-      return cell?.display ?? "";
+    scriptId: definition.id,
+    scriptName: definition.name,
+    tier: definition.accessLevel === "unlocked" ? "unlocked" : "restricted",
+    objectType: definition.objectType,
+    instanceId: definition.instanceId,
+    origin: isDistributed ? (definition.packageName || "(unknown package)") : "local",
+    grants,
+  };
+}
+
+/**
+ * Build the unlocked API — full extension-level access to cells, sheets,
+ * events, commands. Only constructed when accessLevel === "unlocked".
+ * Every method routes through the tier broker (policy + audit).
+ */
+function buildUnlockedAPI(handle: ScriptHandle, cleanupFns: CleanupFn[]): UnlockedAPI {
+  return {
+    getCellValue(row: number, col: number): Promise<string> {
+      return brokerCall(handle, "api.getCellValue", [row, col], async () => {
+        const lib = await getLib();
+        const cell = await lib.getCell(row, col);
+        return cell?.display ?? "";
+      });
     },
-    async setCellValue(row: number, col: number, value: string): Promise<void> {
-      const lib = await getLib();
-      await lib.updateCell(row, col, value);
+    setCellValue(row: number, col: number, value: string): Promise<void> {
+      return brokerCall(handle, "api.setCellValue", [row, col, value], async () => {
+        const lib = await getLib();
+        await lib.updateCell(row, col, value);
+      });
     },
-    async updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void> {
-      const lib = await getLib();
-      await lib.updateCellsBatch(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+    updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void> {
+      return brokerCall(handle, "api.updateCellsBatch", [updates], async () => {
+        const lib = await getLib();
+        await lib.updateCellsBatch(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+      });
     },
-    async getSheetNames(): Promise<string[]> {
-      const lib = await getLib();
-      const result = await lib.getSheets();
-      return result.sheets.map((s: { name: string }) => s.name);
+    getSheetNames(): Promise<string[]> {
+      return brokerCall(handle, "api.getSheetNames", [], async () => {
+        const lib = await getLib();
+        const result = await lib.getSheets();
+        return result.sheets.map((s: { name: string }) => s.name);
+      });
     },
-    async getActiveSheet(): Promise<number> {
-      const lib = await getLib();
-      return lib.getActiveSheet();
+    getActiveSheet(): Promise<number> {
+      return brokerCall(handle, "api.getActiveSheet", [], async () => {
+        const lib = await getLib();
+        return lib.getActiveSheet();
+      });
     },
-    async setActiveSheet(index: number): Promise<void> {
-      const lib = await getLib();
-      await lib.setActiveSheet(index);
+    setActiveSheet(index: number): Promise<void> {
+      return brokerCall(handle, "api.setActiveSheet", [index], async () => {
+        const lib = await getLib();
+        await lib.setActiveSheet(index);
+      });
     },
     emitEvent(name: string, detail?: unknown): void {
-      emitAppEvent(name, detail);
+      // Force-namespaced userscript:* — scripts can never forge internal
+      // control events (symmetric with onEvent, so custom names still work).
+      brokerCallSync(handle, "api.emitEvent", [name], () => {
+        emitAppEvent(scriptEmitEventName(name), detail);
+      });
     },
     onEvent(name: string, handler: (detail: unknown) => void): CleanupFn {
-      const unsub = onAppEvent(name, handler);
-      cleanupFns.push(unsub);
-      return unsub;
+      return brokerCallSync(handle, "api.onEvent", [name], () => {
+        const unsub = onAppEvent(scriptSubscribeEventName(name), handler);
+        cleanupFns.push(unsub);
+        return unsub;
+      });
     },
     executeCommand(commandId: string, args?: unknown): void {
-      import("./commands").then((mod) => {
-        mod.CommandRegistry.execute(commandId, args);
+      brokerCall(handle, "api.executeCommand", [commandId], async () => {
+        const mod = await import("./commands");
+        if (!mod.CommandRegistry.isScriptSafe(commandId)) {
+          throw new BrokerError(
+            "PermissionDenied",
+            `Command '${commandId}' is not flagged scriptSafe; scripts may only run commands their extension has audited for script use`,
+          );
+        }
+        await mod.CommandRegistry.execute(commandId, args);
+      }).catch((e) => {
+        console.warn(`[Script:${handle.scriptName}] executeCommand failed:`, e);
+        emitAppEvent("objectscript:console", {
+          scriptId: handle.scriptId,
+          level: "warn",
+          args: [`executeCommand('${commandId}') failed: ${e instanceof Error ? e.message : e}`],
+        });
       });
     },
 
-    async beginBatch(description: string): Promise<void> {
-      const lib = await getLib();
-      await lib.beginUndoTransaction(description);
+    beginBatch(description: string): Promise<void> {
+      return brokerCall(handle, "api.beginBatch", [description], async () => {
+        const lib = await getLib();
+        await lib.beginUndoTransaction(description);
+      });
     },
-    async commitBatch(): Promise<void> {
-      const lib = await getLib();
-      await lib.commitUndoTransaction();
+    commitBatch(): Promise<void> {
+      return brokerCall(handle, "api.commitBatch", [], async () => {
+        const lib = await getLib();
+        await lib.commitUndoTransaction();
+      });
     },
-    async cancelBatch(): Promise<void> {
-      const lib = await getLib();
-      await lib.cancelUndoTransaction();
+    cancelBatch(): Promise<void> {
+      return brokerCall(handle, "api.cancelBatch", [], async () => {
+        const lib = await getLib();
+        await lib.cancelUndoTransaction();
+      });
     },
   };
 }
@@ -981,46 +1035,50 @@ function buildUnlockedAPI(cleanupFns: CleanupFn[]): UnlockedAPI {
  */
 function buildObjectContext(
   definition: ObjectScriptDefinition,
+  handle: ScriptHandle,
   cleanupFns: CleanupFn[],
 ): BaseObjectContext {
   // Build unlocked API if access level permits
   const unlockedApi: UnlockedAPI | null = definition.accessLevel === "unlocked"
-    ? buildUnlockedAPI(cleanupFns)
+    ? buildUnlockedAPI(handle, cleanupFns)
     : null;
 
-  // Base context (shared by all types)
+  // Base context (shared by all types). Every sanctioned call routes through
+  // the tier broker so policy is enforced and audited in one place.
   const base: BaseObjectContext = {
     objectType: definition.objectType,
     accessLevel: definition.accessLevel,
     apiVersion: SCRIPT_API_VERSION,
 
-    expose(name: string, handler: (...args: unknown[]) => unknown): CleanupFn {
-      // Register in both local and global registries
-      const globalCleanup = registerExposedMethod(
-        definition.objectType,
-        definition.instanceId,
-        name,
-        handler,
-      );
-      cleanupFns.push(globalCleanup);
-      return globalCleanup;
+    expose(name: string, handler: (...args: unknown[]) => unknown, options?: { public?: boolean }): CleanupFn {
+      return brokerCallSync(handle, "base.expose", [name, handler, options], () => {
+        const cleanup = registerExposed(handle, name, handler, options?.public === true);
+        cleanupFns.push(cleanup);
+        return cleanup;
+      });
     },
 
-    callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: unknown[]): unknown {
-      return callExposedMethod(targetType, targetInstanceId, methodName, ...args);
+    callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: unknown[]): Promise<unknown> {
+      return brokerCall(handle, "base.callMethod", [targetType, targetInstanceId, methodName], () =>
+        callExposed(handle, targetType, targetInstanceId, methodName, args),
+      );
     },
 
     log(...args: unknown[]): void {
-      console.log(`[Script:${definition.name}]`, ...args);
-      emitAppEvent("objectscript:console", {
-        scriptId: definition.id,
-        level: "log",
-        args,
+      brokerCallSync(handle, "base.log", args, () => {
+        console.log(`[Script:${definition.name}]`, ...args);
+        emitAppEvent("objectscript:console", {
+          scriptId: definition.id,
+          level: "log",
+          args,
+        });
       });
     },
 
     notify(message: string, type?: "info" | "success" | "warning" | "error"): void {
-      showToast(message, { type: type || "info" });
+      brokerCallSync(handle, "base.notify", [message, type], () => {
+        showToast(message, { type: type || "info" });
+      });
     },
 
     api: unlockedApi,
@@ -1031,7 +1089,7 @@ function buildObjectContext(
     case "workbook":
       return buildWorkbookContext(base, cleanupFns);
     case "sheet":
-      return buildSheetContext(base, cleanupFns);
+      return buildSheetContext(base, handle, cleanupFns);
     case "cell":
       return buildCellContext(base, cleanupFns);
     case "row":
@@ -1129,7 +1187,7 @@ function buildWorkbookContext(base: BaseObjectContext, cleanupFns: CleanupFn[]):
 
 // ---- Sheet Context ----
 
-function buildSheetContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): SheetContext {
+function buildSheetContext(base: BaseObjectContext, handle: ScriptHandle, cleanupFns: CleanupFn[]): SheetContext {
   return {
     ...base,
     objectType: "sheet" as const,
@@ -1175,34 +1233,55 @@ function buildSheetContext(base: BaseObjectContext, cleanupFns: CleanupFn[]): Sh
 
     async getCellValue(row, col, sheetIndex?) {
       try {
-        const lib = await getLib();
-        if (sheetIndex !== undefined) {
-          const active = await lib.getActiveSheet();
-          if (sheetIndex !== active) {
-            const results = await lib.getWatchCells([[sheetIndex, row, col]]);
-            return results[0]?.display ?? "";
+        return await brokerCall(handle, "sheet.getCellValue", [row, col, sheetIndex], async () => {
+          const lib = await getLib();
+          if (sheetIndex !== undefined) {
+            const active = await lib.getActiveSheet();
+            if (sheetIndex !== active) {
+              // R16 clamp: restricted sheet scripts can only touch their own
+              // (active) sheet; cross-sheet reach is unlocked-tier territory.
+              if (handle.tier !== "unlocked") {
+                throw new BrokerError(
+                  "PermissionDenied",
+                  "Restricted sheet scripts can only access their own sheet",
+                );
+              }
+              const results = await lib.getWatchCells([[sheetIndex, row, col]]);
+              return results[0]?.display ?? "";
+            }
           }
-        }
-        const cellData = await lib.getCell(row, col);
-        return cellData?.display ?? "";
-      } catch {
+          const cellData = await lib.getCell(row, col);
+          return cellData?.display ?? "";
+        });
+      } catch (e) {
+        if (e instanceof BrokerError) throw e;
         return "";
       }
     },
     async setCellValue(row, col, value, sheetIndex?) {
       try {
-        const lib = await getLib();
-        if (sheetIndex !== undefined) {
-          const active = await lib.getActiveSheet();
-          if (sheetIndex !== active) {
-            // update_cell_on_sheets handles non-active sheets; the active
-            // sheet goes through the regular update path below.
-            await lib.updateCellOnSheets([sheetIndex], row, col, value);
-            return;
+        await brokerCall(handle, "sheet.setCellValue", [row, col, value, sheetIndex], async () => {
+          const lib = await getLib();
+          if (sheetIndex !== undefined) {
+            const active = await lib.getActiveSheet();
+            if (sheetIndex !== active) {
+              if (handle.tier !== "unlocked") {
+                throw new BrokerError(
+                  "PermissionDenied",
+                  "Restricted sheet scripts can only access their own sheet",
+                );
+              }
+              // update_cell_on_sheets handles non-active sheets; the active
+              // sheet goes through the regular update path below.
+              await lib.updateCellOnSheets([sheetIndex], row, col, value);
+              return;
+            }
           }
-        }
-        await lib.updateCell(row, col, value);
+          await lib.updateCell(row, col, value);
+        });
+        return;
       } catch (e) {
+        if (e instanceof BrokerError) throw e;
         console.error("[SheetContext] setCellValue failed:", e);
       }
     },
@@ -1851,5 +1930,5 @@ export function resetObjectScriptManager(): void {
   registeredScripts.clear();
   mountedScripts.clear();
   changeListeners.clear();
-  globalExposedMethods.clear();
+  clearExposed();
 }
