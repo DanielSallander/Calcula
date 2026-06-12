@@ -3,17 +3,20 @@
 use engine_connectors::{
     AggregateExpr, AggregateFunction, FetchRequest, FilterCondition, FilterOperator,
 };
-use engine_core::compute::expression::{ComparisonOp, Expression, FilterPredicate};
+use engine_core::compute::expression::{
+    expand_global_variables, expand_measure_refs, ComparisonOp, Expression, FilterPredicate,
+    InPredicate,
+};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::parser::parse_measure_expression;
 use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use engine_core::model::schema::apply_lookup_placeholder;
-use engine_core::model::DataModel;
+use engine_core::model::{DataModel, Relationship, Table};
 use engine_core::types::DataType;
 
 use crate::error::{QueryError, QueryResult};
 use crate::registry::SourceRegistry;
-use crate::request::{ColumnRef, QueryRequest};
+use crate::request::{ColumnRef, OrderByClause, OrderTarget, QueryRequest, TotalsMode};
 
 /// The outcome of query planning: what to push down vs. compute locally.
 #[derive(Debug)]
@@ -29,11 +32,21 @@ pub enum QueryPlan {
     ///
     /// Used when all tables share the same connector. The connector
     /// renders the request using its own SQL dialect.
+    ///
+    /// The pushed join SQL itself is not ordered; `order_by` and `limit` are
+    /// applied locally (Arrow-level) to the result rows it returns. When the
+    /// effective ordering requires sort-by-column substitution (the sort
+    /// column is not part of the result), the planner does not choose this
+    /// plan and falls back to [`QueryPlan::LocalAggregation`] instead.
     PushedJoinAggregation {
         /// Any model table name (to look up the connector).
         source_table: String,
         /// Structured join aggregation request (dialect-neutral).
         request: engine_connectors::JoinAggregationRequest,
+        /// Effective ORDER BY clauses (explicit, or derived from `group_by`).
+        order_by: Vec<OrderByClause>,
+        /// Maximum number of result rows, applied after ordering.
+        limit: Option<usize>,
     },
     /// Must fetch raw data and aggregate locally.
     ///
@@ -47,6 +60,13 @@ pub enum QueryPlan {
         group_by: Vec<ColumnRef>,
         /// Columns to look up post-aggregation via JOIN + resolution expression.
         lookup_specs: Vec<LookupSpec>,
+        /// Effective ORDER BY clauses (explicit, or derived from `group_by`).
+        order_by: Vec<OrderByClause>,
+        /// Maximum number of result rows, applied after ordering.
+        limit: Option<usize>,
+        /// Whether to add ROLLUP subtotal rows to the local aggregation
+        /// (rendered as `GROUP BY ROLLUP` in the local DataFusion SQL).
+        totals: TotalsMode,
     },
 }
 
@@ -62,6 +82,19 @@ pub struct LookupSpec {
     pub key_column: String,
     /// Pre-rendered SQL resolution expression (e.g., `MIN(dim."col")`).
     pub resolution_sql: String,
+}
+
+/// Diagnostics describing column-projection decisions made while planning
+/// `LocalAggregation` source fetches.
+///
+/// A fetch with an empty `columns` list is executed as `SELECT *`. This
+/// struct records why projection was skipped for specific tables so that
+/// `plan_explained` can report it.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionDiagnostics {
+    /// `(table, reason)` pairs for tables fetched without column projection.
+    /// The table name `"*"` means projection was disabled for all tables.
+    pub fallbacks: Vec<(String, String)>,
 }
 
 /// The pushdown planner analyzes a query request and produces an execution plan.
@@ -81,6 +114,23 @@ impl PushdownPlanner {
         Self::plan_with_cached(request, model, registry, &std::collections::HashSet::new())
     }
 
+    /// Analyze a query request and produce a plan along with column-projection
+    /// diagnostics describing which tables fall back to a full fetch.
+    ///
+    /// Used by `plan_explained` to report projection decisions.
+    pub fn plan_with_diagnostics(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+    ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
+        Self::plan_with_cached_diagnostics(
+            request,
+            model,
+            registry,
+            &std::collections::HashSet::new(),
+        )
+    }
+
     /// Analyze a query request and produce a plan, treating tables in
     /// `cached_tables` as locally cached (same as in-memory tables for
     /// pushdown decisions).
@@ -90,11 +140,35 @@ impl PushdownPlanner {
         registry: &SourceRegistry,
         cached_tables: &std::collections::HashSet<String>,
     ) -> QueryResult<QueryPlan> {
+        Ok(Self::plan_with_cached_diagnostics(request, model, registry, cached_tables)?.0)
+    }
+
+    /// Analyze a query request and produce a plan plus projection diagnostics,
+    /// treating tables in `cached_tables` as locally cached.
+    ///
+    /// For `LocalAggregation` plans, each source fetch carries the exact set
+    /// of columns required by the query (measure references, group-by columns,
+    /// relationship join keys, filter columns, calculated-column inputs, and
+    /// lookup columns). Tables whose requirements cannot be statically
+    /// determined fall back to a full fetch (empty `columns`), with the reason
+    /// recorded in the returned [`ProjectionDiagnostics`].
+    pub fn plan_with_cached_diagnostics(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+        cached_tables: &std::collections::HashSet<String>,
+    ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
         if request.measures.is_empty() {
             return Err(QueryError::InvalidQuery(
                 "at least one measure is required".into(),
             ));
         }
+
+        // Validate ORDER BY targets against group_by and measures.
+        validate_order_by(request)?;
+
+        // Validate ROLLUP totals constraints (see `TotalsMode` docs).
+        validate_totals(request)?;
 
         // Resolve all measures.
         let measures: Vec<Measure> = request
@@ -102,6 +176,18 @@ impl PushdownPlanner {
             .iter()
             .map(|name| model.measure(name).cloned())
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Effective ordering: explicit clauses, or the group-by columns
+        // (ascending) when none were given. Targets are canonicalized to the
+        // exact group-by column / measure-name spelling so SQL rendering
+        // matches the SELECT list.
+        let effective_order = canonical_effective_order(request, &measures);
+
+        // Whether the effective ordering needs sort-by-column substitution
+        // (a group-by column whose model `sort_by_column` differs from the
+        // column itself). Pushed join SQL cannot express the `MIN(sort_col)`
+        // ordering, so substitution forces local aggregation for join plans.
+        let needs_sort_substitution = order_requires_sort_substitution(&effective_order, model);
 
         // Collect all referenced tables.
         let measure_tables: Vec<&str> = measures.iter().map(|m| m.table()).collect();
@@ -197,47 +283,73 @@ impl PushdownPlanner {
             && lookup_specs.is_empty()
             && !any_in_memory
         {
-            let table_name = all_tables[0];
-            let binding = registry.binding_for(table_name)?;
+            // ORDER BY / LIMIT are rendered into the pushed SQL. Sort-by
+            // substitution uses `MIN(sort_col)` on the same (single) table.
+            // `None` means an ordering entry is not expressible at the source
+            // (the sort column is not a physical source column, e.g. a
+            // calculated column) — fall through to local aggregation, which
+            // materializes calculated columns before ordering.
+            if let Some(pushed_order) = build_pushed_order_by(&effective_order, model) {
+                let table_name = all_tables[0];
+                let binding = registry.binding_for(table_name)?;
 
-            let aggregates: Vec<AggregateExpr> = measures
-                .iter()
-                .map(|m| {
-                    // Safe to unwrap: we checked is_simple_aggregate and all_pushable above.
-                    let col = m.simple_column().unwrap();
-                    let op = m.simple_operation().unwrap();
-                    AggregateExpr {
-                        column: col.to_string(),
-                        function: aggregate_op_to_function(op).unwrap(),
-                        alias: Some(m.name().to_string()),
-                    }
-                })
-                .collect();
+                let aggregates: Vec<AggregateExpr> = measures
+                    .iter()
+                    .map(|m| {
+                        // Safe to unwrap: we checked is_simple_aggregate and all_pushable above.
+                        let col = m.simple_column().unwrap();
+                        let op = m.simple_operation().unwrap();
+                        AggregateExpr {
+                            column: col.to_string(),
+                            function: aggregate_op_to_function(op).unwrap(),
+                            alias: Some(m.name().to_string()),
+                        }
+                    })
+                    .collect();
 
-            let group_by: Vec<String> = request.group_by.iter().map(|c| c.column.clone()).collect();
+                let group_by: Vec<String> =
+                    request.group_by.iter().map(|c| c.column.clone()).collect();
 
-            let fetch = FetchRequest {
-                schema: Some(binding.schema.clone()),
-                table: binding.table.clone(),
-                filters: request.filters.clone(),
-                group_by,
-                aggregates,
-                ..Default::default()
-            };
+                let fetch = FetchRequest {
+                    schema: Some(binding.schema.clone()),
+                    table: binding.table.clone(),
+                    filters: request.filters.clone(),
+                    group_by,
+                    aggregates,
+                    order_by: pushed_order,
+                    limit: request.limit,
+                    // Real ROLLUP rendered at the source: the connector adds
+                    // `GROUP BY ROLLUP (...)` plus the trailing grouping-id
+                    // column (see `FetchRequest::rollup_totals`).
+                    rollup_totals: request.totals == TotalsMode::Rollup,
+                    ..Default::default()
+                };
 
-            return Ok(QueryPlan::PushedAggregation {
-                source_table: table_name.to_string(),
-                request: fetch,
-            });
+                return Ok((
+                    QueryPlan::PushedAggregation {
+                        source_table: table_name.to_string(),
+                        request: fetch,
+                    },
+                    ProjectionDiagnostics::default(),
+                ));
+            }
         }
 
         // Single-table with compound expressions (not simple aggregates):
         // use PushedJoinAggregation (no JOINs needed, just compound SQL).
+        // Skipped when the effective ordering needs sort-by-column
+        // substitution — the pushed join result lacks the sort column, so
+        // ordering must happen in local SQL (LocalAggregation below).
+        // Skipped when ROLLUP totals are requested — the join request cannot
+        // express ROLLUP, so totals fall back to LocalAggregation (which
+        // renders ROLLUP into the local DataFusion SQL).
         if unique_tables.len() == 1
             && !any_context_ops
             && !any_table_var_refs
             && lookup_specs.is_empty()
             && !any_in_memory
+            && !needs_sort_substitution
+            && request.totals == TotalsMode::None
         {
             let table_name = all_tables[0];
             if let Ok(req) = build_join_aggregation_request(
@@ -248,10 +360,15 @@ impl PushdownPlanner {
                 model,
                 registry,
             ) {
-                return Ok(QueryPlan::PushedJoinAggregation {
-                    source_table: table_name.to_string(),
-                    request: req,
-                });
+                return Ok((
+                    QueryPlan::PushedJoinAggregation {
+                        source_table: table_name.to_string(),
+                        request: req,
+                        order_by: effective_order.clone(),
+                        limit: request.limit,
+                    },
+                    ProjectionDiagnostics::default(),
+                ));
             }
         }
 
@@ -259,6 +376,7 @@ impl PushdownPlanner {
         // and measures have no unpushable context ops or table variable refs,
         // push a JOIN query with compound SQL expressions directly to the source.
         // KEEP is pushable (translates to CASE WHEN), but CLEAR/RESET/UseRelationship are not.
+        // Skipped when ordering needs sort-by-column substitution (see above).
         let has_unpushable_context = measures.iter().any(|m| has_unpushable_ops(m.expression()));
 
         if !has_unpushable_context
@@ -266,6 +384,8 @@ impl PushdownPlanner {
             && lookup_specs.is_empty()
             && !any_in_memory
             && unique_tables.len() > 1
+            && !needs_sort_substitution
+            && request.totals == TotalsMode::None
         {
             // Check if all tables share the same connector.
             let first_table = all_tables[0];
@@ -284,10 +404,15 @@ impl PushdownPlanner {
                         model,
                         registry,
                     ) {
-                        return Ok(QueryPlan::PushedJoinAggregation {
-                            source_table: first_table.to_string(),
-                            request: req,
-                        });
+                        return Ok((
+                            QueryPlan::PushedJoinAggregation {
+                                source_table: first_table.to_string(),
+                                request: req,
+                                order_by: effective_order.clone(),
+                                limit: request.limit,
+                            },
+                            ProjectionDiagnostics::default(),
+                        ));
                     }
                 }
             }
@@ -300,6 +425,39 @@ impl PushdownPlanner {
         // only through context operations. This reduces data volume at the source.
         let pushable_context_filters =
             compute_pushable_context_filters(&measures, &measure_tables, &group_by_tables);
+
+        // Determine the distinct set of tables that will be fetched (skipping
+        // QUERY binding names, including lookup-only tables) so the column
+        // projection can account for every relationship and lookup among them.
+        let mut projection_tables: Vec<String> = Vec::new();
+        {
+            let mut seen = std::collections::HashSet::new();
+            for table_name in &all_tables {
+                if query_binding_names.contains(&table_name.to_lowercase()) {
+                    continue;
+                }
+                if seen.insert(*table_name) {
+                    projection_tables.push((*table_name).to_string());
+                }
+            }
+            for spec in &lookup_specs {
+                if seen.insert(spec.table.as_str()) {
+                    projection_tables.push(spec.table.clone());
+                }
+            }
+        }
+
+        // Compute the exact source columns each fetch needs. Tables whose
+        // requirements cannot be statically determined fall back to a full
+        // fetch (empty column list = SELECT *).
+        let projections = compute_table_projections(
+            request,
+            model,
+            &measures,
+            &projection_tables,
+            &lookup_specs,
+            cached_tables,
+        );
 
         let mut fetches = Vec::new();
         let mut seen_tables = std::collections::HashSet::new();
@@ -336,6 +494,7 @@ impl PushdownPlanner {
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
+                    columns: projections.columns_for(table_name),
                     filters: table_filters,
                     ..Default::default()
                 };
@@ -351,19 +510,1088 @@ impl PushdownPlanner {
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
+                    columns: projections.columns_for(&spec.table),
                     ..Default::default()
                 };
                 fetches.push((spec.table.clone(), fetch));
             }
         }
 
-        Ok(QueryPlan::LocalAggregation {
-            fetches,
-            measures,
-            group_by: request.group_by.clone(),
-            lookup_specs,
-        })
+        let diagnostics = projections.into_diagnostics();
+
+        Ok((
+            QueryPlan::LocalAggregation {
+                fetches,
+                measures,
+                group_by: request.group_by.clone(),
+                lookup_specs,
+                order_by: effective_order,
+                limit: request.limit,
+                totals: request.totals,
+            },
+            diagnostics,
+        ))
     }
+}
+
+/// Validate the request's [`TotalsMode`] constraints.
+///
+/// ROLLUP totals are rejected with lookup columns (the post-aggregation
+/// lookup JOIN + re-GROUP-BY does not preserve subtotal levels) and with
+/// more than 31 group-by columns (the `__grouping_id` bitmask is `Int32`).
+/// Measure-shape restrictions (window measures, QUERY-in-VAR, multiple fact
+/// tables, unsafe group-by relationships) are only detectable during
+/// execution and are enforced by the executor.
+fn validate_totals(request: &QueryRequest) -> QueryResult<()> {
+    if request.totals == TotalsMode::None {
+        return Ok(());
+    }
+    if !request.lookups.is_empty() {
+        return Err(QueryError::InvalidQuery(
+            "totals (TotalsMode::Rollup) is not supported with lookup columns yet".into(),
+        ));
+    }
+    if request.group_by.len() > 31 {
+        return Err(QueryError::InvalidQuery(format!(
+            "totals (TotalsMode::Rollup) supports at most 31 group_by columns \
+             (the __grouping_id bitmask is Int32), got {}",
+            request.group_by.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the request's ORDER BY targets.
+///
+/// Each [`OrderTarget::Column`] must reference one of the `group_by` columns
+/// and each [`OrderTarget::Measure`] one of the requested `measures`
+/// (case-insensitive). `limit` needs no validation — any value including
+/// `Some(0)` (empty result) is allowed.
+fn validate_order_by(request: &QueryRequest) -> QueryResult<()> {
+    for clause in &request.order_by {
+        match &clause.target {
+            OrderTarget::Column(col) => {
+                let in_group_by = request.group_by.iter().any(|g| {
+                    g.table.eq_ignore_ascii_case(&col.table)
+                        && g.column.eq_ignore_ascii_case(&col.column)
+                });
+                if !in_group_by {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "ORDER BY column '{}.{}' must be one of the group_by columns",
+                        col.table, col.column
+                    )));
+                }
+            }
+            OrderTarget::Measure(name) => {
+                let in_measures = request
+                    .measures
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(name));
+                if !in_measures {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "ORDER BY measure '{name}' must be one of the requested measures"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compute the effective ORDER BY clauses for a request, canonicalizing
+/// targets: column targets adopt the exact spelling of the matching
+/// `group_by` entry and measure targets the resolved measure's name, so the
+/// rendered SQL identifiers match the SELECT list exactly.
+fn canonical_effective_order(request: &QueryRequest, measures: &[Measure]) -> Vec<OrderByClause> {
+    request
+        .effective_order_by()
+        .into_iter()
+        .map(|mut clause| {
+            match &mut clause.target {
+                OrderTarget::Column(col) => {
+                    if let Some(canonical) = request.group_by.iter().find(|g| {
+                        g.table.eq_ignore_ascii_case(&col.table)
+                            && g.column.eq_ignore_ascii_case(&col.column)
+                    }) {
+                        *col = canonical.clone();
+                    }
+                }
+                OrderTarget::Measure(name) => {
+                    if let Some(measure) = measures
+                        .iter()
+                        .find(|m| m.name().eq_ignore_ascii_case(name))
+                    {
+                        *name = measure.name().to_string();
+                    }
+                }
+            }
+            clause
+        })
+        .collect()
+}
+
+/// Outcome of model `sort_by_column` resolution for an order-by column.
+enum SortSubstitution {
+    /// No substitution — order by the column itself.
+    None,
+    /// Substitute with this physical sort column (rendered as `MIN(col)`).
+    Physical(String),
+    /// A sort column is declared but is not a physical source column
+    /// (e.g. a calculated column) — not expressible in pushed SQL.
+    NotPushable,
+}
+
+/// Resolve the model `sort_by_column` substitution for an order-by column.
+fn resolve_sort_substitution(model: &DataModel, col: &ColumnRef) -> SortSubstitution {
+    let Some(table) = lookup_model_table(model, &col.table) else {
+        return SortSubstitution::None;
+    };
+    let Ok(sort_col) = table.sort_column_for(&col.column) else {
+        return SortSubstitution::None;
+    };
+    if sort_col.eq_ignore_ascii_case(&col.column) {
+        return SortSubstitution::None;
+    }
+    if let Some(physical) = resolve_physical_column(table, sort_col) {
+        SortSubstitution::Physical(physical.to_string())
+    } else {
+        SortSubstitution::NotPushable
+    }
+}
+
+/// True when any effective order-by column requires sort-by-column
+/// substitution (its model `sort_by_column` differs from the column itself).
+fn order_requires_sort_substitution(order_by: &[OrderByClause], model: &DataModel) -> bool {
+    order_by.iter().any(|clause| match &clause.target {
+        OrderTarget::Column(col) => !matches!(
+            resolve_sort_substitution(model, col),
+            SortSubstitution::None
+        ),
+        OrderTarget::Measure(_) => false,
+    })
+}
+
+/// Build the connector-level ORDER BY entries for a pushed single-table
+/// aggregation.
+///
+/// Sort-by-column substitution renders as `MIN(sort_col)` — the sort column
+/// lives on the same (single) table but is not part of the GROUP BY clause,
+/// so it must be aggregated; `MIN` is exact under the model's 1:1
+/// display-value-to-sort-value assumption. Measure targets render as the
+/// aggregate's output alias.
+///
+/// Returns `None` when an entry is not expressible at the source (the sort
+/// column is not a physical source column); the planner then falls back to
+/// local aggregation.
+fn build_pushed_order_by(
+    order_by: &[OrderByClause],
+    model: &DataModel,
+) -> Option<Vec<engine_connectors::OrderByExpr>> {
+    use engine_connectors::{OrderByExpr, OrderByTarget};
+
+    let mut entries = Vec::with_capacity(order_by.len());
+    for clause in order_by {
+        let target = match &clause.target {
+            OrderTarget::Column(col) => match resolve_sort_substitution(model, col) {
+                SortSubstitution::None => OrderByTarget::Column(col.column.clone()),
+                SortSubstitution::Physical(sort_col) => OrderByTarget::MinColumn(sort_col),
+                SortSubstitution::NotPushable => return None,
+            },
+            OrderTarget::Measure(name) => OrderByTarget::Alias(name.clone()),
+        };
+        entries.push(OrderByExpr {
+            target,
+            descending: clause.descending,
+        });
+    }
+    Some(entries)
+}
+
+/// Per-table column projections computed during planning.
+///
+/// Tables present in `fallbacks` (or all tables, when `global_fallback` is
+/// set) are fetched without projection (`SELECT *`).
+struct TableProjections {
+    /// Lowercased model table name → required source columns (sorted).
+    columns: std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+    /// Lowercased model table name → (display name, reason projection skipped).
+    fallbacks: std::collections::HashMap<String, (String, String)>,
+    /// When set, projection is disabled for every table.
+    global_fallback: Option<String>,
+}
+
+impl TableProjections {
+    /// The projected columns for a fetched table. Empty means full fetch.
+    fn columns_for(&self, table_name: &str) -> Vec<String> {
+        if self.global_fallback.is_some() {
+            return Vec::new();
+        }
+        let key = table_name.to_lowercase();
+        if self.fallbacks.contains_key(&key) {
+            return Vec::new();
+        }
+        self.columns
+            .get(&key)
+            .map(|cols| cols.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Convert into reportable diagnostics for `plan_explained`.
+    fn into_diagnostics(self) -> ProjectionDiagnostics {
+        if let Some(reason) = self.global_fallback {
+            return ProjectionDiagnostics {
+                fallbacks: vec![("*".to_string(), reason)],
+            };
+        }
+        let mut fallbacks: Vec<(String, String)> = self.fallbacks.into_values().collect();
+        fallbacks.sort();
+        ProjectionDiagnostics { fallbacks }
+    }
+}
+
+/// Walks measure expressions and request structures to compute, per fetched
+/// table, the exact set of source columns required for local aggregation.
+///
+/// Conservative by design: any reference that cannot be attributed to a known
+/// physical model column triggers a fallback to a full fetch — for the table
+/// when it is known, otherwise for all tables.
+struct ProjectionCollector<'a> {
+    model: &'a DataModel,
+    /// Lowercased fetched table name → canonical model table name.
+    fetched: std::collections::HashMap<String, String>,
+    /// Lowercased fetched table name → required source columns.
+    columns: std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+    /// Lowercased fetched table name → (display name, fallback reason).
+    fallbacks: std::collections::HashMap<String, (String, String)>,
+    /// When set, projection is disabled for every table.
+    global_fallback: Option<String>,
+    /// Lowercased names of intermediate "tables" (QUERY/VAR binding names)
+    /// that are materialized at runtime, not fetched from a source.
+    intermediate_tables: std::collections::HashSet<String>,
+    /// Lowercased names of intermediate output columns (QUERY aggregate
+    /// aliases and QUERY group-by output names).
+    intermediate_columns: std::collections::HashSet<String>,
+}
+
+impl<'a> ProjectionCollector<'a> {
+    fn new(model: &'a DataModel, fetch_tables: &[String]) -> Self {
+        let mut fetched = std::collections::HashMap::new();
+        for table_name in fetch_tables {
+            let canonical = lookup_model_table(model, table_name)
+                .map(|t| t.name().to_string())
+                .unwrap_or_else(|| table_name.clone());
+            fetched.insert(table_name.to_lowercase(), canonical);
+        }
+        Self {
+            model,
+            fetched,
+            columns: std::collections::HashMap::new(),
+            fallbacks: std::collections::HashMap::new(),
+            global_fallback: None,
+            intermediate_tables: std::collections::HashSet::new(),
+            intermediate_columns: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Record that a table must be fetched without projection.
+    fn mark_fallback(&mut self, table: &str, reason: &str) {
+        let key = table.to_lowercase();
+        if !self.fetched.contains_key(&key) {
+            return;
+        }
+        self.fallbacks
+            .entry(key)
+            .or_insert_with(|| (table.to_string(), reason.to_string()));
+    }
+
+    /// Disable projection for all tables (keeps the first reason).
+    fn set_global_fallback(&mut self, reason: String) {
+        if self.global_fallback.is_none() {
+            self.global_fallback = Some(reason);
+        }
+    }
+
+    /// True if `column` names a calculated column on `table_name`.
+    fn is_calculated_column(&self, table_name: &str, column: &str) -> bool {
+        self.model
+            .calculated_columns_for_table(table_name)
+            .iter()
+            .any(|cc| cc.name().eq_ignore_ascii_case(column))
+    }
+
+    /// Attribute a column requirement to a specific table.
+    ///
+    /// Unknown tables and tables outside the fetch set are ignored (they
+    /// cannot affect any source fetch). Calculated columns are not added —
+    /// they do not exist at the source; their inputs are collected by
+    /// [`Self::add_calculated_inputs`]. A column that is neither physical nor
+    /// calculated triggers a fallback for the table.
+    fn add(&mut self, table: &str, column: &str) {
+        if self.global_fallback.is_some() {
+            return;
+        }
+        let model = self.model;
+        let Some(model_table) = lookup_model_table(model, table) else {
+            return;
+        };
+        let canonical = model_table.name().to_string();
+        let key = canonical.to_lowercase();
+        if !self.fetched.contains_key(&key) || self.fallbacks.contains_key(&key) {
+            return;
+        }
+        if let Some(physical) = resolve_physical_column(model_table, column) {
+            let physical = physical.to_string();
+            self.columns.entry(key).or_default().insert(physical);
+        } else if self.is_calculated_column(&canonical, column) {
+            // Calculated column: inputs are added via add_calculated_inputs.
+        } else {
+            self.mark_fallback(
+                &canonical,
+                &format!("column '{column}' not found in table '{canonical}'"),
+            );
+        }
+    }
+
+    /// Attribute an unqualified column reference.
+    ///
+    /// Local SQL resolves unqualified references against any registered
+    /// table, so the column is added to every fetched table that has it.
+    /// A name matching no fetched table (and no intermediate output column)
+    /// cannot be attributed — projection is disabled entirely.
+    fn add_unqualified(&mut self, column: &str) {
+        if self.global_fallback.is_some() {
+            return;
+        }
+        let model = self.model;
+        let candidates: Vec<String> = self.fetched.values().cloned().collect();
+        let mut found = false;
+        for table_name in candidates {
+            let Some(model_table) = lookup_model_table(model, &table_name) else {
+                continue;
+            };
+            let has_column = resolve_physical_column(model_table, column).is_some()
+                || self.is_calculated_column(model_table.name(), column);
+            if has_column {
+                self.add(&table_name, column);
+                found = true;
+            }
+        }
+        if !found && !self.intermediate_columns.contains(&column.to_lowercase()) {
+            self.set_global_fallback(format!(
+                "cannot attribute column reference '{column}' to any fetched table"
+            ));
+        }
+    }
+
+    /// Attribute a qualified reference (`table_or_var[column]`).
+    fn add_qualified(&mut self, table_or_var: &str, column: &str) {
+        if self.global_fallback.is_some() {
+            return;
+        }
+        if self
+            .intermediate_tables
+            .contains(&table_or_var.to_lowercase())
+        {
+            return;
+        }
+        let model = self.model;
+        if model.table_variable(table_or_var).is_ok() {
+            self.add_variable_chain(table_or_var, Some(column));
+        } else if lookup_model_table(model, table_or_var).is_some() {
+            self.add(table_or_var, column);
+        } else if model.global_variable(table_or_var).is_ok() {
+            // Query-global reference: materialized at runtime, not a source column.
+        } else {
+            self.set_global_fallback(format!(
+                "cannot resolve qualified reference '{table_or_var}[{column}]'"
+            ));
+        }
+    }
+
+    /// Follow a table variable's source chain: add all filter columns along
+    /// the chain and, optionally, `final_column` on the base table.
+    fn add_variable_chain(&mut self, var_name: &str, final_column: Option<&str>) {
+        let model = self.model;
+        let mut current = var_name.to_string();
+        for _ in 0..64 {
+            match model.table_variable(&current) {
+                Ok(var) => {
+                    for f in var.filters() {
+                        self.add(&f.table, &f.column);
+                    }
+                    current = var.source().to_string();
+                }
+                Err(_) => {
+                    if let Some(column) = final_column {
+                        self.add(&current, column);
+                    }
+                    return;
+                }
+            }
+        }
+        self.set_global_fallback(format!(
+            "table variable chain too deep starting at '{var_name}'"
+        ));
+    }
+
+    /// Add the columns referenced by an IN-membership predicate.
+    fn add_in_predicate(&mut self, predicate: &InPredicate) {
+        self.add(&predicate.table, &predicate.column);
+        let model = self.model;
+        if model.table_variable(&predicate.var_name).is_ok() {
+            self.add_variable_chain(&predicate.var_name, Some(&predicate.var_column));
+        } else if lookup_model_table(model, &predicate.var_name).is_some() {
+            self.add(&predicate.var_name, &predicate.var_column);
+        } else {
+            self.set_global_fallback(format!(
+                "cannot resolve IN predicate source '{}'",
+                predicate.var_name
+            ));
+        }
+    }
+
+    /// Add the columns referenced by a named context definition's operations,
+    /// recursively following `Inherit`.
+    fn add_context_columns(&mut self, context_name: &str, depth: usize) {
+        use engine_core::model::context::ContextOp;
+        use engine_core::model::ClearTarget;
+
+        if depth > 16 {
+            return;
+        }
+        let model = self.model;
+        if let Ok(ctx) = model.context(context_name) {
+            for op in ctx.operations() {
+                match op {
+                    ContextOp::Keep(filters) => {
+                        for f in filters {
+                            self.add(&f.table, &f.column);
+                        }
+                    }
+                    ContextOp::KeepIn(predicates) => {
+                        for p in predicates {
+                            self.add_in_predicate(p);
+                        }
+                    }
+                    ContextOp::Clear(targets)
+                    | ContextOp::ClearInner(targets)
+                    | ContextOp::ClearOuter(targets) => {
+                        for target in targets {
+                            if let ClearTarget::Column { table, column } = target {
+                                self.add(table, column);
+                            }
+                        }
+                    }
+                    ContextOp::Inherit(parent) => self.add_context_columns(parent, depth + 1),
+                    ContextOp::UseRelationship(name) => {
+                        if let Ok(rel) = model.relationship(name) {
+                            self.add_relationship_conditions(rel);
+                        }
+                    }
+                    ContextOp::Reset | ContextOp::ResetInner | ContextOp::ResetOuter => {}
+                }
+            }
+        }
+    }
+
+    /// Add both sides of every join condition of a relationship.
+    fn add_relationship_conditions(&mut self, rel: &Relationship) {
+        for cond in rel.conditions() {
+            self.add(rel.from_table(), cond.from_column());
+            self.add(rel.to_table(), cond.to_column());
+        }
+    }
+
+    /// Add the key columns of every relationship (active or inactive)
+    /// between two tables.
+    fn add_relationship_keys_between(&mut self, table_a: &str, table_b: &str) {
+        let model = self.model;
+        for rel in model.relationships() {
+            let matches = (rel.from_table().eq_ignore_ascii_case(table_a)
+                && rel.to_table().eq_ignore_ascii_case(table_b))
+                || (rel.from_table().eq_ignore_ascii_case(table_b)
+                    && rel.to_table().eq_ignore_ascii_case(table_a));
+            if matches {
+                self.add_relationship_conditions(rel);
+            }
+        }
+    }
+
+    /// Add window ORDER BY / PARTITION BY columns. ORDER BY columns also pull
+    /// in their model-declared sort-by columns.
+    fn add_window_columns(
+        &mut self,
+        order_by: &[(String, String)],
+        partition_by: &[(String, String)],
+    ) {
+        let model = self.model;
+        for (table, column) in order_by {
+            self.add(table, column);
+            if let Ok(model_table) = model.table(table) {
+                if let Ok(sort_col) = model_table.sort_column_for(column) {
+                    if sort_col != column {
+                        let sort_col = sort_col.to_string();
+                        self.add(table, &sort_col);
+                    }
+                }
+            }
+        }
+        for (table, column) in partition_by {
+            self.add(table, column);
+        }
+    }
+
+    /// Add the physical inputs of every calculated column on a fetched table.
+    ///
+    /// The execution pipeline materializes calculated columns from fetched
+    /// batches, so all physical inputs must be present in the fetch. The
+    /// calculated column itself must never be requested from the source.
+    fn add_calculated_inputs(&mut self, table_name: &str) {
+        let model = self.model;
+        let Some(model_table) = lookup_model_table(model, table_name) else {
+            return;
+        };
+        let canonical = model_table.name().to_string();
+        for cc in model.calculated_columns_for_table(&canonical) {
+            for input in cc.expression().column_references() {
+                if resolve_physical_column(model_table, input).is_some() {
+                    let input = input.to_string();
+                    self.add(&canonical, &input);
+                } else if self.is_calculated_column(&canonical, input) {
+                    // Calc-on-calc reference: that column's own inputs are
+                    // covered by this loop over all calculated columns.
+                } else {
+                    self.mark_fallback(
+                        &canonical,
+                        &format!(
+                            "calculated column '{}' input '{input}' not found in table",
+                            cc.name()
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Add the columns referenced by a lookup's resolution expression.
+    ///
+    /// Mirrors `resolve_lookups`: per-column expression → model default (with
+    /// the `__column` placeholder applied) → built-in fallback (which only
+    /// references the lookup column itself, added by the caller). All
+    /// resolution references are rendered against the lookup table.
+    fn add_lookup_resolution_columns(&mut self, spec: &LookupSpec) {
+        let model = self.model;
+        let Some(model_table) = lookup_model_table(model, &spec.table) else {
+            return;
+        };
+        let canonical = model_table.name().to_string();
+        let Ok(column) = model_table.column(&spec.column) else {
+            return;
+        };
+
+        let parsed = match column.lookup_resolution() {
+            Some(text) => match parse_measure_expression(text) {
+                Ok(parsed) => Some(parsed),
+                Err(_) => {
+                    self.mark_fallback(&canonical, "lookup resolution expression failed to parse");
+                    return;
+                }
+            },
+            None => match model.default_lookup_resolution() {
+                Some(default_expr) => {
+                    let rewritten = parse_measure_expression(default_expr)
+                        .ok()
+                        .and_then(|p| apply_lookup_placeholder(&p, &spec.column).ok());
+                    match rewritten {
+                        Some(expr) => Some(expr),
+                        None => {
+                            self.mark_fallback(
+                                &canonical,
+                                "default lookup resolution failed to parse",
+                            );
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            },
+        };
+
+        if let Some(expr) = parsed {
+            for reference in expr.column_references() {
+                if resolve_physical_column(model_table, reference).is_some() {
+                    let reference = reference.to_string();
+                    self.add(&canonical, &reference);
+                } else if self.is_calculated_column(&canonical, reference) {
+                    // Inputs covered by add_calculated_inputs.
+                } else {
+                    self.mark_fallback(
+                        &canonical,
+                        &format!("lookup resolution references unknown column '{reference}'"),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Recursively collect column requirements from an expression tree.
+    ///
+    /// The match is exhaustive on purpose: when a new `Expression` variant is
+    /// added, this fails to compile, forcing an explicit decision on how the
+    /// variant contributes to fetch projections.
+    fn walk(&mut self, expr: &Expression) {
+        if self.global_fallback.is_some() {
+            return;
+        }
+        match expr {
+            Expression::ColumnRef(name) => self.add_unqualified(name),
+            Expression::QualifiedColumnRef {
+                table_or_var,
+                column,
+            } => self.add_qualified(table_or_var, column),
+            Expression::LiteralFloat(_)
+            | Expression::LiteralInt(_)
+            | Expression::LiteralString(_)
+            | Expression::LiteralBool(_)
+            | Expression::Blank
+            | Expression::TableRef(_) => {}
+            Expression::MeasureRef(name) => {
+                // Measure references are expanded before analysis; one
+                // surviving here cannot be attributed statically.
+                self.set_global_fallback(format!("unexpanded measure reference '[{name}]'"));
+            }
+            Expression::BinaryOp { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::And(left, right)
+            | Expression::Or(left, right)
+            | Expression::Xor(left, right) => {
+                self.walk(left);
+                self.walk(right);
+            }
+            Expression::Aggregate { operand, .. } => self.walk(operand),
+            Expression::Not(inner) | Expression::IsBlank(inner) => self.walk(inner),
+            Expression::Keep {
+                expr: inner,
+                filters,
+                variables,
+                conditions,
+                in_predicates,
+            } => {
+                self.walk(inner);
+                for f in filters {
+                    self.add(&f.table, &f.column);
+                }
+                for v in variables {
+                    if self.model.table_variable(v).is_ok() {
+                        self.add_variable_chain(v, None);
+                    } else if self.model.context(v).is_ok() {
+                        self.add_context_columns(v, 0);
+                    } else if lookup_model_table(self.model, v).is_some() {
+                        // Bare table reference — join keys are covered by the
+                        // relationship pass.
+                    } else {
+                        self.set_global_fallback(format!("unknown KEEP target '{v}'"));
+                    }
+                }
+                for c in conditions {
+                    self.walk(c);
+                }
+                for p in in_predicates {
+                    self.add_in_predicate(p);
+                }
+            }
+            Expression::KeepIn {
+                expr: inner,
+                predicates,
+            } => {
+                self.walk(inner);
+                for p in predicates {
+                    self.add_in_predicate(p);
+                }
+            }
+            Expression::Clear {
+                expr: inner,
+                targets,
+            }
+            | Expression::ClearInner {
+                expr: inner,
+                targets,
+            }
+            | Expression::ClearOuter {
+                expr: inner,
+                targets,
+            } => {
+                self.walk(inner);
+                for target in targets {
+                    if let engine_core::model::ClearTarget::Column { table, column } = target {
+                        self.add(table, column);
+                    }
+                }
+            }
+            Expression::ClearExcept {
+                expr: inner,
+                table,
+                except_columns,
+            } => {
+                self.walk(inner);
+                for column in except_columns {
+                    self.add(table, column);
+                }
+            }
+            Expression::Reset { expr: inner }
+            | Expression::ResetInner { expr: inner }
+            | Expression::ResetOuter { expr: inner } => self.walk(inner),
+            Expression::Traverse { expr: inner, path } => {
+                self.walk(inner);
+                for pair in path.hops.windows(2) {
+                    self.add_relationship_keys_between(&pair[0], &pair[1]);
+                }
+            }
+            Expression::Using {
+                expr: inner,
+                context_name,
+            } => {
+                self.walk(inner);
+                if self.model.context(context_name).is_ok() {
+                    self.add_context_columns(context_name, 0);
+                } else {
+                    self.set_global_fallback(format!("unknown context '{context_name}'"));
+                }
+            }
+            Expression::UseRelationship {
+                expr: inner,
+                relationship_name,
+            } => {
+                self.walk(inner);
+                let model = self.model;
+                if let Ok(rel) = model.relationship(relationship_name) {
+                    self.add_relationship_conditions(rel);
+                }
+            }
+            Expression::Block { bindings, .. } => {
+                // Register binding names FIRST so references to them in the
+                // result (`monthly[revenue]`, `COUNTROWS(monthly)`) resolve
+                // as intermediates instead of unknown tables. Table-producing
+                // bindings (QUERY/window family) become intermediate tables;
+                // scalar VAR names become intermediate columns.
+                for (name, binding_expr) in bindings {
+                    match binding_expr {
+                        Expression::Query { .. }
+                        | Expression::Window { .. }
+                        | Expression::Offset { .. }
+                        | Expression::Index { .. } => {
+                            self.intermediate_tables.insert(name.to_lowercase());
+                        }
+                        _ => {
+                            self.intermediate_columns.insert(name.to_lowercase());
+                        }
+                    }
+                }
+                // Walk every binding's source columns (QUERY group-bys and
+                // aggregates feed the two-stage materialization SQL, so their
+                // columns MUST be fetched), then the result with scalar
+                // bindings inlined — inline_bindings() strips the Block
+                // wrapper and substitutes scalar VAR names away, so no bare
+                // binding-name ColumnRef survives the walk.
+                for (_, binding_expr) in bindings {
+                    self.walk(binding_expr);
+                }
+                self.walk(&expr.inline_bindings());
+            }
+            Expression::Query {
+                aggregates,
+                group_by,
+            } => {
+                for (agg_expr, alias) in aggregates {
+                    self.intermediate_columns.insert(alias.to_lowercase());
+                    self.walk(agg_expr);
+                }
+                for (table, column) in group_by {
+                    self.intermediate_columns.insert(column.to_lowercase());
+                    self.add(table, column);
+                }
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.walk(condition);
+                self.walk(then_expr);
+                self.walk(else_expr);
+            }
+            Expression::Switch {
+                expr: inner,
+                cases,
+                default,
+            } => {
+                self.walk(inner);
+                for (value, result) in cases {
+                    self.walk(value);
+                    self.walk(result);
+                }
+                if let Some(d) = default {
+                    self.walk(d);
+                }
+            }
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
+                self.walk(numerator);
+                self.walk(denominator);
+                if let Some(a) = alternate {
+                    self.walk(a);
+                }
+            }
+            Expression::Coalesce(exprs)
+            | Expression::Greatest(exprs)
+            | Expression::Least(exprs) => {
+                for e in exprs {
+                    self.walk(e);
+                }
+            }
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. } => {
+                for a in args {
+                    self.walk(a);
+                }
+            }
+            Expression::IfError {
+                expr: inner,
+                alternate,
+            } => {
+                self.walk(inner);
+                self.walk(alternate);
+            }
+            Expression::IsInScope { table, column } => self.add(table, column),
+            Expression::Iterate { expression, .. } => self.walk(expression),
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                self.walk(operand);
+                self.walk(percentile);
+            }
+            Expression::NullIf { expr: inner, value } => {
+                self.walk(inner);
+                self.walk(value);
+            }
+            Expression::CountIf { condition } => self.walk(condition),
+            Expression::ListAgg { column, delimiter } => {
+                self.walk(column);
+                self.walk(delimiter);
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                self.walk(value);
+                self.walk(sort_by);
+            }
+            Expression::HasOneValue { column } => self.walk(column),
+            Expression::SelectedValue { column, alternate } => {
+                self.walk(column);
+                if let Some(a) = alternate {
+                    self.walk(a);
+                }
+            }
+            Expression::FirstValue { column, order_by } => {
+                self.walk(column);
+                self.walk(order_by);
+            }
+            Expression::InList {
+                expr: inner,
+                values,
+            } => {
+                self.walk(inner);
+                for v in values {
+                    self.walk(v);
+                }
+            }
+            Expression::Window {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            }
+            | Expression::Offset {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            }
+            | Expression::Index {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            } => {
+                self.walk(inner);
+                self.add_window_columns(order_by, partition_by);
+            }
+            Expression::RankWindow {
+                order_by,
+                partition_by,
+                ..
+            } => self.add_window_columns(order_by, partition_by),
+        }
+    }
+
+    fn finish(self) -> TableProjections {
+        TableProjections {
+            columns: self.columns,
+            fallbacks: self.fallbacks,
+            global_fallback: self.global_fallback,
+        }
+    }
+}
+
+/// Look up a model table by name, falling back to case-insensitive matching.
+fn lookup_model_table<'m>(model: &'m DataModel, name: &str) -> Option<&'m Table> {
+    model
+        .tables()
+        .iter()
+        .find(|t| t.name() == name)
+        .or_else(|| {
+            model
+                .tables()
+                .iter()
+                .find(|t| t.name().eq_ignore_ascii_case(name))
+        })
+}
+
+/// Resolve a column reference against a table's physical columns, returning
+/// the canonical column name (exact match preferred, then case-insensitive).
+fn resolve_physical_column<'t>(table: &'t Table, name: &str) -> Option<&'t str> {
+    table
+        .columns()
+        .iter()
+        .find(|c| c.name() == name)
+        .map(|c| c.name())
+        .or_else(|| {
+            table
+                .columns()
+                .iter()
+                .find(|c| c.name().eq_ignore_ascii_case(name))
+                .map(|c| c.name())
+        })
+}
+
+/// Compute the per-table column projection for `LocalAggregation` fetches.
+///
+/// The required set for each fetched table is the union of:
+/// 1. columns referenced by every measure expression (expanded the same way
+///    the execution pipeline expands them before SQL generation), including
+///    KEEP/CLEAR/IN/context/window/QUERY references;
+/// 2. group-by columns (plus their declared sort-by columns);
+/// 3. query filter columns (mirroring the per-table filter heuristic);
+/// 4. join-key columns of every relationship — active or inactive, since
+///    USERELATIONSHIP can activate inactive ones — whose endpoints are both
+///    fetched (this also covers IN-filter propagation key extraction);
+/// 5. physical inputs of every calculated column on the table;
+/// 6. lookup key/value columns and resolution-expression references.
+///
+/// Tables served from the in-memory cache always fall back (they are not
+/// fetched from a source), as does any table whose requirements cannot be
+/// statically determined.
+fn compute_table_projections(
+    request: &QueryRequest,
+    model: &DataModel,
+    measures: &[Measure],
+    fetch_tables: &[String],
+    lookup_specs: &[LookupSpec],
+    cached_tables: &std::collections::HashSet<String>,
+) -> TableProjections {
+    let mut collector = ProjectionCollector::new(model, fetch_tables);
+
+    // Tables served from the in-memory cache are never fetched from a source;
+    // projection does not apply to them.
+    for table_name in fetch_tables {
+        let in_memory = model.table(table_name).is_ok_and(|t| t.is_in_memory());
+        if in_memory || cached_tables.contains(table_name) {
+            collector.mark_fallback(
+                table_name,
+                "served from in-memory cache (not fetched from source)",
+            );
+        }
+    }
+
+    // 1. Columns referenced by measure expressions.
+    for measure in measures {
+        match expand_measure_refs(measure.expression(), model) {
+            Ok(ref_expanded) => {
+                let expanded = expand_global_variables(&ref_expanded, model);
+                let analyzed = Measure::new(measure.name(), expanded);
+                collector.walk(analyzed.expression());
+            }
+            Err(e) => {
+                collector.set_global_fallback(format!(
+                    "measure '{}': reference expansion failed: {e}",
+                    measure.name()
+                ));
+            }
+        }
+        if collector.global_fallback.is_some() {
+            break;
+        }
+    }
+
+    // 2. Group-by columns plus their declared sort-by columns.
+    for col_ref in &request.group_by {
+        collector.add(&col_ref.table, &col_ref.column);
+        if let Ok(table) = model.table(&col_ref.table) {
+            if let Ok(sort_col) = table.sort_column_for(&col_ref.column) {
+                if sort_col != col_ref.column {
+                    let sort_col = sort_col.to_string();
+                    collector.add(&col_ref.table, &sort_col);
+                }
+            }
+        }
+    }
+
+    // 3. Query filter columns (mirrors the per-table filter heuristic used
+    //    when building fetches).
+    for filter in &request.filters {
+        for table_name in fetch_tables {
+            let has_column = model
+                .table(table_name)
+                .ok()
+                .and_then(|t| t.column(&filter.column).ok())
+                .is_some();
+            if has_column {
+                collector.add(table_name, &filter.column);
+            }
+        }
+    }
+
+    // 4. Relationship join keys between fetched tables.
+    {
+        let fetched_lower: std::collections::HashSet<String> =
+            fetch_tables.iter().map(|t| t.to_lowercase()).collect();
+        for rel in model.relationships() {
+            if fetched_lower.contains(&rel.from_table().to_lowercase())
+                && fetched_lower.contains(&rel.to_table().to_lowercase())
+            {
+                collector.add_relationship_conditions(rel);
+            }
+        }
+    }
+
+    // 5. Calculated-column inputs.
+    for table_name in fetch_tables {
+        collector.add_calculated_inputs(table_name);
+    }
+
+    // 6. Lookup key, value, and resolution columns.
+    for spec in lookup_specs {
+        collector.add(&spec.table, &spec.key_column);
+        collector.add(&spec.table, &spec.column);
+        collector.add_lookup_resolution_columns(spec);
+    }
+
+    collector.finish()
 }
 
 /// Check if an expression contains any `QualifiedColumnRef` that references
@@ -1308,8 +2536,6 @@ fn expression_to_source_sql(
     model: &DataModel,
     registry: &SourceRegistry,
 ) -> QueryResult<String> {
-    use engine_core::compute::aggregate::AggregateOp;
-
     match expr {
         Expression::QualifiedColumnRef {
             table_or_var,
@@ -1360,50 +2586,12 @@ fn expression_to_source_sql(
 
                     let condition = condition_parts.join(" AND ");
                     let inner_sql = expression_to_source_sql(inner, model, registry)?;
-                    let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                    return Ok(match operation {
-                        AggregateOp::Sum => format!("SUM({case_expr})"),
-                        AggregateOp::Count => format!("COUNT({case_expr})"),
-                        AggregateOp::Average => format!("AVG({case_expr})"),
-                        AggregateOp::Min => format!("MIN({case_expr})"),
-                        AggregateOp::Max => format!("MAX({case_expr})"),
-                        AggregateOp::DistinctCount => format!("COUNT(DISTINCT {case_expr})"),
-                        AggregateOp::CountRows => {
-                            format!("SUM(CASE WHEN {condition} THEN 1 END)")
-                        }
-                        AggregateOp::Median => {
-                            format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})")
-                        }
-                        AggregateOp::StdevSample => format!("STDDEV_SAMP({case_expr})"),
-                        AggregateOp::StdevPop => format!("STDDEV_POP({case_expr})"),
-                        AggregateOp::VarSample => format!("VAR_SAMP({case_expr})"),
-                        AggregateOp::VarPop => format!("VAR_POP({case_expr})"),
-                        AggregateOp::AnyValue => format!("MIN({case_expr})"),
-                        AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {case_expr})"),
-                    });
+                    return Ok(operation.render_postgres_case_when_sql(&condition, &inner_sql));
                 }
             }
 
             let operand_sql = expression_to_source_sql(operand, model, registry)?;
-            Ok(match operation {
-                AggregateOp::Sum => format!("SUM({operand_sql})"),
-                AggregateOp::Count => format!("COUNT({operand_sql})"),
-                AggregateOp::Average => format!("AVG({operand_sql})"),
-                AggregateOp::Min => format!("MIN({operand_sql})"),
-                AggregateOp::Max => format!("MAX({operand_sql})"),
-                AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
-                AggregateOp::CountRows => "COUNT(*)".to_string(),
-                // PostgreSQL statistical aggregates
-                AggregateOp::Median => {
-                    format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand_sql})")
-                }
-                AggregateOp::StdevSample => format!("STDDEV_SAMP({operand_sql})"),
-                AggregateOp::StdevPop => format!("STDDEV_POP({operand_sql})"),
-                AggregateOp::VarSample => format!("VAR_SAMP({operand_sql})"),
-                AggregateOp::VarPop => format!("VAR_POP({operand_sql})"),
-                AggregateOp::AnyValue => format!("MIN({operand_sql})"),
-                AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {operand_sql})"),
-            })
+            Ok(operation.render_postgres_sql(&operand_sql))
         }
         Expression::BinaryOp { left, op, right } => {
             let l = expression_to_source_sql(left, model, registry)?;
@@ -1655,32 +2843,10 @@ fn expression_to_case_when_source_sql(
     model: &DataModel,
     registry: &SourceRegistry,
 ) -> QueryResult<String> {
-    use engine_core::compute::aggregate::AggregateOp;
-
     match expr {
         Expression::Aggregate { operation, operand } => {
             let operand_sql = expression_to_source_sql(operand, model, registry)?;
-            let case_expr = format!("CASE WHEN {condition} THEN {operand_sql} END");
-            Ok(match operation {
-                AggregateOp::Sum => format!("SUM({case_expr})"),
-                AggregateOp::Count => format!("COUNT({case_expr})"),
-                AggregateOp::Average => format!("AVG({case_expr})"),
-                AggregateOp::Min => format!("MIN({case_expr})"),
-                AggregateOp::Max => format!("MAX({case_expr})"),
-                AggregateOp::DistinctCount => format!("COUNT(DISTINCT {case_expr})"),
-                AggregateOp::CountRows => {
-                    format!("SUM(CASE WHEN {condition} THEN 1 END)")
-                }
-                AggregateOp::Median => {
-                    format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})")
-                }
-                AggregateOp::StdevSample => format!("STDDEV_SAMP({case_expr})"),
-                AggregateOp::StdevPop => format!("STDDEV_POP({case_expr})"),
-                AggregateOp::VarSample => format!("VAR_SAMP({case_expr})"),
-                AggregateOp::VarPop => format!("VAR_POP({case_expr})"),
-                AggregateOp::AnyValue => format!("MIN({case_expr})"),
-                AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {case_expr})"),
-            })
+            Ok(operation.render_postgres_case_when_sql(condition, &operand_sql))
         }
         Expression::BinaryOp { left, op, right } => {
             let l = expression_to_case_when_source_sql(left, condition, model, registry)?;
@@ -2070,7 +3236,7 @@ fn render_resolution_sql(
     })?;
 
     // Render to SQL with column refs qualified by the table alias.
-    Ok(qualified_sql(&parsed, table_alias))
+    qualified_sql(&parsed, table_alias)
 }
 
 /// Render the model-level default lookup resolution for a specific column.
@@ -2091,7 +3257,7 @@ fn render_default_resolution_sql(
         QueryError::InvalidQuery(format!("Invalid default_lookup_resolution expression: {e}"))
     })?;
     let rewritten = apply_lookup_placeholder(&parsed, column_name)?;
-    Ok(qualified_sql(&rewritten, table_alias))
+    qualified_sql(&rewritten, table_alias)
 }
 
 /// Built-in lookup resolution fallback (no per-column expression, no model
@@ -2119,8 +3285,11 @@ fn built_in_resolution_sql(table_alias: &str, column_name: &str, data_type: &Dat
 /// `ColumnRef("col")` → `table."col"` instead of just `"col"`.
 /// This is used for lookup resolution SQL where column references must be
 /// prefixed with the dimension table alias.
-fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
-    match expr {
+///
+/// Returns an error if the expression contains nodes that cannot be rendered
+/// as scalar SQL (see [`Expression::to_sql_string`]).
+fn qualified_sql(expr: &Expression, table_alias: &str) -> QueryResult<String> {
+    Ok(match expr {
         Expression::ColumnRef(name) => {
             format!("{table_alias}.{}", quote_ident_double(name))
         }
@@ -2141,19 +3310,17 @@ fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
         Expression::BinaryOp { left, op, right } => {
             format!(
                 "({} {} {})",
-                qualified_sql(left, table_alias),
+                qualified_sql(left, table_alias)?,
                 op.as_sql(),
-                qualified_sql(right, table_alias)
+                qualified_sql(right, table_alias)?
             )
         }
         Expression::Aggregate { operation, operand } => {
             use engine_core::compute::aggregate::AggregateOp;
             match operation {
-                AggregateOp::DistinctCount => {
-                    format!("COUNT(DISTINCT {})", qualified_sql(operand, table_alias))
-                }
-                AggregateOp::CountRows => "COUNT(*)".to_string(),
-                _ => format!("{operation}({})", qualified_sql(operand, table_alias)),
+                // COUNT(*) — the operand is not rendered.
+                AggregateOp::CountRows => operation.render_sql(""),
+                _ => operation.render_sql(&qualified_sql(operand, table_alias)?),
             }
         }
         Expression::If {
@@ -2163,72 +3330,78 @@ fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
         } => {
             format!(
                 "CASE WHEN {} THEN {} ELSE {} END",
-                qualified_sql(condition, table_alias),
-                qualified_sql(then_expr, table_alias),
-                qualified_sql(else_expr, table_alias)
+                qualified_sql(condition, table_alias)?,
+                qualified_sql(then_expr, table_alias)?,
+                qualified_sql(else_expr, table_alias)?
             )
         }
         Expression::Comparison { left, op, right } => {
             format!(
                 "({} {} {})",
-                qualified_sql(left, table_alias),
+                qualified_sql(left, table_alias)?,
                 op.as_sql(),
-                qualified_sql(right, table_alias)
+                qualified_sql(right, table_alias)?
             )
         }
         Expression::And(left, right) => {
             format!(
                 "({} AND {})",
-                qualified_sql(left, table_alias),
-                qualified_sql(right, table_alias)
+                qualified_sql(left, table_alias)?,
+                qualified_sql(right, table_alias)?
             )
         }
         Expression::Or(left, right) => {
             format!(
                 "({} OR {})",
-                qualified_sql(left, table_alias),
-                qualified_sql(right, table_alias)
+                qualified_sql(left, table_alias)?,
+                qualified_sql(right, table_alias)?
             )
         }
-        Expression::Not(inner) => format!("(NOT {})", qualified_sql(inner, table_alias)),
+        Expression::Not(inner) => format!("(NOT {})", qualified_sql(inner, table_alias)?),
         Expression::Xor(left, right) => {
-            let l = qualified_sql(left, table_alias);
-            let r = qualified_sql(right, table_alias);
+            let l = qualified_sql(left, table_alias)?;
+            let r = qualified_sql(right, table_alias)?;
             format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))")
         }
         Expression::IsBlank(inner) => {
-            format!("({} IS NULL)", qualified_sql(inner, table_alias))
+            format!("({} IS NULL)", qualified_sql(inner, table_alias)?)
         }
         Expression::SafeDivide {
             numerator,
             denominator,
             alternate,
         } => {
-            let alt = alternate
-                .as_ref()
-                .map(|a| qualified_sql(a, table_alias))
-                .unwrap_or_else(|| "NULL".to_string());
+            let alt = match alternate {
+                Some(a) => qualified_sql(a, table_alias)?,
+                None => "NULL".to_string(),
+            };
             format!(
                 "CASE WHEN {} = 0 THEN {} ELSE (CAST({} AS DOUBLE) / {}) END",
-                qualified_sql(denominator, table_alias),
+                qualified_sql(denominator, table_alias)?,
                 alt,
-                qualified_sql(numerator, table_alias),
-                qualified_sql(denominator, table_alias)
+                qualified_sql(numerator, table_alias)?,
+                qualified_sql(denominator, table_alias)?
             )
         }
         Expression::Coalesce(exprs) => {
-            let args: Vec<String> = exprs
+            let args = exprs
                 .iter()
                 .map(|e| qualified_sql(e, table_alias))
-                .collect();
+                .collect::<QueryResult<Vec<String>>>()?;
             format!("COALESCE({})", args.join(", "))
         }
         Expression::ScalarFunc { function, args } => {
-            let strs: Vec<String> = args.iter().map(|a| qualified_sql(a, table_alias)).collect();
+            let strs = args
+                .iter()
+                .map(|a| qualified_sql(a, table_alias))
+                .collect::<QueryResult<Vec<String>>>()?;
             function.to_sql_strs(&strs)
         }
         Expression::TextFunc { function, args } => {
-            let strs: Vec<String> = args.iter().map(|a| qualified_sql(a, table_alias)).collect();
+            let strs = args
+                .iter()
+                .map(|a| qualified_sql(a, table_alias))
+                .collect::<QueryResult<Vec<String>>>()?;
             function.to_sql_strs(&strs)
         }
         Expression::Switch {
@@ -2236,16 +3409,16 @@ fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
             cases,
             default,
         } => {
-            let mut sql = format!("CASE {}", qualified_sql(expr, table_alias));
+            let mut sql = format!("CASE {}", qualified_sql(expr, table_alias)?);
             for (val, result) in cases {
                 sql.push_str(&format!(
                     " WHEN {} THEN {}",
-                    qualified_sql(val, table_alias),
-                    qualified_sql(result, table_alias)
+                    qualified_sql(val, table_alias)?,
+                    qualified_sql(result, table_alias)?
                 ));
             }
             if let Some(d) = default {
-                sql.push_str(&format!(" ELSE {}", qualified_sql(d, table_alias)));
+                sql.push_str(&format!(" ELSE {}", qualified_sql(d, table_alias)?));
             }
             sql.push_str(" END");
             sql
@@ -2253,27 +3426,27 @@ fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
         Expression::Block { .. } => {
             // Inline bindings first, then render with qualification.
             let inlined = expr.inline_bindings();
-            qualified_sql(&inlined, table_alias)
+            qualified_sql(&inlined, table_alias)?
         }
         Expression::HasOneValue { column } => {
             format!(
                 "(COUNT(DISTINCT {}) = 1)",
-                qualified_sql(column, table_alias)
+                qualified_sql(column, table_alias)?
             )
         }
         Expression::SelectedValue { column, alternate } => {
-            let col_sql = qualified_sql(column, table_alias);
-            let alt = alternate
-                .as_ref()
-                .map(|a| qualified_sql(a, table_alias))
-                .unwrap_or_else(|| "NULL".to_string());
+            let col_sql = qualified_sql(column, table_alias)?;
+            let alt = match alternate {
+                Some(a) => qualified_sql(a, table_alias)?,
+                None => "NULL".to_string(),
+            };
             format!("CASE WHEN COUNT(DISTINCT {col_sql}) = 1 THEN MIN({col_sql}) ELSE {alt} END")
         }
         Expression::FirstValue { column, order_by } => {
             format!(
                 "FIRST_VALUE({} ORDER BY {})",
-                qualified_sql(column, table_alias),
-                qualified_sql(order_by, table_alias)
+                qualified_sql(column, table_alias)?,
+                qualified_sql(order_by, table_alias)?
             )
         }
         // Context ops, TableRef, etc. — delegate to inner or pass through.
@@ -2286,9 +3459,9 @@ fn qualified_sql(expr: &Expression, table_alias: &str) -> String {
         | Expression::ResetOuter { expr }
         | Expression::Traverse { expr, .. }
         | Expression::Using { expr, .. }
-        | Expression::KeepIn { expr, .. } => qualified_sql(expr, table_alias),
-        _ => expr.to_sql_string(),
-    }
+        | Expression::KeepIn { expr, .. } => qualified_sql(expr, table_alias)?,
+        _ => expr.to_sql_string()?,
+    })
 }
 
 #[cfg(test)]
@@ -2398,6 +3571,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Sales", "region")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2468,6 +3642,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2490,6 +3665,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2498,6 +3674,7 @@ mod tests {
             QueryPlan::PushedJoinAggregation {
                 source_table,
                 request: req,
+                ..
             } => {
                 assert_eq!(source_table, "Sales");
                 assert!(!req.joins.is_empty(), "Expected JOINs");
@@ -2517,6 +3694,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2539,6 +3717,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let result = PushdownPlanner::plan(&request, &model, &registry);
@@ -2557,6 +3736,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let result = PushdownPlanner::plan(&request, &model, &registry);
@@ -2583,6 +3763,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2614,6 +3795,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2677,6 +3859,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2700,6 +3883,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let result = PushdownPlanner::plan(&request, &model, &registry);
@@ -2824,6 +4008,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2882,6 +4067,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -2940,6 +4126,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -3013,6 +4200,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -3086,6 +4274,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -3146,6 +4335,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -3533,5 +4723,1102 @@ mod tests {
     fn render_resolution_simple_max() {
         let sql = render_resolution_sql("MAX(category_name)", "products", "category_name").unwrap();
         assert_eq!(sql, "MAX(products.\"category_name\")");
+    }
+
+    // --- Column projection tests ---
+
+    /// Extract the fetch for a table from a LocalAggregation plan.
+    fn fetch_for<'p>(plan: &'p QueryPlan, table: &str) -> &'p FetchRequest {
+        match plan {
+            QueryPlan::LocalAggregation { fetches, .. } => {
+                &fetches
+                    .iter()
+                    .find(|(name, _)| name == table)
+                    .unwrap_or_else(|| panic!("no fetch for table '{table}'"))
+                    .1
+            }
+            other => panic!("Expected LocalAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_aggregation_projects_measure_and_join_key_columns() {
+        let model = test_model_star_schema();
+        let registry = make_cross_source_registry();
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        // Sales: measure column + fact-side join key. The unused "id" column
+        // must NOT be fetched.
+        assert_eq!(
+            fetch_for(&plan, "Sales").columns,
+            vec!["amount".to_string(), "product_id".to_string()]
+        );
+        // Products: group-by column + dimension-side join key.
+        assert_eq!(
+            fetch_for(&plan, "Products").columns,
+            vec!["category".to_string(), "id".to_string()]
+        );
+    }
+
+    #[test]
+    fn projection_includes_keep_filter_columns() {
+        // KEEP filter on a context-only dimension (Dates): its filter column
+        // and join key must be fetched; the unused "month" column must not.
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("date_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String),
+            ],
+        )
+        .unwrap();
+        let dates = Table::new(
+            "Dates",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("year", DataType::Int32),
+                Column::new("month", DataType::Int32),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_table(dates)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Dates",
+                "Sales",
+                "date_id",
+                "Dates",
+                "id",
+            ))
+            .add_measure(expression_measure(
+                "Revenue2014",
+                expr::agg(
+                    AggregateOp::Sum,
+                    expr::keep(
+                        expr::qualified_col("Sales", "amount"),
+                        vec![FilterPredicate::new(
+                            "Dates",
+                            "year",
+                            ComparisonOp::Equal,
+                            "2014",
+                        )],
+                    ),
+                ),
+            ))
+            .build()
+            .unwrap();
+
+        // Dates on a different connector forces local aggregation.
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("dbo", "sales"));
+        registry.bind("Products", 0, SourceBinding::new("dbo", "products"));
+        registry.bind("Dates", 1, SourceBinding::new("dbo", "dates"));
+
+        let request = QueryRequest {
+            measures: vec!["Revenue2014".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        assert_eq!(
+            fetch_for(&plan, "Dates").columns,
+            vec!["id".to_string(), "year".to_string()]
+        );
+        assert_eq!(
+            fetch_for(&plan, "Sales").columns,
+            vec![
+                "amount".to_string(),
+                "date_id".to_string(),
+                "product_id".to_string()
+            ]
+        );
+        assert_eq!(
+            fetch_for(&plan, "Products").columns,
+            vec!["category".to_string(), "id".to_string()]
+        );
+    }
+
+    #[test]
+    fn projection_includes_query_binding_columns_for_countrows_result() {
+        // Regression: QUERY-in-VAR bindings feed the two-stage
+        // materialization SQL, so their aggregate and group-by columns must
+        // be fetched even when the RETURN expression only references the
+        // intermediate table (COUNTROWS(monthly) — a bare TableRef that
+        // collects nothing itself).
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("date_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let dates = Table::new(
+            "Dates",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("year", DataType::Int32),
+                Column::new("month", DataType::Int32),
+                Column::new("day", DataType::Int32),
+            ],
+        )
+        .unwrap();
+
+        let month_count = engine_core::compute::parser::parse_measure_expression(
+            "VAR monthly = QUERY(SUM(Sales[amount]) AS revenue BY Dates[year], Dates[month]) \
+             RETURN COUNTROWS(monthly)",
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_table(dates)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Dates",
+                "Sales",
+                "date_id",
+                "Dates",
+                "id",
+            ))
+            .add_measure(expression_measure("MonthCount", month_count))
+            .build()
+            .unwrap();
+
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("dbo", "sales"));
+        registry.bind("Dates", 0, SourceBinding::new("dbo", "dates"));
+
+        let request = QueryRequest {
+            measures: vec!["MonthCount".into()],
+            group_by: vec![],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        // The QUERY's aggregate column and join key must be fetched on Sales;
+        // its group-by columns (plus join key) on Dates. The unused "day"
+        // column must not be fetched.
+        assert_eq!(
+            fetch_for(&plan, "Sales").columns,
+            vec!["amount".to_string(), "date_id".to_string()]
+        );
+        assert_eq!(
+            fetch_for(&plan, "Dates").columns,
+            vec!["id".to_string(), "month".to_string(), "year".to_string()]
+        );
+    }
+
+    #[test]
+    fn projection_includes_calculated_column_inputs_not_calc_name() {
+        use engine_core::model::CalculatedColumn;
+
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("price", DataType::Float64),
+                Column::new("quantity", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_calculated_column(CalculatedColumn::new(
+                "line_total",
+                "Sales",
+                expr::col("price").multiply(expr::col("quantity")),
+                DataType::Float64,
+            ))
+            .add_measure(sum_measure("TotalRevenue", "Sales", "line_total"))
+            .build()
+            .unwrap();
+
+        let registry = make_cross_source_registry();
+        let request = QueryRequest {
+            measures: vec!["TotalRevenue".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        // The calculated column's physical inputs are fetched; the calculated
+        // column itself does not exist at the source and must not be requested.
+        let sales_columns = &fetch_for(&plan, "Sales").columns;
+        assert_eq!(
+            sales_columns,
+            &vec![
+                "price".to_string(),
+                "product_id".to_string(),
+                "quantity".to_string()
+            ]
+        );
+        assert!(!sales_columns.contains(&"line_total".to_string()));
+    }
+
+    #[test]
+    fn projection_includes_lookup_key_value_and_resolution_columns() {
+        use crate::request::LookupColumn;
+
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category_id", DataType::Int32),
+                Column::new("category_name", DataType::String)
+                    .with_lookup_resolution("FIRST(category_name, ORDER BY sort_order)"),
+                Column::new("sort_order", DataType::Int32),
+                Column::new("unused", DataType::String),
+            ],
+        )
+        .unwrap();
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(products)
+            .add_table(sales)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        // Lookups force local aggregation even on a single source.
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("dbo", "sales"));
+        registry.bind("Products", 0, SourceBinding::new("dbo", "products"));
+
+        let request = QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Products", "category_id")],
+            filters: vec![],
+            lookups: vec![LookupColumn::new("Products", "category_name")],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        // Key (group-by inferred), value, resolution reference (sort_order),
+        // and join key — but not "unused".
+        assert_eq!(
+            fetch_for(&plan, "Products").columns,
+            vec![
+                "category_id".to_string(),
+                "category_name".to_string(),
+                "id".to_string(),
+                "sort_order".to_string()
+            ]
+        );
+        assert_eq!(
+            fetch_for(&plan, "Sales").columns,
+            vec!["amount".to_string(), "product_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn projection_includes_group_by_sort_column() {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String).with_sort_by("category_sort"),
+                Column::new("category_sort", DataType::Int32),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        let registry = make_cross_source_registry();
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        assert_eq!(
+            fetch_for(&plan, "Products").columns,
+            vec![
+                "category".to_string(),
+                "category_sort".to_string(),
+                "id".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn projection_includes_query_filter_columns() {
+        let model = test_model_star_schema();
+        let registry = make_cross_source_registry();
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![FilterCondition {
+                column: "id".into(),
+                operator: FilterOperator::Equal,
+                value: "42".into(),
+            }],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        // "id" exists in both tables; the filter heuristic applies it to both,
+        // so both projections include it.
+        assert_eq!(
+            fetch_for(&plan, "Sales").columns,
+            vec![
+                "amount".to_string(),
+                "id".to_string(),
+                "product_id".to_string()
+            ]
+        );
+        assert_eq!(
+            fetch_for(&plan, "Products").columns,
+            vec!["category".to_string(), "id".to_string()]
+        );
+    }
+
+    #[test]
+    fn unanalyzable_reference_falls_back_to_full_fetch() {
+        // `DataModelBuilder::build()` rejects measures referencing unknown
+        // columns, so an unattributable reference cannot enter a validated
+        // model. Exercise the safety valve directly with a hand-built
+        // measure (e.g. a model that bypassed validation).
+        let model = test_model_star_schema();
+
+        let weird = expression_measure(
+            "Weird",
+            expr::agg(
+                AggregateOp::Sum,
+                expr::qualified_col("Sales", "amount")
+                    .multiply(Expression::ColumnRef("mystery_col".into())),
+            ),
+        );
+
+        let request = QueryRequest {
+            measures: vec!["Weird".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let fetch_tables = vec!["Sales".to_string(), "Products".to_string()];
+        let projections = compute_table_projections(
+            &request,
+            &model,
+            &[weird],
+            &fetch_tables,
+            &[],
+            &std::collections::HashSet::new(),
+        );
+
+        // "mystery_col" cannot be attributed to any fetched table → projection
+        // is disabled entirely; both fetches fall back to SELECT *.
+        assert!(projections.columns_for("Sales").is_empty());
+        assert!(projections.columns_for("Products").is_empty());
+
+        let diagnostics = projections.into_diagnostics();
+        assert_eq!(diagnostics.fallbacks.len(), 1);
+        assert_eq!(diagnostics.fallbacks[0].0, "*");
+        assert!(
+            diagnostics.fallbacks[0].1.contains("mystery_col"),
+            "got: {}",
+            diagnostics.fallbacks[0].1
+        );
+    }
+
+    #[test]
+    fn in_memory_table_is_not_projected() {
+        use engine_core::model::StorageMode;
+
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String),
+            ],
+        )
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory);
+
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        let registry = mock_registry_star(0);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+
+        // The in-memory table is served from cache — no projection.
+        assert!(fetch_for(&plan, "Products").columns.is_empty());
+        // The connector-fetched fact table is still projected.
+        assert_eq!(
+            fetch_for(&plan, "Sales").columns,
+            vec!["amount".to_string(), "product_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn plan_explained_reports_projected_columns_and_fallbacks() {
+        // Projected case.
+        let model = test_model_star_schema();
+        let registry = make_cross_source_registry();
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let projected = node
+            .properties
+            .iter()
+            .find(|p| p.key == "projected_columns")
+            .expect("projected_columns property");
+        match &projected.value {
+            engine_core::compute::plan::PlanValue::List(entries) => {
+                assert!(
+                    entries.iter().any(|e| e == "Sales: 2 column(s)"),
+                    "got: {entries:?}"
+                );
+                assert!(
+                    entries.iter().any(|e| e == "Products: 2 column(s)"),
+                    "got: {entries:?}"
+                );
+            }
+            other => panic!("Expected List, got {other:?}"),
+        }
+
+        // Fallback case: an in-memory table is served from cache, so it is
+        // fetched without projection and the reason is reported.
+        let fallback_model = {
+            use engine_core::model::StorageMode;
+            let sales = model.table("Sales").unwrap().clone();
+            let products = model
+                .table("Products")
+                .unwrap()
+                .clone()
+                .with_storage_mode(StorageMode::InMemory);
+            DataModel::builder()
+                .add_table(sales)
+                .add_table(products)
+                .add_relationship(Relationship::many_to_one(
+                    "Sales_Products",
+                    "Sales",
+                    "product_id",
+                    "Products",
+                    "id",
+                ))
+                .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+                .build()
+                .unwrap()
+        };
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &fallback_model, &registry).unwrap();
+        let fallbacks = node
+            .properties
+            .iter()
+            .find(|p| p.key == "projection_fallbacks")
+            .expect("projection_fallbacks property");
+        match &fallbacks.value {
+            engine_core::compute::plan::PlanValue::List(entries) => {
+                assert!(
+                    entries
+                        .iter()
+                        .any(|e| e.starts_with("Products: ") && e.contains("in-memory cache")),
+                    "got: {entries:?}"
+                );
+            }
+            other => panic!("Expected List, got {other:?}"),
+        }
+    }
+    // --- ORDER BY / LIMIT planning ---
+
+    /// Single-table model whose `month_name` column sorts by `month_number`.
+    fn test_model_with_sort_by() -> DataModel {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+                Column::new("month_name", DataType::String).with_sort_by("month_number"),
+                Column::new("month_number", DataType::Int32),
+            ],
+        )
+        .unwrap();
+
+        DataModel::builder()
+            .add_table(sales)
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .build()
+            .unwrap()
+    }
+
+    /// Star schema whose dimension `category` column sorts by `id`.
+    fn test_model_star_schema_with_sort_by() -> DataModel {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String).with_sort_by("id"),
+            ],
+        )
+        .unwrap();
+
+        DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn order_by_column_not_in_group_by_is_rejected() {
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            order_by: vec![crate::request::OrderByClause::column("Sales", "region")],
+            ..Default::default()
+        };
+
+        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        match err {
+            QueryError::InvalidQuery(msg) => {
+                assert!(msg.contains("must be one of the group_by columns"), "{msg}");
+            }
+            other => panic!("Expected InvalidQuery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_by_unknown_measure_is_rejected() {
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            order_by: vec![crate::request::OrderByClause::measure_desc("Nope")],
+            ..Default::default()
+        };
+
+        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        match err {
+            QueryError::InvalidQuery(msg) => {
+                assert!(
+                    msg.contains("must be one of the requested measures"),
+                    "{msg}"
+                );
+            }
+            other => panic!("Expected InvalidQuery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pushed_plan_carries_order_by_and_limit() {
+        use engine_connectors::{OrderByExpr, OrderByTarget};
+
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            order_by: vec![crate::request::OrderByClause::measure_desc("TotalAmount")],
+            limit: Some(5),
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request: fetch, .. } => {
+                assert_eq!(
+                    fetch.order_by,
+                    vec![OrderByExpr {
+                        target: OrderByTarget::Alias("TotalAmount".into()),
+                        descending: true,
+                    }]
+                );
+                assert_eq!(fetch.limit, Some(5));
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pushed_plan_defaults_order_to_group_by_columns() {
+        use engine_connectors::{OrderByExpr, OrderByTarget};
+
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request: fetch, .. } => {
+                assert_eq!(
+                    fetch.order_by,
+                    vec![OrderByExpr {
+                        target: OrderByTarget::Column("region".into()),
+                        descending: false,
+                    }]
+                );
+                assert_eq!(fetch.limit, None);
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pushed_plan_substitutes_sort_by_column_as_min() {
+        use engine_connectors::{OrderByExpr, OrderByTarget};
+
+        let model = test_model_with_sort_by();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "month_name")],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request: fetch, .. } => {
+                assert_eq!(
+                    fetch.order_by,
+                    vec![OrderByExpr {
+                        target: OrderByTarget::MinColumn("month_number".into()),
+                        descending: false,
+                    }]
+                );
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    /// Group-by on a dimension column whose ordering needs sort-by
+    /// substitution: the pushed join result cannot carry the sort column,
+    /// so the planner falls back to local aggregation.
+    #[test]
+    fn pushed_join_falls_back_to_local_when_sort_substitution_needed() {
+        let model = test_model_star_schema_with_sort_by();
+        let registry = mock_registry_star(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::LocalAggregation {
+                order_by, limit, ..
+            } => {
+                assert_eq!(order_by.len(), 1);
+                assert_eq!(
+                    order_by[0],
+                    crate::request::OrderByClause::column("Products", "category")
+                );
+                assert_eq!(limit, None);
+            }
+            other => panic!("Expected LocalAggregation, got {other:?}"),
+        }
+
+        // Sanity: grouping by a column without sort-by keeps the pushed join.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "id")],
+            ..Default::default()
+        };
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
+    }
+
+    #[test]
+    fn pushed_join_plan_carries_order_by_and_limit() {
+        let model = test_model_star_schema();
+        let registry = mock_registry_star(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            order_by: vec![crate::request::OrderByClause::measure_desc("TotalAmount")],
+            limit: Some(10),
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedJoinAggregation {
+                order_by, limit, ..
+            } => {
+                assert_eq!(
+                    order_by,
+                    vec![crate::request::OrderByClause::measure_desc("TotalAmount")]
+                );
+                assert_eq!(limit, Some(10));
+            }
+            other => panic!("Expected PushedJoinAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_plan_carries_effective_order_and_limit() {
+        let model = test_model_star_schema();
+        let registry = make_cross_source_registry();
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::LocalAggregation {
+                order_by, limit, ..
+            } => {
+                // Default ordering derived from group_by, ascending.
+                assert_eq!(
+                    order_by,
+                    vec![crate::request::OrderByClause::column(
+                        "Products", "category"
+                    )]
+                );
+                assert_eq!(limit, Some(3));
+            }
+            other => panic!("Expected LocalAggregation, got {other:?}"),
+        }
+    }
+
+    /// ORDER BY targets are canonicalized to the group-by / measure spelling
+    /// so SQL identifiers match the SELECT list.
+    #[test]
+    fn order_targets_are_canonicalized_to_request_spelling() {
+        use engine_connectors::{OrderByExpr, OrderByTarget};
+
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            order_by: vec![
+                crate::request::OrderByClause::column("SALES", "REGION"),
+                crate::request::OrderByClause::measure_desc("totalamount"),
+            ],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request: fetch, .. } => {
+                assert_eq!(
+                    fetch.order_by,
+                    vec![
+                        OrderByExpr {
+                            target: OrderByTarget::Column("region".into()),
+                            descending: false,
+                        },
+                        OrderByExpr {
+                            target: OrderByTarget::Alias("TotalAmount".into()),
+                            descending: true,
+                        },
+                    ]
+                );
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    // --- ROLLUP totals planning ---
+
+    /// Single-table simple aggregates + totals: the ROLLUP is pushed to the
+    /// source via the fetch request (no fallback to local aggregation).
+    #[test]
+    fn pushed_plan_carries_rollup_totals() {
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            totals: crate::request::TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request: fetch, .. } => {
+                assert!(fetch.rollup_totals);
+                assert_eq!(fetch.group_by, vec!["region".to_string()]);
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+
+        // Without totals the fetch request does not ask for ROLLUP.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            ..Default::default()
+        };
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request: fetch, .. } => {
+                assert!(!fetch.rollup_totals);
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    /// The pushed join request cannot express ROLLUP — totals force the
+    /// star-schema same-source plan back to local aggregation (which renders
+    /// ROLLUP into the local DataFusion SQL), mirroring the order-by
+    /// sort-substitution fallback.
+    #[test]
+    fn pushed_join_falls_back_to_local_when_totals_requested() {
+        let model = test_model_star_schema();
+        let registry = mock_registry_star(0);
+
+        let base = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            ..Default::default()
+        };
+
+        // Sanity: without totals this request pushes the join.
+        let plan = PushdownPlanner::plan(&base, &model, &registry).unwrap();
+        assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
+
+        let request = QueryRequest {
+            totals: crate::request::TotalsMode::Rollup,
+            ..base
+        };
+        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        match plan {
+            QueryPlan::LocalAggregation { totals, .. } => {
+                assert_eq!(totals, crate::request::TotalsMode::Rollup);
+            }
+            other => panic!("Expected LocalAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn totals_with_lookups_rejected() {
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            lookups: vec![crate::request::LookupColumn::new("Sales", "region")],
+            totals: crate::request::TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        match err {
+            QueryError::InvalidQuery(msg) => {
+                assert!(msg.contains("lookup columns"), "unexpected message: {msg}");
+            }
+            other => panic!("Expected InvalidQuery, got {other:?}"),
+        }
+    }
+
+    /// The `__grouping_id` bitmask is `Int32` — more than 31 group-by
+    /// columns cannot be represented and are rejected at planning time.
+    #[test]
+    fn totals_with_more_than_31_group_by_columns_rejected() {
+        let mut columns = vec![Column::new("amount", DataType::Float64)];
+        for i in 0..32 {
+            columns.push(Column::new(format!("dim{i}"), DataType::String));
+        }
+        let model = DataModel::builder()
+            .add_table(Table::new("Wide", columns).unwrap())
+            .add_measure(sum_measure("Total", "Wide", "amount"))
+            .build()
+            .unwrap();
+        let mut registry = SourceRegistry::new();
+        registry.bind("Wide", 0, SourceBinding::new("public", "wide"));
+
+        let request = QueryRequest {
+            measures: vec!["Total".into()],
+            group_by: (0..32)
+                .map(|i| ColumnRef::new("Wide", format!("dim{i}")))
+                .collect(),
+            totals: crate::request::TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        match err {
+            QueryError::InvalidQuery(msg) => {
+                assert!(msg.contains("31"), "unexpected message: {msg}");
+            }
+            other => panic!("Expected InvalidQuery, got {other:?}"),
+        }
     }
 }

@@ -104,9 +104,16 @@ enum Token {
     RBrace,
 }
 
-fn tokenize(input: &str) -> EngineResult<Vec<Token>> {
+/// Tokenize the input into `(token, byte_offset)` pairs, where the offset is
+/// the byte position of the token's first character in `input`.
+fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
+    // Byte offset of each char index, for reporting positions in the
+    // original input text (multi-byte UTF-8 chars make char index != byte
+    // offset).
+    let byte_offsets: Vec<usize> = input.char_indices().map(|(b, _)| b).collect();
+    let byte_at = |char_idx: usize| byte_offsets.get(char_idx).copied().unwrap_or(input.len());
     let len = chars.len();
     let mut i = 0;
 
@@ -119,73 +126,76 @@ fn tokenize(input: &str) -> EngineResult<Vec<Token>> {
             continue;
         }
 
+        // Byte offset where the current token starts.
+        let tok_start = byte_at(i);
+
         match c {
             '[' => {
-                tokens.push(Token::LBracket);
+                tokens.push((Token::LBracket, tok_start));
                 i += 1;
             }
             ']' => {
-                tokens.push(Token::RBracket);
+                tokens.push((Token::RBracket, tok_start));
                 i += 1;
             }
             '(' => {
-                tokens.push(Token::LParen);
+                tokens.push((Token::LParen, tok_start));
                 i += 1;
             }
             ')' => {
-                tokens.push(Token::RParen);
+                tokens.push((Token::RParen, tok_start));
                 i += 1;
             }
             ',' => {
-                tokens.push(Token::Comma);
+                tokens.push((Token::Comma, tok_start));
                 i += 1;
             }
             '{' => {
-                tokens.push(Token::LBrace);
+                tokens.push((Token::LBrace, tok_start));
                 i += 1;
             }
             '}' => {
-                tokens.push(Token::RBrace);
+                tokens.push((Token::RBrace, tok_start));
                 i += 1;
             }
             '+' => {
-                tokens.push(Token::Plus);
+                tokens.push((Token::Plus, tok_start));
                 i += 1;
             }
             '-' => {
-                tokens.push(Token::Minus);
+                tokens.push((Token::Minus, tok_start));
                 i += 1;
             }
             '*' => {
-                tokens.push(Token::Star);
+                tokens.push((Token::Star, tok_start));
                 i += 1;
             }
             '/' => {
-                tokens.push(Token::Slash);
+                tokens.push((Token::Slash, tok_start));
                 i += 1;
             }
             '=' => {
-                tokens.push(Token::Eq);
+                tokens.push((Token::Eq, tok_start));
                 i += 1;
             }
             '!' if i + 1 < len && chars[i + 1] == '=' => {
-                tokens.push(Token::Neq);
+                tokens.push((Token::Neq, tok_start));
                 i += 2;
             }
             '>' if i + 1 < len && chars[i + 1] == '=' => {
-                tokens.push(Token::Gte);
+                tokens.push((Token::Gte, tok_start));
                 i += 2;
             }
             '>' => {
-                tokens.push(Token::Gt);
+                tokens.push((Token::Gt, tok_start));
                 i += 1;
             }
             '<' if i + 1 < len && chars[i + 1] == '=' => {
-                tokens.push(Token::Lte);
+                tokens.push((Token::Lte, tok_start));
                 i += 2;
             }
             '<' => {
-                tokens.push(Token::Lt);
+                tokens.push((Token::Lt, tok_start));
                 i += 1;
             }
             '"' => {
@@ -196,12 +206,13 @@ fn tokenize(input: &str) -> EngineResult<Vec<Token>> {
                     i += 1;
                 }
                 if i >= len {
-                    return Err(EngineError::InvalidData(
-                        "unterminated string literal".into(),
-                    ));
+                    return Err(EngineError::ParseError {
+                        position: tok_start,
+                        message: "unterminated string literal".into(),
+                    });
                 }
                 let s: String = chars[start..i].iter().collect();
-                tokens.push(Token::StringLit(s));
+                tokens.push((Token::StringLit(s), tok_start));
                 i += 1; // skip closing quote
             }
             _ if c.is_ascii_digit() || c == '.' => {
@@ -211,10 +222,11 @@ fn tokenize(input: &str) -> EngineResult<Vec<Token>> {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
-                let val: f64 = num_str
-                    .parse()
-                    .map_err(|_| EngineError::InvalidData(format!("invalid number: {num_str}")))?;
-                tokens.push(Token::Number(val));
+                let val: f64 = num_str.parse().map_err(|_| EngineError::ParseError {
+                    position: tok_start,
+                    message: format!("invalid number: {num_str}"),
+                })?;
+                tokens.push((Token::Number(val), tok_start));
             }
             _ if c.is_alphanumeric() || c == '_' => {
                 // Identifier.
@@ -223,12 +235,13 @@ fn tokenize(input: &str) -> EngineResult<Vec<Token>> {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                tokens.push(Token::Ident(ident));
+                tokens.push((Token::Ident(ident), tok_start));
             }
             _ => {
-                return Err(EngineError::InvalidData(format!(
-                    "unexpected character: '{c}'"
-                )));
+                return Err(EngineError::ParseError {
+                    position: tok_start,
+                    message: format!("unexpected character: '{c}'"),
+                });
             }
         }
     }
@@ -251,6 +264,12 @@ const MAX_PARSE_DEPTH: usize = 128;
 
 struct Parser {
     tokens: Vec<Token>,
+    /// Byte offset into the input text where each token starts (parallel to
+    /// `tokens`). Used for error reporting.
+    positions: Vec<usize>,
+    /// Total byte length of the input text; reported as the position of
+    /// end-of-input errors.
+    input_len: usize,
     pos: usize,
     /// Current recursion depth, guarded by [`MAX_PARSE_DEPTH`].
     ///
@@ -260,11 +279,40 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+    fn new(spanned_tokens: Vec<(Token, usize)>, input_len: usize) -> Self {
+        let (tokens, positions) = spanned_tokens.into_iter().unzip();
         Self {
             tokens,
+            positions,
+            input_len,
             pos: 0,
             depth: 0,
+        }
+    }
+
+    /// Byte offset of the token at `index`, or the input length when the
+    /// index is past the last token (end-of-input).
+    fn offset_at(&self, index: usize) -> usize {
+        self.positions.get(index).copied().unwrap_or(self.input_len)
+    }
+
+    /// Build a [`EngineError::ParseError`] positioned at the current
+    /// (next unconsumed) token, or at the end of the input when all tokens
+    /// have been consumed.
+    fn parse_err(&self, message: impl Into<String>) -> EngineError {
+        EngineError::ParseError {
+            position: self.offset_at(self.pos),
+            message: message.into(),
+        }
+    }
+
+    /// Build a [`EngineError::ParseError`] positioned at the most recently
+    /// consumed token. Used when the offending token has already been
+    /// consumed by `advance()`.
+    fn parse_err_prev(&self, message: impl Into<String>) -> EngineError {
+        EngineError::ParseError {
+            position: self.offset_at(self.pos.saturating_sub(1)),
+            message: message.into(),
         }
     }
 
@@ -279,7 +327,7 @@ impl Parser {
     /// these two choke points bounds native stack usage for arbitrary input.
     fn enter_recursion(&mut self) -> EngineResult<()> {
         if self.depth >= MAX_PARSE_DEPTH {
-            return Err(EngineError::InvalidData(format!(
+            return Err(self.parse_err(format!(
                 "expression nesting too deep (max {MAX_PARSE_DEPTH} levels)"
             )));
         }
@@ -298,9 +346,7 @@ impl Parser {
 
     fn advance(&mut self) -> EngineResult<&Token> {
         if self.pos >= self.tokens.len() {
-            return Err(EngineError::InvalidData(
-                "unexpected end of expression".into(),
-            ));
+            return Err(self.parse_err("unexpected end of expression"));
         }
         let tok = &self.tokens[self.pos];
         self.pos += 1;
@@ -310,9 +356,7 @@ impl Parser {
     fn expect(&mut self, expected: &Token) -> EngineResult<()> {
         let tok = self.advance()?.clone();
         if &tok != expected {
-            return Err(EngineError::InvalidData(format!(
-                "expected {expected:?}, got {tok:?}"
-            )));
+            return Err(self.parse_err_prev(format!("expected {expected:?}, got {tok:?}")));
         }
         Ok(())
     }
@@ -402,12 +446,8 @@ impl Parser {
             }
             Some(Token::Ident(_)) => self.parse_ident_or_call(),
             Some(Token::LBracket) => self.parse_measure_ref(),
-            Some(tok) => Err(EngineError::InvalidData(format!(
-                "unexpected token: {tok:?}"
-            ))),
-            None => Err(EngineError::InvalidData(
-                "unexpected end of expression".into(),
-            )),
+            Some(tok) => Err(self.parse_err(format!("unexpected token: {tok:?}"))),
+            None => Err(self.parse_err("unexpected end of expression")),
         }
     }
 
@@ -418,9 +458,7 @@ impl Parser {
         let ident = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected identifier, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("expected identifier, got {tok:?}")));
             }
         };
 
@@ -454,9 +492,7 @@ impl Parser {
         let column = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected column name, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("expected column name, got {tok:?}")));
             }
         };
         self.expect(&Token::RBracket)?;
@@ -465,6 +501,10 @@ impl Parser {
 
     /// Parse a function call: aggregate, context op, scalar, conditional, etc.
     fn parse_function_call(&mut self, name: &str, upper: &str) -> EngineResult<Expression> {
+        // Offset of the function-name token, which the caller consumed
+        // immediately before calling us. Used to position "unknown function"
+        // errors on the name itself rather than the opening parenthesis.
+        let name_offset = self.offset_at(self.pos.saturating_sub(1));
         self.expect(&Token::LParen)?;
 
         match upper {
@@ -603,9 +643,10 @@ impl Parser {
             "STARTSWITH" => self.parse_text_call(TextFunction::StartsWith, 2),
             "ENDSWITH" => self.parse_text_call(TextFunction::EndsWith, 2),
             "INITCAP" => self.parse_text_call(TextFunction::InitCap, 1),
-            _ => Err(EngineError::InvalidData(format!(
-                "unknown function: {name}"
-            ))),
+            _ => Err(EngineError::ParseError {
+                position: name_offset,
+                message: format!("unknown function: {name}"),
+            }),
         }
     }
 
@@ -641,8 +682,9 @@ impl Parser {
             let mut result = expr::agg(op, operand);
             while self.peek() == Some(&Token::Comma) {
                 self.advance()?; // consume comma
+                let arg_offset = self.offset_at(self.pos);
                 let context_arg = self.parse_context_arg()?;
-                result = wrap_context_op(result, context_arg)?;
+                result = wrap_context_op(result, context_arg, arg_offset)?;
             }
             self.expect(&Token::RParen)?;
             Ok(result)
@@ -687,12 +729,10 @@ impl Parser {
                     Ok(expr::table_ref(name))
                 }
             }
-            Some(tok) => Err(EngineError::InvalidData(format!(
+            Some(tok) => Err(self.parse_err(format!(
                 "expected variable name or context function, got {tok:?}"
             ))),
-            None => Err(EngineError::InvalidData(
-                "unexpected end of expression after comma in aggregate".into(),
-            )),
+            None => Err(self.parse_err("unexpected end of expression after comma in aggregate")),
         }
     }
 
@@ -783,9 +823,7 @@ impl Parser {
             self.expect(&Token::RBrace)?;
 
             if values.is_empty() {
-                return Err(EngineError::InvalidData(
-                    "IN list must contain at least one value".into(),
-                ));
+                return Err(self.parse_err("IN list must contain at least one value"));
             }
 
             Ok(Expression::InList {
@@ -801,27 +839,27 @@ impl Parser {
                     column,
                 } => (table_or_var.clone(), column.clone()),
                 _ => {
-                    return Err(EngineError::InvalidData(
-                        "IN with variable requires table[column] on both sides".into(),
-                    ));
+                    return Err(
+                        self.parse_err("IN with variable requires table[column] on both sides")
+                    );
                 }
             };
 
             let var_name = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "IN: expected variable name, got {tok:?}"
-                    )));
+                    return Err(
+                        self.parse_err_prev(format!("IN: expected variable name, got {tok:?}"))
+                    );
                 }
             };
             self.expect(&Token::LBracket)?;
             let var_column = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "IN: expected column name, got {tok:?}"
-                    )));
+                    return Err(
+                        self.parse_err_prev(format!("IN: expected column name, got {tok:?}"))
+                    );
                 }
             };
             self.expect(&Token::RBracket)?;
@@ -841,9 +879,7 @@ impl Parser {
         let _dim_table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "KEEP: expected table name, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("KEEP: expected table name, got {tok:?}")));
             }
         };
 
@@ -941,9 +977,9 @@ impl Parser {
         let name = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "USING: expected context name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("USING: expected context name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::RParen)?;
@@ -962,9 +998,9 @@ impl Parser {
         let name = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected measure name inside [], got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("expected measure name inside [], got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::RBracket)?;
@@ -975,8 +1011,9 @@ impl Parser {
         if self.peek() == Some(&Token::LParen) {
             self.advance()?; // consume (
             loop {
+                let arg_offset = self.offset_at(self.pos);
                 let context_arg = self.parse_context_arg()?;
-                result = wrap_context_op(result, context_arg)?;
+                result = wrap_context_op(result, context_arg, arg_offset)?;
                 if self.peek() != Some(&Token::Comma) {
                     break;
                 }
@@ -1013,7 +1050,7 @@ impl Parser {
         let rel_name = match self.advance()?.clone() {
             Token::StringLit(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
+                return Err(self.parse_err_prev(format!(
                     "USERELATIONSHIP: expected string literal for relationship name, got {tok:?}"
                 )));
             }
@@ -1029,9 +1066,9 @@ impl Parser {
             let table = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "CLEAR: expected table name, got {tok:?}"
-                    )));
+                    return Err(
+                        self.parse_err_prev(format!("CLEAR: expected table name, got {tok:?}"))
+                    );
                 }
             };
 
@@ -1040,9 +1077,8 @@ impl Parser {
                 let col = match self.advance()?.clone() {
                     Token::Ident(s) => s,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
-                            "CLEAR: expected column name, got {tok:?}"
-                        )));
+                        return Err(self
+                            .parse_err_prev(format!("CLEAR: expected column name, got {tok:?}")));
                     }
                 };
                 self.expect(&Token::RBracket)?;
@@ -1074,18 +1110,18 @@ impl Parser {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "filter: expected table name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("filter: expected table name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::LBracket)?;
         let column = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "filter: expected column name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("filter: expected column name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::RBracket)?;
@@ -1098,9 +1134,8 @@ impl Parser {
             Token::Lt => ComparisonOp::LessThan,
             Token::Lte => ComparisonOp::LessThanOrEqual,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "filter: expected comparison operator, got {tok:?}"
-                )));
+                return Err(self
+                    .parse_err_prev(format!("filter: expected comparison operator, got {tok:?}")));
             }
         };
 
@@ -1116,9 +1151,7 @@ impl Parser {
             Token::StringLit(s) => s,
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "filter: expected value, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("filter: expected value, got {tok:?}")));
             }
         };
 
@@ -1131,22 +1164,23 @@ impl Parser {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "COUNTROWS: expected table name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("COUNTROWS: expected table name, got {tok:?}"))
+                );
             }
         };
 
         // Check for optional context operation argument.
         if self.peek() == Some(&Token::Comma) {
             self.advance()?; // consume comma
+            let arg_offset = self.offset_at(self.pos);
             let context_op = self.parse_atom()?;
             self.expect(&Token::RParen)?;
             let cr = Expression::Aggregate {
                 operation: AggregateOp::CountRows,
                 operand: Box::new(Expression::TableRef(table)),
             };
-            Ok(wrap_context_op(cr, context_op)?)
+            Ok(wrap_context_op(cr, context_op, arg_offset)?)
         } else {
             self.expect(&Token::RParen)?;
             Ok(Expression::Aggregate {
@@ -1305,7 +1339,7 @@ impl Parser {
                     self.advance()?;
                 }
                 other => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err(format!(
                         "expected 'AS' after aggregate expression in QUERY, got {other:?}"
                     )));
                 }
@@ -1315,7 +1349,7 @@ impl Parser {
             let alias = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err_prev(format!(
                         "expected alias name after AS in QUERY, got {tok:?}"
                     )));
                 }
@@ -1333,7 +1367,7 @@ impl Parser {
                     self.advance()?; // consume comma, continue parsing aggregates
                 }
                 other => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err(format!(
                         "expected ',' or 'BY' after aggregate alias in QUERY, got {other:?}"
                     )));
                 }
@@ -1346,7 +1380,7 @@ impl Parser {
             let table = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err_prev(format!(
                         "expected table name in QUERY BY clause, got {tok:?}"
                     )));
                 }
@@ -1355,7 +1389,7 @@ impl Parser {
             let column = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err_prev(format!(
                         "expected column name in QUERY BY clause, got {tok:?}"
                     )));
                 }
@@ -1374,14 +1408,10 @@ impl Parser {
         self.expect(&Token::RParen)?;
 
         if aggregates.is_empty() {
-            return Err(EngineError::InvalidData(
-                "QUERY requires at least one aggregate expression".into(),
-            ));
+            return Err(self.parse_err("QUERY requires at least one aggregate expression"));
         }
         if group_by.is_empty() {
-            return Err(EngineError::InvalidData(
-                "QUERY requires at least one BY column".into(),
-            ));
+            return Err(self.parse_err("QUERY requires at least one BY column"));
         }
 
         Ok(expr::query_expr(aggregates, group_by))
@@ -1394,18 +1424,14 @@ impl Parser {
             let table = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "expected table name, got {tok:?}"
-                    )));
+                    return Err(self.parse_err_prev(format!("expected table name, got {tok:?}")));
                 }
             };
             self.expect(&Token::LBracket)?;
             let column = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "expected column name, got {tok:?}"
-                    )));
+                    return Err(self.parse_err_prev(format!("expected column name, got {tok:?}")));
                 }
             };
             self.expect(&Token::RBracket)?;
@@ -1426,9 +1452,7 @@ impl Parser {
         let pairs = self.parse_table_column_pairs()?;
         self.expect(&Token::RParen)?;
         if pairs.is_empty() {
-            return Err(EngineError::InvalidData(
-                "ORDERBY requires at least one column".into(),
-            ));
+            return Err(self.parse_err("ORDERBY requires at least one column"));
         }
         Ok(pairs)
     }
@@ -1439,9 +1463,7 @@ impl Parser {
         let pairs = self.parse_table_column_pairs()?;
         self.expect(&Token::RParen)?;
         if pairs.is_empty() {
-            return Err(EngineError::InvalidData(
-                "PARTITIONBY requires at least one column".into(),
-            ));
+            return Err(self.parse_err("PARTITIONBY requires at least one column"));
         }
         Ok(pairs)
     }
@@ -1459,7 +1481,7 @@ impl Parser {
                 let v = match self.advance()?.clone() {
                     Token::Number(v) => v as i64,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "expected integer after '-' in ROWS, got {tok:?}"
                         )));
                     }
@@ -1467,9 +1489,9 @@ impl Parser {
                 -v
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected integer for ROWS from, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("expected integer for ROWS from, got {tok:?}"))
+                );
             }
         };
 
@@ -1480,7 +1502,7 @@ impl Parser {
             Token::Ident(ref s) if s.eq_ignore_ascii_case("REL") => BoundaryType::Rel,
             Token::Ident(ref s) if s.eq_ignore_ascii_case("ABS") => BoundaryType::Abs,
             tok => {
-                return Err(EngineError::InvalidData(format!(
+                return Err(self.parse_err_prev(format!(
                     "expected REL or ABS for ROWS from_type, got {tok:?}"
                 )));
             }
@@ -1495,7 +1517,7 @@ impl Parser {
                 let v = match self.advance()?.clone() {
                     Token::Number(v) => v as i64,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "expected integer after '-' in ROWS, got {tok:?}"
                         )));
                     }
@@ -1503,9 +1525,9 @@ impl Parser {
                 -v
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected integer for ROWS to, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("expected integer for ROWS to, got {tok:?}"))
+                );
             }
         };
 
@@ -1516,9 +1538,8 @@ impl Parser {
             Token::Ident(ref s) if s.eq_ignore_ascii_case("REL") => BoundaryType::Rel,
             Token::Ident(ref s) if s.eq_ignore_ascii_case("ABS") => BoundaryType::Abs,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected REL or ABS for ROWS to_type, got {tok:?}"
-                )));
+                return Err(self
+                    .parse_err_prev(format!("expected REL or ABS for ROWS to_type, got {tok:?}")));
             }
         };
 
@@ -1547,13 +1568,13 @@ impl Parser {
                 "MAX" => AggregateOp::Max,
                 "COUNT" => AggregateOp::Count,
                 other => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err_prev(format!(
                         "unsupported window aggregate function: {other}"
                     )));
                 }
             },
             tok => {
-                return Err(EngineError::InvalidData(format!(
+                return Err(self.parse_err_prev(format!(
                     "expected aggregate function name in WINDOW, got {tok:?}"
                 )));
             }
@@ -1565,9 +1586,7 @@ impl Parser {
         match self.advance()?.clone() {
             Token::Ident(ref s) if s.eq_ignore_ascii_case("ORDERBY") => {}
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected ORDERBY in WINDOW, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("expected ORDERBY in WINDOW, got {tok:?}")));
             }
         }
         let order_by = self.parse_orderby_clause()?;
@@ -1588,7 +1607,7 @@ impl Parser {
                     frame = Some(self.parse_rows_clause()?);
                 }
                 other => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err(format!(
                         "expected PARTITIONBY or ROWS in WINDOW, got {other:?}"
                     )));
                 }
@@ -1618,7 +1637,7 @@ impl Parser {
                 let v = match self.advance()?.clone() {
                     Token::Number(v) => v as i64,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "expected integer after '-' in OFFSET delta, got {tok:?}"
                         )));
                     }
@@ -1626,9 +1645,9 @@ impl Parser {
                 -v
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected integer for OFFSET delta, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("expected integer for OFFSET delta, got {tok:?}"))
+                );
             }
         };
 
@@ -1638,9 +1657,7 @@ impl Parser {
         match self.advance()?.clone() {
             Token::Ident(ref s) if s.eq_ignore_ascii_case("ORDERBY") => {}
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected ORDERBY in OFFSET, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("expected ORDERBY in OFFSET, got {tok:?}")));
             }
         }
         let order_by = self.parse_orderby_clause()?;
@@ -1654,9 +1671,9 @@ impl Parser {
                     partition_by = self.parse_partitionby_clause()?;
                 }
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "expected PARTITIONBY in OFFSET, got {tok:?}"
-                    )));
+                    return Err(
+                        self.parse_err_prev(format!("expected PARTITIONBY in OFFSET, got {tok:?}"))
+                    );
                 }
             }
         }
@@ -1678,7 +1695,7 @@ impl Parser {
                 let v = match self.advance()?.clone() {
                     Token::Number(v) => v as i64,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "expected integer after '-' in INDEX position, got {tok:?}"
                         )));
                     }
@@ -1686,9 +1703,8 @@ impl Parser {
                 -v
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected integer for INDEX position, got {tok:?}"
-                )));
+                return Err(self
+                    .parse_err_prev(format!("expected integer for INDEX position, got {tok:?}")));
             }
         };
 
@@ -1698,9 +1714,7 @@ impl Parser {
         match self.advance()?.clone() {
             Token::Ident(ref s) if s.eq_ignore_ascii_case("ORDERBY") => {}
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected ORDERBY in INDEX, got {tok:?}"
-                )));
+                return Err(self.parse_err_prev(format!("expected ORDERBY in INDEX, got {tok:?}")));
             }
         }
         let order_by = self.parse_orderby_clause()?;
@@ -1714,9 +1728,9 @@ impl Parser {
                     partition_by = self.parse_partitionby_clause()?;
                 }
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "expected PARTITIONBY in INDEX, got {tok:?}"
-                    )));
+                    return Err(
+                        self.parse_err_prev(format!("expected PARTITIONBY in INDEX, got {tok:?}"))
+                    );
                 }
             }
         }
@@ -1754,9 +1768,9 @@ impl Parser {
         let column = self.parse_expression()?;
 
         if self.peek() != Some(&Token::Comma) {
-            return Err(EngineError::InvalidData(
-                "FIRST requires two arguments: FIRST(column, ORDER BY sort_column)".into(),
-            ));
+            return Err(
+                self.parse_err("FIRST requires two arguments: FIRST(column, ORDER BY sort_column)")
+            );
         }
         self.advance()?; // consume comma
 
@@ -1840,7 +1854,7 @@ impl Parser {
             args.push(self.parse_expression()?);
         }
         if args.len() < min_args {
-            return Err(EngineError::InvalidData(format!(
+            return Err(self.parse_err(format!(
                 "{function}: expected at least {min_args} arguments, got {}",
                 args.len()
             )));
@@ -1861,7 +1875,7 @@ impl Parser {
             args.push(self.parse_expression()?);
         }
         if args.len() < min_args {
-            return Err(EngineError::InvalidData(format!(
+            return Err(self.parse_err(format!(
                 "{function}: expected at least {min_args} arguments, got {}",
                 args.len()
             )));
@@ -1887,7 +1901,7 @@ impl Parser {
             args.push(self.parse_expression()?);
         }
         if args.len() < min_args {
-            return Err(EngineError::InvalidData(format!(
+            return Err(self.parse_err(format!(
                 "{function}: expected at least {min_args} arguments, got {}",
                 args.len()
             )));
@@ -1909,14 +1923,14 @@ impl Parser {
                 match upper.as_str() {
                     "DAY" | "MONTH" | "YEAR" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => upper,
                     _ => {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "DATEDIFF: invalid interval '{s}', expected DAY, MONTH, YEAR, or QUARTER"
                         )));
                     }
                 }
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
+                return Err(self.parse_err_prev(format!(
                     "DATEDIFF: expected interval (DAY/MONTH/YEAR/QUARTER), got {tok:?}"
                 )));
             }
@@ -1940,16 +1954,14 @@ impl Parser {
                 match upper.as_str() {
                     "DAY" | "MONTH" | "YEAR" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => upper,
                     _ => {
-                        return Err(EngineError::InvalidData(format!(
-                            "DATEADD: invalid interval '{s}'"
-                        )));
+                        return Err(self.parse_err_prev(format!("DATEADD: invalid interval '{s}'")));
                     }
                 }
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "DATEADD: expected interval keyword, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("DATEADD: expected interval keyword, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::RParen)?;
@@ -1970,14 +1982,14 @@ impl Parser {
                     "YEAR" | "QUARTER" | "MONTH" | "WEEK" | "DAY" | "HOUR" | "MINUTE"
                     | "SECOND" => upper,
                     _ => {
-                        return Err(EngineError::InvalidData(format!(
-                            "DATE_TRUNC: invalid interval '{s}'"
-                        )));
+                        return Err(
+                            self.parse_err_prev(format!("DATE_TRUNC: invalid interval '{s}'"))
+                        );
                     }
                 }
             }
             tok => {
-                return Err(EngineError::InvalidData(format!(
+                return Err(self.parse_err_prev(format!(
                     "DATE_TRUNC: expected interval keyword, got {tok:?}"
                 )));
             }
@@ -2000,14 +2012,14 @@ impl Parser {
                     match upper.as_str() {
                         "YEAR" | "QUARTER" | "MONTH" | "WEEK" => upper,
                         _ => {
-                            return Err(EngineError::InvalidData(format!(
-                                "LAST_DAY: invalid interval '{s}'"
-                            )));
+                            return Err(
+                                self.parse_err_prev(format!("LAST_DAY: invalid interval '{s}'"))
+                            );
                         }
                     }
                 }
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err_prev(format!(
                         "LAST_DAY: expected interval keyword, got {tok:?}"
                     )));
                 }
@@ -2036,18 +2048,18 @@ impl Parser {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "ISINSCOPE: expected table name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("ISINSCOPE: expected table name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::LBracket)?;
         let column = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "ISINSCOPE: expected column name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("ISINSCOPE: expected column name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::RBracket)?;
@@ -2063,9 +2075,9 @@ impl Parser {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "CLEAREXCEPT: expected table name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("CLEAREXCEPT: expected table name, got {tok:?}"))
+                );
             }
         };
         let mut except_columns = Vec::new();
@@ -2080,7 +2092,7 @@ impl Parser {
                         let col = match self.advance()?.clone() {
                             Token::Ident(c) => c,
                             tok => {
-                                return Err(EngineError::InvalidData(format!(
+                                return Err(self.parse_err_prev(format!(
                                     "CLEAREXCEPT: expected column name, got {tok:?}"
                                 )));
                             }
@@ -2092,7 +2104,7 @@ impl Parser {
                     }
                 }
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
+                    return Err(self.parse_err_prev(format!(
                         "CLEAREXCEPT: expected column reference, got {tok:?}"
                     )));
                 }
@@ -2112,9 +2124,9 @@ impl Parser {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "ITERATE: expected table name, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("ITERATE: expected table name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::Comma)?;
@@ -2132,8 +2144,9 @@ impl Parser {
         let mut result = expr::percentile(operand, percentile);
         while self.peek() == Some(&Token::Comma) {
             self.advance()?;
+            let arg_offset = self.offset_at(self.pos);
             let context_arg = self.parse_context_arg()?;
-            result = wrap_context_op(result, context_arg)?;
+            result = wrap_context_op(result, context_arg, arg_offset)?;
         }
         self.expect(&Token::RParen)?;
         Ok(result)
@@ -2147,9 +2160,7 @@ impl Parser {
             args.push(self.parse_expression()?);
         }
         if args.len() < 2 {
-            return Err(EngineError::InvalidData(
-                "GREATEST: expected at least 2 arguments".to_string(),
-            ));
+            return Err(self.parse_err("GREATEST: expected at least 2 arguments"));
         }
         self.expect(&Token::RParen)?;
         Ok(Expression::Greatest(args))
@@ -2163,9 +2174,7 @@ impl Parser {
             args.push(self.parse_expression()?);
         }
         if args.len() < 2 {
-            return Err(EngineError::InvalidData(
-                "LEAST: expected at least 2 arguments".to_string(),
-            ));
+            return Err(self.parse_err("LEAST: expected at least 2 arguments"));
         }
         self.expect(&Token::RParen)?;
         Ok(Expression::Least(args))
@@ -2192,8 +2201,9 @@ impl Parser {
         };
         while self.peek() == Some(&Token::Comma) {
             self.advance()?;
+            let arg_offset = self.offset_at(self.pos);
             let context_arg = self.parse_context_arg()?;
-            result = wrap_context_op(result, context_arg)?;
+            result = wrap_context_op(result, context_arg, arg_offset)?;
         }
         self.expect(&Token::RParen)?;
         Ok(result)
@@ -2211,8 +2221,9 @@ impl Parser {
         };
         while self.peek() == Some(&Token::Comma) {
             self.advance()?;
+            let arg_offset = self.offset_at(self.pos);
             let context_arg = self.parse_context_arg()?;
-            result = wrap_context_op(result, context_arg)?;
+            result = wrap_context_op(result, context_arg, arg_offset)?;
         }
         self.expect(&Token::RParen)?;
         Ok(result)
@@ -2230,8 +2241,9 @@ impl Parser {
         };
         while self.peek() == Some(&Token::Comma) {
             self.advance()?;
+            let arg_offset = self.offset_at(self.pos);
             let context_arg = self.parse_context_arg()?;
-            result = wrap_context_op(result, context_arg)?;
+            result = wrap_context_op(result, context_arg, arg_offset)?;
         }
         self.expect(&Token::RParen)?;
         Ok(result)
@@ -2249,8 +2261,9 @@ impl Parser {
         };
         while self.peek() == Some(&Token::Comma) {
             self.advance()?;
+            let arg_offset = self.offset_at(self.pos);
             let context_arg = self.parse_context_arg()?;
-            result = wrap_context_op(result, context_arg)?;
+            result = wrap_context_op(result, context_arg, arg_offset)?;
         }
         self.expect(&Token::RParen)?;
         Ok(result)
@@ -2262,9 +2275,9 @@ impl Parser {
         match self.advance()?.clone() {
             Token::Ident(ref s) if s.eq_ignore_ascii_case("ORDERBY") => {}
             tok => {
-                return Err(EngineError::InvalidData(format!(
-                    "{function}: expected ORDERBY, got {tok:?}"
-                )));
+                return Err(
+                    self.parse_err_prev(format!("{function}: expected ORDERBY, got {tok:?}"))
+                );
             }
         }
         let order_by = self.parse_orderby_clause()?;
@@ -2279,9 +2292,9 @@ impl Parser {
                     partition_by = self.parse_partitionby_clause()?;
                 }
                 other => {
-                    return Err(EngineError::InvalidData(format!(
-                        "{function}: expected PARTITIONBY, got {other:?}"
-                    )));
+                    return Err(
+                        self.parse_err(format!("{function}: expected PARTITIONBY, got {other:?}"))
+                    );
                 }
             }
         }
@@ -2299,7 +2312,15 @@ impl Parser {
 ///
 /// The context op was parsed as a placeholder Expression; here we extract
 /// the context info and apply it to the real aggregate expression.
-fn wrap_context_op(aggregate: Expression, context_op: Expression) -> EngineResult<Expression> {
+///
+/// `position` is the byte offset where the context argument started in the
+/// input text, used to position the error when the argument turns out not to
+/// be a context operation.
+fn wrap_context_op(
+    aggregate: Expression,
+    context_op: Expression,
+    position: usize,
+) -> EngineResult<Expression> {
     match context_op {
         Expression::Keep {
             filters,
@@ -2330,9 +2351,12 @@ fn wrap_context_op(aggregate: Expression, context_op: Expression) -> EngineResul
             except_columns,
             ..
         } => Ok(expr::clear_except(aggregate, table, except_columns)),
-        _ => Err(EngineError::InvalidData(
-            "expected context operation (KEEP, CLEAR, RESET, USING, USERELATIONSHIP, etc.)".into(),
-        )),
+        _ => Err(EngineError::ParseError {
+            position,
+            message:
+                "expected context operation (KEEP, CLEAR, RESET, USING, USERELATIONSHIP, etc.)"
+                    .into(),
+        }),
     }
 }
 
@@ -2353,7 +2377,8 @@ fn wrap_context_op(aggregate: Expression, context_op: Expression) -> EngineResul
 ///
 /// # Errors
 ///
-/// Returns `EngineError::InvalidData` for syntax errors.
+/// Returns `EngineError::ParseError` for syntax errors, with a byte offset
+/// into the input text where the error was detected.
 ///
 /// # Example
 ///
@@ -2402,15 +2427,18 @@ fn try_as_filter_predicate(expr: &Expression) -> Option<FilterPredicate> {
 pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
-        return Err(EngineError::InvalidData("empty expression".into()));
+        return Err(EngineError::ParseError {
+            position: 0,
+            message: "empty expression".into(),
+        });
     }
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, input.len());
 
     // Check for VAR/RETURN block syntax.
     if parser.peek_is_var() {
         let expr = parser.parse_var_return_block()?;
         if !parser.at_end() {
-            return Err(EngineError::InvalidData(format!(
+            return Err(parser.parse_err(format!(
                 "unexpected token after RETURN expression: {:?}",
                 parser.peek()
             )));
@@ -2420,7 +2448,7 @@ pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
 
     let expr = parser.parse_expression()?;
     if !parser.at_end() {
-        return Err(EngineError::InvalidData(format!(
+        return Err(parser.parse_err(format!(
             "unexpected token after expression: {:?}",
             parser.peek()
         )));
@@ -2445,9 +2473,10 @@ pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
 pub fn parse_measure(input: &str) -> EngineResult<Expression> {
     let expression = parse_measure_expression(input)?;
     if infer_fact_table(&expression).is_none() {
-        return Err(EngineError::InvalidData(
-            "cannot infer fact table — use table[column] syntax".into(),
-        ));
+        return Err(EngineError::ParseError {
+            position: 0,
+            message: "cannot infer fact table — use table[column] syntax".into(),
+        });
     }
     Ok(expression)
 }
@@ -2480,17 +2509,18 @@ pub fn parse_measure(input: &str) -> EngineResult<Expression> {
 pub fn parse_table_variable(input: &str) -> EngineResult<(String, Vec<FilterPredicate>)> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
-        return Err(EngineError::InvalidData("empty expression".into()));
+        return Err(EngineError::ParseError {
+            position: 0,
+            message: "empty expression".into(),
+        });
     }
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, input.len());
 
     // Expect: KEEP ( source, filters... )
-    match parser.advance()? {
-        Token::Ident(name) if name.to_uppercase() == "KEEP" => {}
+    match parser.advance()?.clone() {
+        Token::Ident(ref name) if name.to_uppercase() == "KEEP" => {}
         tok => {
-            return Err(EngineError::InvalidData(format!(
-                "expected KEEP(...), got {tok:?}"
-            )));
+            return Err(parser.parse_err_prev(format!("expected KEEP(...), got {tok:?}")));
         }
     }
     parser.expect(&Token::LParen)?;
@@ -2499,9 +2529,9 @@ pub fn parse_table_variable(input: &str) -> EngineResult<(String, Vec<FilterPred
     let source = match parser.advance()?.clone() {
         Token::Ident(s) => s,
         tok => {
-            return Err(EngineError::InvalidData(format!(
-                "KEEP: expected source table name, got {tok:?}"
-            )));
+            return Err(
+                parser.parse_err_prev(format!("KEEP: expected source table name, got {tok:?}"))
+            );
         }
     };
 
@@ -2516,7 +2546,7 @@ pub fn parse_table_variable(input: &str) -> EngineResult<(String, Vec<FilterPred
     parser.expect(&Token::RParen)?;
 
     if !parser.at_end() {
-        return Err(EngineError::InvalidData(format!(
+        return Err(parser.parse_err(format!(
             "unexpected token after KEEP expression: {:?}",
             parser.peek()
         )));
@@ -2565,9 +2595,12 @@ pub fn parse_table_variable(input: &str) -> EngineResult<(String, Vec<FilterPred
 pub fn parse_context(name: &str, input: &str) -> EngineResult<ContextDefinition> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
-        return Err(EngineError::InvalidData("empty context definition".into()));
+        return Err(EngineError::ParseError {
+            position: 0,
+            message: "empty context definition".into(),
+        });
     }
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, input.len());
     let mut ops = Vec::new();
 
     loop {
@@ -2580,7 +2613,7 @@ pub fn parse_context(name: &str, input: &str) -> EngineResult<ContextDefinition>
     }
 
     if !parser.at_end() {
-        return Err(EngineError::InvalidData(format!(
+        return Err(parser.parse_err(format!(
             "unexpected token in context definition: {:?}",
             parser.peek()
         )));
@@ -2621,9 +2654,9 @@ impl Parser {
         let name = match self.peek().cloned() {
             Some(Token::Ident(s)) => s,
             other => {
-                return Err(EngineError::InvalidData(format!(
-                    "expected context operation or name, got {other:?}"
-                )));
+                return Err(
+                    self.parse_err(format!("expected context operation or name, got {other:?}"))
+                );
             }
         };
 
@@ -2636,9 +2669,9 @@ impl Parser {
                 let _dim_table = match self.advance()?.clone() {
                     Token::Ident(s) => s,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
-                            "KEEP: expected table name, got {tok:?}"
-                        )));
+                        return Err(
+                            self.parse_err_prev(format!("KEEP: expected table name, got {tok:?}"))
+                        );
                     }
                 };
                 let mut filters = Vec::new();
@@ -2695,7 +2728,7 @@ impl Parser {
                 let rel_name = match self.advance()?.clone() {
                     Token::StringLit(s) => s,
                     tok => {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "USERELATIONSHIP: expected string literal, got {tok:?}"
                         )));
                     }
@@ -2741,16 +2774,16 @@ impl Parser {
                 Token::Ident(s) => {
                     let upper = s.to_uppercase();
                     if upper == "VAR" || upper == "RETURN" {
-                        return Err(EngineError::InvalidData(format!(
+                        return Err(self.parse_err_prev(format!(
                             "'{s}' is a reserved keyword and cannot be used as a variable name"
                         )));
                     }
                     s
                 }
                 tok => {
-                    return Err(EngineError::InvalidData(format!(
-                        "VAR: expected variable name, got {tok:?}"
-                    )));
+                    return Err(
+                        self.parse_err_prev(format!("VAR: expected variable name, got {tok:?}"))
+                    );
                 }
             };
 
@@ -2763,14 +2796,12 @@ impl Parser {
         }
 
         if bindings.is_empty() {
-            return Err(EngineError::InvalidData(
-                "VAR block must have at least one VAR declaration".into(),
-            ));
+            return Err(self.parse_err("VAR block must have at least one VAR declaration"));
         }
 
         // Expect RETURN.
         if !self.peek_is_return() {
-            return Err(EngineError::InvalidData(format!(
+            return Err(self.parse_err(format!(
                 "expected RETURN after VAR declarations, got {:?}",
                 self.peek()
             )));
@@ -2795,38 +2826,44 @@ mod tests {
     fn parse_simple_sum() {
         let expr = parse_measure_expression("SUM(Sales[amount])").unwrap();
         assert!(expr.has_aggregate());
-        assert_eq!(expr.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "SUM(\"amount\")");
     }
 
     #[test]
     fn parse_simple_count() {
         let expr = parse_measure_expression("COUNT(Sales[id])").unwrap();
-        assert_eq!(expr.to_sql_string(), "COUNT(\"id\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "COUNT(\"id\")");
     }
 
     #[test]
     fn parse_distinctcount() {
         let expr = parse_measure_expression("DISTINCTCOUNT(Sales[product_id])").unwrap();
-        assert_eq!(expr.to_sql_string(), "COUNT(DISTINCT \"product_id\")");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "COUNT(DISTINCT \"product_id\")"
+        );
     }
 
     #[test]
     fn parse_avg() {
         let expr = parse_measure_expression("AVG(Sales[price])").unwrap();
-        assert_eq!(expr.to_sql_string(), "AVG(\"price\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "AVG(\"price\")");
     }
 
     #[test]
     fn parse_arithmetic_aggregates() {
         let expr = parse_measure_expression("SUM(Sales[amount]) / COUNT(Sales[id])").unwrap();
-        assert_eq!(expr.to_sql_string(), "(SUM(\"amount\") / COUNT(\"id\"))");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "(SUM(\"amount\") / COUNT(\"id\"))"
+        );
     }
 
     #[test]
     fn parse_addition_subtraction() {
         let expr =
             parse_measure_expression("SUM(Sales[a]) + SUM(Sales[b]) - SUM(Sales[c])").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("SUM(\"a\")"));
         assert!(sql.contains("SUM(\"b\")"));
         assert!(sql.contains("SUM(\"c\")"));
@@ -2835,7 +2872,7 @@ mod tests {
     #[test]
     fn parse_parenthesized_arithmetic() {
         let expr = parse_measure_expression("(SUM(Sales[a]) + SUM(Sales[b])) * 100").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("100"));
     }
 
@@ -2889,8 +2926,9 @@ mod tests {
         ctx.register_batch("dim_category", dim_batch).unwrap();
 
         // to_case_when_sql must qualify columns inside arithmetic operands.
-        let case_sql =
-            expr.to_case_when_sql("dim_category.\"categoryname\" = 'Bikes'", "fact_sales");
+        let case_sql = expr
+            .to_case_when_sql("dim_category.\"categoryname\" = 'Bikes'", "fact_sales")
+            .unwrap();
         assert!(
             case_sql.contains("fact_sales.\"unitprice\" * fact_sales.\"orderqty\""),
             "columns inside arithmetic should be individually qualified, got: {case_sql}"
@@ -3019,14 +3057,14 @@ mod tests {
     #[test]
     fn parse_numeric_literal() {
         let expr = parse_measure_expression("SUM(Sales[a]) * 100").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("100"));
     }
 
     #[test]
     fn parse_float_literal() {
         let expr = parse_measure_expression("SUM(Sales[a]) * 1.5").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("1.5"));
     }
 
@@ -3062,7 +3100,7 @@ mod tests {
         let expr =
             parse_measure_expression(r#"IF(SUM(Sales[amount]) > 1000, "High", "Low")"#).unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN (SUM(\"amount\") > 1000) THEN 'High' ELSE 'Low' END"
         );
         assert!(expr.has_aggregate());
@@ -3071,7 +3109,7 @@ mod tests {
     #[test]
     fn parse_if_with_numeric_result() {
         let expr = parse_measure_expression("IF(SUM(S[a]) > 0, SUM(S[a]), 0)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.starts_with("CASE WHEN"));
         assert!(sql.contains("SUM(\"a\")"));
     }
@@ -3079,7 +3117,7 @@ mod tests {
     #[test]
     fn parse_if_with_isblank() {
         let expr = parse_measure_expression(r#"IF(ISBLANK(SUM(S[a])), 0, SUM(S[a]))"#).unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("IS NULL"));
     }
 
@@ -3089,7 +3127,7 @@ mod tests {
             r#"SWITCH(SUM(S[status]), 1, "Active", 2, "Inactive", "Unknown")"#,
         )
         .unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("CASE SUM(\"status\")"));
         assert!(sql.contains("WHEN 1 THEN 'Active'"));
         assert!(sql.contains("WHEN 2 THEN 'Inactive'"));
@@ -3099,7 +3137,7 @@ mod tests {
     #[test]
     fn parse_divide() {
         let expr = parse_measure_expression("DIVIDE(SUM(S[revenue]), COUNT(S[orders]))").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("CASE WHEN"));
         assert!(sql.contains("= 0"));
         assert!(sql.contains("CAST(SUM(\"revenue\") AS DOUBLE) / COUNT(\"orders\")"));
@@ -3108,38 +3146,41 @@ mod tests {
     #[test]
     fn parse_divide_with_alternate() {
         let expr = parse_measure_expression("DIVIDE(SUM(S[a]), SUM(S[b]), 0)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("THEN 0 ELSE"));
     }
 
     #[test]
     fn parse_blank() {
         let expr = parse_measure_expression("BLANK()").unwrap();
-        assert_eq!(expr.to_sql_string(), "NULL");
+        assert_eq!(expr.to_sql_string().unwrap(), "NULL");
     }
 
     #[test]
     fn parse_isblank() {
         let expr = parse_measure_expression("ISBLANK(SUM(S[x]))").unwrap();
-        assert_eq!(expr.to_sql_string(), "(SUM(\"x\") IS NULL)");
+        assert_eq!(expr.to_sql_string().unwrap(), "(SUM(\"x\") IS NULL)");
     }
 
     #[test]
     fn parse_coalesce() {
         let expr = parse_measure_expression("COALESCE(SUM(S[a]), 0)").unwrap();
-        assert_eq!(expr.to_sql_string(), "COALESCE(SUM(\"a\"), 0)");
+        assert_eq!(expr.to_sql_string().unwrap(), "COALESCE(SUM(\"a\"), 0)");
     }
 
     #[test]
     fn parse_coalesce_multiple() {
         let expr = parse_measure_expression("COALESCE(SUM(S[a]), SUM(S[b]), 0)").unwrap();
-        assert_eq!(expr.to_sql_string(), "COALESCE(SUM(\"a\"), SUM(\"b\"), 0)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "COALESCE(SUM(\"a\"), SUM(\"b\"), 0)"
+        );
     }
 
     #[test]
     fn parse_countrows() {
         let expr = parse_measure_expression("COUNTROWS(Sales)").unwrap();
-        assert_eq!(expr.to_sql_string(), "COUNT(*)");
+        assert_eq!(expr.to_sql_string().unwrap(), "COUNT(*)");
         assert!(expr.has_aggregate());
         assert!(expr.is_simple_aggregate());
     }
@@ -3153,38 +3194,38 @@ mod tests {
     #[test]
     fn parse_abs() {
         let expr = parse_measure_expression("ABS(SUM(S[diff]))").unwrap();
-        assert_eq!(expr.to_sql_string(), "ABS(SUM(\"diff\"))");
+        assert_eq!(expr.to_sql_string().unwrap(), "ABS(SUM(\"diff\"))");
     }
 
     #[test]
     fn parse_round() {
         let expr = parse_measure_expression("ROUND(SUM(S[price]), 2)").unwrap();
-        assert_eq!(expr.to_sql_string(), "ROUND(SUM(\"price\"), 2)");
+        assert_eq!(expr.to_sql_string().unwrap(), "ROUND(SUM(\"price\"), 2)");
     }
 
     #[test]
     fn parse_int() {
         let expr = parse_measure_expression("INT(SUM(S[value]))").unwrap();
-        assert_eq!(expr.to_sql_string(), "FLOOR(SUM(\"value\"))");
+        assert_eq!(expr.to_sql_string().unwrap(), "FLOOR(SUM(\"value\"))");
     }
 
     #[test]
     fn parse_sqrt() {
         let expr = parse_measure_expression("SQRT(SUM(S[x]))").unwrap();
-        assert_eq!(expr.to_sql_string(), "SQRT(SUM(\"x\"))");
+        assert_eq!(expr.to_sql_string().unwrap(), "SQRT(SUM(\"x\"))");
     }
 
     #[test]
     fn parse_power() {
         let expr = parse_measure_expression("POWER(SUM(S[x]), 2)").unwrap();
-        assert_eq!(expr.to_sql_string(), "POWER(SUM(\"x\"), 2)");
+        assert_eq!(expr.to_sql_string().unwrap(), "POWER(SUM(\"x\"), 2)");
     }
 
     #[test]
     fn parse_nested_new_functions() {
         // ROUND(DIVIDE(SUM(S[a]), COUNT(S[b])), 2)
         let expr = parse_measure_expression("ROUND(DIVIDE(SUM(S[a]), COUNT(S[b])), 2)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.starts_with("ROUND("));
         assert!(sql.contains("CASE WHEN"));
     }
@@ -3194,7 +3235,7 @@ mod tests {
         let expr =
             parse_measure_expression("IF(COUNT(S[b]) > 0, DIVIDE(SUM(S[a]), COUNT(S[b])), 0)")
                 .unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.starts_with("CASE WHEN"));
         assert!(sql.contains("COUNT(\"b\") > 0"));
     }
@@ -3535,7 +3576,7 @@ mod tests {
         )
         .unwrap();
         // After inlining, should produce valid SQL.
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("SUM"));
         assert!(sql.contains("COUNT"));
         assert!(sql.contains("/"));
@@ -3547,7 +3588,7 @@ mod tests {
         let expr =
             parse_measure_expression("VAR a = SUM(Sales[amount]) VAR b = a * 2 RETURN b + 1")
                 .unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         // After inlining: (SUM("amount") * 2) + 1
         assert!(sql.contains("SUM"));
         assert!(sql.contains("* 2"));
@@ -3606,7 +3647,7 @@ mod tests {
             "VAR avg = DIVIDE(SUM(Sales[amount]), COUNT(Sales[id])) RETURN ROUND(avg, 2)",
         )
         .unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("ROUND"));
         assert!(sql.contains("SUM"));
     }
@@ -3745,14 +3786,17 @@ mod tests {
     #[test]
     fn parse_hasonevalue() {
         let expr = parse_measure_expression("HASONEVALUE(Products[category])").unwrap();
-        assert_eq!(expr.to_sql_string(), "(COUNT(DISTINCT \"category\") = 1)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "(COUNT(DISTINCT \"category\") = 1)"
+        );
     }
 
     #[test]
     fn parse_selectedvalue_no_alternate() {
         let expr = parse_measure_expression("SELECTEDVALUE(Products[category])").unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(DISTINCT \"category\") = 1 THEN MIN(\"category\") ELSE NULL END"
         );
     }
@@ -3762,7 +3806,7 @@ mod tests {
         let expr =
             parse_measure_expression("SELECTEDVALUE(Products[category], \"Multiple\")").unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(DISTINCT \"category\") = 1 THEN MIN(\"category\") ELSE 'Multiple' END"
         );
     }
@@ -3772,7 +3816,7 @@ mod tests {
         let expr = parse_measure_expression("FIRST(Products[name], ORDER BY Products[sort_order])")
             .unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "FIRST_VALUE(\"name\" ORDER BY \"sort_order\")"
         );
     }
@@ -3781,7 +3825,7 @@ mod tests {
     fn parse_first_without_order_by_keywords() {
         let expr = parse_measure_expression("FIRST(Products[name], Products[sort_order])").unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "FIRST_VALUE(\"name\" ORDER BY \"sort_order\")"
         );
     }
@@ -3792,7 +3836,7 @@ mod tests {
             "IF(HASONEVALUE(Calendar[year]), SELECTEDVALUE(Calendar[year]), \"All\")",
         )
         .unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.starts_with("CASE WHEN"));
         assert!(sql.contains("COUNT(DISTINCT \"year\") = 1"));
     }
@@ -3801,7 +3845,7 @@ mod tests {
     fn parse_selectedvalue_with_blank() {
         let expr = parse_measure_expression("SELECTEDVALUE(Calendar[year], BLANK())").unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(DISTINCT \"year\") = 1 THEN MIN(\"year\") ELSE NULL END"
         );
     }
@@ -3811,7 +3855,7 @@ mod tests {
     #[test]
     fn parse_and_function() {
         let expr = parse_measure_expression("IF(AND(SUM(t[a]) > 0, SUM(t[b]) > 0), 1, 0)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("AND"));
         assert!(sql.contains("SUM(\"a\") > 0"));
         assert!(sql.contains("SUM(\"b\") > 0"));
@@ -3821,21 +3865,21 @@ mod tests {
     fn parse_or_function() {
         let expr =
             parse_measure_expression("IF(OR(SUM(t[a]) > 100, SUM(t[b]) > 100), 1, 0)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("OR"));
     }
 
     #[test]
     fn parse_not_function() {
         let expr = parse_measure_expression("IF(NOT(SUM(t[a]) = 0), 1, 0)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("NOT"));
     }
 
     #[test]
     fn parse_true_false_function() {
         let expr = parse_measure_expression("IF(SUM(t[a]) > 0, TRUE(), FALSE())").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("TRUE"));
         assert!(sql.contains("FALSE"));
     }
@@ -3843,7 +3887,7 @@ mod tests {
     #[test]
     fn parse_true_false_bare() {
         let expr = parse_measure_expression("IF(SUM(t[a]) > 0, TRUE, FALSE)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("TRUE"));
         assert!(sql.contains("FALSE"));
     }
@@ -3851,7 +3895,7 @@ mod tests {
     #[test]
     fn parse_xor_function() {
         let expr = parse_measure_expression("IF(XOR(SUM(t[a]) > 0, SUM(t[b]) > 0), 1, 0)").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         // XOR renders as (A AND NOT B) OR (NOT A AND B)
         assert!(sql.contains("AND NOT"));
     }
@@ -3862,7 +3906,7 @@ mod tests {
             "IF(AND(OR(SUM(t[a]) > 0, SUM(t[b]) > 0), NOT(SUM(t[c]) = 0)), 1, 0)",
         )
         .unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("AND"));
         assert!(sql.contains("OR"));
         assert!(sql.contains("NOT"));
@@ -3873,78 +3917,90 @@ mod tests {
     #[test]
     fn parse_upper() {
         let expr = parse_measure_expression("UPPER(t[name])").unwrap();
-        assert_eq!(expr.to_sql_string(), "UPPER(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "UPPER(\"name\")");
     }
 
     #[test]
     fn parse_lower() {
         let expr = parse_measure_expression("LOWER(t[name])").unwrap();
-        assert_eq!(expr.to_sql_string(), "LOWER(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "LOWER(\"name\")");
     }
 
     #[test]
     fn parse_trim() {
         let expr = parse_measure_expression("TRIM(t[name])").unwrap();
-        assert_eq!(expr.to_sql_string(), "TRIM(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "TRIM(\"name\")");
     }
 
     #[test]
     fn parse_len() {
         let expr = parse_measure_expression("LEN(t[name])").unwrap();
-        assert_eq!(expr.to_sql_string(), "LENGTH(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "LENGTH(\"name\")");
     }
 
     #[test]
     fn parse_left_right() {
         let expr = parse_measure_expression("LEFT(t[name], 3)").unwrap();
-        assert_eq!(expr.to_sql_string(), "LEFT(\"name\", 3)");
+        assert_eq!(expr.to_sql_string().unwrap(), "LEFT(\"name\", 3)");
 
         let expr = parse_measure_expression("RIGHT(t[name], 2)").unwrap();
-        assert_eq!(expr.to_sql_string(), "RIGHT(\"name\", 2)");
+        assert_eq!(expr.to_sql_string().unwrap(), "RIGHT(\"name\", 2)");
     }
 
     #[test]
     fn parse_mid() {
         let expr = parse_measure_expression("MID(t[name], 2, 4)").unwrap();
-        assert_eq!(expr.to_sql_string(), "SUBSTRING(\"name\" FROM 2 FOR 4)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "SUBSTRING(\"name\" FROM 2 FOR 4)"
+        );
     }
 
     #[test]
     fn parse_concatenate_variadic() {
         let expr = parse_measure_expression("CONCATENATE(t[first], \" \", t[last])").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert_eq!(sql, "CONCAT(\"first\", ' ', \"last\")");
     }
 
     #[test]
     fn parse_combinevalues() {
         let expr = parse_measure_expression("COMBINEVALUES(\"-\", t[a], t[b], t[c])").unwrap();
-        assert_eq!(expr.to_sql_string(), "CONCAT_WS('-', \"a\", \"b\", \"c\")");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "CONCAT_WS('-', \"a\", \"b\", \"c\")"
+        );
     }
 
     #[test]
     fn parse_find() {
         let expr = parse_measure_expression("FIND(\"x\", t[text])").unwrap();
-        assert_eq!(expr.to_sql_string(), "STRPOS(\"text\", 'x')");
+        assert_eq!(expr.to_sql_string().unwrap(), "STRPOS(\"text\", 'x')");
     }
 
     #[test]
     fn parse_search() {
         let expr = parse_measure_expression("SEARCH(\"x\", t[text])").unwrap();
-        assert_eq!(expr.to_sql_string(), "STRPOS(LOWER(\"text\"), LOWER('x'))");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "STRPOS(LOWER(\"text\"), LOWER('x'))"
+        );
     }
 
     #[test]
     fn parse_substitute() {
         let expr = parse_measure_expression("SUBSTITUTE(t[text], \"old\", \"new\")").unwrap();
-        assert_eq!(expr.to_sql_string(), "REPLACE(\"text\", 'old', 'new')");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "REPLACE(\"text\", 'old', 'new')"
+        );
     }
 
     #[test]
     fn parse_replace() {
         let expr = parse_measure_expression("REPLACE(t[text], 3, 2, \"XX\")").unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "OVERLAY(\"text\" PLACING 'XX' FROM 3 FOR 2)"
         );
     }
@@ -3952,26 +4008,29 @@ mod tests {
     #[test]
     fn parse_rept() {
         let expr = parse_measure_expression("REPT(\"ab\", 3)").unwrap();
-        assert_eq!(expr.to_sql_string(), "REPEAT('ab', 3)");
+        assert_eq!(expr.to_sql_string().unwrap(), "REPEAT('ab', 3)");
     }
 
     #[test]
     fn parse_exact() {
         let expr = parse_measure_expression("EXACT(t[a], t[b])").unwrap();
-        assert_eq!(expr.to_sql_string(), "(\"a\" = \"b\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "(\"a\" = \"b\")");
     }
 
     #[test]
     fn parse_value() {
         let expr = parse_measure_expression("VALUE(t[price_text])").unwrap();
-        assert_eq!(expr.to_sql_string(), "CAST(\"price_text\" AS DOUBLE)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "CAST(\"price_text\" AS DOUBLE)"
+        );
     }
 
     #[test]
     fn parse_fixed() {
         let expr = parse_measure_expression("FIXED(SUM(t[amount]), 2)").unwrap();
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CAST(ROUND(SUM(\"amount\"), 2) AS VARCHAR)"
         );
     }
@@ -3979,47 +4038,50 @@ mod tests {
     #[test]
     fn parse_unichar_unicode() {
         let expr = parse_measure_expression("UNICHAR(65)").unwrap();
-        assert_eq!(expr.to_sql_string(), "CHR(65)");
+        assert_eq!(expr.to_sql_string().unwrap(), "CHR(65)");
 
         let expr = parse_measure_expression("UNICODE(\"A\")").unwrap();
-        assert_eq!(expr.to_sql_string(), "ASCII('A')");
+        assert_eq!(expr.to_sql_string().unwrap(), "ASCII('A')");
     }
 
     #[test]
     fn parse_ltrim_rtrim() {
         let expr = parse_measure_expression("LTRIM(t[name])").unwrap();
-        assert_eq!(expr.to_sql_string(), "LTRIM(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "LTRIM(\"name\")");
         let expr = parse_measure_expression("LTRIM(t[name], \"0#\")").unwrap();
-        assert_eq!(expr.to_sql_string(), "LTRIM(\"name\", '0#')");
+        assert_eq!(expr.to_sql_string().unwrap(), "LTRIM(\"name\", '0#')");
         let expr = parse_measure_expression("RTRIM(t[price], \"0.\")").unwrap();
-        assert_eq!(expr.to_sql_string(), "RTRIM(\"price\", '0.')");
+        assert_eq!(expr.to_sql_string().unwrap(), "RTRIM(\"price\", '0.')");
     }
 
     #[test]
     fn parse_lpad_rpad() {
         let expr = parse_measure_expression("LPAD(t[id], 5, \"0\")").unwrap();
-        assert_eq!(expr.to_sql_string(), "LPAD(\"id\", 5, '0')");
+        assert_eq!(expr.to_sql_string().unwrap(), "LPAD(\"id\", 5, '0')");
         let expr = parse_measure_expression("RPAD(t[code], 10)").unwrap();
-        assert_eq!(expr.to_sql_string(), "RPAD(\"code\", 10)");
+        assert_eq!(expr.to_sql_string().unwrap(), "RPAD(\"code\", 10)");
     }
 
     #[test]
     fn parse_reverse() {
         let expr = parse_measure_expression("REVERSE(t[name])").unwrap();
-        assert_eq!(expr.to_sql_string(), "REVERSE(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "REVERSE(\"name\")");
     }
 
     #[test]
     fn parse_split() {
         let expr = parse_measure_expression("SPLIT(t[path], \"/\", 2)").unwrap();
-        assert_eq!(expr.to_sql_string(), "SPLIT_PART(\"path\", '/', 2)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "SPLIT_PART(\"path\", '/', 2)"
+        );
     }
 
     #[test]
     fn parse_text_in_if() {
         let expr =
             parse_measure_expression("IF(LEN(t[name]) > 10, LEFT(t[name], 10), t[name])").unwrap();
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert!(sql.contains("LENGTH"));
         assert!(sql.contains("LEFT"));
     }
@@ -4496,7 +4558,10 @@ mod tests {
                 Expression::LiteralString("Red".into()),
             ],
         };
-        assert_eq!(inlist.to_sql_string(), "\"color\" IN ('Blue', 'Red')");
+        assert_eq!(
+            inlist.to_sql_string().unwrap(),
+            "\"color\" IN ('Blue', 'Red')"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4565,5 +4630,146 @@ mod tests {
         } else {
             panic!("expected Keep expression");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ParseError variant and position reporting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn syntax_error_returns_parse_error_variant() {
+        let err = parse_measure_expression("SUM(t[col] +").unwrap_err();
+        assert!(
+            matches!(err, EngineError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_expression_reports_position_at_end_of_input() {
+        let input = "SUM(t[col] +";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(position, input.len());
+                assert!(message.contains("unexpected end of expression"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_function_reports_position_of_function_name() {
+        let input = "1 + BOGUS(t[a])";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(position, 4, "position should point at 'BOGUS'");
+                assert!(message.contains("unknown function: BOGUS"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unexpected_character_reports_its_position() {
+        let input = "SUM(t[a]) ; 1";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(position, 10, "position should point at ';'");
+                assert!(message.contains("unexpected character"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_string_reports_opening_quote_position() {
+        let input = "SUM(t[a]) + \"abc";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(position, 12, "position should point at the opening quote");
+                assert!(message.contains("unterminated string literal"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn token_mismatch_reports_offending_token_position() {
+        let input = "SUM(t[a] 5)";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, .. } => {
+                assert_eq!(position, 9, "position should point at the stray '5'");
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_tokens_report_position_of_first_extra_token() {
+        let input = "SUM(t[a]) 42";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(position, 10, "position should point at '42'");
+                assert!(message.contains("unexpected token after expression"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn position_is_byte_offset_for_multibyte_input() {
+        // 'å' is 2 bytes in UTF-8, so the ';' sits at byte offset 9 even
+        // though it is the 9th character (char index 8).
+        let input = "SUM(å[a];";
+        let err = parse_measure_expression(input).unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(
+                    position, 9,
+                    "position must be a byte offset, not a char index"
+                );
+                assert!(message.contains("unexpected character"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_input_reports_parse_error_at_position_zero() {
+        let err = parse_measure_expression("").unwrap_err();
+        match err {
+            EngineError::ParseError { position, message } => {
+                assert_eq!(position, 0);
+                assert!(message.contains("empty expression"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_var_name_reports_parse_error_variant() {
+        let err =
+            parse_measure_expression("VAR RETURN = SUM(Sales[amount]) RETURN RETURN").unwrap_err();
+        assert!(
+            matches!(err, EngineError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn depth_guard_reports_parse_error_variant() {
+        let n = 100_000;
+        let input = format!("{}1{}", "(".repeat(n), ")".repeat(n));
+        let err = parse_measure_expression(&input).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
     }
 }

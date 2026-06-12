@@ -1182,7 +1182,7 @@ mod tests {
         let expr = expr::agg(AggregateOp::Sum, expr::col("amount"));
         let (stripped, ctx) = resolver.resolve(&expr).unwrap();
 
-        assert_eq!(stripped.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert!(ctx.filters.is_empty());
         assert!(!ctx.is_reset);
     }
@@ -1205,7 +1205,7 @@ mod tests {
         );
         let (stripped, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert_eq!(stripped.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert_eq!(ctx.filters.len(), 1);
         assert_eq!(ctx.filters[0].table, "Sales");
         assert_eq!(ctx.filters[0].column, "region");
@@ -1238,7 +1238,7 @@ mod tests {
         );
         let (stripped, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert_eq!(stripped.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert_eq!(ctx.filters.len(), 2);
     }
 
@@ -1360,7 +1360,7 @@ mod tests {
         let expression = expr::agg(AggregateOp::Sum, expr::using(expr::col("amount"), "ctx_us"));
         let (stripped, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert_eq!(stripped.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert_eq!(ctx.filters.len(), 1);
         assert_eq!(ctx.filters[0].table, "Sales");
         assert_eq!(ctx.filters[0].column, "region");
@@ -1472,7 +1472,7 @@ mod tests {
         );
         let (stripped, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert_eq!(stripped.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert!(ctx
             .cleared_columns
             .contains(&("Calendar".into(), "year".into())));
@@ -1625,7 +1625,7 @@ mod tests {
         );
         let (stripped, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert_eq!(stripped.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert!(ctx
             .cleared_inner_columns
             .contains(&("Sales".into(), "region".into())));

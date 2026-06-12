@@ -4,10 +4,24 @@
 //! connectors must implement. It provides schema introspection and data
 //! fetching, returning results as Arrow `RecordBatch` values.
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{PoisonError, RwLock};
+
 use arrow::record_batch::RecordBatch;
 use engine_core::model::Table;
 
 use crate::error::ConnectorResult;
+
+/// Name of the synthetic grouping-indicator column appended to query results
+/// when ROLLUP totals are requested (see [`FetchRequest::rollup_totals`]).
+///
+/// The column is a 32-bit integer bitmask: bit `i` (least-significant bit =
+/// the first `group_by` column) is **set** when that group-by column is
+/// rolled up (aggregated away) in the row. Detail rows are `0`; the grand
+/// total has all bits set. This matches SQL `GROUPING_ID` semantics and
+/// disambiguates subtotal `NULL`s from real `NULL` dimension values.
+pub const GROUPING_ID_COLUMN: &str = "__grouping_id";
 
 /// Metadata about a table discovered from a data source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +123,24 @@ pub struct FilterCondition {
     pub value: String,
 }
 
+/// Classification of IN-list filter values, controlling how connectors
+/// render them in SQL.
+///
+/// Integer join keys (the common case for surrogate keys) must be rendered
+/// as unquoted numeric literals compared against the *uncast* column —
+/// casting the fact column to text (`"col"::text IN ('1', ...)`) makes the
+/// predicate non-sargable and forces a sequential scan over the fact table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InValueKind {
+    /// Values are arbitrary strings; connectors escape and quote them.
+    #[default]
+    Text,
+    /// Values are decimal integer literals; connectors render them unquoted
+    /// (index-friendly) **after re-validating** that every value parses as
+    /// an integer. See [`InFilterCondition::effective_kind`].
+    Integer,
+}
+
 /// An IN-list filter condition: `column IN (v1, v2, ...)`.
 ///
 /// Used for relationship-based filter propagation: when a dimension table is
@@ -120,6 +152,67 @@ pub struct InFilterCondition {
     pub column: String,
     /// Values to include (string representations; connector handles quoting).
     pub values: Vec<String>,
+    /// How the values should be rendered in SQL. Defaults to
+    /// [`InValueKind::Text`] (escaped + quoted).
+    pub kind: InValueKind,
+}
+
+impl InFilterCondition {
+    /// Create a text-kind IN filter (values escaped and quoted by the
+    /// connector). This is the safe default for arbitrary values.
+    pub fn text(column: impl Into<String>, values: Vec<String>) -> Self {
+        Self {
+            column: column.into(),
+            values,
+            kind: InValueKind::Text,
+        }
+    }
+
+    /// The value kind connectors must actually render with.
+    ///
+    /// Re-validates [`InValueKind::Integer`] defensively: unless **every**
+    /// value parses as `i128`, the kind is downgraded to
+    /// [`InValueKind::Text`] so that no unvalidated string is ever inlined
+    /// unquoted into SQL. Connectors must call this rather than trusting
+    /// the `kind` field directly.
+    pub fn effective_kind(&self) -> InValueKind {
+        match self.kind {
+            InValueKind::Text => InValueKind::Text,
+            InValueKind::Integer => {
+                if self.values.iter().all(|v| v.parse::<i128>().is_ok()) {
+                    InValueKind::Integer
+                } else {
+                    InValueKind::Text
+                }
+            }
+        }
+    }
+}
+
+/// The sort key of an [`OrderByExpr`] in a pushed query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderByTarget {
+    /// A plain column reference. For aggregate requests this must be one of
+    /// the `group_by` columns.
+    Column(String),
+    /// `MIN(column)` — engine sort-by-column substitution. The model sorts a
+    /// display column by a different column (e.g. `MonthName` by
+    /// `MonthNumber`) that is not part of the GROUP BY clause, so the sort
+    /// column must be aggregated. `MIN` is exact under the model's 1:1
+    /// display-value-to-sort-value assumption.
+    MinColumn(String),
+    /// A result-column alias from the SELECT list (e.g. an aggregate alias),
+    /// used to order by a measure's value.
+    Alias(String),
+}
+
+/// A single ORDER BY entry of a [`FetchRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderByExpr {
+    /// What to sort by.
+    pub target: OrderByTarget,
+    /// Sort direction; `false` is ascending.
+    pub descending: bool,
 }
 
 /// A request to fetch data from a source table.
@@ -152,6 +245,26 @@ pub struct FetchRequest {
     /// Maximum number of IN-filter values to inline in SQL before switching
     /// to a temp-table strategy. `None` means always inline.
     pub max_inline_in_values: Option<usize>,
+    /// ORDER BY entries applied to the result. Rendered after `GROUP BY` and
+    /// combined with the row limit (`LIMIT` on PostgreSQL, `TOP(n)` on SQL
+    /// Server — `TOP` with `ORDER BY` returns the first rows of the ordered
+    /// result).
+    pub order_by: Vec<OrderByExpr>,
+    /// Render the aggregation with SQL ROLLUP totals.
+    ///
+    /// Only meaningful when `aggregates` is non-empty. When set, the
+    /// connector renders `GROUP BY ROLLUP (a, b, ...)` instead of a plain
+    /// `GROUP BY`, so the result contains the detail rows plus subtotal rows
+    /// per group-by prefix and a grand total — all computed at the source in
+    /// one query. The result gains a trailing integer column named
+    /// [`GROUPING_ID_COLUMN`] whose bitmask identifies the rolled-up columns
+    /// (bit `i` set = `group_by[i]` rolled up, LSB = `group_by[0]`). With an
+    /// empty `group_by`, the single aggregate row is emitted with a literal
+    /// `0` grouping id.
+    ///
+    /// `limit` (when present) applies to the combined result including the
+    /// subtotal rows.
+    pub rollup_totals: bool,
 }
 
 /// A join condition for multi-table aggregation pushdown.
@@ -260,6 +373,129 @@ pub trait Connector {
             "join aggregation pushdown not supported by this connector".into(),
         ))
     }
+
+    /// Discard any cached schema metadata held by this connector.
+    ///
+    /// Connectors that cache introspection results (see [`SchemaCache`])
+    /// serve table schemas from memory after the first lookup and will not
+    /// observe DDL changes on the source (`ALTER TABLE`, column type changes,
+    /// drops) until invalidated. Host applications that issue or expect DDL —
+    /// model designers in particular — should call this afterwards; the next
+    /// introspection re-reads the source catalog.
+    ///
+    /// Default implementation is a no-op for connectors that do not cache.
+    fn invalidate_schema_cache(&self) {}
+}
+
+/// A read-through cache for introspected table schemas, keyed by
+/// `(schema, table)`.
+///
+/// Schema introspection requires one or more catalog round-trips per table
+/// (e.g. `information_schema.columns` plus domain-type resolution on
+/// PostgreSQL). Connectors consult this cache so that repeated fetches
+/// against the same table pay that cost only once per connector lifetime.
+///
+/// # Staleness tradeoff
+///
+/// Entries never expire on their own: a cached schema can go stale if the
+/// source table is altered (columns added/removed/retyped) while the
+/// connector is alive. Within a typical analytical session schemas
+/// essentially never change, so this is the right default — but hosts that
+/// run DDL (model designers) must call [`SchemaCache::invalidate_all`]
+/// (exposed as `invalidate_schema_cache` on connectors) afterwards.
+///
+/// # Lock discipline
+///
+/// Uses a synchronous [`std::sync::RwLock`]: every guard is acquired and
+/// released within a single non-async statement, and the loader future in
+/// [`SchemaCache::get_or_load`] runs with **no lock held**, so a guard is
+/// never held across an `.await` and futures using the cache remain `Send`.
+/// Lock poisoning is recovered via [`PoisonError::into_inner`] — the guarded
+/// sections only perform `HashMap` operations, so the map cannot be left in
+/// a logically inconsistent state.
+#[derive(Debug, Default)]
+pub struct SchemaCache {
+    /// Cached table definitions keyed by `(schema, table)`.
+    entries: RwLock<HashMap<(String, String), Table>>,
+}
+
+impl SchemaCache {
+    /// Create an empty schema cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the cached schema for `(schema, table)`, or run `loader` to
+    /// introspect it and cache the result.
+    ///
+    /// Read-through semantics: the cache is probed under a read lock (guard
+    /// dropped immediately); on a miss the `loader` future runs without any
+    /// lock held, and the result is inserted under a short write lock.
+    /// Loader **errors are not cached** — a failed introspection is retried
+    /// on the next call.
+    ///
+    /// Two concurrent callers missing on the same key may both run the
+    /// loader; both then insert the identical schema, so this benign race
+    /// costs at most one redundant catalog round-trip and never corrupts
+    /// the cache.
+    pub async fn get_or_load<F, Fut>(
+        &self,
+        schema: &str,
+        table: &str,
+        loader: F,
+    ) -> ConnectorResult<Table>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ConnectorResult<Table>>,
+    {
+        let key = (schema.to_string(), table.to_string());
+
+        // Fast path: probe under a read lock; the guard is dropped at the
+        // end of this statement, before any await.
+        let cached = self
+            .entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(table) = cached {
+            return Ok(table);
+        }
+
+        // Miss: run the real introspection with no lock held.
+        let loaded = loader().await?;
+
+        self.entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, loaded.clone());
+        Ok(loaded)
+    }
+
+    /// Remove all cached schemas.
+    ///
+    /// Call after DDL on the source (or whenever stale metadata is
+    /// suspected); subsequent lookups re-introspect against the source
+    /// catalog.
+    pub fn invalidate_all(&self) {
+        self.entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Number of cached table schemas (diagnostics/testing).
+    pub fn len(&self) -> usize {
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// Whether the cache holds no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +514,8 @@ mod tests {
         assert!(req.group_by.is_empty());
         assert!(req.aggregates.is_empty());
         assert!(req.max_inline_in_values.is_none());
+        assert!(req.order_by.is_empty());
+        assert!(!req.rollup_totals);
     }
 
     #[test]
@@ -295,9 +533,48 @@ mod tests {
         let in_filter = InFilterCondition {
             column: "date_key".into(),
             values: vec!["1".into(), "2".into(), "3".into()],
+            kind: InValueKind::Integer,
         };
         assert_eq!(in_filter.column, "date_key");
         assert_eq!(in_filter.values.len(), 3);
+        assert_eq!(in_filter.kind, InValueKind::Integer);
+    }
+
+    #[test]
+    fn in_value_kind_defaults_to_text() {
+        assert_eq!(InValueKind::default(), InValueKind::Text);
+        let in_filter = InFilterCondition::text("name", vec!["a".into()]);
+        assert_eq!(in_filter.kind, InValueKind::Text);
+    }
+
+    #[test]
+    fn effective_kind_integer_with_valid_values_stays_integer() {
+        let in_filter = InFilterCondition {
+            column: "product_id".into(),
+            values: vec!["1".into(), "-42".into(), "9223372036854775807".into()],
+            kind: InValueKind::Integer,
+        };
+        assert_eq!(in_filter.effective_kind(), InValueKind::Integer);
+    }
+
+    #[test]
+    fn effective_kind_integer_with_hostile_value_downgrades_to_text() {
+        let in_filter = InFilterCondition {
+            column: "product_id".into(),
+            values: vec!["1".into(), "2); DROP TABLE t; --".into()],
+            kind: InValueKind::Integer,
+        };
+        assert_eq!(in_filter.effective_kind(), InValueKind::Text);
+    }
+
+    #[test]
+    fn effective_kind_text_stays_text_even_for_numeric_values() {
+        let in_filter = InFilterCondition {
+            column: "code".into(),
+            values: vec!["1".into(), "2".into()],
+            kind: InValueKind::Text,
+        };
+        assert_eq!(in_filter.effective_kind(), InValueKind::Text);
     }
 
     #[test]
@@ -308,5 +585,131 @@ mod tests {
         assert_eq!(FilterOperator::LessThan.as_sql(), "<");
         assert_eq!(FilterOperator::GreaterThanOrEqual.as_sql(), ">=");
         assert_eq!(FilterOperator::LessThanOrEqual.as_sql(), "<=");
+    }
+
+    mod schema_cache {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use engine_core::model::Column;
+        use engine_core::types::DataType;
+
+        use super::super::SchemaCache;
+        use crate::error::{ConnectorError, ConnectorResult};
+        use engine_core::model::Table;
+
+        /// Build a minimal table definition for cache tests.
+        fn sample_table(name: &str) -> Table {
+            Table::new(name, vec![Column::new("id", DataType::Int32)])
+                .expect("test table construction cannot fail")
+        }
+
+        /// Loader stub that counts invocations and returns `sample_table`.
+        async fn counting_loader(counter: &AtomicUsize, name: &str) -> ConnectorResult<Table> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(sample_table(name))
+        }
+
+        #[tokio::test]
+        async fn second_lookup_does_not_reinvoke_loader() {
+            let cache = SchemaCache::new();
+            let calls = AtomicUsize::new(0);
+
+            let first = cache
+                .get_or_load("sales", "orders", || {
+                    counting_loader(&calls, "sales.orders")
+                })
+                .await
+                .unwrap();
+            let second = cache
+                .get_or_load("sales", "orders", || {
+                    counting_loader(&calls, "sales.orders")
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(first.name(), second.name());
+            assert_eq!(cache.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn invalidate_all_clears_entries_and_forces_reload() {
+            let cache = SchemaCache::new();
+            let calls = AtomicUsize::new(0);
+
+            cache
+                .get_or_load("sales", "orders", || {
+                    counting_loader(&calls, "sales.orders")
+                })
+                .await
+                .unwrap();
+            assert_eq!(cache.len(), 1);
+
+            cache.invalidate_all();
+            assert!(cache.is_empty());
+
+            cache
+                .get_or_load("sales", "orders", || {
+                    counting_loader(&calls, "sales.orders")
+                })
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn distinct_keys_are_loaded_independently() {
+            let cache = SchemaCache::new();
+            let calls = AtomicUsize::new(0);
+
+            cache
+                .get_or_load("sales", "orders", || {
+                    counting_loader(&calls, "sales.orders")
+                })
+                .await
+                .unwrap();
+            cache
+                .get_or_load("sales", "customers", || {
+                    counting_loader(&calls, "sales.customers")
+                })
+                .await
+                .unwrap();
+            // Same table name in a different schema is a distinct key.
+            cache
+                .get_or_load("archive", "orders", || {
+                    counting_loader(&calls, "archive.orders")
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            assert_eq!(cache.len(), 3);
+        }
+
+        #[tokio::test]
+        async fn loader_error_is_not_cached() {
+            let cache = SchemaCache::new();
+            let calls = AtomicUsize::new(0);
+
+            let err = cache
+                .get_or_load("sales", "orders", || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<Table, _>(ConnectorError::IntrospectionFailed("boom".into()))
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ConnectorError::IntrospectionFailed(_)));
+            assert!(cache.is_empty());
+
+            // The failed lookup must be retried, not served from cache.
+            cache
+                .get_or_load("sales", "orders", || {
+                    counting_loader(&calls, "sales.orders")
+                })
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(cache.len(), 1);
+        }
     }
 }

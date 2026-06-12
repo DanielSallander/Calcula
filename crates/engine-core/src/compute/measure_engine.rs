@@ -99,7 +99,7 @@ impl<'a> MeasureEngine<'a> {
             .register_cross_table_data(&ctx, table_name, &effective, &eval_ctx)
             .await?;
 
-        let expr_sql = stripped_expr.to_sql_string();
+        let expr_sql = stripped_expr.to_sql_string()?;
         let mut sql = format!(
             "SELECT {expr_sql} AS {} FROM t",
             quote_ident_double(measure.name())
@@ -354,7 +354,7 @@ impl<'a> MeasureEngine<'a> {
             group_parts.push(qualified);
         }
 
-        let expr_sql = stripped_expr.to_sql_string();
+        let expr_sql = stripped_expr.to_sql_string()?;
         select_parts.push(format!(
             "{expr_sql} AS {}",
             quote_ident_double(measure.name())
@@ -777,7 +777,7 @@ impl<'a> MeasureEngine<'a> {
                 }
 
                 // Literals and non-aggregate expressions: render as SQL directly.
-                _ => Ok(expr.to_sql_string()),
+                _ => expr.to_sql_string(),
             }
         })
     }
@@ -912,7 +912,7 @@ impl<'a> MeasureEngine<'a> {
             }
         }
 
-        let expr_sql = stripped_expr.to_sql_string();
+        let expr_sql = stripped_expr.to_sql_string()?;
         main_select.push(format!("{expr_sql} AS {}", quote_ident_double(alias)));
 
         let mut main_from = format!("{fact_lower} CROSS JOIN {bounds_name}");
@@ -1018,7 +1018,7 @@ impl<'a> MeasureEngine<'a> {
             group_parts.push(qualified);
         }
 
-        let expr_sql = stripped_expr.to_sql_string();
+        let expr_sql = stripped_expr.to_sql_string()?;
         select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(alias)));
 
         let mut sql = format!("SELECT {} FROM {fact_lower}", select_parts.join(", "));
@@ -1215,7 +1215,7 @@ impl<'a> MeasureEngine<'a> {
         }
 
         // Measure aggregate.
-        let expr_sql = stripped_expr.to_sql_string();
+        let expr_sql = stripped_expr.to_sql_string()?;
         main_select.push(format!(
             "{expr_sql} AS {}",
             quote_ident_double(measure_name)
@@ -1376,7 +1376,7 @@ impl<'a> MeasureEngine<'a> {
 
         // Step 2: Inline scalar bindings and evaluate the RETURN expression.
         let inlined = expr.inline_bindings();
-        let result_sql = inlined.to_sql_string();
+        let result_sql = inlined.to_sql_string()?;
         let from_table = query_binding_names[0].to_lowercase();
 
         let mut sql = format!(
@@ -1486,7 +1486,7 @@ impl<'a> MeasureEngine<'a> {
 
         // Step 2: Build SQL over the intermediate table(s).
         let inlined = expr.inline_bindings();
-        let result_sql = inlined.to_sql_string();
+        let result_sql = inlined.to_sql_string()?;
         let from_table = query_binding_names[0].to_lowercase();
 
         let mut select_parts: Vec<String> = Vec::new();
@@ -1586,13 +1586,13 @@ impl<'a> MeasureEngine<'a> {
             let effective = eval_ctx.effective_filters(outer_filters);
 
             if effective.is_empty() {
-                let sql = stripped.to_sql_string();
+                let sql = stripped.to_sql_string()?;
                 select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
             } else {
                 // Build CASE WHEN for per-aggregate context filters.
                 let condition = self.build_where_clause(&effective, fact_table);
                 let measure_table = &fact_lower;
-                let sql = stripped.to_case_when_sql(&condition, measure_table);
+                let sql = stripped.to_case_when_sql(&condition, measure_table)?;
                 select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
 
                 // Track additional dimension tables needed for filter JOINs.

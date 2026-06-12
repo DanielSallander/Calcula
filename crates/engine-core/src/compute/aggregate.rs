@@ -68,6 +68,86 @@ impl std::fmt::Display for AggregateOp {
     }
 }
 
+impl AggregateOp {
+    /// Render this aggregate over an already-rendered operand SQL fragment
+    /// using DataFusion-compatible function names (the dialect used for local
+    /// execution SQL).
+    ///
+    /// Shapes: `COUNT(DISTINCT x)` for [`AggregateOp::DistinctCount`],
+    /// `COUNT(*)` for [`AggregateOp::CountRows`] (the operand is ignored), and
+    /// `NAME(x)` using the [`Display`](std::fmt::Display) name for everything
+    /// else (e.g. `SUM(x)`, `median(x)`, `stddev(x)`).
+    pub fn render_sql(&self, operand_sql: &str) -> String {
+        match self {
+            AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
+            AggregateOp::CountRows => "COUNT(*)".to_string(),
+            _ => format!("{self}({operand_sql})"),
+        }
+    }
+
+    /// Render this aggregate over an already-rendered operand SQL fragment
+    /// using PostgreSQL function names (the dialect used for source pushdown
+    /// SQL).
+    ///
+    /// Deviations from [`AggregateOp::render_sql`] are PostgreSQL-specific
+    /// spellings of the statistical aggregates:
+    /// `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)` for
+    /// [`AggregateOp::Median`], `STDDEV_SAMP`/`STDDEV_POP`/`VAR_SAMP`/`VAR_POP`
+    /// for the deviation/variance operations, and
+    /// `MODE() WITHIN GROUP (ORDER BY x)` for [`AggregateOp::Mode`].
+    /// [`AggregateOp::AnyValue`] renders as `MIN(x)` (semantically equivalent
+    /// for non-empty groups). The operand is ignored for
+    /// [`AggregateOp::CountRows`].
+    pub fn render_postgres_sql(&self, operand_sql: &str) -> String {
+        match self {
+            AggregateOp::Sum => format!("SUM({operand_sql})"),
+            AggregateOp::Count => format!("COUNT({operand_sql})"),
+            AggregateOp::Average => format!("AVG({operand_sql})"),
+            AggregateOp::Min => format!("MIN({operand_sql})"),
+            AggregateOp::Max => format!("MAX({operand_sql})"),
+            AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
+            AggregateOp::CountRows => "COUNT(*)".to_string(),
+            AggregateOp::Median => {
+                format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand_sql})")
+            }
+            AggregateOp::StdevSample => format!("STDDEV_SAMP({operand_sql})"),
+            AggregateOp::StdevPop => format!("STDDEV_POP({operand_sql})"),
+            AggregateOp::VarSample => format!("VAR_SAMP({operand_sql})"),
+            AggregateOp::VarPop => format!("VAR_POP({operand_sql})"),
+            AggregateOp::AnyValue => format!("MIN({operand_sql})"),
+            AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {operand_sql})"),
+        }
+    }
+
+    /// Render this aggregate with a filter condition applied via `CASE WHEN`,
+    /// using DataFusion-compatible function names.
+    ///
+    /// Produces `NAME(CASE WHEN condition THEN operand END)` via
+    /// [`AggregateOp::render_sql`]. [`AggregateOp::CountRows`] becomes
+    /// `SUM(CASE WHEN condition THEN 1 END)` (a conditional `COUNT(*)`); its
+    /// operand is ignored.
+    pub fn render_case_when_sql(&self, condition: &str, operand_sql: &str) -> String {
+        match self {
+            AggregateOp::CountRows => format!("SUM(CASE WHEN {condition} THEN 1 END)"),
+            _ => self.render_sql(&format!("CASE WHEN {condition} THEN {operand_sql} END")),
+        }
+    }
+
+    /// Render this aggregate with a filter condition applied via `CASE WHEN`,
+    /// using PostgreSQL function names.
+    ///
+    /// Produces `NAME(CASE WHEN condition THEN operand END)` via
+    /// [`AggregateOp::render_postgres_sql`]. [`AggregateOp::CountRows`]
+    /// becomes `SUM(CASE WHEN condition THEN 1 END)` (a conditional
+    /// `COUNT(*)`); its operand is ignored.
+    pub fn render_postgres_case_when_sql(&self, condition: &str, operand_sql: &str) -> String {
+        match self {
+            AggregateOp::CountRows => format!("SUM(CASE WHEN {condition} THEN 1 END)"),
+            _ => self.render_postgres_sql(&format!("CASE WHEN {condition} THEN {operand_sql} END")),
+        }
+    }
+}
+
 /// Result of an aggregation, represented as a DataFusion `ScalarValue`.
 ///
 /// This preserves the original Arrow type (e.g. sum of Int64 column is Int64,
@@ -468,5 +548,93 @@ mod tests {
         let result = sum_column(&data, "value").await.unwrap();
         // Sum of empty table: null → None via as_f64.
         assert!(result.is_none() || result == Some(0.0));
+    }
+
+    #[test]
+    fn render_sql_produces_datafusion_shapes() {
+        assert_eq!(AggregateOp::Sum.render_sql("\"amount\""), "SUM(\"amount\")");
+        assert_eq!(AggregateOp::Count.render_sql("x"), "COUNT(x)");
+        assert_eq!(AggregateOp::Average.render_sql("x"), "AVG(x)");
+        assert_eq!(AggregateOp::Min.render_sql("x"), "MIN(x)");
+        assert_eq!(AggregateOp::Max.render_sql("x"), "MAX(x)");
+        assert_eq!(
+            AggregateOp::DistinctCount.render_sql("x"),
+            "COUNT(DISTINCT x)"
+        );
+        // COUNT(*) ignores the operand.
+        assert_eq!(AggregateOp::CountRows.render_sql("ignored"), "COUNT(*)");
+        // Statistical aggregates use the DataFusion-flavored Display names.
+        assert_eq!(AggregateOp::Median.render_sql("x"), "median(x)");
+        assert_eq!(AggregateOp::StdevSample.render_sql("x"), "stddev(x)");
+        assert_eq!(AggregateOp::VarSample.render_sql("x"), "var(x)");
+        assert_eq!(AggregateOp::AnyValue.render_sql("x"), "MIN(x)");
+    }
+
+    #[test]
+    fn render_postgres_sql_produces_postgres_shapes() {
+        assert_eq!(AggregateOp::Sum.render_postgres_sql("x"), "SUM(x)");
+        assert_eq!(AggregateOp::Count.render_postgres_sql("x"), "COUNT(x)");
+        assert_eq!(AggregateOp::Average.render_postgres_sql("x"), "AVG(x)");
+        assert_eq!(AggregateOp::Min.render_postgres_sql("x"), "MIN(x)");
+        assert_eq!(AggregateOp::Max.render_postgres_sql("x"), "MAX(x)");
+        assert_eq!(
+            AggregateOp::DistinctCount.render_postgres_sql("x"),
+            "COUNT(DISTINCT x)"
+        );
+        assert_eq!(
+            AggregateOp::CountRows.render_postgres_sql("ignored"),
+            "COUNT(*)"
+        );
+        assert_eq!(
+            AggregateOp::Median.render_postgres_sql("x"),
+            "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)"
+        );
+        assert_eq!(
+            AggregateOp::StdevSample.render_postgres_sql("x"),
+            "STDDEV_SAMP(x)"
+        );
+        assert_eq!(
+            AggregateOp::StdevPop.render_postgres_sql("x"),
+            "STDDEV_POP(x)"
+        );
+        assert_eq!(
+            AggregateOp::VarSample.render_postgres_sql("x"),
+            "VAR_SAMP(x)"
+        );
+        assert_eq!(AggregateOp::VarPop.render_postgres_sql("x"), "VAR_POP(x)");
+        assert_eq!(AggregateOp::AnyValue.render_postgres_sql("x"), "MIN(x)");
+        assert_eq!(
+            AggregateOp::Mode.render_postgres_sql("x"),
+            "MODE() WITHIN GROUP (ORDER BY x)"
+        );
+    }
+
+    #[test]
+    fn render_case_when_sql_wraps_operand_in_condition() {
+        assert_eq!(
+            AggregateOp::Sum.render_case_when_sql("d.\"year\" = 2014", "f.\"amount\""),
+            "SUM(CASE WHEN d.\"year\" = 2014 THEN f.\"amount\" END)"
+        );
+        assert_eq!(
+            AggregateOp::DistinctCount.render_case_when_sql("c", "x"),
+            "COUNT(DISTINCT CASE WHEN c THEN x END)"
+        );
+        // Conditional COUNT(*) counts matching rows; operand is ignored.
+        assert_eq!(
+            AggregateOp::CountRows.render_case_when_sql("c", "ignored"),
+            "SUM(CASE WHEN c THEN 1 END)"
+        );
+    }
+
+    #[test]
+    fn render_postgres_case_when_sql_wraps_operand_in_condition() {
+        assert_eq!(
+            AggregateOp::Median.render_postgres_case_when_sql("c", "x"),
+            "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CASE WHEN c THEN x END)"
+        );
+        assert_eq!(
+            AggregateOp::CountRows.render_postgres_case_when_sql("c", "ignored"),
+            "SUM(CASE WHEN c THEN 1 END)"
+        );
     }
 }

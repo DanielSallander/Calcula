@@ -277,6 +277,7 @@ fn parse_query(input: &str, model: &DataModel) -> Result<QueryRequest, String> {
         group_by,
         filters,
         lookups: vec![],
+        ..Default::default()
     })
 }
 
@@ -610,7 +611,10 @@ async fn main() {
             match parse_measure_expression(expr_str.trim()) {
                 Ok(expr) => {
                     println!("  AST: {:#?}", expr);
-                    println!("  SQL: {}", expr.to_sql_string());
+                    match expr.to_sql_string() {
+                        Ok(sql) => println!("  SQL: {sql}"),
+                        Err(e) => println!("  SQL: <unrenderable: {e}>"),
+                    }
                     println!("  has_aggregate: {}", expr.has_aggregate());
                     println!("  has_context_ops: {}", expr.has_context_ops());
                     if let Some(table) = infer_fact_table(&expr) {

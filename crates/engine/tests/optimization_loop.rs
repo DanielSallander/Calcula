@@ -3191,6 +3191,7 @@ async fn optimization_loop() {
                 .collect(),
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let start = std::time::Instant::now();

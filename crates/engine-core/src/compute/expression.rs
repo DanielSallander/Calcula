@@ -324,9 +324,17 @@ fn validate_interval_keyword(
 
 impl ScalarFunction {
     /// Render as a SQL function call with the given arguments.
-    pub fn to_sql(&self, args: &[Expression]) -> String {
-        let strs: Vec<String> = args.iter().map(|a| a.to_sql_string()).collect();
-        self.to_sql_strs(&strs)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any argument cannot be rendered as scalar SQL
+    /// (see [`Expression::to_sql_string`]).
+    pub fn to_sql(&self, args: &[Expression]) -> EngineResult<String> {
+        let strs = args
+            .iter()
+            .map(|a| a.to_sql_string())
+            .collect::<EngineResult<Vec<String>>>()?;
+        Ok(self.to_sql_strs(&strs))
     }
 
     /// Render as a SQL function call with pre-rendered string arguments.
@@ -400,9 +408,17 @@ impl std::fmt::Display for ScalarFunction {
 
 impl DateTimeFunction {
     /// Render as a SQL function call with the given arguments.
-    pub fn to_sql(&self, args: &[Expression]) -> String {
-        let strs: Vec<String> = args.iter().map(|a| a.to_sql_string()).collect();
-        self.to_sql_strs(&strs)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any argument cannot be rendered as scalar SQL
+    /// (see [`Expression::to_sql_string`]).
+    pub fn to_sql(&self, args: &[Expression]) -> EngineResult<String> {
+        let strs = args
+            .iter()
+            .map(|a| a.to_sql_string())
+            .collect::<EngineResult<Vec<String>>>()?;
+        Ok(self.to_sql_strs(&strs))
     }
 
     /// Render as a SQL function call with pre-rendered string arguments.
@@ -599,9 +615,17 @@ pub enum TextFunction {
 
 impl TextFunction {
     /// Render as a SQL function call with the given arguments.
-    pub fn to_sql(&self, args: &[Expression]) -> String {
-        let strs: Vec<String> = args.iter().map(|a| a.to_sql_string()).collect();
-        self.to_sql_strs(&strs)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any argument cannot be rendered as scalar SQL
+    /// (see [`Expression::to_sql_string`]).
+    pub fn to_sql(&self, args: &[Expression]) -> EngineResult<String> {
+        let strs = args
+            .iter()
+            .map(|a| a.to_sql_string())
+            .collect::<EngineResult<Vec<String>>>()?;
+        Ok(self.to_sql_strs(&strs))
     }
 
     /// Render as a SQL function call with pre-rendered string arguments.
@@ -2734,15 +2758,36 @@ impl Expression {
     ///
     /// Column names are double-quoted. Aggregate functions are rendered
     /// as `FUNC(operand)`. `DistinctCount` renders as `COUNT(DISTINCT operand)`.
-    pub fn to_sql_string(&self) -> String {
-        match self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidExpression`] when the expression contains
+    /// nodes that cannot be rendered as scalar SQL:
+    ///
+    /// - [`Expression::MeasureRef`] — a measure reference must be expanded to
+    ///   its underlying expression (by the parser/model) before SQL generation.
+    /// - [`Expression::TableRef`] — a bare table reference is not a scalar
+    ///   value. Table references are only valid where the surrounding
+    ///   construct consumes them before rendering (e.g. `COUNTROWS(table)`,
+    ///   context operations, fact-table inference).
+    pub fn to_sql_string(&self) -> EngineResult<String> {
+        Ok(match self {
             Expression::ColumnRef(name) => crate::compute::sql_util::quote_ident_double(name),
             Expression::QualifiedColumnRef { column, .. } => {
                 crate::compute::sql_util::quote_ident_double(column)
             }
-            Expression::TableRef(_) => String::new(),
+            Expression::TableRef(name) => {
+                return Err(EngineError::InvalidExpression(format!(
+                    "Table reference '{name}' cannot be rendered as scalar SQL; table \
+                     references are only valid where the surrounding construct consumes \
+                     them before rendering (e.g. COUNTROWS(table), context operations)"
+                )));
+            }
             Expression::MeasureRef(name) => {
-                panic!("MeasureRef '{name}' must be expanded before SQL generation")
+                return Err(EngineError::InvalidExpression(format!(
+                    "Measure reference '[{name}]' must be expanded to its underlying \
+                     expression before SQL generation"
+                )));
             }
             Expression::LiteralFloat(v) => format!("{v}"),
             Expression::LiteralInt(v) => format!("{v}"),
@@ -2755,20 +2800,15 @@ impl Expression {
             }
             Expression::LiteralString(s) => crate::compute::sql_util::sql_quote_literal(s),
             Expression::BinaryOp { left, op, right } => {
-                let left_sql = left.to_sql_string();
-                let right_sql = right.to_sql_string();
+                let left_sql = left.to_sql_string()?;
+                let right_sql = right.to_sql_string()?;
                 format!("({left_sql} {} {right_sql})", op.as_sql())
             }
             Expression::Aggregate { operation, operand } => match operation {
-                AggregateOp::DistinctCount => {
-                    let operand_sql = operand.to_sql_string();
-                    format!("COUNT(DISTINCT {operand_sql})")
-                }
-                AggregateOp::CountRows => "COUNT(*)".to_string(),
-                _ => {
-                    let operand_sql = operand.to_sql_string();
-                    format!("{operation}({operand_sql})")
-                }
+                // COUNT(*) — handled before rendering the operand: COUNTROWS
+                // carries a bare table reference, which is not renderable.
+                AggregateOp::CountRows => operation.render_sql(""),
+                _ => operation.render_sql(&operand.to_sql_string()?),
             },
             // Context manipulation nodes render as their inner expression's SQL.
             // Context operations are resolved by the ContextResolver before SQL
@@ -2783,32 +2823,32 @@ impl Expression {
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
-            | Expression::KeepIn { expr, .. } => expr.to_sql_string(),
-            Expression::Block { .. } => self.inline_bindings().to_sql_string(),
+            | Expression::KeepIn { expr, .. } => expr.to_sql_string()?,
+            Expression::Block { .. } => self.inline_bindings().to_sql_string()?,
             Expression::Blank => "NULL".to_string(),
             Expression::IsBlank(inner) => {
-                format!("({} IS NULL)", inner.to_sql_string())
+                format!("({} IS NULL)", inner.to_sql_string()?)
             }
             Expression::Comparison { left, op, right } => {
                 format!(
                     "({} {} {})",
-                    left.to_sql_string(),
+                    left.to_sql_string()?,
                     op.as_sql(),
-                    right.to_sql_string()
+                    right.to_sql_string()?
                 )
             }
             Expression::And(left, right) => {
-                format!("({} AND {})", left.to_sql_string(), right.to_sql_string())
+                format!("({} AND {})", left.to_sql_string()?, right.to_sql_string()?)
             }
             Expression::Or(left, right) => {
-                format!("({} OR {})", left.to_sql_string(), right.to_sql_string())
+                format!("({} OR {})", left.to_sql_string()?, right.to_sql_string()?)
             }
             Expression::Not(inner) => {
-                format!("(NOT {})", inner.to_sql_string())
+                format!("(NOT {})", inner.to_sql_string()?)
             }
             Expression::Xor(left, right) => {
-                let l = left.to_sql_string();
-                let r = right.to_sql_string();
+                let l = left.to_sql_string()?;
+                let r = right.to_sql_string()?;
                 format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))")
             }
             Expression::If {
@@ -2818,9 +2858,9 @@ impl Expression {
             } => {
                 format!(
                     "CASE WHEN {} THEN {} ELSE {} END",
-                    condition.to_sql_string(),
-                    then_expr.to_sql_string(),
-                    else_expr.to_sql_string()
+                    condition.to_sql_string()?,
+                    then_expr.to_sql_string()?,
+                    else_expr.to_sql_string()?
                 )
             }
             Expression::Switch {
@@ -2828,16 +2868,16 @@ impl Expression {
                 cases,
                 default,
             } => {
-                let mut sql = format!("CASE {}", expr.to_sql_string());
+                let mut sql = format!("CASE {}", expr.to_sql_string()?);
                 for (val, result) in cases {
                     sql.push_str(&format!(
                         " WHEN {} THEN {}",
-                        val.to_sql_string(),
-                        result.to_sql_string()
+                        val.to_sql_string()?,
+                        result.to_sql_string()?
                     ));
                 }
                 if let Some(d) = default {
-                    sql.push_str(&format!(" ELSE {}", d.to_sql_string()));
+                    sql.push_str(&format!(" ELSE {}", d.to_sql_string()?));
                 }
                 sql.push_str(" END");
                 sql
@@ -2847,46 +2887,49 @@ impl Expression {
                 denominator,
                 alternate,
             } => {
-                let alt = alternate
-                    .as_ref()
-                    .map(|a| a.to_sql_string())
-                    .unwrap_or_else(|| "NULL".to_string());
+                let alt = match alternate {
+                    Some(a) => a.to_sql_string()?,
+                    None => "NULL".to_string(),
+                };
                 format!(
                     "CASE WHEN {} = 0 THEN {} ELSE (CAST({} AS DOUBLE) / {}) END",
-                    denominator.to_sql_string(),
+                    denominator.to_sql_string()?,
                     alt,
-                    numerator.to_sql_string(),
-                    denominator.to_sql_string()
+                    numerator.to_sql_string()?,
+                    denominator.to_sql_string()?
                 )
             }
             Expression::Coalesce(exprs) => {
-                let args: Vec<String> = exprs.iter().map(|e| e.to_sql_string()).collect();
+                let args = exprs
+                    .iter()
+                    .map(|e| e.to_sql_string())
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("COALESCE({})", args.join(", "))
             }
-            Expression::ScalarFunc { function, args } => function.to_sql(args),
-            Expression::TextFunc { function, args } => function.to_sql(args),
-            Expression::DateTimeFunc { function, args } => function.to_sql(args),
+            Expression::ScalarFunc { function, args } => function.to_sql(args)?,
+            Expression::TextFunc { function, args } => function.to_sql(args)?,
+            Expression::DateTimeFunc { function, args } => function.to_sql(args)?,
             Expression::IfError { expr, alternate } => {
                 format!(
                     "COALESCE({}, {})",
-                    expr.to_sql_string(),
-                    alternate.to_sql_string()
+                    expr.to_sql_string()?,
+                    alternate.to_sql_string()?
                 )
             }
             Expression::IsInScope { .. } => {
                 // Should be resolved before SQL generation. Default to TRUE.
                 "TRUE".to_string()
             }
-            Expression::ClearExcept { expr, .. } => expr.to_sql_string(),
-            Expression::Iterate { expression, .. } => expression.to_sql_string(),
+            Expression::ClearExcept { expr, .. } => expr.to_sql_string()?,
+            Expression::Iterate { expression, .. } => expression.to_sql_string()?,
             Expression::Percentile {
                 operand,
                 percentile,
             } => {
                 format!(
                     "approx_percentile_cont({}, {})",
-                    operand.to_sql_string(),
-                    percentile.to_sql_string()
+                    operand.to_sql_string()?,
+                    percentile.to_sql_string()?
                 )
             }
             Expression::Query { .. } => {
@@ -2895,14 +2938,14 @@ impl Expression {
                 "/* QUERY: must be materialized */".to_string()
             }
             Expression::HasOneValue { column } => {
-                format!("(COUNT(DISTINCT {}) = 1)", column.to_sql_string())
+                format!("(COUNT(DISTINCT {}) = 1)", column.to_sql_string()?)
             }
             Expression::SelectedValue { column, alternate } => {
-                let col_sql = column.to_sql_string();
-                let alt = alternate
-                    .as_ref()
-                    .map(|a| a.to_sql_string())
-                    .unwrap_or_else(|| "NULL".to_string());
+                let col_sql = column.to_sql_string()?;
+                let alt = match alternate {
+                    Some(a) => a.to_sql_string()?,
+                    None => "NULL".to_string(),
+                };
                 format!(
                     "CASE WHEN COUNT(DISTINCT {col_sql}) = 1 THEN MIN({col_sql}) ELSE {alt} END"
                 )
@@ -2910,8 +2953,8 @@ impl Expression {
             Expression::FirstValue { column, order_by } => {
                 format!(
                     "FIRST_VALUE({} ORDER BY {})",
-                    column.to_sql_string(),
-                    order_by.to_sql_string()
+                    column.to_sql_string()?,
+                    order_by.to_sql_string()?
                 )
             }
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
@@ -2920,59 +2963,68 @@ impl Expression {
                 "/* WINDOW: must be materialized */".to_string()
             }
             Expression::InList { expr, values } => {
-                let expr_sql = expr.to_sql_string();
-                let vals: Vec<String> = values.iter().map(|v| v.to_sql_string()).collect();
+                let expr_sql = expr.to_sql_string()?;
+                let vals = values
+                    .iter()
+                    .map(|v| v.to_sql_string())
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("{expr_sql} IN ({})", vals.join(", "))
             }
             Expression::Greatest(args) => {
-                let a: Vec<String> = args.iter().map(|e| e.to_sql_string()).collect();
+                let a = args
+                    .iter()
+                    .map(|e| e.to_sql_string())
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("GREATEST({})", a.join(", "))
             }
             Expression::Least(args) => {
-                let a: Vec<String> = args.iter().map(|e| e.to_sql_string()).collect();
+                let a = args
+                    .iter()
+                    .map(|e| e.to_sql_string())
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("LEAST({})", a.join(", "))
             }
             Expression::NullIf { expr, value } => {
                 format!(
                     "NULLIF({}, {})",
-                    expr.to_sql_string(),
-                    value.to_sql_string()
+                    expr.to_sql_string()?,
+                    value.to_sql_string()?
                 )
             }
             Expression::CountIf { condition } => {
                 format!(
                     "SUM(CASE WHEN {} THEN 1 ELSE 0 END)",
-                    condition.to_sql_string()
+                    condition.to_sql_string()?
                 )
             }
             Expression::ListAgg { column, delimiter } => {
                 format!(
                     "STRING_AGG({}, {})",
-                    column.to_sql_string(),
-                    delimiter.to_sql_string()
+                    column.to_sql_string()?,
+                    delimiter.to_sql_string()?
                 )
             }
             Expression::MaxBy { value, sort_by } => {
                 // First value ordered by sort_by descending
                 format!(
                     "FIRST_VALUE({} ORDER BY {} DESC)",
-                    value.to_sql_string(),
-                    sort_by.to_sql_string()
+                    value.to_sql_string()?,
+                    sort_by.to_sql_string()?
                 )
             }
             Expression::MinBy { value, sort_by } => {
                 // First value ordered by sort_by ascending
                 format!(
                     "FIRST_VALUE({} ORDER BY {} ASC)",
-                    value.to_sql_string(),
-                    sort_by.to_sql_string()
+                    value.to_sql_string()?,
+                    sort_by.to_sql_string()?
                 )
             }
             Expression::RankWindow { .. } => {
                 // Rank window expressions must be materialized, not rendered inline.
                 "/* RANK_WINDOW: must be materialized */".to_string()
             }
-        }
+        })
     }
 
     /// Render this expression as SQL with the aggregate operand wrapped in CASE WHEN.
@@ -2985,31 +3037,33 @@ impl Expression {
     ///
     /// The `fact_table` parameter is the lowercase fact table name used to
     /// qualify column references in the operand.
-    pub fn to_case_when_sql(&self, condition: &str, fact_table: &str) -> String {
-        match self {
-            Expression::Aggregate { operation, operand } => {
-                let qualified = qualify_operand_sql(operand, fact_table);
-                let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
-                match operation {
-                    AggregateOp::DistinctCount => {
-                        format!("COUNT(DISTINCT {case_expr})")
-                    }
-                    AggregateOp::Count => {
-                        // For COUNT, count non-null CASE results.
-                        format!("COUNT({case_expr})")
-                    }
-                    AggregateOp::CountRows => {
-                        // COUNT(*) with condition → SUM(CASE WHEN condition THEN 1 END)
-                        format!("SUM(CASE WHEN {condition} THEN 1 END)")
-                    }
-                    _ => format!("{operation}({case_expr})"),
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidExpression`] when the expression contains
+    /// nodes that cannot be rendered as scalar SQL — see
+    /// [`Expression::to_sql_string`] for the cases (`MeasureRef`, bare
+    /// `TableRef`). `COUNTROWS` is exempt: its table-reference operand is
+    /// consumed before rendering.
+    pub fn to_case_when_sql(&self, condition: &str, fact_table: &str) -> EngineResult<String> {
+        Ok(match self {
+            Expression::Aggregate { operation, operand } => match operation {
+                AggregateOp::CountRows => {
+                    // COUNT(*) with condition → SUM(CASE WHEN condition THEN 1 END).
+                    // Handled before rendering the operand: COUNTROWS carries a
+                    // bare table reference, which is not renderable as scalar SQL.
+                    operation.render_case_when_sql(condition, "")
                 }
-            }
+                _ => {
+                    let qualified = qualify_operand_sql(operand, fact_table)?;
+                    operation.render_case_when_sql(condition, &qualified)
+                }
+            },
             // Compound expressions: recurse into sub-expressions so CASE WHEN
             // is applied to each leaf aggregate independently.
             Expression::BinaryOp { left, op, right } => {
-                let l = left.to_case_when_sql(condition, fact_table);
-                let r = right.to_case_when_sql(condition, fact_table);
+                let l = left.to_case_when_sql(condition, fact_table)?;
+                let r = right.to_case_when_sql(condition, fact_table)?;
                 format!("({l} {} {r})", op.as_sql())
             }
             Expression::SafeDivide {
@@ -3017,58 +3071,58 @@ impl Expression {
                 denominator,
                 alternate,
             } => {
-                let n = numerator.to_case_when_sql(condition, fact_table);
-                let d = denominator.to_case_when_sql(condition, fact_table);
-                let alt = alternate
-                    .as_ref()
-                    .map(|a| a.to_case_when_sql(condition, fact_table))
-                    .unwrap_or_else(|| "NULL".to_string());
+                let n = numerator.to_case_when_sql(condition, fact_table)?;
+                let d = denominator.to_case_when_sql(condition, fact_table)?;
+                let alt = match alternate {
+                    Some(a) => a.to_case_when_sql(condition, fact_table)?,
+                    None => "NULL".to_string(),
+                };
                 format!("CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE) / {d} END")
             }
             Expression::ScalarFunc { function, args } => {
-                let mapped: Vec<String> = args
+                let mapped = args
                     .iter()
                     .map(|a| a.to_case_when_sql(condition, fact_table))
-                    .collect();
+                    .collect::<EngineResult<Vec<String>>>()?;
                 function.to_sql_strs(&mapped)
             }
             Expression::TextFunc { function, args } => {
-                let mapped: Vec<String> = args
+                let mapped = args
                     .iter()
                     .map(|a| a.to_case_when_sql(condition, fact_table))
-                    .collect();
+                    .collect::<EngineResult<Vec<String>>>()?;
                 function.to_sql_strs(&mapped)
             }
             Expression::DateTimeFunc { function, args } => {
-                let mapped: Vec<String> = args
+                let mapped = args
                     .iter()
                     .map(|a| a.to_case_when_sql(condition, fact_table))
-                    .collect();
+                    .collect::<EngineResult<Vec<String>>>()?;
                 function.to_sql_strs(&mapped)
             }
             Expression::IfError { expr, alternate } => {
-                let e = expr.to_case_when_sql(condition, fact_table);
-                let a = alternate.to_case_when_sql(condition, fact_table);
+                let e = expr.to_case_when_sql(condition, fact_table)?;
+                let a = alternate.to_case_when_sql(condition, fact_table)?;
                 format!("COALESCE({e}, {a})")
             }
-            Expression::ClearExcept { expr, .. } => expr.to_case_when_sql(condition, fact_table),
+            Expression::ClearExcept { expr, .. } => expr.to_case_when_sql(condition, fact_table)?,
             Expression::Iterate { expression, .. } => {
-                expression.to_case_when_sql(condition, fact_table)
+                expression.to_case_when_sql(condition, fact_table)?
             }
             Expression::Percentile {
                 operand,
                 percentile,
             } => {
-                let qualified = qualify_operand_sql(operand, fact_table);
+                let qualified = qualify_operand_sql(operand, fact_table)?;
                 let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
-                let p = percentile.to_sql_string();
+                let p = percentile.to_sql_string()?;
                 format!("approx_percentile_cont({case_expr}, {p})")
             }
             Expression::Coalesce(exprs) => {
-                let mapped: Vec<String> = exprs
+                let mapped = exprs
                     .iter()
                     .map(|e| e.to_case_when_sql(condition, fact_table))
-                    .collect();
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("COALESCE({})", mapped.join(", "))
             }
             Expression::If {
@@ -3076,29 +3130,29 @@ impl Expression {
                 then_expr,
                 else_expr,
             } => {
-                let c = cond_expr.to_case_when_sql(condition, fact_table);
-                let t = then_expr.to_case_when_sql(condition, fact_table);
-                let e = else_expr.to_case_when_sql(condition, fact_table);
+                let c = cond_expr.to_case_when_sql(condition, fact_table)?;
+                let t = then_expr.to_case_when_sql(condition, fact_table)?;
+                let e = else_expr.to_case_when_sql(condition, fact_table)?;
                 format!("CASE WHEN {c} THEN {t} ELSE {e} END")
             }
             Expression::IsBlank(inner) => {
-                let i = inner.to_case_when_sql(condition, fact_table);
+                let i = inner.to_case_when_sql(condition, fact_table)?;
                 format!("({i} IS NULL)")
             }
             Expression::Not(inner) => {
-                let i = inner.to_case_when_sql(condition, fact_table);
+                let i = inner.to_case_when_sql(condition, fact_table)?;
                 format!("(NOT {i})")
             }
             Expression::Xor(left, right) => {
-                let l = left.to_case_when_sql(condition, fact_table);
-                let r = right.to_case_when_sql(condition, fact_table);
+                let l = left.to_case_when_sql(condition, fact_table)?;
+                let r = right.to_case_when_sql(condition, fact_table)?;
                 format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))")
             }
             Expression::Block { .. } => self
                 .inline_bindings()
-                .to_case_when_sql(condition, fact_table),
+                .to_case_when_sql(condition, fact_table)?,
             Expression::HasOneValue { column } => {
-                let col_sql = column.to_sql_string();
+                let col_sql = column.to_sql_string()?;
                 let qualified = if !col_sql.contains('.') {
                     format!("{fact_table}.{col_sql}")
                 } else {
@@ -3108,29 +3162,29 @@ impl Expression {
                 format!("(COUNT(DISTINCT {case_expr}) = 1)")
             }
             Expression::SelectedValue { column, alternate } => {
-                let col_sql = column.to_sql_string();
+                let col_sql = column.to_sql_string()?;
                 let qualified = if !col_sql.contains('.') {
                     format!("{fact_table}.{col_sql}")
                 } else {
                     col_sql
                 };
                 let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
-                let alt = alternate
-                    .as_ref()
-                    .map(|a| a.to_case_when_sql(condition, fact_table))
-                    .unwrap_or_else(|| "NULL".to_string());
+                let alt = match alternate {
+                    Some(a) => a.to_case_when_sql(condition, fact_table)?,
+                    None => "NULL".to_string(),
+                };
                 format!(
                     "CASE WHEN COUNT(DISTINCT {case_expr}) = 1 THEN MIN({case_expr}) ELSE {alt} END"
                 )
             }
             Expression::FirstValue { column, order_by } => {
-                let col_sql = column.to_sql_string();
+                let col_sql = column.to_sql_string()?;
                 let qualified_col = if !col_sql.contains('.') {
                     format!("{fact_table}.{col_sql}")
                 } else {
                     col_sql
                 };
-                let order_sql = order_by.to_sql_string();
+                let order_sql = order_by.to_sql_string()?;
                 let qualified_order = if !order_sql.contains('.') {
                     format!("{fact_table}.{order_sql}")
                 } else {
@@ -3143,50 +3197,50 @@ impl Expression {
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
                 "/* WINDOW: must be materialized */".to_string()
             }
-            Expression::InList { .. } => self.to_sql_string(),
+            Expression::InList { .. } => self.to_sql_string()?,
             Expression::Greatest(args) => {
-                let a: Vec<String> = args
+                let a = args
                     .iter()
                     .map(|e| e.to_case_when_sql(condition, fact_table))
-                    .collect();
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("GREATEST({})", a.join(", "))
             }
             Expression::Least(args) => {
-                let a: Vec<String> = args
+                let a = args
                     .iter()
                     .map(|e| e.to_case_when_sql(condition, fact_table))
-                    .collect();
+                    .collect::<EngineResult<Vec<String>>>()?;
                 format!("LEAST({})", a.join(", "))
             }
             Expression::NullIf { expr, value } => {
-                let e = expr.to_case_when_sql(condition, fact_table);
-                let v = value.to_case_when_sql(condition, fact_table);
+                let e = expr.to_case_when_sql(condition, fact_table)?;
+                let v = value.to_case_when_sql(condition, fact_table)?;
                 format!("NULLIF({e}, {v})")
             }
             Expression::CountIf {
                 condition: cond_expr,
             } => {
-                let c = cond_expr.to_case_when_sql(condition, fact_table);
+                let c = cond_expr.to_case_when_sql(condition, fact_table)?;
                 format!("SUM(CASE WHEN {c} THEN 1 ELSE 0 END)")
             }
             Expression::ListAgg { column, delimiter } => {
-                let col = column.to_case_when_sql(condition, fact_table);
-                let delim = delimiter.to_case_when_sql(condition, fact_table);
+                let col = column.to_case_when_sql(condition, fact_table)?;
+                let delim = delimiter.to_case_when_sql(condition, fact_table)?;
                 format!("STRING_AGG({col}, {delim})")
             }
             Expression::MaxBy { value, sort_by } => {
-                let v = value.to_case_when_sql(condition, fact_table);
-                let s = sort_by.to_case_when_sql(condition, fact_table);
+                let v = value.to_case_when_sql(condition, fact_table)?;
+                let s = sort_by.to_case_when_sql(condition, fact_table)?;
                 format!("FIRST_VALUE({v} ORDER BY {s} DESC)")
             }
             Expression::MinBy { value, sort_by } => {
-                let v = value.to_case_when_sql(condition, fact_table);
-                let s = sort_by.to_case_when_sql(condition, fact_table);
+                let v = value.to_case_when_sql(condition, fact_table)?;
+                let s = sort_by.to_case_when_sql(condition, fact_table)?;
                 format!("FIRST_VALUE({v} ORDER BY {s} ASC)")
             }
             // For leaf expressions (literals, column refs, etc.), fall back to regular SQL.
-            _ => self.to_sql_string(),
-        }
+            _ => self.to_sql_string()?,
+        })
     }
 
     /// Create a binary addition: `self + other`.
@@ -4626,8 +4680,8 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
 /// For simple column references (`"col"`), prepends `fact_table."col"`.
 /// For compound expressions (e.g., `"price" * "qty"`), qualifies each leaf
 /// column reference individually so the result is `fact_table."price" * fact_table."qty"`.
-fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
-    match operand {
+fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> EngineResult<String> {
+    Ok(match operand {
         Expression::ColumnRef(name) => format!(
             "{fact_table}.{}",
             crate::compute::sql_util::quote_ident_double(name)
@@ -4644,15 +4698,15 @@ fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
             )
         }
         Expression::BinaryOp { left, op, right } => {
-            let l = qualify_operand_sql(left, fact_table);
-            let r = qualify_operand_sql(right, fact_table);
+            let l = qualify_operand_sql(left, fact_table)?;
+            let r = qualify_operand_sql(right, fact_table)?;
             format!("({l} {} {r})", op.as_sql())
         }
         Expression::ScalarFunc { function, args } => {
-            let mapped: Vec<String> = args
+            let mapped = args
                 .iter()
                 .map(|a| qualify_operand_sql(a, fact_table))
-                .collect();
+                .collect::<EngineResult<Vec<String>>>()?;
             function.to_sql_strs(&mapped)
         }
         Expression::If {
@@ -4660,14 +4714,14 @@ fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
             then_expr,
             else_expr,
         } => {
-            let c = qualify_operand_sql(condition, fact_table);
-            let t = qualify_operand_sql(then_expr, fact_table);
-            let e = qualify_operand_sql(else_expr, fact_table);
+            let c = qualify_operand_sql(condition, fact_table)?;
+            let t = qualify_operand_sql(then_expr, fact_table)?;
+            let e = qualify_operand_sql(else_expr, fact_table)?;
             format!("CASE WHEN {c} THEN {t} ELSE {e} END")
         }
         // For literals and other leaf nodes, just use to_sql_string (no qualification needed).
-        _ => operand.to_sql_string(),
-    }
+        _ => operand.to_sql_string()?,
+    })
 }
 
 /// Walk the expression tree to find the first qualified column reference's table.
@@ -4801,19 +4855,19 @@ mod tests {
     #[test]
     fn column_ref_sql() {
         let expr = col("amount");
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
     fn literal_sql() {
-        assert_eq!(lit(3.25).to_sql_string(), "3.25");
-        assert_eq!(lit_int(42).to_sql_string(), "42");
+        assert_eq!(lit(3.25).to_sql_string().unwrap(), "3.25");
+        assert_eq!(lit_int(42).to_sql_string().unwrap(), "42");
     }
 
     #[test]
     fn binary_op_sql() {
         let expr = col("price").multiply(col("quantity"));
-        assert_eq!(expr.to_sql_string(), "(\"price\" * \"quantity\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "(\"price\" * \"quantity\")");
     }
 
     #[test]
@@ -4821,7 +4875,7 @@ mod tests {
         // (revenue - cost) / quantity
         let expr = col("revenue").subtract(col("cost")).divide(col("quantity"));
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "((\"revenue\" - \"cost\") / \"quantity\")"
         );
     }
@@ -4829,25 +4883,34 @@ mod tests {
     #[test]
     fn simple_aggregate_sql() {
         let expr = agg(AggregateOp::Sum, col("amount"));
-        assert_eq!(expr.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "SUM(\"amount\")");
     }
 
     #[test]
     fn expression_aggregate_sql() {
         let expr = agg(AggregateOp::Sum, col("price").multiply(col("quantity")));
-        assert_eq!(expr.to_sql_string(), "SUM((\"price\" * \"quantity\"))");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "SUM((\"price\" * \"quantity\"))"
+        );
     }
 
     #[test]
     fn ratio_measure_sql() {
         let expr = agg(AggregateOp::Sum, col("amount")).divide(agg(AggregateOp::Count, col("id")));
-        assert_eq!(expr.to_sql_string(), "(SUM(\"amount\") / COUNT(\"id\"))");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "(SUM(\"amount\") / COUNT(\"id\"))"
+        );
     }
 
     #[test]
     fn distinct_count_sql() {
         let expr = agg(AggregateOp::DistinctCount, col("product_id"));
-        assert_eq!(expr.to_sql_string(), "COUNT(DISTINCT \"product_id\")");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "COUNT(DISTINCT \"product_id\")"
+        );
     }
 
     #[test]
@@ -4945,7 +5008,7 @@ mod tests {
             )],
         );
         // SQL rendering passes through to inner expression
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
@@ -4962,7 +5025,7 @@ mod tests {
                 )],
             ),
         );
-        assert_eq!(expr.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "SUM(\"amount\")");
     }
 
     #[test]
@@ -4974,13 +5037,13 @@ mod tests {
                 column: "Region".into(),
             }],
         );
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
     fn reset_expression_sql_passes_through() {
         let expr = reset(col("amount"));
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
@@ -4989,13 +5052,13 @@ mod tests {
             col("amount"),
             RelationshipPath::new(vec!["Sales", "Products"]),
         );
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
     fn using_expression_sql_passes_through() {
         let expr = using(col("amount"), "ctx_2024");
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
@@ -5008,7 +5071,10 @@ mod tests {
             col("actual").divide(col("total")),
         );
         // Bindings are inlined: actual → SUM("amount"), total → SUM("amount")
-        assert_eq!(expr.to_sql_string(), "(SUM(\"amount\") / SUM(\"amount\"))");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "(SUM(\"amount\") / SUM(\"amount\"))"
+        );
     }
 
     #[test]
@@ -5105,21 +5171,64 @@ mod tests {
         );
         assert!(expr.has_context_ops());
         assert!(!expr.has_aggregate());
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     // --- Table variable expression tests ---
 
     #[test]
-    fn table_ref_sql_empty() {
+    fn table_ref_to_sql_string_returns_error() {
+        // A bare table reference is not a scalar value — rendering it used to
+        // silently produce an empty string (malformed SQL); it is now an error.
         let expr = table_ref("premium");
-        assert_eq!(expr.to_sql_string(), "");
+        let err = expr.to_sql_string().unwrap_err();
+        assert!(matches!(err, EngineError::InvalidExpression(_)));
+        assert!(err.to_string().contains("premium"));
+    }
+
+    #[test]
+    fn measure_ref_to_sql_string_returns_error_not_panic() {
+        // Reachable via public APIs: parse_measure_expression("[Total] * 2")
+        // then to_sql_string() — this used to panic and abort the host process.
+        let expr = Expression::MeasureRef("Total Sales".to_string());
+        let err = expr.to_sql_string().unwrap_err();
+        assert!(matches!(err, EngineError::InvalidExpression(_)));
+        assert!(err.to_string().contains("Total Sales"));
+    }
+
+    #[test]
+    fn measure_ref_inside_compound_to_sql_string_returns_error() {
+        let expr = Expression::MeasureRef("SomeMeasure".to_string()).multiply(lit_int(2));
+        assert!(expr.to_sql_string().is_err());
+    }
+
+    #[test]
+    fn measure_ref_to_case_when_sql_returns_error_not_panic() {
+        let expr = Expression::MeasureRef("Total Sales".to_string());
+        assert!(expr
+            .to_case_when_sql("dim.\"year\" = 2014", "fact")
+            .is_err());
+    }
+
+    #[test]
+    fn countrows_to_case_when_sql_skips_table_ref_operand() {
+        // COUNTROWS carries a bare TableRef operand; to_case_when_sql must
+        // consume it before rendering rather than returning an error.
+        let expr = Expression::Aggregate {
+            operation: AggregateOp::CountRows,
+            operand: Box::new(table_ref("fact_sales")),
+        };
+        assert_eq!(
+            expr.to_case_when_sql("dim.\"year\" = 2014", "fact_sales")
+                .unwrap(),
+            "SUM(CASE WHEN dim.\"year\" = 2014 THEN 1 END)"
+        );
     }
 
     #[test]
     fn qualified_column_ref_sql() {
         let expr = qualified_col("Products", "category");
-        assert_eq!(expr.to_sql_string(), "\"category\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"category\"");
     }
 
     #[test]
@@ -5145,7 +5254,7 @@ mod tests {
         let expr = qualified_col("premium", "amount");
         let json = serde_json::to_string(&expr).unwrap();
         let deserialized: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.to_sql_string(), "\"amount\"");
+        assert_eq!(deserialized.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
@@ -5176,7 +5285,7 @@ mod tests {
     #[test]
     fn keep_in_sql_passes_through() {
         let expr = keep_in(col("amount"), vec![InPredicate::new("S", "c", "v", "c2")]);
-        assert_eq!(expr.to_sql_string(), "\"amount\"");
+        assert_eq!(expr.to_sql_string().unwrap(), "\"amount\"");
     }
 
     #[test]
@@ -5189,7 +5298,7 @@ mod tests {
         let deserialized: Expression = serde_json::from_str(&json).unwrap();
         assert!(deserialized.has_context_ops());
         assert!(deserialized.has_aggregate());
-        assert_eq!(deserialized.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(deserialized.to_sql_string().unwrap(), "SUM(\"amount\")");
     }
 
     #[test]
@@ -5208,7 +5317,7 @@ mod tests {
         );
         let json = serde_json::to_string(&expr).unwrap();
         let deserialized: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.to_sql_string(), "SUM(\"amount\")");
+        assert_eq!(deserialized.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert!(deserialized.has_context_ops());
         assert!(deserialized.has_aggregate());
     }
@@ -5217,26 +5326,26 @@ mod tests {
 
     #[test]
     fn literal_string_sql() {
-        assert_eq!(lit_str("hello").to_sql_string(), "'hello'");
+        assert_eq!(lit_str("hello").to_sql_string().unwrap(), "'hello'");
         // Escaped single quotes
-        assert_eq!(lit_str("it's").to_sql_string(), "'it''s'");
+        assert_eq!(lit_str("it's").to_sql_string().unwrap(), "'it''s'");
     }
 
     #[test]
     fn blank_sql() {
-        assert_eq!(blank().to_sql_string(), "NULL");
+        assert_eq!(blank().to_sql_string().unwrap(), "NULL");
     }
 
     #[test]
     fn is_blank_sql() {
         let expr = is_blank(col("amount"));
-        assert_eq!(expr.to_sql_string(), "(\"amount\" IS NULL)");
+        assert_eq!(expr.to_sql_string().unwrap(), "(\"amount\" IS NULL)");
     }
 
     #[test]
     fn comparison_sql() {
         let expr = compare(col("amount"), ComparisonOp::GreaterThan, lit_int(100));
-        assert_eq!(expr.to_sql_string(), "(\"amount\" > 100)");
+        assert_eq!(expr.to_sql_string().unwrap(), "(\"amount\" > 100)");
     }
 
     #[test]
@@ -5244,14 +5353,14 @@ mod tests {
         let a = compare(col("x"), ComparisonOp::GreaterThan, lit_int(0));
         let b = compare(col("y"), ComparisonOp::LessThan, lit_int(10));
         assert_eq!(
-            and(a.clone(), b.clone()).to_sql_string(),
+            and(a.clone(), b.clone()).to_sql_string().unwrap(),
             "((\"x\" > 0) AND (\"y\" < 10))"
         );
         assert_eq!(
-            or(a.clone(), b.clone()).to_sql_string(),
+            or(a.clone(), b.clone()).to_sql_string().unwrap(),
             "((\"x\" > 0) OR (\"y\" < 10))"
         );
-        assert_eq!(not(a).to_sql_string(), "(NOT (\"x\" > 0))");
+        assert_eq!(not(a).to_sql_string().unwrap(), "(NOT (\"x\" > 0))");
     }
 
     #[test]
@@ -5266,7 +5375,7 @@ mod tests {
             lit_str("Low"),
         );
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN (SUM(\"amount\") > 1000) THEN 'High' ELSE 'Low' END"
         );
     }
@@ -5296,7 +5405,7 @@ mod tests {
             Some(lit_str("Unknown")),
         );
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE \"status\" WHEN 1 THEN 'Active' WHEN 2 THEN 'Inactive' ELSE 'Unknown' END"
         );
     }
@@ -5305,7 +5414,7 @@ mod tests {
     fn switch_without_default_sql() {
         let expr = switch(col("status"), vec![(lit_int(1), lit_str("Active"))], None);
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE \"status\" WHEN 1 THEN 'Active' END"
         );
     }
@@ -5318,7 +5427,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(\"orders\") = 0 THEN NULL ELSE (CAST(SUM(\"revenue\") AS DOUBLE) / COUNT(\"orders\")) END"
         );
     }
@@ -5327,7 +5436,7 @@ mod tests {
     fn safe_divide_with_alternate_sql() {
         let expr = safe_divide(col("a"), col("b"), Some(lit_int(0)));
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN \"b\" = 0 THEN 0 ELSE (CAST(\"a\" AS DOUBLE) / \"b\") END"
         );
     }
@@ -5335,43 +5444,43 @@ mod tests {
     #[test]
     fn coalesce_sql() {
         let expr = coalesce(vec![col("a"), col("b"), lit_int(0)]);
-        assert_eq!(expr.to_sql_string(), "COALESCE(\"a\", \"b\", 0)");
+        assert_eq!(expr.to_sql_string().unwrap(), "COALESCE(\"a\", \"b\", 0)");
     }
 
     #[test]
     fn scalar_abs_sql() {
         let expr = scalar_fn(ScalarFunction::Abs, vec![col("value")]);
-        assert_eq!(expr.to_sql_string(), "ABS(\"value\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "ABS(\"value\")");
     }
 
     #[test]
     fn scalar_round_sql() {
         let expr = scalar_fn(ScalarFunction::Round, vec![col("price"), lit_int(2)]);
-        assert_eq!(expr.to_sql_string(), "ROUND(\"price\", 2)");
+        assert_eq!(expr.to_sql_string().unwrap(), "ROUND(\"price\", 2)");
     }
 
     #[test]
     fn scalar_int_sql() {
         let expr = scalar_fn(ScalarFunction::Int, vec![col("value")]);
-        assert_eq!(expr.to_sql_string(), "FLOOR(\"value\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "FLOOR(\"value\")");
     }
 
     #[test]
     fn scalar_sqrt_sql() {
         let expr = scalar_fn(ScalarFunction::Sqrt, vec![col("value")]);
-        assert_eq!(expr.to_sql_string(), "SQRT(\"value\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "SQRT(\"value\")");
     }
 
     #[test]
     fn scalar_mod_sql() {
         let expr = scalar_fn(ScalarFunction::Mod, vec![col("a"), col("b")]);
-        assert_eq!(expr.to_sql_string(), "(\"a\" % \"b\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "(\"a\" % \"b\")");
     }
 
     #[test]
     fn count_rows_sql() {
         let expr = count_rows();
-        assert_eq!(expr.to_sql_string(), "COUNT(*)");
+        assert_eq!(expr.to_sql_string().unwrap(), "COUNT(*)");
         assert!(expr.is_simple_aggregate());
     }
 
@@ -5429,7 +5538,10 @@ mod tests {
         for expr in exprs {
             let json = serde_json::to_string(&expr).unwrap();
             let deser: Expression = serde_json::from_str(&json).unwrap();
-            assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+            assert_eq!(
+                deser.to_sql_string().unwrap(),
+                expr.to_sql_string().unwrap()
+            );
         }
     }
 
@@ -5442,7 +5554,7 @@ mod tests {
             vec![("total".into(), agg(AggregateOp::Sum, col("amount")))],
             col("total").multiply(lit_int(2)),
         );
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert_eq!(sql, "(SUM(\"amount\") * 2)");
     }
 
@@ -5456,7 +5568,7 @@ mod tests {
             ],
             col("b").add(lit_int(1)),
         );
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert_eq!(sql, "((SUM(\"x\") * 2) + 1)");
     }
 
@@ -5470,7 +5582,7 @@ mod tests {
             ],
             safe_divide(col("rev"), col("cnt"), None),
         );
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         assert_eq!(
             sql,
             "CASE WHEN COUNT(\"id\") = 0 THEN NULL ELSE (CAST(SUM(\"amount\") AS DOUBLE) / COUNT(\"id\")) END"
@@ -5484,7 +5596,7 @@ mod tests {
             vec![("total".into(), agg(AggregateOp::Sum, col("amount")))],
             col("total").divide(col("real_column")),
         );
-        let sql = expr.to_sql_string();
+        let sql = expr.to_sql_string().unwrap();
         // "total" substituted, "real_column" preserved as column ref
         assert_eq!(sql, "(SUM(\"amount\") / \"real_column\")");
     }
@@ -5496,7 +5608,7 @@ mod tests {
             vec![("total".into(), agg(AggregateOp::Sum, col("amount")))],
             col("total").multiply(lit_int(2)),
         );
-        let sql = expr.to_case_when_sql("f.\"region\" = 'US'", "f");
+        let sql = expr.to_case_when_sql("f.\"region\" = 'US'", "f").unwrap();
         // CASE WHEN should be applied to the aggregate inside the inlined expression.
         assert!(sql.contains("SUM(CASE WHEN"));
         assert!(sql.contains("* 2"));
@@ -5533,20 +5645,26 @@ mod tests {
         );
         let json = serde_json::to_string(&expr).unwrap();
         let deser: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            deser.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     #[test]
     fn has_one_value_sql() {
         let expr = has_one_value(col("region"));
-        assert_eq!(expr.to_sql_string(), "(COUNT(DISTINCT \"region\") = 1)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "(COUNT(DISTINCT \"region\") = 1)"
+        );
     }
 
     #[test]
     fn selected_value_sql_no_alternate() {
         let expr = selected_value(col("region"), None);
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(DISTINCT \"region\") = 1 THEN MIN(\"region\") ELSE NULL END"
         );
     }
@@ -5555,7 +5673,7 @@ mod tests {
     fn selected_value_sql_with_alternate() {
         let expr = selected_value(col("region"), Some(lit_str("Multiple")));
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(DISTINCT \"region\") = 1 THEN MIN(\"region\") ELSE 'Multiple' END"
         );
     }
@@ -5564,7 +5682,7 @@ mod tests {
     fn first_value_sql() {
         let expr = first_value(col("name"), col("sort_order"));
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "FIRST_VALUE(\"name\" ORDER BY \"sort_order\")"
         );
     }
@@ -5592,7 +5710,10 @@ mod tests {
         let expr = has_one_value(col("region"));
         let json = serde_json::to_string(&expr).unwrap();
         let deser: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            deser.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     #[test]
@@ -5600,7 +5721,10 @@ mod tests {
         let expr = selected_value(col("region"), Some(lit_str("Multiple")));
         let json = serde_json::to_string(&expr).unwrap();
         let deser: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            deser.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     #[test]
@@ -5608,15 +5732,18 @@ mod tests {
         let expr = first_value(col("name"), col("sort_order"));
         let json = serde_json::to_string(&expr).unwrap();
         let deser: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            deser.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     // --- Logical function tests ---
 
     #[test]
     fn literal_bool_sql() {
-        assert_eq!(lit_bool(true).to_sql_string(), "TRUE");
-        assert_eq!(lit_bool(false).to_sql_string(), "FALSE");
+        assert_eq!(lit_bool(true).to_sql_string().unwrap(), "TRUE");
+        assert_eq!(lit_bool(false).to_sql_string().unwrap(), "FALSE");
     }
 
     #[test]
@@ -5640,12 +5767,12 @@ mod tests {
         let expr = lit_bool(true);
         let json = serde_json::to_string(&expr).unwrap();
         let deser: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.to_sql_string(), "TRUE");
+        assert_eq!(deser.to_sql_string().unwrap(), "TRUE");
 
         let expr2 = lit_bool(false);
         let json2 = serde_json::to_string(&expr2).unwrap();
         let deser2: Expression = serde_json::from_str(&json2).unwrap();
-        assert_eq!(deser2.to_sql_string(), "FALSE");
+        assert_eq!(deser2.to_sql_string().unwrap(), "FALSE");
     }
 
     #[test]
@@ -5653,7 +5780,7 @@ mod tests {
         let a = compare(col("x"), ComparisonOp::GreaterThan, lit_int(0));
         let b = compare(col("y"), ComparisonOp::LessThan, lit_int(10));
         assert_eq!(
-            xor(a, b).to_sql_string(),
+            xor(a, b).to_sql_string().unwrap(),
             "(((\"x\" > 0) AND NOT (\"y\" < 10)) OR (NOT (\"x\" > 0) AND (\"y\" < 10)))"
         );
     }
@@ -5685,7 +5812,10 @@ mod tests {
         let expr = xor(lit_bool(true), lit_bool(false));
         let json = serde_json::to_string(&expr).unwrap();
         let deser: Expression = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            deser.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     // --- Text function tests ---
@@ -5696,7 +5826,7 @@ mod tests {
             TextFunction::Concatenate,
             vec![col("a"), col("b"), col("c")],
         );
-        assert_eq!(expr.to_sql_string(), "CONCAT(\"a\", \"b\", \"c\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "CONCAT(\"a\", \"b\", \"c\")");
     }
 
     #[test]
@@ -5705,19 +5835,22 @@ mod tests {
             TextFunction::CombineValues,
             vec![lit_str("-"), col("a"), col("b")],
         );
-        assert_eq!(expr.to_sql_string(), "CONCAT_WS('-', \"a\", \"b\")");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "CONCAT_WS('-', \"a\", \"b\")"
+        );
     }
 
     #[test]
     fn text_exact_sql() {
         let expr = text_fn(TextFunction::Exact, vec![col("a"), col("b")]);
-        assert_eq!(expr.to_sql_string(), "(\"a\" = \"b\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "(\"a\" = \"b\")");
     }
 
     #[test]
     fn text_find_sql() {
         let expr = text_fn(TextFunction::Find, vec![lit_str("x"), col("text")]);
-        assert_eq!(expr.to_sql_string(), "STRPOS(\"text\", 'x')");
+        assert_eq!(expr.to_sql_string().unwrap(), "STRPOS(\"text\", 'x')");
     }
 
     #[test]
@@ -5727,7 +5860,7 @@ mod tests {
             vec![lit_str("x"), col("text"), lit_int(5)],
         );
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "(STRPOS(SUBSTRING(\"text\" FROM 5), 'x') + 5 - 1)"
         );
     }
@@ -5735,23 +5868,27 @@ mod tests {
     #[test]
     fn text_left_sql() {
         let expr = text_fn(TextFunction::Left, vec![col("name"), lit_int(3)]);
-        assert_eq!(expr.to_sql_string(), "LEFT(\"name\", 3)");
+        assert_eq!(expr.to_sql_string().unwrap(), "LEFT(\"name\", 3)");
     }
 
     #[test]
     fn text_len_sql() {
         let expr = text_fn(TextFunction::Len, vec![col("name")]);
-        assert_eq!(expr.to_sql_string(), "LENGTH(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "LENGTH(\"name\")");
     }
 
     #[test]
     fn text_lower_upper_sql() {
         assert_eq!(
-            text_fn(TextFunction::Lower, vec![col("name")]).to_sql_string(),
+            text_fn(TextFunction::Lower, vec![col("name")])
+                .to_sql_string()
+                .unwrap(),
             "LOWER(\"name\")"
         );
         assert_eq!(
-            text_fn(TextFunction::Upper, vec![col("name")]).to_sql_string(),
+            text_fn(TextFunction::Upper, vec![col("name")])
+                .to_sql_string()
+                .unwrap(),
             "UPPER(\"name\")"
         );
     }
@@ -5759,7 +5896,10 @@ mod tests {
     #[test]
     fn text_mid_sql() {
         let expr = text_fn(TextFunction::Mid, vec![col("text"), lit_int(2), lit_int(4)]);
-        assert_eq!(expr.to_sql_string(), "SUBSTRING(\"text\" FROM 2 FOR 4)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "SUBSTRING(\"text\" FROM 2 FOR 4)"
+        );
     }
 
     #[test]
@@ -5769,7 +5909,7 @@ mod tests {
             vec![col("text"), lit_int(3), lit_int(2), lit_str("XX")],
         );
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "OVERLAY(\"text\" PLACING 'XX' FROM 3 FOR 2)"
         );
     }
@@ -5777,19 +5917,22 @@ mod tests {
     #[test]
     fn text_rept_sql() {
         let expr = text_fn(TextFunction::Rept, vec![lit_str("ab"), lit_int(3)]);
-        assert_eq!(expr.to_sql_string(), "REPEAT('ab', 3)");
+        assert_eq!(expr.to_sql_string().unwrap(), "REPEAT('ab', 3)");
     }
 
     #[test]
     fn text_right_sql() {
         let expr = text_fn(TextFunction::Right, vec![col("name"), lit_int(2)]);
-        assert_eq!(expr.to_sql_string(), "RIGHT(\"name\", 2)");
+        assert_eq!(expr.to_sql_string().unwrap(), "RIGHT(\"name\", 2)");
     }
 
     #[test]
     fn text_search_sql() {
         let expr = text_fn(TextFunction::Search, vec![lit_str("X"), col("text")]);
-        assert_eq!(expr.to_sql_string(), "STRPOS(LOWER(\"text\"), LOWER('X'))");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "STRPOS(LOWER(\"text\"), LOWER('X'))"
+        );
     }
 
     #[test]
@@ -5798,38 +5941,44 @@ mod tests {
             TextFunction::Substitute,
             vec![col("text"), lit_str("old"), lit_str("new")],
         );
-        assert_eq!(expr.to_sql_string(), "REPLACE(\"text\", 'old', 'new')");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "REPLACE(\"text\", 'old', 'new')"
+        );
     }
 
     #[test]
     fn text_trim_sql() {
         let expr = text_fn(TextFunction::Trim, vec![col("name")]);
-        assert_eq!(expr.to_sql_string(), "TRIM(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "TRIM(\"name\")");
     }
 
     #[test]
     fn text_unichar_sql() {
         let expr = text_fn(TextFunction::Unichar, vec![lit_int(65)]);
-        assert_eq!(expr.to_sql_string(), "CHR(65)");
+        assert_eq!(expr.to_sql_string().unwrap(), "CHR(65)");
     }
 
     #[test]
     fn text_unicode_sql() {
         let expr = text_fn(TextFunction::Unicode, vec![lit_str("A")]);
-        assert_eq!(expr.to_sql_string(), "ASCII('A')");
+        assert_eq!(expr.to_sql_string().unwrap(), "ASCII('A')");
     }
 
     #[test]
     fn text_value_sql() {
         let expr = text_fn(TextFunction::Value, vec![col("price_text")]);
-        assert_eq!(expr.to_sql_string(), "CAST(\"price_text\" AS DOUBLE)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "CAST(\"price_text\" AS DOUBLE)"
+        );
     }
 
     #[test]
     fn text_fixed_sql() {
         let expr = text_fn(TextFunction::Fixed, vec![col("amount"), lit_int(2)]);
         assert_eq!(
-            expr.to_sql_string(),
+            expr.to_sql_string().unwrap(),
             "CAST(ROUND(\"amount\", 2) AS VARCHAR)"
         );
     }
@@ -5837,45 +5986,45 @@ mod tests {
     #[test]
     fn text_ltrim_sql() {
         let expr = text_fn(TextFunction::Ltrim, vec![col("name")]);
-        assert_eq!(expr.to_sql_string(), "LTRIM(\"name\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "LTRIM(\"name\")");
         let expr = text_fn(TextFunction::Ltrim, vec![col("name"), lit_str("0#")]);
-        assert_eq!(expr.to_sql_string(), "LTRIM(\"name\", '0#')");
+        assert_eq!(expr.to_sql_string().unwrap(), "LTRIM(\"name\", '0#')");
     }
 
     #[test]
     fn text_rtrim_sql() {
         let expr = text_fn(TextFunction::Rtrim, vec![col("price")]);
-        assert_eq!(expr.to_sql_string(), "RTRIM(\"price\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "RTRIM(\"price\")");
         let expr = text_fn(TextFunction::Rtrim, vec![col("price"), lit_str("0.")]);
-        assert_eq!(expr.to_sql_string(), "RTRIM(\"price\", '0.')");
+        assert_eq!(expr.to_sql_string().unwrap(), "RTRIM(\"price\", '0.')");
     }
 
     #[test]
     fn text_lpad_sql() {
         let expr = text_fn(TextFunction::Lpad, vec![col("id"), lit_int(5)]);
-        assert_eq!(expr.to_sql_string(), "LPAD(\"id\", 5)");
+        assert_eq!(expr.to_sql_string().unwrap(), "LPAD(\"id\", 5)");
         let expr = text_fn(
             TextFunction::Lpad,
             vec![col("id"), lit_int(5), lit_str("0")],
         );
-        assert_eq!(expr.to_sql_string(), "LPAD(\"id\", 5, '0')");
+        assert_eq!(expr.to_sql_string().unwrap(), "LPAD(\"id\", 5, '0')");
     }
 
     #[test]
     fn text_rpad_sql() {
         let expr = text_fn(TextFunction::Rpad, vec![col("code"), lit_int(10)]);
-        assert_eq!(expr.to_sql_string(), "RPAD(\"code\", 10)");
+        assert_eq!(expr.to_sql_string().unwrap(), "RPAD(\"code\", 10)");
         let expr = text_fn(
             TextFunction::Rpad,
             vec![col("code"), lit_int(10), lit_str("*")],
         );
-        assert_eq!(expr.to_sql_string(), "RPAD(\"code\", 10, '*')");
+        assert_eq!(expr.to_sql_string().unwrap(), "RPAD(\"code\", 10, '*')");
     }
 
     #[test]
     fn text_reverse_sql() {
         let expr = text_fn(TextFunction::Reverse, vec![col("text")]);
-        assert_eq!(expr.to_sql_string(), "REVERSE(\"text\")");
+        assert_eq!(expr.to_sql_string().unwrap(), "REVERSE(\"text\")");
     }
 
     #[test]
@@ -5884,7 +6033,10 @@ mod tests {
             TextFunction::Split,
             vec![col("path"), lit_str("/"), lit_int(2)],
         );
-        assert_eq!(expr.to_sql_string(), "SPLIT_PART(\"path\", '/', 2)");
+        assert_eq!(
+            expr.to_sql_string().unwrap(),
+            "SPLIT_PART(\"path\", '/', 2)"
+        );
     }
 
     #[test]
@@ -5919,7 +6071,10 @@ mod tests {
         for expr in exprs {
             let json = serde_json::to_string(&expr).unwrap();
             let deser: Expression = serde_json::from_str(&json).unwrap();
-            assert_eq!(deser.to_sql_string(), expr.to_sql_string());
+            assert_eq!(
+                deser.to_sql_string().unwrap(),
+                expr.to_sql_string().unwrap()
+            );
         }
     }
 
@@ -5994,7 +6149,7 @@ mod tests {
         let expanded = expand_global_variables(&expr, &model);
 
         assert!(matches!(expanded, Expression::Aggregate { .. }));
-        assert_eq!(expanded.to_sql_string(), "SUM(\"linetotal\")");
+        assert_eq!(expanded.to_sql_string().unwrap(), "SUM(\"linetotal\")");
     }
 
     #[test]
@@ -6004,7 +6159,10 @@ mod tests {
         let expr = col("total_revenue").divide(lit(100.0));
         let expanded = expand_global_variables(&expr, &model);
 
-        assert_eq!(expanded.to_sql_string(), "(SUM(\"linetotal\") / 100)");
+        assert_eq!(
+            expanded.to_sql_string().unwrap(),
+            "(SUM(\"linetotal\") / 100)"
+        );
     }
 
     #[test]
@@ -6040,7 +6198,10 @@ mod tests {
         // Expression with no global references.
         let expr = col("linetotal");
         let expanded = expand_global_variables(&expr, &model);
-        assert_eq!(expanded.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            expanded.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     #[test]
@@ -6056,7 +6217,10 @@ mod tests {
 
         let expr = col("x");
         let expanded = expand_global_variables(&expr, &model);
-        assert_eq!(expanded.to_sql_string(), expr.to_sql_string());
+        assert_eq!(
+            expanded.to_sql_string().unwrap(),
+            expr.to_sql_string().unwrap()
+        );
     }
 
     #[test]
@@ -6330,7 +6494,7 @@ mod tests {
             vec![],
             None,
         );
-        assert!(w.to_sql_string().contains("WINDOW"));
+        assert!(w.to_sql_string().unwrap().contains("WINDOW"));
     }
 
     #[test]

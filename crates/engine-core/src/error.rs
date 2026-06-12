@@ -35,6 +35,24 @@ pub enum EngineError {
     #[error("Invalid data: {0}")]
     InvalidData(String),
 
+    /// A measure, context, or variable text expression failed to parse.
+    ///
+    /// Raised by the expression parser for syntax errors and for errors
+    /// triggered by the content of the parsed text (e.g. unknown function
+    /// names, reserved variable names, invalid interval keywords).
+    ///
+    /// `position` is a byte offset into the input text where the error was
+    /// detected, suitable for inline error highlighting in host applications
+    /// (e.g. a formula bar). For errors at end of input it equals the input
+    /// length.
+    #[error("Parse error at position {position}: {message}")]
+    ParseError {
+        /// Byte offset into the input text where the error was detected.
+        position: usize,
+        /// Description of the parse failure.
+        message: String,
+    },
+
     /// A referenced relationship was not found in the data model.
     #[error("Relationship '{0}' not found")]
     RelationshipNotFound(String),

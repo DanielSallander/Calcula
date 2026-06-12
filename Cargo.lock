@@ -424,6 +424,7 @@ dependencies = [
  "engine-connectors",
  "engine-core",
  "engine-query",
+ "futures",
  "rust_decimal",
  "serde",
  "serde_json",

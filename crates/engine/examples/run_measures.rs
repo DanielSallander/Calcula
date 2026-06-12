@@ -414,6 +414,7 @@ fn parse_query(input: &str, model: &DataModel) -> Result<QueryRequest, String> {
         group_by,
         filters,
         lookups: vec![],
+        ..Default::default()
     })
 }
 

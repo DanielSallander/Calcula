@@ -63,10 +63,15 @@ impl super::QueryExecutor {
             QueryPlan::PushedJoinAggregation {
                 source_table,
                 request,
+                order_by,
+                limit,
             } => {
                 let start = Instant::now();
                 let connector = registry.connector_for(source_table)?;
                 let batches = connector.execute_join_aggregation(request).await?;
+                // The pushed join SQL is not ordered; apply ORDER BY / LIMIT
+                // locally over the result rows (mirrors `execute`).
+                let batches = super::pipeline::apply_order_and_limit(batches, order_by, *limit)?;
                 let elapsed = start.elapsed();
 
                 let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -85,6 +90,9 @@ impl super::QueryExecutor {
                 measures,
                 group_by,
                 lookup_specs,
+                order_by,
+                limit,
+                totals,
             } => {
                 let start = Instant::now();
 
@@ -95,6 +103,9 @@ impl super::QueryExecutor {
                     measures,
                     group_by,
                     lookup_specs,
+                    order_by,
+                    *limit,
+                    *totals,
                     model,
                     registry,
                     cache,

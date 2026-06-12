@@ -1,12 +1,16 @@
 //! Query executor: executes a `QueryPlan` and returns Arrow results.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{Array, Int64Array};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
+use datafusion::common::TableReference;
+use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 
+use engine_connectors::traits::InValueKind;
 use engine_connectors::InFilterCondition;
 use engine_core::compute::aggregate::AggregateOp;
 use engine_core::compute::context::{
@@ -23,7 +27,7 @@ use engine_core::store::InMemoryCache;
 use crate::error::QueryResult;
 use crate::planner::QueryPlan;
 use crate::registry::SourceRegistry;
-use crate::request::ColumnRef;
+use crate::request::{ColumnRef, OrderByClause, OrderTarget, TotalsMode, GROUPING_ID_COLUMN};
 
 /// Executes query plans, coordinating between data sources and local computation.
 pub struct QueryExecutor;
@@ -52,22 +56,32 @@ impl QueryExecutor {
             QueryPlan::PushedJoinAggregation {
                 source_table,
                 request,
+                order_by,
+                limit,
             } => {
                 let connector = registry.connector_for(source_table)?;
                 let batches = connector.execute_join_aggregation(request).await?;
-                Ok(batches)
+                // The pushed join SQL is not ordered; apply ORDER BY / LIMIT
+                // locally over the (already aggregated) result rows.
+                apply_order_and_limit(batches, order_by, *limit)
             }
             QueryPlan::LocalAggregation {
                 fetches,
                 measures,
                 group_by,
                 lookup_specs,
+                order_by,
+                limit,
+                totals,
             } => {
                 Self::execute_local_aggregation(
                     fetches,
                     measures,
                     group_by,
                     lookup_specs,
+                    order_by,
+                    *limit,
+                    *totals,
                     model,
                     registry,
                     cache,
@@ -83,18 +97,47 @@ impl QueryExecutor {
     ///
     /// When `plan_node` is `Some`, timing and metadata are recorded into child nodes.
     /// When `cache` is provided, in-memory tables are served from the cache.
+    ///
+    /// `order_by` carries the plan's effective ORDER BY clauses. In the main
+    /// single-fact-table path they are rendered into the final DataFusion SQL
+    /// (with model `sort_by_column` substitution as `MIN(sort_col)`); paths
+    /// whose result is assembled outside a single SQL statement (multi-fact,
+    /// window measures, QUERY-in-VAR measures, pre-aggregate joins, override
+    /// splits, post-lookup results) apply [`apply_order_and_limit`] as a
+    /// final Arrow-level step instead. `limit` is applied after ordering.
+    ///
+    /// `totals` adds ROLLUP subtotal rows in the main path by rendering
+    /// `GROUP BY ROLLUP (...)` plus a trailing `__grouping_id` bitmask column
+    /// into the DataFusion SQL — every subtotal level is its own GROUP BY
+    /// evaluation over the same registered tables, so non-additive measures
+    /// are correct and the fact table is fetched once. The specialized paths
+    /// listed above do not support totals and return a typed
+    /// `InvalidQuery` error (see `TotalsMode` docs for the exact list).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_local_aggregation(
         fetches: &[(String, engine_connectors::FetchRequest)],
         measures: &[engine_core::compute::measure::Measure],
         group_by: &[ColumnRef],
         lookup_specs: &[crate::planner::LookupSpec],
+        order_by: &[OrderByClause],
+        limit: Option<usize>,
+        totals: TotalsMode,
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
+        let rollup = totals == TotalsMode::Rollup;
+        // Lookups + totals and oversized group-by lists are rejected at
+        // planning time; these guards cover direct callers of the executor
+        // (the arity cap also keeps the grouping-id bit shifts in range).
+        if rollup && !lookup_specs.is_empty() {
+            return Err(totals_unsupported("lookup columns"));
+        }
+        if rollup && group_by.len() > 31 {
+            return Err(totals_unsupported("more than 31 group_by columns"));
+        }
         // Expand measure references and global variable references.
         let needs_expansion = measures
             .iter()
@@ -247,7 +290,7 @@ impl QueryExecutor {
         for (idx, _dim_table, ref batches, _, _) in &pre_fetch_results {
             for (pi, dim_col, fact_table, fact_col) in &propagation_info {
                 if pi == idx {
-                    let values = extract_column_values(batches, dim_col);
+                    let (values, kind) = extract_column_values(batches, dim_col);
                     if !values.is_empty() {
                         in_filters_by_table
                             .entry(fact_table.to_lowercase())
@@ -255,6 +298,7 @@ impl QueryExecutor {
                             .push(InFilterCondition {
                                 column: fact_col.clone(),
                                 values,
+                                kind,
                             });
                     }
                 }
@@ -288,7 +332,7 @@ impl QueryExecutor {
                     if let Some((_, batches, _, _)) =
                         inmemory_results.iter().find(|(n, _, _, _)| n == table_name)
                     {
-                        let values = extract_column_values(batches, &dim_col);
+                        let (values, kind) = extract_column_values(batches, &dim_col);
                         if !values.is_empty() {
                             in_filters_by_table
                                 .entry(mt.to_lowercase())
@@ -296,6 +340,7 @@ impl QueryExecutor {
                                 .push(InFilterCondition {
                                     column: fact_col,
                                     values,
+                                    kind,
                                 });
                         }
                     }
@@ -350,6 +395,14 @@ impl QueryExecutor {
         let mut all_fetch_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
             Vec::new();
 
+        // Remember which tables were served from the in-memory cache: their
+        // batches were already optimized (and sorted) at refresh time, so the
+        // per-query re-optimization is skipped for them below.
+        let cache_served_tables: std::collections::HashSet<String> = inmemory_results
+            .iter()
+            .map(|(name, _, _, _)| name.clone())
+            .collect();
+
         // In-memory tables first.
         all_fetch_results.extend(inmemory_results);
         // Then connector pre-fetches.
@@ -369,21 +422,32 @@ impl QueryExecutor {
                 continue;
             }
 
-            let schema = batches[0].schema();
-            let combined = concat_batches(&schema, batches)?;
+            // Register with lowercase name (DataFusion normalizes to lowercase).
+            let df_name = table_name.to_lowercase();
+
+            if cache_served_tables.contains(table_name) {
+                // Cache-served batches were already optimized and sorted at
+                // refresh time (`Engine::refresh_table_inner`); skip the
+                // redundant per-query re-optimization and register directly.
+                register_partitioned_table(&ctx, &df_name, batches.clone())?;
+                continue;
+            }
 
             // Optimize the batch (narrow integers, dictionary-encode strings,
             // convert midnight timestamps to Date32) to reduce memory pressure
-            // during local joins and aggregation.
+            // during local joins and aggregation. Optimization decisions must
+            // be consistent across batches (one schema per table), so the
+            // batches are concatenated first; registration then re-chunks the
+            // result zero-copy so DataFusion can parallelize across partitions.
+            let schema = batches[0].schema();
+            let combined = concat_batches(&schema, batches)?;
             let (optimized, stats) = engine_core::optimize::optimize_batch(&combined, &opt_config)?;
 
             if stats.any_applied() {
                 opt_stats_by_table.push((table_name.clone(), stats));
             }
 
-            // Register with lowercase name (DataFusion normalizes to lowercase).
-            let df_name = table_name.to_lowercase();
-            ctx.register_batch(&df_name, optimized)?;
+            register_partitioned_table(&ctx, &df_name, vec![optimized])?;
         }
 
         // Build fetch plan nodes if collecting plan data.
@@ -405,6 +469,12 @@ impl QueryExecutor {
                 if is_cached {
                     fetch_node
                         .add_property("source", PlanValue::Text("in_memory_cache".to_string()));
+                    // Cache-served batches skip the per-query optimization
+                    // pass — they were already optimized at refresh time.
+                    fetch_node.add_property(
+                        "optimization",
+                        PlanValue::Text("cached (pre-optimized)".to_string()),
+                    );
                 }
 
                 // Annotate measure table fetches with propagated IN filter info.
@@ -474,8 +544,13 @@ impl QueryExecutor {
             .partition(|m| m.expression().has_query_bindings());
 
         // If we have QUERY-in-VAR measures, evaluate them via two-stage aggregation.
+        // Result rows are assembled outside the final SQL — apply ORDER BY /
+        // LIMIT as a final Arrow-level step.
         if !query_measures.is_empty() {
-            return Self::execute_query_measures(
+            if rollup {
+                return Err(totals_unsupported("QUERY-in-VAR measures"));
+            }
+            let batches = Self::execute_query_measures(
                 &ctx,
                 &query_measures,
                 &normal_measures,
@@ -483,30 +558,39 @@ impl QueryExecutor {
                 model,
                 plan,
             )
-            .await;
+            .await?;
+            return apply_order_and_limit(batches, order_by, limit);
         }
 
         // Separate window measures from normal measures.
         let (window_measures, _non_window): (Vec<&Measure>, Vec<&Measure>) =
             measures.iter().partition(|m| m.expression().has_window());
 
-        // If we have window measures, evaluate them via two-stage window execution.
+        // If we have window measures, evaluate them via two-stage window execution
+        // (ordered at the Arrow level afterwards).
         if !window_measures.is_empty() {
-            return Self::execute_window_measures(&ctx, &window_measures, group_by, model, plan)
-                .await;
+            if rollup {
+                return Err(totals_unsupported("window measures"));
+            }
+            let batches =
+                Self::execute_window_measures(&ctx, &window_measures, group_by, model, plan)
+                    .await?;
+            return apply_order_and_limit(batches, order_by, limit);
         }
 
         // Partition measures by home table to detect multi-fact-table queries.
+        // The combined FULL OUTER JOIN result is ordered at the Arrow level.
         let measure_groups = partition_measures_by_table(measures);
         if measure_groups.len() > 1 {
-            return Self::execute_multi_group_aggregation(
-                &ctx,
-                &measure_groups,
-                group_by,
-                model,
-                plan,
-            )
-            .await;
+            if rollup {
+                return Err(totals_unsupported(
+                    "measures from multiple fact tables in one request",
+                ));
+            }
+            let batches =
+                Self::execute_multi_group_aggregation(&ctx, &measure_groups, group_by, model, plan)
+                    .await?;
+            return apply_order_and_limit(batches, order_by, limit);
         }
 
         // Build the SQL query for the local aggregation.
@@ -527,7 +611,13 @@ impl QueryExecutor {
             .collect();
 
         if !unsafe_group_by_dims.is_empty() {
-            return Self::execute_pre_aggregate_join(
+            if rollup {
+                return Err(totals_unsupported(
+                    "GROUP BY dimensions reached through many-to-many or non-equi relationships",
+                ));
+            }
+            // Two-stage pre-aggregation — ordered at the Arrow level.
+            let batches = Self::execute_pre_aggregate_join(
                 &ctx,
                 measures,
                 group_by,
@@ -538,7 +628,8 @@ impl QueryExecutor {
                 fact_model_name,
                 &unsafe_group_by_dims,
             )
-            .await;
+            .await?;
+            return apply_order_and_limit(batches, order_by, limit);
         }
 
         let mut select_parts: Vec<String> = Vec::new();
@@ -596,7 +687,14 @@ impl QueryExecutor {
         // via the standard path, unsafe override measures via pre-aggregation,
         // then combine via FULL OUTER JOIN.
         if !unsafe_override_measures.is_empty() {
-            return Self::execute_split_override_measures(
+            if rollup {
+                return Err(totals_unsupported(
+                    "USERELATIONSHIP overrides targeting a group-by dimension \
+                     through a many-to-many or non-equi relationship",
+                ));
+            }
+            // Split evaluation + FULL OUTER JOIN — ordered at the Arrow level.
+            let batches = Self::execute_split_override_measures(
                 &ctx,
                 &normal_measures,
                 &unsafe_override_measures,
@@ -607,7 +705,8 @@ impl QueryExecutor {
                 fact_table,
                 fact_model_name,
             )
-            .await;
+            .await?;
+            return apply_order_and_limit(batches, order_by, limit);
         }
 
         let measures = &normal_measures[..];
@@ -687,38 +786,76 @@ impl QueryExecutor {
                         fact_model_name,
                         model,
                         &alias_map,
-                    );
+                    )?;
                     // Use the measure's own table for column qualification.
                     let measure_table = &measure.table().to_lowercase();
-                    let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table);
+                    let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table)?;
                     format!("{expr_sql} AS {}", quote_ident_double(name))
                 } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
                     let col = quote_ident_double(col);
                     let name = quote_ident_double(name);
-                    match op {
-                        AggregateOp::Sum => format!("SUM({fact}.{col}) AS {name}"),
-                        AggregateOp::Count => {
-                            format!("COUNT({fact}.{col}) AS {name}")
-                        }
-                        AggregateOp::Average => {
-                            format!("AVG({fact}.{col}) AS {name}")
-                        }
-                        AggregateOp::Min => format!("MIN({fact}.{col}) AS {name}"),
-                        AggregateOp::Max => format!("MAX({fact}.{col}) AS {name}"),
-                        AggregateOp::DistinctCount => {
-                            format!("COUNT(DISTINCT {fact}.{col}) AS {name}")
-                        }
-                        AggregateOp::CountRows => format!("COUNT(*) AS {name}"),
-                        // Statistical aggregates: use Display for function name
-                        _ => format!("{op}({fact}.{col}) AS {name}"),
-                    }
+                    format!("{} AS {name}", op.render_sql(&format!("{fact}.{col}")))
                 } else {
-                    let expr_sql = stripped_expr.to_sql_string();
+                    let expr_sql = stripped_expr.to_sql_string()?;
                     format!("{expr_sql} AS {}", quote_ident_double(name))
                 }
             };
             select_parts.push(sql_fragment);
+        }
+
+        // ROLLUP totals: project the trailing `__grouping_id` bitmask column.
+        // It must follow the measure columns — the hidden `__order_N` /
+        // `__plan_join_rows` helpers added below are stripped from the result,
+        // leaving `__grouping_id` as the trailing result column.
+        if rollup {
+            select_parts.push(grouping_id_select_sql(&group_parts));
+        }
+
+        // ORDER BY terms for the final SQL. Rendered into this statement when
+        // the result comes straight from it; when lookups follow (their JOIN
+        // + re-GROUP BY does not preserve row order), ordering is applied
+        // after the lookup step instead (see below).
+        //
+        // Sort-by-column substitution: DataFusion cannot ORDER BY an
+        // aggregate expression that is not projected, so `MIN(sort_col)` is
+        // projected as a hidden `__order_N` helper column (stripped from the
+        // result after execution) and the ORDER BY references its alias.
+        let order_in_sql = lookup_specs.is_empty();
+        let mut order_terms: Vec<String> = Vec::new();
+        if order_in_sql {
+            for (i, clause) in order_by.iter().enumerate() {
+                let term = match &clause.target {
+                    OrderTarget::Column(col) => {
+                        let dim_lower = col.table.to_lowercase();
+                        let sort_col = model
+                            .table(&col.table)
+                            .ok()
+                            .and_then(|t| t.sort_column_for(&col.column).ok())
+                            .unwrap_or(col.column.as_str());
+                        if sort_col.eq_ignore_ascii_case(&col.column) {
+                            format!("{dim_lower}.{}", quote_ident_double(&col.column))
+                        } else {
+                            // `MIN(sort_col)`: the sort column is not in the
+                            // GROUP BY, so it must be aggregated. MIN is exact
+                            // under the model's 1:1 display-value-to-sort-value
+                            // assumption (enforced at model build time).
+                            let alias = format!("__order_{i}");
+                            select_parts.push(format!(
+                                "MIN({dim_lower}.{}) AS \"{alias}\"",
+                                quote_ident_double(sort_col)
+                            ));
+                            format!("\"{alias}\"")
+                        }
+                    }
+                    OrderTarget::Measure(name) => quote_ident_double(name),
+                };
+                order_terms.push(if clause.descending {
+                    format!("{term} DESC")
+                } else {
+                    term
+                });
+            }
         }
 
         // When building an explained plan, add COUNT(*) to measure intermediate join rows.
@@ -871,10 +1008,20 @@ impl QueryExecutor {
             sql.push_str(&exists_conditions.join(" AND "));
         }
 
-        // GROUP BY clause.
+        // GROUP BY clause — `GROUP BY ROLLUP (...)` when totals are
+        // requested. DataFusion plans ROLLUP as grouping sets: each subtotal
+        // level is its own GROUP BY evaluation over the same registered
+        // (already-fetched) tables, so non-additive measures (DISTINCTCOUNT,
+        // AVG, ...) are recomputed per level and the fact table is read once.
         if !group_parts.is_empty() {
-            sql.push_str(" GROUP BY ");
-            sql.push_str(&group_parts.join(", "));
+            if rollup {
+                sql.push_str(" GROUP BY ROLLUP (");
+                sql.push_str(&group_parts.join(", "));
+                sql.push(')');
+            } else {
+                sql.push_str(" GROUP BY ");
+                sql.push_str(&group_parts.join(", "));
+            }
 
             // HAVING clause: exclude groups where all CASE-WHEN measures are NULL.
             // Without this, groups with no matching rows produce NULL aggregates
@@ -886,6 +1033,17 @@ impl QueryExecutor {
                     .collect();
                 sql.push_str(" HAVING ");
                 sql.push_str(&having_parts.join(" OR "));
+            }
+        }
+
+        // ORDER BY / LIMIT (terms built alongside the SELECT list above).
+        if !order_terms.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&order_terms.join(", "));
+        }
+        if order_in_sql {
+            if let Some(n) = limit {
+                sql.push_str(&format!(" LIMIT {n}"));
             }
         }
 
@@ -955,6 +1113,9 @@ impl QueryExecutor {
                 stripped
             };
 
+            // Strip hidden `__order_N` sort-helper columns.
+            let batches = strip_order_helper_columns(batches)?;
+
             plan_node.add_child(agg_node);
 
             if !lookup_specs.is_empty() {
@@ -966,7 +1127,7 @@ impl QueryExecutor {
                     Some(plan_node),
                 )
                 .await?;
-                Ok(batches)
+                apply_order_and_limit(batches, order_by, limit)
             } else {
                 Ok(batches)
             }
@@ -975,10 +1136,13 @@ impl QueryExecutor {
             let df = ctx.sql(&sql).await?;
             let batches = df.collect().await?;
 
+            // Strip hidden `__order_N` sort-helper columns.
+            let batches = strip_order_helper_columns(batches)?;
+
             if !lookup_specs.is_empty() {
                 let batches =
                     Self::apply_lookup_specs(&ctx, batches, lookup_specs, group_by, None).await?;
-                Ok(batches)
+                apply_order_and_limit(batches, order_by, limit)
             } else {
                 Ok(batches)
             }
@@ -1081,8 +1245,12 @@ impl QueryExecutor {
                 let (s1_agg, s2_agg) = match op {
                     AggregateOp::Sum => {
                         if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             (
                                 format!(
                                     "SUM(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -1110,14 +1278,18 @@ impl QueryExecutor {
                                     fact_table,
                                     fact_model_name,
                                     model,
-                                );
+                                )?;
                                 format!("COUNT(CASE WHEN {condition} THEN 1 END) AS \"{alias}\"")
                             } else {
                                 format!("COUNT(*) AS \"{alias}\"")
                             }
                         } else if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             format!(
                                 "COUNT(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                             )
@@ -1131,8 +1303,12 @@ impl QueryExecutor {
                     }
                     AggregateOp::Min => {
                         if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             (
                                 format!(
                                     "MIN(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -1154,8 +1330,12 @@ impl QueryExecutor {
                     }
                     AggregateOp::Max => {
                         if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             (
                                 format!(
                                     "MAX(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -1180,8 +1360,12 @@ impl QueryExecutor {
                         let sum_alias = format!("__pre_{i}_sum");
                         let cnt_alias = format!("__pre_{i}_cnt");
                         if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             s1_select.push(format!(
                                 "SUM(CASE WHEN {condition} THEN {col_ref} END) AS \"{sum_alias}\""
                             ));
@@ -1212,8 +1396,12 @@ impl QueryExecutor {
                         // Better approach: we skip pre-aggregation for DISTINCTCOUNT
                         // and evaluate it separately via an EXISTS-filtered subquery.
                         if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             s1_select.push(format!(
                                 "COUNT(DISTINCT CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
                             ));
@@ -1237,8 +1425,12 @@ impl QueryExecutor {
                     _ => {
                         let fn_name = op.to_string();
                         if has_context {
-                            let condition =
-                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            let condition = build_condition_sql(
+                                &effective,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                            )?;
                             (
                                 format!(
                                     "{fn_name}(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
@@ -1266,7 +1458,7 @@ impl QueryExecutor {
                 // Complex expression: emit the full SQL in Stage 1.
                 // Stage 2 re-aggregates with SUM (best-effort for complex exprs).
                 let alias = format!("__pre_{i}");
-                let expr_sql = stripped.to_sql_string();
+                let expr_sql = stripped.to_sql_string()?;
                 s1_select.push(format!("{expr_sql} AS \"{alias}\""));
                 s2_measure_parts.push(format!(
                     "SUM(__pre_agg.\"{alias}\") AS {}",
@@ -1313,9 +1505,7 @@ impl QueryExecutor {
             )]);
         }
 
-        let s1_schema = s1_batches[0].schema();
-        let s1_combined = concat_batches(&s1_schema, &s1_batches)?;
-        ctx.register_batch("__pre_agg", s1_combined)?;
+        register_partitioned_table(ctx, "__pre_agg", s1_batches.clone())?;
 
         // --- Stage 2: Join pre-aggregated result to unsafe dims ---
         let mut s2_select: Vec<String> = Vec::new();
@@ -1440,24 +1630,13 @@ impl QueryExecutor {
                 if let Some((op, col)) = measure.expression().as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
                     let col = quote_ident_double(col);
-                    let agg_sql = match op {
-                        AggregateOp::Sum => format!("SUM({fact}.{col})"),
-                        AggregateOp::Count => format!("COUNT({fact}.{col})"),
-                        AggregateOp::Average => format!("AVG({fact}.{col})"),
-                        AggregateOp::Min => format!("MIN({fact}.{col})"),
-                        AggregateOp::Max => format!("MAX({fact}.{col})"),
-                        AggregateOp::DistinctCount => {
-                            format!("COUNT(DISTINCT {fact}.{col})")
-                        }
-                        AggregateOp::CountRows => "COUNT(*)".to_string(),
-                        _ => format!("{op}({fact}.{col})"),
-                    };
+                    let agg_sql = op.render_sql(&format!("{fact}.{col}"));
                     select_parts.push(format!(
                         "{agg_sql} AS {}",
                         quote_ident_double(measure.name())
                     ));
                 } else {
-                    let expr_sql = measure.expression().to_sql_string();
+                    let expr_sql = measure.expression().to_sql_string()?;
                     select_parts.push(format!(
                         "{expr_sql} AS {}",
                         quote_ident_double(measure.name())
@@ -1503,9 +1682,7 @@ impl QueryExecutor {
                 pn.add_child(node);
             }
             if !batches.is_empty() {
-                let schema = batches[0].schema();
-                let combined = concat_batches(&schema, &batches)?;
-                ctx.register_batch(normal_table_name, combined)?;
+                register_partitioned_table(ctx, normal_table_name, batches)?;
                 has_normal = true;
             }
         }
@@ -1606,9 +1783,7 @@ impl QueryExecutor {
                 continue;
             }
 
-            let bounds_schema = bounds_batches[0].schema();
-            let bounds_combined = concat_batches(&bounds_schema, &bounds_batches)?;
-            ctx.register_batch(&bounds_alias, bounds_combined)?;
+            register_partitioned_table(ctx, &bounds_alias, bounds_batches.clone())?;
 
             // Main query: CROSS JOIN fact with bounds, filter by boundary.
             let mut main_select: Vec<String> = Vec::new();
@@ -1624,19 +1799,10 @@ impl QueryExecutor {
             let measure_name = measure.name();
             if let Some((op, col)) = stripped.as_simple_aggregate() {
                 let col_ref = format!("{fact_table}.{}", quote_ident_double(col));
-                let agg_sql = match op {
-                    AggregateOp::Sum => format!("SUM({col_ref})"),
-                    AggregateOp::Count => format!("COUNT({col_ref})"),
-                    AggregateOp::Average => format!("AVG({col_ref})"),
-                    AggregateOp::Min => format!("MIN({col_ref})"),
-                    AggregateOp::Max => format!("MAX({col_ref})"),
-                    AggregateOp::DistinctCount => format!("COUNT(DISTINCT {col_ref})"),
-                    AggregateOp::CountRows => "COUNT(*)".to_string(),
-                    _ => format!("{op}({col_ref})"),
-                };
+                let agg_sql = op.render_sql(&col_ref);
                 main_select.push(format!("{agg_sql} AS {}", quote_ident_double(measure_name)));
             } else {
-                let expr_sql = stripped.to_sql_string();
+                let expr_sql = stripped.to_sql_string()?;
                 main_select.push(format!(
                     "{expr_sql} AS {}",
                     quote_ident_double(measure_name)
@@ -1673,9 +1839,7 @@ impl QueryExecutor {
             }
 
             if !main_batches.is_empty() {
-                let schema = main_batches[0].schema();
-                let combined = concat_batches(&schema, &main_batches)?;
-                ctx.register_batch(&result_table, combined)?;
+                register_partitioned_table(ctx, &result_table, main_batches)?;
                 override_table_names.push((result_table, measure_name.to_string()));
             }
         }
@@ -1880,28 +2044,17 @@ impl QueryExecutor {
                             fact_model_name,
                             model,
                             &alias_map,
-                        );
+                        )?;
                         let measure_table = &measure.table().to_lowercase();
-                        let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table);
+                        let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table)?;
                         format!("{expr_sql} AS {}", quote_ident_double(name))
                     } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                         let fact = measure.table().to_lowercase();
                         let col = quote_ident_double(col);
                         let name = quote_ident_double(name);
-                        match op {
-                            AggregateOp::Sum => format!("SUM({fact}.{col}) AS {name}"),
-                            AggregateOp::Count => format!("COUNT({fact}.{col}) AS {name}"),
-                            AggregateOp::Average => format!("AVG({fact}.{col}) AS {name}"),
-                            AggregateOp::Min => format!("MIN({fact}.{col}) AS {name}"),
-                            AggregateOp::Max => format!("MAX({fact}.{col}) AS {name}"),
-                            AggregateOp::DistinctCount => {
-                                format!("COUNT(DISTINCT {fact}.{col}) AS {name}")
-                            }
-                            AggregateOp::CountRows => format!("COUNT(*) AS {name}"),
-                            _ => format!("{op}({fact}.{col}) AS {name}"),
-                        }
+                        format!("{} AS {name}", op.render_sql(&format!("{fact}.{col}")))
                     } else {
-                        let expr_sql = stripped_expr.to_sql_string();
+                        let expr_sql = stripped_expr.to_sql_string()?;
                         format!("{expr_sql} AS {}", quote_ident_double(name))
                     }
                 };
@@ -2023,9 +2176,7 @@ impl QueryExecutor {
             }
 
             if !batches.is_empty() {
-                let schema = batches[0].schema();
-                let combined = concat_batches(&schema, &batches)?;
-                ctx.register_batch(&group_name, combined)?;
+                register_partitioned_table(ctx, &group_name, batches)?;
             } else {
                 // Register an empty batch so the FULL OUTER JOIN still works.
                 let empty = RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
@@ -2221,8 +2372,7 @@ impl QueryExecutor {
 
         // Register aggregation result.
         let schema = agg_batches[0].schema();
-        let combined = concat_batches(&schema, &agg_batches)?;
-        ctx.register_batch("__agg_result", combined)?;
+        register_partitioned_table(ctx, "__agg_result", agg_batches)?;
 
         // Collect unique (table, key_column) pairs for JOINs.
         let mut join_keys: Vec<(String, String)> = Vec::new();
@@ -2452,7 +2602,7 @@ impl QueryExecutor {
 
             // Stage 2: Build SQL over the intermediate table(s).
             let inlined = stripped_expr.inline_bindings();
-            let result_sql = inlined.to_sql_string();
+            let result_sql = inlined.to_sql_string()?;
             let from_table = query_binding_names[0].to_lowercase();
 
             let mut select_parts: Vec<String> = Vec::new();
@@ -2874,11 +3024,11 @@ async fn materialize_query_in_pipeline(
         let effective = eval_ctx.effective_filters(&[]);
 
         if effective.is_empty() {
-            let sql = stripped.to_sql_string();
+            let sql = stripped.to_sql_string()?;
             select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
         } else {
-            let condition = build_condition_sql(&effective, &fact_lower, fact_table, model);
-            let sql = stripped.to_case_when_sql(&condition, &fact_lower);
+            let condition = build_condition_sql(&effective, &fact_lower, fact_table, model)?;
+            let sql = stripped.to_case_when_sql(&condition, &fact_lower)?;
             select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
 
             // Track dimension tables needed for CASE WHEN filter JOINs.
@@ -3112,7 +3262,7 @@ fn build_condition_sql_with_aliases(
     fact_model_name: &str,
     model: &DataModel,
     alias_map: &std::collections::HashMap<String, String>,
-) -> String {
+) -> QueryResult<String> {
     build_condition_sql_impl(
         filters,
         &[],
@@ -3128,7 +3278,7 @@ fn build_condition_sql(
     fact_table: &str,
     fact_model_name: &str,
     model: &DataModel,
-) -> String {
+) -> QueryResult<String> {
     build_condition_sql_impl(filters, &[], fact_table, fact_model_name, model, None)
 }
 
@@ -3139,7 +3289,7 @@ fn build_condition_sql_with_conditions(
     fact_model_name: &str,
     model: &DataModel,
     alias_map: &std::collections::HashMap<String, String>,
-) -> String {
+) -> QueryResult<String> {
     build_condition_sql_impl(
         filters,
         conditions,
@@ -3157,7 +3307,7 @@ fn build_condition_sql_impl(
     fact_model_name: &str,
     model: &DataModel,
     alias_map: Option<&std::collections::HashMap<String, String>>,
-) -> String {
+) -> QueryResult<String> {
     let mut parts: Vec<String> = filters
         .iter()
         .map(|f| {
@@ -3180,10 +3330,10 @@ fn build_condition_sql_impl(
 
     // Render expression-based conditions with table-qualified column references.
     for cond in conditions {
-        parts.push(qualify_condition_sql(cond));
+        parts.push(qualify_condition_sql(cond)?);
     }
 
-    parts.join(" AND ")
+    Ok(parts.join(" AND "))
 }
 
 /// Collect table names from QualifiedColumnRef nodes in an expression,
@@ -3212,8 +3362,8 @@ fn collect_qualified_tables(expr: &Expression, fact_table: &str, tables: &mut Ve
 /// Render an expression-based condition as SQL with table-qualified column references.
 ///
 /// QualifiedColumnRef nodes are rendered as `table."column"` (lowercased table name).
-fn qualify_condition_sql(expr: &Expression) -> String {
-    match expr {
+fn qualify_condition_sql(expr: &Expression) -> QueryResult<String> {
+    Ok(match expr {
         Expression::QualifiedColumnRef {
             table_or_var,
             column,
@@ -3225,46 +3375,49 @@ fn qualify_condition_sql(expr: &Expression) -> String {
         Expression::Comparison { left, op, right } => {
             format!(
                 "({} {} {})",
-                qualify_condition_sql(left),
+                qualify_condition_sql(left)?,
                 op.as_sql(),
-                qualify_condition_sql(right)
+                qualify_condition_sql(right)?
             )
         }
         Expression::BinaryOp { left, op, right } => {
             format!(
                 "({} {} {})",
-                qualify_condition_sql(left),
+                qualify_condition_sql(left)?,
                 op.as_sql(),
-                qualify_condition_sql(right)
+                qualify_condition_sql(right)?
             )
         }
         Expression::And(left, right) => {
             format!(
                 "({} AND {})",
-                qualify_condition_sql(left),
-                qualify_condition_sql(right)
+                qualify_condition_sql(left)?,
+                qualify_condition_sql(right)?
             )
         }
         Expression::Or(left, right) => {
             format!(
                 "({} OR {})",
-                qualify_condition_sql(left),
-                qualify_condition_sql(right)
+                qualify_condition_sql(left)?,
+                qualify_condition_sql(right)?
             )
         }
-        Expression::Not(inner) => format!("(NOT {})", qualify_condition_sql(inner)),
-        Expression::IsBlank(inner) => format!("({} IS NULL)", qualify_condition_sql(inner)),
+        Expression::Not(inner) => format!("(NOT {})", qualify_condition_sql(inner)?),
+        Expression::IsBlank(inner) => format!("({} IS NULL)", qualify_condition_sql(inner)?),
         Expression::InList {
             expr: inner,
             values,
         } => {
-            let lhs = qualify_condition_sql(inner);
-            let vals: Vec<String> = values.iter().map(qualify_condition_sql).collect();
+            let lhs = qualify_condition_sql(inner)?;
+            let vals = values
+                .iter()
+                .map(qualify_condition_sql)
+                .collect::<QueryResult<Vec<String>>>()?;
             format!("{lhs} IN ({})", vals.join(", "))
         }
         // For literals and other expressions, fall back to to_sql_string().
-        _ => expr.to_sql_string(),
-    }
+        _ => expr.to_sql_string()?,
+    })
 }
 
 /// Apply filter conditions to a cached `RecordBatch` using DataFusion.
@@ -3302,16 +3455,134 @@ async fn filter_cached_batch(
     }
 }
 
-/// Extract unique string values from a named column across Arrow record batches.
+/// Minimum number of rows per partition when re-chunking fetched batches for
+/// multi-partition registration. Matches DataFusion's default batch size so
+/// small tables stay in a single partition (identical scan behavior to the
+/// previous single-batch registration).
+const MIN_PARTITION_ROWS: usize = 8192;
+
+/// Split `batches` into up to `max_partitions` partition groups for
+/// multi-partition `MemTable` registration.
 ///
-/// Values are cast to strings for use in IN filter lists. Null values are excluded.
-fn extract_column_values(batches: &[RecordBatch], column_name: &str) -> Vec<String> {
+/// DataFusion parallelizes partial aggregation and join probes per partition,
+/// so a single-partition table executes on one core regardless of
+/// `target_partitions`. Re-chunking uses zero-copy [`RecordBatch::slice`] —
+/// no row data is copied. Inputs with fewer than [`MIN_PARTITION_ROWS`] rows
+/// per would-be partition stay in a single partition to avoid scheduling
+/// overhead on tiny tables.
+fn partition_batches(batches: Vec<RecordBatch>, max_partitions: usize) -> Vec<Vec<RecordBatch>> {
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let partition_count = (total_rows / MIN_PARTITION_ROWS).clamp(1, max_partitions.max(1));
+    if partition_count <= 1 {
+        return vec![batches];
+    }
+
+    // Distribute rows evenly: fill each partition up to `rows_per_partition`
+    // rows, slicing batches at partition boundaries (zero-copy).
+    let rows_per_partition = total_rows.div_ceil(partition_count);
+    let mut partitions: Vec<Vec<RecordBatch>> = vec![Vec::new(); partition_count];
+    let mut current = 0;
+    let mut current_rows = 0;
+
+    for batch in batches {
+        let rows = batch.num_rows();
+        let mut offset = 0;
+        while offset < rows {
+            if current_rows >= rows_per_partition && current + 1 < partition_count {
+                current += 1;
+                current_rows = 0;
+            }
+            let take = if current + 1 < partition_count {
+                (rows - offset).min(rows_per_partition - current_rows)
+            } else {
+                // The last partition takes everything that remains.
+                rows - offset
+            };
+            partitions[current].push(batch.slice(offset, take));
+            offset += take;
+            current_rows += take;
+        }
+    }
+
+    // Drop partitions that received no batches (possible with skewed row
+    // counts); `MemTable` accepts any partition count.
+    partitions.retain(|p| !p.is_empty());
+    partitions
+}
+
+/// Register `batches` as an in-memory table, preserving them as multiple
+/// `MemTable` partitions instead of concatenating into one giant batch.
+///
+/// Functionally equivalent to [`SessionContext::register_batch`] (same bare
+/// table-name semantics — callers pass lowercase names), but avoids the full
+/// extra copy made by `concat_batches` and lets DataFusion parallelize across
+/// `target_partitions` cores. An empty batch list registers nothing (matching
+/// the previous skip-on-empty behavior); zero-row batches register an empty
+/// table with the correct schema.
+fn register_partitioned_table(
+    ctx: &SessionContext,
+    name: &str,
+    batches: Vec<RecordBatch>,
+) -> QueryResult<()> {
+    let Some(first) = batches.first() else {
+        return Ok(());
+    };
+    let schema = first.schema();
+    let target_partitions = ctx.copied_config().target_partitions();
+    let partitions = partition_batches(batches, target_partitions);
+    let table = MemTable::try_new(schema, partitions)?;
+    ctx.register_table(TableReference::bare(name), Arc::new(table))?;
+    Ok(())
+}
+
+/// Whether an Arrow type is an integer family type (including
+/// dictionary-encoded integer variants).
+///
+/// Used to classify IN-filter values: integer join keys are rendered by
+/// connectors as unquoted numeric literals so the fact-table FK index stays
+/// usable.
+fn is_integer_arrow_type(data_type: &arrow::datatypes::DataType) -> bool {
+    use arrow::datatypes::DataType as AT;
+    match data_type {
+        AT::Int8
+        | AT::Int16
+        | AT::Int32
+        | AT::Int64
+        | AT::UInt8
+        | AT::UInt16
+        | AT::UInt32
+        | AT::UInt64 => true,
+        AT::Dictionary(_, value_type) => is_integer_arrow_type(value_type),
+        _ => false,
+    }
+}
+
+/// Extract unique string values from a named column across Arrow record
+/// batches, classifying the source column type for SQL rendering.
+///
+/// Values are cast to strings for use in IN filter lists; null values are
+/// excluded. The returned [`InValueKind`] is [`InValueKind::Integer`] when
+/// the source column is an integer family type (including dictionary-encoded
+/// integers — the Utf8 cast unpacks the dictionary, so values are plain
+/// decimal strings either way) **and** every extracted value parses as
+/// `i128`; otherwise [`InValueKind::Text`]. Connectors re-validate before
+/// rendering unquoted literals, so a wrong `Integer` classification can cost
+/// performance but never correctness.
+fn extract_column_values(batches: &[RecordBatch], column_name: &str) -> (Vec<String>, InValueKind) {
     let mut values = std::collections::HashSet::new();
+    let mut all_integer_typed = true;
+    let mut found_column = false;
     for batch in batches {
         let Ok(idx) = batch.schema().index_of(column_name) else {
             continue;
         };
         let array = batch.column(idx);
+        found_column = true;
+        // Batches of one table share a schema, but classify every batch
+        // defensively: any non-integer occurrence downgrades to Text.
+        if !is_integer_arrow_type(array.data_type()) {
+            all_integer_typed = false;
+        }
         let Ok(string_array) = arrow::compute::cast(array, &arrow::datatypes::DataType::Utf8)
         else {
             continue;
@@ -3327,7 +3598,17 @@ fn extract_column_values(batches: &[RecordBatch], column_name: &str) -> Vec<Stri
             }
         }
     }
-    values.into_iter().collect()
+    let values: Vec<String> = values.into_iter().collect();
+    // Defensive validation: Integer kind requires every value to be a clean
+    // decimal integer. Data integrity over speed — downgrade to Text if any
+    // value fails to parse.
+    let kind =
+        if found_column && all_integer_typed && values.iter().all(|v| v.parse::<i128>().is_ok()) {
+            InValueKind::Integer
+        } else {
+            InValueKind::Text
+        };
+    (values, kind)
 }
 
 /// Recursively resolve and generate SQL for compound measure expressions
@@ -3521,14 +3802,19 @@ fn resolve_compound_sql(
                 fact_model_name,
                 model,
                 &alias_map,
-            );
+            )?;
             let measure_table = &fact_model_name.to_lowercase();
-            Ok(stripped.to_case_when_sql(&condition, measure_table))
+            Ok(stripped.to_case_when_sql(&condition, measure_table)?)
         }
 
         // Naked aggregate without context: generate plain SQL with qualified columns.
         Expression::Aggregate { operation, operand } => {
-            let col = operand.to_sql_string();
+            // COUNT(*) ignores its operand (a bare table reference, which is
+            // not renderable as scalar SQL) — handle it before rendering.
+            if matches!(operation, AggregateOp::CountRows) {
+                return Ok("COUNT(*)".to_string());
+            }
+            let col = operand.to_sql_string()?;
             let fact = fact_model_name.to_lowercase();
             let qualified = if col.contains('.') {
                 col
@@ -3538,21 +3824,187 @@ fn resolve_compound_sql(
             } else {
                 format!("{fact}.\"{col}\"")
             };
-            Ok(match operation {
-                AggregateOp::Sum => format!("SUM({qualified})"),
-                AggregateOp::Count => format!("COUNT({qualified})"),
-                AggregateOp::Average => format!("AVG({qualified})"),
-                AggregateOp::Min => format!("MIN({qualified})"),
-                AggregateOp::Max => format!("MAX({qualified})"),
-                AggregateOp::DistinctCount => format!("COUNT(DISTINCT {qualified})"),
-                AggregateOp::CountRows => "COUNT(*)".to_string(),
-                _ => format!("{operation}({qualified})"),
-            })
+            Ok(operation.render_sql(&qualified))
         }
 
         // Leaf expressions: generate plain SQL.
-        _ => Ok(expr.to_sql_string()),
+        _ => Ok(expr.to_sql_string()?),
     }
+}
+
+/// Remove hidden `__order_N` sort-helper columns from result batches.
+///
+/// The main local-aggregation SQL projects `MIN(sort_col)` helper columns to
+/// implement sort-by-column ordering (DataFusion cannot ORDER BY an
+/// unprojected aggregate); they are internal and must not appear in results.
+/// Typed error for query shapes that do not support ROLLUP totals yet.
+///
+/// The unsupported combinations are listed in the `TotalsMode` docs; erroring
+/// is deliberate — silently returning detail-only rows (or wrong subtotals)
+/// would corrupt pivot output.
+fn totals_unsupported(what: &str) -> crate::error::QueryError {
+    crate::error::QueryError::InvalidQuery(format!(
+        "totals (TotalsMode::Rollup) is not supported with {what} yet"
+    ))
+}
+
+/// Render the trailing `__grouping_id` SELECT item for a local ROLLUP query.
+///
+/// `group_terms` are the qualified group-by SQL terms (e.g.
+/// `dim_table."col"`) in request order. The bitmask follows the engine
+/// contract — bit `i` (LSB = `group_by[0]`) set when that column is rolled
+/// up — built from per-column `GROUPING(...)` calls so the bit order is
+/// explicit. DataFusion rewrites `GROUPING()` over grouping sets into its
+/// internal grouping-id column, so the calls cost nothing at execution time.
+/// The `CAST` pins the result type to `Int32` per the contract. With no
+/// group-by terms the single aggregate row is its own grand total: literal
+/// `0`.
+fn grouping_id_select_sql(group_terms: &[String]) -> String {
+    if group_terms.is_empty() {
+        return format!("CAST(0 AS INT) AS \"{GROUPING_ID_COLUMN}\"");
+    }
+    let bits: Vec<String> = group_terms
+        .iter()
+        .enumerate()
+        .map(|(i, term)| {
+            if i == 0 {
+                format!("GROUPING({term})")
+            } else {
+                format!("GROUPING({term}) * {}", 1u32 << i)
+            }
+        })
+        .collect();
+    format!(
+        "CAST({} AS INT) AS \"{GROUPING_ID_COLUMN}\"",
+        bits.join(" + ")
+    )
+}
+
+fn strip_order_helper_columns(batches: Vec<RecordBatch>) -> QueryResult<Vec<RecordBatch>> {
+    let mut out = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let schema = batch.schema();
+        let keep: Vec<usize> = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.name().starts_with("__order_"))
+            .map(|(i, _)| i)
+            .collect();
+        if keep.len() == schema.fields().len() {
+            out.push(batch);
+        } else {
+            out.push(batch.project(&keep)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Apply ORDER BY / LIMIT to already-computed result batches.
+///
+/// Used by execution paths whose final result is assembled outside a single
+/// SQL statement (pushed join aggregation, multi-fact-table combination,
+/// window and QUERY-in-VAR measures, two-stage pre-aggregation, post-lookup
+/// results). Sorting uses Arrow's lexicographic sort over the **result
+/// columns**: dimension targets sort by the group-by output column, measure
+/// targets by the measure column (both matched case-insensitively). Model
+/// `sort_by_column` substitution does NOT apply here — the sort column is not
+/// part of the result; the planner routes substitution-dependent orderings to
+/// SQL-ordered paths. Sort keys missing from the result schema are skipped.
+///
+/// Null ordering matches PostgreSQL/DataFusion defaults: nulls last for
+/// ascending keys, nulls first for descending keys.
+///
+/// `limit` is applied after sorting; `Some(0)` produces an empty result
+/// (schema preserved). Batches with differing schemas (e.g. per-measure
+/// outputs of window evaluation) are sorted individually.
+pub(crate) fn apply_order_and_limit(
+    batches: Vec<RecordBatch>,
+    order_by: &[OrderByClause],
+    limit: Option<usize>,
+) -> QueryResult<Vec<RecordBatch>> {
+    if (order_by.is_empty() && limit.is_none()) || batches.is_empty() {
+        return Ok(batches);
+    }
+
+    // Sort. Batches sharing one schema are concatenated so ordering holds
+    // across batch boundaries; heterogeneous batches are sorted individually.
+    let sorted: Vec<RecordBatch> = if order_by.is_empty() {
+        batches
+    } else {
+        let first_schema = batches[0].schema();
+        if batches.len() > 1 && batches.iter().all(|b| b.schema() == first_schema) {
+            let combined = concat_batches(&first_schema, &batches)?;
+            vec![sort_batch(&combined, order_by)?]
+        } else {
+            batches
+                .iter()
+                .map(|b| sort_batch(b, order_by))
+                .collect::<QueryResult<Vec<_>>>()?
+        }
+    };
+
+    // Limit: take rows in order until the cap is reached.
+    let Some(n) = limit else {
+        return Ok(sorted);
+    };
+    let mut remaining = n;
+    let mut limited = Vec::new();
+    for batch in &sorted {
+        if remaining == 0 {
+            break;
+        }
+        let take = batch.num_rows().min(remaining);
+        limited.push(batch.slice(0, take));
+        remaining -= take;
+    }
+    if limited.is_empty() {
+        // LIMIT 0 (or all batches empty): preserve the result schema.
+        limited.push(sorted[0].slice(0, 0));
+    }
+    Ok(limited)
+}
+
+/// Sort a single batch by the order-by clauses, matching sort keys against
+/// the batch's columns case-insensitively. Missing keys are skipped; when no
+/// key resolves the batch is returned unchanged.
+fn sort_batch(batch: &RecordBatch, order_by: &[OrderByClause]) -> QueryResult<RecordBatch> {
+    use arrow::compute::{lexsort_to_indices, take, SortColumn, SortOptions};
+
+    let schema = batch.schema();
+    let mut sort_columns: Vec<SortColumn> = Vec::new();
+    for clause in order_by {
+        let name = match &clause.target {
+            OrderTarget::Column(col) => col.column.as_str(),
+            OrderTarget::Measure(measure) => measure.as_str(),
+        };
+        let Some((idx, _)) = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name().eq_ignore_ascii_case(name))
+        else {
+            continue;
+        };
+        sort_columns.push(SortColumn {
+            values: batch.column(idx).clone(),
+            options: Some(SortOptions {
+                descending: clause.descending,
+                nulls_first: clause.descending,
+            }),
+        });
+    }
+    if sort_columns.is_empty() || batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
+
+    let indices = lexsort_to_indices(&sort_columns, None)?;
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|c| take(c, &indices, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RecordBatch::try_new(schema, columns)?)
 }
 
 /// Partition measures into groups by their home table, preserving insertion order.
@@ -3634,10 +4086,11 @@ mod tests {
         )
         .unwrap();
 
-        let values = extract_column_values(&[batch], "name");
+        let (values, kind) = extract_column_values(&[batch], "name");
         assert_eq!(values.len(), 2); // Deduplicated, nulls excluded
         assert!(values.contains(&"Alice".to_string()));
         assert!(values.contains(&"Bob".to_string()));
+        assert_eq!(kind, InValueKind::Text);
     }
 
     #[test]
@@ -3655,8 +4108,67 @@ mod tests {
         )
         .unwrap();
 
-        let values = extract_column_values(&[batch], "id");
+        let (values, kind) = extract_column_values(&[batch], "id");
         assert_eq!(values.len(), 3); // 1, 2, 3 — deduplicated, null excluded
+        assert_eq!(kind, InValueKind::Integer);
+        // Every extracted value is a clean decimal integer string.
+        assert!(values.iter().all(|v| v.parse::<i128>().is_ok()));
+    }
+
+    #[test]
+    fn extract_column_values_from_dictionary_int_column_is_integer() {
+        use arrow::array::{DictionaryArray, Int64Array, Int8Array};
+
+        let keys = Int8Array::from(vec![Some(0), Some(1), None, Some(0)]);
+        let dict_values = Int64Array::from(vec![100, 200]);
+        let dict = DictionaryArray::new(keys, Arc::new(dict_values) as arrow::array::ArrayRef);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "key",
+            dict.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(dict)]).unwrap();
+
+        let (values, kind) = extract_column_values(&[batch], "key");
+        assert_eq!(kind, InValueKind::Integer);
+        assert_eq!(values.len(), 2); // 100, 200 — deduplicated, null excluded
+        assert!(values.contains(&"100".to_string()));
+        assert!(values.contains(&"200".to_string()));
+    }
+
+    #[test]
+    fn extract_column_values_from_dictionary_string_column_is_text() {
+        use arrow::array::{DictionaryArray, Int32Array as Keys};
+
+        let keys = Keys::from(vec![0, 1, 0]);
+        let dict_values = StringArray::from(vec!["red", "blue"]);
+        let dict = DictionaryArray::new(keys, Arc::new(dict_values) as arrow::array::ArrayRef);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "color",
+            dict.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(dict)]).unwrap();
+
+        let (values, kind) = extract_column_values(&[batch], "color");
+        assert_eq!(kind, InValueKind::Text);
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn extract_column_values_numeric_looking_strings_stay_text() {
+        // A Utf8 column whose values happen to be numeric must remain Text:
+        // classification follows the source Arrow type, not value shape.
+        let schema = Arc::new(Schema::new(vec![Field::new("code", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["1", "2", "3"]))],
+        )
+        .unwrap();
+
+        let (values, kind) = extract_column_values(&[batch], "code");
+        assert_eq!(values.len(), 3);
+        assert_eq!(kind, InValueKind::Text);
     }
 
     #[test]
@@ -3665,14 +4177,16 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap();
 
-        let values = extract_column_values(&[batch], "nonexistent");
+        let (values, kind) = extract_column_values(&[batch], "nonexistent");
         assert!(values.is_empty());
+        assert_eq!(kind, InValueKind::Text);
     }
 
     #[test]
     fn extract_column_values_empty_batches() {
-        let values = extract_column_values(&[], "id");
+        let (values, kind) = extract_column_values(&[], "id");
         assert!(values.is_empty());
+        assert_eq!(kind, InValueKind::Text);
     }
 
     #[test]
@@ -3716,5 +4230,868 @@ mod tests {
         assert_eq!(groups[0].0, "t1");
         assert_eq!(groups[1].0, "t2");
         assert_eq!(groups[2].0, "t3");
+    }
+
+    /// Build a single-column Int64 batch with values `start..start + len`.
+    fn int64_batch(start: i64, len: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from_iter_values(
+                start..start + len as i64,
+            ))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn partition_batches_small_input_stays_single_partition() {
+        let batch = int64_batch(0, 100);
+        let parts = partition_batches(vec![batch], 8);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].len(), 1);
+        assert_eq!(parts[0][0].num_rows(), 100);
+    }
+
+    #[test]
+    fn partition_batches_rechunks_single_large_batch() {
+        let parts = partition_batches(vec![int64_batch(0, 40_000)], 4);
+        assert_eq!(parts.len(), 4);
+        // Total rows preserved, evenly distributed (ceil(40_000 / 4) max).
+        let total: usize = parts.iter().flatten().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 40_000);
+        for part in &parts {
+            let rows: usize = part.iter().map(|b| b.num_rows()).sum();
+            assert!(rows <= 10_000);
+        }
+        // Row order preserved across partitions in sequence.
+        let all: Vec<RecordBatch> = parts.into_iter().flatten().collect();
+        let combined = concat_batches(&all[0].schema(), &all).unwrap();
+        let col = combined
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 0);
+        assert_eq!(col.value(39_999), 39_999);
+    }
+
+    #[test]
+    fn partition_batches_respects_max_partitions() {
+        let parts = partition_batches(vec![int64_batch(0, 100_000)], 3);
+        assert_eq!(parts.len(), 3);
+        let total: usize = parts.iter().flatten().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 100_000);
+    }
+
+    #[test]
+    fn partition_batches_slices_share_buffers() {
+        let batch = int64_batch(0, 20_000);
+        let base_ptr = batch.column(0).to_data().buffers()[0].as_ptr() as usize;
+        let end_ptr = base_ptr + 20_000 * std::mem::size_of::<i64>();
+
+        let parts = partition_batches(vec![batch], 2);
+        assert_eq!(parts.len(), 2);
+        for slice in parts.iter().flatten() {
+            // Zero-copy: every slice's value buffer points into the original
+            // allocation instead of a fresh copy.
+            let ptr = slice.column(0).to_data().buffers()[0].as_ptr() as usize;
+            assert!(
+                ptr >= base_ptr && ptr < end_ptr,
+                "slice buffer was copied instead of shared"
+            );
+        }
+    }
+
+    #[test]
+    fn partition_batches_groups_existing_batches() {
+        let batches: Vec<RecordBatch> = (0..4).map(|i| int64_batch(i * 8192, 8192)).collect();
+        let parts = partition_batches(batches, 2);
+        assert_eq!(parts.len(), 2);
+        let rows: Vec<usize> = parts
+            .iter()
+            .map(|p| p.iter().map(|b| b.num_rows()).sum())
+            .collect();
+        assert_eq!(rows, vec![16_384, 16_384]);
+    }
+
+    #[test]
+    fn partition_batches_empty_input_single_empty_partition() {
+        let parts = partition_batches(vec![], 8);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_empty());
+    }
+
+    #[test]
+    fn partition_batches_zero_row_batch_preserved() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let batch = RecordBatch::new_empty(schema.clone());
+        let parts = partition_batches(vec![batch], 8);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].len(), 1);
+        assert_eq!(parts[0][0].num_rows(), 0);
+        assert_eq!(parts[0][0].schema(), schema);
+    }
+
+    #[tokio::test]
+    async fn register_partitioned_table_preserves_rows_and_sums() {
+        let ctx = SessionContext::new();
+        let n = 20_000i64;
+        register_partitioned_table(&ctx, "t", vec![int64_batch(0, n as usize)]).unwrap();
+
+        let df = ctx.sql("SELECT COUNT(*) AS c, SUM(v) AS s FROM t").await;
+        let out = df.unwrap().collect().await.unwrap();
+        let combined = concat_batches(&out[0].schema(), &out).unwrap();
+        let count = combined
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        let sum = combined
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, n);
+        assert_eq!(sum, n * (n - 1) / 2);
+    }
+
+    #[tokio::test]
+    async fn register_partitioned_table_empty_list_registers_nothing() {
+        let ctx = SessionContext::new();
+        register_partitioned_table(&ctx, "t", vec![]).unwrap();
+        assert!(ctx.sql("SELECT * FROM t").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn register_partitioned_table_zero_rows_keeps_schema() {
+        let ctx = SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        register_partitioned_table(&ctx, "t", vec![RecordBatch::new_empty(schema)]).unwrap();
+
+        let out = ctx
+            .sql("SELECT v FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let rows: usize = out.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn cache_served_table_skips_optimization_and_aggregates() {
+        use arrow::array::Float64Array;
+        use engine_core::model::column::Column;
+        use engine_core::model::table::{StorageMode, Table};
+        use engine_core::types::DataType as EngineDataType;
+
+        // Model: one in-memory fact table.
+        let table = Table::new(
+            "fact_sales",
+            vec![
+                Column::new("id", EngineDataType::Int64),
+                Column::new("amount", EngineDataType::Float64),
+            ],
+        )
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory);
+        let model = DataModel::builder().add_table(table).build().unwrap();
+
+        // Cache holds the batch (pre-optimized at refresh time in production).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("amount", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+        let mut cache = InMemoryCache::new();
+        cache.store("fact_sales", batch).unwrap();
+
+        // No connector registered: the table must be served from the cache.
+        let registry = SourceRegistry::new();
+        let fetches = vec![(
+            "fact_sales".to_string(),
+            engine_connectors::FetchRequest {
+                table: "fact_sales".to_string(),
+                ..Default::default()
+            },
+        )];
+        let measures = vec![Measure::simple(
+            "Total",
+            "fact_sales",
+            "amount",
+            AggregateOp::Sum,
+        )];
+
+        let mut plan = PlanNode::new(PlanOperation::LocalAggregation, "test");
+        let batches = QueryExecutor::execute_local_aggregation(
+            &fetches,
+            &measures,
+            &[],
+            &[],
+            &[],
+            None,
+            TotalsMode::None,
+            &model,
+            &registry,
+            Some(&cache),
+            None,
+            Some(&mut plan),
+        )
+        .await
+        .unwrap();
+
+        // Result: SUM(amount) = 60.0.
+        let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+        let total = combined
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0);
+        assert!((total - 60.0).abs() < 1e-9);
+
+        // The fetch node reports the cache source and the optimization skip.
+        let fetch_node = plan
+            .children
+            .iter()
+            .find(|n| n.label == "Cache: fact_sales")
+            .expect("cache fetch plan node");
+        let prop = |key: &str| {
+            fetch_node
+                .properties
+                .iter()
+                .find(|p| p.key == key)
+                .map(|p| &p.value)
+        };
+        match prop("source") {
+            Some(PlanValue::Text(s)) => assert_eq!(s, "in_memory_cache"),
+            other => panic!("unexpected source property: {other:?}"),
+        }
+        match prop("optimization") {
+            Some(PlanValue::Text(s)) => assert_eq!(s, "cached (pre-optimized)"),
+            other => panic!("unexpected optimization property: {other:?}"),
+        }
+    }
+    // --- ORDER BY / LIMIT execution ---
+
+    mod order_and_limit {
+        use super::*;
+        use crate::planner::PushdownPlanner;
+        use crate::registry::SourceBinding;
+        use crate::request::{OrderByClause, QueryRequest};
+        use arrow::array::Float64Array;
+        use arrow::array::StringArray;
+        use engine_core::compute::measure::sum_measure;
+        use engine_core::model::column::Column;
+        use engine_core::model::table::{StorageMode, Table};
+        use engine_core::types::DataType as EngineDataType;
+
+        /// In-memory single-table model: regions + months (with sort-by) +
+        /// amounts. Per-region totals: East 15.0, West 20.0, South 30.0.
+        /// Per-month totals: Jan 15.0, Feb 20.0, Mar 30.0 (alphabetically
+        /// Feb < Jan < Mar, but month_number orders Jan, Feb, Mar).
+        fn fixture() -> (DataModel, InMemoryCache, SourceRegistry) {
+            let table = Table::new(
+                "fact_sales",
+                vec![
+                    Column::new("region", EngineDataType::String),
+                    Column::new("month_name", EngineDataType::String).with_sort_by("month_number"),
+                    Column::new("month_number", EngineDataType::Int32),
+                    Column::new("amount", EngineDataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory);
+
+            let model = DataModel::builder()
+                .add_table(table)
+                .add_measure(sum_measure("Total", "fact_sales", "amount"))
+                .build()
+                .unwrap();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("region", DataType::Utf8, true),
+                Field::new("month_name", DataType::Utf8, true),
+                Field::new("month_number", DataType::Int32, true),
+                Field::new("amount", DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["West", "East", "South", "East"])),
+                    Arc::new(StringArray::from(vec!["Feb", "Jan", "Mar", "Jan"])),
+                    Arc::new(Int32Array::from(vec![2, 1, 3, 1])),
+                    Arc::new(Float64Array::from(vec![20.0, 10.0, 30.0, 5.0])),
+                ],
+            )
+            .unwrap();
+            let mut cache = InMemoryCache::new();
+            cache.store("fact_sales", batch).unwrap();
+
+            // Bind the table so the planner accepts it; the in-memory cache
+            // serves the data, so no connector is ever contacted.
+            let mut registry = SourceRegistry::new();
+            registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+
+            (model, cache, registry)
+        }
+
+        /// Plan + execute a request against the in-memory fixture.
+        async fn run(request: QueryRequest) -> Vec<RecordBatch> {
+            let (model, cache, registry) = fixture();
+            let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+            QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None)
+                .await
+                .unwrap()
+        }
+
+        /// Extract a column as strings (casting through Utf8 to be robust
+        /// against dictionary/view encodings of grouped output).
+        fn string_column(batches: &[RecordBatch], name: &str) -> Vec<String> {
+            let combined = concat_batches(&batches[0].schema(), batches).unwrap();
+            let idx = combined.schema().index_of(name).unwrap();
+            let cast = arrow::compute::cast(combined.column(idx), &DataType::Utf8).unwrap();
+            let arr = cast.as_any().downcast_ref::<StringArray>().unwrap();
+            (0..arr.len()).map(|i| arr.value(i).to_string()).collect()
+        }
+
+        #[tokio::test]
+        async fn order_by_dimension_ascending() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                order_by: vec![OrderByClause::column("fact_sales", "region")],
+                ..Default::default()
+            })
+            .await;
+            assert_eq!(string_column(&batches, "region"), ["East", "South", "West"]);
+        }
+
+        #[tokio::test]
+        async fn order_by_dimension_descending() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                order_by: vec![OrderByClause::column_desc("fact_sales", "region")],
+                ..Default::default()
+            })
+            .await;
+            assert_eq!(string_column(&batches, "region"), ["West", "South", "East"]);
+        }
+
+        #[tokio::test]
+        async fn top_n_by_measure_descending_with_limit() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                order_by: vec![OrderByClause::measure_desc("Total")],
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await;
+            // Totals: South 30.0, West 20.0, East 15.0 — top 2.
+            assert_eq!(string_column(&batches, "region"), ["South", "West"]);
+        }
+
+        /// No explicit order_by: the engine defaults to ordering by the
+        /// group-by columns — and `month_name` sorts by `month_number`, so
+        /// rows come back Jan, Feb, Mar (not alphabetical Feb, Jan, Mar).
+        #[tokio::test]
+        async fn default_group_by_ordering_applies_sort_by_column() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "month_name")],
+                ..Default::default()
+            })
+            .await;
+            assert_eq!(string_column(&batches, "month_name"), ["Jan", "Feb", "Mar"]);
+        }
+
+        #[tokio::test]
+        async fn explicit_order_by_respects_sort_by_column_descending() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "month_name")],
+                order_by: vec![OrderByClause::column_desc("fact_sales", "month_name")],
+                ..Default::default()
+            })
+            .await;
+            assert_eq!(string_column(&batches, "month_name"), ["Mar", "Feb", "Jan"]);
+        }
+
+        #[tokio::test]
+        async fn limit_zero_returns_empty_result() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                limit: Some(0),
+                ..Default::default()
+            })
+            .await;
+            let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, 0);
+        }
+
+        // --- apply_order_and_limit (Arrow-level fallback) ---
+
+        /// Two-column result batch: region (Utf8) + Total (Float64).
+        fn result_batch(rows: &[(&str, f64)]) -> RecordBatch {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("region", DataType::Utf8, true),
+                Field::new("Total", DataType::Float64, true),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(
+                        rows.iter().map(|(r, _)| *r).collect::<Vec<_>>(),
+                    )),
+                    Arc::new(Float64Array::from(
+                        rows.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
+                    )),
+                ],
+            )
+            .unwrap()
+        }
+
+        fn regions(batches: &[RecordBatch]) -> Vec<String> {
+            string_column(batches, "region")
+        }
+
+        #[test]
+        fn apply_order_and_limit_sorts_by_measure_desc_and_limits() {
+            let batch = result_batch(&[("East", 15.0), ("South", 30.0), ("West", 20.0)]);
+            let out = apply_order_and_limit(
+                vec![batch],
+                &[OrderByClause::measure_desc("Total")],
+                Some(2),
+            )
+            .unwrap();
+            assert_eq!(regions(&out), ["South", "West"]);
+        }
+
+        #[test]
+        fn apply_order_and_limit_sorts_across_batches_with_same_schema() {
+            let b1 = result_batch(&[("West", 20.0), ("East", 15.0)]);
+            let b2 = result_batch(&[("South", 30.0)]);
+            let out = apply_order_and_limit(
+                vec![b1, b2],
+                &[OrderByClause::column("fact_sales", "region")],
+                None,
+            )
+            .unwrap();
+            assert_eq!(regions(&out), ["East", "South", "West"]);
+        }
+
+        #[test]
+        fn apply_order_and_limit_missing_sort_key_is_skipped() {
+            let batch = result_batch(&[("West", 20.0), ("East", 15.0)]);
+            let out = apply_order_and_limit(
+                vec![batch],
+                &[OrderByClause::column("dim", "no_such_column")],
+                Some(1),
+            )
+            .unwrap();
+            // Ordering unchanged (key not in result), limit still applied.
+            assert_eq!(regions(&out), ["West"]);
+        }
+
+        #[test]
+        fn apply_order_and_limit_limit_zero_preserves_schema() {
+            let batch = result_batch(&[("West", 20.0)]);
+            let schema = batch.schema();
+            let out =
+                apply_order_and_limit(vec![batch], &[OrderByClause::measure("Total")], Some(0))
+                    .unwrap();
+            let rows: usize = out.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, 0);
+            assert_eq!(out[0].schema(), schema);
+        }
+
+        #[test]
+        fn apply_order_and_limit_noop_without_order_or_limit() {
+            let batch = result_batch(&[("West", 20.0), ("East", 15.0)]);
+            let out = apply_order_and_limit(vec![batch], &[], None).unwrap();
+            assert_eq!(regions(&out), ["West", "East"]);
+        }
+    }
+
+    // --- ROLLUP totals execution ---
+
+    mod totals {
+        use super::*;
+        use crate::error::QueryError;
+        use crate::planner::PushdownPlanner;
+        use crate::registry::SourceBinding;
+        use crate::request::{LookupColumn, OrderByClause, QueryRequest, TotalsMode};
+        use arrow::array::{Float64Array, Int64Array, StringArray};
+        use engine_core::compute::expression as expr;
+        use engine_core::compute::measure::{
+            average_measure, distinct_count_measure, expression_measure, sum_measure, Measure,
+        };
+        use engine_core::model::column::Column;
+        use engine_core::model::table::{StorageMode, Table};
+        use engine_core::model::DataModel;
+        use engine_core::store::InMemoryCache;
+        use engine_core::types::DataType as EngineDataType;
+
+        /// In-memory single-table model with non-additive measures.
+        ///
+        /// Data is shaped so subtotal levels differ from sums of detail rows:
+        /// customer `c1` buys both products in East and `c2` appears in both
+        /// East and West, so DISTINCTCOUNT subtotals are smaller than the sum
+        /// of the detail counts, and AVG subtotals are not averages of the
+        /// detail averages.
+        ///
+        /// ```text
+        /// region product customer amount
+        /// East   A       c1       10
+        /// East   B       c1       20
+        /// East   B       c2       30
+        /// West   A       c2       40
+        /// West   A       c3       50
+        /// ```
+        fn fixture() -> (DataModel, InMemoryCache, SourceRegistry) {
+            let table = Table::new(
+                "fact_sales",
+                vec![
+                    Column::new("region", EngineDataType::String),
+                    Column::new("product", EngineDataType::String),
+                    Column::new("customer", EngineDataType::String),
+                    Column::new("amount", EngineDataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory);
+
+            let model = DataModel::builder()
+                .add_table(table)
+                .add_measure(sum_measure("Total", "fact_sales", "amount"))
+                .add_measure(distinct_count_measure(
+                    "Customers",
+                    "fact_sales",
+                    "customer",
+                ))
+                .add_measure(average_measure("AvgAmount", "fact_sales", "amount"))
+                .build()
+                .unwrap();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("region", DataType::Utf8, true),
+                Field::new("product", DataType::Utf8, true),
+                Field::new("customer", DataType::Utf8, true),
+                Field::new("amount", DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec![
+                        "East", "East", "East", "West", "West",
+                    ])),
+                    Arc::new(StringArray::from(vec!["A", "B", "B", "A", "A"])),
+                    Arc::new(StringArray::from(vec!["c1", "c1", "c2", "c2", "c3"])),
+                    Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0])),
+                ],
+            )
+            .unwrap();
+            let mut cache = InMemoryCache::new();
+            cache.store("fact_sales", batch).unwrap();
+
+            // Bind the table so the planner accepts it; the in-memory cache
+            // serves the data, so no connector is ever contacted.
+            let mut registry = SourceRegistry::new();
+            registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+
+            (model, cache, registry)
+        }
+
+        /// Plan + execute a request against the in-memory fixture.
+        async fn run(request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
+            let (model, cache, registry) = fixture();
+            let plan = PushdownPlanner::plan(&request, &model, &registry)?;
+            QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None).await
+        }
+
+        /// Combine batches and extract a nullable string column by name.
+        fn opt_string_column(combined: &RecordBatch, name: &str) -> Vec<Option<String>> {
+            let idx = combined.schema().index_of(name).unwrap();
+            let cast = arrow::compute::cast(combined.column(idx), &DataType::Utf8).unwrap();
+            let arr = cast.as_any().downcast_ref::<StringArray>().unwrap();
+            (0..arr.len())
+                .map(|i| (!arr.is_null(i)).then(|| arr.value(i).to_string()))
+                .collect()
+        }
+
+        fn f64_column(combined: &RecordBatch, name: &str) -> Vec<f64> {
+            let idx = combined.schema().index_of(name).unwrap();
+            let arr = combined
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            (0..arr.len()).map(|i| arr.value(i)).collect()
+        }
+
+        fn i64_column(combined: &RecordBatch, name: &str) -> Vec<i64> {
+            let idx = combined.schema().index_of(name).unwrap();
+            let arr = combined
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            (0..arr.len()).map(|i| arr.value(i)).collect()
+        }
+
+        fn grouping_ids(combined: &RecordBatch) -> Vec<i32> {
+            let idx = combined.schema().index_of(GROUPING_ID_COLUMN).unwrap();
+            let arr = combined
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            (0..arr.len()).map(|i| arr.value(i)).collect()
+        }
+
+        /// Two-dimension rollup: detail rows + per-region subtotals + grand
+        /// total, each level recomputed (not summed from details), correct
+        /// `__grouping_id` bitmask, default ordering with subtotals after
+        /// their group's detail rows.
+        #[tokio::test]
+        async fn rollup_two_dims_recomputes_each_level() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into(), "Customers".into(), "AvgAmount".into()],
+                group_by: vec![
+                    ColumnRef::new("fact_sales", "region"),
+                    ColumnRef::new("fact_sales", "product"),
+                ],
+                totals: TotalsMode::Rollup,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+            // Contract: trailing Int32 column named __grouping_id.
+            let schema = combined.schema();
+            let last = schema.field(schema.fields().len() - 1);
+            assert_eq!(last.name(), GROUPING_ID_COLUMN);
+            assert_eq!(last.data_type(), &DataType::Int32);
+
+            // Default ordering (region, product ascending, nulls last) puts
+            // each region's subtotal after its detail rows and the grand
+            // total last.
+            let some = |s: &str| Some(s.to_string());
+            assert_eq!(
+                opt_string_column(&combined, "region"),
+                [
+                    some("East"),
+                    some("East"),
+                    some("East"),
+                    some("West"),
+                    some("West"),
+                    None
+                ]
+            );
+            assert_eq!(
+                opt_string_column(&combined, "product"),
+                [some("A"), some("B"), None, some("A"), None, None]
+            );
+            // Bitmask: bit 0 = region (group_by[0]), bit 1 = product.
+            // Detail = 0; region subtotal rolls up product = 2; grand = 3.
+            assert_eq!(grouping_ids(&combined), [0, 0, 2, 0, 2, 3]);
+
+            // SUM is additive — sanity check.
+            assert_eq!(
+                f64_column(&combined, "Total"),
+                [10.0, 50.0, 60.0, 90.0, 90.0, 150.0]
+            );
+
+            // DISTINCTCOUNT must be recomputed per level: East subtotal is
+            // 2 distinct customers (c1, c2), NOT the detail sum 1 + 2 = 3;
+            // the grand total is 3 (c1, c2, c3), NOT 2 + 2 = 4.
+            assert_eq!(i64_column(&combined, "Customers"), [1, 2, 2, 2, 2, 3]);
+
+            // AVG must be recomputed per level: East subtotal is
+            // (10+20+30)/3 = 20, NOT the average of detail averages
+            // (10 + 25) / 2 = 17.5; grand total is 150/5 = 30.
+            assert_eq!(
+                f64_column(&combined, "AvgAmount"),
+                [10.0, 25.0, 20.0, 45.0, 45.0, 30.0]
+            );
+        }
+
+        #[tokio::test]
+        async fn rollup_single_dim_adds_grand_total() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into(), "Customers".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                totals: TotalsMode::Rollup,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+            let some = |s: &str| Some(s.to_string());
+            assert_eq!(
+                opt_string_column(&combined, "region"),
+                [some("East"), some("West"), None]
+            );
+            assert_eq!(grouping_ids(&combined), [0, 0, 1]);
+            assert_eq!(f64_column(&combined, "Total"), [60.0, 90.0, 150.0]);
+            // Grand total: 3 distinct customers, not 2 + 2.
+            assert_eq!(i64_column(&combined, "Customers"), [2, 2, 3]);
+        }
+
+        /// Totals with an empty group_by: the single aggregate row is both
+        /// detail and grand total — `__grouping_id` is 0 (no bits exist).
+        #[tokio::test]
+        async fn rollup_with_empty_group_by_returns_single_grand_total_row() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                totals: TotalsMode::Rollup,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+            assert_eq!(combined.num_rows(), 1);
+            let schema = combined.schema();
+            let last = schema.field(schema.fields().len() - 1);
+            assert_eq!(last.name(), GROUPING_ID_COLUMN);
+            assert_eq!(last.data_type(), &DataType::Int32);
+            assert_eq!(grouping_ids(&combined), [0]);
+            assert_eq!(f64_column(&combined, "Total"), [150.0]);
+        }
+
+        /// `limit` applies to the combined result including subtotal rows:
+        /// ordering by the measure descending puts the grand total first.
+        #[tokio::test]
+        async fn rollup_limit_applies_after_totals_rows_are_included() {
+            let batches = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                order_by: vec![OrderByClause::measure_desc("Total")],
+                limit: Some(1),
+                totals: TotalsMode::Rollup,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+            assert_eq!(combined.num_rows(), 1);
+            assert_eq!(grouping_ids(&combined), [1]);
+            assert_eq!(f64_column(&combined, "Total"), [150.0]);
+        }
+
+        #[tokio::test]
+        async fn totals_with_window_measure_errors_cleanly() {
+            let (model, cache, registry) = fixture();
+            let window_measure = expression_measure(
+                "RunningTotal",
+                expr::Expression::Window {
+                    inner: Box::new(expr::agg(
+                        AggregateOp::Sum,
+                        expr::qualified_col("fact_sales", "amount"),
+                    )),
+                    function: AggregateOp::Sum,
+                    order_by: vec![("fact_sales".into(), "region".into())],
+                    partition_by: vec![],
+                    frame: None,
+                },
+            );
+            let model = {
+                let mut builder = DataModel::builder();
+                for table in model.tables() {
+                    builder = builder.add_table(table.clone());
+                }
+                builder.add_measure(window_measure).build().unwrap()
+            };
+
+            let request = QueryRequest {
+                measures: vec!["RunningTotal".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                totals: TotalsMode::Rollup,
+                ..Default::default()
+            };
+            let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+            let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None)
+                .await
+                .unwrap_err();
+            match err {
+                QueryError::InvalidQuery(msg) => {
+                    assert!(msg.contains("window measures"), "unexpected message: {msg}");
+                }
+                other => panic!("expected InvalidQuery, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn totals_with_lookups_errors_cleanly() {
+            let err = run(QueryRequest {
+                measures: vec!["Total".into()],
+                group_by: vec![ColumnRef::new("fact_sales", "region")],
+                lookups: vec![LookupColumn::new("fact_sales", "customer")],
+                totals: TotalsMode::Rollup,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+            match err {
+                QueryError::InvalidQuery(msg) => {
+                    assert!(msg.contains("lookup columns"), "unexpected message: {msg}");
+                }
+                other => panic!("expected InvalidQuery, got {other:?}"),
+            }
+        }
+
+        /// Direct executor call with lookups + totals (bypassing the planner
+        /// gate) is also rejected.
+        #[tokio::test]
+        async fn executor_rejects_totals_with_lookup_specs() {
+            let (model, cache, registry) = fixture();
+            let measures = vec![Measure::simple(
+                "Total",
+                "fact_sales",
+                "amount",
+                AggregateOp::Sum,
+            )];
+            let specs = vec![crate::planner::LookupSpec {
+                table: "fact_sales".into(),
+                column: "customer".into(),
+                key_column: "region".into(),
+                resolution_sql: "MIN(fact_sales.\"customer\")".into(),
+            }];
+            let err = QueryExecutor::execute_local_aggregation(
+                &[],
+                &measures,
+                &[ColumnRef::new("fact_sales", "region")],
+                &specs,
+                &[],
+                None,
+                TotalsMode::Rollup,
+                &model,
+                &registry,
+                Some(&cache),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, QueryError::InvalidQuery(_)));
+        }
     }
 }

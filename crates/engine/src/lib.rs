@@ -32,9 +32,7 @@
 //!
 //! let results = engine.query(QueryRequest {
 //!     measures: vec!["Revenue".into()],
-//!     group_by: vec![],
-//!     filters: vec![],
-//!     lookups: vec![],
+//!     ..Default::default()
 //! }).await?;
 //! # Ok(())
 //! # }
@@ -47,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::record_batch::RecordBatch;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 pub use query_cache::{QueryCacheConfig, QueryCacheStats};
@@ -74,12 +73,12 @@ pub use engine_core::compute::plan::{
     ExecutionPlan, PlanDuration, PlanNode, PlanOperation, PlanProperty, PlanValue,
 };
 pub use engine_core::error::{EngineError, EngineResult};
+pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
     DataModelBuilder, FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, JoinCondition,
     JoinOperator, RaggedBehavior, RefreshStrategy, Relationship, StorageMode, Table, TableVariable,
 };
-pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};
@@ -93,7 +92,7 @@ pub use engine_connectors::postgres::PostgresConnector;
 pub use engine_connectors::sqlserver::SqlServerConnector;
 pub use engine_connectors::traits::{
     AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
-    SourceTable,
+    OrderByExpr, OrderByTarget, SourceTable,
 };
 pub use engine_connectors::{ConnectorError, ConnectorResult};
 
@@ -101,7 +100,10 @@ pub use engine_connectors::{ConnectorError, ConnectorResult};
 
 pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
-pub use engine_query::request::{ColumnRef, LookupColumn, QueryRequest};
+pub use engine_query::request::{
+    ColumnRef, LookupColumn, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
+    GROUPING_ID_COLUMN,
+};
 pub use engine_query::{LookupSpec, PushdownPlanner, QueryExecutor, QueryPlan};
 
 // ---------------------------------------------------------------------------
@@ -323,8 +325,9 @@ fn safe_cache_path(dir: &Path, file_name: &str) -> EngineResult<PathBuf> {
 ///
 /// When enabled, the engine automatically caches dimension tables (the "one"
 /// side of many-to-one relationships) that are below a configurable row count
-/// threshold. This happens lazily on first query, and remaining eligible
-/// tables are pre-warmed in the background after the query returns.
+/// threshold. This happens lazily on first query; remaining eligible tables
+/// can be pre-warmed afterwards by calling
+/// [`Engine::auto_tier_remaining`] off the query's critical path.
 ///
 /// Tables with explicit [`StorageMode::InMemory`] or [`StorageMode::DirectQuery`]
 /// set by the user are never affected by auto-tiering.
@@ -365,6 +368,12 @@ struct AutoTierState {
 /// [`InMemoryCache`] for tables configured with [`StorageMode::InMemory`].
 /// Default threshold for inline IN-filter values before switching to temp tables.
 const DEFAULT_MAX_INLINE_IN_VALUES: usize = 1000;
+
+/// Maximum number of source fetches that run concurrently during bulk
+/// refresh and auto-tier pre-warm operations. Bounded so that a model with
+/// many tables does not open an unbounded number of simultaneous source
+/// queries.
+const MAX_CONCURRENT_FETCHES: usize = 4;
 
 pub struct Engine {
     model: DataModel,
@@ -479,8 +488,8 @@ impl Engine {
     /// When enabled, dimension tables (the "one" side of many-to-one
     /// relationships) are automatically cached when first needed by a query,
     /// provided they are below the configured row threshold. Remaining
-    /// eligible tables are pre-warmed in the background after the query
-    /// completes.
+    /// eligible tables can be pre-warmed afterwards via
+    /// [`auto_tier_remaining`](Self::auto_tier_remaining).
     pub fn set_auto_tier_config(&mut self, config: AutoTierConfig) {
         self.auto_tier_config = config;
     }
@@ -508,6 +517,16 @@ impl Engine {
             .iter()
             .map(|s| s.as_str())
             .collect()
+    }
+
+    /// Returns the names of dimension tables that are currently eligible for
+    /// auto-tiering but have not been cached (or rejected) yet.
+    ///
+    /// Hosts can use this to decide whether a deferred pre-warm pass is
+    /// worthwhile: when this returns an empty list,
+    /// [`auto_tier_remaining`](Self::auto_tier_remaining) is a no-op.
+    pub fn auto_tier_pending(&self) -> Vec<String> {
+        self.auto_tier_candidates()
     }
 
     /// Set the query-result cache configuration.
@@ -583,6 +602,37 @@ impl Engine {
     /// Tables configured for in-memory storage are served from the cache.
     /// If query caching is enabled, repeated identical queries are served
     /// from the result cache.
+    ///
+    /// # Result ordering
+    ///
+    /// Results honor [`QueryRequest::order_by`] and [`QueryRequest::limit`].
+    /// When `order_by` is empty and `group_by` is non-empty, rows are ordered
+    /// by the group-by columns in declaration order (ascending), so grouped
+    /// (pivot) output is always deterministic — previously row order was
+    /// whatever the source or DataFusion happened to return. Dimension
+    /// ordering respects each column's model-declared `sort_by_column` in the
+    /// SQL-ordered execution paths (pushed single-table aggregation and local
+    /// aggregation); see [`QueryRequest`] for details.
+    ///
+    /// # Totals (ROLLUP subtotals)
+    ///
+    /// When [`QueryRequest::totals`] is [`TotalsMode::Rollup`], the result
+    /// contains the detail rows plus subtotal rows per group-by prefix and a
+    /// grand total — all computed in **one** query (one fact-table
+    /// scan/fetch; each subtotal level is recomputed at that level, so
+    /// non-additive measures like DISTINCTCOUNT and AVG are correct). The
+    /// result gains a trailing `Int32` column named [`GROUPING_ID_COLUMN`]
+    /// (`"__grouping_id"`): a bitmask with bit `i` (LSB = `group_by[0]`) set
+    /// when `group_by[i]` is rolled up in that row — `0` for detail rows,
+    /// all bits set for the grand total. Subtotal `NULL` dimension values
+    /// are thereby distinguishable from real `NULL`s. With an empty
+    /// `group_by` the result is the single grand-total row with
+    /// `__grouping_id` = 0. Ordering defaults are unchanged (subtotal rows
+    /// sort after their group's detail rows under the default ascending
+    /// group-by ordering); `limit` applies after subtotal rows are included.
+    /// See [`TotalsMode`] for the unsupported query shapes (lookups, window
+    /// measures, QUERY-in-VAR, multi-fact-table requests, unsafe group-by
+    /// relationships), which return a typed error rather than wrong totals.
     pub async fn query(&mut self, request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
         // Check the query cache first.
         let cache_key = query_cache::query_cache_key(&request, self.query_cache.model_version());
@@ -721,8 +771,21 @@ impl Engine {
             return Err(EngineError::TableNotInMemory(table_name.to_string()));
         }
 
-        let binding = self
-            .registry
+        let batches = Self::fetch_table_batches(&self.registry, table_name).await?;
+        self.store_refreshed_table(table_name, batches)
+    }
+
+    /// Fetch all rows of a table from its source connector.
+    ///
+    /// Borrows only the [`SourceRegistry`] (not the whole engine) so that
+    /// multiple table fetches can run concurrently; the caller performs the
+    /// `&mut self` cache insertion afterwards via
+    /// [`store_refreshed_table`](Self::store_refreshed_table).
+    async fn fetch_table_batches(
+        registry: &SourceRegistry,
+        table_name: &str,
+    ) -> EngineResult<Vec<RecordBatch>> {
+        let binding = registry
             .binding_for(table_name)
             .map_err(|e| EngineError::InvalidData(e.to_string()))?;
         let request = FetchRequest {
@@ -730,16 +793,24 @@ impl Engine {
             table: binding.table.clone(),
             ..Default::default()
         };
-        let connector = self
-            .registry
+        let connector = registry
             .connector_for(table_name)
             .map_err(|e| EngineError::InvalidData(e.to_string()))?;
-        let batches = connector
+        connector
             .fetch_data(&request)
             .await
-            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+            .map_err(|e| EngineError::InvalidData(e.to_string()))
+    }
 
+    /// Optimize, sort, and store fetched batches in the in-memory cache,
+    /// invalidating the query-result cache.
+    fn store_refreshed_table(
+        &mut self,
+        table_name: &str,
+        batches: Vec<RecordBatch>,
+    ) -> EngineResult<OptimizationStats> {
         if batches.is_empty() {
+            let table = self.model.table(table_name)?;
             let schema = std::sync::Arc::new(table.to_arrow_schema());
             let batch = RecordBatch::new_empty(schema);
             self.cache.store(table_name, batch)?;
@@ -765,6 +836,12 @@ impl Engine {
     }
 
     /// Refresh all tables configured for in-memory storage.
+    ///
+    /// Source fetches run concurrently (bounded), then results are inserted
+    /// into the cache sequentially in model table order. The first fetch or
+    /// store error is returned; as with the previous sequential
+    /// implementation, tables ordered before the failing one are stored and
+    /// later ones are not.
     pub async fn refresh_all_in_memory(&mut self) -> EngineResult<()> {
         let table_names: Vec<String> = self
             .model
@@ -773,8 +850,21 @@ impl Engine {
             .filter(|t| t.is_in_memory())
             .map(|t| t.name().to_string())
             .collect();
-        for name in table_names {
-            self.refresh_table(&name).await?;
+
+        // Phase 1: fetch concurrently — futures borrow only the registry.
+        let registry = &self.registry;
+        let fetched: Vec<(String, EngineResult<Vec<RecordBatch>>)> =
+            stream::iter(table_names.into_iter().map(|name| async move {
+                let result = Self::fetch_table_batches(registry, &name).await;
+                (name, result)
+            }))
+            .buffered(MAX_CONCURRENT_FETCHES)
+            .collect()
+            .await;
+
+        // Phase 2: store sequentially (cache insertion needs `&mut self`).
+        for (name, result) in fetched {
+            self.store_refreshed_table(&name, result?)?;
         }
         Ok(())
     }
@@ -999,25 +1089,57 @@ impl Engine {
     ///
     /// Returns `true` if the table was cached, `false` if rejected (too many rows).
     async fn try_auto_tier_table(&mut self, table_name: &str) -> EngineResult<bool> {
-        let binding = self
-            .registry
+        let batches = Self::fetch_auto_tier_batches(
+            &self.registry,
+            table_name,
+            self.auto_tier_config.max_rows,
+        )
+        .await?;
+        self.store_auto_tier_result(table_name, batches)
+    }
+
+    /// Fetch up to `max_rows + 1` rows of an auto-tier candidate from its
+    /// source connector (one extra row so the row-count check can detect
+    /// oversized tables).
+    ///
+    /// Borrows only the [`SourceRegistry`] (not the whole engine) so that
+    /// multiple candidate fetches can run concurrently; the caller performs
+    /// the `&mut self` bookkeeping afterwards via
+    /// [`store_auto_tier_result`](Self::store_auto_tier_result).
+    async fn fetch_auto_tier_batches(
+        registry: &SourceRegistry,
+        table_name: &str,
+        max_rows: usize,
+    ) -> EngineResult<Vec<RecordBatch>> {
+        let binding = registry
             .binding_for(table_name)
             .map_err(|e| EngineError::InvalidData(e.to_string()))?;
         let request = FetchRequest {
             schema: Some(binding.schema.clone()),
             table: binding.table.clone(),
-            limit: Some(self.auto_tier_config.max_rows + 1),
+            limit: Some(max_rows + 1),
             ..Default::default()
         };
-        let connector = self
-            .registry
+        let connector = registry
             .connector_for(table_name)
             .map_err(|e| EngineError::InvalidData(e.to_string()))?;
-        let batches = connector
+        connector
             .fetch_data(&request)
             .await
-            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+            .map_err(|e| EngineError::InvalidData(e.to_string()))
+    }
 
+    /// Apply the auto-tier row-count check to fetched batches, caching the
+    /// table if it qualifies and recording the rejection if it does not.
+    ///
+    /// Returns `true` if the table was cached, `false` if rejected (too many
+    /// rows). On success the query-result cache is invalidated, exactly as
+    /// when the fetch and store ran as one step.
+    fn store_auto_tier_result(
+        &mut self,
+        table_name: &str,
+        batches: Vec<RecordBatch>,
+    ) -> EngineResult<bool> {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
         if total_rows > self.auto_tier_config.max_rows {
@@ -1084,16 +1206,34 @@ impl Engine {
         Ok(tiered)
     }
 
-    /// Cache all remaining eligible dimension tables.
+    /// Cache all remaining eligible dimension tables (deferred pre-warm).
     ///
-    /// Call this after the first query returns to pre-warm the cache in the
-    /// background. The host app can spawn this as a background task:
+    /// [`query_auto_tier`](Self::query_auto_tier) only caches the dimension
+    /// tables a query actually touches; this method caches every other
+    /// eligible candidate (see
+    /// [`auto_tier_pending`](Self::auto_tier_pending)). Call it **after**
+    /// rendering query results so the pre-warm cost stays off the query's
+    /// critical path — for example from a background task that owns the
+    /// `Engine`:
     ///
-    /// ```rust,ignore
-    /// let results = engine.query_auto_tier(request).await?;
-    /// // Fire-and-forget background pre-warm:
-    /// tokio::spawn(async move { engine.auto_tier_remaining().await });
+    /// ```rust,no_run
+    /// # use bi_engine::*;
+    /// # async fn example(mut engine: Engine, request: QueryRequest)
+    /// # -> Result<(), Box<dyn std::error::Error>> {
+    /// let (batches, tiered) = engine.query_auto_tier(request).await?;
+    /// // ... render `batches` to the user first ...
+    /// # let _ = (&batches, &tiered);
+    /// // Then pre-warm the remaining dimension tables:
+    /// let warmed = engine.auto_tier_remaining().await?;
+    /// println!("pre-warmed: {warmed:?}");
+    /// # Ok(())
+    /// # }
     /// ```
+    ///
+    /// Candidate tables are fetched from their sources concurrently
+    /// (bounded), then inserted into the cache sequentially. A table whose
+    /// fetch fails is skipped — it stays a candidate and is retried on the
+    /// next call.
     ///
     /// Returns the names of tables that were successfully cached.
     pub async fn auto_tier_remaining(&mut self) -> EngineResult<Vec<String>> {
@@ -1102,12 +1242,26 @@ impl Engine {
         }
 
         let candidates = self.auto_tier_candidates();
+        let max_rows = self.auto_tier_config.max_rows;
+
+        // Phase 1: fetch concurrently — futures borrow only the registry.
+        let registry = &self.registry;
+        let fetched: Vec<(String, EngineResult<Vec<RecordBatch>>)> =
+            stream::iter(candidates.into_iter().map(|name| async move {
+                let result = Self::fetch_auto_tier_batches(registry, &name, max_rows).await;
+                (name, result)
+            }))
+            .buffered(MAX_CONCURRENT_FETCHES)
+            .collect()
+            .await;
+
+        // Phase 2: store sequentially (cache insertion needs `&mut self`).
         let mut tiered = Vec::new();
-        for candidate in candidates {
-            match self.try_auto_tier_table(&candidate).await {
-                Ok(true) => tiered.push(candidate),
+        for (name, result) in fetched {
+            match result.and_then(|batches| self.store_auto_tier_result(&name, batches)) {
+                Ok(true) => tiered.push(name),
                 Ok(false) => {} // Rejected (too large).
-                Err(_) => {}    // Fetch failed — skip, will retry next time.
+                Err(_) => {}    // Fetch or store failed — skip, will retry next time.
             }
         }
         Ok(tiered)
@@ -1115,18 +1269,49 @@ impl Engine {
 
     /// Execute a query with automatic dimension caching.
     ///
-    /// Before executing the query, checks if any dimension tables needed by the
-    /// query are eligible for auto-tiering and caches them. After the query
-    /// completes, remaining eligible dimensions are pre-warmed in the background.
+    /// Before executing the query, dimension tables needed by **this** query
+    /// that are eligible for auto-tiering are cached, and stale auto-tiered
+    /// tables are refreshed. The query is then served from the query-result
+    /// cache when possible, otherwise executed against the sources.
     ///
-    /// Returns the query results and the list of tables that were auto-tiered
-    /// (both during the query and in the background pre-warm).
+    /// Returns the query results and the names of tables that were
+    /// auto-tiered for this query.
+    ///
+    /// # Behavior change: pre-warming is no longer inline
+    ///
+    /// Earlier versions awaited
+    /// [`auto_tier_remaining`](Self::auto_tier_remaining) before returning —
+    /// despite documenting it as a background pre-warm — so the first query
+    /// paid for fetching every remaining candidate dimension it did not
+    /// need, even on a query-cache hit. This method now returns as soon as
+    /// the results are available and never fetches unrelated candidates.
+    /// Consequently the returned table list contains only tables tiered for
+    /// this query, no longer ones pre-warmed afterwards.
+    ///
+    /// To pre-warm the remaining candidates, call
+    /// [`auto_tier_remaining`](Self::auto_tier_remaining) after rendering
+    /// the results — e.g. from a background task that owns the `Engine`:
+    ///
+    /// ```rust,no_run
+    /// # use bi_engine::*;
+    /// # async fn example(mut engine: Engine, request: QueryRequest)
+    /// # -> Result<(), Box<dyn std::error::Error>> {
+    /// let (batches, tiered) = engine.query_auto_tier(request).await?;
+    /// println!("{} batches; auto-tiered for query: {tiered:?}", batches.len());
+    /// // Render results first, then pre-warm off the critical path:
+    /// let warmed = engine.auto_tier_remaining().await?;
+    /// println!("pre-warmed afterwards: {warmed:?}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn query_auto_tier(
         &mut self,
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
-        // Phase 1: Auto-tier tables needed by this specific query.
-        let mut tiered = self
+        // Auto-tier tables needed by this specific query. Remaining
+        // candidates are deliberately NOT fetched here — hosts pre-warm them
+        // via `auto_tier_remaining()` after rendering the results.
+        let tiered = self
             .auto_tier_for_query(&request)
             .await
             .map_err(QueryError::Engine)?;
@@ -1139,10 +1324,6 @@ impl Engine {
         // Check query cache.
         let cache_key = query_cache::query_cache_key(&request, self.query_cache.model_version());
         if let Some(cached) = self.query_cache.get(cache_key) {
-            // Still pre-warm remaining in background.
-            if let Ok(more) = self.auto_tier_remaining().await {
-                tiered.extend(more);
-            }
             return Ok((cached, tiered));
         }
 
@@ -1164,15 +1345,13 @@ impl Engine {
 
         self.query_cache.put(cache_key, batches.clone());
 
-        // Phase 2: Pre-warm remaining candidates.
-        if let Ok(more) = self.auto_tier_remaining().await {
-            tiered.extend(more);
-        }
-
         Ok((batches, tiered))
     }
 
     /// Refresh auto-tiered tables that have exceeded their TTL.
+    ///
+    /// Stale tables are re-fetched from their sources concurrently
+    /// (bounded), then re-cached sequentially.
     async fn refresh_stale_auto_tiered(&mut self) -> EngineResult<()> {
         let ttl = Duration::from_secs(self.auto_tier_config.default_ttl_secs);
         let stale: Vec<String> = self
@@ -1183,9 +1362,23 @@ impl Engine {
             .cloned()
             .collect();
 
-        for name in stale {
-            // Re-fetch and re-cache. If it fails or is now too large, remove from auto-tier.
-            match self.try_auto_tier_table(&name).await {
+        let max_rows = self.auto_tier_config.max_rows;
+
+        // Phase 1: fetch concurrently — futures borrow only the registry.
+        let registry = &self.registry;
+        let fetched: Vec<(String, EngineResult<Vec<RecordBatch>>)> =
+            stream::iter(stale.into_iter().map(|name| async move {
+                let result = Self::fetch_auto_tier_batches(registry, &name, max_rows).await;
+                (name, result)
+            }))
+            .buffered(MAX_CONCURRENT_FETCHES)
+            .collect()
+            .await;
+
+        // Phase 2: re-cache sequentially. If a table fails or is now too
+        // large, remove it from auto-tier.
+        for (name, result) in fetched {
+            match result.and_then(|batches| self.store_auto_tier_result(&name, batches)) {
                 Ok(true) => {} // Still cached.
                 Ok(false) => {
                     // Grew beyond threshold — evict and reject.
@@ -2765,5 +2958,111 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.max_rows, 100_000);
         assert_eq!(config.default_ttl_secs, 3600);
+    }
+
+    // -- Deferred pre-warm tests --
+
+    #[tokio::test]
+    async fn query_auto_tier_cache_hit_skips_remaining_candidate_fetches() {
+        // dim_products and dim_customers are auto-tier candidates with
+        // bindings but NO registered connector, so any fetch attempt would
+        // blow up. A query-cache hit must return without touching them:
+        // pre-warming is deferred to an explicit auto_tier_remaining() call.
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine.set_query_cache_config(QueryCacheConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
+        engine.registry.bind(
+            "dim_customers",
+            0,
+            SourceBinding::new("public", "customers"),
+        );
+
+        // Seed the query cache so the request below is a hit.
+        let request = QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        };
+        let key = query_cache::query_cache_key(&request, engine.query_cache.model_version());
+        engine.query_cache.put(key, vec![make_test_batch()]);
+
+        let (batches, tiered) = engine.query_auto_tier(request).await.unwrap();
+
+        // Served from cache; no remaining candidate was fetched, tiered, or
+        // rejected.
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+        assert!(tiered.is_empty());
+        assert!(engine.auto_tiered_tables().is_empty());
+        assert!(engine.auto_tier_rejected_tables().is_empty());
+
+        // Both dimensions remain pending for a deferred pre-warm.
+        let mut pending = engine.auto_tier_pending();
+        pending.sort();
+        assert_eq!(pending, vec!["dim_customers", "dim_products"]);
+    }
+
+    #[test]
+    fn auto_tier_pending_lists_uncached_candidates() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.set_auto_tier_config(AutoTierConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        engine
+            .registry
+            .bind("dim_products", 0, SourceBinding::new("public", "products"));
+
+        assert_eq!(engine.auto_tier_pending(), vec!["dim_products"]);
+
+        // Once cached, the table is no longer pending.
+        engine
+            .auto_tier_state
+            .cached
+            .insert("dim_products".to_string());
+        assert!(engine.auto_tier_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_tier_remaining_disabled_returns_empty() {
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        // Auto-tier disabled (default): no candidates, no fetch attempts.
+        let tiered = engine.auto_tier_remaining().await.unwrap();
+        assert!(tiered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_all_in_memory_with_no_in_memory_tables_is_noop() {
+        // All tables are DirectQuery — nothing to fetch or store.
+        let model = make_star_schema_model();
+        let mut engine = Engine::new(model);
+        engine.refresh_all_in_memory().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_all_in_memory_propagates_fetch_errors() {
+        // An InMemory table with no source binding: the concurrent fetch
+        // phase yields an error which the store phase propagates.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new("A", vec![Column::new("id", DataType::Int64)])
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory),
+            )
+            .build()
+            .unwrap();
+        let mut engine = Engine::new(model);
+        assert!(engine.refresh_all_in_memory().await.is_err());
     }
 }

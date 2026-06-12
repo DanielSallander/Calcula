@@ -26,7 +26,7 @@ pub async fn evaluate_expression(
     let ctx = SessionContext::new();
     ctx.register_batch("t", batch.clone())?;
 
-    let expr_sql = expression.to_sql_string();
+    let expr_sql = expression.to_sql_string()?;
     let sql = format!("SELECT {expr_sql} AS result FROM t");
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
@@ -70,7 +70,7 @@ pub async fn materialize_calculated_columns(
     // SELECT *, expr1 AS name1, expr2 AS name2, ... FROM t
     let mut select_parts: Vec<String> = vec!["*".to_string()];
     for cc in calculated_columns {
-        let expr_sql = cc.expression().to_sql_string();
+        let expr_sql = cc.expression().to_sql_string()?;
         select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(cc.name())));
     }
 

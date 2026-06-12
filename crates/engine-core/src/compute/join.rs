@@ -241,18 +241,7 @@ async fn aggregate_over_relationship_pre_agg(
 
     // Step 2: CROSS JOIN fact × bounds, filter by boundary.
     let agg_col_quoted = quote_ident_double(aggregate_column);
-    let agg_sql = match operation {
-        AggregateOp::Sum => format!("SUM(from_t.{agg_col_quoted})"),
-        AggregateOp::Count => format!("COUNT(from_t.{agg_col_quoted})"),
-        AggregateOp::CountRows => "COUNT(*)".to_string(),
-        AggregateOp::Min => format!("MIN(from_t.{agg_col_quoted})"),
-        AggregateOp::Max => format!("MAX(from_t.{agg_col_quoted})"),
-        AggregateOp::Average => format!("AVG(from_t.{agg_col_quoted})"),
-        AggregateOp::DistinctCount => {
-            format!("COUNT(DISTINCT from_t.{agg_col_quoted})")
-        }
-        _ => format!("{operation}(from_t.{agg_col_quoted})"),
-    };
+    let agg_sql = operation.render_sql(&format!("from_t.{agg_col_quoted}"));
 
     let main_sql = format!(
         "SELECT __bounds.{group_by_quoted}, {agg_sql} AS {agg_alias} FROM from_t CROSS JOIN __bounds WHERE {} GROUP BY __bounds.{group_by_quoted}",

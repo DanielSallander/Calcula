@@ -6,14 +6,17 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bb8::Pool;
 use bb8_tiberius::ConnectionManager;
-use engine_core::compute::sql_util::{quote_ident_bracket, sql_quote_literal};
+use engine_core::compute::sql_util::quote_ident_bracket;
 use engine_core::model::{Column, Table};
 use tiberius::{Config, EncryptionLevel};
 
 use crate::auth::{validate_no_nul, AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
 use crate::error::{ConnectorError, ConnectorResult};
+use crate::sql_builder::{self, SqlDialect, SqlServerDialect};
 use crate::sqlserver_convert::tiberius_rows_to_record_batches;
-use crate::traits::{Connector, FetchRequest, SourceTable};
+use crate::traits::{
+    Connector, FetchRequest, InFilterCondition, InValueKind, SchemaCache, SourceTable,
+};
 use crate::type_mapping::sqlserver_type_to_engine_type;
 
 /// Default number of connections in the pool.
@@ -24,6 +27,12 @@ pub struct SqlServerConnector {
     pool: Pool<ConnectionManager>,
     /// Counter for generating unique temp table names.
     temp_table_counter: AtomicU64,
+    /// Read-through cache of introspected table schemas, keyed by
+    /// `(schema, table)`. Avoids repeating the `INFORMATION_SCHEMA.COLUMNS`
+    /// query on every fetch. Entries live for the connector's lifetime — see
+    /// [`SqlServerConnector::invalidate_schema_cache`] for the staleness
+    /// tradeoff.
+    schema_cache: SchemaCache,
 }
 
 impl ConnectorAuth for SqlServerConnector {
@@ -102,6 +111,7 @@ impl SqlServerConnector {
         Ok(Self {
             pool,
             temp_table_counter: AtomicU64::new(0),
+            schema_cache: SchemaCache::new(),
         })
     }
 
@@ -223,89 +233,10 @@ impl SqlServerConnector {
     /// Build SQL for an aggregate query from a `FetchRequest`.
     ///
     /// Returns `(sql, params)` where params are bound as `@P1`, `@P2`, etc.
+    /// Delegates to the shared [`sql_builder`] with the SQL Server dialect
+    /// (`[ident]` quoting, `@Pn` placeholders, `TOP(n)` row limiting).
     fn build_aggregate_sql(request: &FetchRequest) -> (String, Vec<String>) {
-        let schema_name = request.schema.as_deref().unwrap_or("dbo");
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident_bracket(schema_name),
-            quote_ident_bracket(&request.table)
-        );
-
-        // SELECT group_by columns + aggregate expressions.
-        let mut select_parts: Vec<String> = request
-            .group_by
-            .iter()
-            .map(|c| quote_ident_bracket(c))
-            .collect();
-
-        for agg in &request.aggregates {
-            let func = agg.function.as_sql();
-            let col = &agg.column;
-            let default_alias = format!("{}_{}", func.to_lowercase(), col);
-            let alias = agg.alias.as_deref().unwrap_or(&default_alias);
-            if agg.function == crate::traits::AggregateFunction::CountDistinct {
-                select_parts.push(format!(
-                    "{func}(DISTINCT {}) AS {}",
-                    quote_ident_bracket(col),
-                    quote_ident_bracket(alias)
-                ));
-            } else if agg.function == crate::traits::AggregateFunction::CountAll {
-                select_parts.push(format!("COUNT(*) AS {}", quote_ident_bracket(alias)));
-            } else {
-                select_parts.push(format!(
-                    "{func}({}) AS {}",
-                    quote_ident_bracket(col),
-                    quote_ident_bracket(alias)
-                ));
-            }
-        }
-
-        let select_clause = select_parts.join(", ");
-
-        // TOP for LIMIT (SQL Server syntax).
-        let top_clause = request
-            .limit
-            .map(|n| format!("TOP({n}) "))
-            .unwrap_or_default();
-
-        let mut sql = format!("SELECT {top_clause}{select_clause} FROM {table_ref}");
-
-        // WHERE clause.
-        let mut params: Vec<String> = Vec::new();
-        let has_conditions = !request.filters.is_empty() || !request.in_filters.is_empty();
-        if has_conditions {
-            let mut conditions = Vec::new();
-            for filter in &request.filters {
-                params.push(filter.value.clone());
-                let param_idx = params.len();
-                conditions.push(format!(
-                    "CAST({} AS NVARCHAR(MAX)) {} @P{}",
-                    quote_ident_bracket(&filter.column),
-                    filter.operator.as_sql(),
-                    param_idx
-                ));
-            }
-            for in_filter in &request.in_filters {
-                if !in_filter.values.is_empty() {
-                    conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        // GROUP BY clause.
-        if !request.group_by.is_empty() {
-            let group_clause: Vec<String> = request
-                .group_by
-                .iter()
-                .map(|c| quote_ident_bracket(c))
-                .collect();
-            sql.push_str(" GROUP BY ");
-            sql.push_str(&group_clause.join(", "));
-        }
-
-        (sql, params)
+        sql_builder::build_aggregate_sql(&SqlServerDialect, request)
     }
 
     /// Execute a parameterized query and return results as Arrow `RecordBatch`
@@ -336,32 +267,43 @@ impl SqlServerConnector {
     /// Generate a unique temp table name (SQL Server `#` prefix).
     fn next_temp_table_name(&self) -> String {
         let id = self.temp_table_counter.fetch_add(1, Ordering::Relaxed);
-        format!("#_ef_{id}")
+        SqlServerDialect.temp_table_name(id)
     }
 
     /// Create a temp table on the given connection and populate it with values.
     ///
-    /// Returns `true` on success, `false` if creation failed (permissions).
-    /// Values are inserted in batches of 500.
+    /// The column type follows the (pre-validated) value kind: `BIGINT` for
+    /// [`InValueKind::Integer`] so the fact-table FK comparison needs no
+    /// casts, `NVARCHAR(MAX)` otherwise. Values are inserted as multi-row
+    /// `VALUES` statements of up to 1000 rows each (the SQL Server table
+    /// value constructor maximum; values are inlined literals, so the
+    /// bind-parameter limit does not apply).
+    ///
+    /// Returns `true` on success, `false` if creation or any insert failed
+    /// (e.g., permissions, or an integer value out of `BIGINT` range) —
+    /// callers fall back to the inline IN list.
     async fn create_temp_filter_table(
         conn: &mut bb8::PooledConnection<'_, ConnectionManager>,
         name: &str,
         values: &[String],
+        kind: InValueKind,
     ) -> bool {
-        let create_sql = format!("CREATE TABLE [{name}] (val NVARCHAR(MAX))");
+        let create_sql = SqlServerDialect.temp_table_ddl(name, kind);
         if conn.execute(&create_sql, &[]).await.is_err() {
             return false;
         }
 
-        for chunk in values.chunks(500) {
-            let rows: Vec<String> = chunk
-                .iter()
-                .map(|v| format!("(N{})", sql_quote_literal(v)))
-                .collect();
-            let insert_sql = format!("INSERT INTO [{name}] (val) VALUES {}", rows.join(", "));
+        // Integer values were validated (parse::<i128>) by the caller via
+        // `effective_kind()` before choosing this kind.
+        for insert_sql in
+            sql_builder::temp_table_insert_statements(&SqlServerDialect, name, values, kind)
+        {
             if conn.execute(&insert_sql, &[]).await.is_err() {
                 let _ = conn
-                    .execute(&format!("DROP TABLE IF EXISTS [{name}]"), &[])
+                    .execute(
+                        &sql_builder::temp_table_drop_sql(&SqlServerDialect, name),
+                        &[],
+                    )
                     .await;
                 return false;
             }
@@ -384,72 +326,48 @@ impl SqlServerConnector {
         let mut temp_tables: Vec<String> = Vec::new();
 
         // Build WHERE conditions, using temp tables for large IN-filter sets.
-        let mut conditions = Vec::new();
         let mut params: Vec<String> = Vec::new();
-
-        for filter in &request.filters {
-            params.push(filter.value.clone());
-            let param_idx = params.len();
-            conditions.push(format!(
-                "CAST({} AS NVARCHAR(MAX)) {} @P{}",
-                quote_ident_bracket(&filter.column),
-                filter.operator.as_sql(),
-                param_idx
-            ));
-        }
+        let mut conditions =
+            sql_builder::build_filter_conditions(&SqlServerDialect, &request.filters, &mut params);
 
         for in_filter in &request.in_filters {
             if in_filter.values.is_empty() {
                 continue;
             }
             if in_filter.values.len() > threshold {
+                // `effective_kind()` re-validates Integer values so the temp
+                // table type matches what gets inserted.
+                let kind = in_filter.effective_kind();
                 let temp_name = self.next_temp_table_name();
-                if Self::create_temp_filter_table(&mut conn, &temp_name, &in_filter.values).await {
-                    conditions.push(format!(
-                        "CAST({} AS NVARCHAR(MAX)) IN (SELECT val FROM [{}])",
-                        quote_ident_bracket(&in_filter.column),
-                        temp_name
+                if Self::create_temp_filter_table(&mut conn, &temp_name, &in_filter.values, kind)
+                    .await
+                {
+                    conditions.push(sql_builder::temp_in_condition(
+                        &SqlServerDialect,
+                        &in_filter.column,
+                        &temp_name,
+                        kind,
                     ));
                     temp_tables.push(temp_name);
                 } else {
                     // Fallback: inline IN list if temp table creation failed.
-                    conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
+                    conditions.push(build_inline_in_ss(in_filter));
                 }
             } else {
-                conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
+                conditions.push(build_inline_in_ss(in_filter));
             }
         }
 
         // Build SQL.
         let is_aggregate = !request.aggregates.is_empty();
         let sql = if is_aggregate {
-            Self::build_aggregate_sql_with_conditions(request, &conditions, &params)
+            sql_builder::build_aggregate_sql_with_conditions(
+                &SqlServerDialect,
+                request,
+                &conditions,
+            )
         } else {
-            let select_clause = if request.columns.is_empty() {
-                "*".to_string()
-            } else {
-                request
-                    .columns
-                    .iter()
-                    .map(|c| quote_ident_bracket(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let table_ref = format!(
-                "{}.{}",
-                quote_ident_bracket(schema_name),
-                quote_ident_bracket(&request.table)
-            );
-            let top_clause = request
-                .limit
-                .map(|n| format!("TOP({n}) "))
-                .unwrap_or_default();
-            let mut sql = format!("SELECT {top_clause}{select_clause} FROM {table_ref}");
-            if !conditions.is_empty() {
-                sql.push_str(" WHERE ");
-                sql.push_str(&conditions.join(" AND "));
-            }
-            sql
+            sql_builder::build_select_sql_with_conditions(&SqlServerDialect, request, &conditions)
         };
 
         // Execute on the pinned connection.
@@ -463,7 +381,10 @@ impl SqlServerConnector {
         // Cleanup temp tables.
         for name in &temp_tables {
             let _ = conn
-                .execute(&format!("DROP TABLE IF EXISTS [{name}]"), &[])
+                .execute(
+                    &sql_builder::temp_table_drop_sql(&SqlServerDialect, name),
+                    &[],
+                )
                 .await;
         }
 
@@ -503,101 +424,17 @@ impl SqlServerConnector {
         }
     }
 
-    /// Build aggregate SQL with pre-built WHERE conditions (for temp table path).
-    fn build_aggregate_sql_with_conditions(
-        request: &FetchRequest,
-        conditions: &[String],
-        _params: &[String],
-    ) -> String {
-        let schema_name = request.schema.as_deref().unwrap_or("dbo");
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident_bracket(schema_name),
-            quote_ident_bracket(&request.table)
-        );
-
-        let mut select_parts: Vec<String> = request
-            .group_by
-            .iter()
-            .map(|c| quote_ident_bracket(c))
-            .collect();
-
-        for agg in &request.aggregates {
-            let func = agg.function.as_sql();
-            let col = &agg.column;
-            let default_alias = format!("{}_{}", func.to_lowercase(), col);
-            let alias = agg.alias.as_deref().unwrap_or(&default_alias);
-            if agg.function == crate::traits::AggregateFunction::CountDistinct {
-                select_parts.push(format!(
-                    "{func}(DISTINCT {}) AS {}",
-                    quote_ident_bracket(col),
-                    quote_ident_bracket(alias)
-                ));
-            } else if agg.function == crate::traits::AggregateFunction::CountAll {
-                select_parts.push(format!("COUNT(*) AS {}", quote_ident_bracket(alias)));
-            } else {
-                select_parts.push(format!(
-                    "{func}({}) AS {}",
-                    quote_ident_bracket(col),
-                    quote_ident_bracket(alias)
-                ));
-            }
-        }
-
-        let select_clause = select_parts.join(", ");
-        let top_clause = request
-            .limit
-            .map(|n| format!("TOP({n}) "))
-            .unwrap_or_default();
-        let mut sql = format!("SELECT {top_clause}{select_clause} FROM {table_ref}");
-
-        if !conditions.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        if !request.group_by.is_empty() {
-            let group_clause: Vec<String> = request
-                .group_by
-                .iter()
-                .map(|c| quote_ident_bracket(c))
-                .collect();
-            sql.push_str(" GROUP BY ");
-            sql.push_str(&group_clause.join(", "));
-        }
-
-        sql
-    }
-}
-
-impl Connector for SqlServerConnector {
-    async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
-        let mut conn = self.get_conn().await?;
-        let results = conn
-            .simple_query(
-                "SELECT TABLE_SCHEMA, TABLE_NAME
-                 FROM INFORMATION_SCHEMA.TABLES
-                 WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-                   AND TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
-                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
-            )
-            .await?;
-        let rows = results.into_first_result().await?;
-
-        let mut tables = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let schema: &str = row.try_get(0).map_err(tib_err)?.unwrap_or_default();
-            let name: &str = row.try_get(1).map_err(tib_err)?.unwrap_or_default();
-            tables.push(SourceTable {
-                schema: schema.to_string(),
-                name: name.to_string(),
-            });
-        }
-
-        Ok(tables)
-    }
-
-    async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
+    /// Introspect a table's schema directly against the source catalog,
+    /// bypassing the schema cache.
+    ///
+    /// Runs an `INFORMATION_SCHEMA.COLUMNS` query.
+    /// [`Connector::introspect_table`] wraps this with the read-through
+    /// [`SchemaCache`].
+    async fn introspect_table_uncached(
+        &self,
+        schema: &str,
+        table_name: &str,
+    ) -> ConnectorResult<Table> {
         let mut conn = self.get_conn().await?;
 
         let mut query = tiberius::Query::new(
@@ -650,6 +487,60 @@ impl Connector for SqlServerConnector {
         Table::new(&full_name, columns).map_err(ConnectorError::from)
     }
 
+    /// Discard all cached table schemas, forcing the next introspection of
+    /// each table to re-read the source catalog.
+    ///
+    /// Schemas are cached for the connector's lifetime, so DDL on the source
+    /// (`ALTER TABLE`, column changes, drops) is invisible until this is
+    /// called. Host applications that issue or expect DDL — model designer
+    /// hosts in particular — should invalidate afterwards. Synchronous and
+    /// cheap: it only clears an in-memory map.
+    pub fn invalidate_schema_cache(&self) {
+        self.schema_cache.invalidate_all();
+    }
+}
+
+impl Connector for SqlServerConnector {
+    async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
+        let mut conn = self.get_conn().await?;
+        let results = conn
+            .simple_query(
+                "SELECT TABLE_SCHEMA, TABLE_NAME
+                 FROM INFORMATION_SCHEMA.TABLES
+                 WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+                   AND TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            )
+            .await?;
+        let rows = results.into_first_result().await?;
+
+        let mut tables = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let schema: &str = row.try_get(0).map_err(tib_err)?.unwrap_or_default();
+            let name: &str = row.try_get(1).map_err(tib_err)?.unwrap_or_default();
+            tables.push(SourceTable {
+                schema: schema.to_string(),
+                name: name.to_string(),
+            });
+        }
+
+        Ok(tables)
+    }
+
+    /// Introspect a table's schema, served from the connector's
+    /// [`SchemaCache`] after the first lookup.
+    ///
+    /// The returned [`Table`] is identical to an uncached introspection; only
+    /// the catalog round-trip is skipped. Stale after source DDL until
+    /// [`SqlServerConnector::invalidate_schema_cache`] is called.
+    async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
+        self.schema_cache
+            .get_or_load(schema, table_name, || {
+                self.introspect_table_uncached(schema, table_name)
+            })
+            .await
+    }
+
     async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
         // Check if any IN-filter exceeds the temp-table threshold.
         let threshold = request.max_inline_in_values.unwrap_or(usize::MAX);
@@ -695,55 +586,9 @@ impl Connector for SqlServerConnector {
             Schema::new(fields)
         };
 
-        // Build SQL query.
-        let select_clause = if request.columns.is_empty() {
-            "*".to_string()
-        } else {
-            request
-                .columns
-                .iter()
-                .map(|c| quote_ident_bracket(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident_bracket(schema_name),
-            quote_ident_bracket(&request.table)
-        );
-
-        // TOP for LIMIT.
-        let top_clause = request
-            .limit
-            .map(|n| format!("TOP({n}) "))
-            .unwrap_or_default();
-
-        let mut sql = format!("SELECT {top_clause}{select_clause} FROM {table_ref}");
-
-        // WHERE clause.
-        let mut params: Vec<String> = Vec::new();
-        let has_conditions = !request.filters.is_empty() || !request.in_filters.is_empty();
-        if has_conditions {
-            let mut conditions = Vec::new();
-            for filter in &request.filters {
-                params.push(filter.value.clone());
-                let param_idx = params.len();
-                conditions.push(format!(
-                    "CAST({} AS NVARCHAR(MAX)) {} @P{}",
-                    quote_ident_bracket(&filter.column),
-                    filter.operator.as_sql(),
-                    param_idx
-                ));
-            }
-            for in_filter in &request.in_filters {
-                if !in_filter.values.is_empty() {
-                    conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
+        // Build SQL query (filter values bound as `@Pn` parameters, row limit
+        // rendered as `TOP(n)`).
+        let (sql, params) = sql_builder::build_select_sql(&SqlServerDialect, request);
 
         // Execute with parameters.
         let mut conn = self.get_conn().await?;
@@ -790,6 +635,12 @@ impl Connector for SqlServerConnector {
             .ok_or_else(|| ConnectorError::QueryFailed("COUNT_BIG(*) returned NULL".into()))?;
         Ok(count as usize)
     }
+
+    /// Trait-level dispatch to
+    /// [`SqlServerConnector::invalidate_schema_cache`].
+    fn invalidate_schema_cache(&self) {
+        self.schema_cache.invalidate_all();
+    }
 }
 
 /// Infer an Arrow `Schema` from the first result row's column metadata.
@@ -827,20 +678,22 @@ fn infer_schema_from_row(row: &tiberius::Row) -> ConnectorResult<Schema> {
     Ok(Schema::new(fields))
 }
 
-/// Build an inline `CAST([col] AS NVARCHAR(MAX)) IN (N'v1', ...)` condition for SQL Server.
+/// Build an inline IN condition for SQL Server.
 ///
-/// Values are escaped with [`sql_quote_literal`] and the column is escaped
+/// - [`InValueKind::Integer`] (re-validated via
+///   [`InFilterCondition::effective_kind`]): renders `[col] IN (1, 2, 3)` —
+///   unquoted numeric literals against the uncast column, so the FK index
+///   stays usable (casting the column to NVARCHAR forces a scan).
+/// - [`InValueKind::Text`] (or failed integer validation): keeps the
+///   existing `CAST([col] AS NVARCHAR(MAX)) IN (N'v1', ...)` form —
+///   collation-sensitive text comparison is left untouched.
+///
+/// Values are escaped with `sql_quote_literal` and the column is escaped
 /// with [`quote_ident_bracket`] so neither can break out of the IN list.
-fn build_inline_in_ss(column: &str, values: &[String]) -> String {
-    let quoted: Vec<String> = values
-        .iter()
-        .map(|v| format!("N{}", sql_quote_literal(v)))
-        .collect();
-    format!(
-        "CAST({} AS NVARCHAR(MAX)) IN ({})",
-        quote_ident_bracket(column),
-        quoted.join(", ")
-    )
+/// Delegates to the shared [`sql_builder`] inline-IN builder with the SQL
+/// Server dialect.
+fn build_inline_in_ss(in_filter: &InFilterCondition) -> String {
+    sql_builder::build_inline_in(&SqlServerDialect, in_filter)
 }
 
 /// Convert a tiberius error into a `ConnectorError`.
@@ -853,9 +706,22 @@ mod tests {
     use super::*;
     use crate::traits::{AggregateExpr, AggregateFunction, FilterCondition, FilterOperator};
 
+    /// Test helper: build an [`InFilterCondition`] from string values.
+    fn in_filter(column: &str, values: &[&str], kind: InValueKind) -> InFilterCondition {
+        InFilterCondition {
+            column: column.into(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            kind,
+        }
+    }
+
     #[test]
     fn build_inline_in_ss_escapes_injection_payload() {
-        let cond = build_inline_in_ss("color", &["x'); DROP TABLE t; --".to_string()]);
+        let cond = build_inline_in_ss(&in_filter(
+            "color",
+            &["x'); DROP TABLE t; --"],
+            InValueKind::Text,
+        ));
         assert_eq!(
             cond,
             "CAST([color] AS NVARCHAR(MAX)) IN (N'x''); DROP TABLE t; --')"
@@ -866,8 +732,57 @@ mod tests {
 
     #[test]
     fn build_inline_in_ss_escapes_embedded_bracket_identifier() {
-        let cond = build_inline_in_ss("evil]name", &["a".to_string()]);
+        let cond = build_inline_in_ss(&in_filter("evil]name", &["a"], InValueKind::Text));
         assert!(cond.starts_with("CAST([evil]]name] AS NVARCHAR(MAX)) IN"));
+    }
+
+    #[test]
+    fn build_inline_in_ss_text_kind_keeps_existing_cast_form() {
+        // Text path is intentionally unchanged: collation-sensitive text
+        // comparison keeps the CAST + N'' literal form.
+        let cond = build_inline_in_ss(&in_filter("region", &["north", "south"], InValueKind::Text));
+        assert_eq!(
+            cond,
+            "CAST([region] AS NVARCHAR(MAX)) IN (N'north', N'south')"
+        );
+    }
+
+    #[test]
+    fn build_inline_in_ss_integer_kind_renders_unquoted_without_cast() {
+        let cond = build_inline_in_ss(&in_filter(
+            "product_id",
+            &["1", "2", "3"],
+            InValueKind::Integer,
+        ));
+        assert_eq!(cond, "[product_id] IN (1, 2, 3)");
+        assert!(!cond.contains("CAST"));
+        assert!(!cond.contains("N'"));
+    }
+
+    #[test]
+    fn build_inline_in_ss_hostile_integer_value_falls_back_to_quoted_text() {
+        // Declared Integer but contains a non-numeric payload: must be
+        // re-validated and rendered escaped + quoted, never inlined raw.
+        let cond = build_inline_in_ss(&in_filter(
+            "product_id",
+            &["1", "2); DROP TABLE t; --"],
+            InValueKind::Integer,
+        ));
+        assert_eq!(
+            cond,
+            "CAST([product_id] AS NVARCHAR(MAX)) IN (N'1', N'2); DROP TABLE t; --')"
+        );
+        assert!(!cond.contains("IN (1, 2);"));
+    }
+
+    #[test]
+    fn build_inline_in_ss_negative_and_large_integers_stay_integer() {
+        let cond = build_inline_in_ss(&in_filter(
+            "key",
+            &["-7", "9223372036854775807"],
+            InValueKind::Integer,
+        ));
+        assert_eq!(cond, "[key] IN (-7, 9223372036854775807)");
     }
 
     #[test]

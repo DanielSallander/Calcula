@@ -16,6 +16,7 @@ pub mod auth;
 pub(crate) mod decimal;
 pub mod error;
 pub mod postgres;
+pub(crate) mod sql_builder;
 pub mod sqlserver;
 pub mod sqlserver_convert;
 pub mod traits;
@@ -27,6 +28,6 @@ pub use postgres::PostgresConnector;
 pub use sqlserver::SqlServerConnector;
 pub use traits::{
     AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
-    InFilterCondition, JoinAggregationRequest, JoinClause, MeasureExpr, QualifiedColumn,
-    SourceTable,
+    InFilterCondition, JoinAggregationRequest, JoinClause, MeasureExpr, OrderByExpr, OrderByTarget,
+    QualifiedColumn, SourceTable, GROUPING_ID_COLUMN,
 };

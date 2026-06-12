@@ -222,6 +222,7 @@ async fn end_to_end_pushed_aggregation() {
         group_by: vec![ColumnRef::new("SalesDetail", "productid")],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -254,6 +255,7 @@ async fn end_to_end_pushed_aggregation_no_groupby() {
         group_by: vec![],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -278,6 +280,7 @@ async fn end_to_end_local_aggregation_star_schema() {
         group_by: vec![ColumnRef::new("Product", "name")],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -315,6 +318,7 @@ async fn end_to_end_pushed_with_filter() {
             value: "776".into(),
         }],
         lookups: vec![],
+        ..Default::default()
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -340,6 +344,7 @@ async fn end_to_end_cross_source_star_schema() {
         group_by: vec![ColumnRef::new("Product", "name")],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
@@ -376,6 +381,7 @@ async fn end_to_end_cross_source_no_groupby() {
         group_by: vec![],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();

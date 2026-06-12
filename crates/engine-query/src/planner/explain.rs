@@ -27,7 +27,7 @@ impl PushdownPlanner {
         registry: &SourceRegistry,
     ) -> QueryResult<(QueryPlan, PlanNode)> {
         let start = Instant::now();
-        let plan = Self::plan(request, model, registry)?;
+        let (plan, projection) = Self::plan_with_diagnostics(request, model, registry)?;
         let elapsed = start.elapsed();
 
         // Reconstruct decision reasoning from the plan and request.
@@ -69,10 +69,19 @@ impl PushdownPlanner {
                     "filters_pushed",
                     PlanValue::Number(fetch.filters.len() as f64),
                 );
+
+                if fetch.rollup_totals {
+                    node.add_property("totals", PlanValue::Text("rollup".into()));
+                    node.add_property(
+                        "totals_strategy",
+                        PlanValue::Text("rollup-sql (pushed to source)".into()),
+                    );
+                }
             }
             QueryPlan::PushedJoinAggregation {
                 source_table,
                 request,
+                ..
             } => {
                 node.add_property("decision", PlanValue::Text("PushedJoinAggregation".into()));
                 node.add_property(
@@ -90,8 +99,18 @@ impl PushdownPlanner {
                 measures,
                 group_by,
                 lookup_specs,
+                totals,
+                ..
             } => {
                 node.add_property("decision", PlanValue::Text("LocalAggregation".into()));
+
+                if *totals == crate::request::TotalsMode::Rollup {
+                    node.add_property("totals", PlanValue::Text("rollup".into()));
+                    node.add_property(
+                        "totals_strategy",
+                        PlanValue::Text("rollup-sql (local DataFusion)".into()),
+                    );
+                }
 
                 // Determine the reason for local aggregation.
                 let table_names: Vec<String> =
@@ -147,6 +166,29 @@ impl PushdownPlanner {
                         })
                         .collect();
                     node.add_property("lookup_specs", PlanValue::List(lookup_desc));
+                }
+
+                // Report the column projection applied to each source fetch
+                // (an empty column list means a full SELECT * fetch).
+                let projected: Vec<String> = fetches
+                    .iter()
+                    .map(|(name, req)| {
+                        if req.columns.is_empty() {
+                            format!("{name}: all columns")
+                        } else {
+                            format!("{name}: {} column(s)", req.columns.len())
+                        }
+                    })
+                    .collect();
+                node.add_property("projected_columns", PlanValue::List(projected));
+
+                if !projection.fallbacks.is_empty() {
+                    let reasons: Vec<String> = projection
+                        .fallbacks
+                        .iter()
+                        .map(|(table, reason)| format!("{table}: {reason}"))
+                        .collect();
+                    node.add_property("projection_fallbacks", PlanValue::List(reasons));
                 }
             }
         }
@@ -240,6 +282,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
@@ -273,6 +316,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
@@ -299,6 +343,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
@@ -310,6 +355,70 @@ mod tests {
             PlanValue::Text(s) => assert!(s.contains("Multiple tables")),
             other => panic!("Expected Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn explain_reports_totals_mode_and_strategy() {
+        use crate::request::TotalsMode;
+
+        // Pushed single-table rollup.
+        let model = single_table_model();
+        let registry = mock_registry(&["Sales"]);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            totals: TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
+        let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
+        assert_eq!(totals.value, PlanValue::Text("rollup".into()));
+        let strategy = node
+            .properties
+            .iter()
+            .find(|p| p.key == "totals_strategy")
+            .unwrap();
+        assert_eq!(
+            strategy.value,
+            PlanValue::Text("rollup-sql (pushed to source)".into())
+        );
+
+        // Local (cross-source) rollup.
+        let model = star_schema_model();
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("public", "sales"));
+        registry.bind("Products", 1, SourceBinding::new("public", "products"));
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            totals: TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
+        let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
+        assert_eq!(totals.value, PlanValue::Text("rollup".into()));
+        let strategy = node
+            .properties
+            .iter()
+            .find(|p| p.key == "totals_strategy")
+            .unwrap();
+        assert_eq!(
+            strategy.value,
+            PlanValue::Text("rollup-sql (local DataFusion)".into())
+        );
+
+        // No totals: the properties are absent.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            ..Default::default()
+        };
+        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        assert!(node.properties.iter().all(|p| p.key != "totals"));
     }
 
     #[test]
@@ -350,6 +459,7 @@ mod tests {
             group_by: vec![],
             filters: vec![],
             lookups: vec![],
+            ..Default::default()
         };
 
         let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();

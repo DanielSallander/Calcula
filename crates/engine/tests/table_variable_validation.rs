@@ -272,6 +272,7 @@ async fn compare_grand_total(
         group_by: vec![],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
     let batches = engine
         .query(request)
@@ -304,6 +305,7 @@ async fn compare_grouped(
         group_by: vec![ColumnRef::new(group_table, group_column)],
         filters: vec![],
         lookups: vec![],
+        ..Default::default()
     };
     let batches = engine
         .query(request)

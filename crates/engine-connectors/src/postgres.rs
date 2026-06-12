@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
-use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
+use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::model::{Column, Table};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
@@ -12,7 +12,11 @@ use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
 use crate::arrow_convert::rows_to_record_batches;
 use crate::auth::{validate_no_nul, AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
 use crate::error::{ConnectorError, ConnectorResult};
-use crate::traits::{Connector, FetchRequest, JoinAggregationRequest, SourceTable};
+use crate::sql_builder::{self, PostgresDialect, SqlDialect};
+use crate::traits::{
+    Connector, FetchRequest, InFilterCondition, InValueKind, JoinAggregationRequest, SchemaCache,
+    SourceTable,
+};
 use crate::type_mapping::pg_type_to_engine_type;
 
 /// Default number of connections in the pool.
@@ -23,6 +27,13 @@ pub struct PostgresConnector {
     pool: PgPool,
     /// Counter for generating unique temp table names.
     temp_table_counter: AtomicU64,
+    /// Read-through cache of introspected table schemas, keyed by
+    /// `(schema, table)`. Avoids repeating the `information_schema.columns`
+    /// and `pg_type` domain-resolution queries on every fetch. Entries live
+    /// for the connector's lifetime — see
+    /// [`PostgresConnector::invalidate_schema_cache`] for the staleness
+    /// tradeoff.
+    schema_cache: SchemaCache,
 }
 
 impl ConnectorAuth for PostgresConnector {
@@ -67,6 +78,7 @@ impl PostgresConnector {
         Ok(Self {
             pool,
             temp_table_counter: AtomicU64::new(0),
+            schema_cache: SchemaCache::new(),
         })
     }
 
@@ -223,118 +235,50 @@ impl PostgresConnector {
     }
 
     /// Build SQL for an aggregate query from a `FetchRequest`.
+    ///
+    /// Delegates to the shared [`sql_builder`] with the PostgreSQL dialect
+    /// (`"ident"` quoting, `$n` placeholders, trailing `LIMIT`).
     fn build_aggregate_sql(request: &FetchRequest) -> (String, Vec<String>) {
-        let schema_name = request.schema.as_deref().unwrap_or("public");
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident_double(schema_name),
-            quote_ident_double(&request.table)
-        );
-
-        // SELECT group_by columns + aggregate expressions.
-        let mut select_parts: Vec<String> = request
-            .group_by
-            .iter()
-            .map(|c| quote_ident_double(c))
-            .collect();
-
-        for agg in &request.aggregates {
-            let func = agg.function.as_sql();
-            let col = &agg.column;
-            let default_alias = format!("{}_{}", func.to_lowercase(), col);
-            let alias = agg.alias.as_deref().unwrap_or(&default_alias);
-            if agg.function == crate::traits::AggregateFunction::CountDistinct {
-                select_parts.push(format!(
-                    "{func}(DISTINCT {}) AS {}",
-                    quote_ident_double(col),
-                    quote_ident_double(alias)
-                ));
-            } else if agg.function == crate::traits::AggregateFunction::CountAll {
-                select_parts.push(format!("COUNT(*) AS {}", quote_ident_double(alias)));
-            } else {
-                select_parts.push(format!(
-                    "{func}({}) AS {}",
-                    quote_ident_double(col),
-                    quote_ident_double(alias)
-                ));
-            }
-        }
-
-        let select_clause = select_parts.join(", ");
-        let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
-
-        // WHERE clause.
-        let mut params: Vec<String> = Vec::new();
-        let has_conditions = !request.filters.is_empty() || !request.in_filters.is_empty();
-        if has_conditions {
-            let mut conditions = Vec::new();
-            for filter in &request.filters {
-                params.push(filter.value.clone());
-                let param_idx = params.len();
-                conditions.push(format!(
-                    "{}::text {} ${}",
-                    quote_ident_double(&filter.column),
-                    filter.operator.as_sql(),
-                    param_idx
-                ));
-            }
-            for in_filter in &request.in_filters {
-                if !in_filter.values.is_empty() {
-                    conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        // GROUP BY clause.
-        if !request.group_by.is_empty() {
-            let group_clause: Vec<String> = request
-                .group_by
-                .iter()
-                .map(|c| quote_ident_double(c))
-                .collect();
-            sql.push_str(" GROUP BY ");
-            sql.push_str(&group_clause.join(", "));
-        }
-
-        if let Some(limit) = request.limit {
-            sql.push_str(&format!(" LIMIT {limit}"));
-        }
-
-        (sql, params)
+        sql_builder::build_aggregate_sql(&PostgresDialect, request)
     }
 
     /// Generate a unique temp table name.
     fn next_temp_table_name(&self) -> String {
         let id = self.temp_table_counter.fetch_add(1, Ordering::Relaxed);
-        format!("_ef_{id}")
+        PostgresDialect.temp_table_name(id)
     }
 
     /// Create a temp table on the given connection and populate it with values.
     ///
-    /// Returns the temp table name on success, or `None` if creation failed
-    /// (e.g., insufficient permissions). Values are inserted in batches of 500.
+    /// The column type follows the (pre-validated) value kind: `BIGINT` for
+    /// [`InValueKind::Integer`] so the fact-table FK comparison needs no
+    /// casts, `TEXT` otherwise. Values are inserted as multi-row `VALUES`
+    /// statements of up to 1000 rows each (values are inlined literals, so
+    /// the bind-parameter limit does not apply).
+    ///
+    /// Returns the temp table name on success, or `None` if creation or any
+    /// insert failed (e.g., insufficient permissions, or an integer value out
+    /// of `BIGINT` range) — callers fall back to the inline IN list.
     async fn create_temp_filter_table(
         &self,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
         values: &[String],
+        kind: InValueKind,
     ) -> Option<String> {
         let name = self.next_temp_table_name();
-        let create_sql = format!("CREATE TEMP TABLE \"{name}\" (val TEXT)");
+        let create_sql = PostgresDialect.temp_table_ddl(&name, kind);
         if conn.execute(create_sql.as_str()).await.is_err() {
             return None;
         }
 
-        for chunk in values.chunks(500) {
-            let rows: Vec<String> = chunk
-                .iter()
-                .map(|v| format!("({})", sql_quote_literal(v)))
-                .collect();
-            let insert_sql = format!("INSERT INTO \"{name}\" (val) VALUES {}", rows.join(", "));
+        // Integer values were validated (parse::<i128>) by the caller via
+        // `effective_kind()` before choosing this kind.
+        for insert_sql in
+            sql_builder::temp_table_insert_statements(&PostgresDialect, &name, values, kind)
+        {
             if conn.execute(insert_sql.as_str()).await.is_err() {
                 let _ = conn
-                    .execute(format!("DROP TABLE IF EXISTS \"{name}\"").as_str())
+                    .execute(sql_builder::temp_table_drop_sql(&PostgresDialect, &name).as_str())
                     .await;
                 return None;
             }
@@ -359,78 +303,48 @@ impl PostgresConnector {
         let mut temp_tables: Vec<String> = Vec::new();
 
         // Build WHERE conditions, using temp tables for large IN-filter sets.
-        let mut conditions = Vec::new();
         let mut params: Vec<String> = Vec::new();
-
-        for filter in &request.filters {
-            params.push(filter.value.clone());
-            let param_idx = params.len();
-            conditions.push(format!(
-                "{}::text {} ${}",
-                quote_ident_double(&filter.column),
-                filter.operator.as_sql(),
-                param_idx
-            ));
-        }
+        let mut conditions =
+            sql_builder::build_filter_conditions(&PostgresDialect, &request.filters, &mut params);
 
         for in_filter in &request.in_filters {
             if in_filter.values.is_empty() {
                 continue;
             }
             if in_filter.values.len() > threshold {
-                // Temp table path.
+                // Temp table path. `effective_kind()` re-validates Integer
+                // values so the temp table type matches what gets inserted.
+                let kind = in_filter.effective_kind();
                 match self
-                    .create_temp_filter_table(&mut conn, &in_filter.values)
+                    .create_temp_filter_table(&mut conn, &in_filter.values, kind)
                     .await
                 {
                     Some(temp_name) => {
-                        conditions.push(format!(
-                            "{}::text IN (SELECT val FROM \"{}\")",
-                            quote_ident_double(&in_filter.column),
-                            temp_name
+                        conditions.push(sql_builder::temp_in_condition(
+                            &PostgresDialect,
+                            &in_filter.column,
+                            &temp_name,
+                            kind,
                         ));
                         temp_tables.push(temp_name);
                     }
                     None => {
                         // Fallback: inline IN list if temp table creation failed.
-                        conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
+                        conditions.push(build_inline_in_pg(in_filter));
                     }
                 }
             } else {
                 // Below threshold: inline.
-                conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
+                conditions.push(build_inline_in_pg(in_filter));
             }
         }
 
         // Build the SQL query.
         let is_aggregate = !request.aggregates.is_empty();
         let sql = if is_aggregate {
-            Self::build_aggregate_sql_with_conditions(request, &conditions, &params)
+            sql_builder::build_aggregate_sql_with_conditions(&PostgresDialect, request, &conditions)
         } else {
-            let select_clause = if request.columns.is_empty() {
-                "*".to_string()
-            } else {
-                request
-                    .columns
-                    .iter()
-                    .map(|c| quote_ident_double(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let table_ref = format!(
-                "{}.{}",
-                quote_ident_double(schema_name),
-                quote_ident_double(&request.table)
-            );
-            let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
-            if !conditions.is_empty() {
-                sql.push_str(" WHERE ");
-                sql.push_str(&conditions.join(" AND "));
-            }
-            if let Some(limit) = request.limit {
-                sql.push_str(&format!(" LIMIT {limit}"));
-            }
-            sql
+            sql_builder::build_select_sql_with_conditions(&PostgresDialect, request, &conditions)
         };
 
         // Execute on the pinned connection.
@@ -446,7 +360,7 @@ impl PostgresConnector {
         // Cleanup temp tables.
         for name in &temp_tables {
             let _ = conn
-                .execute(format!("DROP TABLE IF EXISTS \"{name}\"").as_str())
+                .execute(sql_builder::temp_table_drop_sql(&PostgresDialect, name).as_str())
                 .await;
         }
 
@@ -473,72 +387,6 @@ impl PostgresConnector {
                 .await?;
             rows_to_record_batches(&rows, &arrow_schema)
         }
-    }
-
-    /// Build aggregate SQL with pre-built WHERE conditions (for temp table path).
-    fn build_aggregate_sql_with_conditions(
-        request: &FetchRequest,
-        conditions: &[String],
-        _params: &[String],
-    ) -> String {
-        let schema_name = request.schema.as_deref().unwrap_or("public");
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident_double(schema_name),
-            quote_ident_double(&request.table)
-        );
-
-        let mut select_parts: Vec<String> = request
-            .group_by
-            .iter()
-            .map(|c| quote_ident_double(c))
-            .collect();
-
-        for agg in &request.aggregates {
-            let func = agg.function.as_sql();
-            let col = &agg.column;
-            let default_alias = format!("{}_{}", func.to_lowercase(), col);
-            let alias = agg.alias.as_deref().unwrap_or(&default_alias);
-            if agg.function == crate::traits::AggregateFunction::CountDistinct {
-                select_parts.push(format!(
-                    "{func}(DISTINCT {}) AS {}",
-                    quote_ident_double(col),
-                    quote_ident_double(alias)
-                ));
-            } else if agg.function == crate::traits::AggregateFunction::CountAll {
-                select_parts.push(format!("COUNT(*) AS {}", quote_ident_double(alias)));
-            } else {
-                select_parts.push(format!(
-                    "{func}({}) AS {}",
-                    quote_ident_double(col),
-                    quote_ident_double(alias)
-                ));
-            }
-        }
-
-        let select_clause = select_parts.join(", ");
-        let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
-
-        if !conditions.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        if !request.group_by.is_empty() {
-            let group_clause: Vec<String> = request
-                .group_by
-                .iter()
-                .map(|c| quote_ident_double(c))
-                .collect();
-            sql.push_str(" GROUP BY ");
-            sql.push_str(&group_clause.join(", "));
-        }
-
-        if let Some(limit) = request.limit {
-            sql.push_str(&format!(" LIMIT {limit}"));
-        }
-
-        sql
     }
 
     /// Resolve a custom PostgreSQL domain type to its base type name.
@@ -571,33 +419,19 @@ impl PostgresConnector {
             None => Ok(type_name.to_string()),
         }
     }
-}
 
-impl Connector for PostgresConnector {
-    async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
-        let rows = sqlx::query(
-            "SELECT table_schema, table_name
-             FROM information_schema.tables
-             WHERE table_type IN ('BASE TABLE', 'VIEW')
-               AND table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-             ORDER BY table_schema, table_name",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let tables = rows
-            .iter()
-            .map(|row| {
-                let schema: String = row.try_get("table_schema")?;
-                let name: String = row.try_get("table_name")?;
-                Ok(SourceTable { schema, name })
-            })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
-
-        Ok(tables)
-    }
-
-    async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
+    /// Introspect a table's schema directly against the source catalog,
+    /// bypassing the schema cache.
+    ///
+    /// Runs an `information_schema.columns` query plus a `pg_type` /
+    /// `pg_namespace` domain-resolution query per custom-typed column.
+    /// [`Connector::introspect_table`] wraps this with the read-through
+    /// [`SchemaCache`].
+    async fn introspect_table_uncached(
+        &self,
+        schema: &str,
+        table_name: &str,
+    ) -> ConnectorResult<Table> {
         let rows = sqlx::query(
             "SELECT
                 c.column_name,
@@ -653,6 +487,57 @@ impl Connector for PostgresConnector {
         Table::new(&full_name, columns).map_err(ConnectorError::from)
     }
 
+    /// Discard all cached table schemas, forcing the next introspection of
+    /// each table to re-read the source catalog.
+    ///
+    /// Schemas are cached for the connector's lifetime, so DDL on the source
+    /// (`ALTER TABLE`, column changes, drops) is invisible until this is
+    /// called. Host applications that issue or expect DDL — model designer
+    /// hosts in particular — should invalidate afterwards. Synchronous and
+    /// cheap: it only clears an in-memory map.
+    pub fn invalidate_schema_cache(&self) {
+        self.schema_cache.invalidate_all();
+    }
+}
+
+impl Connector for PostgresConnector {
+    async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
+        let rows = sqlx::query(
+            "SELECT table_schema, table_name
+             FROM information_schema.tables
+             WHERE table_type IN ('BASE TABLE', 'VIEW')
+               AND table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+             ORDER BY table_schema, table_name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let tables = rows
+            .iter()
+            .map(|row| {
+                let schema: String = row.try_get("table_schema")?;
+                let name: String = row.try_get("table_name")?;
+                Ok(SourceTable { schema, name })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+        Ok(tables)
+    }
+
+    /// Introspect a table's schema, served from the connector's
+    /// [`SchemaCache`] after the first lookup.
+    ///
+    /// The returned [`Table`] is identical to an uncached introspection; only
+    /// the catalog round-trips are skipped. Stale after source DDL until
+    /// [`PostgresConnector::invalidate_schema_cache`] is called.
+    async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
+        self.schema_cache
+            .get_or_load(schema, table_name, || {
+                self.introspect_table_uncached(schema, table_name)
+            })
+            .await
+    }
+
     async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
         // Check if any IN-filter exceeds the temp-table threshold.
         let threshold = request.max_inline_in_values.unwrap_or(usize::MAX);
@@ -677,54 +562,10 @@ impl Connector for PostgresConnector {
             .build_arrow_schema_for_query(schema_name, &request.table, &request.columns)
             .await?;
 
-        // Build SQL query.
-        let select_clause = if request.columns.is_empty() {
-            "*".to_string()
-        } else {
-            request
-                .columns
-                .iter()
-                .map(|c| quote_ident_double(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let table_ref = format!(
-            "{}.{}",
-            quote_ident_double(schema_name),
-            quote_ident_double(&request.table)
-        );
-        let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
-
-        // Append WHERE clause from filters.
-        // Values are bound as text parameters and cast to the column's type
-        // using PG's `::text` cast on the column side for universal comparison.
-        let mut params: Vec<String> = Vec::new();
-        let has_conditions = !request.filters.is_empty() || !request.in_filters.is_empty();
-        if has_conditions {
-            let mut conditions = Vec::new();
-            for filter in &request.filters {
-                params.push(filter.value.clone());
-                let param_idx = params.len();
-                conditions.push(format!(
-                    "{}::text {} ${}",
-                    quote_ident_double(&filter.column),
-                    filter.operator.as_sql(),
-                    param_idx
-                ));
-            }
-            for in_filter in &request.in_filters {
-                if !in_filter.values.is_empty() {
-                    conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        if let Some(limit) = request.limit {
-            sql.push_str(&format!(" LIMIT {limit}"));
-        }
+        // Build SQL query. Filter values are bound as text parameters and
+        // cast to the column's type using PG's `::text` cast on the column
+        // side for universal comparison.
+        let (sql, params) = sql_builder::build_select_sql(&PostgresDialect, request);
 
         // Execute the query with parameters.
         let mut query = sqlx::query(&sql);
@@ -844,19 +685,11 @@ impl Connector for PostgresConnector {
         // `build_aggregate_sql`) so a value can never terminate the SQL string.
         let mut params: Vec<String> = Vec::new();
         if !request.filters.is_empty() {
-            let where_parts: Vec<String> = request
-                .filters
-                .iter()
-                .map(|f| {
-                    params.push(f.value.clone());
-                    format!(
-                        "{}::text {} ${}",
-                        quote_ident_double(&f.column),
-                        f.operator.as_sql(),
-                        params.len()
-                    )
-                })
-                .collect();
+            let where_parts = sql_builder::build_filter_conditions(
+                &PostgresDialect,
+                &request.filters,
+                &mut params,
+            );
             sql.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
         }
 
@@ -867,19 +700,32 @@ impl Connector for PostgresConnector {
 
         self.execute_query_with_params(&sql, &params).await
     }
+
+    /// Trait-level dispatch to [`PostgresConnector::invalidate_schema_cache`].
+    fn invalidate_schema_cache(&self) {
+        self.schema_cache.invalidate_all();
+    }
 }
 
-/// Build an inline `"col"::text IN ('v1', 'v2', ...)` condition for PostgreSQL.
+/// Build an inline `"col" IN (...)` condition for PostgreSQL.
 ///
-/// Values are escaped with [`sql_quote_literal`] and the column is escaped
-/// with [`quote_ident_double`] so neither can break out of the IN list.
-fn build_inline_in_pg(column: &str, values: &[String]) -> String {
-    let quoted: Vec<String> = values.iter().map(|v| sql_quote_literal(v)).collect();
-    format!(
-        "{}::text IN ({})",
-        quote_ident_double(column),
-        quoted.join(", ")
-    )
+/// The column is never cast: casting the (typically indexed) fact column to
+/// text makes the predicate non-sargable and forces a sequential scan.
+///
+/// - [`InValueKind::Integer`] (re-validated via
+///   [`InFilterCondition::effective_kind`]): values render as unquoted
+///   numeric literals — `"col" IN (1, 2, 3)`.
+/// - [`InValueKind::Text`] (or failed integer validation): values are
+///   escaped with [`sql_quote_literal`] — `"col" IN ('v1', 'v2')`. The
+///   quoted literals are of "unknown" type in PostgreSQL, so they coerce to
+///   the column's actual type (text, varchar, date, uuid, ...) and the
+///   comparison stays index-friendly.
+///
+/// The column identifier is escaped with [`quote_ident_double`] so it cannot
+/// break out of the IN list. Delegates to the shared [`sql_builder`] inline-IN
+/// builder with the PostgreSQL dialect.
+fn build_inline_in_pg(in_filter: &InFilterCondition) -> String {
+    sql_builder::build_inline_in(&PostgresDialect, in_filter)
 }
 
 /// Map a pg_type base type name (e.g., `"bool"`, `"int4"`) back to
@@ -1237,25 +1083,11 @@ mod pg_dialect {
     }
 
     /// Render an aggregate operation as PostgreSQL SQL.
+    ///
+    /// Delegates to [`AggregateOp::render_postgres_sql`], the shared
+    /// PostgreSQL-dialect mapping.
     fn agg_sql(op: &AggregateOp, operand: &str) -> String {
-        match op {
-            AggregateOp::Sum => format!("SUM({operand})"),
-            AggregateOp::Count => format!("COUNT({operand})"),
-            AggregateOp::Average => format!("AVG({operand})"),
-            AggregateOp::Min => format!("MIN({operand})"),
-            AggregateOp::Max => format!("MAX({operand})"),
-            AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand})"),
-            AggregateOp::CountRows => "COUNT(*)".to_string(),
-            AggregateOp::Median => {
-                format!("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand})")
-            }
-            AggregateOp::StdevSample => format!("STDDEV_SAMP({operand})"),
-            AggregateOp::StdevPop => format!("STDDEV_POP({operand})"),
-            AggregateOp::VarSample => format!("VAR_SAMP({operand})"),
-            AggregateOp::VarPop => format!("VAR_POP({operand})"),
-            AggregateOp::AnyValue => format!("MIN({operand})"),
-            AggregateOp::Mode => format!("MODE() WITHIN GROUP (ORDER BY {operand})"),
-        }
+        op.render_postgres_sql(operand)
     }
 
     /// Build a CASE WHEN SQL fragment for KEEP filter predicates.
@@ -1441,18 +1273,73 @@ mod tests {
     use super::*;
     use crate::traits::{AggregateExpr, AggregateFunction};
 
+    /// Test helper: build an [`InFilterCondition`] from string values.
+    fn in_filter(column: &str, values: &[&str], kind: InValueKind) -> InFilterCondition {
+        InFilterCondition {
+            column: column.into(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            kind,
+        }
+    }
+
     #[test]
     fn build_inline_in_pg_escapes_injection_payload() {
-        let cond = build_inline_in_pg("color", &["x'); DROP TABLE t; --".to_string()]);
-        assert_eq!(cond, "\"color\"::text IN ('x''); DROP TABLE t; --')");
+        let cond = build_inline_in_pg(&in_filter(
+            "color",
+            &["x'); DROP TABLE t; --"],
+            InValueKind::Text,
+        ));
+        assert_eq!(cond, "\"color\" IN ('x''); DROP TABLE t; --')");
         assert!(cond.contains("''"));
         assert!(!cond.contains("IN ('x');"));
     }
 
     #[test]
     fn build_inline_in_pg_escapes_embedded_identifier_quote() {
-        let cond = build_inline_in_pg("evil\"name", &["a".to_string()]);
-        assert!(cond.starts_with("\"evil\"\"name\"::text IN"));
+        let cond = build_inline_in_pg(&in_filter("evil\"name", &["a"], InValueKind::Text));
+        assert!(cond.starts_with("\"evil\"\"name\" IN"));
+    }
+
+    #[test]
+    fn build_inline_in_pg_integer_kind_renders_unquoted_without_cast() {
+        let cond = build_inline_in_pg(&in_filter(
+            "product_id",
+            &["1", "2", "3"],
+            InValueKind::Integer,
+        ));
+        assert_eq!(cond, "\"product_id\" IN (1, 2, 3)");
+        assert!(!cond.contains("::text"));
+        assert!(!cond.contains('\''));
+    }
+
+    #[test]
+    fn build_inline_in_pg_text_kind_drops_column_cast_but_keeps_quoting() {
+        let cond = build_inline_in_pg(&in_filter("region", &["north"], InValueKind::Text));
+        assert_eq!(cond, "\"region\" IN ('north')");
+        assert!(!cond.contains("::text"));
+    }
+
+    #[test]
+    fn build_inline_in_pg_hostile_integer_value_falls_back_to_quoted_text() {
+        // Declared Integer but contains a non-numeric payload: must be
+        // re-validated and rendered escaped + quoted, never inlined raw.
+        let cond = build_inline_in_pg(&in_filter(
+            "product_id",
+            &["1", "2); DROP TABLE t; --"],
+            InValueKind::Integer,
+        ));
+        assert_eq!(cond, "\"product_id\" IN ('1', '2); DROP TABLE t; --')");
+        assert!(!cond.contains("IN (1, 2);"));
+    }
+
+    #[test]
+    fn build_inline_in_pg_negative_and_large_integers_stay_integer() {
+        let cond = build_inline_in_pg(&in_filter(
+            "key",
+            &["-7", "9223372036854775807"],
+            InValueKind::Integer,
+        ));
+        assert_eq!(cond, "\"key\" IN (-7, 9223372036854775807)");
     }
 
     #[test]

@@ -12,7 +12,9 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use engine_connectors::traits::FilterCondition;
-use engine_query::request::{ColumnRef, LookupColumn, QueryRequest};
+use engine_query::request::{
+    ColumnRef, LookupColumn, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
+};
 
 /// Configuration for the query-result cache.
 #[derive(Debug, Clone)]
@@ -246,8 +248,8 @@ fn batch_list_size(batches: &[RecordBatch]) -> usize {
 /// Compute a deterministic cache key for a query request + model version.
 ///
 /// The key incorporates all fields that affect query results: measures,
-/// group_by, filters, lookups, and the model version (which changes on
-/// model edits and data refreshes).
+/// group_by, filters, lookups, order_by, limit, totals mode, and the model
+/// version (which changes on model edits and data refreshes).
 pub(crate) fn query_cache_key(request: &QueryRequest, model_version: u64) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
@@ -278,6 +280,23 @@ pub(crate) fn query_cache_key(request: &QueryRequest, model_version: u64) -> u64
         hash_lookup_column(l, &mut hasher);
     }
 
+    // Order by (order matters — it determines sort precedence).
+    request.order_by.len().hash(&mut hasher);
+    for clause in &request.order_by {
+        hash_order_by_clause(clause, &mut hasher);
+    }
+
+    // Limit.
+    request.limit.hash(&mut hasher);
+
+    // Totals mode (discriminant tag — a rollup result has extra subtotal
+    // rows and a trailing __grouping_id column).
+    let totals_tag: u8 = match request.totals {
+        TotalsMode::None => 0,
+        TotalsMode::Rollup => 1,
+    };
+    totals_tag.hash(&mut hasher);
+
     hasher.finish()
 }
 
@@ -296,6 +315,21 @@ fn hash_lookup_column(l: &LookupColumn, hasher: &mut impl Hasher) {
     l.table.hash(hasher);
     l.column.hash(hasher);
     l.key_column.hash(hasher);
+}
+
+fn hash_order_by_clause(clause: &OrderByClause, hasher: &mut impl Hasher) {
+    // Discriminant tag so Column("x") and Measure("x") hash differently.
+    match &clause.target {
+        OrderTarget::Column(col) => {
+            0u8.hash(hasher);
+            hash_column_ref(col, hasher);
+        }
+        OrderTarget::Measure(name) => {
+            1u8.hash(hasher);
+            name.hash(hasher);
+        }
+    }
+    clause.descending.hash(hasher);
 }
 
 #[cfg(test)]
@@ -328,6 +362,7 @@ mod tests {
             group_by: Vec::new(),
             filters: Vec::new(),
             lookups: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -512,6 +547,55 @@ mod tests {
             value: "US".to_string(),
         });
         assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+    }
+
+    #[test]
+    fn order_by_affects_hash() {
+        let mut r1 = make_request(&["Revenue"]);
+        let r2 = make_request(&["Revenue"]);
+        r1.order_by.push(OrderByClause::measure_desc("Revenue"));
+        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+    }
+
+    #[test]
+    fn order_direction_affects_hash() {
+        let mut r1 = make_request(&["Revenue"]);
+        let mut r2 = make_request(&["Revenue"]);
+        r1.order_by.push(OrderByClause::measure("Revenue"));
+        r2.order_by.push(OrderByClause::measure_desc("Revenue"));
+        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+    }
+
+    #[test]
+    fn order_target_kind_affects_hash() {
+        // Column("t"."x") and Measure("x") must not collide.
+        let mut r1 = make_request(&["Revenue"]);
+        let mut r2 = make_request(&["Revenue"]);
+        r1.order_by.push(OrderByClause::column("t", "x"));
+        r2.order_by.push(OrderByClause::measure("x"));
+        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+    }
+
+    #[test]
+    fn totals_affects_hash() {
+        let mut r1 = make_request(&["Revenue"]);
+        let r2 = make_request(&["Revenue"]);
+        r1.totals = TotalsMode::Rollup;
+        // A rollup result (extra subtotal rows + __grouping_id column) must
+        // never be served for a detail-only request, and vice versa.
+        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+    }
+
+    #[test]
+    fn limit_affects_hash() {
+        let mut r1 = make_request(&["Revenue"]);
+        let r2 = make_request(&["Revenue"]);
+        r1.limit = Some(10);
+        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+
+        let mut r3 = make_request(&["Revenue"]);
+        r3.limit = Some(20);
+        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r3, 0));
     }
 
     #[test]
