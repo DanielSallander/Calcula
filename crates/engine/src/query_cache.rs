@@ -13,7 +13,7 @@ use arrow::record_batch::RecordBatch;
 
 use engine_connectors::traits::FilterCondition;
 use engine_query::request::{
-    ColumnRef, LookupColumn, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
+    ColumnRef, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
 };
 
 /// Configuration for the query-result cache.
@@ -245,15 +245,24 @@ fn batch_list_size(batches: &[RecordBatch]) -> usize {
 
 // --- Query hashing ---
 
-/// Compute a deterministic cache key for a query request + model version.
+/// Compute a deterministic cache key for a query request + model version +
+/// UDF registry identity.
 ///
 /// The key incorporates all fields that affect query results: measures,
-/// group_by, filters, lookups, order_by, limit, totals mode, and the model
-/// version (which changes on model edits and data refreshes).
-pub(crate) fn query_cache_key(request: &QueryRequest, model_version: u64) -> u64 {
+/// group_by, filters, lookups, order_by, limit, totals mode, the model
+/// version (which changes on model edits and data refreshes), and the UDF
+/// registry's identity hash (which changes when a UDF is registered,
+/// replaced, or version-bumped — different function behavior must never be
+/// served from results computed with the old behavior).
+pub(crate) fn query_cache_key(
+    request: &QueryRequest,
+    model_version: u64,
+    udf_identity: u64,
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
     model_version.hash(&mut hasher);
+    udf_identity.hash(&mut hasher);
 
     // Measures (order matters).
     request.measures.len().hash(&mut hasher);
@@ -297,7 +306,22 @@ pub(crate) fn query_cache_key(request: &QueryRequest, model_version: u64) -> u64
     };
     totals_tag.hash(&mut hasher);
 
+    // Hierarchy group-by (presence tag + name + depth — different depths
+    // expand to different group-by columns and must never collide).
+    match &request.hierarchy_group_by {
+        Some(h) => {
+            1u8.hash(&mut hasher);
+            hash_hierarchy_group_by(h, &mut hasher);
+        }
+        None => 0u8.hash(&mut hasher),
+    }
+
     hasher.finish()
+}
+
+fn hash_hierarchy_group_by(h: &HierarchyGroupBy, hasher: &mut impl Hasher) {
+    h.hierarchy.hash(hasher);
+    h.depth.hash(hasher);
 }
 
 fn hash_column_ref(col: &ColumnRef, hasher: &mut impl Hasher) {
@@ -505,27 +529,27 @@ mod tests {
     fn same_request_same_hash() {
         let r1 = make_request(&["Revenue", "Profit"]);
         let r2 = make_request(&["Revenue", "Profit"]);
-        assert_eq!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_eq!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
     fn different_measures_different_hash() {
         let r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Profit"]);
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
     fn measure_order_matters() {
         let r1 = make_request(&["Revenue", "Profit"]);
         let r2 = make_request(&["Profit", "Revenue"]);
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
     fn different_model_version_different_hash() {
         let r = make_request(&["Revenue"]);
-        assert_ne!(query_cache_key(&r, 0), query_cache_key(&r, 1));
+        assert_ne!(query_cache_key(&r, 0, 0), query_cache_key(&r, 1, 0));
     }
 
     #[test]
@@ -534,7 +558,7 @@ mod tests {
         let r2 = make_request(&["Revenue"]);
         r1.group_by.push(ColumnRef::new("products", "category"));
         // r2 has no group_by.
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
@@ -546,7 +570,7 @@ mod tests {
             operator: engine_connectors::traits::FilterOperator::Equal,
             value: "US".to_string(),
         });
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
@@ -554,7 +578,7 @@ mod tests {
         let mut r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Revenue"]);
         r1.order_by.push(OrderByClause::measure_desc("Revenue"));
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
@@ -563,7 +587,7 @@ mod tests {
         let mut r2 = make_request(&["Revenue"]);
         r1.order_by.push(OrderByClause::measure("Revenue"));
         r2.order_by.push(OrderByClause::measure_desc("Revenue"));
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
     }
 
     #[test]
@@ -573,7 +597,16 @@ mod tests {
         let mut r2 = make_request(&["Revenue"]);
         r1.order_by.push(OrderByClause::column("t", "x"));
         r2.order_by.push(OrderByClause::measure("x"));
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+    }
+
+    #[test]
+    fn udf_identity_affects_hash() {
+        // Registering / version-bumping a UDF changes the registry identity,
+        // which must change the cache key for the same request.
+        let r = make_request(&["Revenue"]);
+        assert_ne!(query_cache_key(&r, 0, 1), query_cache_key(&r, 0, 2));
+        assert_eq!(query_cache_key(&r, 0, 1), query_cache_key(&r, 0, 1));
     }
 
     #[test]
@@ -583,7 +616,42 @@ mod tests {
         r1.totals = TotalsMode::Rollup;
         // A rollup result (extra subtotal rows + __grouping_id column) must
         // never be served for a detail-only request, and vice versa.
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+    }
+
+    #[test]
+    fn hierarchy_group_by_affects_hash() {
+        // Presence, name, and depth must each change the key: a depth-2
+        // result has different columns than a depth-3 result for the same
+        // hierarchy, and neither may be served for a plain request.
+        let r_none = make_request(&["Revenue"]);
+        let mut r_geo2 = make_request(&["Revenue"]);
+        r_geo2.hierarchy_group_by = Some(HierarchyGroupBy::new("Geo", 2));
+        let mut r_geo3 = make_request(&["Revenue"]);
+        r_geo3.hierarchy_group_by = Some(HierarchyGroupBy::new("Geo", 3));
+        let mut r_cal2 = make_request(&["Revenue"]);
+        r_cal2.hierarchy_group_by = Some(HierarchyGroupBy::new("Calendar", 2));
+
+        assert_ne!(
+            query_cache_key(&r_none, 0, 0),
+            query_cache_key(&r_geo2, 0, 0)
+        );
+        assert_ne!(
+            query_cache_key(&r_geo2, 0, 0),
+            query_cache_key(&r_geo3, 0, 0)
+        );
+        assert_ne!(
+            query_cache_key(&r_geo2, 0, 0),
+            query_cache_key(&r_cal2, 0, 0)
+        );
+
+        // Same hierarchy + depth: stable key.
+        let mut r_geo2b = make_request(&["Revenue"]);
+        r_geo2b.hierarchy_group_by = Some(HierarchyGroupBy::new("Geo", 2));
+        assert_eq!(
+            query_cache_key(&r_geo2, 0, 0),
+            query_cache_key(&r_geo2b, 0, 0)
+        );
     }
 
     #[test]
@@ -591,11 +659,11 @@ mod tests {
         let mut r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Revenue"]);
         r1.limit = Some(10);
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r2, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
 
         let mut r3 = make_request(&["Revenue"]);
         r3.limit = Some(20);
-        assert_ne!(query_cache_key(&r1, 0), query_cache_key(&r3, 0));
+        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r3, 0, 0));
     }
 
     #[test]

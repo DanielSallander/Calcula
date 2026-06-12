@@ -17,6 +17,12 @@ pub enum QueryError {
     #[error("Invalid query: {0}")]
     InvalidQuery(String),
 
+    /// The query was cancelled via a
+    /// [`CancellationToken`](tokio_util::sync::CancellationToken) before it
+    /// completed.
+    #[error("Query cancelled")]
+    Cancelled,
+
     /// An error from the engine core.
     #[error(transparent)]
     Engine(#[from] engine_core::error::EngineError),

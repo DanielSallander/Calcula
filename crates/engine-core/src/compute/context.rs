@@ -736,6 +736,32 @@ impl<'a> ContextResolver<'a> {
                 })
             }
 
+            // Time-intelligence sugar: recurse into the inner measure only.
+            // The granularity is structural; the date axis is resolved from
+            // the query's group_by when the node is lowered to Window/Offset.
+            Expression::ToDate {
+                expr: inner,
+                granularity,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::ToDate {
+                    expr: Box::new(inner),
+                    granularity: *granularity,
+                })
+            }
+            Expression::PeriodShift {
+                expr: inner,
+                offset,
+                granularity,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::PeriodShift {
+                    expr: Box::new(inner),
+                    offset: *offset,
+                    granularity: *granularity,
+                })
+            }
+
             Expression::InList { expr, values } => {
                 let expr = self.walk(expr, ctx)?;
                 let walked: Vec<Expression> = values
@@ -868,6 +894,17 @@ impl<'a> ContextResolver<'a> {
             }
             // RankWindow: no inner expression to recurse into.
             Expression::RankWindow { .. } => Ok(expr.clone()),
+            // UDF call: row-level function, recurse into arguments.
+            Expression::Call { name, args } => {
+                let walked: Vec<Expression> = args
+                    .iter()
+                    .map(|e| self.walk(e, ctx))
+                    .collect::<EngineResult<_>>()?;
+                Ok(Expression::Call {
+                    name: name.clone(),
+                    args: walked,
+                })
+            }
         }
     }
 

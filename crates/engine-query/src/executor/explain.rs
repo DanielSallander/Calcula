@@ -21,12 +21,16 @@ impl super::QueryExecutor {
     ///
     /// Returns the query results alongside a [`PlanNode`] tree describing
     /// each execution phase with timing and metadata.
+    ///
+    /// `udfs` carries host-registered UDFs into the local DataFusion session
+    /// (see [`QueryExecutor::execute`](super::QueryExecutor::execute)).
     pub async fn execute_explained(
         plan: &QueryPlan,
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
+        udfs: Option<&engine_core::compute::udf::UdfRegistry>,
     ) -> QueryResult<(Vec<RecordBatch>, PlanNode)> {
         match plan {
             QueryPlan::PushedAggregation {
@@ -93,6 +97,7 @@ impl super::QueryExecutor {
                 order_by,
                 limit,
                 totals,
+                hierarchy,
             } => {
                 let start = Instant::now();
 
@@ -106,11 +111,16 @@ impl super::QueryExecutor {
                     order_by,
                     *limit,
                     *totals,
+                    hierarchy.as_ref(),
                     model,
                     registry,
                     cache,
                     max_inline_in_values,
+                    udfs,
                     Some(&mut node),
+                    // Explained execution has no cancellation entry point;
+                    // a fresh token is never cancelled.
+                    &tokio_util::sync::CancellationToken::new(),
                 )
                 .await?;
 

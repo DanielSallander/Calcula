@@ -23,6 +23,59 @@ impl ColumnRef {
     }
 }
 
+/// Group a query by the levels of a model-defined hierarchy.
+///
+/// The hierarchy's level columns — in drill order, up to `depth` — are
+/// **appended** to the request's explicit [`QueryRequest::group_by`] columns
+/// by the planner. From that point on they behave exactly like ordinary
+/// group-by columns: they participate in projection, joins, pushdown
+/// decisions, default ordering, ROLLUP totals, and lookup-key inference.
+///
+/// `depth` is the **number of levels to include**, counted from the top of
+/// the drill path: `1..=levels.len()`. For a `Year → Quarter → Month`
+/// hierarchy named `"Calendar"`:
+///
+/// - `depth: 1` groups by `Year`,
+/// - `depth: 2` groups by `Year, Quarter`,
+/// - `depth: 3` groups by `Year, Quarter, Month`.
+///
+/// `depth: 0` and depths beyond the number of levels are rejected at
+/// planning time, as is an explicit `group_by` column that duplicates one of
+/// the included level columns (the levels are appended automatically — do
+/// not list them yourself).
+///
+/// The hierarchy's [`RaggedBehavior`](engine_core::model::RaggedBehavior)
+/// (from the model) is applied to the result; level cells equal to a level's
+/// `stopper_value` are treated as NULL-equivalent under every behavior.
+///
+/// # Example
+///
+/// ```ignore
+/// // Drill two levels into the Calendar hierarchy: Revenue by Year, Quarter.
+/// let request = QueryRequest {
+///     measures: vec!["Revenue".into()],
+///     hierarchy_group_by: Some(HierarchyGroupBy::new("Calendar", 2)),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyGroupBy {
+    /// Name of a hierarchy defined in the `DataModel`.
+    pub hierarchy: String,
+    /// Number of levels to include, from the top: `1..=levels.len()`.
+    pub depth: usize,
+}
+
+impl HierarchyGroupBy {
+    /// Group by the first `depth` levels of the named hierarchy.
+    pub fn new(hierarchy: impl Into<String>, depth: usize) -> Self {
+        Self {
+            hierarchy: hierarchy.into(),
+            depth,
+        }
+    }
+}
+
 /// A column to look up post-aggregation instead of grouping by.
 ///
 /// When a query uses lookup columns, they are not included in the GROUP BY
@@ -271,6 +324,14 @@ pub struct QueryRequest {
     /// bitmask column identifying each row's level. See [`TotalsMode`] for
     /// the full result contract and unsupported combinations.
     pub totals: TotalsMode,
+    /// Group by the levels of a model-defined hierarchy.
+    ///
+    /// When set, the hierarchy's level columns (in drill order, up to the
+    /// requested depth) are appended to `group_by` by the planner and then
+    /// behave like ordinary group-by columns — including for ROLLUP totals
+    /// (each level becomes a drill subtotal) and default ordering. See
+    /// [`HierarchyGroupBy`] for the depth semantics and validation rules.
+    pub hierarchy_group_by: Option<HierarchyGroupBy>,
 }
 
 impl QueryRequest {

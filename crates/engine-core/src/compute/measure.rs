@@ -32,6 +32,18 @@ pub struct Measure {
     /// the expression AST acts as a cache of its last successful parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    /// Display format hint for host applications (e.g. `"#,##0.00"`,
+    /// `"0.0%"`). Opaque to the engine — see [`Measure::format_string`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string: Option<String>,
+    /// Human-readable description shown by host applications.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// Whether host applications should hide this measure from end-user
+    /// field lists. Purely presentational — hidden measures remain fully
+    /// queryable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_hidden: bool,
     /// Fact table inferred from the expression's qualified column refs.
     #[serde(skip)]
     cached_table: String,
@@ -50,6 +62,12 @@ impl<'de> Deserialize<'de> for Measure {
             group: Option<String>,
             #[serde(default)]
             source: Option<String>,
+            #[serde(default)]
+            format_string: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            is_hidden: bool,
         }
         let f = Fields::deserialize(deserializer)?;
         let cached_table = infer_fact_table(&f.expression).unwrap_or_default();
@@ -58,6 +76,9 @@ impl<'de> Deserialize<'de> for Measure {
             expression: f.expression,
             group: f.group,
             source: f.source,
+            format_string: f.format_string,
+            description: f.description,
+            is_hidden: f.is_hidden,
             cached_table,
         })
     }
@@ -76,6 +97,9 @@ impl Measure {
             expression,
             group: None,
             source: None,
+            format_string: None,
+            description: None,
+            is_hidden: false,
             cached_table,
         }
     }
@@ -115,6 +139,51 @@ impl Measure {
     pub fn with_source(mut self, text: impl Into<String>) -> Self {
         self.source = Some(text.into());
         self
+    }
+
+    /// Set the display format hint for this measure (e.g. `"#,##0.00"`,
+    /// `"0.0%"`).
+    ///
+    /// The format string is an **opaque host contract**: the engine stores
+    /// and round-trips it but never interprets it. Calcula Studio writes
+    /// it and Calcula applies it when rendering values; the two hosts must
+    /// agree on the format-string grammar between themselves.
+    pub fn with_format_string(mut self, format: impl Into<String>) -> Self {
+        self.format_string = Some(format.into());
+        self
+    }
+
+    /// Set the human-readable description of this measure.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Mark this measure as hidden from end-user field lists.
+    ///
+    /// Hiding is purely presentational — hidden measures remain fully
+    /// queryable (e.g. as building blocks for other measures).
+    pub fn hidden(mut self) -> Self {
+        self.is_hidden = true;
+        self
+    }
+
+    /// Returns the display format hint, if set.
+    ///
+    /// Opaque to the engine — see [`Measure::with_format_string`].
+    pub fn format_string(&self) -> Option<&str> {
+        self.format_string.as_deref()
+    }
+
+    /// Returns the description, if any.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// Returns `true` if host applications should hide this measure from
+    /// end-user field lists.
+    pub fn is_hidden(&self) -> bool {
+        self.is_hidden
     }
 
     /// Returns the measure name.
@@ -379,5 +448,73 @@ mod tests {
         assert!(!json.contains("\"source\""));
         let restored: Measure = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.source(), None);
+    }
+
+    // --- Presentation metadata ---
+
+    #[test]
+    fn measure_metadata_builders_and_getters() {
+        let m = sum_measure("Total", "Sales", "amount")
+            .with_format_string("#,##0.00")
+            .with_description("Total sales amount")
+            .hidden();
+        assert_eq!(m.format_string(), Some("#,##0.00"));
+        assert_eq!(m.description(), Some("Total sales amount"));
+        assert!(m.is_hidden());
+    }
+
+    #[test]
+    fn measure_metadata_defaults_to_absent_and_visible() {
+        let m = sum_measure("Total", "Sales", "amount");
+        assert_eq!(m.format_string(), None);
+        assert_eq!(m.description(), None);
+        assert!(!m.is_hidden());
+    }
+
+    #[test]
+    fn measure_metadata_round_trips_through_serde() {
+        let m = sum_measure("Total", "Sales", "amount")
+            .with_format_string("0.0%")
+            .with_description("Share of revenue")
+            .hidden();
+
+        let json = serde_json::to_string(&m).unwrap();
+        let restored: Measure = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.format_string(), Some("0.0%"));
+        assert_eq!(restored.description(), Some("Share of revenue"));
+        assert!(restored.is_hidden());
+        // Custom Deserialize must still rebuild the cached fact table.
+        assert_eq!(restored.table(), "Sales");
+    }
+
+    #[test]
+    fn absent_measure_metadata_is_skipped_in_json_and_defaults_on_load() {
+        let m = sum_measure("Total", "Sales", "amount");
+        let json = serde_json::to_string(&m).unwrap();
+        // Legacy-compatible output: absent metadata writes no fields.
+        assert!(!json.contains("\"format_string\""));
+        assert!(!json.contains("\"description\""));
+        assert!(!json.contains("\"is_hidden\""));
+
+        let restored: Measure = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.format_string(), None);
+        assert_eq!(restored.description(), None);
+        assert!(!restored.is_hidden());
+    }
+
+    #[test]
+    fn legacy_measure_json_without_metadata_loads_with_defaults() {
+        // JSON written by an older engine: no metadata fields at all.
+        let json = r#"{
+            "name": "Total",
+            "expression": {"Aggregate": {"operation": "Sum", "operand": {
+                "QualifiedColumnRef": {"table_or_var": "Sales", "column": "amount"}
+            }}}
+        }"#;
+        let restored: Measure = serde_json::from_str(json).unwrap();
+        assert_eq!(restored.format_string(), None);
+        assert_eq!(restored.description(), None);
+        assert!(!restored.is_hidden());
+        assert_eq!(restored.table(), "Sales");
     }
 }

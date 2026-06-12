@@ -14,9 +14,11 @@ engine-connectors = { path = "../engine-connectors" }
 engine-query = { path = "../engine-query" }
 arrow = { workspace = true }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

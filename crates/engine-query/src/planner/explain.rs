@@ -38,6 +38,26 @@ impl PushdownPlanner {
         let measure_names: Vec<String> = request.measures.clone();
         node.add_property("measures", PlanValue::List(measure_names));
 
+        // Hierarchy group-by: report the resolved expansion (name, depth,
+        // expanded level columns, ragged behavior).
+        if let Some(spec) = crate::planner::pushdown::resolve_hierarchy(request, model)? {
+            node.add_property("hierarchy", PlanValue::Text(spec.name.clone()));
+            node.add_property("hierarchy_depth", PlanValue::Number(spec.depth as f64));
+            node.add_property(
+                "hierarchy_columns",
+                PlanValue::List(
+                    spec.levels
+                        .iter()
+                        .map(|l| format!("{}.{}", spec.table, l.column))
+                        .collect(),
+                ),
+            );
+            node.add_property(
+                "hierarchy_ragged_behavior",
+                PlanValue::Text(format!("{:?}", spec.behavior)),
+            );
+        }
+
         match &plan {
             QueryPlan::PushedAggregation {
                 source_table,
@@ -419,6 +439,74 @@ mod tests {
         };
         let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
         assert!(node.properties.iter().all(|p| p.key != "totals"));
+    }
+
+    #[test]
+    fn explain_reports_hierarchy_expansion() {
+        use engine_core::model::{Hierarchy, HierarchyLevel, RaggedBehavior};
+
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("amount", DataType::Float64),
+                Column::new("country", DataType::String),
+                Column::new("state", DataType::String),
+                Column::new("city", DataType::String),
+            ],
+        )
+        .unwrap();
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .add_hierarchy(
+                Hierarchy::new(
+                    "Geo",
+                    "Sales",
+                    vec![
+                        HierarchyLevel::new("country"),
+                        HierarchyLevel::new("state").with_optional(true),
+                        HierarchyLevel::new("city"),
+                    ],
+                )
+                .with_ragged_behavior(RaggedBehavior::RepeatParent),
+            )
+            .build()
+            .unwrap();
+        let registry = mock_registry(&["Sales"]);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            hierarchy_group_by: Some(crate::request::HierarchyGroupBy::new("Geo", 2)),
+            ..Default::default()
+        };
+        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+
+        let prop = |key: &str| {
+            node.properties
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("missing property {key}"))
+                .value
+                .clone()
+        };
+        assert_eq!(prop("hierarchy"), PlanValue::Text("Geo".into()));
+        assert_eq!(prop("hierarchy_depth"), PlanValue::Number(2.0));
+        assert_eq!(
+            prop("hierarchy_columns"),
+            PlanValue::List(vec!["Sales.country".into(), "Sales.state".into()])
+        );
+        assert_eq!(
+            prop("hierarchy_ragged_behavior"),
+            PlanValue::Text("RepeatParent".into())
+        );
+
+        // No hierarchy: the properties are absent.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            ..Default::default()
+        };
+        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        assert!(node.properties.iter().all(|p| p.key != "hierarchy"));
     }
 
     #[test]

@@ -782,11 +782,11 @@ fn pg_type_name_to_arrow(
 // ---------------------------------------------------------------------------
 
 mod pg_dialect {
-    use engine_core::compute::aggregate::AggregateOp;
-    use engine_core::compute::expression::Expression;
-    use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
+    use engine_core::compute::expression::{ColumnQualifier, Expression, SqlDialect, SqlRenderer};
+    use engine_core::compute::sql_util::quote_ident_double;
+    use engine_core::error::EngineResult;
 
-    use super::ConnectorResult;
+    use super::{ConnectorError, ConnectorResult};
 
     /// Resolve a model table name to its source table name via the table map.
     fn source_table(model_table: &str, table_map: &[(String, String)]) -> String {
@@ -797,357 +797,52 @@ mod pg_dialect {
             .unwrap_or_else(|| model_table.to_string())
     }
 
+    /// Column qualifier that renders table-qualified references through the
+    /// connector table map: `"source_table"."column"`.
+    struct TableMapQualifier<'a> {
+        table_map: &'a [(String, String)],
+    }
+
+    impl ColumnQualifier for TableMapQualifier<'_> {
+        fn column(&self, table_or_var: Option<&str>, column: &str) -> EngineResult<String> {
+            Ok(match table_or_var {
+                None => quote_ident_double(column),
+                Some(table) => {
+                    let src = source_table(table, self.table_map);
+                    format!(
+                        "{}.{}",
+                        quote_ident_double(&src),
+                        quote_ident_double(column)
+                    )
+                }
+            })
+        }
+    }
+
     /// Render an Expression as PostgreSQL SQL.
     ///
     /// Uses `"double_quotes"` for identifiers and PostgreSQL-specific function
     /// syntax (e.g., `PERCENTILE_CONT`, `STDDEV_SAMP`, `::NUMERIC` casts).
+    /// Delegates to the unified [`SqlRenderer`] (Postgres dialect, table-map
+    /// qualifier, KEEP rendered as conditional aggregation).
     pub fn expr_to_sql(
         expr: &Expression,
         table_map: &[(String, String)],
     ) -> ConnectorResult<String> {
-        use engine_core::compute::expression::ScalarFunction;
-
-        match expr {
-            Expression::QualifiedColumnRef {
-                table_or_var,
-                column,
-            } => {
-                let src = source_table(table_or_var, table_map);
-                Ok(format!(
-                    "{}.{}",
-                    quote_ident_double(&src),
-                    quote_ident_double(column)
-                ))
-            }
-            Expression::ColumnRef(name) => Ok(quote_ident_double(name)),
-            Expression::LiteralFloat(v) => Ok(format!("{v}")),
-            Expression::LiteralInt(v) => Ok(format!("{v}")),
-            Expression::LiteralBool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
-            Expression::LiteralString(s) => Ok(sql_quote_literal(s)),
-            Expression::Blank => Ok("NULL".to_string()),
-
-            Expression::Aggregate { operation, operand } => {
-                // Check for KEEP inside aggregate operand.
-                if let Expression::Keep {
-                    expr: inner,
-                    filters,
-                    variables,
-                    conditions,
-                    in_predicates,
-                } = operand.as_ref()
-                {
-                    if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
-                        let condition = filters_to_condition(filters, table_map)?;
-                        let inner_sql = expr_to_sql(inner, table_map)?;
-                        let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                        return Ok(agg_sql(operation, &case_expr));
-                    }
-                }
-                let operand_sql = expr_to_sql(operand, table_map)?;
-                Ok(agg_sql(operation, &operand_sql))
-            }
-            Expression::BinaryOp { left, op, right } => {
-                let l = expr_to_sql(left, table_map)?;
-                let r = expr_to_sql(right, table_map)?;
-                Ok(format!("({l} {} {r})", op.as_sql()))
-            }
-            Expression::SafeDivide {
-                numerator,
-                denominator,
-                alternate,
-            } => {
-                let n = expr_to_sql(numerator, table_map)?;
-                let d = expr_to_sql(denominator, table_map)?;
-                let alt = match alternate {
-                    Some(a) => expr_to_sql(a, table_map)?,
-                    None => "NULL".to_string(),
-                };
-                Ok(format!(
-                    "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
-                ))
-            }
-            Expression::If {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                let c = expr_to_sql(condition, table_map)?;
-                let t = expr_to_sql(then_expr, table_map)?;
-                let e = expr_to_sql(else_expr, table_map)?;
-                Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
-            }
-            Expression::Comparison { left, op, right } => {
-                let l = expr_to_sql(left, table_map)?;
-                let r = expr_to_sql(right, table_map)?;
-                Ok(format!("({l} {} {r})", op.as_sql()))
-            }
-            Expression::And(l, r) => Ok(format!(
-                "({} AND {})",
-                expr_to_sql(l, table_map)?,
-                expr_to_sql(r, table_map)?
-            )),
-            Expression::Or(l, r) => Ok(format!(
-                "({} OR {})",
-                expr_to_sql(l, table_map)?,
-                expr_to_sql(r, table_map)?
-            )),
-            Expression::Not(inner) => Ok(format!("(NOT {})", expr_to_sql(inner, table_map)?)),
-            Expression::IsBlank(inner) => {
-                Ok(format!("({} IS NULL)", expr_to_sql(inner, table_map)?))
-            }
-            Expression::Coalesce(exprs) => {
-                let parts: Vec<String> = exprs
-                    .iter()
-                    .map(|e| expr_to_sql(e, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(format!("COALESCE({})", parts.join(", ")))
-            }
-            Expression::ScalarFunc { function, args } => {
-                let mapped: Vec<String> = args
-                    .iter()
-                    .map(|a| expr_to_sql(a, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                match function {
-                    ScalarFunction::Round | ScalarFunction::RoundUp | ScalarFunction::RoundDown => {
-                        let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
-                        let func = if matches!(function, ScalarFunction::RoundDown) {
-                            "TRUNC"
-                        } else {
-                            "ROUND"
-                        };
-                        Ok(format!("{func}(({})::NUMERIC, {digits})", mapped[0]))
-                    }
-                    ScalarFunction::Trunc => {
-                        let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
-                        Ok(format!("TRUNC(({})::NUMERIC, {digits})", mapped[0]))
-                    }
-                    ScalarFunction::Log10 => Ok(format!("LOG(10, ({})::NUMERIC)", mapped[0])),
-                    ScalarFunction::Sign => Ok(format!("SIGN({})", mapped[0])),
-                    ScalarFunction::Mod => Ok(format!("MOD({}, {})", mapped[0], mapped[1])),
-                    _ => Ok(function.to_sql_strs(&mapped)),
-                }
-            }
-            Expression::TextFunc { function, args } => {
-                let mapped: Vec<String> = args
-                    .iter()
-                    .map(|a| expr_to_sql(a, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(function.to_sql_strs(&mapped))
-            }
-            Expression::DateTimeFunc { function, args } => {
-                let mapped: Vec<String> = args
-                    .iter()
-                    .map(|a| expr_to_sql(a, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(function.to_sql_strs(&mapped))
-            }
-            Expression::IfError {
-                expr: inner,
-                alternate,
-            } => {
-                let i = expr_to_sql(inner, table_map)?;
-                let a = expr_to_sql(alternate, table_map)?;
-                Ok(format!("COALESCE({i}, {a})"))
-            }
-            Expression::IsInScope { .. } => Ok("TRUE".to_string()),
-            Expression::Iterate { expression, .. } => expr_to_sql(expression, table_map),
-            Expression::ClearExcept { expr: inner, .. } | Expression::Clear { expr: inner, .. } => {
-                expr_to_sql(inner, table_map)
-            }
-            Expression::Keep {
-                expr: inner,
-                filters,
-                variables,
-                conditions,
-                in_predicates,
-            } => {
-                if variables.is_empty() && conditions.is_empty() && in_predicates.is_empty() {
-                    let condition = filters_to_condition(filters, table_map)?;
-                    return case_when_expr(inner, &condition, table_map);
-                }
-                expr_to_sql(inner, table_map)
-            }
-            Expression::Block { .. } => {
-                let inlined = expr.inline_bindings();
-                expr_to_sql(&inlined, table_map)
-            }
-            Expression::Switch {
-                expr: switch_expr,
-                cases,
-                default,
-            } => {
-                let e = expr_to_sql(switch_expr, table_map)?;
-                let mut sql = format!("CASE {e}");
-                for (v, r) in cases {
-                    sql.push_str(&format!(
-                        " WHEN {} THEN {}",
-                        expr_to_sql(v, table_map)?,
-                        expr_to_sql(r, table_map)?
-                    ));
-                }
-                if let Some(d) = default {
-                    sql.push_str(&format!(" ELSE {}", expr_to_sql(d, table_map)?));
-                }
-                sql.push_str(" END");
-                Ok(sql)
-            }
-            Expression::Percentile {
-                operand,
-                percentile,
-            } => {
-                let op = expr_to_sql(operand, table_map)?;
-                let k = expr_to_sql(percentile, table_map)?;
-                Ok(format!("PERCENTILE_CONT({k}) WITHIN GROUP (ORDER BY {op})"))
-            }
-            Expression::HasOneValue { column } => {
-                let c = expr_to_sql(column, table_map)?;
-                Ok(format!("(COUNT(DISTINCT {c}) = 1)"))
-            }
-            Expression::SelectedValue { column, alternate } => {
-                let c = expr_to_sql(column, table_map)?;
-                let a = match alternate {
-                    Some(v) => expr_to_sql(v, table_map)?,
-                    None => "NULL".to_string(),
-                };
-                Ok(format!(
-                    "CASE WHEN COUNT(DISTINCT {c}) = 1 THEN MIN({c}) ELSE {a} END"
-                ))
-            }
-            Expression::FirstValue { column, .. } => {
-                let c = expr_to_sql(column, table_map)?;
-                Ok(format!("MIN({c})"))
-            }
-            Expression::Xor(l, r) => {
-                let ls = expr_to_sql(l, table_map)?;
-                let rs = expr_to_sql(r, table_map)?;
-                Ok(format!("(({ls} AND NOT {rs}) OR (NOT {ls} AND {rs}))"))
-            }
-            Expression::Greatest(args) => {
-                let parts: Vec<String> = args
-                    .iter()
-                    .map(|e| expr_to_sql(e, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(format!("GREATEST({})", parts.join(", ")))
-            }
-            Expression::Least(args) => {
-                let parts: Vec<String> = args
-                    .iter()
-                    .map(|e| expr_to_sql(e, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(format!("LEAST({})", parts.join(", ")))
-            }
-            Expression::NullIf { expr: inner, value } => {
-                let i = expr_to_sql(inner, table_map)?;
-                let v = expr_to_sql(value, table_map)?;
-                Ok(format!("NULLIF({i}, {v})"))
-            }
-            Expression::TableRef(_) => Ok(String::new()),
-            // COUNT_IF(condition) → SUM(CASE WHEN condition THEN 1 ELSE 0 END)
-            Expression::CountIf { condition } => {
-                let c = expr_to_sql(condition, table_map)?;
-                Ok(format!("SUM(CASE WHEN {c} THEN 1 ELSE 0 END)"))
-            }
-            // STRING_AGG
-            Expression::ListAgg { column, delimiter } => {
-                let col = expr_to_sql(column, table_map)?;
-                let delim = expr_to_sql(delimiter, table_map)?;
-                Ok(format!("STRING_AGG({col}, {delim})"))
-            }
-            // MAXBY / MINBY — needs subquery or ORDER BY, simplified
-            Expression::MaxBy { value, sort_by } => {
-                let v = expr_to_sql(value, table_map)?;
-                let s = expr_to_sql(sort_by, table_map)?;
-                Ok(format!("(ARRAY_AGG({v} ORDER BY {s} DESC NULLS LAST))[1]"))
-            }
-            Expression::MinBy { value, sort_by } => {
-                let v = expr_to_sql(value, table_map)?;
-                let s = expr_to_sql(sort_by, table_map)?;
-                Ok(format!("(ARRAY_AGG({v} ORDER BY {s} ASC NULLS LAST))[1]"))
-            }
-            // IN list
-            Expression::InList {
-                expr: inner,
-                values,
-            } => {
-                let e = expr_to_sql(inner, table_map)?;
-                let vals: Vec<String> = values
-                    .iter()
-                    .map(|v| expr_to_sql(v, table_map))
-                    .collect::<ConnectorResult<Vec<_>>>()?;
-                Ok(format!("{e} IN ({})", vals.join(", ")))
-            }
-            _ => Err(super::ConnectorError::UnsupportedOperation(format!(
-                "PostgreSQL pushdown: unsupported expression {expr:?}"
-            ))),
-        }
-    }
-
-    /// Render an aggregate operation as PostgreSQL SQL.
-    ///
-    /// Delegates to [`AggregateOp::render_postgres_sql`], the shared
-    /// PostgreSQL-dialect mapping.
-    fn agg_sql(op: &AggregateOp, operand: &str) -> String {
-        op.render_postgres_sql(operand)
-    }
-
-    /// Build a CASE WHEN SQL fragment for KEEP filter predicates.
-    fn filters_to_condition(
-        filters: &[engine_core::compute::expression::FilterPredicate],
-        table_map: &[(String, String)],
-    ) -> ConnectorResult<String> {
-        let parts: Vec<String> = filters
-            .iter()
-            .map(|f| {
-                let src = source_table(&f.table, table_map);
-                Ok(format!(
-                    "{}.{} {} {}",
-                    quote_ident_double(&src),
-                    quote_ident_double(&f.column),
-                    f.operator.as_sql(),
-                    sql_quote_literal(&f.value)
-                ))
-            })
-            .collect::<ConnectorResult<Vec<_>>>()?;
-        Ok(parts.join(" AND "))
-    }
-
-    /// Wrap an inner expression's aggregates with CASE WHEN.
-    fn case_when_expr(
-        expr: &Expression,
-        condition: &str,
-        table_map: &[(String, String)],
-    ) -> ConnectorResult<String> {
-        match expr {
-            Expression::Aggregate { operation, operand } => {
-                let inner_sql = expr_to_sql(operand, table_map)?;
-                let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                Ok(agg_sql(operation, &case_expr))
-            }
-            Expression::BinaryOp { left, op, right } => {
-                let l = case_when_expr(left, condition, table_map)?;
-                let r = case_when_expr(right, condition, table_map)?;
-                Ok(format!("({l} {} {r})", op.as_sql()))
-            }
-            Expression::SafeDivide {
-                numerator,
-                denominator,
-                alternate,
-            } => {
-                let n = case_when_expr(numerator, condition, table_map)?;
-                let d = case_when_expr(denominator, condition, table_map)?;
-                let alt = match alternate {
-                    Some(a) => expr_to_sql(a, table_map)?,
-                    None => "NULL".to_string(),
-                };
-                Ok(format!(
-                    "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
-                ))
-            }
-            _ => expr_to_sql(expr, table_map),
-        }
+        let qualifier = TableMapQualifier { table_map };
+        SqlRenderer::new(SqlDialect::Postgres, &qualifier)
+            .with_keep_case_when()
+            .render(expr)
+            .map_err(|e| ConnectorError::UnsupportedOperation(format!("PostgreSQL pushdown: {e}")))
     }
 
     /// Render a full Expression with CLEAR/CLEAREXCEPT as window functions.
+    ///
+    /// NOT unified into [`SqlRenderer`]: the CLEAR-to-window translation
+    /// depends on the request's `group_by` column set (to compute the
+    /// PARTITION BY over *source* table/column names), which is join-request
+    /// state rather than expression-rendering configuration. Non-CLEAR
+    /// subtrees delegate to the unified renderer via [`expr_to_sql`].
     pub fn expr_to_sql_with_clear(
         expr: &Expression,
         table_map: &[(String, String)],
@@ -1340,6 +1035,67 @@ mod tests {
             InValueKind::Integer,
         ));
         assert_eq!(cond, "\"key\" IN (-7, 9223372036854775807)");
+    }
+
+    #[test]
+    fn pg_dialect_complex_expression_pinned() {
+        // Equivalence oracle for the unified renderer migration: KEEP + IF +
+        // SAFE DIVIDE + aggregates + literals with embedded quotes, rendered
+        // with table-map-qualified column references. Pinned from the
+        // pre-unification implementation — must never change.
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression::{
+            agg, col, compare, if_expr, keep, lit_int, lit_str, safe_divide, ComparisonOp,
+            FilterPredicate,
+        };
+
+        let table_map = vec![("Products".to_string(), "production_product".to_string())];
+        let expr = if_expr(
+            compare(
+                agg(
+                    AggregateOp::Sum,
+                    keep(
+                        col("amount"),
+                        vec![FilterPredicate::new(
+                            "Products",
+                            "category",
+                            ComparisonOp::Equal,
+                            "O'Brien",
+                        )],
+                    ),
+                ),
+                ComparisonOp::GreaterThan,
+                lit_int(1000),
+            ),
+            lit_str("it's high"),
+            safe_divide(
+                agg(AggregateOp::Sum, col("amount")),
+                agg(AggregateOp::Count, col("id")),
+                None,
+            ),
+        );
+
+        let sql = pg_dialect::expr_to_sql(&expr, &table_map).unwrap();
+        assert_eq!(
+            sql,
+            "CASE WHEN (SUM(CASE WHEN \"production_product\".\"category\" = 'O''Brien' \
+             THEN \"amount\" END) > 1000) THEN 'it''s high' \
+             ELSE CASE WHEN COUNT(\"id\") = 0 THEN NULL \
+             ELSE CAST(SUM(\"amount\") AS DOUBLE PRECISION) / COUNT(\"id\") END END"
+        );
+    }
+
+    #[test]
+    fn pg_dialect_round_is_pinned_to_numeric_cast() {
+        // PostgreSQL ROUND requires a NUMERIC operand — pinned from the
+        // pre-unification implementation.
+        use engine_core::compute::expression::{col, lit_int, scalar_fn, ScalarFunction};
+
+        let expr = scalar_fn(ScalarFunction::Round, vec![col("x"), lit_int(2)]);
+        assert_eq!(
+            pg_dialect::expr_to_sql(&expr, &[]).unwrap(),
+            "ROUND((\"x\")::NUMERIC, 2)"
+        );
     }
 
     #[test]

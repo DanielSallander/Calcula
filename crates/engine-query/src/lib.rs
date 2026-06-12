@@ -14,9 +14,11 @@ pub mod request;
 
 pub use error::{QueryError, QueryResult};
 pub use executor::QueryExecutor;
-pub use planner::{LookupSpec, PushdownPlanner, QueryPlan};
+pub use planner::{
+    effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner, QueryPlan,
+};
 pub use registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use request::{
-    ColumnRef, LookupColumn, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
-    GROUPING_ID_COLUMN,
+    ColumnRef, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget, QueryRequest,
+    TotalsMode, GROUPING_ID_COLUMN,
 };

@@ -10,6 +10,8 @@ pub mod measure_engine;
 pub mod parser;
 pub mod plan;
 pub mod sql_util;
+pub mod time_intelligence;
+pub mod udf;
 
 pub use aggregate::{
     average_column, compute_aggregate, compute_aggregates, count_column, distinct_count_column,
@@ -19,10 +21,14 @@ pub use context::{
     format_filter_value, ContextResolver, EvaluationContext, FilterSource, ResolvedFilter,
     ResolvedInFilter,
 };
-pub use evaluate::{evaluate_expression, materialize_calculated_columns};
+pub use evaluate::{
+    evaluate_expression, evaluate_expression_with_udfs, materialize_calculated_columns,
+    materialize_calculated_columns_with_udfs,
+};
 pub use expression::{
-    infer_fact_table, ArithmeticOp, BoundaryType, ComparisonOp, DateTimeFunction, Expression,
-    FilterPredicate, InPredicate, RelationshipPath, ScalarFunction, TextFunction, WindowFrame,
+    infer_fact_table, ArithmeticOp, BoundaryType, ComparisonOp, DateGranularity, DateTimeFunction,
+    Expression, FilterPredicate, InPredicate, RelationshipPath, ScalarFunction, TextFunction,
+    WindowFrame,
 };
 pub use join::{
     aggregate_over_relationship, determine_join_strategy, join_tables, JoinStrategy, JoinType,
@@ -34,3 +40,5 @@ pub use measure::{
 pub use measure_engine::MeasureEngine;
 pub use plan::{ExecutionPlan, PlanDuration, PlanNode, PlanOperation, PlanProperty, PlanValue};
 pub use sql_util::{quote_ident_bracket, quote_ident_double, sql_quote_literal};
+pub use time_intelligence::lower_time_intelligence;
+pub use udf::{session_context_with_udfs, UdfRegistry};

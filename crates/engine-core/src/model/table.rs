@@ -218,6 +218,19 @@ pub struct Table {
     /// Only meaningful when `storage_mode` is `InMemory`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     refresh_strategies: Vec<RefreshStrategy>,
+    /// Optional human-friendly name shown by host applications instead of
+    /// the physical table name. Purely presentational — queries and
+    /// expressions always use the physical name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    /// Human-readable description shown by host applications.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    /// Whether host applications should hide this table from end-user
+    /// field lists. Purely presentational — hidden tables remain fully
+    /// queryable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_hidden: bool,
 }
 
 impl Table {
@@ -242,7 +255,50 @@ impl Table {
             columns,
             storage_mode: StorageMode::default(),
             refresh_strategies: Vec::new(),
+            display_name: None,
+            description: None,
+            is_hidden: false,
         })
+    }
+
+    /// Set the human-friendly display name for this table.
+    ///
+    /// Purely presentational — hosts show it instead of the physical
+    /// table name; queries and expressions always use the physical name.
+    pub fn with_display_name(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = Some(display_name.into());
+        self
+    }
+
+    /// Returns the display name, if set.
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// Set the human-readable description of this table.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Returns the description, if any.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// Mark this table as hidden from end-user field lists.
+    ///
+    /// Hiding is purely presentational — hidden tables remain fully
+    /// queryable (e.g. bridge tables that only serve relationships).
+    pub fn hidden(mut self) -> Self {
+        self.is_hidden = true;
+        self
+    }
+
+    /// Returns `true` if host applications should hide this table from
+    /// end-user field lists.
+    pub fn is_hidden(&self) -> bool {
+        self.is_hidden
     }
 
     /// Returns the table name.
@@ -660,5 +716,66 @@ mod tests {
         let t2 = Table::new("bar", vec![Column::new("id", DataType::Int64)]).unwrap();
         // Same columns → same schema hash (table name is not part of schema).
         assert_eq!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    // --- Presentation metadata ---
+
+    #[test]
+    fn table_metadata_builders_and_getters() {
+        let table = make_table("fact_sales")
+            .with_display_name("Sales")
+            .with_description("One row per order line")
+            .hidden();
+        assert_eq!(table.display_name(), Some("Sales"));
+        assert_eq!(table.description(), Some("One row per order line"));
+        assert!(table.is_hidden());
+    }
+
+    #[test]
+    fn table_metadata_defaults_to_absent_and_visible() {
+        let table = make_table("t");
+        assert_eq!(table.display_name(), None);
+        assert_eq!(table.description(), None);
+        assert!(!table.is_hidden());
+    }
+
+    #[test]
+    fn table_metadata_round_trips_through_serde() {
+        let table = make_table("fact_sales")
+            .with_display_name("Sales")
+            .with_description("Fact table")
+            .hidden();
+
+        let json = serde_json::to_string(&table).unwrap();
+        let restored: Table = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.display_name(), Some("Sales"));
+        assert_eq!(restored.description(), Some("Fact table"));
+        assert!(restored.is_hidden());
+    }
+
+    #[test]
+    fn absent_table_metadata_is_skipped_in_json_and_defaults_on_load() {
+        let table = make_table("t");
+        let json = serde_json::to_string(&table).unwrap();
+        // Legacy-compatible output: absent metadata writes no fields.
+        assert!(!json.contains("\"display_name\""));
+        assert!(!json.contains("\"description\""));
+        assert!(!json.contains("\"is_hidden\""));
+
+        let restored: Table = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.display_name(), None);
+        assert_eq!(restored.description(), None);
+        assert!(!restored.is_hidden());
+    }
+
+    #[test]
+    fn table_metadata_does_not_affect_schema_hash() {
+        let plain = make_table("t");
+        let decorated = make_table("t")
+            .with_display_name("T")
+            .with_description("desc")
+            .hidden();
+        // Presentation metadata is not part of the data schema.
+        assert_eq!(plain.schema_hash(), decorated.schema_hash());
     }
 }

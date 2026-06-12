@@ -11,7 +11,7 @@ pub mod table;
 pub mod table_variable;
 
 pub use calculated_column::CalculatedColumn;
-pub use column::Column;
+pub use column::{Column, DateRole};
 pub use context::{ClearTarget, ContextDefinition, ContextOp};
 pub use global_variable::GlobalVariable;
 pub use hierarchy::{Hierarchy, HierarchyLevel, RaggedBehavior};

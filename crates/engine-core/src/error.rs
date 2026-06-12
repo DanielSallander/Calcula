@@ -156,6 +156,31 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// The model's marked date table is invalid (missing table, duplicate
+    /// date roles, or a role on a column with an unsuitable data type).
+    #[error("Invalid date table '{table}': {reason}")]
+    InvalidDateTable {
+        /// The marked date-table name.
+        table: String,
+        /// Description of the validation failure.
+        reason: String,
+    },
+
+    /// A time-intelligence function (`YTD`, `QTD`, `MTD`, `PRIORYEAR`,
+    /// `PRIORPERIOD`) cannot be evaluated because a model or query
+    /// prerequisite is missing — no marked date table, missing date roles,
+    /// or the required date columns are absent from the query's group_by.
+    ///
+    /// The `reason` always states the corrective action so the message can
+    /// be surfaced directly to model authors.
+    #[error("Time intelligence: {function} cannot be evaluated: {reason}")]
+    TimeIntelligence {
+        /// The function as written (e.g. `YTD`, `PRIORPERIOD`).
+        function: String,
+        /// What is missing and how to fix it.
+        reason: String,
+    },
+
     /// A column's sort_by_column reference is invalid.
     #[error("Invalid sort_by_column on '{table}.{column}': {reason}")]
     InvalidSortByColumn {
@@ -179,6 +204,20 @@ pub enum EngineError {
         /// The offending identifier.
         name: String,
         /// Description of why the identifier was rejected.
+        reason: String,
+    },
+
+    /// Presentation metadata (display name, description, format string)
+    /// on a model object is invalid — e.g. an over-long string or an
+    /// empty display name.
+    #[error("Invalid metadata on {entity}: {field} {reason}")]
+    InvalidMetadata {
+        /// The model object carrying the metadata (e.g. `table 'Sales'`,
+        /// `measure 'Revenue'`, `column 'Sales.amount'`).
+        entity: String,
+        /// The metadata field that failed validation (e.g. `display_name`).
+        field: String,
+        /// Description of the validation failure.
         reason: String,
     },
 
@@ -228,6 +267,21 @@ pub enum EngineError {
         found: u32,
         /// The maximum format version this engine supports.
         supported: u32,
+    },
+
+    /// An expression calls a function that is neither a built-in nor a
+    /// registered UDF.
+    ///
+    /// The parser accepts any well-formed unknown function name as a UDF
+    /// call (`Expression::Call`); the engine verifies at query time that
+    /// every called name is registered and raises this error otherwise —
+    /// covering both unregistered UDFs and typos in built-in names.
+    #[error("Unknown function or unregistered UDF '{name}' (referenced by {referenced_by}). Register it with Engine::register_udf() before querying.")]
+    UnknownFunction {
+        /// The unresolved function name.
+        name: String,
+        /// What references the function (e.g. `measure 'Revenue'`).
+        referenced_by: String,
     },
 
     /// An aggregation was attempted on an unsupported column type.

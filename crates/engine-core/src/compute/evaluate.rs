@@ -8,10 +8,10 @@ use std::sync::Arc;
 use arrow::array::ArrayRef;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use datafusion::prelude::SessionContext;
 
 use crate::compute::expression::Expression;
 use crate::compute::sql_util::quote_ident_double;
+use crate::compute::udf::{session_context_with_udfs, UdfRegistry};
 use crate::error::EngineResult;
 use crate::model::calculated_column::CalculatedColumn;
 
@@ -19,11 +19,27 @@ use crate::model::calculated_column::CalculatedColumn;
 ///
 /// The expression must not contain aggregate nodes. Uses DataFusion SQL
 /// to evaluate the expression, handling type coercion and null propagation.
+///
+/// Expressions containing UDF calls require
+/// [`evaluate_expression_with_udfs`]; this function evaluates with an empty
+/// registry, so calls fail with a DataFusion "invalid function" error.
 pub async fn evaluate_expression(
     batch: &RecordBatch,
     expression: &Expression,
 ) -> EngineResult<ArrayRef> {
-    let ctx = SessionContext::new();
+    evaluate_expression_with_udfs(batch, expression, &UdfRegistry::new()).await
+}
+
+/// Evaluate a row-level expression with host-registered UDFs available.
+///
+/// Like [`evaluate_expression`], but `Expression::Call` nodes resolve
+/// against `udfs`.
+pub async fn evaluate_expression_with_udfs(
+    batch: &RecordBatch,
+    expression: &Expression,
+    udfs: &UdfRegistry,
+) -> EngineResult<ArrayRef> {
+    let ctx = session_context_with_udfs(udfs);
     ctx.register_batch("t", batch.clone())?;
 
     let expr_sql = expression.to_sql_string()?;
@@ -55,16 +71,32 @@ pub async fn evaluate_expression(
 ///
 /// Evaluates each calculated column's expression and appends the result
 /// as a new column to the batch.
+///
+/// Calculated columns containing UDF calls require
+/// [`materialize_calculated_columns_with_udfs`]; this function evaluates
+/// with an empty registry.
 pub async fn materialize_calculated_columns(
     batch: &RecordBatch,
     calculated_columns: &[CalculatedColumn],
+) -> EngineResult<RecordBatch> {
+    materialize_calculated_columns_with_udfs(batch, calculated_columns, &UdfRegistry::new()).await
+}
+
+/// Materialize calculated columns with host-registered UDFs available.
+///
+/// Like [`materialize_calculated_columns`], but `Expression::Call` nodes in
+/// the column expressions resolve against `udfs`.
+pub async fn materialize_calculated_columns_with_udfs(
+    batch: &RecordBatch,
+    calculated_columns: &[CalculatedColumn],
+    udfs: &UdfRegistry,
 ) -> EngineResult<RecordBatch> {
     if calculated_columns.is_empty() {
         return Ok(batch.clone());
     }
 
     // Build all calculated columns in a single DataFusion query for efficiency.
-    let ctx = SessionContext::new();
+    let ctx = session_context_with_udfs(udfs);
     ctx.register_batch("t", batch.clone())?;
 
     // SELECT *, expr1 AS name1, expr2 AS name2, ... FROM t
@@ -128,6 +160,82 @@ mod tests {
         ])
         .unwrap();
         data.to_record_batch().unwrap()
+    }
+
+    /// `double(x) = x * 2` over Float64, registered as "double".
+    fn registry_with_double() -> UdfRegistry {
+        use crate::compute::udf::{create_udf, ColumnarValue, Volatility};
+        use arrow::array::Float64Array;
+
+        let double = create_udf(
+            "double",
+            vec![DataType::Float64],
+            DataType::Float64,
+            Volatility::Immutable,
+            Arc::new(|args: &[ColumnarValue]| {
+                let arrays = ColumnarValue::values_to_arrays(args)?;
+                let input = arrays[0]
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("Float64 enforced by the UDF signature");
+                let out: Float64Array = input.iter().map(|v| v.map(|x| x * 2.0)).collect();
+                Ok(ColumnarValue::Array(Arc::new(out)))
+            }),
+        );
+        let mut registry = UdfRegistry::new();
+        registry.register(double, 1).unwrap();
+        registry
+    }
+
+    #[tokio::test]
+    async fn evaluate_expression_with_udfs_resolves_call() {
+        let batch = sales_data();
+        let expression = expr::call("double", vec![expr::col("price")]);
+        let result = evaluate_expression_with_udfs(&batch, &expression, &registry_with_double())
+            .await
+            .unwrap();
+
+        let values: Vec<f64> = result
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .values()
+            .to_vec();
+        assert_eq!(values, vec![20.0, 40.0, 30.0]);
+    }
+
+    #[tokio::test]
+    async fn evaluate_expression_without_udfs_fails_on_call() {
+        let batch = sales_data();
+        let expression = expr::call("double", vec![expr::col("price")]);
+        assert!(evaluate_expression(&batch, &expression).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn materialize_calculated_columns_with_udfs_resolves_call() {
+        let batch = sales_data();
+        let cc = CalculatedColumn::new(
+            "double_price",
+            "Sales",
+            expr::call("double", vec![expr::col("price")]),
+            EngineDataType::Float64,
+        );
+
+        let result =
+            materialize_calculated_columns_with_udfs(&batch, &[cc], &registry_with_double())
+                .await
+                .unwrap();
+
+        assert_eq!(result.num_columns(), 4);
+        assert_eq!(result.schema().field(3).name(), "double_price");
+        let values: Vec<f64> = result
+            .column(3)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .values()
+            .to_vec();
+        assert_eq!(values, vec![20.0, 40.0, 30.0]);
     }
 
     #[tokio::test]

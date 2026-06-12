@@ -233,7 +233,7 @@ async fn end_to_end_pushed_aggregation() {
         engine_query::QueryPlan::PushedAggregation { .. }
     ));
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
         .await
         .unwrap();
 
@@ -259,7 +259,7 @@ async fn end_to_end_pushed_aggregation_no_groupby() {
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
         .await
         .unwrap();
 
@@ -291,7 +291,7 @@ async fn end_to_end_local_aggregation_star_schema() {
         engine_query::QueryPlan::PushedJoinAggregation { .. }
     ));
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
         .await
         .unwrap();
 
@@ -322,7 +322,7 @@ async fn end_to_end_pushed_with_filter() {
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
         .await
         .unwrap();
 
@@ -355,7 +355,7 @@ async fn end_to_end_cross_source_star_schema() {
         engine_query::QueryPlan::LocalAggregation { .. }
     ));
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
         .await
         .unwrap();
 
@@ -385,7 +385,7 @@ async fn end_to_end_cross_source_no_groupby() {
     };
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
         .await
         .unwrap();
 

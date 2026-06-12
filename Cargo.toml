@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
+parking_lot = "0.12"
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono", "rust_decimal"] }
 bb8 = "0.9"
 bb8-tiberius = "0.16"

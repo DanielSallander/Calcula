@@ -1,0 +1,967 @@
+//! Builder for constructing a validated [`DataModel`].
+
+use crate::compute::measure::{Measure, MeasureGroup};
+use crate::error::{EngineError, EngineResult};
+use crate::model::calculated_column::CalculatedColumn;
+use crate::model::context::ContextDefinition;
+use crate::model::global_variable::GlobalVariable;
+use crate::model::hierarchy::Hierarchy;
+use crate::model::relationship::Relationship;
+use crate::model::table::Table;
+use crate::model::table_variable::TableVariable;
+
+use super::{
+    apply_lookup_placeholder, validate_identifier, validate_metadata_text, DataModel,
+    MAX_METADATA_DESCRIPTION_CHARS, MAX_METADATA_NAME_CHARS, MODEL_FORMAT_VERSION,
+};
+
+/// Builder for constructing a [`DataModel`] incrementally.
+pub struct DataModelBuilder {
+    pub(super) tables: Vec<Table>,
+    pub(super) relationships: Vec<Relationship>,
+    pub(super) measures: Vec<Measure>,
+    pub(super) calculated_columns: Vec<CalculatedColumn>,
+    pub(super) measure_groups: Vec<MeasureGroup>,
+    pub(super) contexts: Vec<ContextDefinition>,
+    pub(super) table_variables: Vec<TableVariable>,
+    pub(super) global_variables: Vec<GlobalVariable>,
+    pub(super) hierarchies: Vec<Hierarchy>,
+    pub(super) default_lookup_resolution: Option<String>,
+    pub(super) date_table: Option<String>,
+}
+
+impl DataModelBuilder {
+    /// Add a table to the model.
+    pub fn add_table(mut self, table: Table) -> Self {
+        self.tables.push(table);
+        self
+    }
+
+    /// Add a relationship to the model.
+    pub fn add_relationship(mut self, relationship: Relationship) -> Self {
+        self.relationships.push(relationship);
+        self
+    }
+
+    /// Add a measure to the model.
+    pub fn add_measure(mut self, measure: Measure) -> Self {
+        self.measures.push(measure);
+        self
+    }
+
+    /// Add a calculated column to the model.
+    pub fn add_calculated_column(mut self, calculated_column: CalculatedColumn) -> Self {
+        self.calculated_columns.push(calculated_column);
+        self
+    }
+
+    /// Add a measure group to the model.
+    pub fn add_measure_group(mut self, group: MeasureGroup) -> Self {
+        self.measure_groups.push(group);
+        self
+    }
+
+    /// Add a context definition to the model.
+    pub fn add_context(mut self, context: ContextDefinition) -> Self {
+        self.contexts.push(context);
+        self
+    }
+
+    /// Add a table variable to the model.
+    pub fn add_table_variable(mut self, variable: TableVariable) -> Self {
+        self.table_variables.push(variable);
+        self
+    }
+
+    /// Add a global variable to the model.
+    pub fn add_global_variable(mut self, variable: GlobalVariable) -> Self {
+        self.global_variables.push(variable);
+        self
+    }
+
+    /// Add a hierarchy to the model.
+    pub fn add_hierarchy(mut self, hierarchy: Hierarchy) -> Self {
+        self.hierarchies.push(hierarchy);
+        self
+    }
+
+    /// Set the model-level default lookup resolution expression.
+    ///
+    /// This expression is used for lookup columns that don't have a
+    /// per-column `lookup_resolution` set. It must reference the lookup
+    /// column via the reserved bare identifier
+    /// [`__column`](LOOKUP_COLUMN_PLACEHOLDER) (case-insensitive), which is
+    /// rewritten to the actual column at query time — e.g.
+    /// `"MAX(__column)"` or `"SELECTEDVALUE(__column, \"*\")"`. Expressions
+    /// without the placeholder are rejected at build time, since they would
+    /// resolve the same hard-coded column for every lookup.
+    ///
+    /// If not specified, the built-in fallback applies: for `String`
+    /// columns, SELECTEDVALUE-style semantics
+    /// (`CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE '#' END`);
+    /// for all other column types, `MIN(col)`.
+    pub fn default_lookup_resolution(mut self, expr: impl Into<String>) -> Self {
+        self.default_lookup_resolution = Some(expr.into());
+        self
+    }
+
+    /// Mark a table as the model's date table.
+    ///
+    /// The date table is the calendar dimension whose
+    /// [`DateRole`](crate::model::DateRole)-tagged columns
+    /// ([`Column::with_date_role`](crate::model::Column::with_date_role))
+    /// power time-intelligence functions (`YTD`, `QTD`, `MTD`, `PRIORYEAR`,
+    /// `PRIORPERIOD`). Build-time validation checks that the table exists,
+    /// that each date role appears on at most one of its columns, and that
+    /// role data types are sensible: `DateKey` requires `Date` or
+    /// `Timestamp`; `Year`/`Quarter`/`Month`/`Week`/`Day` accept integer or
+    /// string columns (lenient — quarters are often stored as `"Q1"`-style
+    /// strings).
+    pub fn mark_date_table(mut self, table_name: impl Into<String>) -> Self {
+        self.date_table = Some(table_name.into());
+        self
+    }
+
+    /// Build the data model.
+    ///
+    /// Validates that:
+    /// - Table names are unique
+    /// - Relationship names are unique
+    /// - All referenced tables and columns exist
+    /// - Join column types are compatible
+    pub fn build(self) -> EngineResult<DataModel> {
+        // 0. Identifier validation. Table, column, calculated-column, and
+        // measure names are later interpolated into quoted SQL identifiers
+        // (and table names into cache file names), so characters that can
+        // break out of those contexts are rejected up front. Table-variable,
+        // context, global-variable, and hierarchy names are intentionally
+        // not validated here: they are pure lookup keys that resolve to
+        // (already validated) tables and columns before any SQL is built.
+        for table in &self.tables {
+            validate_identifier(table.name(), "table")?;
+            for col in table.columns() {
+                validate_identifier(col.name(), "column")?;
+            }
+        }
+        for cc in &self.calculated_columns {
+            validate_identifier(cc.name(), "calculated column")?;
+        }
+        for measure in &self.measures {
+            validate_identifier(measure.name(), "measure")?;
+        }
+
+        // 0a. Presentation metadata validation. Display names, descriptions,
+        // and format strings are host-interpreted hints the engine never
+        // parses, so validation is deliberately minimal: length caps (model
+        // files are shared, so metadata must not become an unbounded
+        // payload channel) and non-empty display names (an empty-but-
+        // present display name would render as a blank field-list entry).
+        for table in &self.tables {
+            let entity = format!("table '{}'", table.name());
+            if let Some(display_name) = table.display_name() {
+                validate_metadata_text(
+                    &entity,
+                    "display_name",
+                    display_name,
+                    MAX_METADATA_NAME_CHARS,
+                    true,
+                )?;
+            }
+            if let Some(description) = table.description() {
+                validate_metadata_text(
+                    &entity,
+                    "description",
+                    description,
+                    MAX_METADATA_DESCRIPTION_CHARS,
+                    false,
+                )?;
+            }
+            for col in table.columns() {
+                let entity = format!("column '{}.{}'", table.name(), col.name());
+                if let Some(display_name) = col.display_name() {
+                    validate_metadata_text(
+                        &entity,
+                        "display_name",
+                        display_name,
+                        MAX_METADATA_NAME_CHARS,
+                        true,
+                    )?;
+                }
+                if let Some(description) = col.description() {
+                    validate_metadata_text(
+                        &entity,
+                        "description",
+                        description,
+                        MAX_METADATA_DESCRIPTION_CHARS,
+                        false,
+                    )?;
+                }
+            }
+        }
+        for measure in &self.measures {
+            let entity = format!("measure '{}'", measure.name());
+            if let Some(format_string) = measure.format_string() {
+                validate_metadata_text(
+                    &entity,
+                    "format_string",
+                    format_string,
+                    MAX_METADATA_NAME_CHARS,
+                    false,
+                )?;
+            }
+            if let Some(description) = measure.description() {
+                validate_metadata_text(
+                    &entity,
+                    "description",
+                    description,
+                    MAX_METADATA_DESCRIPTION_CHARS,
+                    false,
+                )?;
+            }
+        }
+
+        // 0b. Expression AST validation. Measures, calculated columns, and
+        // global variables can be deserialized straight from model JSON,
+        // bypassing the parser's allow-lists (most critically the date/time
+        // interval keywords that the SQL renderers splice in raw). Validate
+        // every expression tree — and the filter predicates embedded in
+        // context definitions and table variables — before any SQL can be
+        // generated from them.
+        for measure in &self.measures {
+            measure.expression().validate()?;
+        }
+        for cc in &self.calculated_columns {
+            cc.expression().validate()?;
+        }
+        for gv in &self.global_variables {
+            gv.expression().validate()?;
+        }
+        for ctx in &self.contexts {
+            use crate::model::context::ContextOp;
+            for op in ctx.operations() {
+                match op {
+                    ContextOp::Keep(filters) => {
+                        for f in filters {
+                            f.validate()?;
+                        }
+                    }
+                    ContextOp::KeepIn(predicates) => {
+                        for p in predicates {
+                            p.validate()?;
+                        }
+                    }
+                    // These operations carry only lookup keys (table /
+                    // column / context / relationship names) that are
+                    // resolved against the model, never rendered raw.
+                    ContextOp::Clear(_)
+                    | ContextOp::ClearInner(_)
+                    | ContextOp::ClearOuter(_)
+                    | ContextOp::Reset
+                    | ContextOp::ResetInner
+                    | ContextOp::ResetOuter
+                    | ContextOp::Inherit(_)
+                    | ContextOp::UseRelationship(_) => {}
+                }
+            }
+        }
+        for var in &self.table_variables {
+            for f in var.filters() {
+                f.validate()?;
+            }
+        }
+
+        // 1. Table name uniqueness.
+        let mut seen_tables = std::collections::HashSet::new();
+        for table in &self.tables {
+            if !seen_tables.insert(table.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate table '{}'",
+                    table.name()
+                )));
+            }
+        }
+
+        // 1b. Validate sort_by_column references within each table.
+        for table in &self.tables {
+            for col in table.columns() {
+                if let Some(sort_col) = col.sort_by_column() {
+                    // Sort-by column must not reference itself.
+                    if sort_col == col.name() {
+                        return Err(EngineError::InvalidSortByColumn {
+                            table: table.name().to_string(),
+                            column: col.name().to_string(),
+                            reason: "column cannot sort by itself".to_string(),
+                        });
+                    }
+                    // Sort-by column must exist in the same table.
+                    let target =
+                        table
+                            .column(sort_col)
+                            .map_err(|_| EngineError::InvalidSortByColumn {
+                                table: table.name().to_string(),
+                                column: col.name().to_string(),
+                                reason: format!(
+                                    "sort_by_column '{}' not found in table '{}'",
+                                    sort_col,
+                                    table.name()
+                                ),
+                            })?;
+                    // Circular: A sorts by B, B sorts by A.
+                    if let Some(target_sort) = target.sort_by_column() {
+                        if target_sort == col.name() {
+                            return Err(EngineError::InvalidSortByColumn {
+                                table: table.name().to_string(),
+                                column: col.name().to_string(),
+                                reason: format!(
+                                    "circular sort_by_column: '{}' and '{}' sort by each other",
+                                    col.name(),
+                                    sort_col
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1c. Lookup resolution expressions must parse, and the model-level
+        // default must be column-generic (reference the `__column`
+        // placeholder). Catching this at build time keeps bad expressions in
+        // shared model files from failing only at query time.
+        if let Some(default_expr) = &self.default_lookup_resolution {
+            let parsed =
+                crate::compute::parser::parse_measure_expression(default_expr).map_err(|e| {
+                    EngineError::InvalidLookup {
+                        table: "(model)".to_string(),
+                        column: "default_lookup_resolution".to_string(),
+                        reason: format!("expression does not parse: {e}"),
+                    }
+                })?;
+            // Probe the placeholder rewrite with a dummy column name; this
+            // rejects defaults that omit the placeholder or qualify it.
+            apply_lookup_placeholder(&parsed, "__probe")?;
+        }
+        for table in &self.tables {
+            for col in table.columns() {
+                if let Some(expr_text) = col.lookup_resolution() {
+                    crate::compute::parser::parse_measure_expression(expr_text).map_err(|e| {
+                        EngineError::InvalidLookup {
+                            table: table.name().to_string(),
+                            column: col.name().to_string(),
+                            reason: format!("lookup_resolution does not parse: {e}"),
+                        }
+                    })?;
+                }
+            }
+        }
+
+        // 2. Relationship name uniqueness.
+        let mut seen_rels = std::collections::HashSet::new();
+        for rel in &self.relationships {
+            if !seen_rels.insert(rel.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate relationship '{}'",
+                    rel.name()
+                )));
+            }
+        }
+
+        // 3. Validate each relationship.
+        for rel in &self.relationships {
+            let from_table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == rel.from_table())
+                .ok_or_else(|| EngineError::InvalidRelationship {
+                    relationship: rel.name().to_string(),
+                    reason: format!("from_table '{}' not found", rel.from_table()),
+                })?;
+
+            let to_table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == rel.to_table())
+                .ok_or_else(|| EngineError::InvalidRelationship {
+                    relationship: rel.name().to_string(),
+                    reason: format!("to_table '{}' not found", rel.to_table()),
+                })?;
+
+            if rel.conditions().is_empty() {
+                return Err(EngineError::InvalidRelationship {
+                    relationship: rel.name().to_string(),
+                    reason: "conditions must not be empty".to_string(),
+                });
+            }
+
+            for condition in rel.conditions() {
+                let from_col = from_table.column(condition.from_column()).map_err(|_| {
+                    EngineError::InvalidRelationship {
+                        relationship: rel.name().to_string(),
+                        reason: format!(
+                            "column '{}' not found in table '{}'",
+                            condition.from_column(),
+                            rel.from_table()
+                        ),
+                    }
+                })?;
+
+                let to_col = to_table.column(condition.to_column()).map_err(|_| {
+                    EngineError::InvalidRelationship {
+                        relationship: rel.name().to_string(),
+                        reason: format!(
+                            "column '{}' not found in table '{}'",
+                            condition.to_column(),
+                            rel.to_table()
+                        ),
+                    }
+                })?;
+
+                if from_col.data_type() != to_col.data_type() {
+                    return Err(EngineError::InvalidRelationship {
+                        relationship: rel.name().to_string(),
+                        reason: format!(
+                            "type mismatch: {}.{} is {:?}, {}.{} is {:?}",
+                            rel.from_table(),
+                            condition.from_column(),
+                            from_col.data_type(),
+                            rel.to_table(),
+                            condition.to_column(),
+                            to_col.data_type(),
+                        ),
+                    });
+                }
+            }
+        }
+
+        // 3b. At most one active relationship per table pair.
+        {
+            let mut active_pairs = std::collections::HashSet::new();
+            for rel in &self.relationships {
+                if rel.is_active() {
+                    let pair = if rel.from_table() < rel.to_table() {
+                        (rel.from_table().to_string(), rel.to_table().to_string())
+                    } else {
+                        (rel.to_table().to_string(), rel.from_table().to_string())
+                    };
+                    if !active_pairs.insert(pair) {
+                        return Err(EngineError::InvalidRelationship {
+                            relationship: rel.name().to_string(),
+                            reason: format!(
+                                "multiple active relationships between '{}' and '{}'",
+                                rel.from_table(),
+                                rel.to_table()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 4. Validate measure groups (before measures, so groups exist for reference).
+        let mut seen_groups = std::collections::HashSet::new();
+        for group in &self.measure_groups {
+            if !seen_groups.insert(group.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate measure group '{}'",
+                    group.name()
+                )));
+            }
+        }
+
+        // 5. Validate measures.
+        let mut seen_measures = std::collections::HashSet::new();
+        for measure in &self.measures {
+            if !seen_measures.insert(measure.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate measure '{}'",
+                    measure.name()
+                )));
+            }
+
+            // Skip table/column validation for measures containing MeasureRef —
+            // their table is inferred after expansion (validated in step 10).
+            if crate::compute::expression::has_measure_ref(measure.expression()) {
+                // If measure references a group, that group must exist.
+                if let Some(group_name) = measure.group() {
+                    if !seen_groups.contains(group_name) {
+                        return Err(EngineError::MeasureGroupNotFound(group_name.to_string()));
+                    }
+                }
+                continue;
+            }
+
+            // Table must exist.
+            let table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == measure.table())
+                .ok_or_else(|| EngineError::TableNotFound(measure.table().to_string()))?;
+
+            // All referenced columns must exist in the table (physical or calculated).
+            let calc_col_names: Vec<&str> = self
+                .calculated_columns
+                .iter()
+                .filter(|cc| cc.table() == measure.table())
+                .map(|cc| cc.name())
+                .collect();
+
+            for col_ref in measure.column_references() {
+                if table.column(col_ref).is_err() && !calc_col_names.contains(&col_ref) {
+                    return Err(EngineError::ExpressionColumnNotFound {
+                        table: measure.table().to_string(),
+                        column: col_ref.to_string(),
+                    });
+                }
+            }
+
+            // If measure references a group, that group must exist.
+            if let Some(group_name) = measure.group() {
+                if !seen_groups.contains(group_name) {
+                    return Err(EngineError::MeasureGroupNotFound(group_name.to_string()));
+                }
+            }
+        }
+
+        // 6. Validate calculated columns.
+        let mut seen_calc_cols = std::collections::HashSet::new();
+        for cc in &self.calculated_columns {
+            // Name uniqueness among calculated columns.
+            if !seen_calc_cols.insert(cc.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate calculated column '{}'",
+                    cc.name()
+                )));
+            }
+
+            // Table must exist.
+            let table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == cc.table())
+                .ok_or_else(|| EngineError::InvalidCalculatedColumn {
+                    name: cc.name().to_string(),
+                    reason: format!("table '{}' not found", cc.table()),
+                })?;
+
+            // Must not contain aggregate nodes.
+            if cc.expression().has_aggregate() {
+                return Err(EngineError::InvalidCalculatedColumn {
+                    name: cc.name().to_string(),
+                    reason: "calculated columns must not contain aggregate expressions".into(),
+                });
+            }
+
+            // Must not contain context manipulation nodes.
+            if cc.expression().has_context_ops() {
+                return Err(EngineError::InvalidCalculatedColumn {
+                    name: cc.name().to_string(),
+                    reason: "calculated columns must not contain context operations (keep/clear/reset/traverse/using/block)".into(),
+                });
+            }
+
+            // All referenced columns must exist in the table.
+            for col_ref in cc.expression().column_references() {
+                if table.column(col_ref).is_err() {
+                    return Err(EngineError::ExpressionColumnNotFound {
+                        table: cc.table().to_string(),
+                        column: col_ref.to_string(),
+                    });
+                }
+            }
+
+            // Name must not collide with a physical column.
+            if table.column(cc.name()).is_ok() {
+                return Err(EngineError::InvalidCalculatedColumn {
+                    name: cc.name().to_string(),
+                    reason: format!(
+                        "name conflicts with physical column '{}' in table '{}'",
+                        cc.name(),
+                        cc.table()
+                    ),
+                });
+            }
+        }
+
+        // 7. Validate context definitions.
+        let mut seen_contexts = std::collections::HashSet::new();
+        for ctx in &self.contexts {
+            if !seen_contexts.insert(ctx.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate context '{}'",
+                    ctx.name()
+                )));
+            }
+            // No collision with table names.
+            if seen_tables.contains(ctx.name()) {
+                return Err(EngineError::InvalidContext {
+                    name: ctx.name().to_string(),
+                    reason: format!("name conflicts with table '{}'", ctx.name()),
+                });
+            }
+        }
+        // Check Inherit references and detect cycles.
+        for ctx in &self.contexts {
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(ctx.name().to_string());
+            for op in ctx.operations() {
+                if let crate::model::context::ContextOp::Inherit(ref parent) = op {
+                    if !seen_contexts.contains(parent.as_str()) {
+                        return Err(EngineError::InvalidContext {
+                            name: ctx.name().to_string(),
+                            reason: format!("inherits unknown context '{parent}'"),
+                        });
+                    }
+                    if !visited.insert(parent.clone()) {
+                        return Err(EngineError::InvalidContext {
+                            name: ctx.name().to_string(),
+                            reason: format!("circular inheritance involving '{parent}'"),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 8. Validate table variables.
+        let mut seen_vars = std::collections::HashSet::new();
+        for var in &self.table_variables {
+            // Unique variable names.
+            if !seen_vars.insert(var.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate table variable '{}'",
+                    var.name()
+                )));
+            }
+
+            // No collision with table names.
+            if seen_tables.contains(var.name()) {
+                return Err(EngineError::InvalidTableVariable {
+                    name: var.name().to_string(),
+                    reason: format!("name conflicts with table '{}'", var.name()),
+                });
+            }
+
+            // No collision with context names.
+            if seen_contexts.contains(var.name()) {
+                return Err(EngineError::InvalidTableVariable {
+                    name: var.name().to_string(),
+                    reason: format!("name conflicts with context '{}'", var.name()),
+                });
+            }
+
+            // Source must be an existing table or another table variable.
+            let source_is_table = self.tables.iter().any(|t| t.name() == var.source());
+            let source_is_var = self
+                .table_variables
+                .iter()
+                .any(|v| v.name() != var.name() && v.name() == var.source());
+            if !source_is_table && !source_is_var {
+                return Err(EngineError::InvalidTableVariable {
+                    name: var.name().to_string(),
+                    reason: format!(
+                        "source '{}' is not a known table or table variable",
+                        var.source()
+                    ),
+                });
+            }
+
+            // Find the base table by walking the variable chain.
+            let base_table_name = {
+                let mut current = var.source().to_string();
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(var.name().to_string());
+                loop {
+                    if !visited.insert(current.clone()) {
+                        return Err(EngineError::InvalidTableVariable {
+                            name: var.name().to_string(),
+                            reason: format!("circular reference involving '{current}'"),
+                        });
+                    }
+                    if let Some(parent_var) = self
+                        .table_variables
+                        .iter()
+                        .find(|v| v.name() == current.as_str())
+                    {
+                        current = parent_var.source().to_string();
+                    } else {
+                        break current;
+                    }
+                }
+            };
+
+            // Validate filter columns exist in the base table.
+            if let Some(base_table) = self.tables.iter().find(|t| t.name() == base_table_name) {
+                for filter in var.filters() {
+                    if base_table.column(&filter.column).is_err() {
+                        return Err(EngineError::InvalidTableVariable {
+                            name: var.name().to_string(),
+                            reason: format!(
+                                "filter column '{}' not found in base table '{}'",
+                                filter.column, base_table_name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 9. Validate global variables.
+        let mut seen_globals = std::collections::HashSet::new();
+        for gv in &self.global_variables {
+            // Unique names.
+            if !seen_globals.insert(gv.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate global variable '{}'",
+                    gv.name()
+                )));
+            }
+
+            // No collision with table names.
+            if seen_tables.contains(gv.name()) {
+                return Err(EngineError::InvalidGlobalVariable {
+                    name: gv.name().to_string(),
+                    reason: format!("name conflicts with table '{}'", gv.name()),
+                });
+            }
+
+            // No collision with context names.
+            if seen_contexts.contains(gv.name()) {
+                return Err(EngineError::InvalidGlobalVariable {
+                    name: gv.name().to_string(),
+                    reason: format!("name conflicts with context '{}'", gv.name()),
+                });
+            }
+
+            // No collision with table variable names.
+            if seen_vars.contains(gv.name()) {
+                return Err(EngineError::InvalidGlobalVariable {
+                    name: gv.name().to_string(),
+                    reason: format!("name conflicts with table variable '{}'", gv.name()),
+                });
+            }
+
+            // Referenced table must exist.
+            if !seen_tables.contains(gv.table()) {
+                return Err(EngineError::InvalidGlobalVariable {
+                    name: gv.name().to_string(),
+                    reason: format!("table '{}' not found", gv.table()),
+                });
+            }
+        }
+
+        // 10. Validate hierarchies.
+        let mut seen_hierarchies = std::collections::HashSet::new();
+        for hierarchy in &self.hierarchies {
+            // Unique hierarchy names.
+            if !seen_hierarchies.insert(hierarchy.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate hierarchy '{}'",
+                    hierarchy.name()
+                )));
+            }
+
+            // No collision with table names.
+            if seen_tables.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with table '{}'", hierarchy.name()),
+                });
+            }
+
+            // No collision with context names.
+            if seen_contexts.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with context '{}'", hierarchy.name()),
+                });
+            }
+
+            // No collision with table variable names.
+            if seen_vars.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with table variable '{}'", hierarchy.name()),
+                });
+            }
+
+            // No collision with global variable names.
+            if seen_globals.contains(hierarchy.name()) {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("name conflicts with global variable '{}'", hierarchy.name()),
+                });
+            }
+
+            // Table must exist.
+            let table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == hierarchy.table())
+                .ok_or_else(|| EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!("table '{}' not found", hierarchy.table()),
+                })?;
+
+            // At least 2 levels.
+            if hierarchy.levels().len() < 2 {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: format!(
+                        "hierarchy must have at least 2 levels, found {}",
+                        hierarchy.levels().len()
+                    ),
+                });
+            }
+
+            // All level columns must exist, no duplicates.
+            let mut seen_level_columns = std::collections::HashSet::new();
+            for level in hierarchy.levels() {
+                if table.column(level.column()).is_err() {
+                    return Err(EngineError::InvalidHierarchy {
+                        name: hierarchy.name().to_string(),
+                        reason: format!(
+                            "level column '{}' not found in table '{}'",
+                            level.column(),
+                            hierarchy.table()
+                        ),
+                    });
+                }
+                if !seen_level_columns.insert(level.column()) {
+                    return Err(EngineError::InvalidHierarchy {
+                        name: hierarchy.name().to_string(),
+                        reason: format!("duplicate level column '{}'", level.column()),
+                    });
+                }
+            }
+
+            // Stopper values are only valid on optional levels.
+            for level in hierarchy.levels() {
+                if level.stopper_value().is_some() && !level.is_optional() {
+                    return Err(EngineError::InvalidHierarchy {
+                        name: hierarchy.name().to_string(),
+                        reason: format!(
+                            "level '{}' has a stopper_value but is not optional",
+                            level.column()
+                        ),
+                    });
+                }
+            }
+
+            // First and last levels must not be optional.
+            if hierarchy.levels().first().unwrap().is_optional() {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: "first level cannot be optional".to_string(),
+                });
+            }
+            if hierarchy.levels().last().unwrap().is_optional() {
+                return Err(EngineError::InvalidHierarchy {
+                    name: hierarchy.name().to_string(),
+                    reason: "last level cannot be optional".to_string(),
+                });
+            }
+        }
+
+        // 11. Validate the date table. Only the marked table is checked:
+        // date roles on unmarked tables are inert metadata until the table
+        // is marked, at which point this step runs against it.
+        if let Some(date_table_name) = &self.date_table {
+            use crate::model::column::DateRole;
+            use crate::types::DataType;
+
+            let table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == date_table_name.as_str())
+                .ok_or_else(|| EngineError::InvalidDateTable {
+                    table: date_table_name.clone(),
+                    reason: "table not found in model".to_string(),
+                })?;
+
+            let mut seen_roles: std::collections::HashMap<DateRole, &str> =
+                std::collections::HashMap::new();
+            for col in table.columns() {
+                let Some(role) = col.date_role() else {
+                    continue;
+                };
+                if let Some(previous) = seen_roles.insert(role, col.name()) {
+                    return Err(EngineError::InvalidDateTable {
+                        table: date_table_name.clone(),
+                        reason: format!(
+                            "date role {role} is assigned to multiple columns \
+                             ('{previous}' and '{}'); each role may appear on at \
+                             most one column",
+                            col.name()
+                        ),
+                    });
+                }
+                match role {
+                    // The date key is the real calendar column.
+                    DateRole::DateKey => {
+                        if !matches!(col.data_type(), DataType::Date | DataType::Timestamp) {
+                            return Err(EngineError::InvalidDateTable {
+                                table: date_table_name.clone(),
+                                reason: format!(
+                                    "column '{}' with role DateKey must be Date or \
+                                     Timestamp, got {:?}",
+                                    col.name(),
+                                    col.data_type()
+                                ),
+                            });
+                        }
+                    }
+                    // Part columns are lenient: integers are the common case,
+                    // strings are accepted for labels like "Q1" / "2024-03".
+                    DateRole::Year
+                    | DateRole::Quarter
+                    | DateRole::Month
+                    | DateRole::Week
+                    | DateRole::Day => {
+                        if !matches!(
+                            col.data_type(),
+                            DataType::Int32 | DataType::Int64 | DataType::String
+                        ) {
+                            return Err(EngineError::InvalidDateTable {
+                                table: date_table_name.clone(),
+                                reason: format!(
+                                    "column '{}' with role {role} must be an integer \
+                                     or string type, got {:?}",
+                                    col.name(),
+                                    col.data_type()
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let model = DataModel {
+            // Freshly built models always carry the current format version
+            // (deserialized legacy models keep their stored value; note
+            // that `DataModel::validate()` only borrows the rebuilt model
+            // for validation and never copies this field back, so
+            // validating a legacy model does not alter its version).
+            format_version: MODEL_FORMAT_VERSION,
+            tables: self.tables,
+            relationships: self.relationships,
+            measures: self.measures,
+            calculated_columns: self.calculated_columns,
+            measure_groups: self.measure_groups,
+            contexts: self.contexts,
+            table_variables: self.table_variables,
+            global_variables: self.global_variables,
+            hierarchies: self.hierarchies,
+            default_lookup_resolution: self.default_lookup_resolution,
+            date_table: self.date_table,
+        };
+
+        // 10. Validate measure references are acyclic and target existing measures.
+        for measure in model.measures() {
+            if crate::compute::expression::has_measure_ref(measure.expression()) {
+                crate::compute::expression::expand_measure_refs(measure.expression(), &model)?;
+            }
+        }
+
+        Ok(model)
+    }
+}

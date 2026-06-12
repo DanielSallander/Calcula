@@ -134,7 +134,46 @@ pub enum FilterPropagation {
     /// No automatic filter propagation. Cross-table filters require explicit
     /// `traverse()` in expressions.
     None,
-    /// Filters propagate in both directions.
+    /// Filters propagate in both directions: dimension → fact (as with
+    /// [`Auto`](FilterPropagation::Auto)) **and** fact → dimension.
+    ///
+    /// # Engine semantics (v1 contract)
+    ///
+    /// The reverse (fact → dimension) direction is applied by the query
+    /// pipeline **at fetch level**, in locally aggregated plans only:
+    ///
+    /// - When the measure (fact) side of this relationship carries filters —
+    ///   query filters on the fact table, pushed context filters, or IN
+    ///   filters propagated from *other* filtered dimensions — the engine
+    ///   obtains the filtered fact rows' distinct join-key values and
+    ///   applies them as an `IN` filter on the dimension side's fetch
+    ///   (pushed into the source query for connector-backed dimensions;
+    ///   applied locally for cached or already-fetched dimensions).
+    /// - Effect: dimension-side aggregates (e.g. `DISTINCTCOUNT` over a
+    ///   dimension attribute) and dimension rows reflect only members
+    ///   related to the filtered fact rows — Power BI-style bidirectional
+    ///   filtering.
+    /// - For a connector-backed fact this costs one extra narrow key-only
+    ///   fetch per `Both` relationship; cache-served facts compute the keys
+    ///   locally with no extra fetch.
+    ///
+    /// # Limitations (by design)
+    ///
+    /// - Only **active**, **single-condition equality** relationships
+    ///   participate; multi-condition or non-equi `Both` relationships are
+    ///   ignored by the reverse direction.
+    /// - One round only: a reverse-filtered dimension does **not**
+    ///   re-propagate to other tables (multi-hop bidirectional chains are
+    ///   not transitive).
+    /// - An unfiltered fact side propagates nothing (no extra fetch is
+    ///   issued).
+    /// - A fact side filtered down to zero rows applies **no** reverse
+    ///   filter (SQL cannot render an empty `IN` list); the dimension stays
+    ///   unfiltered in that edge case.
+    /// - Plans pushed to a single source as one SQL statement need no
+    ///   reverse propagation: their `INNER JOIN` already filters both ways
+    ///   within the statement, so `Both` semantics hold there
+    ///   automatically.
     Both,
 }
 
