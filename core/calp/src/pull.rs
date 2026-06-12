@@ -65,6 +65,21 @@ pub fn pull(
     let version_str = resolved.to_string();
     let ver_manifest = registry.get_version_manifest(&request.package_name, &version_str)?;
 
+    // INTEGRITY GATE: verify every artifact in the version directory against
+    // the manifest's published SHA-256 checksums BEFORE materializing
+    // anything. This single chokepoint covers both subscribe and refresh
+    // (pull_all_updates delegates here), and also vouches for artifacts the
+    // Tauri layer reads lazily after pull (e.g. models/{ds}/model.json).
+    // Phase 2 (Ed25519 signing + TOFU pinning) will verify the manifest
+    // signature here first — see integrity.rs.
+    let ver_dir = registry.version_dir(&request.package_name, &version_str);
+    crate::integrity::verify_version_artifacts(
+        &ver_dir,
+        &ver_manifest,
+        &request.package_name,
+        &version_str,
+    )?;
+
     // Read sheets
     let mut pulled_sheets = Vec::new();
     for pub_sheet in &ver_manifest.sheets {
@@ -397,6 +412,148 @@ mod tests {
 
         let result = pull(&reg, &request);
         assert!(result.is_err());
+    }
+
+    // --- Integrity verification tests (S5 phase 1) ---
+
+    fn make_pull_request() -> PullRequest {
+        PullRequest {
+            package_name: "test-pkg".to_string(),
+            registry_url: "file:///test".to_string(),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        }
+    }
+
+    /// unwrap_err() requires Debug on the Ok type; PullResult intentionally
+    /// has no Debug derive (deep persistence types), so match instead.
+    fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest) -> CalpError {
+        match pull(reg, req) {
+            Ok(_) => panic!("pull unexpectedly succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn pull_roundtrip_passes_integrity_verification() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg);
+
+        // Publish recorded checksums...
+        let ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
+        assert!(!ver.artifact_checksums.is_empty());
+
+        // ...and an untampered pull passes the integrity gate.
+        let result = pull(&reg, &make_pull_request()).unwrap();
+        assert_eq!(result.sheets.len(), 2);
+    }
+
+    #[test]
+    fn pull_fails_on_tampered_data_file() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let wb = publish_test_package(&reg);
+
+        // Tamper with a published artifact after publish.
+        let data_path = reg
+            .sheet_dir("test-pkg", "1.0.0", &wb.sheets[0].id)
+            .join("data.json");
+        fs::write(&data_path, "{\"cells\": \"tampered\"}").unwrap();
+
+        let err = expect_pull_err(&reg, &make_pull_request());
+        assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("Package integrity check failed"), "msg: {}", msg);
+        assert!(msg.contains("test-pkg@1.0.0"), "msg: {}", msg);
+        assert!(msg.contains("data.json"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn pull_fails_on_file_added_after_publish() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg);
+
+        // Inject a file the publisher never wrote (e.g. a smuggled script).
+        let rogue = reg
+            .version_dir("test-pkg", "1.0.0")
+            .join("object_scripts");
+        fs::create_dir_all(&rogue).unwrap();
+        fs::write(rogue.join("rogue.json"), "{\"source\": \"evil()\"}").unwrap();
+
+        let err = expect_pull_err(&reg, &make_pull_request());
+        assert!(matches!(err, CalpError::UnlistedArtifact { .. }));
+        assert!(err.to_string().contains("object_scripts/rogue.json"));
+    }
+
+    #[test]
+    fn pull_fails_on_deleted_artifact() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let wb = publish_test_package(&reg);
+
+        // Tamper-by-deletion: previously a silent skip, now a hard error.
+        let styles_path = reg
+            .sheet_dir("test-pkg", "1.0.0", &wb.sheets[1].id)
+            .join("styles.json");
+        fs::remove_file(&styles_path).unwrap();
+
+        let err = expect_pull_err(&reg, &make_pull_request());
+        assert!(matches!(err, CalpError::MissingArtifact { .. }));
+        assert!(err.to_string().contains("styles.json"));
+    }
+
+    #[test]
+    fn pull_fails_on_package_published_without_checksums() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg);
+
+        // Simulate a pre-checksum (legacy) package: strip the checksum map
+        // from the version manifest. No backward compatibility: hard error.
+        let mut ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
+        ver.artifact_checksums = std::collections::BTreeMap::new();
+        reg.write_version_manifest("test-pkg", "1.0.0", &ver).unwrap();
+
+        let err = expect_pull_err(&reg, &make_pull_request());
+        assert!(matches!(err, CalpError::MissingChecksums { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("without integrity checksums"), "msg: {}", msg);
+        assert!(msg.contains("republish"), "msg: {}", msg);
+    }
+
+    #[test]
+    fn pull_ignores_subscriber_submissions() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg);
+
+        // Subscriber-written submissions land inside the version directory
+        // after publish — they are a separate trust domain and must not
+        // trip the publisher-artifact integrity gate.
+        let submission = crate::writeback::WritebackSubmission {
+            id: "sub-1".to_string(),
+            region_id: "r1".to_string(),
+            cell_row: 0,
+            cell_col: 0,
+            cell_id: None,
+            submitter: crate::identity_provider::SubmitterIdentity {
+                display_name: "alice".to_string(),
+                id: "id-alice".to_string(),
+                extra: HashMap::new(),
+            },
+            value: crate::writeback::SubmissionValue::Number { value: 42.0 },
+            state: crate::writeback::SubmissionState::Submitted,
+            created_at: "2026-05-18T02:00:00Z".to_string(),
+            updated_at: "2026-05-18T02:00:00Z".to_string(),
+            submitted_at: Some("2026-05-18T02:00:00Z".to_string()),
+            extra: HashMap::new(),
+        };
+        reg.save_submission("test-pkg", "1.0.0", &submission).unwrap();
+
+        let result = pull(&reg, &make_pull_request()).unwrap();
+        assert_eq!(result.sheets.len(), 2);
     }
 
     #[test]

@@ -160,14 +160,6 @@ function setup(slicer) {
   //   slicer.log("Selection changed:", selectedItems);
   // });
 
-  // slicer.onDataRefresh(({ items }) => {
-  //   slicer.log("Data refreshed:", items.length, "items");
-  // });
-
-  // slicer.onResize(({ x, y, width, height }) => {
-  //   slicer.log("Resized:", width, "x", height);
-  // });
-
   // == Data Access ==
   // const selected = slicer.getSelectedItems();
   // slicer.setSelectedItems(["Item1", "Item2"]);
@@ -200,14 +192,6 @@ function setup(chart) {
   //   chart.log("Chart data changed");
   // });
 
-  // chart.onClick(({ x, y }) => {
-  //   chart.log("Chart clicked at:", x, y);
-  // });
-
-  // chart.onResize(({ x, y, width, height }) => {
-  //   chart.log("Chart resized:", width, "x", height);
-  // });
-
   // == Data Access ==
   // const spec = chart.getSpec();
   // chart.updateSpec({ title: "Updated Title" });
@@ -222,14 +206,6 @@ function setup(pivot) {
   // == Events ==
   // pivot.onRefresh(() => {
   //   pivot.log("Pivot refreshed");
-  // });
-
-  // pivot.onLayoutChange(({ rows, columns, values, filters }) => {
-  //   pivot.log("Layout changed - rows:", rows, "values:", values);
-  // });
-
-  // pivot.onResize(({ x, y, width, height }) => {
-  //   pivot.log("Pivot resized:", width, "x", height);
   // });
 
   // == Data Access ==
@@ -485,8 +461,6 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
           category: "Events",
           methods: [
             { name: "onSelectionChange", signature: "onSelectionChange(handler)", description: "Called when slicer selection changes" },
-            { name: "onDataRefresh", signature: "onDataRefresh(handler)", description: "Called when data refreshes" },
-            { name: "onResize", signature: "onResize(handler)", description: "Called when slicer is moved/resized" },
           ],
         },
         {

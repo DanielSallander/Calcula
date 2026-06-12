@@ -26,8 +26,8 @@ declare interface UnlockedAPI {
   emitEvent(name: string, detail?: unknown): void;
   /** Listen for a global event. Returns unsubscribe function. */
   onEvent(name: string, handler: (detail: unknown) => void): () => void;
-  /** Execute a registered command by ID. */
-  executeCommand(commandId: string, ...args: unknown[]): void;
+  /** Execute a registered command by ID. Args are forwarded to the handler unchanged. */
+  executeCommand(commandId: string, args?: unknown): void;
   /**
    * Begin an undo transaction. All cell changes until commitBatch() are
    * grouped as a single undo entry.
@@ -166,10 +166,6 @@ declare interface SlicerContext extends BaseObjectContext {
   readonly name: string;
   /** Called when slicer selection changes (items are selected/deselected). */
   onSelectionChange(handler: (detail: { selectedItems: string[] }) => void): () => void;
-  /** Called when the slicer's underlying data is refreshed. */
-  onDataRefresh(handler: (detail: { items: string[] }) => void): () => void;
-  /** Called when the slicer is moved or resized. */
-  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
   /** Get the currently selected items. */
   getSelectedItems(): string[];
   /** Set the selected items programmatically. */
@@ -208,10 +204,6 @@ declare interface ChartContext extends BaseObjectContext {
   readonly instanceId: string;
   /** Called when the chart's source data changes. */
   onDataChange(handler: () => void): () => void;
-  /** Called when the chart is clicked. */
-  onClick(handler: (detail: { x: number; y: number }) => void): () => void;
-  /** Called when the chart is moved or resized. */
-  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
   /** Get the chart specification (JSON object). */
   getSpec(): Record<string, unknown>;
   /** Update the chart specification (merge patch). */
@@ -229,10 +221,6 @@ declare interface PivotContext extends BaseObjectContext {
   readonly instanceId: string;
   /** Called when the pivot is refreshed (recalculated). */
   onRefresh(handler: () => void): () => void;
-  /** Called when pivot field layout changes. */
-  onLayoutChange(handler: (detail: { rows: string[]; columns: string[]; values: string[]; filters: string[] }) => void): () => void;
-  /** Called when the pivot is moved or resized. */
-  onResize(handler: (detail: { x: number; y: number; width: number; height: number }) => void): () => void;
   /** Get current pivot field configuration. */
   getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
   /** Refresh the pivot table data. */

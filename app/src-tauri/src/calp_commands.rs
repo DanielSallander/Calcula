@@ -91,8 +91,11 @@ pub struct SheetInfo {
 pub fn calp_publish(
     state: State<AppState>,
     bi_state: State<BiState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
     params: PublishParams,
+    window: tauri::Window,
 ) -> Result<PublishResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
         .map_err(|e| e.to_string())?;
 
@@ -102,7 +105,63 @@ pub fn calp_publish(
     let now = chrono::Utc::now().to_rfc3339();
 
     // Build a lightweight workbook snapshot for publishing
-    let workbook = crate::persistence::build_workbook_snapshot(&state)?;
+    let mut workbook = crate::persistence::build_workbook_snapshot(&state)?;
+
+    // Ship pivot definitions + BI pivot metadata so subscribers can rebuild
+    // live pivots; per-pivot data source routing reads the dataSourceId
+    // carried in that metadata. Without this, in-app publishes shipped no
+    // pivots at all (only the example generator did).
+    crate::persistence::collect_pivot_definitions(&pivot_state, &state, &mut workbook);
+
+    // The package contains only the selected sheets: drop pivots whose
+    // source or destination sheet isn't included, and remap grid-source
+    // sheet indices from workbook positions to package positions (pull
+    // appends package sheets in order, offset by the pre-pull sheet count).
+    {
+        let index_map: std::collections::HashMap<usize, usize> = params
+            .sheet_indices
+            .iter()
+            .enumerate()
+            .map(|(package_idx, &wb_idx)| (wb_idx, package_idx))
+            .collect();
+        let published_names: std::collections::HashSet<String> = params
+            .sheet_indices
+            .iter()
+            .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.clone()))
+            .collect();
+
+        workbook.pivot_definitions.retain_mut(|def| {
+            let dest_ok = def
+                .definition
+                .get("destination_sheet")
+                .and_then(|v| v.as_str())
+                .map_or(true, |name| published_names.contains(name));
+            if !dest_ok {
+                return false;
+            }
+            match def.source_sheet_index {
+                Some(wb_idx) => match index_map.get(&wb_idx) {
+                    Some(&package_idx) => {
+                        def.source_sheet_index = Some(package_idx);
+                        true
+                    }
+                    None => false, // grid source sheet not published
+                },
+                None => true, // BI pivot — no grid source sheet
+            }
+        });
+
+        let kept: std::collections::HashSet<String> = workbook
+            .pivot_definitions
+            .iter()
+            .map(|d| d.id.to_string())
+            .collect();
+        workbook.bi_pivot_metadata.retain(|m| {
+            m.get("pivotId")
+                .and_then(|v| v.as_str())
+                .map_or(false, |id| kept.contains(id))
+        });
+    }
 
     // Include any author-designated writeback regions in the publish
     let writeback_regions = {
@@ -117,7 +176,7 @@ pub fn calp_publish(
     };
 
     // Capture active BI connections as data sources
-    let data_sources = capture_bi_data_sources(&state, &bi_state)?;
+    let data_sources = capture_bi_data_sources(&bi_state)?;
 
     // Validate BI pivot definitions against the embedded model before publishing.
     // This catches mismatched field names (e.g., grid-style "Category" instead of
@@ -178,7 +237,9 @@ pub fn calp_pull(
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, BiState>,
     params: PullParams,
+    window: tauri::Window,
 ) -> Result<PullResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
         .map_err(|e| e.to_string())?;
 
@@ -290,7 +351,9 @@ pub fn calp_pull(
 #[tauri::command]
 pub fn calp_browse_registry(
     registry_path: String,
+    window: tauri::Window,
 ) -> Result<Vec<PackageInfo>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
 
@@ -368,7 +431,9 @@ pub fn calp_inspect_package(
     registry_path: String,
     package_name: String,
     version_pin: String,
+    window: tauri::Window,
 ) -> Result<PackageInspection, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
 
@@ -414,7 +479,9 @@ pub fn calp_inspect_package(
 #[tauri::command]
 pub fn calp_get_subscriptions(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<SubscriptionManifest, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     Ok(subs.clone())
 }
@@ -423,7 +490,9 @@ pub fn calp_get_subscriptions(
 #[tauri::command]
 pub fn calp_get_overrides(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<calp::OverrideLayer, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
     Ok(layer.clone())
 }
@@ -457,14 +526,35 @@ fn write_override_value(grid: &mut engine::Grid, row: u32, col: u32, value: &cal
             });
         }
         calp::OverrideValue::Formula { formula } => {
-            grid.set_cell(row, col, engine::Cell {
-                ast: parser::parse(formula).ok().map(Box::new),
-                value: engine::CellValue::Empty,
-                style_index,
-                rich_text: None,
-            });
+            match parser::parse(formula) {
+                Ok(ast) => {
+                    grid.set_cell(row, col, engine::Cell {
+                        ast: Some(Box::new(ast)),
+                        value: engine::CellValue::Empty,
+                        style_index,
+                        rich_text: None,
+                    });
+                }
+                Err(_) => {
+                    // Version skew can make a stored formula unparseable
+                    // here. Keep the text visible instead of silently
+                    // blanking the cell (the override layer still holds it).
+                    crate::log_warn!("CALP", "Override formula failed to parse at ({},{}): ={}", row, col, formula);
+                    grid.set_cell(row, col, engine::Cell {
+                        ast: None,
+                        value: engine::CellValue::Text(format!("={}", formula)),
+                        style_index,
+                        rich_text: None,
+                    });
+                }
+            }
         }
     }
+}
+
+/// Resolve a sheet id to its current workbook index.
+fn sheet_index_for_id(state: &AppState, sheet_id: SheetId) -> Option<usize> {
+    state.sheet_ids.lock().ok()?.iter().position(|id| *id == sheet_id)
 }
 
 /// Write an OverrideValue into the workbook grids at the cell's current
@@ -520,9 +610,13 @@ fn apply_override_value_to_grid(
 #[tauri::command]
 pub fn calp_revert_override(
     state: State<AppState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
     sheet_id: String,
     cell_id: String,
+    window: tauri::Window,
 ) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let cid = CellId::parse(&cell_id)
@@ -542,6 +636,13 @@ pub fn calp_revert_override(
     match restore {
         Some((baseline, position)) => {
             apply_override_value_to_grid(&state, sid, cid, position, &baseline);
+            // Re-evaluate the sheet so restored formulas (written Empty,
+            // pending recalc) and dependents of the restored value display
+            // correctly even when the sheet is not active — the frontend's
+            // calculateNow only covers the active one.
+            if let Some(idx) = sheet_index_for_id(&state, sid) {
+                crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx);
+            }
             Ok(true)
         }
         None => Ok(false),
@@ -553,9 +654,13 @@ pub fn calp_revert_override(
 #[tauri::command]
 pub fn calp_accept_upstream(
     state: State<AppState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
     sheet_id: String,
     cell_id: String,
+    window: tauri::Window,
 ) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let cid = CellId::parse(&cell_id)
@@ -578,6 +683,9 @@ pub fn calp_accept_upstream(
     match restore {
         Some((upstream, position)) => {
             apply_override_value_to_grid(&state, sid, cid, position, &upstream);
+            if let Some(idx) = sheet_index_for_id(&state, sid) {
+                crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx);
+            }
             Ok(true)
         }
         None => Ok(false),
@@ -590,7 +698,9 @@ pub fn calp_keep_override(
     state: State<AppState>,
     sheet_id: String,
     cell_id: String,
+    window: tauri::Window,
 ) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let cid = CellId::parse(&cell_id)
@@ -604,7 +714,9 @@ pub fn calp_keep_override(
 pub fn calp_export_overrides(
     state: State<AppState>,
     package_name: String,
+    window: tauri::Window,
 ) -> Result<calp::OverridePatch, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     // Determine baseline version from subscription manifest (first match wins).
@@ -625,7 +737,9 @@ pub fn calp_export_overrides(
 pub fn calp_import_overrides(
     state: State<AppState>,
     patch_json: String,
+    window: tauri::Window,
 ) -> Result<usize, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut patch: calp::OverridePatch =
         serde_json::from_str(&patch_json).map_err(|e| e.to_string())?;
 
@@ -861,7 +975,9 @@ fn group_subscriptions_by_registry(
 #[tauri::command]
 pub fn calp_refresh_preview(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<calp::refresh::RefreshPreview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
 
@@ -901,7 +1017,11 @@ pub fn calp_refresh_preview(
 #[tauri::command]
 pub fn calp_refresh_apply(
     state: State<AppState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let now = chrono::Utc::now().to_rfc3339();
 
     // Pull new versions for all subscriptions that have updates.
@@ -937,7 +1057,12 @@ pub fn calp_refresh_apply(
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
 
         for payload in &payloads {
-            let sub = &subs.subscriptions[payload.subscription_index];
+            // Revalidate: a concurrent detach/subscribe between lock windows
+            // can shift indices; indexing blindly would panic and poison the
+            // grid mutexes app-wide.
+            let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                continue;
+            };
 
             // Collect package_sheet_ids already tracked in this subscription so
             // we can distinguish new sheets from updated ones.
@@ -1040,7 +1165,9 @@ pub fn calp_refresh_apply(
             std::collections::HashMap::new();
         let mut sheets: std::collections::HashSet<SheetId> = std::collections::HashSet::new();
         for payload in &payloads {
-            let sub = &subs.subscriptions[payload.subscription_index];
+            let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                continue;
+            };
             for pulled in &payload.pull_result.sheets {
                 let Some(sheet_sub) = sub.sheets.iter()
                     .find(|s| s.package_sheet_id == pulled.package_sheet_id)
@@ -1062,9 +1189,23 @@ pub fn calp_refresh_apply(
         (values, sheets)
     };
 
+    // Collect each payload's refreshed script set before the payloads move
+    // into apply_refresh below.
+    let script_updates: Vec<(String, Vec<persistence::SavedObjectScript>)> = payloads
+        .iter()
+        .map(|p| (p.pull_result.package_name.clone(), p.pull_result.object_scripts.clone()))
+        .collect();
+
     // Apply refresh: update subscription metadata and rebase overrides.
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+
+    // apply_refresh indexes subscriptions by payload.subscription_index; if a
+    // concurrent detach shrank the list since the payloads were built, bail
+    // out instead of panicking inside the core crate.
+    if payloads.iter().any(|p| p.subscription_index >= subs.subscriptions.len()) {
+        return Err("Subscriptions changed while the refresh was running — please retry.".to_string());
+    }
 
     let result = calp::refresh::apply_refresh(
         payloads,
@@ -1090,6 +1231,29 @@ pub fn calp_refresh_apply(
 
     for ovr in &to_overlay {
         apply_override_value_to_grid(&state, ovr.sheet_id, ovr.cell_id, ovr.position, &ovr.current);
+    }
+
+    // Swap in the refreshed packages' scripts: replace each package's
+    // previous distributed scripts with the new version's set (already
+    // stamped Distributed + restricted by the pull layer) and add new ones.
+    // Without this the workbook keeps running v1 scripts against vN sheets
+    // and the hash-keyed consent re-prompt can never trigger. Distributed
+    // scripts are upstream-owned (read-only locally), so replacement is safe.
+    {
+        let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+        for (package_name, new_scripts) in script_updates {
+            scripts.retain(|s| {
+                !(matches!(s.provenance, persistence::ScriptProvenance::Distributed)
+                    && s.package_name.as_deref() == Some(package_name.as_str()))
+            });
+            for script in new_scripts {
+                // Never let a package script shadow an unrelated local
+                // script that happens to share its id.
+                if !scripts.iter().any(|s| s.id == script.id) {
+                    scripts.push(script);
+                }
+            }
+        }
     }
 
     rebuild_writeback_index(&state);
@@ -1123,13 +1287,36 @@ pub fn calp_refresh_apply(
         }
     }
 
+    // The refreshed grids hold pristine upstream content plus overlays whose
+    // formula cells are pending evaluation, and the dependency maps still
+    // describe the PRE-refresh active sheet. Rebuild deps (active sheet only —
+    // the maps are single-sheet) and re-evaluate every refreshed sheet,
+    // including non-active ones that calculate_now never touches.
+    {
+        let refreshed_indices: Vec<usize> = {
+            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+            sheet_ids.iter().enumerate()
+                .filter(|(_, sid)| refreshed_sheet_ids.contains(sid))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if refreshed_indices.contains(&active) {
+            crate::undo_commands::rebuild_all_dependencies(&state);
+        }
+        for idx in refreshed_indices {
+            crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx);
+        }
+    }
+
     Ok(result)
 }
 
 /// Strip all subscriptions and overrides, converting the workbook to a
 /// standalone (detached) document.
 #[tauri::command]
-pub fn calp_detach(state: State<AppState>) -> Result<(), String> {
+pub fn calp_detach(state: State<AppState>, window: tauri::Window) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
 
@@ -1141,6 +1328,7 @@ pub fn calp_detach(state: State<AppState>) -> Result<(), String> {
     if let Ok(mut idx) = state.writeback_index.lock() {
         *idx = calp::WritebackIndex::default();
     }
+    invalidate_gather_cache(&state);
 
     Ok(())
 }
@@ -1164,7 +1352,9 @@ pub struct DevSubscribeParams {
 pub fn calp_dev_subscribe(
     state: State<AppState>,
     params: DevSubscribeParams,
+    window: tauri::Window,
 ) -> Result<PullResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let source = std::path::Path::new(&params.source_path);
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -1230,7 +1420,8 @@ pub fn calp_dev_subscribe(
 
 /// Re-pull from the dev source, refreshing HEAD sheets in the workbook.
 #[tauri::command]
-pub fn calp_dev_refresh(state: State<AppState>) -> Result<PullResponse, String> {
+pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result<PullResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // Find the dev subscription.
     let (source_path, sub_index) = {
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
@@ -1329,7 +1520,9 @@ pub fn calp_rename_cell_id(
     sheet_id: String,
     old_cell_id: String,
     new_cell_id: String,
+    window: tauri::Window,
 ) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let old = CellId::parse(&old_cell_id)
@@ -1347,7 +1540,9 @@ pub fn calp_merge_cell_ids(
     sheet_id: String,
     survivor_cell_id: String,
     absorbed_cell_id: String,
+    window: tauri::Window,
 ) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let survivor = CellId::parse(&survivor_cell_id)
@@ -1366,7 +1561,9 @@ pub fn calp_merge_cell_ids(
 #[tauri::command]
 pub fn calp_get_audit_log(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<calp::audit::AuditLog, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let log = state.audit_log.lock().map_err(|e| e.to_string())?;
     Ok(log.clone())
 }
@@ -1378,7 +1575,9 @@ pub fn calp_set_audit_enabled(
     state: State<AppState>,
     enabled: bool,
     max_entries: usize,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
     log.enabled = enabled;
     log.max_entries = max_entries;
@@ -1389,7 +1588,9 @@ pub fn calp_set_audit_enabled(
 #[tauri::command]
 pub fn calp_clear_audit_log(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut log = state.audit_log.lock().map_err(|e| e.to_string())?;
     log.clear();
     Ok(())
@@ -1403,7 +1604,9 @@ pub fn calp_clear_audit_log(
 #[tauri::command]
 pub fn calp_get_writeback_regions(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<Vec<calp::WritebackRegionEntry>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
     let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
     let id_to_index: std::collections::HashMap<identity::SheetId, usize> = sheet_ids
@@ -1419,6 +1622,10 @@ pub fn calp_get_writeback_regions(
 /// Called internally after pull and refresh, and after workbook load (the
 /// index is in-memory only and would otherwise be stale-empty after reopen).
 pub(crate) fn rebuild_writeback_index(state: &AppState) {
+    // The index changes on pull/refresh/open/detach — the cached GATHER map
+    // is built from the same declarations and must go with it.
+    invalidate_gather_cache(state);
+
     let subs = match state.subscriptions.lock() {
         Ok(s) => s,
         Err(_) => return,
@@ -1474,7 +1681,9 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
 pub fn calp_get_sheet_id(
     state: State<AppState>,
     sheet_index: usize,
+    window: tauri::Window,
 ) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
     sheet_ids
         .get(sheet_index)
@@ -1486,7 +1695,9 @@ pub fn calp_get_sheet_id(
 #[tauri::command]
 pub fn calp_get_writeback_draft_regions(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<Vec<calp::WritebackRegionDeclaration>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
     Ok(drafts.clone())
 }
@@ -1496,7 +1707,9 @@ pub fn calp_get_writeback_draft_regions(
 pub fn calp_add_writeback_region(
     state: State<AppState>,
     region: calp::WritebackRegionDeclaration,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // Validate the region
     let test_decls = vec![region.clone()];
     calp::WritebackIndex::from_declarations(&test_decls)
@@ -1524,7 +1737,9 @@ pub fn calp_add_writeback_region(
 pub fn calp_remove_writeback_region(
     state: State<AppState>,
     region_id: String,
+    window: tauri::Window,
 ) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
     let len_before = drafts.len();
     drafts.retain(|r| r.id != region_id);
@@ -1536,7 +1751,9 @@ pub fn calp_remove_writeback_region(
 pub fn calp_update_writeback_region(
     state: State<AppState>,
     region: calp::WritebackRegionDeclaration,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
 
     let pos = drafts.iter().position(|r| r.id == region.id)
@@ -1615,6 +1832,77 @@ fn owning_subscription_for_region(
     ))
 }
 
+/// Versions of a package strictly OLDER than `resolved_version` (semver
+/// order). Used for lenient carry-forward — a subscriber pinned behind must
+/// not see submissions made against newer versions.
+fn older_package_versions(
+    registry: &calp::registry::LocalRegistry,
+    package_name: &str,
+    resolved_version: &str,
+) -> Vec<String> {
+    let resolved = match calp::SemVer::parse(resolved_version) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    registry
+        .get_package_manifest(package_name)
+        .map(|m| {
+            m.versions
+                .iter()
+                .map(|v| v.version.clone())
+                .filter(|v| calp::SemVer::parse(v).map(|c| c < resolved).unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the registry already holds a Submitted/Approved record for this
+/// slot from the current subscriber, in the resolved version or any older
+/// one. One-shot/locked lifecycle policies must consult this: the local
+/// writeback layer is volatile (reset when the workbook is reopened without
+/// saving), so it alone cannot enforce "submit once".
+fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col: u32) -> bool {
+    let Ok((package_name, resolved_version, registry_path)) =
+        owning_subscription_for_region(state, region_id)
+    else {
+        return false;
+    };
+    let Ok(own) = get_subscriber_identity(state) else {
+        return false;
+    };
+    let Ok(registry) =
+        calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    else {
+        return false;
+    };
+    let mut versions = vec![resolved_version.clone()];
+    versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
+    versions.into_iter().any(|version| {
+        registry
+            .load_submissions(&package_name, &version, &own.id)
+            .map(|subs| {
+                subs.iter().any(|s| {
+                    s.region_id == region_id
+                        && s.cell_row == row
+                        && s.cell_col == col
+                        && matches!(
+                            s.state,
+                            calp::writeback::SubmissionState::Submitted
+                                | calp::writeback::SubmissionState::Approved
+                        )
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Drop the cached GATHER map after anything that changes submission data.
+pub(crate) fn invalidate_gather_cache(state: &AppState) {
+    if let Ok(mut cache) = state.gather_cache.lock() {
+        *cache = None;
+    }
+}
+
 /// True when the given deadline (ISO 8601, or datetime-local "YYYY-MM-DDTHH:MM")
 /// has passed relative to `now` (RFC 3339).
 fn deadline_passed(deadline: &str, now: &str) -> bool {
@@ -1684,15 +1972,29 @@ pub fn calp_save_writeback_draft(
     row: u32,
     col: u32,
     value: calp::writeback::SubmissionValue,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
 
-    // Verify the cell is in a writeback region
+    // Verify the cell is in a writeback region — and in the CLAIMED region:
+    // schema/lifecycle enforcement below resolves the declaration from the
+    // caller-supplied id, so a mismatched id would validate against the wrong
+    // declaration (or none at all, silently skipping enforcement).
     {
         let wb_index = state.writeback_index.lock().map_err(|e| e.to_string())?;
-        if !wb_index.contains(sid, row, col) {
-            return Err(format!("Cell ({}, {}) is not in a writeback region", row, col));
+        match wb_index.region_id_at(sid, row, col) {
+            Some(actual) if actual == region_id => {}
+            Some(actual) => {
+                return Err(format!(
+                    "Cell ({}, {}) belongs to writeback region '{}', not '{}'",
+                    row, col, actual, region_id
+                ));
+            }
+            None => {
+                return Err(format!("Cell ({}, {}) is not in a writeback region", row, col));
+            }
         }
     }
 
@@ -1726,6 +2028,15 @@ pub fn calp_save_writeback_draft(
                     )
             })
         };
+        // One-shot/locked policies must also consult the authoritative
+        // registry record — the local layer alone is defeated by reopening
+        // the workbook without saving.
+        let already_submitted = already_submitted
+            || (matches!(
+                decl.lifecycle,
+                Some(calp::writeback::LifecyclePolicy::Never)
+                    | Some(calp::writeback::LifecyclePolicy::RequiresUnlock)
+            ) && registry_has_own_submission(&state, &region_id, row, col));
         check_lifecycle_policy(decl, already_submitted, &now)?;
     }
 
@@ -1784,7 +2095,9 @@ pub fn calp_save_writeback_draft(
 #[tauri::command]
 pub fn calp_get_writeback_layer(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<calp::writeback::WritebackLayer, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
     Ok(layer.clone())
 }
@@ -1841,6 +2154,7 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
         let mut wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
         wb_layer.submit_region(region_id, &now);
     }
+    invalidate_gather_cache(state);
 
     let count = to_submit.len();
 
@@ -1868,7 +2182,9 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
 pub fn calp_submit_region(
     state: State<AppState>,
     region_id: String,
+    window: tauri::Window,
 ) -> Result<usize, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     submit_region_internal(&state, &region_id)
 }
 
@@ -1883,7 +2199,9 @@ pub fn calp_set_submission_state(
     cell_row: u32,
     cell_col: u32,
     new_state: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let target_state = match new_state.as_str() {
         "approved" => calp::writeback::SubmissionState::Approved,
         "rejected" => calp::writeback::SubmissionState::Rejected,
@@ -1901,26 +2219,41 @@ pub fn calp_set_submission_state(
     let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
 
-    let submissions = registry
-        .load_submissions(&package_name, &resolved_version, &submitter_id)
-        .map_err(|e| e.to_string())?;
-    let mut submission = submissions
-        .into_iter()
-        .find(|s| s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col)
-        .ok_or_else(|| {
-            format!(
-                "No submission found for region '{}' cell ({}, {}) by submitter '{}'",
-                region_id, cell_row, cell_col, submitter_id
-            )
-        })?;
+    // Search the resolved version first, then older ones: lenient regions
+    // carry submissions forward across version bumps, and those records live
+    // in the version directory they were submitted against — they must be
+    // approvable (and rewritten) where they actually are.
+    let mut versions = vec![resolved_version.clone()];
+    versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
+
+    let mut found: Option<(String, calp::writeback::WritebackSubmission)> = None;
+    for version in &versions {
+        let Ok(submissions) = registry.load_submissions(&package_name, version, &submitter_id)
+        else {
+            continue;
+        };
+        if let Some(s) = submissions.into_iter().find(|s| {
+            s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col
+        }) {
+            found = Some((version.clone(), s));
+            break;
+        }
+    }
+    let (version, mut submission) = found.ok_or_else(|| {
+        format!(
+            "No submission found for region '{}' cell ({}, {}) by submitter '{}'",
+            region_id, cell_row, cell_col, submitter_id
+        )
+    })?;
 
     let now = chrono::Utc::now().to_rfc3339();
     submission.state = target_state;
     submission.updated_at = now;
 
     registry
-        .save_submission(&package_name, &resolved_version, &submission)
+        .save_submission(&package_name, &version, &submission)
         .map_err(|e| e.to_string())?;
+    invalidate_gather_cache(&state);
     Ok(())
 }
 
@@ -1941,6 +2274,20 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
         .unwrap_or(true)
     {
         return result;
+    }
+
+    // Short-TTL cache: this runs on every edit and recalc pass; without it,
+    // each keystroke rescans every submission file in every subscribed
+    // registry. A TTL (rather than pure event-invalidation) keeps OTHER
+    // subscribers' new submissions appearing without an explicit action;
+    // local mutations invalidate eagerly via invalidate_gather_cache.
+    const GATHER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    if let Ok(cache) = state.gather_cache.lock() {
+        if let Some((stamp, cached)) = cache.as_ref() {
+            if stamp.elapsed() < GATHER_CACHE_TTL {
+                return cached.clone();
+            }
+        }
     }
 
     let subs = match state.subscriptions.lock() {
@@ -1975,58 +2322,79 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
             None => continue,
         };
 
-        // Strictly OLDER versions of the package, for lenient carry-forward.
-        // (A subscriber pinned behind must not aggregate submissions made
-        // against newer versions.)
-        let resolved_semver = calp::SemVer::parse(&sub.resolved_version).ok();
-        let older_versions: Vec<String> = registry
-            .get_package_manifest(&sub.package_name)
-            .map(|m| {
-                m.versions
-                    .iter()
-                    .map(|v| v.version.clone())
-                    .filter(|v| match (&resolved_semver, calp::SemVer::parse(v)) {
-                        (Some(resolved), Ok(candidate)) => candidate < *resolved,
-                        _ => false,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Load the resolved version's submissions in ONE tree scan and bucket
+        // by region — per-region loads would rescan everything R times.
+        let mut current_by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
+            std::collections::HashMap::new();
+        match registry.load_all_submissions(&sub.package_name, &sub.resolved_version) {
+            Ok(all) => {
+                for s in all {
+                    current_by_region.entry(s.region_id.clone()).or_default().push(s);
+                }
+            }
+            Err(_) => continue,
+        }
+
+        // Strictly OLDER versions, each loaded once: their region
+        // declarations (for the schema-compatibility gate) and their
+        // submissions bucketed by region.
+        let older: Vec<(Vec<calp::WritebackRegionDeclaration>, std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>>)> =
+            older_package_versions(&registry, &sub.package_name, &sub.resolved_version)
+                .iter()
+                .filter_map(|version| {
+                    let manifest = registry
+                        .get_version_manifest(&sub.package_name, version)
+                        .ok()?;
+                    let mut by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
+                        std::collections::HashMap::new();
+                    for s in registry.load_all_submissions(&sub.package_name, version).ok()? {
+                        by_region.entry(s.region_id.clone()).or_default().push(s);
+                    }
+                    Some((manifest.writeback_regions.unwrap_or_default(), by_region))
+                })
+                .collect();
 
         // The reader's own identity, for visibility enforcement.
         let own_identity = get_subscriber_identity(state).ok();
 
-        // Load submissions for each region
+        // Aggregate per region
         for region in regions {
-            let mut submissions = match registry.load_region_submissions(
-                &sub.package_name, &sub.resolved_version, &region.id,
-            ) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
+            let mut submissions = current_by_region.remove(&region.id).unwrap_or_default();
 
             // Lenient version binding: submissions made against earlier
             // versions of the same region carry forward instead of being
-            // silently dropped on every version bump. Newest wins per
-            // (submitter, cell) slot.
+            // silently dropped on every version bump — but only when that
+            // version's region schema is compatible with the current one.
+            // Newest wins per (submitter, cell) slot.
             let lenient = !matches!(
                 region.version_binding,
                 Some(calp::writeback::VersionBinding::Strict)
             );
-            if lenient && !older_versions.is_empty() {
+            if lenient && !older.is_empty() {
                 let mut slots: std::collections::HashMap<(String, u32, u32), usize> =
                     submissions
                         .iter()
                         .enumerate()
                         .map(|(i, s)| ((s.submitter.id.clone(), s.cell_row, s.cell_col), i))
                         .collect();
-                for version in &older_versions {
-                    let Ok(older) = registry.load_region_submissions(
-                        &sub.package_name, version, &region.id,
-                    ) else {
+                for (old_regions, old_by_region) in &older {
+                    // Schema gate, matching check_region_compatibility: both
+                    // schemas present → compare; either absent → compatible;
+                    // region absent in that version → nothing to carry.
+                    let compatible = match old_regions.iter().find(|r| r.id == region.id) {
+                        None => false,
+                        Some(old_r) => match (&old_r.schema, &region.schema) {
+                            (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
+                            _ => true,
+                        },
+                    };
+                    if !compatible {
+                        continue;
+                    }
+                    let Some(older_subs) = old_by_region.get(&region.id) else {
                         continue;
                     };
-                    for candidate in older {
+                    for candidate in older_subs.iter().cloned() {
                         let key = (
                             candidate.submitter.id.clone(),
                             candidate.cell_row,
@@ -2106,8 +2474,17 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
                 }
             }).collect();
 
-            result.insert(region.id.clone(), engine::GatherRegionData { submissions: gather_subs });
+            // First subscription declaring a region wins, matching the
+            // submit path (owning_subscription_for_region) — last-wins here
+            // would read a different registry than submits write to.
+            result
+                .entry(region.id.clone())
+                .or_insert(engine::GatherRegionData { submissions: gather_subs });
         }
+    }
+
+    if let Ok(mut cache) = state.gather_cache.lock() {
+        *cache = Some((std::time::Instant::now(), result.clone()));
     }
 
     result
@@ -2120,7 +2497,9 @@ pub fn calp_get_cell_id(
     sheet_id: String,
     row: u32,
     col: u32,
+    window: tauri::Window,
 ) -> Result<Option<String>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let sid = SheetId::parse(&sheet_id)
         .ok_or_else(|| format!("Invalid sheet_id: {}", sheet_id))?;
     let reg = state.id_registry.lock().map_err(|e| e.to_string())?;
@@ -2131,7 +2510,9 @@ pub fn calp_get_cell_id(
 #[tauri::command]
 pub fn calp_get_subscriber_identity(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<calp::SubmitterIdentity, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     get_subscriber_identity(&state)
 }
 
@@ -2141,7 +2522,9 @@ pub fn calp_next_version(
     registry_path: String,
     package_name: String,
     bump: String,
+    window: tauri::Window,
 ) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
 
@@ -2329,6 +2712,7 @@ fn load_embedded_data_sources(
             created_at: chrono::Utc::now().to_rfc3339(),
             is_connected: false,
             active_queries: std::collections::HashMap::new(),
+            package_data_source_id: Some(ds.definition.id.clone()),
         };
 
         bi_state.connections.lock().unwrap().insert(conn_id, connection);
@@ -2500,7 +2884,6 @@ fn restore_pulled_pivots(
 /// data. The deprecated query-region path (direct cell insertion) is gone —
 /// BI data flows to subscribers through pivots (and CUBE formulas, planned).
 fn capture_bi_data_sources(
-    _state: &AppState,
     bi_state: &BiState,
 ) -> Result<Vec<calp::publish::PublishDataSource>, String> {
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
@@ -2615,8 +2998,10 @@ pub struct DataSourceNeedsConfig {
 #[tauri::command]
 pub async fn calp_refresh_data(
     state: State<'_, AppState>,
-    _bi_state: State<'_, BiState>,
+    bi_state: State<'_, BiState>,
+    window: tauri::Window,
 ) -> Result<DataRefreshResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     use calp::data_refresh;
 
     let mut sources_refreshed = 0usize;
@@ -2693,17 +3078,27 @@ pub async fn calp_refresh_data(
             }
         };
 
-        // Detect ModelBundle format
+        // Detect ModelBundle format. Parse failures skip THIS source — one
+        // corrupt package must not abort verification of the others.
         let actual_model_json = if model_json.get("formatVersion").is_some() {
-            model_json.get("model")
-                .ok_or_else(|| format!("ModelBundle missing 'model' field for {}", ds.id))?
-                .clone()
+            match model_json.get("model") {
+                Some(m) => m.clone(),
+                None => {
+                    crate::log_warn!("CALP", "ModelBundle missing 'model' field for {}", ds.id);
+                    continue;
+                }
+            }
         } else {
             model_json
         };
 
-        let model: bi_engine::DataModel = serde_json::from_value(actual_model_json)
-            .map_err(|e| format!("Failed to parse model for {}: {}", ds.id, e))?;
+        let model: bi_engine::DataModel = match serde_json::from_value(actual_model_json) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::log_warn!("CALP", "Failed to parse model for {}: {}", ds.id, e);
+                continue;
+            }
+        };
 
         // Create a temporary engine for this refresh
         let mut engine = bi_engine::Engine::new(model);
@@ -2750,6 +3145,21 @@ pub async fn calp_refresh_data(
             engine.bind_table(&binding.model_table, connector_idx, source_binding);
         }
 
+        // Propagate the verified connection string into the pulled BiState
+        // connection pivots actually query — verifying against the throwaway
+        // engine above alone would leave the real connection unconfigured
+        // ("verified" toast, but pivot refresh still prompts for credentials).
+        if let Ok(mut connections) = bi_state.connections.lock() {
+            if let Some(conn) = connections
+                .values_mut()
+                .find(|c| c.package_data_source_id.as_deref() == Some(ds.id.as_str()))
+            {
+                if conn.connection_string != connection_string {
+                    conn.connection_string = connection_string.clone();
+                }
+            }
+        }
+
         sources_refreshed += 1;
     }
 
@@ -2766,7 +3176,9 @@ pub fn calp_save_data_source_config(
     state: State<AppState>,
     data_source_id: String,
     connection_string: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let now = chrono::Utc::now().to_rfc3339();
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
 
@@ -2812,7 +3224,9 @@ pub fn calp_save_data_source_config(
 #[tauri::command]
 pub fn calp_get_data_sources(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<Vec<DataSourceInfo>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let mut result = Vec::new();
 

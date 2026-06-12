@@ -82,6 +82,7 @@ pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
 pub mod state_digest;
+pub mod security;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -330,6 +331,11 @@ pub struct AppState {
     pub writeback_draft_regions: Mutex<Vec<calp::WritebackRegionDeclaration>>,
     /// Writeback layer: local drafts for writeback cells (stored in .cala).
     pub writeback_layer: Mutex<calp::writeback::WritebackLayer>,
+    /// Short-TTL cache of the GATHER pre-fetch map. build_gather_data runs on
+    /// every edit/recalc pass; without this each keystroke rescans every
+    /// registry submission file. Invalidated explicitly on submit/refresh and
+    /// expired by time so other subscribers' new submissions still appear.
+    pub gather_cache: Mutex<Option<(std::time::Instant, std::collections::HashMap<String, engine::GatherRegionData>)>>,
 }
 
 impl AppState {
@@ -453,6 +459,7 @@ pub fn create_app_state() -> AppState {
         audit_log: Mutex::new(calp::audit::AuditLog::new()),
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
         writeback_declarations: Mutex::new(Vec::new()),
+        gather_cache: Mutex::new(None),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
         writeback_draft_regions: Mutex::new(Vec::new()),
@@ -3271,7 +3278,8 @@ pub struct ExtensionFileEntry {
 /// Scan a directory for third-party extension bundles (.js files).
 /// Returns the file name, path, and content of each found extension.
 #[tauri::command]
-fn scan_extension_directory(dir: String) -> Result<Vec<ExtensionFileEntry>, String> {
+fn scan_extension_directory(dir: String, window: tauri::Window) -> Result<Vec<ExtensionFileEntry>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let path = std::path::Path::new(&dir);
     if !path.exists() {
         // Directory doesn't exist — not an error, just no extensions
@@ -3327,7 +3335,8 @@ fn scan_extension_directory(dir: String) -> Result<Vec<ExtensionFileEntry>, Stri
 
 /// Get the default path for third-party extensions (next to the app data dir).
 #[tauri::command]
-fn get_extensions_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
+fn get_extensions_directory(app_handle: tauri::AppHandle, window: tauri::Window) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     use tauri::Manager;
     let app_data = app_handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;

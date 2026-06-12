@@ -29,7 +29,6 @@ use calp::publish::{publish, ExcludedRegion, PublishDataSource, PublishRequest};
 use calp::PackageBinding;
 use calp::registry::LocalRegistry;
 use calp::version::SemVer;
-use identity::SheetId;
 
 // ---------------------------------------------------------------------------
 // Color helpers

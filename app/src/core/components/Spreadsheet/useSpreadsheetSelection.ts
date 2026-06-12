@@ -250,9 +250,9 @@ export function useSpreadsheetSelection({
         console.error("Failed to persist column width:", err);
       });
       canvasRef.current?.redraw();
-      emitAppEvent(AppEvents.COLUMN_RESIZED, { sheetIndex: 0, col, width });
+      emitAppEvent(AppEvents.COLUMN_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, col, width });
     },
-    [dispatch, canvasRef]
+    [dispatch, canvasRef, sheetContext.activeSheetIndex]
   );
 
   const handleRowResize = useCallback(
@@ -262,9 +262,9 @@ export function useSpreadsheetSelection({
         console.error("Failed to persist row height:", err);
       });
       canvasRef.current?.redraw();
-      emitAppEvent(AppEvents.ROW_RESIZED, { sheetIndex: 0, row, height });
+      emitAppEvent(AppEvents.ROW_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, row, height });
     },
-    [dispatch, canvasRef]
+    [dispatch, canvasRef, sheetContext.activeSheetIndex]
   );
 
   // -------------------------------------------------------------------------

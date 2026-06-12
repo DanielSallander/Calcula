@@ -416,37 +416,6 @@ class ExtensionManagerImpl {
   }
 
   // --------------------------------------------------------------------------
-  // Runtime Extension Loading
-  // --------------------------------------------------------------------------
-
-  /**
-   * Load an extension from a URL at runtime.
-   * This enables "drag and drop" installation of extensions.
-   * @param url The URL to the extension's JavaScript module
-   */
-  async loadRuntimeExtension(url: string): Promise<void> {
-    try {
-      console.log(`[ExtensionManager] Loading runtime extension from: ${url}`);
-
-      // Dynamic import (Vite/browser native ESM support)
-      const module = (await import(/* @vite-ignore */ url)) as ExtensionModule;
-
-      // Validate the module has required exports
-      if (!module.manifest) {
-        throw new Error(`Extension at ${url} does not export a 'manifest' object.`);
-      }
-      if (!module.activate) {
-        throw new Error(`Extension at ${url} does not export an 'activate' function.`);
-      }
-
-      await this.activateExtension(module);
-    } catch (error) {
-      console.error(`[ExtensionManager] Runtime load failed for ${url}:`, error);
-      throw error;
-    }
-  }
-
-  // --------------------------------------------------------------------------
   // Third-Party Extension Loading
   // --------------------------------------------------------------------------
 

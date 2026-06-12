@@ -596,6 +596,7 @@ dependencies = [
  "engine-connectors",
  "engine-core",
  "engine-query",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -919,6 +920,7 @@ dependencies = [
  "persistence",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
 ]
 

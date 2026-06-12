@@ -55,7 +55,9 @@ fn template_path(dir: &PathBuf, id: &str) -> PathBuf {
 #[tauri::command]
 pub fn list_object_templates(
     app: tauri::AppHandle,
+    window: tauri::Window,
 ) -> Result<Vec<ObjectTemplate>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let dir = templates_dir(&app)?;
     let mut templates = Vec::new();
 
@@ -81,7 +83,9 @@ pub fn list_object_templates(
 pub fn save_object_template(
     app: tauri::AppHandle,
     template: ObjectTemplate,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let dir = templates_dir(&app)?;
     let path = template_path(&dir, &template.id);
     let json = serde_json::to_string_pretty(&template)
@@ -95,7 +99,9 @@ pub fn save_object_template(
 pub fn load_object_template(
     app: tauri::AppHandle,
     id: String,
+    window: tauri::Window,
 ) -> Result<ObjectTemplate, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let dir = templates_dir(&app)?;
     let path = template_path(&dir, &id);
     let contents =
@@ -109,7 +115,9 @@ pub fn load_object_template(
 pub fn delete_object_template(
     app: tauri::AppHandle,
     id: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let dir = templates_dir(&app)?;
     let path = template_path(&dir, &id);
     if path.exists() {

@@ -137,7 +137,7 @@ pub fn publish(
         }
     }).collect();
 
-    let version_manifest = VersionManifest {
+    let mut version_manifest = VersionManifest {
         format_version: 1,
         package_name: request.package_name.clone(),
         version: version_str.clone(),
@@ -161,10 +161,21 @@ pub fn publish(
             bindings: ds.bindings.clone(),
             extra: std::collections::HashMap::new(),
         }).collect(),
+        // Filled in below, after all artifacts are on disk in final form.
+        artifact_checksums: std::collections::BTreeMap::new(),
         extra: std::collections::HashMap::new(),
     };
 
-    registry.write_version_manifest(&request.package_name, &version_str, &version_manifest)?;
+    // The version manifest is written LAST (it is the integrity root and the
+    // publish commit point — version_exists() keys off it). If the version
+    // directory already exists without a manifest, it is debris from a
+    // crashed earlier publish: clear it so stale files can't end up unlisted
+    // in the checksum map.
+    let ver_dir = registry.version_dir(&request.package_name, &version_str);
+    if ver_dir.exists() {
+        fs::remove_dir_all(&ver_dir)?;
+    }
+    fs::create_dir_all(&ver_dir)?;
 
     // Write sheet data (cells, styles, layout as JSON)
     for &idx in &request.sheet_indices {
@@ -220,9 +231,6 @@ pub fn publish(
 
     // Write named ranges
     if !named_ranges.is_empty() {
-        let ver_dir = registry.root()
-            .join(&request.package_name)
-            .join(&version_str);
         fs::write(
             ver_dir.join("named_ranges.json"),
             serde_json::to_string_pretty(&named_ranges)?,
@@ -249,10 +257,7 @@ pub fn publish(
 
     // Write pivot definitions
     if !request.workbook.pivot_definitions.is_empty() {
-        let pivot_dir = registry.root()
-            .join(&request.package_name)
-            .join(&version_str)
-            .join("pivot_definitions");
+        let pivot_dir = ver_dir.join("pivot_definitions");
         fs::create_dir_all(&pivot_dir)?;
         for pivot_def in &request.workbook.pivot_definitions {
             fs::write(
@@ -264,10 +269,7 @@ pub fn publish(
 
     // Write BI pivot metadata (needed for BI-connected pivots)
     if !request.workbook.bi_pivot_metadata.is_empty() {
-        let pivot_dir = registry.root()
-            .join(&request.package_name)
-            .join(&version_str)
-            .join("pivot_definitions");
+        let pivot_dir = ver_dir.join("pivot_definitions");
         fs::create_dir_all(&pivot_dir)?;
         fs::write(
             pivot_dir.join("bi_metadata.json"),
@@ -277,17 +279,21 @@ pub fn publish(
 
     // Write embedded data source models
     for ds in &request.data_sources {
-        let model_dir = registry.root()
-            .join(&request.package_name)
-            .join(&version_str)
-            .join("models")
-            .join(&ds.id);
+        let model_dir = ver_dir.join("models").join(&ds.id);
         fs::create_dir_all(&model_dir)?;
         fs::write(
             model_dir.join("model.json"),
             serde_json::to_string_pretty(&ds.model_json)?,
         )?;
     }
+
+    // All artifacts are on disk in final form: compute SHA-256 checksums over
+    // the actual bytes, then write the version manifest LAST. The manifest is
+    // the integrity root — it cannot contain its own hash, so it covers all
+    // OTHER artifacts and is itself the commit point of the publish.
+    version_manifest.artifact_checksums =
+        crate::integrity::compute_artifact_checksums(&ver_dir)?;
+    registry.write_version_manifest(&request.package_name, &version_str, &version_manifest)?;
 
     // Update package manifest
     let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
@@ -406,6 +412,48 @@ mod tests {
         let ver = reg.get_version_manifest("partial", "1.0.0").unwrap();
         assert_eq!(ver.sheets.len(), 1);
         assert_eq!(ver.sheets[0].name, "Dashboard");
+    }
+
+    #[test]
+    fn publish_records_artifact_checksums() {
+        let dir = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let wb = make_test_workbook();
+
+        let request = PublishRequest {
+            workbook: &wb,
+            package_name: "checked".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish(&reg, &request).unwrap();
+
+        let ver = reg.get_version_manifest("checked", "1.0.0").unwrap();
+
+        // 2 sheets x (data.json + styles.json + layout.json)
+        assert_eq!(ver.artifact_checksums.len(), 6);
+        // The manifest is the integrity root: never lists itself.
+        assert!(!ver.artifact_checksums.contains_key("version-manifest.json"));
+
+        // Keys are version-dir-relative with forward slashes; digests are
+        // lowercase hex SHA-256 of the final on-disk bytes.
+        let data_key = format!("sheets/{}/data.json", wb.sheets[0].id);
+        let digest = ver.artifact_checksums.get(&data_key)
+            .expect("data.json must be listed in artifact checksums");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+        let on_disk = fs::read(
+            reg.sheet_dir("checked", "1.0.0", &wb.sheets[0].id).join("data.json"),
+        ).unwrap();
+        assert_eq!(digest, &crate::integrity::sha256_hex(&on_disk));
     }
 
     #[test]

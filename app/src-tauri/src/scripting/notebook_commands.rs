@@ -304,7 +304,9 @@ pub fn notebook_run_cell(
     state: State<AppState>,
     script_state: State<ScriptState>,
     request: RunNotebookCellRequest,
+    window: tauri::Window,
 ) -> Result<NotebookCellResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     run_cell_internal(&state, &script_state, &request.notebook_id, &request.cell_id, &request.source)
 }
 
@@ -315,7 +317,9 @@ pub fn notebook_run_all(
     state: State<AppState>,
     script_state: State<ScriptState>,
     notebook_id: String,
+    window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // Reset the runtime first
     reset_runtime_internal(&script_state)?;
 
@@ -363,7 +367,9 @@ pub fn notebook_rewind(
     state: State<AppState>,
     script_state: State<ScriptState>,
     request: RewindNotebookRequest,
+    window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     notebook_rewind_internal(&state, &script_state, &request)
 }
 
@@ -491,7 +497,9 @@ pub fn notebook_run_from(
     state: State<AppState>,
     script_state: State<ScriptState>,
     request: RewindNotebookRequest,
+    window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // 1. Rewind to the target cell (restores snapshot + replays prior cells)
     let replay_results = notebook_rewind_internal(&state, &script_state, &request)?;
 
@@ -550,6 +558,8 @@ pub fn notebook_run_from(
 #[tauri::command]
 pub fn notebook_reset_runtime(
     script_state: State<ScriptState>,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     reset_runtime_internal(&script_state)
 }

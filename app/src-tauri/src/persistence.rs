@@ -983,7 +983,8 @@ fn restore_sparklines(saved: &[persistence::SavedSparkline], state: &State<AppSt
 // ============================================================================
 
 /// Collect full pivot definitions and BI metadata from PivotState into the Workbook.
-fn collect_pivot_definitions(
+/// Also used by calp_publish so packages ship live pivots.
+pub(crate) fn collect_pivot_definitions(
     pivot_state: &crate::pivot::types::PivotState,
     state: &AppState,
     workbook: &mut Workbook,
@@ -1182,7 +1183,9 @@ pub fn save_file(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     path: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // If calculate_before_save is enabled, recalculate all formulas first
     {
         let calc_before_save = *state.calculate_before_save.lock().unwrap();
@@ -1308,7 +1311,9 @@ pub fn open_file(
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     path: String,
+    window: tauri::Window,
 ) -> Result<Vec<CellData>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let path_buf = PathBuf::from(&path);
 
     // Route by file extension
@@ -1756,7 +1761,9 @@ pub fn new_file(
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
     script_state: State<crate::scripting::types::ScriptState>,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     {
         let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
         let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -2036,7 +2043,8 @@ pub struct VirtualFileEntry {
 
 /// List all user files stored inside the .cala archive.
 #[tauri::command]
-pub fn list_virtual_files(user_files_state: State<UserFilesState>) -> Result<Vec<VirtualFileEntry>, String> {
+pub fn list_virtual_files(user_files_state: State<UserFilesState>, window: tauri::Window) -> Result<Vec<VirtualFileEntry>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 
     let mut entries: Vec<VirtualFileEntry> = Vec::new();
@@ -2082,7 +2090,8 @@ pub fn list_virtual_files(user_files_state: State<UserFilesState>) -> Result<Vec
 
 /// Read a user file from the virtual filesystem.
 #[tauri::command]
-pub fn read_virtual_file(user_files_state: State<UserFilesState>, path: String) -> Result<String, String> {
+pub fn read_virtual_file(user_files_state: State<UserFilesState>, path: String, window: tauri::Window) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 
     let content = files.get(&path)
@@ -2100,7 +2109,9 @@ pub fn create_virtual_file(
     file_state: State<FileState>,
     path: String,
     content: Option<String>,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     if path.trim().is_empty() {
         return Err("Path cannot be empty".to_string());
     }
@@ -2129,7 +2140,9 @@ pub fn create_virtual_folder(
     user_files_state: State<UserFilesState>,
     file_state: State<FileState>,
     path: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     if path.trim().is_empty() {
         return Err("Path cannot be empty".to_string());
     }
@@ -2158,7 +2171,9 @@ pub fn delete_virtual_file(
     user_files_state: State<UserFilesState>,
     file_state: State<FileState>,
     path: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
 
     // If it's a directory, remove all files under it
@@ -2195,7 +2210,9 @@ pub fn rename_virtual_file(
     file_state: State<FileState>,
     old_path: String,
     new_path: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     if new_path.trim().is_empty() {
         return Err("New name cannot be empty".to_string());
     }
@@ -2287,7 +2304,8 @@ pub fn get_ai_context(
 /// Read a text file with optional encoding detection.
 /// Supports UTF-8 (with or without BOM), and falls back to Windows-1252 (ANSI).
 #[tauri::command]
-pub fn read_text_file(path: String, encoding: Option<String>) -> Result<String, String> {
+pub fn read_text_file(path: String, encoding: Option<String>, window: tauri::Window) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let path_buf = PathBuf::from(&path);
     let bytes = std::fs::read(&path_buf).map_err(|e| format!("Failed to read file: {}", e))?;
 
@@ -2319,7 +2337,8 @@ pub fn read_text_file(path: String, encoding: Option<String>) -> Result<String, 
 
 /// Write a text string to a file with the specified encoding.
 #[tauri::command]
-pub fn write_text_file(path: String, content: String, encoding: Option<String>) -> Result<(), String> {
+pub fn write_text_file(path: String, content: String, encoding: Option<String>, window: tauri::Window) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let path_buf = PathBuf::from(&path);
 
     let enc = encoding.unwrap_or_default().to_lowercase();
@@ -2447,10 +2466,12 @@ pub fn set_auto_recover_settings(
     state: State<AppState>,
     enabled: bool,
     interval_ms: u64,
-) -> AutoRecoverSettings {
+    window: tauri::Window,
+) -> Result<AutoRecoverSettings, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     *state.auto_recover_enabled.lock().unwrap() = enabled;
     *state.auto_recover_interval_ms.lock().unwrap() = interval_ms;
-    AutoRecoverSettings { enabled, interval_ms }
+    Ok(AutoRecoverSettings { enabled, interval_ms })
 }
 
 #[tauri::command]
@@ -2461,7 +2482,9 @@ pub fn auto_recover_save(
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
+    window: tauri::Window,
 ) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // Only save if the file is dirty
     let is_modified = *file_state.is_modified.lock().map_err(|e| e.to_string())?;
     if !is_modified {

@@ -134,22 +134,22 @@ function activate(context: ExtensionContext): void {
 
   // Listen for structural changes (row/column insert/delete) to refresh cache
   cleanupFunctions.push(
-    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, () => {
+    context.events.on<{ sheetIndex: number; startRow: number; count: number }>(AppEvents.ROWS_INSERTED, () => {
       refreshCache().catch(console.error);
     }),
   );
   cleanupFunctions.push(
-    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, () => {
+    context.events.on<{ sheetIndex: number; startCol: number; count: number }>(AppEvents.COLUMNS_INSERTED, () => {
       refreshCache().catch(console.error);
     }),
   );
   cleanupFunctions.push(
-    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_DELETED, () => {
+    context.events.on<{ sheetIndex: number; startRow: number; count: number }>(AppEvents.ROWS_DELETED, () => {
       refreshCache().catch(console.error);
     }),
   );
   cleanupFunctions.push(
-    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, () => {
+    context.events.on<{ sheetIndex: number; startCol: number; count: number }>(AppEvents.COLUMNS_DELETED, () => {
       refreshCache().catch(console.error);
     }),
   );
@@ -167,12 +167,14 @@ function activate(context: ExtensionContext): void {
     ),
   );
 
-  // Also listen for EDIT_ENDED which fires when the user commits an edit
+  // Also listen for EDIT_ENDED which fires when an edit ends (commit or cancel).
+  // Only committed edits should trigger auto-expansion.
   cleanupFunctions.push(
-    context.events.on<{ row: number; col: number; value?: string }>(
+    context.events.on<{ row: number; col: number; value?: string; committed?: boolean }>(
       AppEvents.EDIT_ENDED,
       (detail) => {
         if (detail && typeof detail === "object" && "row" in detail && "col" in detail) {
+          if (detail.committed === false) return;
           handleCellEdited(detail.row, detail.col, detail.value ?? "");
         }
       },

@@ -414,7 +414,8 @@ fn col_index_to_letter(index: u32) -> String {
 /// Write binary data to a file on disk.
 /// Used by PDF export to save the generated PDF.
 #[tauri::command]
-pub fn write_binary_file(path: String, data: Vec<u8>) -> Result<(), String> {
+pub fn write_binary_file(path: String, data: Vec<u8>, window: tauri::Window) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     fs::write(&path, &data).map_err(|e| format!("Failed to write file '{}': {}", path, e))
 }
 

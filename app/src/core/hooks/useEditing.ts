@@ -874,6 +874,13 @@ export function useEditing(): UseEditingReturn {
           colSpan,
         })
       );
+
+      // Notify extensions/scripts that editing has begun (cell.onEditStart)
+      emitAppEvent(AppEvents.EDIT_STARTED, {
+        row: editRow,
+        col: editCol,
+        sheetIndex: sheetContext.activeSheetIndex,
+      });
     },
     [dispatch, sheetContext]
   );
@@ -961,6 +968,13 @@ export function useEditing(): UseEditingReturn {
             colSpan,
           })
         );
+
+        // Notify extensions/scripts that editing has begun (cell.onEditStart)
+        emitAppEvent(AppEvents.EDIT_STARTED, {
+          row: editRow,
+          col: editCol,
+          sheetIndex: sheetContext.activeSheetIndex,
+        });
       } else {
         // EDIT mode - fetch existing content (handled by startEdit)
         await startEdit(row, col);
@@ -1507,7 +1521,9 @@ export function useEditing(): UseEditingReturn {
         emitAppEvent(AppEvents.EDIT_ENDED, {
           row: primaryCell.row,
           col: primaryCell.col,
+          sheetIndex: editing.sourceSheetIndex ?? sheetContext.activeSheetIndex,
           value: editing.value,
+          committed: true,
         });
 
         dispatch(stopEditing());
@@ -1622,6 +1638,16 @@ export function useEditing(): UseEditingReturn {
     setLastError(null);
     setPendingReference(null);
     dispatch(stopEditing());
+
+    // Emit EDIT_ENDED with committed: false so listeners (cell.onEditEnd)
+    // can distinguish cancelled edits from committed ones.
+    emitAppEvent(AppEvents.EDIT_ENDED, {
+      row: editing.row,
+      col: editing.col,
+      sheetIndex: editing.sourceSheetIndex ?? sheetContext.activeSheetIndex,
+      value: editing.value,
+      committed: false,
+    });
   }, [dispatch, editing, sheetContext]);
 
   /**
@@ -1710,6 +1736,13 @@ export function useEditing(): UseEditingReturn {
           colSpan,
         })
       );
+
+      // Notify extensions/scripts that editing has begun (cell.onEditStart)
+      emitAppEvent(AppEvents.EDIT_STARTED, {
+        row: editRow,
+        col: editCol,
+        sheetIndex: sheetContext.activeSheetIndex,
+      });
     },
     [state, dispatch, sheetContext]
   );

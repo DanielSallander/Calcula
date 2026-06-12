@@ -1812,27 +1812,27 @@ function activate(context: ExtensionContext): void {
   // structuralVersion counter ensures any already-in-flight refresh
   // discards its results when it finally completes.
   cleanupFunctions.push(
-    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, (e) => {
-      shiftPivotRegionsForColInsert(e.col, e.count);
-      shiftCachedRegionsForColInsert(e.col, e.count);
+    context.events.on<{ sheetIndex: number; startCol: number; count: number }>(AppEvents.COLUMNS_INSERTED, (e) => {
+      shiftPivotRegionsForColInsert(e.startCol, e.count);
+      shiftCachedRegionsForColInsert(e.startCol, e.count);
     })
   );
   cleanupFunctions.push(
-    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, (e) => {
-      shiftPivotRegionsForRowInsert(e.row, e.count);
-      shiftCachedRegionsForRowInsert(e.row, e.count);
+    context.events.on<{ sheetIndex: number; startRow: number; count: number }>(AppEvents.ROWS_INSERTED, (e) => {
+      shiftPivotRegionsForRowInsert(e.startRow, e.count);
+      shiftCachedRegionsForRowInsert(e.startRow, e.count);
     })
   );
   cleanupFunctions.push(
-    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, (e) => {
-      shiftPivotRegionsForColDelete(e.col, e.count);
-      shiftCachedRegionsForColDelete(e.col, e.count);
+    context.events.on<{ sheetIndex: number; startCol: number; count: number }>(AppEvents.COLUMNS_DELETED, (e) => {
+      shiftPivotRegionsForColDelete(e.startCol, e.count);
+      shiftCachedRegionsForColDelete(e.startCol, e.count);
     })
   );
   cleanupFunctions.push(
-    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_DELETED, (e) => {
-      shiftPivotRegionsForRowDelete(e.row, e.count);
-      shiftCachedRegionsForRowDelete(e.row, e.count);
+    context.events.on<{ sheetIndex: number; startRow: number; count: number }>(AppEvents.ROWS_DELETED, (e) => {
+      shiftPivotRegionsForRowDelete(e.startRow, e.count);
+      shiftCachedRegionsForRowDelete(e.startRow, e.count);
     })
   );
 

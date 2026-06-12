@@ -163,7 +163,9 @@ fn from_data(d: &ObjectScriptData) -> Result<SavedObjectScript, String> {
 #[tauri::command]
 pub fn list_object_scripts(
     state: State<AppState>,
+    window: tauri::Window,
 ) -> Result<Vec<ObjectScriptSummary>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
     let mut summaries: Vec<ObjectScriptSummary> = scripts.iter().map(to_summary).collect();
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -175,7 +177,9 @@ pub fn list_object_scripts(
 pub fn get_object_script(
     state: State<AppState>,
     id: String,
+    window: tauri::Window,
 ) -> Result<ObjectScriptData, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
     scripts
         .iter()
@@ -190,7 +194,9 @@ pub fn get_object_script_by_target(
     state: State<AppState>,
     object_type: String,
     instance_id: Option<String>,
+    window: tauri::Window,
 ) -> Result<Option<ObjectScriptData>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let obj_type = string_to_object_type(&object_type)?;
     let scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
     let found = scripts.iter().find(|s| {
@@ -207,7 +213,9 @@ pub fn get_object_script_by_target(
 pub fn save_object_script(
     state: State<AppState>,
     script: ObjectScriptData,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let mut saved = from_data(&script)?;
     let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
 
@@ -239,7 +247,9 @@ pub fn save_object_script(
 pub fn delete_object_script(
     state: State<AppState>,
     id: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
     let len_before = scripts.len();
     scripts.retain(|s| s.id != id);
@@ -254,7 +264,9 @@ pub fn delete_object_script(
 pub fn delete_object_scripts_for_instance(
     state: State<AppState>,
     instance_id: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
     let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
     scripts.retain(|s| s.instance_id.as_deref() != Some(&instance_id));
     Ok(())

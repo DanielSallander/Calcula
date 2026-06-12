@@ -10,6 +10,7 @@ pub mod cross_package;
 pub mod dev_mode;
 pub mod error;
 pub mod identity_provider;
+pub mod integrity;
 pub mod manifest;
 pub mod overrides;
 pub mod package_kind;

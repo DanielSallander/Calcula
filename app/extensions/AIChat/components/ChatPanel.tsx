@@ -123,10 +123,12 @@ const errorStyle: React.CSSProperties = {
 interface McpStatus {
   running: boolean;
   port: number;
+  /** Per-session bearer token; null while the server is stopped. */
+  token: string | null;
 }
 
 export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
-  const [status, setStatus] = useState<McpStatus>({ running: false, port: 8787 });
+  const [status, setStatus] = useState<McpStatus>({ running: false, port: 8787, token: null });
   const [portInput, setPortInput] = useState("8787");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -182,6 +184,13 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
     }
   }, [refreshStatus]);
 
+  const handleCopyToken = useCallback(() => {
+    if (status.token) {
+      void navigator.clipboard.writeText(status.token);
+    }
+  }, [status.token]);
+
+  const tokenForSnippet = status.token ?? "<start the server to get a token>";
   const configSnippet =
     '{\n' +
     '  "mcpServers": {\n' +
@@ -189,7 +198,12 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
     '      "command": "npx",\n' +
     '      "args": ["-y",\n' +
     '        "mcp-remote",\n' +
-    `        "http://127.0.0.1:${status.port}/mcp"]\n` +
+    `        "http://127.0.0.1:${status.port}/mcp",\n` +
+    '        "--header",\n' +
+    '        "Authorization:${CALCULA_AUTH}"],\n' +
+    '      "env": {\n' +
+    `        "CALCULA_AUTH": "Bearer ${tokenForSnippet}"\n` +
+    '      }\n' +
     '    }\n' +
     '  }\n' +
     '}';
@@ -260,6 +274,35 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
         React.createElement("li", null, "Cursor"),
         React.createElement("li", null, "Any MCP-compatible AI client"),
       ),
+    ),
+
+    // Session Token
+    React.createElement("div", { style: sectionStyle },
+      React.createElement("h3", { style: sectionTitleStyle }, "Session Token"),
+      React.createElement("p", { style: textStyle },
+        "Every request must carry this bearer token (Authorization header). " +
+        "A new token is generated each time the server starts — update your " +
+        "client config after a restart."
+      ),
+      status.running && status.token
+        ? React.createElement(React.Fragment, null,
+            React.createElement("code", { style: codeStyle }, status.token),
+            React.createElement("button", {
+              onClick: handleCopyToken,
+              style: {
+                padding: "4px 12px",
+                fontSize: 11,
+                border: "1px solid #CCC",
+                borderRadius: 4,
+                cursor: "pointer",
+                backgroundColor: "#FFF",
+                color: "#333",
+              },
+            }, "Copy Token"),
+          )
+        : React.createElement("p", { style: { ...textStyle, fontStyle: "italic" } },
+            "Start the server to generate a token."
+          ),
     ),
 
     // Setup Instructions

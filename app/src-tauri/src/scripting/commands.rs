@@ -63,7 +63,9 @@ pub(crate) fn check_script_security(script_state: &ScriptState) -> Result<(), St
 #[tauri::command]
 pub fn grant_script_session_approval(
     script_state: State<ScriptState>,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_SCRIPT_EDITOR)?;
     let mut grants = script_state
         .permission_grants
         .lock()
@@ -86,7 +88,9 @@ pub fn run_script(
     state: State<AppState>,
     script_state: State<ScriptState>,
     request: RunScriptRequest,
+    window: tauri::Window,
 ) -> Result<RunScriptResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_SCRIPT_EDITOR)?;
     check_script_security(&script_state)?;
 
     // 1. Clone data from AppState for isolated execution
@@ -187,7 +191,9 @@ pub fn get_script_security_level(
 pub fn set_script_security_level(
     script_state: State<ScriptState>,
     level: String,
+    window: tauri::Window,
 ) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let valid_levels = ["disabled", "prompt", "enabled"];
     if !valid_levels.contains(&level.as_str()) {
         return Err(format!(

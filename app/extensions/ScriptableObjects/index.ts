@@ -7,6 +7,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   AppEvents,
+  DialogExtensions,
   ObjectScriptManager,
   resetObjectScriptManager,
   loadAllObjectScripts,
@@ -141,6 +142,7 @@ async function loadAndMountScripts(): Promise<void> {
           packageName: pkg,
           scriptCount: pkgScripts.length,
           scriptNames: pkgScripts.map((s) => s.name),
+          scriptIds: pkgScripts.map((s) => s.id),
         });
       }
     }
@@ -164,9 +166,45 @@ async function activate(context: ExtensionContext): Promise<void> {
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister("scriptable-objects.consent"));
 
+  // Consent prompts are shown one at a time: dialog state is keyed by dialog
+  // id, so showing a second package's prompt while one is open would
+  // overwrite the first before React ever renders it.
+  const consentQueue: Array<Record<string, unknown>> = [];
+  let activeConsentPackage: string | null = null;
+
+  const showNextConsent = (): void => {
+    if (activeConsentPackage !== null) return;
+    const next = consentQueue.shift();
+    if (!next) return;
+    activeConsentPackage = next.packageName as string;
+    context.ui.dialogs.show("scriptable-objects.consent", next);
+  };
+
   cleanupFunctions.push(
     onAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, (detail) => {
-      context.ui.dialogs.show("scriptable-objects.consent", detail as Record<string, unknown>);
+      const request = detail as Record<string, unknown>;
+      const pkg = request.packageName as string;
+      // De-dupe: this package is already being prompted or is queued
+      if (activeConsentPackage === pkg || consentQueue.some((r) => r.packageName === pkg)) {
+        return;
+      }
+      consentQueue.push(request);
+      showNextConsent();
+    }),
+  );
+
+  // Advance the queue when the consent dialog closes — covers Allow, Block,
+  // and Escape (the dialog container closes on Escape without firing any
+  // consent event, so the granted/denied handlers alone would stall the queue).
+  cleanupFunctions.push(
+    DialogExtensions.onChange(() => {
+      if (activeConsentPackage === null) return;
+      const stillOpen = DialogExtensions.getVisibleDialogs()
+        .some((d) => d.definition.id === "scriptable-objects.consent");
+      if (!stillOpen) {
+        activeConsentPackage = null;
+        showNextConsent();
+      }
     }),
   );
 
@@ -182,6 +220,7 @@ async function activate(context: ExtensionContext): Promise<void> {
     onAppEvent(AppEvents.AFTER_OPEN, async () => {
       resetObjectScriptManager();
       consentedPackages.clear();
+      consentQueue.length = 0; // queued prompts belong to the previous workbook
       try {
         await loadAndMountScripts();
       } catch (e) {
@@ -374,14 +413,23 @@ async function activate(context: ExtensionContext): Promise<void> {
   // ---- Listen for edit-script requests (from context menus or property panels) ----
   cleanupFunctions.push(
     onAppEvent(ScriptableObjectEvents.EDIT_SCRIPT, async (detail) => {
-      const { objectType, instanceId, objectName } = detail as {
+      const { objectType, instanceId, objectName, scriptId } = detail as {
         objectType: ScriptableObjectType;
         instanceId?: string | null;
         objectName?: string;
+        scriptId?: string;
       };
 
-      // Check if a script exists for this object
-      let script = ObjectScriptManager.getScript(objectType, instanceId);
+      // An explicit scriptId targets an existing script (e.g. inspecting a
+      // package's distributed scripts from the consent prompt) — never scaffold.
+      let script = scriptId
+        ? (ObjectScriptManager.getAllScripts().find((s) => s.id === scriptId) ?? null)
+        : ObjectScriptManager.getScript(objectType, instanceId);
+
+      if (scriptId && !script) {
+        console.warn(`[ScriptableObjects] Script not found: ${scriptId}`);
+        return;
+      }
 
       if (!script) {
         // Create a new script with the scaffold template

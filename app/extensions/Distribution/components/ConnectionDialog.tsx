@@ -13,17 +13,27 @@ export interface ConnectionDialogData {
 
 export function ConnectionDialog({ onClose, data }: DialogProps & { data?: ConnectionDialogData }) {
   const sources = data?.dataSources ?? [];
-  const first = sources[0];
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const current = sources[sourceIndex];
 
-  const [server, setServer] = useState(first?.server ?? "");
-  const [database, setDatabase] = useState(first?.database ?? "");
+  const [server, setServer] = useState(current?.server ?? "");
+  const [database, setDatabase] = useState(current?.database ?? "");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const advanceTo = (index: number) => {
+    const next = sources[index];
+    setSourceIndex(index);
+    setServer(next?.server ?? "");
+    setDatabase(next?.database ?? "");
+    setUsername("");
+    setPassword("");
+  };
+
   const handleConnect = async () => {
-    if (!first) return;
+    if (!current) return;
 
     setError(null);
     setStatus("Connecting...");
@@ -31,14 +41,27 @@ export function ConnectionDialog({ onClose, data }: DialogProps & { data?: Conne
     const connectionString = `host=${server} dbname=${database} user=${username} password=${password} sslmode=prefer`;
 
     try {
-      await saveDataSourceConfig(first.dataSourceId, connectionString);
+      await saveDataSourceConfig(current.dataSourceId, connectionString);
       setStatus("Saved. Refreshing data...");
 
       const result = await refreshData();
+      const needsConfig = (id: string) =>
+        result.needsConfiguration.some((s) => s.dataSourceId === id);
 
-      if (result.needsConfiguration.length > 0) {
+      if (needsConfig(current.dataSourceId)) {
+        // The credentials for THIS source did not work — other sources still
+        // pending configuration are not a credentials failure.
         setError("Connection saved but refresh failed. Check credentials.");
         setStatus(null);
+        return;
+      }
+
+      const nextIndex = sources.findIndex(
+        (s, i) => i > sourceIndex && needsConfig(s.dataSourceId)
+      );
+      if (nextIndex !== -1) {
+        advanceTo(nextIndex);
+        setStatus(`"${current.name}" connected. Configure the next data source.`);
       } else {
         emitAppEvent(AppEvents.SHEET_CHANGED, {});
         setStatus(
@@ -59,7 +82,7 @@ export function ConnectionDialog({ onClose, data }: DialogProps & { data?: Conne
     padding: "4px 6px", border: "1px solid #ccc", borderRadius: "3px", fontSize: "13px",
   };
 
-  if (!first) {
+  if (!current) {
     return (
       <div style={{ padding: "16px", width: "400px" }}>
         <h3 style={{ margin: "0 0 12px 0" }}>Configure Connection</h3>
@@ -75,7 +98,8 @@ export function ConnectionDialog({ onClose, data }: DialogProps & { data?: Conne
     <div style={{ padding: "16px", width: "420px" }}>
       <h3 style={{ margin: "0 0 8px 0" }}>Configure Connection</h3>
       <p style={{ fontSize: "12px", color: "#666", margin: "0 0 12px 0" }}>
-        Data source: <strong>{first.name}</strong> ({first.connectionType})
+        Data source: <strong>{current.name}</strong> ({current.connectionType})
+        {sources.length > 1 ? ` — ${sourceIndex + 1} of ${sources.length}` : ""}
       </p>
 
       <div style={fieldStyle}>

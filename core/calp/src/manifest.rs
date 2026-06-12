@@ -1,7 +1,7 @@
 //! FILENAME: core/calp/src/manifest.rs
 //! PURPOSE: .calp manifest types — package-level and version-level.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use identity::{EntityId, SheetId};
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,20 @@ pub struct VersionManifest {
     /// database through pivots (and CUBE formulas, planned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data_sources: Vec<PackageDataSource>,
+    /// SHA-256 checksums (lowercase hex) of every artifact in the version
+    /// directory, keyed by version-dir-relative path with forward slashes
+    /// (e.g. "sheets/{sheet_id}/data.json"). The version manifest itself is
+    /// NOT listed — it is the integrity root and is written last on publish.
+    /// Subscriber-written content ("submissions/") is excluded: it is a
+    /// separate trust domain and arrives after publish.
+    /// BTreeMap keeps serialization deterministic.
+    /// Verified on every pull (and therefore on refresh, which shares the
+    /// pull machinery). An empty map means the package predates integrity
+    /// checksums and is rejected on pull — republish to fix.
+    /// Phase 2 (S5) adds an Ed25519 signature over the raw manifest bytes
+    /// to make this root tamper-proof — see integrity.rs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifact_checksums: BTreeMap<String, String>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -337,6 +351,45 @@ mod tests {
         let vm2: VersionManifest = serde_json::from_value(re_json).unwrap();
         let regions2 = vm2.writeback_regions.unwrap();
         assert_eq!(regions2[0].mode, Some(crate::writeback::WritebackMode::PerSubscriber));
+    }
+
+    #[test]
+    fn artifact_checksums_roundtrip_camel_case() {
+        let json = serde_json::json!({
+            "formatVersion": 1,
+            "packageName": "test",
+            "version": "1.0.0",
+            "kind": "report",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "sheets": [],
+            "artifactChecksums": {
+                "sheets/abc/data.json": "aa".repeat(32),
+            }
+        });
+        let vm: VersionManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(vm.artifact_checksums.len(), 1);
+        assert_eq!(vm.artifact_checksums["sheets/abc/data.json"], "aa".repeat(32));
+        // The field must bind to the struct, not fall into the flatten-extra map.
+        assert!(vm.extra.is_empty());
+
+        let re_json = serde_json::to_value(&vm).unwrap();
+        assert_eq!(re_json["artifactChecksums"]["sheets/abc/data.json"], "aa".repeat(32));
+    }
+
+    #[test]
+    fn version_manifest_without_checksums_deserializes_to_empty_map() {
+        // Pre-checksum manifest: loads (so it can be inspected/reported), but
+        // pull rejects it via integrity::verify_version_artifacts.
+        let json = serde_json::json!({
+            "formatVersion": 1,
+            "packageName": "test",
+            "version": "1.0.0",
+            "kind": "report",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "sheets": [],
+        });
+        let vm: VersionManifest = serde_json::from_value(json).unwrap();
+        assert!(vm.artifact_checksums.is_empty());
     }
 
     #[test]

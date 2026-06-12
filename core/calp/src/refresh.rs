@@ -487,6 +487,42 @@ mod tests {
     }
 
     #[test]
+    fn pull_all_updates_detects_tampering() {
+        let dir = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir);
+
+        // Tamper with an artifact of the NEW version (1.1.0) the refresh
+        // would pull. The refresh path shares pull()'s integrity gate.
+        let sheets_dir = reg.version_dir("test-pkg", "1.1.0").join("sheets");
+        let sheet_subdir = std::fs::read_dir(&sheets_dir).unwrap()
+            .next().unwrap().unwrap().path();
+        std::fs::write(sheet_subdir.join("data.json"), "tampered").unwrap();
+
+        let sub = Subscription {
+            package_name: "test-pkg".to_string(),
+            registry_url: String::new(),
+            version_pin: "^1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+
+        // unwrap_err() requires Debug on the Ok type; RefreshPayload has no
+        // Debug derive (wraps PullResult), so match instead.
+        let err = match pull_all_updates(&reg, &[sub]) {
+            Ok(_) => panic!("refresh pull unexpectedly succeeded"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("test-pkg@1.1.0"), "msg: {}", msg);
+        assert!(msg.contains("does not match its published checksum"), "msg: {}", msg);
+    }
+
+    #[test]
     fn apply_refresh_updates_subscription() {
         let dir = TempDir::new().unwrap();
         let reg = setup_registry_with_versions(&dir);

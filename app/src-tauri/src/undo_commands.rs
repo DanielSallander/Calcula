@@ -252,6 +252,12 @@ fn apply_changes(
     // (pivot/slicer/ribbon_filter restores acquire their own locks and may need grid access)
     let mut deferred_restores: Vec<(String, Vec<u8>)> = Vec::new();
 
+    // (row, col, pre, post) per restored cell, for subscriber override
+    // maintenance: undoing an edit on a subscribed sheet must update/remove
+    // the corresponding override, or the next refresh re-applies the stale
+    // override and resurrects the undone edit.
+    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
+
     // Build the inverse transaction
     let mut inverse_transaction = Transaction::new(description.clone());
 
@@ -261,6 +267,7 @@ fn apply_changes(
             CellChange::SetCell { row, col, previous } => {
                 // Save current state for inverse
                 let current = grid.get_cell(*row, *col).cloned();
+                override_edits.push((*row, *col, current.clone(), previous.clone()));
                 inverse_transaction.add_change(CellChange::SetCell {
                     row: *row,
                     col: *col,
@@ -374,6 +381,30 @@ fn apply_changes(
                 };
                 inverse_transaction.add_change(CellChange::RestoreSnapshot(current_snapshot));
 
+                // Diff old vs new cells for override maintenance (union of
+                // keys). Only value/formula matter — that is all the
+                // override layer records.
+                {
+                    let keys: std::collections::HashSet<(u32, u32)> = grid.cells.keys()
+                        .chain(snapshot.cells.keys())
+                        .copied()
+                        .collect();
+                    for (row, col) in keys {
+                        let pre = grid.cells.get(&(row, col));
+                        let post = snapshot.cells.get(&(row, col));
+                        let same = match (pre, post) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => {
+                                a.value == b.value && a.formula_string() == b.formula_string()
+                            }
+                            _ => false,
+                        };
+                        if !same {
+                            override_edits.push((row, col, pre.cloned(), post.cloned()));
+                        }
+                    }
+                }
+
                 // Restore from snapshot
                 grid.cells = snapshot.cells.clone();
                 grid.max_row = snapshot.max_row;
@@ -429,6 +460,10 @@ fn apply_changes(
     drop(grids);
     drop(grid);
     drop(undo_stack);
+
+    // Keep subscriber overrides in step with the restored cells (no-op when
+    // the active sheet isn't subscribed).
+    crate::calp_commands::record_subscription_override_edits(state, active_sheet, &override_edits);
 
     // Process deferred pivot/slicer/ribbon_filter restores (now safe to acquire locks)
     for (kind, data) in deferred_restores {

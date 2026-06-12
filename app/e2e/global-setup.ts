@@ -118,7 +118,10 @@ export default async function globalSetup() {
   delete cleanEnv.AR;
   delete cleanEnv.CFLAGS;
 
-  const child: ChildProcess = spawn("yarn", ["tauri", "dev"], {
+  // The e2e overlay re-enables withGlobalTauri (the harness drives the app
+  // through window.__TAURI__ from page.evaluate). It is a dev-merge config —
+  // production builds never include it.
+  const child: ChildProcess = spawn("yarn", ["tauri", "dev", "--config", "src-tauri/tauri.e2e.conf.json"], {
     cwd: path.resolve(__dirname, ".."),
     env: {
       ...cleanEnv,

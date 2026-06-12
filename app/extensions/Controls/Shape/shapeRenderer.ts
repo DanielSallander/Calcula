@@ -25,6 +25,13 @@ import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./s
 window.addEventListener("message", (e) => {
   if (e.data?.source === "shape-html") {
     const { instanceId, type, data } = e.data;
+    // Integrity check: e.data is spoofable by any frame/script, but e.source
+    // is not. Only accept messages that actually originate from the iframe
+    // registered for this instanceId.
+    const expectedFrame = htmlOverlayElements.get(instanceId);
+    if (!expectedFrame || e.source !== expectedFrame.contentWindow) {
+      return;
+    }
     emitAppEvent("shape:htmlMessage", { instanceId, type, data });
   }
 });
@@ -125,7 +132,9 @@ export function removeShapeHtmlOverlay(instanceId: string): void {
  * Build the full srcdoc HTML for the iframe, injecting the postMessage bridge.
  */
 function buildIframeSrcDoc(controlId: string, userHtml: string): string {
-  const escapedId = controlId.replace(/'/g, "\\'");
+  // JSON.stringify yields a safe JS string literal; escaping "<" additionally
+  // prevents "</script>" inside the id from terminating the script block.
+  const idLiteral = JSON.stringify(controlId).replace(/</g, "\\u003c");
   return `<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
@@ -134,7 +143,7 @@ function buildIframeSrcDoc(controlId: string, userHtml: string): string {
   * { box-sizing: border-box; }
 </style>
 <script>
-  var SHAPE_ID = '${escapedId}';
+  var SHAPE_ID = ${idLiteral};
   window.calcula = {
     sendMessage: function(type, data) {
       parent.postMessage({ source: 'shape-html', instanceId: SHAPE_ID, type: type, data: data }, '*');
@@ -172,7 +181,10 @@ function updateHtmlOverlay(
   if (!el) {
     el = document.createElement("iframe");
     el.dataset.shapeOverlay = controlId;
-    el.sandbox.add("allow-scripts", "allow-same-origin");
+    // allow-scripts only: with srcdoc this gives the iframe an opaque origin,
+    // so its scripts cannot reach the parent window, app-origin storage, or
+    // __TAURI__. The postMessage bridge below is the only communication path.
+    el.sandbox.add("allow-scripts");
     el.style.position = "absolute";
     el.style.overflow = "hidden";
     el.style.boxSizing = "border-box";

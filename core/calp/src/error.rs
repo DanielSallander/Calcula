@@ -40,4 +40,20 @@ pub enum CalpError {
 
     #[error("Format error: {0}")]
     Format(String),
+
+    // -- Package integrity (S5 phase 1: SHA-256 artifact checksums) --------
+    // Phase 2 adds manifest signature variants (Ed25519 + TOFU pinning),
+    // e.g. ManifestSignatureInvalid / PublisherKeyChanged. See integrity.rs.
+
+    #[error("Package integrity check failed: {file} in {package}@{version} does not match its published checksum")]
+    ChecksumMismatch { package: String, version: String, file: String },
+
+    #[error("Package integrity check failed: {file} in {package}@{version} is listed in the manifest but missing from the registry")]
+    MissingArtifact { package: String, version: String, file: String },
+
+    #[error("Package integrity check failed: {file} in {package}@{version} is not listed in the published checksums (file added after publish?)")]
+    UnlistedArtifact { package: String, version: String, file: String },
+
+    #[error("Package {package}@{version} was published without integrity checksums — republish it")]
+    MissingChecksums { package: String, version: String },
 }

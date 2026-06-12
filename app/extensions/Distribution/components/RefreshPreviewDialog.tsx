@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
-import { refreshPreview, refreshApply, calculateNow, type RefreshPreview } from "@api";
+import { refreshPreview, refreshApply, calculateNow, emitAppEvent, type RefreshPreview } from "@api";
 
 export function RefreshPreviewDialog({ onClose }: DialogProps) {
   const [preview, setPreview] = useState<RefreshPreview | null>(null);
@@ -38,6 +38,10 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
         console.error("[Distribution] Recalc after refresh failed:", err);
       }
       window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // The refresh may have replaced distributed scripts with the new
+      // package versions — reload them so changed sources re-prompt for
+      // consent (ScriptableObjects de-dupes unchanged ones by source hash).
+      emitAppEvent("calp:scripts-pulled", {});
       setResult(
         `Refreshed ${r.subscriptionsRefreshed} subscription(s). ` +
         `${r.sheetsAdded} added, ${r.sheetsUpdated} updated, ${r.sheetsRemoved} removed. ` +

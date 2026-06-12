@@ -424,7 +424,9 @@ fn get_engine_arc(
 pub async fn bi_create_connection(
     bi_state: State<'_, BiState>,
     request: CreateConnectionRequest,
+    window: tauri::Window,
 ) -> Result<ConnectionInfo, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     log_info!("BI", "bi_create_connection: name={}", request.name);
 
     // Load model from file
@@ -525,6 +527,7 @@ pub async fn bi_create_connection(
         created_at: now_iso(),
         is_connected: false,
         active_queries: std::collections::HashMap::new(),
+        package_data_source_id: None,
     };
 
     let info = connection.to_info();
@@ -636,7 +639,9 @@ pub async fn bi_get_connection(
 pub async fn bi_connect(
     bi_state: State<'_, BiState>,
     request: BiConnectRequest,
+    window: tauri::Window,
 ) -> Result<ConnectionInfo, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let connection_id = request.connection_id;
     log_info!("CALP-DIAG", "bi_connect called: connection_id={}", connection_id);
 
@@ -816,7 +821,9 @@ pub async fn bi_bind_table(
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
     request: BiBindRequest,
+    window: tauri::Window,
 ) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     log_info!(
         "BI",
         "bi_bind_table: conn={}, {} -> {}.{}",
@@ -867,7 +874,9 @@ pub async fn bi_query(
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
     request: BiQueryRequest,
+    window: tauri::Window,
 ) -> Result<BiQueryResult, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     log_info!(
         "BI",
         "bi_query: conn={}, measures={:?}, group_by={:?}",
@@ -1298,7 +1307,9 @@ pub async fn bi_refresh_connection(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
+    window: tauri::Window,
 ) -> Result<Vec<BiQueryResult>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     log_info!("BI", "bi_refresh_connection: id={}", connection_id);
 
     // Collect active queries

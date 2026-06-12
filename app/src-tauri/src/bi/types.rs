@@ -82,6 +82,11 @@ pub struct Connection {
     pub is_connected: bool,
     /// Active queries inserted into the grid from this connection.
     pub active_queries: HashMap<identity::EntityId, ActiveQuery>,
+    /// For connections materialized from a pulled .calp package: the package
+    /// data source id this connection represents. Lets the subscription
+    /// machinery (verify/save credentials) find and configure the SAME
+    /// connection that pivots query. None for locally created connections.
+    pub package_data_source_id: Option<String>,
 }
 
 /// Supported connection types.

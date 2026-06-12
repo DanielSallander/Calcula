@@ -11,6 +11,7 @@ engine = { path = "../engine" }
 calcula-format = { path = "../calcula-format" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "1.0"
 
 [dev-dependencies]

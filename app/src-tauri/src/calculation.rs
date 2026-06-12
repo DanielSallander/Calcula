@@ -537,6 +537,158 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
     Ok(updated_cells)
 }
 
+/// Evaluate all formula cells on one sheet (active or not), writing results
+/// into grids[sheet_index] (and the active-sheet mirror when applicable).
+///
+/// calculate_now only ever evaluates the ACTIVE sheet; .calp refresh and
+/// override revert/accept write formula cells (value Empty pending recalc)
+/// into arbitrary sheets, which would otherwise display empty until the user
+/// manually recalculated there. Builds a local same-sheet dependency map for
+/// evaluation order — the AppState dependency maps describe only the active
+/// sheet. Computed properties are not re-evaluated here (active-sheet
+/// machinery; the frontend recalc path covers them).
+pub(crate) fn recalculate_sheet_values(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    sheet_index: usize,
+) {
+    let mut grid_mirror = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    if sheet_index >= grids.len() {
+        return;
+    }
+    let styles = state.style_registry.lock().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
+
+    let iteration_enabled = *state.iteration_enabled.lock().unwrap();
+    let max_iterations = *state.max_iterations.lock().unwrap();
+    let max_change = *state.max_change.lock().unwrap();
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        crate::pivot::operations::lookup_pivot_data(
+            &pivot_tables,
+            &pivot_views,
+            data_field,
+            pivot_row,
+            pivot_col,
+            pairs,
+        )
+    };
+
+    let gather_data = crate::calp_commands::build_gather_data(state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
+    let formula_cells: Vec<_> = grids[sheet_index]
+        .cells
+        .iter()
+        .filter_map(|(&(row, col), cell)| {
+            cell.formula_string().map(|f| (row, col, f))
+        })
+        .collect();
+    if formula_cells.is_empty() {
+        return;
+    }
+
+    let tables_map = state.tables.lock().unwrap();
+    let table_names_map = state.table_names.lock().unwrap();
+    let named_ranges_map = state.named_ranges.lock().unwrap();
+    let (column_widths, row_heights) = {
+        let all_cw = state.all_column_widths.lock().unwrap();
+        let all_rh = state.all_row_heights.lock().unwrap();
+        (
+            all_cw.get(sheet_index).cloned().unwrap_or_default(),
+            all_rh.get(sheet_index).cloned().unwrap_or_default(),
+        )
+    };
+
+    // Local same-sheet dependency map for evaluation ordering.
+    let mut local_deps: std::collections::HashMap<(u32, u32), std::collections::HashSet<(u32, u32)>> =
+        std::collections::HashMap::new();
+    for (row, col, _f) in &formula_cells {
+        if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
+            if let Some(ast) = &cell.ast {
+                let refs = crate::extract_all_references(ast, &grids[sheet_index]);
+                if !refs.cells.is_empty() {
+                    local_deps.insert((*row, *col), refs.cells);
+                }
+            }
+        }
+    }
+    let (non_circular, circular_groups) = partition_formula_cells(&formula_cells, &local_deps);
+
+    for (row, col, formula) in &non_circular {
+        let result = evaluate_single_formula(
+            *row, *col, formula,
+            &grids, &sheet_names, sheet_index,
+            &styles, &user_files, &pivot_data_fn, &gather_fn,
+            &tables_map, &table_names_map, &named_ranges_map,
+            &row_heights, &column_widths,
+        );
+        if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
+            let mut updated = cell.clone();
+            updated.value = result;
+            grids[sheet_index].set_cell(*row, *col, updated.clone());
+            if sheet_index == active_sheet {
+                grid_mirror.set_cell(*row, *col, updated);
+            }
+        }
+    }
+
+    for group in &circular_groups {
+        if !iteration_enabled {
+            for (row, col, _formula) in group {
+                if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
+                    let mut updated = cell.clone();
+                    updated.value = engine::CellValue::Error(engine::CellError::Circular);
+                    grids[sheet_index].set_cell(*row, *col, updated.clone());
+                    if sheet_index == active_sheet {
+                        grid_mirror.set_cell(*row, *col, updated);
+                    }
+                }
+            }
+        } else {
+            for _iteration in 0..max_iterations {
+                let mut max_delta: f64 = 0.0;
+                for (row, col, formula) in group {
+                    let old_value = grids[sheet_index].get_cell(*row, *col)
+                        .map(|c| cell_value_as_f64(&c.value))
+                        .unwrap_or(0.0);
+                    let new_result = evaluate_single_formula(
+                        *row, *col, formula,
+                        &grids, &sheet_names, sheet_index,
+                        &styles, &user_files, &pivot_data_fn, &gather_fn,
+                        &tables_map, &table_names_map, &named_ranges_map,
+                        &row_heights, &column_widths,
+                    );
+                    let new_numeric = cell_value_as_f64(&new_result);
+                    if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
+                        let mut updated = cell.clone();
+                        updated.value = new_result;
+                        grids[sheet_index].set_cell(*row, *col, updated.clone());
+                        if sheet_index == active_sheet {
+                            grid_mirror.set_cell(*row, *col, updated);
+                        }
+                    }
+                    let delta = (new_numeric - old_value).abs();
+                    if delta > max_delta {
+                        max_delta = delta;
+                    }
+                }
+                if max_delta < max_change {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Recalculate all formula cells in the current sheet (same as calculate_now for single-sheet)
 #[tauri::command]
 pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>) -> Result<Vec<CellData>, String> {

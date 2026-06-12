@@ -145,8 +145,8 @@ export interface UnlockedAPI {
   emitEvent(name: string, detail?: unknown): void;
   /** Listen for a global event. Returns unsubscribe function. */
   onEvent(name: string, handler: (detail: unknown) => void): CleanupFn;
-  /** Execute a registered command by ID. */
-  executeCommand(commandId: string, ...args: unknown[]): void;
+  /** Execute a registered command by ID. Args are forwarded to the handler unchanged. */
+  executeCommand(commandId: string, args?: unknown): void;
 
   // ---- Batch Transaction Support ----
 
@@ -413,12 +413,6 @@ export interface SlicerContext extends BaseObjectContext {
   /** Called when slicer selection changes (items are selected/deselected). */
   onSelectionChange(handler: EventHandler<{ selectedItems: string[] }>): CleanupFn;
 
-  /** Called when the slicer's underlying data is refreshed. */
-  onDataRefresh(handler: EventHandler<{ items: string[] }>): CleanupFn;
-
-  /** Called when the slicer is moved or resized. */
-  onResize(handler: EventHandler<{ x: number; y: number; width: number; height: number }>): CleanupFn;
-
   /** Get the currently selected items. */
   getSelectedItems(): string[];
 
@@ -463,12 +457,6 @@ export interface ChartContext extends BaseObjectContext {
   /** Called when the chart's source data changes. */
   onDataChange(handler: EventHandler): CleanupFn;
 
-  /** Called when the chart is clicked. */
-  onClick(handler: EventHandler<{ x: number; y: number }>): CleanupFn;
-
-  /** Called when the chart is moved or resized. */
-  onResize(handler: EventHandler<{ x: number; y: number; width: number; height: number }>): CleanupFn;
-
   /** Get the chart specification (opaque JSON). */
   getSpec(): Record<string, unknown>;
 
@@ -490,17 +478,6 @@ export interface PivotContext extends BaseObjectContext {
 
   /** Called when the pivot is refreshed (recalculated). */
   onRefresh(handler: EventHandler): CleanupFn;
-
-  /** Called when pivot field layout changes. */
-  onLayoutChange(handler: EventHandler<{
-    rows: string[];
-    columns: string[];
-    values: string[];
-    filters: string[];
-  }>): CleanupFn;
-
-  /** Called when the pivot is moved or resized. */
-  onResize(handler: EventHandler<{ x: number; y: number; width: number; height: number }>): CleanupFn;
 
   /** Get current pivot field configuration. */
   getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
@@ -977,9 +954,9 @@ function buildUnlockedAPI(cleanupFns: CleanupFn[]): UnlockedAPI {
       cleanupFns.push(unsub);
       return unsub;
     },
-    executeCommand(commandId: string, ...args: unknown[]): void {
+    executeCommand(commandId: string, args?: unknown): void {
       import("./commands").then((mod) => {
-        mod.CommandRegistry.execute(commandId, ...args);
+        mod.CommandRegistry.execute(commandId, args);
       });
     },
 
@@ -1377,23 +1354,6 @@ function buildSlicerContext(
         }
       }));
     },
-    onDataRefresh(handler) {
-      return tracked(cleanupFns, onAppEvent("slicer:dataRefreshed", (detail) => {
-        const d = detail as { slicerId: string; items: string[] };
-        if (String(d.slicerId) === instanceId) {
-          handler({ items: d.items });
-        }
-      }));
-    },
-    onResize(handler) {
-      return tracked(cleanupFns, onAppEvent("slicer:resized", (detail) => {
-        const d = detail as { slicerId: string; x: number; y: number; width: number; height: number };
-        if (String(d.slicerId) === instanceId) {
-          handler({ x: d.x, y: d.y, width: d.width, height: d.height });
-        }
-      }));
-    },
-
     getSelectedItems() {
       const store = getSlicerStoreService();
       if (store) {
@@ -1522,23 +1482,6 @@ function buildChartContext(
         unsubBulk();
       };
     },
-    onClick(handler) {
-      return tracked(cleanupFns, onAppEvent("chart:clicked", (detail) => {
-        const d = detail as { chartId: string; x: number; y: number };
-        if (String(d.chartId) === instanceId) {
-          handler({ x: d.x, y: d.y });
-        }
-      }));
-    },
-    onResize(handler) {
-      return tracked(cleanupFns, onAppEvent("chart:resized", (detail) => {
-        const d = detail as { chartId: string; x: number; y: number; width: number; height: number };
-        if (String(d.chartId) === instanceId) {
-          handler({ x: d.x, y: d.y, width: d.width, height: d.height });
-        }
-      }));
-    },
-
     getSpec() {
       const store = getChartStoreService();
       if (store) {
@@ -1584,27 +1527,15 @@ function buildPivotContext(
     instanceId,
 
     onRefresh(handler) {
-      return tracked(cleanupFns, onAppEvent("pivot:refreshed", (detail) => {
-        const d = detail as { pivotId: string };
-        if (String(d.pivotId) === instanceId) {
-          handler();
+      // "pivot:refresh" is the live refresh signal (FilterPane, Slicer bridge,
+      // Pivot menus, undo/redo). Most emitters dispatch it without a detail
+      // payload (refresh-all); when a pivotId is present, filter on it.
+      return tracked(cleanupFns, onAppEvent("pivot:refresh", (detail) => {
+        const d = detail as { pivotId?: string } | undefined;
+        if (d?.pivotId !== undefined && String(d.pivotId) !== instanceId) {
+          return;
         }
-      }));
-    },
-    onLayoutChange(handler) {
-      return tracked(cleanupFns, onAppEvent("pivot:layoutChanged", (detail) => {
-        const d = detail as { pivotId: string; rows: string[]; columns: string[]; values: string[]; filters: string[] };
-        if (String(d.pivotId) === instanceId) {
-          handler({ rows: d.rows, columns: d.columns, values: d.values, filters: d.filters });
-        }
-      }));
-    },
-    onResize(handler) {
-      return tracked(cleanupFns, onAppEvent("pivot:resized", (detail) => {
-        const d = detail as { pivotId: string; x: number; y: number; width: number; height: number };
-        if (String(d.pivotId) === instanceId) {
-          handler({ x: d.x, y: d.y, width: d.width, height: d.height });
-        }
+        handler();
       }));
     },
 

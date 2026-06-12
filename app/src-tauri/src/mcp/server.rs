@@ -1,9 +1,19 @@
 //! FILENAME: app/src-tauri/src/mcp/server.rs
 //! MCP server definition with tool routing.
 //! Implements the MCP protocol so external AI clients can interact with Calcula.
+//!
+//! All HTTP requests pass through `guard_request` BEFORE reaching the rmcp
+//! service: per-session bearer token auth plus Origin/Host hardening.
+//! rmcp's `Mcp-Session-Id` is a protocol session marker, not authentication.
 
 use std::sync::Arc;
-use axum::Router;
+use axum::{
+    extract::Request,
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    Router,
+};
 use rmcp::{
     ServerHandler, tool, tool_router, tool_handler,
     handler::server::tool::ToolRouter,
@@ -19,6 +29,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
 };
 
+use crate::{log_info, log_warn};
 use super::tools;
 
 // ============================================================================
@@ -111,6 +122,19 @@ pub struct RunScriptParams {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Truncate a string to `max` chars and collapse newlines, for log summaries.
+fn log_summary(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        out.push_str("...");
+    }
+    out.replace(['\n', '\r'], " ")
+}
+
+// ============================================================================
 // MCP Server
 // ============================================================================
 
@@ -135,6 +159,11 @@ impl CalculaMcpServer {
         params: Parameters<GetCellRangeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: get_cell_range r{}c{}..r{}c{}",
+            p.start_row, p.start_col, p.end_row, p.end_col
+        );
         let result = tools::read_cell_range(
             &self.app_handle,
             p.start_row,
@@ -144,7 +173,10 @@ impl CalculaMcpServer {
         );
         match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: get_cell_range: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
         }
     }
 
@@ -154,6 +186,11 @@ impl CalculaMcpServer {
         params: Parameters<SetCellValueParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: set_cell_value r{}c{} = '{}'",
+            p.row, p.col, log_summary(&p.value, 120)
+        );
         let result = tools::write_cell(
             &self.app_handle,
             p.row,
@@ -162,7 +199,10 @@ impl CalculaMcpServer {
         );
         match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: set_cell_value: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
         }
     }
 
@@ -172,10 +212,14 @@ impl CalculaMcpServer {
         params: Parameters<SetCellRangeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
+        log_info!("MCP", "Tool call: set_cell_range ({} cells)", p.cells.len());
         let result = tools::write_cell_range(&self.app_handle, &p.cells);
         match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: set_cell_range: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
         }
     }
 
@@ -185,10 +229,14 @@ impl CalculaMcpServer {
         params: Parameters<GetSheetSummaryParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
+        log_info!("MCP", "Tool call: get_sheet_summary (max_chars={})", p.max_chars);
         let result = tools::get_sheet_summary(&self.app_handle, p.max_chars);
         match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: get_sheet_summary: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
         }
     }
 
@@ -198,10 +246,19 @@ impl CalculaMcpServer {
         params: Parameters<ApplyFormattingParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: apply_formatting r{}c{}..r{}c{} (bold={:?} italic={:?} textColor={:?} bg={:?} numFmt={:?} align={:?})",
+            p.start_row, p.start_col, p.end_row, p.end_col,
+            p.bold, p.italic, p.text_color, p.background_color, p.number_format, p.text_align
+        );
         let result = tools::apply_cell_formatting(&self.app_handle, &p);
         match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: apply_formatting: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
         }
     }
 
@@ -211,10 +268,19 @@ impl CalculaMcpServer {
         params: Parameters<RunScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: run_script ({} chars): {}",
+            p.code.len(),
+            log_summary(&p.code, 160)
+        );
         let result = tools::execute_script(&self.app_handle, &p.code);
         match result {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: run_script: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
         }
     }
 }
@@ -242,10 +308,113 @@ impl ServerHandler for CalculaMcpServer {
 }
 
 // ============================================================================
+// Security middleware (runs BEFORE the rmcp service)
+// ============================================================================
+
+/// Constant-time byte comparison so token checks don't leak length-prefix
+/// timing. (Length mismatch returns early — token length is not secret.)
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// True if a Host header value (optionally with port) is loopback.
+fn host_is_loopback(host: &str) -> bool {
+    let h = host.trim();
+    let without_port = if let Some(rest) = h.strip_prefix('[') {
+        // IPv6 literal: "[::1]:8787" or "[::1]"
+        rest.split(']').next().unwrap_or("")
+    } else {
+        // "127.0.0.1:8787" or "localhost" — strip a trailing :port if present
+        h.rsplit_once(':').map(|(name, _)| name).unwrap_or(h)
+    };
+    matches!(
+        without_port.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// True if a browser Origin header is acceptable.
+/// Allowed: empty, "null" (no token leaks to such contexts anyway — they still
+/// need the bearer token), and loopback http(s) origins (e.g. MCP Inspector).
+/// Everything else is a cross-site request and is rejected (DNS-rebinding and
+/// drive-by browser pages send their own page origin here).
+fn origin_is_allowed(origin: &str) -> bool {
+    let o = origin.trim();
+    if o.is_empty() || o.eq_ignore_ascii_case("null") {
+        return true;
+    }
+    let rest = o
+        .strip_prefix("http://")
+        .or_else(|| o.strip_prefix("https://"));
+    match rest {
+        Some(host) => host_is_loopback(host),
+        None => false,
+    }
+}
+
+/// Gate every request: Host check, Origin check, then bearer-token auth.
+async fn guard_request(token: Arc<String>, req: Request, next: Next) -> Response {
+    // --- Host validation (DNS-rebinding defense) ---
+    // HTTP/1.1 always carries Host; for HTTP/2 fall back to the URI authority.
+    let host_value = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| req.uri().host().map(|h| h.to_string()));
+    if let Some(host) = host_value {
+        if !host_is_loopback(&host) {
+            log_warn!("MCP", "Rejected request: non-local Host '{}'", log_summary(&host, 100));
+            return (StatusCode::FORBIDDEN, "Forbidden: non-local Host").into_response();
+        }
+    }
+
+    // --- Origin validation (reject browser cross-origin requests) ---
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        let origin_str = origin.to_str().unwrap_or("<non-ascii>");
+        if !origin_is_allowed(origin_str) {
+            log_warn!(
+                "MCP",
+                "Rejected request: disallowed Origin '{}'",
+                log_summary(origin_str, 100)
+            );
+            return (StatusCode::FORBIDDEN, "Forbidden: disallowed Origin").into_response();
+        }
+    }
+
+    // --- Per-session bearer token ---
+    let authorized = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|presented| constant_time_eq(presented.trim().as_bytes(), token.as_bytes()))
+        .unwrap_or(false);
+    if !authorized {
+        log_warn!("MCP", "Rejected request: missing or invalid bearer token");
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer realm=\"calcula-mcp\"")],
+            "Unauthorized: valid bearer token required",
+        )
+            .into_response();
+    }
+
+    next.run(req).await
+}
+
+// ============================================================================
 // Router Creation
 // ============================================================================
 
-pub fn create_router(app_handle: Arc<AppHandle>) -> Router {
+pub fn create_router(app_handle: Arc<AppHandle>, session_token: String) -> Router {
     let service: StreamableHttpService<CalculaMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(CalculaMcpServer::new(app_handle.clone())),
@@ -253,5 +422,12 @@ pub fn create_router(app_handle: Arc<AppHandle>) -> Router {
             Default::default(),
         );
 
-    Router::new().nest_service("/mcp", service)
+    let token = Arc::new(session_token);
+
+    Router::new()
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let token = token.clone();
+            async move { guard_request(token, req, next).await }
+        }))
 }

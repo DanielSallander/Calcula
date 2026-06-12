@@ -562,7 +562,11 @@ function SpreadsheetContent({
       // Notify extensions about the structural change BEFORE refreshing cells,
       // so overlays (e.g., pivot tables) can shift their regions synchronously
       // before the grid redraws.
-      emitAppEvent(AppEvents.ROWS_INSERTED, { row: startRow, count });
+      emitAppEvent(AppEvents.ROWS_INSERTED, {
+        sheetIndex: gridState.sheetContext.activeSheetIndex,
+        startRow,
+        count,
+      });
 
       // Refresh dimensions from backend (row heights shifted)
       await refreshDimensions();
@@ -582,7 +586,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert rows:", error);
     }
-  }, [selection, canvasRef, refreshDimensions]);
+  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
   // -------------------------------------------------------------------------
   // Insert Column Handler
@@ -602,7 +606,11 @@ function SpreadsheetContent({
       // Notify extensions about the structural change BEFORE refreshing cells,
       // so overlays (e.g., pivot tables) can shift their regions synchronously
       // before the grid redraws.
-      emitAppEvent(AppEvents.COLUMNS_INSERTED, { col: startCol, count });
+      emitAppEvent(AppEvents.COLUMNS_INSERTED, {
+        sheetIndex: gridState.sheetContext.activeSheetIndex,
+        startCol,
+        count,
+      });
 
       // Refresh dimensions from backend (column widths shifted)
       await refreshDimensions();
@@ -622,7 +630,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert columns:", error);
     }
-  }, [selection, canvasRef, refreshDimensions]);
+  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
   // -------------------------------------------------------------------------
   // Delete Row Handler
@@ -642,7 +650,11 @@ function SpreadsheetContent({
       // Notify extensions about the structural change BEFORE refreshing cells,
       // so overlays (e.g., pivot tables) can shift their regions synchronously
       // before the grid redraws.
-      emitAppEvent(AppEvents.ROWS_DELETED, { row: startRow, count });
+      emitAppEvent(AppEvents.ROWS_DELETED, {
+        sheetIndex: gridState.sheetContext.activeSheetIndex,
+        startRow,
+        count,
+      });
 
       // Refresh dimensions from backend (row heights shifted)
       await refreshDimensions();
@@ -663,7 +675,7 @@ function SpreadsheetContent({
       const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
       alert(msg);
     }
-  }, [selection, canvasRef, refreshDimensions]);
+  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
   // -------------------------------------------------------------------------
   // Delete Column Handler
@@ -683,7 +695,11 @@ function SpreadsheetContent({
       // Notify extensions about the structural change BEFORE refreshing cells,
       // so overlays (e.g., pivot tables) can shift their regions synchronously
       // before the grid redraws.
-      emitAppEvent(AppEvents.COLUMNS_DELETED, { col: startCol, count });
+      emitAppEvent(AppEvents.COLUMNS_DELETED, {
+        sheetIndex: gridState.sheetContext.activeSheetIndex,
+        startCol,
+        count,
+      });
 
       // Refresh dimensions from backend (column widths shifted)
       await refreshDimensions();
@@ -704,7 +720,7 @@ function SpreadsheetContent({
       const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
       alert(msg);
     }
-  }, [selection, canvasRef, refreshDimensions]);
+  }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
   // -------------------------------------------------------------------------
   // Merge Cells Handler

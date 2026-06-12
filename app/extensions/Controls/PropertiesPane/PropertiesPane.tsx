@@ -604,7 +604,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
             <iframe
               style={previewFrameStyle}
               srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;font-family:'Segoe UI Variable','Segoe UI',sans-serif;font-size:12px;}</style></head><body>${htmlContent}</body></html>`}
-              sandbox="allow-scripts allow-same-origin"
+              sandbox="allow-scripts"
               title="Shape HTML Preview"
             />
           ) : (

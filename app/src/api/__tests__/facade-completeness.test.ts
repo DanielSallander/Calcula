@@ -41,12 +41,16 @@ describe("API Facade Completeness", () => {
       }
     });
 
+    // Generous timeout: this dynamic import gets starved when the full
+    // 100k-test suite saturates the worker pool (range.ts pulls in the grid
+    // module graph). It is a presence check, not a perf assertion — it has
+    // flaked at 15s under full-suite load while passing in 6s in isolation.
     it("range.ts exports CellRange class", async () => {
       const mod = await import("../range");
       expect(mod.CellRange).toBeDefined();
       expect(typeof mod.CellRange.fromCell).toBe("function");
       expect(typeof mod.CellRange.fromAddress).toBe("function");
-    }, 15000);
+    }, 60000);
 
     it("version.ts exports API_VERSION as a string", async () => {
       const mod = await import("../version");

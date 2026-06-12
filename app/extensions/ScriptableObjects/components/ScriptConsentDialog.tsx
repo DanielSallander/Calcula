@@ -3,7 +3,7 @@
 // CONTEXT: When a workbook contains scripts from a .calp package, the user
 //          is asked to review and approve them before they can run.
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { emitAppEvent } from "@api/events";
 
 // ============================================================================
@@ -124,7 +124,14 @@ export default function ScriptConsentDialog({
   const packageName = (data?.packageName as string) ?? "Unknown";
   const scriptCount = (data?.scriptCount as number) ?? 0;
   const scriptNames = (data?.scriptNames as string[]) ?? [];
+  const scriptIds = (data?.scriptIds as string[]) ?? [];
   const [inspecting, setInspecting] = useState(false);
+
+  // The dialog instance is reused when the consent queue advances to the
+  // next package — reset per-package UI state.
+  useEffect(() => {
+    setInspecting(false);
+  }, [packageName]);
 
   const handleAllow = useCallback(() => {
     emitAppEvent("scriptable-objects:consent-granted", { packageName });
@@ -137,13 +144,12 @@ export default function ScriptConsentDialog({
   }, [packageName, onClose]);
 
   const handleInspect = useCallback(() => {
-    // Open the Code Editor to let user inspect distributed scripts (read-only)
-    emitAppEvent("scriptable-objects:edit-script", {
-      objectType: "workbook",
-      instanceId: null,
-    });
+    // Open the Code Editor on the package's first distributed script.
+    // Targeting by scriptId opens the existing script — never scaffolds.
+    if (scriptIds.length === 0) return;
+    emitAppEvent("scriptable-objects:edit-script", { scriptId: scriptIds[0] });
     setInspecting(true);
-  }, []);
+  }, [scriptIds]);
 
   return (
     <div style={overlayStyle} onClick={handleBlock}>

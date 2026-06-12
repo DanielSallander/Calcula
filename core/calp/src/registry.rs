@@ -193,6 +193,22 @@ impl LocalRegistry {
         version: &str,
         submission: &crate::writeback::WritebackSubmission,
     ) -> Result<(), CalpError> {
+        // The region id is joined raw into the slot filename and originates
+        // from third-party package manifests — reject anything that could
+        // escape the submissions directory. (Package/submitter path
+        // components get the same treatment under the D7 boundary work.)
+        if submission.region_id.is_empty()
+            || !submission
+                .region_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(CalpError::Registry(format!(
+                "Invalid writeback region id '{}': only alphanumerics, '-' and '_' are allowed",
+                submission.region_id
+            )));
+        }
+
         let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id);
         fs::create_dir_all(&sub_dir)?;
 
@@ -203,6 +219,31 @@ impl LocalRegistry {
         let content = serde_json::to_string_pretty(submission)?;
         fs::write(&path, content)?;
         Ok(())
+    }
+
+    /// Load EVERY submission for a package version across all submitters and
+    /// regions in a single tree scan. Callers that need several regions
+    /// should use this and bucket by region_id — calling
+    /// load_region_submissions per region rescans the whole tree each time.
+    pub fn load_all_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
+        let base = self.version_dir(package_name, version).join("submissions");
+        if !base.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut all = Vec::new();
+        for entry in fs::read_dir(&base)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let submitter_id = entry.file_name().to_string_lossy().to_string();
+                all.extend(self.load_submissions(package_name, version, &submitter_id)?);
+            }
+        }
+        Ok(all)
     }
 
     /// Load all submissions by a specific submitter for a package version.
@@ -265,7 +306,9 @@ impl LocalRegistry {
         self.root.join(package_name)
     }
 
-    fn version_dir(&self, package_name: &str, version: &str) -> PathBuf {
+    /// Get the directory path for a specific package version.
+    /// Public so publish/pull can write and verify artifacts in place.
+    pub fn version_dir(&self, package_name: &str, version: &str) -> PathBuf {
         self.package_dir(package_name).join(version)
     }
 
@@ -358,6 +401,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: Vec::new(),
             data_sources: Vec::new(),
+            artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -429,6 +473,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: Vec::new(),
             data_sources: Vec::new(),
+            artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -480,6 +525,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: Vec::new(),
             data_sources: Vec::new(),
+            artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -519,6 +565,7 @@ mod tests {
             writeback_regions: None,
             object_scripts: Vec::new(),
             data_sources: Vec::new(),
+            artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
         reg.write_version_manifest("pkg", "1.0.0", &ver_manifest).unwrap();
@@ -558,5 +605,32 @@ mod tests {
             subs[0].value,
             crate::writeback::SubmissionValue::Number { value } if value == 99.0
         ));
+    }
+
+    #[test]
+    fn save_submission_rejects_path_traversal_region_id() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        let evil = make_test_submission("..\\..\\escape", "alice");
+        assert!(reg.save_submission("pkg", "1.0.0", &evil).is_err());
+
+        let slashy = make_test_submission("a/b", "alice");
+        assert!(reg.save_submission("pkg", "1.0.0", &slashy).is_err());
+    }
+
+    #[test]
+    fn load_all_submissions_spans_submitters_and_regions() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "alice")).unwrap();
+        reg.save_submission("pkg", "1.0.0", &make_test_submission("r2", "alice")).unwrap();
+        reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "bob")).unwrap();
+
+        let all = reg.load_all_submissions("pkg", "1.0.0").unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.iter().filter(|s| s.region_id == "r1").count(), 2);
+        assert_eq!(all.iter().filter(|s| s.region_id == "r2").count(), 1);
     }
 }
