@@ -206,6 +206,56 @@ fn set_expr_is_read_only(expr: &datafusion::sql::sqlparser::ast::SetExpr) -> boo
     }
 }
 
+/// Incremental-refresh policy for an `InMemory` table.
+///
+/// When set, a stale-table refresh re-fetches only the rows the model author
+/// marks as **volatile** (might have changed since the last load) and retains
+/// the rest of the cached rows, instead of re-fetching the whole table. This
+/// is a big win in the local-first per-user-refresh model.
+///
+/// The volatile rows are identified by a `refresh_filter`: a DAX-like boolean
+/// condition over THIS table's columns. It is **not** a fixed time window — the
+/// author writes a condition, so it works for non-timestamp signals (e.g.
+/// `status <> "closed"`) as well as date windows
+/// (e.g. `order_date >= DATEADD(TODAY(), -7, "DAY")`), and it does not assume
+/// historical immutability.
+///
+/// # v1 limitation
+///
+/// The `refresh_filter` must be an **AND-combination of simple comparisons**
+/// `column <op> rhs`, where `column` exists on this table, `<op>` is a
+/// comparison (`=`, `<>`, `>`, `>=`, `<`, `<=`), and `rhs` is a constant-
+/// foldable scalar (a literal, or a date expression over `TODAY()`, `NOW()`,
+/// `DATE(y,m,d)`, `DATEADD(…)`, `DATETRUNC(…)` with no column references).
+/// `OR` / `NOT` / arbitrary boolean predicates and a raw-SQL escape hatch are
+/// future work. Build-time validation
+/// ([`DataModelBuilder::build`](crate::model::DataModelBuilder::build))
+/// rejects anything outside this shape with a clear, typed error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalRefresh {
+    /// DAX-like boolean condition identifying the volatile rows to re-fetch.
+    refresh_filter: String,
+}
+
+impl IncrementalRefresh {
+    /// Create an incremental-refresh policy from a `refresh_filter` condition.
+    ///
+    /// The filter is the DAX-like boolean expression identifying the volatile
+    /// rows (see the type-level docs for the accepted grammar). It is **not**
+    /// parsed or validated here — validation happens at model build time so the
+    /// table's columns are available to check against.
+    pub fn new(refresh_filter: impl Into<String>) -> Self {
+        Self {
+            refresh_filter: refresh_filter.into(),
+        }
+    }
+
+    /// Returns the `refresh_filter` condition text identifying volatile rows.
+    pub fn refresh_filter(&self) -> &str {
+        &self.refresh_filter
+    }
+}
+
 /// A table definition: a named collection of typed columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
@@ -231,6 +281,13 @@ pub struct Table {
     /// queryable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_hidden: bool,
+    /// Optional incremental-refresh policy. Only meaningful when
+    /// `storage_mode` is `InMemory`: when set and a cached batch already
+    /// exists, a stale-table refresh re-fetches only the volatile rows
+    /// (those matching the policy's `refresh_filter`) and retains the rest of
+    /// the cache. See [`IncrementalRefresh`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incremental_refresh: Option<IncrementalRefresh>,
 }
 
 impl Table {
@@ -258,6 +315,7 @@ impl Table {
             display_name: None,
             description: None,
             is_hidden: false,
+            incremental_refresh: None,
         })
     }
 
@@ -379,6 +437,22 @@ impl Table {
     /// Returns the configured refresh strategies.
     pub fn refresh_strategies(&self) -> &[RefreshStrategy] {
         &self.refresh_strategies
+    }
+
+    /// Set the incremental-refresh policy for this table.
+    ///
+    /// Only meaningful when `storage_mode` is `InMemory` (build-time
+    /// validation rejects it on a `DirectQuery` table). When set and a cached
+    /// batch already exists, a stale-table refresh re-fetches only the volatile
+    /// rows and retains the rest of the cache. See [`IncrementalRefresh`].
+    pub fn with_incremental_refresh(mut self, incremental: IncrementalRefresh) -> Self {
+        self.incremental_refresh = Some(incremental);
+        self
+    }
+
+    /// Returns the incremental-refresh policy, if configured.
+    pub fn incremental_refresh(&self) -> Option<&IncrementalRefresh> {
+        self.incremental_refresh.as_ref()
     }
 
     /// Returns only the strategies that can be evaluated locally (no I/O).
@@ -766,6 +840,64 @@ mod tests {
         assert_eq!(restored.display_name(), None);
         assert_eq!(restored.description(), None);
         assert!(!restored.is_hidden());
+    }
+
+    // --- Incremental refresh ---
+
+    #[test]
+    fn incremental_refresh_new_and_getter() {
+        let inc = IncrementalRefresh::new("order_date >= DATEADD(TODAY(), -7, \"DAY\")");
+        assert_eq!(
+            inc.refresh_filter(),
+            "order_date >= DATEADD(TODAY(), -7, \"DAY\")"
+        );
+    }
+
+    #[test]
+    fn with_incremental_refresh_sets_policy() {
+        let table = make_table("t")
+            .with_storage_mode(StorageMode::InMemory)
+            .with_incremental_refresh(IncrementalRefresh::new("id > 0"));
+        assert_eq!(
+            table.incremental_refresh().map(|i| i.refresh_filter()),
+            Some("id > 0")
+        );
+    }
+
+    #[test]
+    fn incremental_refresh_defaults_to_none() {
+        let table = make_table("t");
+        assert!(table.incremental_refresh().is_none());
+    }
+
+    #[test]
+    fn incremental_refresh_round_trips_through_serde() {
+        let table = make_table("t")
+            .with_storage_mode(StorageMode::InMemory)
+            .with_incremental_refresh(IncrementalRefresh::new("status <> \"closed\""));
+        let json = serde_json::to_string(&table).unwrap();
+        assert!(json.contains("incremental_refresh"));
+        assert!(json.contains("refresh_filter"));
+        let restored: Table = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.incremental_refresh().map(|i| i.refresh_filter()),
+            Some("status <> \"closed\"")
+        );
+    }
+
+    #[test]
+    fn absent_incremental_refresh_is_skipped_in_json() {
+        let table = make_table("t").with_storage_mode(StorageMode::InMemory);
+        let json = serde_json::to_string(&table).unwrap();
+        assert!(!json.contains("incremental_refresh"));
+    }
+
+    #[test]
+    fn incremental_refresh_does_not_affect_schema_hash() {
+        let plain = make_table("t");
+        let with_inc = make_table("t").with_incremental_refresh(IncrementalRefresh::new("id > 0"));
+        // The refresh filter is not part of the data schema.
+        assert_eq!(plain.schema_hash(), with_inc.schema_hash());
     }
 
     #[test]

@@ -609,6 +609,47 @@ pub fn parse_global(name: &str, table: &str, input: &str) -> EngineResult<Global
     Ok(GlobalVariable::new(name, table, expression))
 }
 
+/// Parse an incremental-refresh filter condition into a boolean
+/// [`Expression`] tree.
+///
+/// Unlike [`parse_measure_expression`], this enters the parser through the
+/// condition grammar, so top-level comparisons (`status <> "closed"`) and
+/// `AND`/`OR` chains parse without being wrapped in a `KEEP`. The result is a
+/// boolean expression tree (a [`Comparison`](Expression::Comparison), or an
+/// [`And`](Expression::And) / [`Or`](Expression::Or) of comparisons).
+///
+/// This only handles the *syntax*; the semantic restriction to an
+/// AND-of-simple-comparisons over constant-foldable right-hand sides is
+/// enforced by the model builder and the incremental-refresh planner (see
+/// [`crate::compute::incremental`]).
+///
+/// # Example
+///
+/// ```
+/// use engine_core::compute::parser::parse_refresh_filter;
+///
+/// let expr = parse_refresh_filter("order_date >= DATEADD(TODAY(), -7, \"DAY\")").unwrap();
+/// assert!(matches!(expr, engine_core::compute::expression::Expression::Comparison { .. }));
+/// ```
+pub fn parse_refresh_filter(input: &str) -> EngineResult<Expression> {
+    let tokens = tokenize(input)?;
+    if tokens.is_empty() {
+        return Err(EngineError::ParseError {
+            position: 0,
+            message: "empty refresh filter".into(),
+        });
+    }
+    let mut parser = Parser::new(tokens, input.len());
+    let expr = parser.parse_condition()?;
+    if !parser.at_end() {
+        return Err(parser.parse_err(format!(
+            "unexpected token after refresh filter: {:?}",
+            parser.peek()
+        )));
+    }
+    Ok(expr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

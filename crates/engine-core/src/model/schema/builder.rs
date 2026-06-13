@@ -1103,6 +1103,39 @@ impl DataModelBuilder {
             }
         }
 
+        // 13. Validate incremental-refresh policies. The `refresh_filter`
+        // travels inside shared model files (a trust boundary) and is later
+        // (a) pushed to the source as WHERE conditions and (b) rendered into
+        // DataFusion SQL for cache retention, so a bad filter must be caught
+        // here rather than at refresh time. For each table with a policy:
+        // - the table must be `InMemory` (incremental refresh is meaningless
+        //   for DirectQuery — there is no cache to retain);
+        // - the `refresh_filter` must parse and be an AND-combination of
+        //   simple comparisons `column <op> rhs`, where every column exists on
+        //   THIS table (no cross-table refs), `<op>` is a comparison, and
+        //   every `rhs` is a constant-foldable scalar (a literal or a date
+        //   expression over TODAY/NOW/DATE/DATEADD/DATETRUNC).
+        // v1 limitation: OR / NOT / arbitrary boolean predicates and a
+        // raw-SQL escape hatch are future work (see `compute::incremental`).
+        for table in &self.tables {
+            let Some(incremental) = table.incremental_refresh() else {
+                continue;
+            };
+            if !table.is_in_memory() {
+                return Err(EngineError::InvalidData(format!(
+                    "table '{}' has an incremental_refresh policy but is not InMemory; \
+                     incremental refresh is only meaningful for in-memory tables",
+                    table.name()
+                )));
+            }
+            let column_names: Vec<&str> = table.columns().iter().map(|c| c.name()).collect();
+            crate::compute::incremental::validate_refresh_filter(
+                table.name(),
+                incremental.refresh_filter(),
+                &column_names,
+            )?;
+        }
+
         let model = DataModel {
             // Freshly built models always carry the current format version
             // (deserialized legacy models keep their stored value; note

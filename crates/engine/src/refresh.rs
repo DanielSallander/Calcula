@@ -5,6 +5,11 @@
 use std::collections::HashMap;
 
 use arrow::record_batch::RecordBatch;
+use engine_connectors::{FilterCondition, FilterOperator};
+use engine_core::compute::expression::ComparisonOp;
+use engine_core::compute::incremental::{
+    fold_refresh_filter_now, retain_stable_rows, splice_incremental, RefreshConjunct,
+};
 use futures::stream::{self, StreamExt};
 
 use crate::{
@@ -113,8 +118,66 @@ impl Engine {
             return Err(EngineError::TableNotInMemory(table_name.to_string()));
         }
 
+        // Incremental path: only when the table has an `incremental_refresh`
+        // policy AND a cached batch already exists. The first load (empty
+        // cache) has no stable rows to retain, so it takes the full path.
+        if let Some(incremental) = table.incremental_refresh() {
+            if self.cache.get(table_name).is_some() {
+                let refresh_filter = incremental.refresh_filter().to_string();
+                return self
+                    .refresh_table_incremental(table_name, &refresh_filter)
+                    .await;
+            }
+        }
+
         let batches = Self::fetch_table_batches(&self.registry, table_name).await?;
         self.store_refreshed_table(table_name, batches)
+    }
+
+    /// Incrementally refresh a cached in-memory table: re-fetch only the
+    /// volatile rows the `refresh_filter` identifies and retain the rest of
+    /// the cached rows.
+    ///
+    /// The "today/now" boundary is evaluated **once** (local time) so the
+    /// source fetch (volatile rows) and the cache retention (stable rows) use
+    /// the identical boundary. Then:
+    ///
+    /// 1. fold the filter to concrete `(column, op, value)` conjuncts;
+    /// 2. fetch volatile rows from the source with those conjuncts pushed as a
+    ///    `WHERE` (only the volatile rows cross the network);
+    /// 3. retain the cached rows the filter does NOT match
+    ///    (`WHERE NOT(conjunction)`, NULL-safe);
+    /// 4. splice retained-stable + fetched-volatile into one batch and store
+    ///    it through the same optimize/sort/store tail as a full refresh.
+    ///
+    /// Caller guarantees the table is `InMemory` and already cached.
+    async fn refresh_table_incremental(
+        &mut self,
+        table_name: &str,
+        refresh_filter: &str,
+    ) -> EngineResult<OptimizationStats> {
+        // Single refresh-time snapshot of "now" in local time (captured inside
+        // engine-core) — shared by the source fetch and the cache retention so
+        // they agree on the boundary.
+        let conjuncts = fold_refresh_filter_now(table_name, refresh_filter)?;
+
+        // 1. Fetch the volatile rows from the source (filters pushed as WHERE).
+        let filters: Vec<FilterCondition> = conjuncts.iter().map(conjunct_to_filter).collect();
+        let volatile =
+            Self::fetch_table_batches_with_filters(&self.registry, table_name, filters).await?;
+
+        // 2. Retain the stable cached rows (those NOT matched by the filter).
+        //    The cached batch is present (caller guarantees it).
+        let cached = self
+            .cache
+            .get(table_name)
+            .ok_or_else(|| EngineError::TableNotCached(table_name.to_string()))?;
+        let stable = retain_stable_rows(cached, &conjuncts).await?;
+
+        // 3. Splice retained-stable + fetched-volatile into one batch, then run
+        //    the same optimize/sort/store tail as a full refresh.
+        let spliced = splice_incremental(stable, &volatile)?;
+        self.store_refreshed_table(table_name, vec![spliced])
     }
 
     /// Fetch all rows of a table from its source connector.
@@ -127,12 +190,29 @@ impl Engine {
         registry: &SourceRegistry,
         table_name: &str,
     ) -> EngineResult<Vec<RecordBatch>> {
+        Self::fetch_table_batches_with_filters(registry, table_name, Vec::new()).await
+    }
+
+    /// Fetch a table's rows from its source connector, optionally restricted by
+    /// pushed `WHERE` filter conditions.
+    ///
+    /// With an empty `filters` this is a full fetch (the original
+    /// [`fetch_table_batches`](Self::fetch_table_batches) behavior). With
+    /// filters it fetches only the matching (volatile) rows — used by
+    /// [`refresh_table_incremental`](Self::refresh_table_incremental) so only
+    /// the volatile rows cross the network.
+    async fn fetch_table_batches_with_filters(
+        registry: &SourceRegistry,
+        table_name: &str,
+        filters: Vec<FilterCondition>,
+    ) -> EngineResult<Vec<RecordBatch>> {
         let binding = registry
             .binding_for(table_name)
             .map_err(|e| EngineError::InvalidData(e.to_string()))?;
         let request = FetchRequest {
             schema: Some(binding.schema.clone()),
             table: binding.table.clone(),
+            filters,
             ..Default::default()
         };
         let connector = registry
@@ -409,6 +489,28 @@ impl Engine {
     }
 }
 
+/// Convert a folded incremental-refresh conjunct into a connector
+/// [`FilterCondition`] (the volatile-row `WHERE` pushed to the source).
+///
+/// The conjunct's [`ComparisonOp`] maps 1:1 onto a [`FilterOperator`]; the
+/// connector quotes/parameterizes the value safely, so no escaping happens
+/// here.
+fn conjunct_to_filter(conjunct: &RefreshConjunct) -> FilterCondition {
+    let operator = match conjunct.op {
+        ComparisonOp::Equal => FilterOperator::Equal,
+        ComparisonOp::NotEqual => FilterOperator::NotEqual,
+        ComparisonOp::GreaterThan => FilterOperator::GreaterThan,
+        ComparisonOp::GreaterThanOrEqual => FilterOperator::GreaterThanOrEqual,
+        ComparisonOp::LessThan => FilterOperator::LessThan,
+        ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
+    };
+    FilterCondition {
+        column: conjunct.column.clone(),
+        operator,
+        value: conjunct.value.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::test_fixtures::{
@@ -528,5 +630,334 @@ mod tests {
             .unwrap();
         let mut engine = Engine::new(model);
         assert!(engine.refresh_all_in_memory().await.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental refresh (the headline) — end-to-end through `refresh_table`
+    // with an in-process connector that honors FetchRequest.filters.
+    // -----------------------------------------------------------------------
+
+    mod incremental {
+        use std::sync::Arc;
+
+        use arrow::array::{Date32Array, Float64Array};
+        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+        use arrow::record_batch::RecordBatch;
+        use chrono::NaiveDate;
+
+        use crate::{
+            Column, DataModel, DataType, Engine, InMemoryConnector, IncrementalRefresh,
+            SourceBinding, StorageMode, Table,
+        };
+
+        /// Days since the Unix epoch for a calendar date (Date32 value).
+        fn days(y: i32, m: u32, d: u32) -> i32 {
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .signed_duration_since(epoch)
+                .num_days() as i32
+        }
+
+        fn fact_schema() -> Arc<ArrowSchema> {
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("order_date", ArrowDataType::Date32, true),
+                Field::new("amount", ArrowDataType::Float64, true),
+            ]))
+        }
+
+        fn fact_batch(dates: &[i32], amounts: &[f64]) -> RecordBatch {
+            RecordBatch::try_new(
+                fact_schema(),
+                vec![
+                    Arc::new(Date32Array::from(dates.to_vec())),
+                    Arc::new(Float64Array::from(amounts.to_vec())),
+                ],
+            )
+            .unwrap()
+        }
+
+        /// Build a model with one in-memory fact table carrying an incremental
+        /// refresh filter `order_date >= <boundary>`.
+        fn incremental_model(filter: &str) -> DataModel {
+            DataModel::builder()
+                .add_table(
+                    Table::new(
+                        "fact_orders",
+                        vec![
+                            Column::new("order_date", DataType::Date),
+                            Column::new("amount", DataType::Float64),
+                        ],
+                    )
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory)
+                    .with_incremental_refresh(IncrementalRefresh::new(filter)),
+                )
+                .build()
+                .unwrap()
+        }
+
+        /// Read the (date_days, amount) rows of the cached fact_orders batch,
+        /// sorted by date for stable assertions.
+        fn cached_rows(engine: &Engine) -> Vec<(i32, f64)> {
+            let batch = engine.cache().get("fact_orders").expect("cached batch");
+            let dates = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap();
+            let amounts = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let mut rows: Vec<(i32, f64)> = (0..batch.num_rows())
+                .map(|i| (dates.value(i), amounts.value(i)))
+                .collect();
+            rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
+            rows
+        }
+
+        #[tokio::test]
+        async fn incremental_splice_replaces_volatile_keeps_stable() {
+            // Boundary 2026-06-06: rows on/after it are volatile.
+            let mut engine = Engine::new(incremental_model("order_date >= \"2026-06-06\""));
+
+            // Connector returns the CURRENT source state: the stable row is
+            // unchanged (it must NOT be re-fetched), and the volatile row now
+            // has a NEW amount (550 instead of the cached 200).
+            let source = InMemoryConnector::new().with_table(
+                "public",
+                "orders",
+                fact_batch(&[days(2026, 6, 10)], &[550.0]),
+            );
+            let idx = engine.add_in_memory_source(source);
+            engine.bind_table("fact_orders", idx, SourceBinding::new("public", "orders"));
+
+            // Seed the cache with the OLD state: one stable row (2026-06-01,
+            // 100) and one volatile row (2026-06-10, 200 — the stale value).
+            engine
+                .cache
+                .store(
+                    "fact_orders",
+                    fact_batch(&[days(2026, 6, 1), days(2026, 6, 10)], &[100.0, 200.0]),
+                )
+                .unwrap();
+
+            engine.refresh_table("fact_orders").await.unwrap();
+
+            // Result = retained stable row (date < boundary, untouched) +
+            // fetched volatile row (date >= boundary, replaced).
+            let rows = cached_rows(&engine);
+            assert_eq!(rows.len(), 2);
+            // Stable row's value did NOT change.
+            assert_eq!(rows[0], (days(2026, 6, 1), 100.0));
+            // Volatile row's value DID change (200 → 550), not duplicated.
+            assert_eq!(rows[1], (days(2026, 6, 10), 550.0));
+        }
+
+        #[tokio::test]
+        async fn first_load_with_empty_cache_does_full_fetch() {
+            let mut engine = Engine::new(incremental_model("order_date >= \"2026-06-06\""));
+
+            // Source has BOTH a stable and a volatile row. With an empty cache
+            // the filter is ignored and the whole table is fetched.
+            let source = InMemoryConnector::new().with_table(
+                "public",
+                "orders",
+                fact_batch(&[days(2026, 6, 1), days(2026, 6, 10)], &[100.0, 200.0]),
+            );
+            let idx = engine.add_in_memory_source(source);
+            engine.bind_table("fact_orders", idx, SourceBinding::new("public", "orders"));
+
+            // No cache seeded → full refresh path.
+            engine.refresh_table("fact_orders").await.unwrap();
+
+            let rows = cached_rows(&engine);
+            // Both rows present — including the stable one the filter would
+            // have excluded had this been incremental.
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0], (days(2026, 6, 1), 100.0));
+            assert_eq!(rows[1], (days(2026, 6, 10), 200.0));
+        }
+
+        #[tokio::test]
+        async fn volatile_fetch_returning_zero_rows_keeps_only_stable() {
+            // All volatile rows were deleted at source: the volatile fetch
+            // returns nothing, so only the retained stable rows remain.
+            let mut engine = Engine::new(incremental_model("order_date >= \"2026-06-06\""));
+
+            // Source has only the stable row now (volatile rows deleted).
+            let source = InMemoryConnector::new().with_table(
+                "public",
+                "orders",
+                fact_batch(&[days(2026, 6, 1)], &[100.0]),
+            );
+            let idx = engine.add_in_memory_source(source);
+            engine.bind_table("fact_orders", idx, SourceBinding::new("public", "orders"));
+
+            // Cache had a stable row and a volatile row.
+            engine
+                .cache
+                .store(
+                    "fact_orders",
+                    fact_batch(&[days(2026, 6, 1), days(2026, 6, 10)], &[100.0, 200.0]),
+                )
+                .unwrap();
+
+            engine.refresh_table("fact_orders").await.unwrap();
+
+            // The volatile row is gone (deleted at source, fetch returned 0);
+            // the stable row remains untouched.
+            let rows = cached_rows(&engine);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0], (days(2026, 6, 1), 100.0));
+        }
+
+        #[tokio::test]
+        async fn non_timestamp_status_filter_replaces_by_status() {
+            // A non-date volatile signal: status <> "closed". Volatile = open
+            // rows; closed rows are stable.
+            let model = DataModel::builder()
+                .add_table(
+                    Table::new(
+                        "fact_tickets",
+                        vec![
+                            Column::new("id", DataType::Int64),
+                            Column::new("status", DataType::String),
+                        ],
+                    )
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory)
+                    .with_incremental_refresh(IncrementalRefresh::new("status <> \"closed\"")),
+                )
+                .build()
+                .unwrap();
+            let mut engine = Engine::new(model);
+
+            use arrow::array::{Int64Array, StringArray};
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("id", ArrowDataType::Int64, true),
+                Field::new("status", ArrowDataType::Utf8, true),
+            ]));
+            let batch = |ids: Vec<i64>, statuses: Vec<&str>| {
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(Int64Array::from(ids)),
+                        Arc::new(StringArray::from(statuses)),
+                    ],
+                )
+                .unwrap()
+            };
+
+            // Source CURRENT state: ticket 2 (was "open") is now "pending".
+            let source = InMemoryConnector::new().with_table(
+                "public",
+                "tickets",
+                batch(vec![2], vec!["pending"]),
+            );
+            let idx = engine.add_in_memory_source(source);
+            engine.bind_table("fact_tickets", idx, SourceBinding::new("public", "tickets"));
+
+            // Cache: ticket 1 closed (stable), ticket 2 open (volatile).
+            engine
+                .cache
+                .store("fact_tickets", batch(vec![1, 2], vec!["closed", "open"]))
+                .unwrap();
+
+            engine.refresh_table("fact_tickets").await.unwrap();
+
+            let out = engine.cache().get("fact_tickets").unwrap();
+            let ids = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let statuses = out
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let mut rows: Vec<(i64, String)> = (0..out.num_rows())
+                .map(|i| (ids.value(i), statuses.value(i).to_string()))
+                .collect();
+            rows.sort_by_key(|r| r.0);
+
+            assert_eq!(rows.len(), 2);
+            // Closed ticket retained untouched.
+            assert_eq!(rows[0], (1, "closed".to_string()));
+            // Open ticket replaced by its new "pending" status.
+            assert_eq!(rows[1], (2, "pending".to_string()));
+        }
+
+        #[tokio::test]
+        async fn injection_value_is_escaped_in_retention_sql() {
+            // A refresh_filter value containing a quote/`;` must render escaped
+            // in the cache-retention SQL — it cannot break out and inject. We
+            // use a status filter whose literal carries the payload; the
+            // refresh must run cleanly (no SQL error) and the cache must end up
+            // correct, which only happens if the literal stayed quoted.
+            let payload = "x'); DROP TABLE _cached; --";
+            let filter = format!("status <> \"{payload}\"");
+            let model = DataModel::builder()
+                .add_table(
+                    Table::new(
+                        "fact_tickets",
+                        vec![
+                            Column::new("id", DataType::Int64),
+                            Column::new("status", DataType::String),
+                        ],
+                    )
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory)
+                    .with_incremental_refresh(IncrementalRefresh::new(filter)),
+                )
+                .build()
+                .unwrap();
+            let mut engine = Engine::new(model);
+
+            use arrow::array::{Int64Array, StringArray};
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("id", ArrowDataType::Int64, true),
+                Field::new("status", ArrowDataType::Utf8, true),
+            ]));
+            let make = |ids: Vec<i64>, statuses: Vec<&str>| {
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(Int64Array::from(ids)),
+                        Arc::new(StringArray::from(statuses)),
+                    ],
+                )
+                .unwrap()
+            };
+
+            // Source returns no volatile rows (nothing currently != payload
+            // that the source wants to re-supply).
+            let source =
+                InMemoryConnector::new().with_table("public", "tickets", make(vec![], vec![]));
+            let idx = engine.add_in_memory_source(source);
+            engine.bind_table("fact_tickets", idx, SourceBinding::new("public", "tickets"));
+
+            // Cache: one row whose status equals the payload (so it is a
+            // "stable" row under `status <> payload`) and must be retained.
+            engine
+                .cache
+                .store("fact_tickets", make(vec![1], vec![payload]))
+                .unwrap();
+
+            // If the value were not escaped, the embedded `DROP TABLE` /
+            // unbalanced quote would make the retention SQL fail. A clean Ok
+            // means it stayed a quoted literal.
+            engine.refresh_table("fact_tickets").await.unwrap();
+
+            let out = engine.cache().get("fact_tickets").unwrap();
+            // The payload-status row is stable (status == payload, so NOT
+            // `status <> payload`) → retained.
+            assert_eq!(out.num_rows(), 1);
+            let statuses = out
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(statuses.value(0), payload);
+        }
     }
 }

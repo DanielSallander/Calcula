@@ -143,8 +143,8 @@ pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
     DataModelBuilder, DateRole, FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel,
-    JoinCondition, JoinOperator, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole,
-    StorageMode, Table, TableVariable,
+    IncrementalRefresh, JoinCondition, JoinOperator, RaggedBehavior, RefreshStrategy, Relationship,
+    SecurityRole, StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -166,6 +166,7 @@ pub use engine_connectors::{ConnectorError, ConnectorResult};
 // --- Re-exports from engine-query ---
 
 pub use engine_query::error::{QueryError, QueryResult};
+pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
     ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget,
@@ -495,6 +496,21 @@ impl Engine {
             .registry
             .add_connector(AnyConnector::SqlServer(connector));
         Ok(idx)
+    }
+
+    /// Register an in-process [`InMemoryConnector`] (canned Arrow batches) and
+    /// return its connector index.
+    ///
+    /// Unlike [`add_postgres`](Self::add_postgres) /
+    /// [`add_sqlserver`](Self::add_sqlserver), this connector has no
+    /// connection target or credentials — it serves data already held in
+    /// memory. Useful for tests and for simple file-less sources where the
+    /// host loads data itself but still wants the connector seam (e.g. so that
+    /// incremental refresh can push the volatile-row `WHERE` to the same
+    /// fetch path a real database would use). Synchronous (no I/O).
+    pub fn add_in_memory_source(&mut self, connector: InMemoryConnector) -> usize {
+        self.registry
+            .add_connector(AnyConnector::InMemory(connector))
     }
 
     /// Register a host-provided scalar UDF, replacing any UDF with the same

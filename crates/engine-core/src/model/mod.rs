@@ -19,5 +19,5 @@ pub use hierarchy::{Hierarchy, HierarchyLevel, RaggedBehavior};
 pub use relationship::{Cardinality, FilterPropagation, JoinCondition, JoinOperator, Relationship};
 pub use schema::{DataModel, DataModelBuilder};
 pub use security_role::SecurityRole;
-pub use table::{RefreshStrategy, StorageMode, Table};
+pub use table::{IncrementalRefresh, RefreshStrategy, StorageMode, Table};
 pub use table_variable::TableVariable;

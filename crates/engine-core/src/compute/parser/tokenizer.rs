@@ -124,6 +124,12 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
                 tokens.push((Token::Neq, tok_start));
                 i += 2;
             }
+            // SQL-style inequality `<>` (an alias for `!=`). Checked before the
+            // bare `<` / `<=` arms so the two characters are consumed together.
+            '<' if i + 1 < len && chars[i + 1] == '>' => {
+                tokens.push((Token::Neq, tok_start));
+                i += 2;
+            }
             '>' if i + 1 < len && chars[i + 1] == '=' => {
                 tokens.push((Token::Gte, tok_start));
                 i += 2;

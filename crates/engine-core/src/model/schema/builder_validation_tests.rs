@@ -804,3 +804,141 @@ fn empty_script_functions_omitted_from_json() {
     let json = serde_json::to_string(&model).unwrap();
     assert!(!json.contains("script_functions"));
 }
+
+// --- Incremental refresh validation (builder step 13) ---
+
+use crate::model::table::{IncrementalRefresh, StorageMode};
+
+/// In-memory fact table with a date column, a status column, and a numeric
+/// column — the shapes the incremental-refresh filter validation exercises.
+fn incremental_fact(filter: &str) -> Table {
+    Table::new(
+        "fact_orders",
+        vec![
+            Column::new("order_date", DataType::Date),
+            Column::new("status", DataType::String),
+            Column::new("amount", DataType::Float64),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory)
+    .with_incremental_refresh(IncrementalRefresh::new(filter))
+}
+
+#[test]
+fn accepts_date_window_incremental_filter() {
+    let model = DataModel::builder()
+        .add_table(incremental_fact(
+            "order_date >= DATEADD(TODAY(), -7, \"DAY\")",
+        ))
+        .build()
+        .unwrap();
+    assert!(model
+        .table("fact_orders")
+        .unwrap()
+        .incremental_refresh()
+        .is_some());
+}
+
+#[test]
+fn accepts_status_incremental_filter() {
+    assert!(DataModel::builder()
+        .add_table(incremental_fact("status <> \"closed\""))
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn accepts_anded_incremental_filter() {
+    assert!(DataModel::builder()
+        .add_table(incremental_fact(
+            "order_date >= DATEADD(TODAY(), -30, \"DAY\") AND status <> \"closed\""
+        ))
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn rejects_incremental_refresh_on_directquery_table() {
+    let table = Table::new(
+        "fact_orders",
+        vec![Column::new("order_date", DataType::Date)],
+    )
+    .unwrap()
+    // DirectQuery (default storage mode) — incremental refresh is meaningless.
+    .with_incremental_refresh(IncrementalRefresh::new("order_date >= TODAY()"));
+    let err = DataModel::builder().add_table(table).build().unwrap_err();
+    assert!(
+        matches!(err, EngineError::InvalidData(ref m) if m.contains("not InMemory")),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn rejects_incremental_filter_unknown_column() {
+    let err = DataModel::builder()
+        .add_table(incremental_fact("ghost_date >= TODAY()"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("unknown column")));
+}
+
+#[test]
+fn rejects_incremental_filter_with_or() {
+    let err = DataModel::builder()
+        .add_table(incremental_fact("status <> \"closed\" OR amount > 0"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("OR is not supported")));
+}
+
+#[test]
+fn rejects_incremental_filter_aggregate_rhs() {
+    let err = DataModel::builder()
+        .add_table(incremental_fact("amount > SUM(fact_orders[amount])"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("not a constant value")));
+}
+
+#[test]
+fn rejects_incremental_filter_column_ref_rhs() {
+    // RHS references another column → not a constant.
+    let err = DataModel::builder()
+        .add_table(incremental_fact("amount > order_date"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("not a constant value")));
+}
+
+#[test]
+fn rejects_incremental_filter_non_comparison() {
+    // A bare boolean column with no comparison operator is not a simple
+    // comparison.
+    let err = DataModel::builder()
+        .add_table(incremental_fact("status"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(_)));
+}
+
+#[test]
+fn incremental_refresh_survives_json_round_trip_through_model() {
+    let model = DataModel::builder()
+        .add_table(incremental_fact(
+            "order_date >= DATEADD(TODAY(), -7, \"DAY\")",
+        ))
+        .build()
+        .unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(json.contains("incremental_refresh"));
+    let back: DataModel = serde_json::from_str(&json).unwrap();
+    back.validate().unwrap();
+    assert_eq!(
+        back.table("fact_orders")
+            .unwrap()
+            .incremental_refresh()
+            .map(|i| i.refresh_filter()),
+        Some("order_date >= DATEADD(TODAY(), -7, \"DAY\")")
+    );
+}

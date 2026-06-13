@@ -421,6 +421,7 @@ name = "bi-engine"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "chrono",
  "engine-connectors",
  "engine-core",
  "engine-query",

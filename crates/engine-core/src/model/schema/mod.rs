@@ -77,9 +77,21 @@ use crate::model::table_variable::TableVariable;
 ///   unrestricted one, leaking data. The [`ModelFormatTooNew`] load gate
 ///   therefore refuses v5 files on a pre-v5 engine rather than letting them
 ///   round-trip without the roles.
+/// - `6` — incremental refresh: tables gained an optional
+///   `incremental_refresh` policy
+///   ([`IncrementalRefresh`](crate::model::IncrementalRefresh)) carrying a
+///   `refresh_filter` that identifies the volatile rows to re-fetch on a
+///   stale-table refresh. This is authored, behavior-bearing content: an
+///   older engine that silently dropped it on a load→save round-trip would
+///   turn an incremental table back into a **full**-refresh table (re-pulling
+///   the whole table from source on every refresh) without the author's
+///   knowledge — a silent correctness/performance regression rather than a
+///   safe default. The [`ModelFormatTooNew`] load gate therefore refuses v6
+///   files on a pre-v6 engine rather than letting them round-trip without the
+///   policy.
 ///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 5;
+pub const MODEL_FORMAT_VERSION: u32 = 6;
 
 /// A data model consisting of tables and relationships between them.
 ///

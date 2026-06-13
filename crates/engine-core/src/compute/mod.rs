@@ -4,6 +4,7 @@ pub mod aggregate;
 pub mod context;
 pub mod evaluate;
 pub mod expression;
+pub mod incremental;
 pub mod join;
 pub mod measure;
 pub mod measure_engine;
@@ -30,6 +31,10 @@ pub use expression::{
     infer_fact_table, ArithmeticOp, BoundaryType, ComparisonOp, DateGranularity, DateTimeFunction,
     Expression, FilterPredicate, InPredicate, RelationshipPath, ScalarFunction, TextFunction,
     WindowFrame,
+};
+pub use incremental::{
+    fold_refresh_filter_at, fold_refresh_filter_now, retain_predicate_sql, retain_stable_rows,
+    splice_incremental, validate_refresh_filter, RefreshConjunct,
 };
 pub use join::{
     aggregate_over_relationship, determine_join_strategy, join_tables, JoinStrategy, JoinType,

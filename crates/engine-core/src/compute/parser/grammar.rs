@@ -63,6 +63,22 @@ impl Parser {
 
     fn parse_atom_inner(&mut self) -> EngineResult<Expression> {
         match self.peek().cloned() {
+            // Unary minus: a leading `-` (start of expression, or after `(`,
+            // `,`, an operator, etc.) negates the following atom. Binary
+            // subtraction is handled in `parse_expression`, which consumes the
+            // `-` before recursing here, so this only fires for a genuine
+            // prefix minus (e.g. the negative `n` in `DATEADD(d, -7, "DAY")`).
+            Some(Token::Minus) => {
+                self.advance()?;
+                let operand = self.parse_atom()?;
+                // Fold a negated numeric literal to a literal so callers that
+                // expect a constant (the incremental-refresh folder) see one.
+                match operand {
+                    Expression::LiteralInt(v) => Ok(expr::lit_int(-v)),
+                    Expression::LiteralFloat(v) => Ok(expr::lit(-v)),
+                    other => Ok(expr::lit_int(0).subtract(other)),
+                }
+            }
             Some(Token::Number(n)) => {
                 self.advance()?;
                 // Decide int vs float.

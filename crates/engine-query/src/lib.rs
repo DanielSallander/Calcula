@@ -8,12 +8,14 @@
 
 pub mod error;
 pub mod executor;
+pub mod in_memory_connector;
 pub mod planner;
 pub mod registry;
 pub mod request;
 
 pub use error::{QueryError, QueryResult};
 pub use executor::QueryExecutor;
+pub use in_memory_connector::InMemoryConnector;
 pub use planner::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner, QueryPlan,
 };

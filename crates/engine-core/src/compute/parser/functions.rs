@@ -165,8 +165,10 @@ impl Parser {
         self.expect(&Token::Comma)?;
         let n = self.parse_expression()?;
         self.expect(&Token::Comma)?;
+        // The interval keyword may be written bare (`DAY`) or quoted
+        // (`"DAY"`), case-insensitive — both are accepted.
         let interval = match self.advance()?.clone() {
-            Token::Ident(s) => {
+            Token::Ident(s) | Token::StringLit(s) => {
                 let upper = s.to_uppercase();
                 match upper.as_str() {
                     "DAY" | "MONTH" | "YEAR" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => upper,
@@ -192,8 +194,9 @@ impl Parser {
     pub(super) fn parse_datetrunc_call(&mut self) -> EngineResult<Expression> {
         let date = self.parse_expression()?;
         self.expect(&Token::Comma)?;
+        // Bare (`MONTH`) or quoted (`"MONTH"`) interval keyword, case-insensitive.
         let interval = match self.advance()?.clone() {
-            Token::Ident(s) => {
+            Token::Ident(s) | Token::StringLit(s) => {
                 let upper = s.to_uppercase();
                 match upper.as_str() {
                     "YEAR" | "QUARTER" | "MONTH" | "WEEK" | "DAY" | "HOUR" | "MINUTE"
