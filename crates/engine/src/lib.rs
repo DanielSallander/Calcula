@@ -86,6 +86,8 @@ mod query_cache;
 mod refresh;
 
 #[cfg(test)]
+mod detail_tests;
+#[cfg(test)]
 mod disk_cache_tests;
 #[cfg(test)]
 mod security_tests;
@@ -166,8 +168,8 @@ pub use engine_connectors::{ConnectorError, ConnectorResult};
 pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
-    ColumnRef, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget, QueryRequest,
-    TotalsMode, GROUPING_ID_COLUMN,
+    ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget,
+    QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
@@ -1060,6 +1062,109 @@ impl Engine {
             }
         }
         Ok(batches)
+    }
+
+    /// Return the **raw fact rows** behind a pivot cell (drillthrough /
+    /// detail-rows).
+    ///
+    /// Given a [`DetailRequest`], this fetches the detail (fact) table's rows
+    /// filtered to the cell's coordinates and slicers, with **no aggregation**
+    /// — a `SELECT columns ... WHERE ... ORDER BY ... LIMIT n`. Hosts call it
+    /// when a user double-clicks a cell to inspect the underlying
+    /// transactions.
+    ///
+    /// # Row-level security
+    ///
+    /// Drillthrough exposes raw rows, so RLS is enforced even more strictly
+    /// than for aggregates. The active role's predicates on the detail table
+    /// are sealed onto the detail fetch; a role (or a cell-coordinate filter)
+    /// on a related **dimension** is propagated to the detail table so only
+    /// rows joined to permitted dimension rows are returned; and a role on a
+    /// dimension reachable only through a relationship the engine cannot
+    /// enforce (non-equi / many-to-many / composite-key / inactive /
+    /// multi-hop) **fails closed** with
+    /// [`EngineError::RowLevelSecurityNotEnforceable`] rather than returning
+    /// under-restricted rows. With no active role, rows are unrestricted (up
+    /// to the limit).
+    ///
+    /// A role that filters a table genuinely unreachable from the detail table
+    /// is an irrelevant no-op (it restricts nothing the drillthrough can
+    /// observe). The common case — drilling into a fact with roles on its
+    /// dimensions — is enforced directly; v1 only enforces the detail table
+    /// itself and its single-hop equi dimensions, so drilling *into* a
+    /// dimension table while a role filters a sibling or snowflake dimension
+    /// fails closed rather than risk an unenforced restriction.
+    ///
+    /// # Output columns
+    ///
+    /// `columns` returns columns of the detail table only; v1 does not join
+    /// back to dimensions to surface dimension attributes (a host that needs
+    /// `Geography.region` in the output resolves it separately).
+    ///
+    /// # Caching
+    ///
+    /// Drillthrough results are **never** stored in the query-result cache:
+    /// they are interactive, one-off, and per-cell, so caching them would add
+    /// no hit-rate while widening the surface for a cache-key/role-isolation
+    /// mistake. (The detail table's own data is still served from the
+    /// in-memory cache when present — only the drillthrough *result* is
+    /// uncached.)
+    ///
+    /// `request.limit` is mandatory and applies after ordering; `limit == 0`
+    /// is a valid request that returns an empty result.
+    ///
+    /// # Errors
+    ///
+    /// - [`QueryError::SourceNotRegistered`] if the detail table is neither
+    ///   bound to a source nor cached.
+    /// - [`QueryError::Engine`] wrapping
+    ///   [`EngineError::SecurityRoleNotFound`] for an unknown active role, or
+    ///   [`EngineError::RowLevelSecurityNotEnforceable`] on a fail-closed
+    ///   refusal.
+    /// - [`QueryError::InvalidQuery`] when a filter or ORDER BY clause cannot
+    ///   be mapped to the detail table or a propagatable dimension.
+    ///
+    /// Takes `&self`: like [`query`](Self::query), this is concurrency-safe.
+    pub async fn query_rows(&self, request: DetailRequest) -> QueryResult<Vec<RecordBatch>> {
+        self.query_rows_with_cancellation(request, CancellationToken::new())
+            .await
+    }
+
+    /// Return the raw detail rows behind a pivot cell, cancellable from another
+    /// task.
+    ///
+    /// Like [`query_rows`](Self::query_rows), but stops with
+    /// [`QueryError::Cancelled`] when `token` is cancelled. Cancellation is
+    /// cooperative: it is checked before any work and raced against the
+    /// connector fetches.
+    pub async fn query_rows_with_cancellation(
+        &self,
+        request: DetailRequest,
+        token: CancellationToken,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        // A pre-cancelled token never executes anything.
+        if token.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+
+        // Mirror the query preamble: validate the active role (an unknown role
+        // is a hard error, never a silent no-RLS run). There are no measures
+        // in a DetailRequest, so no UDF validation is needed.
+        self.validate_active_role()?;
+        let role_filters = self.active_role_filters();
+
+        // Drillthrough results are intentionally NOT cached (see the doc
+        // comment): interactive, one-off, per-cell. Go straight to execution.
+        QueryExecutor::execute_detail(
+            &request,
+            &self.model,
+            &self.registry,
+            Some(&self.cache),
+            Some(self.max_inline_in_values),
+            role_filters,
+            &token,
+        )
+        .await
     }
 
     /// Execute a query, automatically refreshing any stale in-memory tables first.

@@ -3,6 +3,7 @@
 mod bidirectional;
 #[cfg(test)]
 mod bidirectional_tests;
+mod detail;
 mod fetch;
 mod hierarchy;
 #[cfg(test)]

@@ -334,6 +334,137 @@ pub struct QueryRequest {
     pub hierarchy_group_by: Option<HierarchyGroupBy>,
 }
 
+/// A request for the **raw fact rows** behind a pivot cell (drillthrough /
+/// detail-rows).
+///
+/// Unlike [`QueryRequest`], a `DetailRequest` performs **no aggregation**: it
+/// returns the underlying detail-table rows that a measure cell aggregated
+/// over, as a `SELECT columns ... WHERE ... ORDER BY ... LIMIT n`. The host (a
+/// spreadsheet) issues one when a user double-clicks a cell to inspect the
+/// transactions behind it.
+///
+/// # Security
+///
+/// Because this exposes raw rows, **row-level security is enforced even more
+/// strictly than for aggregates** — a missing restriction is a direct data
+/// leak rather than a wrong total. The active role's predicates are sealed
+/// onto the detail fetch, a role (or cell filter) on a related dimension is
+/// propagated to the detail table the same way it is for aggregation (only
+/// the detail rows that join to permitted dimension rows are returned), and a
+/// role on a dimension reachable only through a relationship the engine cannot
+/// enforce (non-equi / many-to-many / composite-key / inactive / multi-hop)
+/// **fails closed** with
+/// [`RowLevelSecurityNotEnforceable`](engine_core::error::EngineError::RowLevelSecurityNotEnforceable)
+/// rather than returning under-restricted rows.
+///
+/// # Filters target the detail table OR a related dimension
+///
+/// A [`FilterCondition`] names only a column, not a table. Each filter is
+/// matched to the table whose model definition owns that column. Filters on
+/// the detail table are applied to the detail fetch directly; filters on a
+/// related dimension are propagated to the detail table by fetching the
+/// dimension (restricted by the filter), extracting its join keys, and adding
+/// an `IN (...)` filter on the detail table's join column — exactly the
+/// dimension→fact propagation the aggregation path uses. A cell-coordinate
+/// filter that lands on a dimension reached through a non-propagatable
+/// relationship cannot restrict the detail rows and is rejected at execution
+/// time.
+///
+/// # Limit is mandatory
+///
+/// DirectQuery fact tables are effectively unbounded, so a drillthrough must
+/// always cap its result: [`limit`](DetailRequest::limit) is a required field
+/// (there is intentionally no `Default`). `limit == 0` is a valid request that
+/// returns an empty result.
+///
+/// New fields may be added over time; construct with
+/// [`DetailRequest::new`] plus struct-update syntax to stay
+/// forward-compatible:
+///
+/// ```ignore
+/// // The 50 raw Sales rows behind the "West / 2024" cell.
+/// let request = DetailRequest {
+///     columns: vec!["order_id".into(), "amount".into()],
+///     filters: vec![/* region = West, year = 2024 (on dimensions) */],
+///     ..DetailRequest::new("Sales", 50)
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct DetailRequest {
+    /// The detail (fact) table whose raw rows to return.
+    ///
+    /// Must be a table the model defines. It is resolved to a connector + a
+    /// source binding via the registry, or served from the in-memory cache
+    /// when present. A table that is neither bound nor cached yields
+    /// [`SourceNotRegistered`](crate::error::QueryError::SourceNotRegistered).
+    pub table: String,
+    /// Detail-table columns to return. **Empty means all columns** (`SELECT
+    /// *`). Each named column must exist on the detail table; only
+    /// detail-table columns are returned (dimension attributes are not joined
+    /// in — see the type docs for the scoped-out join-back).
+    pub columns: Vec<String>,
+    /// Cell-coordinate and slicer filters.
+    ///
+    /// Each [`FilterCondition`] is matched to the table that owns its named
+    /// column. Filters on the **detail table** are applied directly; filters
+    /// on a **related dimension** are propagated to the detail table (see the
+    /// type-level docs). A filter whose column is not found on the detail
+    /// table or any single-hop propagatable dimension is rejected.
+    pub filters: Vec<FilterCondition>,
+    /// ORDER BY clauses, by **detail-table columns only**.
+    ///
+    /// Each clause must be an [`OrderTarget::Column`] naming a detail-table
+    /// column; an [`OrderTarget::Measure`] target is rejected (a drillthrough
+    /// computes no measures). When empty, row order is source-defined.
+    pub order_by: Vec<OrderByClause>,
+    /// Mandatory cap on the number of returned rows, applied after ordering.
+    ///
+    /// `0` is allowed and returns an empty result. There is no default —
+    /// every drillthrough must state its cap explicitly because DirectQuery
+    /// fact tables are unbounded.
+    pub limit: usize,
+}
+
+impl DetailRequest {
+    /// Create a drillthrough request for `table` capped at `limit` rows.
+    ///
+    /// Starts with all columns (`columns` empty), no filters, and no
+    /// ordering. Set the other fields with struct-update syntax. `limit` is
+    /// required (and may be `0` for an explicitly empty request).
+    pub fn new(table: impl Into<String>, limit: usize) -> Self {
+        Self {
+            table: table.into(),
+            columns: Vec::new(),
+            filters: Vec::new(),
+            order_by: Vec::new(),
+            limit,
+        }
+    }
+
+    /// Return only the given detail-table columns (replacing any previously
+    /// set). An empty list means all columns.
+    pub fn with_columns<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.columns = columns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Replace the filter conditions.
+    pub fn with_filters(mut self, filters: Vec<FilterCondition>) -> Self {
+        self.filters = filters;
+        self
+    }
+
+    /// Replace the ORDER BY clauses.
+    pub fn with_order_by(mut self, order_by: Vec<OrderByClause>) -> Self {
+        self.order_by = order_by;
+        self
+    }
+}
+
 impl QueryRequest {
     /// The effective ORDER BY for this request: the explicit `order_by`
     /// clauses, or — when `order_by` is empty and `group_by` is not — the
@@ -347,5 +478,61 @@ impl QueryRequest {
             .iter()
             .map(|col| OrderByClause::column(col.table.clone(), col.column.clone()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_connectors::FilterOperator;
+
+    #[test]
+    fn detail_request_new_sets_table_and_limit_with_empty_defaults() {
+        let request = DetailRequest::new("Sales", 100);
+        assert_eq!(request.table, "Sales");
+        assert_eq!(request.limit, 100);
+        assert!(
+            request.columns.is_empty(),
+            "empty columns means all columns"
+        );
+        assert!(request.filters.is_empty());
+        assert!(request.order_by.is_empty());
+    }
+
+    #[test]
+    fn detail_request_zero_limit_is_a_valid_empty_request() {
+        let request = DetailRequest::new("Sales", 0);
+        assert_eq!(request.limit, 0);
+    }
+
+    #[test]
+    fn detail_request_builders_replace_fields() {
+        let filters = vec![FilterCondition {
+            column: "region".into(),
+            operator: FilterOperator::Equal,
+            value: "West".into(),
+        }];
+        let request = DetailRequest::new("Sales", 50)
+            .with_columns(["order_id", "amount"])
+            .with_filters(filters.clone())
+            .with_order_by(vec![OrderByClause::column("Sales", "order_id")]);
+
+        assert_eq!(request.columns, vec!["order_id", "amount"]);
+        assert_eq!(request.filters.len(), 1);
+        assert_eq!(request.filters[0].column, "region");
+        assert_eq!(request.order_by.len(), 1);
+        match &request.order_by[0].target {
+            OrderTarget::Column(col) => {
+                assert_eq!(col.table, "Sales");
+                assert_eq!(col.column, "order_id");
+            }
+            other => panic!("expected a column order target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detail_request_with_columns_empty_means_all() {
+        let request = DetailRequest::new("Sales", 10).with_columns(Vec::<String>::new());
+        assert!(request.columns.is_empty());
     }
 }

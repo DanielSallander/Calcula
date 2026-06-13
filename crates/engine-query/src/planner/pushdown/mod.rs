@@ -14,6 +14,12 @@ mod totals_order;
 
 pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
 
+// Re-exported for the executor's drillthrough path (`executor::pipeline::detail`),
+// which must enforce the *same* RLS relevance / fail-closed check and seal the
+// *same* role conditions onto its fetches as the aggregation planner. Sharing
+// these keeps the two enforcement halves in lockstep.
+pub(crate) use security::{rls_relevance, role_conditions_for_table};
+
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
 use engine_core::compute::expression::FilterPredicate;
 use engine_core::compute::measure::Measure;
@@ -31,7 +37,6 @@ use context_filters::compute_pushable_context_filters;
 pub(crate) use hierarchy::resolve_hierarchy;
 use lookups::resolve_lookups;
 use projection::compute_table_projections;
-use security::{rls_relevance, role_conditions_for_table};
 use source_sql::{aggregate_op_to_function, build_join_aggregation_request, has_unpushable_ops};
 use totals_order::{
     build_pushed_order_by, canonical_effective_order, order_requires_sort_substitution,

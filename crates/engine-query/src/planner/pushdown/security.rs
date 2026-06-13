@@ -57,7 +57,7 @@ pub(super) fn predicate_to_condition(predicate: &FilterPredicate) -> FilterCondi
 /// Collect the role's [`FilterCondition`]s that target a specific table.
 ///
 /// Returns an empty vec when the role filters nothing on `table_name`.
-pub(super) fn role_conditions_for_table(
+pub(crate) fn role_conditions_for_table(
     role_filters: &[FilterPredicate],
     table_name: &str,
 ) -> Vec<FilterCondition> {
@@ -151,7 +151,7 @@ fn reachable(model: &DataModel, start: &str, target: &str) -> bool {
 /// unrestricted (a data leak). A role-filtered table that is in the query is
 /// always enforceable — its predicates are sealed onto its own fetch and the
 /// in-statement join restricts the fact.
-pub(super) fn rls_relevance(
+pub(crate) fn rls_relevance(
     role_filters: &[FilterPredicate],
     query_tables: &HashSet<String>,
     measure_tables: &[&str],
