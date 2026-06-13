@@ -10,6 +10,7 @@ impl Expression {
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
+            | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralString(_)
@@ -112,6 +113,7 @@ impl Expression {
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
+            | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralString(_)

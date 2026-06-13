@@ -257,6 +257,60 @@ pub enum TotalsMode {
     Rollup,
 }
 
+/// Apply a model-defined **calculation group** to a query's measures.
+///
+/// A calculation group (see
+/// [`CalculationGroup`](engine_core::model::CalculationGroup)) is a set of
+/// named *calculation items* — measure templates that transform whichever
+/// measure they are applied to (via the `SELECTEDMEASURE()` placeholder). When
+/// set on a [`QueryRequest`], the engine cross-applies the selected items to
+/// the request's [`measures`](QueryRequest::measures), replacing those
+/// measures with the resulting **synthetic** measures for this one query.
+///
+/// # Result contract — ordering and naming
+///
+/// For requested measures `[M1, M2, ...]` (in `QueryRequest::measures` order)
+/// and selected items `[I1, I2, ...]` (in [`items`](Self::items) order; an
+/// **empty** list means *all* items in the group, in declaration order), the
+/// result has `measures.len() * items.len()` value columns, ordered
+/// **measures-outer / items-inner**:
+///
+/// ```text
+/// M1[I1], M1[I2], ..., M2[I1], M2[I2], ...
+/// ```
+///
+/// Each value column is named `"{measure} [{item}]"` — e.g. applying a group
+/// with items `Current`, `YTD`, `PY` to `Revenue` yields the columns
+/// `"Revenue [Current]"`, `"Revenue [YTD]"`, `"Revenue [PY]"`. The synthetic
+/// measures are ordinary measures and compose with `group_by`, `filters`,
+/// `order_by`, etc. exactly like a plain multi-measure request.
+///
+/// # Errors
+///
+/// The query fails with a typed error when the named group does not exist, a
+/// selected item is not in the group, a requested measure does not exist, or a
+/// synthetic name would collide with an existing model measure.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CalculationGroupApplication {
+    /// Name of a calculation group defined in the `DataModel`.
+    pub group: String,
+    /// Names of the calculation items to apply, in the order their columns
+    /// should appear (items-inner). An **empty** list applies *all* items in
+    /// the group, in declaration order.
+    pub items: Vec<String>,
+}
+
+impl CalculationGroupApplication {
+    /// Apply the named calculation group's items (all of them when `items` is
+    /// empty) to the request's measures.
+    pub fn new(group: impl Into<String>, items: Vec<String>) -> Self {
+        Self {
+            group: group.into(),
+            items,
+        }
+    }
+}
+
 /// A request to compute measures, optionally grouped by dimensions and filtered.
 ///
 /// This is the primary input to the query planner. Measures and dimensions
@@ -332,6 +386,16 @@ pub struct QueryRequest {
     /// (each level becomes a drill subtotal) and default ordering. See
     /// [`HierarchyGroupBy`] for the depth semantics and validation rules.
     pub hierarchy_group_by: Option<HierarchyGroupBy>,
+    /// Apply a model-defined calculation group to this request's
+    /// [`measures`](Self::measures).
+    ///
+    /// When set, the engine cross-applies the selected calculation items to
+    /// the requested measures and computes the resulting synthetic measures
+    /// instead — producing `measures.len() * items.len()` value columns,
+    /// ordered measures-outer / items-inner, each named `"{measure} [{item}]"`.
+    /// See [`CalculationGroupApplication`] for the full ordering and naming
+    /// contract. `None` (default) leaves the requested measures unchanged.
+    pub calculation_group: Option<CalculationGroupApplication>,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /

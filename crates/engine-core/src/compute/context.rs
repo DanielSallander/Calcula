@@ -299,13 +299,16 @@ impl<'a> ContextResolver<'a> {
 
     fn walk(&self, expr: &Expression, ctx: &mut EvaluationContext) -> EngineResult<Expression> {
         match expr {
-            // Leaf nodes pass through
+            // Leaf nodes pass through. SelectedMeasure is always substituted
+            // away before context resolution, but pass it through unchanged
+            // (like MeasureRef) rather than failing here.
             Expression::ColumnRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralBool(_)
             | Expression::TableRef(_)
-            | Expression::MeasureRef(_) => Ok(expr.clone()),
+            | Expression::MeasureRef(_)
+            | Expression::SelectedMeasure => Ok(expr.clone()),
 
             // Qualified column ref: if table_or_var is a table variable, resolve it
             Expression::QualifiedColumnRef {

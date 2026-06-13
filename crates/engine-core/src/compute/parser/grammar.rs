@@ -224,6 +224,7 @@ impl Parser {
             // Value inspection functions
             "HASONEVALUE" => self.parse_hasonevalue_call(),
             "SELECTEDVALUE" => self.parse_selectedvalue_call(),
+            "SELECTEDMEASURE" => self.parse_selectedmeasure_call(),
             "FIRST" => self.parse_first_call(),
             // Scalar math functions
             "ABS" => self.parse_scalar_call(ScalarFunction::Abs, 1),

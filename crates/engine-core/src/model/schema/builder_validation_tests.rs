@@ -942,3 +942,140 @@ fn incremental_refresh_survives_json_round_trip_through_model() {
         Some("order_date >= DATEADD(TODAY(), -7, \"DAY\")")
     );
 }
+
+// --- Calculation group validation tests ---
+
+use crate::compute::measure::sum_measure;
+use crate::model::calculated_column::CalculatedColumn;
+use crate::model::calculation_group::{CalculationGroup, CalculationItem};
+
+fn time_group() -> CalculationGroup {
+    CalculationGroup::new(
+        "Time",
+        vec![
+            CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+            CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
+        ],
+    )
+}
+
+#[test]
+fn accepts_valid_calculation_group() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(time_group())
+        .build()
+        .unwrap();
+    assert_eq!(model.calculation_groups().len(), 1);
+    assert_eq!(model.calculation_group("Time").unwrap().items().len(), 2);
+}
+
+#[test]
+fn rejects_duplicate_calculation_group_names() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(time_group())
+        .add_calculation_group(time_group())
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("calculation group"), "got: {err}");
+}
+
+#[test]
+fn rejects_duplicate_item_names_within_group() {
+    let group = CalculationGroup::new(
+        "Time",
+        vec![
+            CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+            CalculationItem::from_text("Current", "SELECTEDMEASURE() * 2").unwrap(),
+        ],
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("calculation item"), "got: {err}");
+}
+
+#[test]
+fn rejects_empty_calculation_group() {
+    let group = CalculationGroup::new("Time", vec![]);
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("no items"), "got: {err}");
+}
+
+#[test]
+fn rejects_calc_item_with_unknown_measure_ref() {
+    let group = CalculationGroup::new(
+        "Time",
+        vec![CalculationItem::from_text("Ratio", "SELECTEDMEASURE() / [Nope]").unwrap()],
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown measure"), "got: {err}");
+}
+
+#[test]
+fn rejects_calc_item_with_unknown_qualified_column() {
+    let group = CalculationGroup::new(
+        "Time",
+        vec![
+            CalculationItem::from_text("WithCol", "SELECTEDMEASURE() + SUM(Sales[nonexistent])")
+                .unwrap(),
+        ],
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown column"), "got: {err}");
+}
+
+#[test]
+fn rejects_selected_measure_in_a_regular_measure() {
+    // A measure (not a calc item) that uses SELECTEDMEASURE() must be rejected
+    // at build time via the regular validate() path.
+    let bad = crate::compute::measure::Measure::new(
+        "Bad",
+        crate::compute::expression::agg(
+            crate::compute::aggregate::AggregateOp::Sum,
+            crate::compute::expression::Expression::SelectedMeasure,
+        ),
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(bad)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
+}
+
+#[test]
+fn rejects_selected_measure_in_a_calculated_column() {
+    let cc = CalculatedColumn::new(
+        "Bad",
+        "Sales",
+        crate::compute::expression::Expression::SelectedMeasure,
+        DataType::Float64,
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_calculated_column(cc)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
+}

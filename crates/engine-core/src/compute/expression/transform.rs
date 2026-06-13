@@ -294,6 +294,336 @@ impl Expression {
         }
     }
 
+    /// Replace every [`Expression::SelectedMeasure`] node in this tree with
+    /// `replacement`, returning the rewritten clone.
+    ///
+    /// This is how a calculation item is applied to a target measure: the
+    /// item's expression (e.g. `YTD(SELECTEDMEASURE())`) is rewritten with
+    /// `replacement` set to the target measure's expression tree. **All**
+    /// occurrences are replaced — an item may reference `SELECTEDMEASURE()`
+    /// multiple times (e.g.
+    /// `DIVIDE(SELECTEDMEASURE() - PRIORYEAR(SELECTEDMEASURE()), PRIORYEAR(SELECTEDMEASURE()))`).
+    ///
+    /// Modeled on [`Expression::substitute_vars`]: every compound node is
+    /// rebuilt with its children substituted; leaf nodes other than
+    /// `SelectedMeasure` are returned unchanged.
+    pub fn substitute_selected_measure(&self, replacement: &Expression) -> Expression {
+        match self {
+            Expression::SelectedMeasure => replacement.clone(),
+            Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+                left: Box::new(left.substitute_selected_measure(replacement)),
+                op: *op,
+                right: Box::new(right.substitute_selected_measure(replacement)),
+            },
+            Expression::Aggregate { operation, operand } => Expression::Aggregate {
+                operation: *operation,
+                operand: Box::new(operand.substitute_selected_measure(replacement)),
+            },
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => Expression::SafeDivide {
+                numerator: Box::new(numerator.substitute_selected_measure(replacement)),
+                denominator: Box::new(denominator.substitute_selected_measure(replacement)),
+                alternate: alternate
+                    .as_ref()
+                    .map(|a| Box::new(a.substitute_selected_measure(replacement))),
+            },
+            Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
+                function: *function,
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_selected_measure(replacement))
+                    .collect(),
+            },
+            Expression::TextFunc { function, args } => Expression::TextFunc {
+                function: *function,
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_selected_measure(replacement))
+                    .collect(),
+            },
+            Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+                function: *function,
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_selected_measure(replacement))
+                    .collect(),
+            },
+            Expression::IfError { expr, alternate } => Expression::IfError {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                alternate: Box::new(alternate.substitute_selected_measure(replacement)),
+            },
+            Expression::ClearExcept {
+                expr,
+                table,
+                except_columns,
+            } => Expression::ClearExcept {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                table: table.clone(),
+                except_columns: except_columns.clone(),
+            },
+            Expression::Iterate { table, expression } => Expression::Iterate {
+                table: table.clone(),
+                expression: Box::new(expression.substitute_selected_measure(replacement)),
+            },
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => Expression::Percentile {
+                operand: Box::new(operand.substitute_selected_measure(replacement)),
+                percentile: Box::new(percentile.substitute_selected_measure(replacement)),
+            },
+            Expression::Coalesce(exprs) => Expression::Coalesce(
+                exprs
+                    .iter()
+                    .map(|e| e.substitute_selected_measure(replacement))
+                    .collect(),
+            ),
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => Expression::If {
+                condition: Box::new(condition.substitute_selected_measure(replacement)),
+                then_expr: Box::new(then_expr.substitute_selected_measure(replacement)),
+                else_expr: Box::new(else_expr.substitute_selected_measure(replacement)),
+            },
+            Expression::IsBlank(inner) => {
+                Expression::IsBlank(Box::new(inner.substitute_selected_measure(replacement)))
+            }
+            Expression::Not(inner) => {
+                Expression::Not(Box::new(inner.substitute_selected_measure(replacement)))
+            }
+            Expression::Comparison { left, op, right } => Expression::Comparison {
+                left: Box::new(left.substitute_selected_measure(replacement)),
+                op: *op,
+                right: Box::new(right.substitute_selected_measure(replacement)),
+            },
+            Expression::And(left, right) => Expression::And(
+                Box::new(left.substitute_selected_measure(replacement)),
+                Box::new(right.substitute_selected_measure(replacement)),
+            ),
+            Expression::Or(left, right) => Expression::Or(
+                Box::new(left.substitute_selected_measure(replacement)),
+                Box::new(right.substitute_selected_measure(replacement)),
+            ),
+            Expression::Xor(left, right) => Expression::Xor(
+                Box::new(left.substitute_selected_measure(replacement)),
+                Box::new(right.substitute_selected_measure(replacement)),
+            ),
+            Expression::Switch {
+                expr,
+                cases,
+                default,
+            } => Expression::Switch {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                cases: cases
+                    .iter()
+                    .map(|(v, r)| {
+                        (
+                            v.substitute_selected_measure(replacement),
+                            r.substitute_selected_measure(replacement),
+                        )
+                    })
+                    .collect(),
+                default: default
+                    .as_ref()
+                    .map(|d| Box::new(d.substitute_selected_measure(replacement))),
+            },
+            Expression::Block { bindings, result } => Expression::Block {
+                bindings: bindings
+                    .iter()
+                    .map(|(name, e)| (name.clone(), e.substitute_selected_measure(replacement)))
+                    .collect(),
+                result: Box::new(result.substitute_selected_measure(replacement)),
+            },
+            Expression::Query {
+                aggregates,
+                group_by,
+            } => Expression::Query {
+                aggregates: aggregates
+                    .iter()
+                    .map(|(e, alias)| (e.substitute_selected_measure(replacement), alias.clone()))
+                    .collect(),
+                group_by: group_by.clone(),
+            },
+            Expression::HasOneValue { column } => Expression::HasOneValue {
+                column: Box::new(column.substitute_selected_measure(replacement)),
+            },
+            Expression::SelectedValue { column, alternate } => Expression::SelectedValue {
+                column: Box::new(column.substitute_selected_measure(replacement)),
+                alternate: alternate
+                    .as_ref()
+                    .map(|a| Box::new(a.substitute_selected_measure(replacement))),
+            },
+            Expression::FirstValue { column, order_by } => Expression::FirstValue {
+                column: Box::new(column.substitute_selected_measure(replacement)),
+                order_by: Box::new(order_by.substitute_selected_measure(replacement)),
+            },
+            Expression::Window {
+                inner,
+                function,
+                order_by,
+                partition_by,
+                frame,
+            } => Expression::Window {
+                inner: Box::new(inner.substitute_selected_measure(replacement)),
+                function: *function,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: frame.clone(),
+            },
+            Expression::Offset {
+                inner,
+                delta,
+                order_by,
+                partition_by,
+            } => Expression::Offset {
+                inner: Box::new(inner.substitute_selected_measure(replacement)),
+                delta: *delta,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+            },
+            Expression::Index {
+                inner,
+                position,
+                order_by,
+                partition_by,
+            } => Expression::Index {
+                inner: Box::new(inner.substitute_selected_measure(replacement)),
+                position: *position,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+            },
+            Expression::ToDate { expr, granularity } => Expression::ToDate {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                granularity: *granularity,
+            },
+            Expression::PeriodShift {
+                expr,
+                offset,
+                granularity,
+            } => Expression::PeriodShift {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                offset: *offset,
+                granularity: *granularity,
+            },
+            Expression::Keep {
+                expr,
+                filters,
+                variables,
+                conditions,
+                in_predicates,
+            } => Expression::Keep {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                filters: filters.clone(),
+                variables: variables.clone(),
+                conditions: conditions
+                    .iter()
+                    .map(|c| c.substitute_selected_measure(replacement))
+                    .collect(),
+                in_predicates: in_predicates.clone(),
+            },
+            Expression::Clear { expr, targets } => Expression::Clear {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                targets: targets.clone(),
+            },
+            Expression::Reset { expr } => Expression::Reset {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+            },
+            Expression::ClearInner { expr, targets } => Expression::ClearInner {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                targets: targets.clone(),
+            },
+            Expression::ClearOuter { expr, targets } => Expression::ClearOuter {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                targets: targets.clone(),
+            },
+            Expression::ResetInner { expr } => Expression::ResetInner {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+            },
+            Expression::ResetOuter { expr } => Expression::ResetOuter {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+            },
+            Expression::Traverse { expr, path } => Expression::Traverse {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                path: path.clone(),
+            },
+            Expression::Using { expr, context_name } => Expression::Using {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                context_name: context_name.clone(),
+            },
+            Expression::UseRelationship {
+                expr,
+                relationship_name,
+            } => Expression::UseRelationship {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                relationship_name: relationship_name.clone(),
+            },
+            Expression::KeepIn { expr, predicates } => Expression::KeepIn {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                predicates: predicates.clone(),
+            },
+            Expression::InList { expr, values } => Expression::InList {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                values: values
+                    .iter()
+                    .map(|v| v.substitute_selected_measure(replacement))
+                    .collect(),
+            },
+            Expression::Greatest(args) => Expression::Greatest(
+                args.iter()
+                    .map(|a| a.substitute_selected_measure(replacement))
+                    .collect(),
+            ),
+            Expression::Least(args) => Expression::Least(
+                args.iter()
+                    .map(|a| a.substitute_selected_measure(replacement))
+                    .collect(),
+            ),
+            Expression::NullIf { expr, value } => Expression::NullIf {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                value: Box::new(value.substitute_selected_measure(replacement)),
+            },
+            Expression::CountIf { condition } => Expression::CountIf {
+                condition: Box::new(condition.substitute_selected_measure(replacement)),
+            },
+            Expression::ListAgg { column, delimiter } => Expression::ListAgg {
+                column: Box::new(column.substitute_selected_measure(replacement)),
+                delimiter: Box::new(delimiter.substitute_selected_measure(replacement)),
+            },
+            Expression::MaxBy { value, sort_by } => Expression::MaxBy {
+                value: Box::new(value.substitute_selected_measure(replacement)),
+                sort_by: Box::new(sort_by.substitute_selected_measure(replacement)),
+            },
+            Expression::MinBy { value, sort_by } => Expression::MinBy {
+                value: Box::new(value.substitute_selected_measure(replacement)),
+                sort_by: Box::new(sort_by.substitute_selected_measure(replacement)),
+            },
+            Expression::Call { name, args } => Expression::Call {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_selected_measure(replacement))
+                    .collect(),
+            },
+            // Leaf expressions with no SelectedMeasure node — return as-is.
+            Expression::ColumnRef(_)
+            | Expression::QualifiedColumnRef { .. }
+            | Expression::TableRef(_)
+            | Expression::MeasureRef(_)
+            | Expression::LiteralFloat(_)
+            | Expression::LiteralInt(_)
+            | Expression::LiteralString(_)
+            | Expression::LiteralBool(_)
+            | Expression::Blank
+            | Expression::IsInScope { .. }
+            | Expression::RankWindow { .. } => self.clone(),
+        }
+    }
+
     /// Inline all VAR bindings into the result expression of a Block,
     /// returning the fully expanded expression. Non-Block expressions
     /// are returned unchanged.

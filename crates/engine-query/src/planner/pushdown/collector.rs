@@ -463,6 +463,12 @@ impl<'a> ProjectionCollector<'a> {
                 // surviving here cannot be attributed statically.
                 self.set_global_fallback(format!("unexpanded measure reference '[{name}]'"));
             }
+            Expression::SelectedMeasure => {
+                // The calculation-item placeholder is substituted with the
+                // applied measure's expression before analysis; one surviving
+                // here cannot be attributed statically.
+                self.set_global_fallback("unsubstituted SELECTEDMEASURE() placeholder".to_string());
+            }
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::And(left, right)

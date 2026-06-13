@@ -29,6 +29,14 @@ impl SqlRenderer<'_> {
                      expression before SQL generation"
                 )));
             }
+            Expression::SelectedMeasure => {
+                return Err(EngineError::InvalidExpression(
+                    "SELECTEDMEASURE() must be substituted with the applied measure's \
+                     expression before SQL generation; an unsubstituted SELECTEDMEASURE() \
+                     node reached the renderer (internal error)"
+                        .to_string(),
+                ));
+            }
             Expression::LiteralFloat(v) => format!("{v}"),
             Expression::LiteralInt(v) => format!("{v}"),
             Expression::LiteralBool(b) => {

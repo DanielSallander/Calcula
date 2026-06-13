@@ -338,6 +338,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         // Value inspection
         "HASONEVALUE",
         "SELECTEDVALUE",
+        "SELECTEDMEASURE",
         "FIRST",
         "ISINSCOPE",
         "PERCENTILE",

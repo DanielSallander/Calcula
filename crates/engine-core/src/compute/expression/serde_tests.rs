@@ -275,3 +275,61 @@ fn call_deserialized_hostile_name_rejected_by_validate() {
     let deserialized: Expression = serde_json::from_str(json).unwrap();
     assert!(deserialized.validate().is_err());
 }
+
+// --- SelectedMeasure (calculation-item placeholder) ---
+
+#[test]
+fn selected_measure_serialization_roundtrip() {
+    let expr = Expression::SelectedMeasure;
+    let json = serde_json::to_string(&expr).unwrap();
+    assert_eq!(json, "\"SelectedMeasure\"");
+    let deserialized: Expression = serde_json::from_str(&json).unwrap();
+    assert!(matches!(deserialized, Expression::SelectedMeasure));
+}
+
+#[test]
+fn substitute_selected_measure_replaces_all_occurrences() {
+    // YoY% pattern: SELECTEDMEASURE() appears three times.
+    let item = safe_divide(
+        Expression::SelectedMeasure.subtract(Expression::SelectedMeasure),
+        Expression::SelectedMeasure,
+        None,
+    );
+    let replacement = agg(AggregateOp::Sum, qualified_col("Sales", "amount"));
+    let substituted = item.substitute_selected_measure(&replacement);
+
+    // No SelectedMeasure node survives anywhere in the tree.
+    assert!(!format!("{substituted:?}").contains("SelectedMeasure"));
+    // It renders (proving every placeholder was replaced with the aggregate).
+    let sql = substituted.to_sql_string().unwrap();
+    assert!(sql.contains("SUM(\"amount\")"));
+    // validate() now passes (no placeholder left), confirming all three
+    // occurrences were substituted.
+    assert!(substituted.validate().is_ok());
+}
+
+#[test]
+fn validate_rejects_selected_measure_in_regular_measure() {
+    let expr = agg(AggregateOp::Sum, Expression::SelectedMeasure);
+    let err = expr.validate().unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
+}
+
+#[test]
+fn validate_calc_item_allows_selected_measure() {
+    // Bare placeholder and nested-in-aggregate both pass validate_calc_item.
+    assert!(Expression::SelectedMeasure.validate_calc_item().is_ok());
+    let nested = agg(AggregateOp::Sum, Expression::SelectedMeasure).multiply(lit_int(2));
+    assert!(nested.validate_calc_item().is_ok());
+}
+
+#[test]
+fn render_errors_on_unsubstituted_selected_measure() {
+    let err = Expression::SelectedMeasure.to_sql_string().unwrap_err();
+    assert!(matches!(err, EngineError::InvalidExpression(_)));
+    let err2 = Expression::SelectedMeasure
+        .multiply(lit_int(2))
+        .to_sql_string()
+        .unwrap_err();
+    assert!(matches!(err2, EngineError::InvalidExpression(_)));
+}

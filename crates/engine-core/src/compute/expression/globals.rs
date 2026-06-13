@@ -76,7 +76,8 @@ fn collect_query_global_refs(
         | Expression::LiteralBool(_)
         | Expression::Blank
         | Expression::TableRef(_)
-        | Expression::MeasureRef(_) => {}
+        | Expression::MeasureRef(_)
+        | Expression::SelectedMeasure => {}
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::And(left, right)
@@ -568,6 +569,7 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
         | Expression::Blank
         | Expression::TableRef(_)
         | Expression::MeasureRef(_)
+        | Expression::SelectedMeasure
         | Expression::QualifiedColumnRef { .. }
         | Expression::Query { .. } => expr.clone(),
     }

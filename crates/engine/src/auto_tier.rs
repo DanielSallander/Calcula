@@ -420,14 +420,25 @@ impl Engine {
             return Ok((cached, tiered));
         }
 
+        // Resolve any calculation-group application: yields an overlay model
+        // (self.model + ephemeral synthetic measures) and an expanded request
+        // (synthetic measure names). Without this, a calc-group request on the
+        // auto-tier path would be silently ignored and return only the base
+        // measures.
+        let overlay = self.resolve_calculation_group(&request)?;
+        let (model, effective_request) = match &overlay {
+            Some((overlay_model, expanded)) => (overlay_model, expanded),
+            None => (&self.model, &request),
+        };
+
         // Execute the query — tell the planner that auto-tiered tables are
         // local, and thread the active role's predicates so a cached
         // (auto-tiered) dimension is restricted just like a connector-fetched
         // one.
         let role_filters = self.active_role_filters();
         let plan = PushdownPlanner::plan_with_cached(
-            &request,
-            &self.model,
+            effective_request,
+            model,
             &self.registry,
             &self.auto_tier_state.cached,
             role_filters,
@@ -435,7 +446,7 @@ impl Engine {
         let batches = crate::map_script_error(
             QueryExecutor::execute(
                 &plan,
-                &self.model,
+                model,
                 &self.registry,
                 Some(&self.cache),
                 Some(self.max_inline_in_values),

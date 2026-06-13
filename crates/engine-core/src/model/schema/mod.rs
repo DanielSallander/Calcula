@@ -27,6 +27,7 @@ use crate::compute::measure::{Measure, MeasureGroup};
 use crate::compute::script::ScriptFunction;
 use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
+use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
@@ -89,9 +90,18 @@ use crate::model::table_variable::TableVariable;
 ///   safe default. The [`ModelFormatTooNew`] load gate therefore refuses v6
 ///   files on a pre-v6 engine rather than letting them round-trip without the
 ///   policy.
+/// - `7` — calculation groups: the model gained `calculation_groups`, a list
+///   of author-defined [`CalculationGroup`](crate::model::CalculationGroup)s
+///   (reusable measure templates whose items transform an applied measure),
+///   and the persisted expression tree gained the
+///   [`SelectedMeasure`](crate::compute::expression::Expression::SelectedMeasure)
+///   variant (the `SELECTEDMEASURE()` placeholder). Both are authored content
+///   an older engine would silently drop — or, for the new expression variant,
+///   fail to deserialize — on a load→save round-trip, so the
+///   [`ModelFormatTooNew`] load gate refuses v7 files on a pre-v7 engine.
 ///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 6;
+pub const MODEL_FORMAT_VERSION: u32 = 7;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -132,6 +142,14 @@ pub struct DataModel {
     /// pre-v5 model files). See [`SecurityRole`] for the full semantics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     security_roles: Vec<SecurityRole>,
+    /// Author-defined calculation groups: reusable measure templates whose
+    /// items transform an applied measure (via the `SELECTEDMEASURE()`
+    /// placeholder). Applied per-query — the synthetic measures they produce
+    /// are ephemeral and never persisted. Empty by default and skipped on
+    /// serialization when empty (back-compat with pre-v7 model files). See
+    /// [`CalculationGroup`] for the full semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    calculation_groups: Vec<CalculationGroup>,
 }
 
 impl DataModel {
@@ -151,6 +169,7 @@ impl DataModel {
             date_table: None,
             script_functions: Vec::new(),
             security_roles: Vec::new(),
+            calculation_groups: Vec::new(),
         }
     }
 
@@ -299,6 +318,56 @@ impl DataModel {
             .ok_or_else(|| EngineError::SecurityRoleNotFound(name.to_string()))
     }
 
+    /// Returns all calculation groups defined in the model.
+    pub fn calculation_groups(&self) -> &[CalculationGroup] {
+        &self.calculation_groups
+    }
+
+    /// Look up a calculation group by name (exact match).
+    ///
+    /// Returns [`EngineError::CalculationGroupNotFound`] when no group with
+    /// that name exists.
+    pub fn calculation_group(&self, name: &str) -> EngineResult<&CalculationGroup> {
+        self.calculation_groups
+            .iter()
+            .find(|g| g.name() == name)
+            .ok_or_else(|| EngineError::CalculationGroupNotFound(name.to_string()))
+    }
+
+    /// Returns a clone of this model with `extra` measures appended.
+    ///
+    /// This is the cheap overlay used to plan and execute a calculation-group
+    /// application: the synthetic measures produced by
+    /// [`expand_calculation_group`](crate::model::calculation_group::expand_calculation_group)
+    /// are derived from already-validated parts (an existing measure's
+    /// expression substituted into a build-time-validated calculation item),
+    /// so they need no full re-validation — only a name-collision check
+    /// against the existing measures. The overlay is per-query and ephemeral;
+    /// the synthetic measures are never written back to the persistent model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::DuplicateName`] when an `extra` measure's name
+    /// collides with an existing model measure (or with another `extra`).
+    pub fn with_overlay_measures(&self, extra: Vec<Measure>) -> EngineResult<DataModel> {
+        let mut model = self.clone();
+        let mut seen: std::collections::HashSet<String> = model
+            .measures
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect();
+        for measure in &extra {
+            if !seen.insert(measure.name().to_string()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "overlay measure '{}' collides with an existing measure",
+                    measure.name()
+                )));
+            }
+        }
+        model.measures.extend(extra);
+        Ok(model)
+    }
+
     /// Returns all hierarchies that belong to a specific table.
     pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
         self.hierarchies
@@ -402,6 +471,9 @@ impl DataModel {
         }
         for role in &self.security_roles {
             builder = builder.add_security_role(role.clone());
+        }
+        for cg in &self.calculation_groups {
+            builder = builder.add_calculation_group(cg.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

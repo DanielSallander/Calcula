@@ -79,6 +79,25 @@ impl Expression {
     /// to — so models deserialized from JSON are covered before any SQL is
     /// generated.
     pub fn validate(&self) -> EngineResult<()> {
+        self.validate_inner(false)
+    }
+
+    /// Validate a **calculation-item** expression tree for safe SQL rendering.
+    ///
+    /// Identical to [`Expression::validate`] except that
+    /// [`Expression::SelectedMeasure`] (`SELECTEDMEASURE()`) is **allowed**:
+    /// it is the placeholder a calculation item uses for the measure it is
+    /// applied to, substituted away (via
+    /// [`Expression::substitute_selected_measure`]) before any SQL is
+    /// generated. Ordinary measures and calculated columns must use
+    /// [`Expression::validate`], which rejects the placeholder.
+    pub fn validate_calc_item(&self) -> EngineResult<()> {
+        self.validate_inner(true)
+    }
+
+    /// Shared validation walk. `allow_selected_measure` permits
+    /// [`Expression::SelectedMeasure`] (only true for calculation items).
+    fn validate_inner(&self, allow_selected_measure: bool) -> EngineResult<()> {
         match self {
             // Leaves that are either quoted at render time (ColumnRef via
             // quote_ident_double, LiteralString via sql_quote_literal),
@@ -92,6 +111,20 @@ impl Expression {
             | Expression::Blank
             | Expression::MeasureRef(_)
             | Expression::IsInScope { .. } => Ok(()),
+            // SELECTEDMEASURE() is only legal inside a calculation item. For
+            // ordinary measures / calculated columns it must never appear: it
+            // would reach the renderer unsubstituted (an internal error).
+            Expression::SelectedMeasure => {
+                if allow_selected_measure {
+                    Ok(())
+                } else {
+                    Err(EngineError::InvalidExpression(
+                        "SELECTEDMEASURE() is only valid inside a calculation item; \
+                         it cannot be used in a regular measure or calculated column"
+                            .to_string(),
+                    ))
+                }
+            }
             // Table references are rendered as raw (unquoted) qualifiers.
             Expression::TableRef(name) => validate_identifier(name, "table reference"),
             Expression::QualifiedColumnRef { table_or_var, .. } => {
@@ -102,11 +135,13 @@ impl Expression {
             | Expression::And(left, right)
             | Expression::Or(left, right)
             | Expression::Xor(left, right) => {
-                left.validate()?;
-                right.validate()
+                left.validate_inner(allow_selected_measure)?;
+                right.validate_inner(allow_selected_measure)
             }
-            Expression::Aggregate { operand, .. } => operand.validate(),
-            Expression::Not(inner) | Expression::IsBlank(inner) => inner.validate(),
+            Expression::Aggregate { operand, .. } => operand.validate_inner(allow_selected_measure),
+            Expression::Not(inner) | Expression::IsBlank(inner) => {
+                inner.validate_inner(allow_selected_measure)
+            }
             Expression::Keep {
                 expr,
                 filters,
@@ -114,7 +149,7 @@ impl Expression {
                 conditions,
                 in_predicates,
             } => {
-                expr.validate()?;
+                expr.validate_inner(allow_selected_measure)?;
                 for f in filters {
                     f.validate()?;
                 }
@@ -122,7 +157,7 @@ impl Expression {
                     validate_identifier(v, "table variable reference")?;
                 }
                 for c in conditions {
-                    c.validate()?;
+                    c.validate_inner(allow_selected_measure)?;
                 }
                 for p in in_predicates {
                     p.validate()?;
@@ -130,7 +165,7 @@ impl Expression {
                 Ok(())
             }
             Expression::KeepIn { expr, predicates } => {
-                expr.validate()?;
+                expr.validate_inner(allow_selected_measure)?;
                 for p in predicates {
                     p.validate()?;
                 }
@@ -148,38 +183,38 @@ impl Expression {
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
-            | Expression::ClearExcept { expr, .. } => expr.validate(),
+            | Expression::ClearExcept { expr, .. } => expr.validate_inner(allow_selected_measure),
             Expression::Block { bindings, result } => {
                 for (name, binding_expr) in bindings {
                     // QUERY bindings are materialized and registered under
                     // the binding name, which then appears raw in FROM
                     // clauses of the second-stage SQL.
                     validate_identifier(name, "variable binding")?;
-                    binding_expr.validate()?;
+                    binding_expr.validate_inner(allow_selected_measure)?;
                 }
-                result.validate()
+                result.validate_inner(allow_selected_measure)
             }
             Expression::If {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                condition.validate()?;
-                then_expr.validate()?;
-                else_expr.validate()
+                condition.validate_inner(allow_selected_measure)?;
+                then_expr.validate_inner(allow_selected_measure)?;
+                else_expr.validate_inner(allow_selected_measure)
             }
             Expression::Switch {
                 expr,
                 cases,
                 default,
             } => {
-                expr.validate()?;
+                expr.validate_inner(allow_selected_measure)?;
                 for (val, result) in cases {
-                    val.validate()?;
-                    result.validate()?;
+                    val.validate_inner(allow_selected_measure)?;
+                    result.validate_inner(allow_selected_measure)?;
                 }
                 if let Some(d) = default {
-                    d.validate()?;
+                    d.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
@@ -188,10 +223,10 @@ impl Expression {
                 denominator,
                 alternate,
             } => {
-                numerator.validate()?;
-                denominator.validate()?;
+                numerator.validate_inner(allow_selected_measure)?;
+                denominator.validate_inner(allow_selected_measure)?;
                 if let Some(alt) = alternate {
-                    alt.validate()?;
+                    alt.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
@@ -199,13 +234,13 @@ impl Expression {
             | Expression::Greatest(exprs)
             | Expression::Least(exprs) => {
                 for e in exprs {
-                    e.validate()?;
+                    e.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
             Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
                 for arg in args {
-                    arg.validate()?;
+                    arg.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
@@ -242,21 +277,23 @@ impl Expression {
                     | DateTimeFunction::MonthsBetween => {}
                 }
                 for arg in args {
-                    arg.validate()?;
+                    arg.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
             Expression::IfError { expr, alternate } => {
-                expr.validate()?;
-                alternate.validate()
+                expr.validate_inner(allow_selected_measure)?;
+                alternate.validate_inner(allow_selected_measure)
             }
-            Expression::Iterate { expression, .. } => expression.validate(),
+            Expression::Iterate { expression, .. } => {
+                expression.validate_inner(allow_selected_measure)
+            }
             Expression::Percentile {
                 operand,
                 percentile,
             } => {
-                operand.validate()?;
-                percentile.validate()
+                operand.validate_inner(allow_selected_measure)?;
+                percentile.validate_inner(allow_selected_measure)
             }
             Expression::Query {
                 aggregates,
@@ -266,24 +303,24 @@ impl Expression {
                 // group-by tables are rendered as raw qualifiers and JOIN
                 // targets.
                 for (agg_expr, _alias) in aggregates {
-                    agg_expr.validate()?;
+                    agg_expr.validate_inner(allow_selected_measure)?;
                 }
                 for (table, _column) in group_by {
                     validate_identifier(table, "group-by table")?;
                 }
                 Ok(())
             }
-            Expression::HasOneValue { column } => column.validate(),
+            Expression::HasOneValue { column } => column.validate_inner(allow_selected_measure),
             Expression::SelectedValue { column, alternate } => {
-                column.validate()?;
+                column.validate_inner(allow_selected_measure)?;
                 if let Some(alt) = alternate {
-                    alt.validate()?;
+                    alt.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
             Expression::FirstValue { column, order_by } => {
-                column.validate()?;
-                order_by.validate()
+                column.validate_inner(allow_selected_measure)?;
+                order_by.validate_inner(allow_selected_measure)
             }
             // Frame boundaries, deltas, and positions are numeric; ORDER BY
             // and PARTITION BY columns are quoted at render time, but their
@@ -306,7 +343,7 @@ impl Expression {
                 partition_by,
                 ..
             } => {
-                inner.validate()?;
+                inner.validate_inner(allow_selected_measure)?;
                 for (table, _column) in order_by.iter().chain(partition_by.iter()) {
                     validate_identifier(table, "window table")?;
                 }
@@ -325,34 +362,34 @@ impl Expression {
             // Granularity is a closed enum and the offset is numeric; only
             // the inner expression carries renderable content.
             Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
-                expr.validate()
+                expr.validate_inner(allow_selected_measure)
             }
             Expression::InList { expr, values } => {
-                expr.validate()?;
+                expr.validate_inner(allow_selected_measure)?;
                 for v in values {
-                    v.validate()?;
+                    v.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }
             Expression::NullIf { expr, value } => {
-                expr.validate()?;
-                value.validate()
+                expr.validate_inner(allow_selected_measure)?;
+                value.validate_inner(allow_selected_measure)
             }
-            Expression::CountIf { condition } => condition.validate(),
+            Expression::CountIf { condition } => condition.validate_inner(allow_selected_measure),
             Expression::ListAgg { column, delimiter } => {
-                column.validate()?;
-                delimiter.validate()
+                column.validate_inner(allow_selected_measure)?;
+                delimiter.validate_inner(allow_selected_measure)
             }
             Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
-                value.validate()?;
-                sort_by.validate()
+                value.validate_inner(allow_selected_measure)?;
+                sort_by.validate_inner(allow_selected_measure)
             }
             // UDF call names are rendered unquoted into SQL — enforce the
             // strict call-name rule (model files are untrusted input).
             Expression::Call { name, args } => {
                 validate_call_name(name)?;
                 for arg in args {
-                    arg.validate()?;
+                    arg.validate_inner(allow_selected_measure)?;
                 }
                 Ok(())
             }

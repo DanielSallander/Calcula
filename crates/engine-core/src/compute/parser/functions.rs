@@ -23,6 +23,20 @@ impl Parser {
         Ok(expr::selected_value(column, alternate))
     }
 
+    /// Parse `SELECTEDMEASURE()` — the calculation-item placeholder for the
+    /// measure currently being transformed. Takes no arguments.
+    ///
+    /// The opening parenthesis has already been consumed by
+    /// [`Parser::parse_function_call`]. A non-empty argument list is rejected
+    /// with a positioned [`EngineError::ParseError`].
+    pub(super) fn parse_selectedmeasure_call(&mut self) -> EngineResult<Expression> {
+        if self.peek() != Some(&Token::RParen) {
+            return Err(self.parse_err("SELECTEDMEASURE() takes no arguments"));
+        }
+        self.advance()?; // consume RParen
+        Ok(Expression::SelectedMeasure)
+    }
+
     /// Parse `FIRST(table[column], ORDER BY table[sort_col])`.
     ///
     /// Simplified from DAX: no axis, no reset, no blanks parameter.
@@ -315,6 +329,37 @@ mod tests {
             expr.to_sql_string().unwrap(),
             "CASE WHEN COUNT(DISTINCT \"category\") = 1 THEN MIN(\"category\") ELSE 'Multiple' END"
         );
+    }
+
+    #[test]
+    fn parse_selectedmeasure_zero_args() {
+        let expr = parse_measure_expression("SELECTEDMEASURE()").unwrap();
+        assert!(matches!(expr, Expression::SelectedMeasure));
+        // Case-insensitive.
+        let expr = parse_measure_expression("selectedmeasure()").unwrap();
+        assert!(matches!(expr, Expression::SelectedMeasure));
+    }
+
+    #[test]
+    fn parse_selectedmeasure_inside_expression() {
+        let expr = parse_measure_expression("YTD(SELECTEDMEASURE())").unwrap();
+        assert!(matches!(expr, Expression::ToDate { .. }));
+        if let Expression::ToDate { expr: inner, .. } = expr {
+            assert!(matches!(*inner, Expression::SelectedMeasure));
+        }
+    }
+
+    #[test]
+    fn parse_selectedmeasure_with_args_is_positioned_error() {
+        let err = parse_measure_expression("SELECTEDMEASURE(1)").unwrap_err();
+        match err {
+            crate::error::EngineError::ParseError { position, message } => {
+                assert!(message.contains("no arguments"), "got: {message}");
+                // The error is positioned at the offending argument token.
+                assert!(position > 0);
+            }
+            other => panic!("expected a ParseError, got: {other:?}"),
+        }
     }
 
     #[test]

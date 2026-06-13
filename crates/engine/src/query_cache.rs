@@ -13,7 +13,8 @@ use arrow::record_batch::RecordBatch;
 
 use engine_connectors::traits::FilterCondition;
 use engine_query::request::{
-    ColumnRef, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
+    CalculationGroupApplication, ColumnRef, HierarchyGroupBy, LookupColumn, OrderByClause,
+    OrderTarget, QueryRequest, TotalsMode,
 };
 
 /// Configuration for the query-result cache.
@@ -335,7 +336,30 @@ pub(crate) fn query_cache_key(
         None => 0u8.hash(&mut hasher),
     }
 
+    // Calculation-group application (presence tag + group name + ordered item
+    // list). The item order is hashed as-is — it determines the result column
+    // order (measures-outer / items-inner), so two applications that select
+    // the same items in a different order produce different results and must
+    // get different keys. The presence discriminant keeps "no application"
+    // distinct from an application whose item list happens to be empty (which
+    // means "all items").
+    match &request.calculation_group {
+        Some(app) => {
+            1u8.hash(&mut hasher);
+            hash_calculation_group_application(app, &mut hasher);
+        }
+        None => 0u8.hash(&mut hasher),
+    }
+
     hasher.finish()
+}
+
+fn hash_calculation_group_application(app: &CalculationGroupApplication, hasher: &mut impl Hasher) {
+    app.group.hash(hasher);
+    app.items.len().hash(hasher);
+    for item in &app.items {
+        item.hash(hasher);
+    }
 }
 
 fn hash_hierarchy_group_by(h: &HierarchyGroupBy, hasher: &mut impl Hasher) {
@@ -722,6 +746,70 @@ mod tests {
         assert_eq!(
             query_cache_key(&r_geo2, 0, 0, None),
             query_cache_key(&r_geo2b, 0, 0, None)
+        );
+    }
+
+    #[test]
+    fn calculation_group_affects_hash() {
+        // Presence, group name, and the ordered item list must each change the
+        // key: a different application produces different result columns (and
+        // a different column order), and none of them may be served for a
+        // plain request.
+        let r_none = make_request(&["Revenue"]);
+        let mut r_time_current = make_request(&["Revenue"]);
+        r_time_current.calculation_group = Some(CalculationGroupApplication::new(
+            "Time",
+            vec!["Current".into()],
+        ));
+        let mut r_time_doubled = make_request(&["Revenue"]);
+        r_time_doubled.calculation_group = Some(CalculationGroupApplication::new(
+            "Time",
+            vec!["Doubled".into()],
+        ));
+        let mut r_other_group = make_request(&["Revenue"]);
+        r_other_group.calculation_group = Some(CalculationGroupApplication::new(
+            "Other",
+            vec!["Current".into()],
+        ));
+
+        assert_ne!(
+            query_cache_key(&r_none, 0, 0, None),
+            query_cache_key(&r_time_current, 0, 0, None)
+        );
+        assert_ne!(
+            query_cache_key(&r_time_current, 0, 0, None),
+            query_cache_key(&r_time_doubled, 0, 0, None)
+        );
+        assert_ne!(
+            query_cache_key(&r_time_current, 0, 0, None),
+            query_cache_key(&r_other_group, 0, 0, None)
+        );
+
+        // Switching item order (different result column order) changes the key.
+        let mut r_order_a = make_request(&["Revenue"]);
+        r_order_a.calculation_group = Some(CalculationGroupApplication::new(
+            "Time",
+            vec!["Current".into(), "Doubled".into()],
+        ));
+        let mut r_order_b = make_request(&["Revenue"]);
+        r_order_b.calculation_group = Some(CalculationGroupApplication::new(
+            "Time",
+            vec!["Doubled".into(), "Current".into()],
+        ));
+        assert_ne!(
+            query_cache_key(&r_order_a, 0, 0, None),
+            query_cache_key(&r_order_b, 0, 0, None)
+        );
+
+        // Same application: stable key (so caching actually works).
+        let mut r_time_current_b = make_request(&["Revenue"]);
+        r_time_current_b.calculation_group = Some(CalculationGroupApplication::new(
+            "Time",
+            vec!["Current".into()],
+        ));
+        assert_eq!(
+            query_cache_key(&r_time_current, 0, 0, None),
+            query_cache_key(&r_time_current_b, 0, 0, None)
         );
     }
 

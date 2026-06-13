@@ -86,6 +86,8 @@ mod query_cache;
 mod refresh;
 
 #[cfg(test)]
+mod calc_group_tests;
+#[cfg(test)]
 mod detail_tests;
 #[cfg(test)]
 mod disk_cache_tests;
@@ -141,10 +143,10 @@ pub use engine_core::compute::udf::{
 pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
-    CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
-    DataModelBuilder, DateRole, FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel,
-    IncrementalRefresh, JoinCondition, JoinOperator, RaggedBehavior, RefreshStrategy, Relationship,
-    SecurityRole, StorageMode, Table, TableVariable,
+    CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
+    ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole, FilterPropagation,
+    GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh, JoinCondition, JoinOperator,
+    RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -169,8 +171,8 @@ pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
-    ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget,
-    QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
+    CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn,
+    OrderByClause, OrderTarget, QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
@@ -825,6 +827,63 @@ impl Engine {
         Ok(())
     }
 
+    /// Resolve a calculation-group application against the current model.
+    ///
+    /// When `request.calculation_group` is set, this expands the named group's
+    /// selected items across the request's measures into ephemeral synthetic
+    /// measures (measures-outer / items-inner, each named `"{measure} [{item}]"`),
+    /// builds an **overlay** model = the current model plus those synthetic
+    /// measures, and rewrites the request to ask for the synthetic measure
+    /// names with `calculation_group` cleared. The overlay is per-query and
+    /// never written back to the persistent model.
+    ///
+    /// Returns `Ok(Some((overlay_model, expanded_request)))` when an
+    /// application is present, or `Ok(None)` when it is not (the caller plans
+    /// against `self.model` and the original request unchanged).
+    ///
+    /// # Errors
+    ///
+    /// Wraps [`EngineError`] in [`QueryError::Engine`] for an unknown group,
+    /// unknown item, unknown measure, or a synthetic-name collision with an
+    /// existing model measure.
+    fn resolve_calculation_group(
+        &self,
+        request: &QueryRequest,
+    ) -> QueryResult<Option<(DataModel, QueryRequest)>> {
+        let Some(application) = &request.calculation_group else {
+            return Ok(None);
+        };
+
+        // Expand the application into synthetic measures + their ordered names
+        // (measures-outer / items-inner). Errors (unknown group/item/measure,
+        // name collision) are surfaced as typed engine errors.
+        let (synthetic, names) = engine_core::model::calculation_group::expand_calculation_group(
+            &self.model,
+            &request.measures,
+            &application.group,
+            &application.items,
+        )
+        .map_err(QueryError::Engine)?;
+
+        // Cheap overlay: clone the model and append the synthetic measures
+        // (they are derived from already-validated parts, so no full
+        // re-validation — only a name-collision check).
+        let overlay = self
+            .model
+            .with_overlay_measures(synthetic)
+            .map_err(QueryError::Engine)?;
+
+        // Rewrite the request to ask for the synthetic measures by name, with
+        // the application cleared (it has been expanded).
+        let expanded = QueryRequest {
+            measures: names,
+            calculation_group: None,
+            ..request.clone()
+        };
+
+        Ok(Some((overlay, expanded)))
+    }
+
     /// Resolve the active role to its filter predicates (an empty slice when
     /// no role is active). Caller must have run
     /// [`validate_active_role`](Self::validate_active_role) first; an unknown
@@ -1032,10 +1091,24 @@ impl Engine {
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
 
+        // Resolve any calculation-group application up front (a typed error
+        // for an unknown group/item/measure or a synthetic-name collision).
+        // When present this yields an overlay model (self.model + ephemeral
+        // synthetic measures) and an expanded request asking for those
+        // synthetic measures by name; otherwise planning uses self.model and
+        // the original request unchanged.
+        let overlay = self.resolve_calculation_group(&request)?;
+        let (model, effective_request) = match &overlay {
+            Some((overlay_model, expanded)) => (overlay_model, expanded),
+            None => (&self.model, &request),
+        };
+
         // Check the query cache first. The guard is dropped before any
         // await: key computation and lookup are synchronous. The active role
         // is part of the key — a result computed under one role must never be
-        // served to another.
+        // served to another. The key is computed from the ORIGINAL request
+        // (which carries the calculation-group application), so different
+        // applications never share a cache entry.
         let (cache_key, cache_version, cached) = {
             let mut query_cache = self.query_cache.lock();
             let version = query_cache.model_version();
@@ -1053,11 +1126,11 @@ impl Engine {
         }
 
         let role_filters = self.active_role_filters();
-        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry, role_filters)?;
+        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute_with_cancellation(
                 &plan,
-                &self.model,
+                model,
                 &self.registry,
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
@@ -1209,9 +1282,18 @@ impl Engine {
             .map_err(crate::QueryError::Engine)?
             .refreshed;
 
+        // Resolve any calculation-group application (overlay model + expanded
+        // request); plan against the original model/request otherwise.
+        let overlay = self.resolve_calculation_group(&request)?;
+        let (model, effective_request) = match &overlay {
+            Some((overlay_model, expanded)) => (overlay_model, expanded),
+            None => (&self.model, &request),
+        };
+
         // Check query cache (after refresh — stale data was already
         // invalidated). The guard is dropped before any await. The active
-        // role is part of the key (cross-role isolation).
+        // role is part of the key (cross-role isolation). The key uses the
+        // ORIGINAL request, which carries the calculation-group application.
         let (cache_key, cached) = {
             let mut query_cache = self.query_cache.lock();
             let key = query_cache::query_cache_key(
@@ -1228,11 +1310,11 @@ impl Engine {
         }
 
         let role_filters = self.active_role_filters();
-        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry, role_filters)?;
+        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute(
                 &plan,
-                &self.model,
+                model,
                 &self.registry,
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
@@ -1259,13 +1341,25 @@ impl Engine {
 
         let start = Instant::now();
 
+        // Resolve any calculation-group application (overlay model + expanded
+        // request); plan against the original model/request otherwise.
+        let overlay = self.resolve_calculation_group(&request)?;
+        let (model, effective_request) = match &overlay {
+            Some((overlay_model, expanded)) => (overlay_model, expanded),
+            None => (&self.model, &request),
+        };
+
         let role_filters = self.active_role_filters();
-        let (query_plan, pushdown_node) =
-            PushdownPlanner::plan_explained(&request, &self.model, &self.registry, role_filters)?;
+        let (query_plan, pushdown_node) = PushdownPlanner::plan_explained(
+            effective_request,
+            model,
+            &self.registry,
+            role_filters,
+        )?;
         let (batches, exec_node) = map_script_error(
             QueryExecutor::execute_explained(
                 &query_plan,
-                &self.model,
+                model,
                 &self.registry,
                 Some(&self.cache),
                 Some(self.max_inline_in_values),

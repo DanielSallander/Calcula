@@ -764,4 +764,22 @@ pub enum Expression {
         /// Argument expressions, in call order.
         args: Vec<Expression>,
     },
+
+    /// `SELECTEDMEASURE()` — the placeholder for the measure a calculation
+    /// item is currently being applied to.
+    ///
+    /// This is a unit placeholder, legal **only** inside a calculation item's
+    /// expression (see
+    /// [`CalculationItem`](crate::model::CalculationItem)). When a calculation
+    /// group is applied to a measure, every `SelectedMeasure` node in the
+    /// item's expression is replaced with the target measure's expression tree
+    /// (see [`Expression::substitute_selected_measure`]).
+    ///
+    /// It must never reach SQL generation or context resolution unsubstituted:
+    /// the SQL renderers reject it (exactly as they reject an unexpanded
+    /// [`MeasureRef`](Expression::MeasureRef)), [`Expression::validate`]
+    /// rejects it for ordinary measures and calculated columns (only
+    /// [`Expression::validate_calc_item`] permits it), and the pushdown
+    /// planner treats it as unpushable so it can never be pushed to a source.
+    SelectedMeasure,
 }

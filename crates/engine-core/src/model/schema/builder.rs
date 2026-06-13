@@ -4,6 +4,7 @@ use crate::compute::measure::{Measure, MeasureGroup};
 use crate::compute::script::{ScriptFunction, ScriptSandboxConfig};
 use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
+use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
@@ -32,6 +33,7 @@ pub struct DataModelBuilder {
     pub(super) date_table: Option<String>,
     pub(super) script_functions: Vec<ScriptFunction>,
     pub(super) security_roles: Vec<SecurityRole>,
+    pub(super) calculation_groups: Vec<CalculationGroup>,
 }
 
 impl DataModelBuilder {
@@ -157,6 +159,39 @@ impl DataModelBuilder {
     /// ```
     pub fn add_security_role(mut self, role: SecurityRole) -> Self {
         self.security_roles.push(role);
+        self
+    }
+
+    /// Add a calculation group to the model.
+    ///
+    /// A calculation group is a set of named calculation items — reusable
+    /// measure templates whose expressions transform an applied measure via
+    /// the `SELECTEDMEASURE()` placeholder. At `build()` time the engine
+    /// validates that group names are unique, item names are unique within a
+    /// group, each group has at least one item, and each item's expression
+    /// validates (with `SELECTEDMEASURE()` permitted) and references only
+    /// columns and measures the model defines.
+    ///
+    /// ```
+    /// use engine_core::model::{CalculationGroup, CalculationItem, Column, DataModel, Table};
+    /// use engine_core::compute::measure::sum_measure;
+    /// use engine_core::types::DataType;
+    ///
+    /// let model = DataModel::builder()
+    ///     .add_table(Table::new("Sales", vec![
+    ///         Column::new("amount", DataType::Float64),
+    ///     ]).unwrap())
+    ///     .add_measure(sum_measure("Revenue", "Sales", "amount"))
+    ///     .add_calculation_group(CalculationGroup::new("Time", vec![
+    ///         CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+    ///         CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
+    ///     ]))
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(model.calculation_groups().len(), 1);
+    /// ```
+    pub fn add_calculation_group(mut self, group: CalculationGroup) -> Self {
+        self.calculation_groups.push(group);
         self
     }
 
@@ -1136,6 +1171,87 @@ impl DataModelBuilder {
             )?;
         }
 
+        // 14. Validate calculation groups. Each group is a set of measure
+        // templates ("calculation items"); their item expressions are
+        // author-written and travel inside shared model files, so they are
+        // checked at build time:
+        // - group names are unique;
+        // - a group has at least one item (an empty group can transform
+        //   nothing);
+        // - item names are unique within their group (the synthetic result
+        //   column for a (measure, item) pair is named "measure [item]", so
+        //   duplicate item names would collide);
+        // - each item expression validates for safe SQL rendering with
+        //   SELECTEDMEASURE() permitted (`validate_calc_item`);
+        // - each item references only measures the model defines (any
+        //   MeasureRef must resolve) and only columns that exist somewhere in
+        //   the model (a typo'd column would otherwise surface only after a
+        //   group is applied at query time).
+        {
+            let mut seen_groups = std::collections::HashSet::new();
+            for group in &self.calculation_groups {
+                if !seen_groups.insert(group.name()) {
+                    return Err(EngineError::DuplicateName(format!(
+                        "Duplicate calculation group '{}'",
+                        group.name()
+                    )));
+                }
+                if group.items().is_empty() {
+                    return Err(EngineError::InvalidData(format!(
+                        "calculation group '{}' has no items; a group must define at \
+                         least one calculation item",
+                        group.name()
+                    )));
+                }
+                let mut seen_items = std::collections::HashSet::new();
+                for item in group.items() {
+                    if !seen_items.insert(item.name()) {
+                        return Err(EngineError::DuplicateName(format!(
+                            "duplicate calculation item '{}' in group '{}'",
+                            item.name(),
+                            group.name()
+                        )));
+                    }
+                    // SELECTEDMEASURE() is allowed in a calc item; everything
+                    // else is enforced as for a regular measure expression.
+                    item.expression().validate_calc_item()?;
+                    // Any MeasureRef inside the item must resolve.
+                    for measure_name in
+                        crate::model::calculation_group::measure_ref_names(item.expression())
+                    {
+                        if self.measures.iter().all(|m| m.name() != measure_name) {
+                            return Err(EngineError::InvalidData(format!(
+                                "calculation item '{}' in group '{}' references unknown \
+                                 measure '{measure_name}'",
+                                item.name(),
+                                group.name()
+                            )));
+                        }
+                    }
+                    // Any qualified column reference must point at a real
+                    // table+column (bare column refs carry no table, so they
+                    // are left to substitution/query-time resolution).
+                    for (table_name, column_name) in
+                        crate::model::calculation_group::qualified_column_refs(item.expression())
+                    {
+                        let column_ok = self
+                            .tables
+                            .iter()
+                            .find(|t| t.name() == table_name)
+                            .is_some_and(|t| t.column(&column_name).is_ok());
+                        if !column_ok {
+                            return Err(EngineError::InvalidData(format!(
+                                "calculation item '{}' in group '{}' references unknown \
+                                 column '{table_name}[{column_name}]'",
+                                item.name(),
+                                group.name()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         let model = DataModel {
             // Freshly built models always carry the current format version
             // (deserialized legacy models keep their stored value; note
@@ -1156,6 +1272,7 @@ impl DataModelBuilder {
             date_table: self.date_table,
             script_functions: self.script_functions,
             security_roles: self.security_roles,
+            calculation_groups: self.calculation_groups,
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

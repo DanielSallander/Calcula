@@ -93,6 +93,10 @@ pub enum EngineError {
     #[error("Measure group '{0}' not found")]
     MeasureGroupNotFound(String),
 
+    /// A referenced calculation group was not found in the data model.
+    #[error("Calculation group '{0}' not found")]
+    CalculationGroupNotFound(String),
+
     /// A referenced context definition was not found.
     #[error("Context '{0}' not found")]
     ContextNotFound(String),

@@ -21,6 +21,6 @@ pub use planner::{
 };
 pub use registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use request::{
-    ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn, OrderByClause, OrderTarget,
-    QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
+    CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn,
+    OrderByClause, OrderTarget, QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
 };

@@ -25,7 +25,7 @@ fn sales_table_with_metadata() -> Table {
 }
 
 #[test]
-fn model_format_version_is_6_for_incremental_refresh() {
+fn model_format_version_is_7_for_calculation_groups() {
     // Version 2 introduced presentation metadata (measure format_string/
     // description/is_hidden, column display_name/description/is_hidden/
     // default_aggregation, table display_name/description/is_hidden).
@@ -34,9 +34,11 @@ fn model_format_version_is_6_for_incremental_refresh() {
     // Version 4 introduced sandboxed script functions (model script_functions).
     // Version 5 introduced row-level security (model security_roles).
     // Version 6 introduced incremental refresh (table incremental_refresh).
+    // Version 7 introduced calculation groups (model calculation_groups,
+    // SelectedMeasure expression variant).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 6);
+    assert_eq!(MODEL_FORMAT_VERSION, 7);
 }
 
 #[test]
