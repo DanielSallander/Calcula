@@ -113,7 +113,18 @@ export function installErrorTracking(page: Page): void {
   });
 
   page.on("pageerror", (error) => {
-    pendingJsExceptions.push(error.message);
+    // Capture the top stack frames alongside the message so monkey-found
+    // crashes are root-causable. In Vite dev the frames reference the served
+    // module URL + line (e.g. .../extensions/Controls/index.ts:125:30), which
+    // pinpoints the throw site. Kept single-line to not disturb report layout.
+    const frames = (error.stack ?? "")
+      .split("\n")
+      .slice(1, 6)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    pendingJsExceptions.push(
+      frames.length ? `${error.message} | ${frames.join(" | ")}` : error.message
+    );
   });
 }
 

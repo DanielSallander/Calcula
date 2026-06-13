@@ -464,7 +464,12 @@ function activate(context: ExtensionContext): void {
   // Listen for pivot table changes to invalidate pivot-sourced chart caches
   const handlePivotChanged = () => {
     const charts = getAllCharts();
-    const pivotCharts = charts.filter((c) => isPivotDataSource(c.spec.data));
+    // Guard c.spec?.data: during rapid chart create/delete/undo churn,
+    // getAllCharts() can briefly return a transient/post-undo entry whose spec
+    // is not yet populated. A spec-less entry is simply not a pivot chart, so
+    // skip it rather than crash this event handler (fired on every pivot:refresh
+    // / PIVOT_REGIONS_UPDATED).
+    const pivotCharts = charts.filter((c) => isPivotDataSource(c.spec?.data));
     if (pivotCharts.length > 0) {
       for (const chart of pivotCharts) {
         invalidateChartCache(chart.chartId);
@@ -1094,7 +1099,7 @@ function handlePivotFieldButtonClick(
   canvasY: number,
 ): void {
   const chart = getAllCharts().find((c) => c.chartId === chartId);
-  if (!chart || !isPivotDataSource(chart.spec.data)) return;
+  if (!chart || !isPivotDataSource(chart.spec?.data)) return;
 
   const pivotId = chart.spec.data.pivotId;
 
