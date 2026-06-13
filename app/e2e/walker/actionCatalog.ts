@@ -1244,13 +1244,13 @@ const navigateViaNameBox: ActionDef<{ ref: string }> = {
 //
 // These are the only actions that mount object scripts, so they are what makes
 // the soak exercise the Phase 3 worker realm at all: each mount spawns a Worker
-// that compiles + runs the script and registers a canvas renderer; mutate
-// triggers a re-render; unmount terminates the worker. The walker churns
-// mount/mutate/unmount over a bounded 4-slot pool so worker spawn/teardown,
-// render-blit and event wiring run under sustained random load alongside every
-// other action. Setting localStorage "calcula.scriptWorker"="0" (the soak spec
-// reads SOAK_SCRIPT_WORKER) routes mounts through the legacy main-thread path
-// instead — the worker-vs-legacy dual-run gate.
+// that compiles + runs the script and registers a canvas renderer; render
+// triggers a worker draw via getShapeBitmap; unmount terminates the worker. The
+// walker churns mount/render/unmount over a bounded 4-slot pool so worker
+// spawn/teardown, render-blit and event wiring run under sustained random load
+// alongside every other action. Scripts mount on SYNTHETIC shape instances (no
+// backing control / backend state) so they don't pollute the workbook digest
+// the undo/save-reload oracles check.
 // ============================================================================
 
 // Bounded pool of script slots. Scripts mount on SYNTHETIC shape instances

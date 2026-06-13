@@ -50,31 +50,12 @@ const RESULTS_DIR = process.env.SOAK_RESULTS_DIR
   ? path.resolve(process.env.SOAK_RESULTS_DIR)
   : path.resolve(HERE, "../results/soak");
 const NO_SHRINK = process.env.SOAK_NO_SHRINK === "1";
-// "0" routes object-script mounts through the legacy main-thread path; anything
-// else (incl. unset) uses the Phase 3 worker realm. Same seed on both = the
-// worker-vs-legacy dual-run gate.
-const SCRIPT_WORKER = process.env.SOAK_SCRIPT_WORKER;
 
 test.describe("Soak walk", () => {
   test("random walk maintains semantic oracles", async ({ appPage, grid }) => {
     fs.mkdirSync(RESULTS_DIR, { recursive: true });
     await deepResetForWalk(appPage);
     await appPage.waitForTimeout(500);
-
-    // Select the object-script execution path for the worker-vs-legacy dual-run.
-    // useWorkerRealm() reads this per mountScript, so setting it before any
-    // script.shape-mount action routes every mount consistently.
-    await appPage.evaluate((flag) => {
-      try {
-        if (flag === "0") window.localStorage.setItem("calcula.scriptWorker", "0");
-        else window.localStorage.removeItem("calcula.scriptWorker");
-      } catch {
-        /* localStorage unavailable */
-      }
-    }, SCRIPT_WORKER ?? "");
-    console.log(
-      `  Object-script path: ${SCRIPT_WORKER === "0" ? "LEGACY (main-thread)" : "worker realm"}`,
-    );
 
     console.log(
       `\n  Soak walk: seed=${SEED} actions=${MAX_ACTIONS}` +
