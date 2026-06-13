@@ -66,6 +66,20 @@ export async function deepResetForWalk(page: Page): Promise<void> {
     try {
       await tauri.core.invoke("remove_auto_filter", {}).catch(() => {});
     } catch { /* none */ }
+
+    // Worker-realm soak actions mount scripts on synthetic instances via the
+    // frontend manager only (no backend control/script state), so terminating
+    // any leaked workers + clearing the registry gives each walk/replay a
+    // deterministic empty realm.
+    try {
+      const importer = new Function("u", "return import(u);") as (
+        u: string,
+      ) => Promise<any>;
+      const api = await importer(
+        new URL("/src/api/index.ts", document.baseURI).href,
+      ).catch(() => null);
+      await api?.resetObjectScriptManager?.();
+    } catch { /* none */ }
   });
   await page.waitForTimeout(300);
 

@@ -1240,6 +1240,143 @@ const navigateViaNameBox: ActionDef<{ ref: string }> = {
 };
 
 // ============================================================================
+// Scriptable object (worker-realm) actions
+//
+// These are the only actions that mount object scripts, so they are what makes
+// the soak exercise the Phase 3 worker realm at all: each mount spawns a Worker
+// that compiles + runs the script and registers a canvas renderer; mutate
+// triggers a re-render; unmount terminates the worker. The walker churns
+// mount/mutate/unmount over a bounded 4-slot pool so worker spawn/teardown,
+// render-blit and event wiring run under sustained random load alongside every
+// other action. Setting localStorage "calcula.scriptWorker"="0" (the soak spec
+// reads SOAK_SCRIPT_WORKER) routes mounts through the legacy main-thread path
+// instead — the worker-vs-legacy dual-run gate.
+// ============================================================================
+
+// Bounded pool of script slots. Scripts mount on SYNTHETIC shape instances
+// (no backing control, no backend persistence) so the soak exercises the
+// worker realm — spawn / compile / setup / render / teardown — WITHOUT writing
+// control or script state into the workbook digest. (Creating a real control
+// trips the undo/save-reload oracles on the pre-existing "object create not
+// undoable" bug — same class as BUG-0001/0002/0006 — which is path-invariant
+// and would just truncate every walk, unrelated to the realm.) A non-"control-"
+// instanceId also makes buildSnapshot skip its resolve_control_properties call.
+const SCRIPT_SHAPE_SLOT_COUNT = 4;
+
+const SCRIPT_SHAPE_COLORS = ["#ff0000", "#1ca31c", "#1f6fff", "#e6a100"] as const;
+
+// Each action's execute reaches ObjectScriptManager + the host blit API via a
+// dynamic import (same trick the worker-realm specs use; page.evaluate is a
+// classic script, so it needs the Function wrapper + an absolute Vite URL).
+
+const scriptShapeMount: ActionDef<{ slotIndex: number; fill: string }> = {
+  id: "script.shape-mount",
+  category: "script",
+  weight: 4,
+  precondition: () => true,
+  pickParams: (rng) => ({
+    slotIndex: pickInt(rng, 0, SCRIPT_SHAPE_SLOT_COUNT - 1),
+    fill: pick(rng, SCRIPT_SHAPE_COLORS),
+  }),
+  async execute(page, _grid, p) {
+    await page.evaluate(
+      async (a) => {
+        const importer = new Function("u", "return import(u);") as (
+          u: string,
+        ) => Promise<any>;
+        const api = await importer(
+          new URL("/src/api/index.ts", document.baseURI).href,
+        );
+        const mgr = api.ObjectScriptManager;
+        const id = `soak-script-${a.slotIndex}`;
+        const def = {
+          id,
+          name: "Soak Shape Renderer",
+          objectType: "shape",
+          instanceId: `soak-shape-${a.slotIndex}`,
+          source:
+            "function setup(shape){ shape.render.canvasRenderer(function(ctx,b){ ctx.fillStyle='" +
+            a.fill +
+            "'; ctx.fillRect(0,0,b.width,b.height); }); }",
+          accessLevel: "restricted",
+          description: null,
+        };
+        mgr.registerScript(def);
+        if (mgr.isScriptMounted(id)) mgr.unmountScript(id); // remount = teardown + respawn
+        await mgr.mountScript(id);
+      },
+      { slotIndex: p.slotIndex, fill: p.fill },
+    );
+    await page.waitForTimeout(120);
+  },
+};
+
+const scriptShapeRender: ActionDef<{ slotIndex: number }> = {
+  id: "script.shape-render",
+  category: "script",
+  weight: 3,
+  precondition: () => true,
+  pickParams: (rng) => ({
+    slotIndex: pickInt(rng, 0, SCRIPT_SHAPE_SLOT_COUNT - 1),
+  }),
+  async execute(page, _grid, p) {
+    // Drive the worker render/draw path: getShapeBitmap kicks off an async
+    // OffscreenCanvas draw in the worker, then caches the transferred bitmap.
+    // No-op if the slot isn't mounted (deterministic given the seed).
+    await page.evaluate(
+      async (a) => {
+        const importer = new Function("u", "return import(u);") as (
+          u: string,
+        ) => Promise<any>;
+        const api = await importer(
+          new URL("/src/api/index.ts", document.baseURI).href,
+        );
+        const id = `soak-script-${a.slotIndex}`;
+        if (!api.ObjectScriptManager.isScriptMounted(id)) return;
+        const instanceId = `soak-shape-${a.slotIndex}`;
+        api.getShapeBitmap(instanceId, 80, 40, 1);
+        await new Promise((r) => setTimeout(r, 60));
+        api.getShapeBitmap(instanceId, 80, 40, 1);
+      },
+      { slotIndex: p.slotIndex },
+    );
+    await page.waitForTimeout(80);
+  },
+};
+
+const scriptShapeUnmount: ActionDef<{ slotIndex: number }> = {
+  id: "script.shape-unmount",
+  category: "script",
+  weight: 3,
+  precondition: () => true,
+  pickParams: (rng) => ({
+    slotIndex: pickInt(rng, 0, SCRIPT_SHAPE_SLOT_COUNT - 1),
+  }),
+  async execute(page, _grid, p) {
+    await page.evaluate(
+      async (a) => {
+        const importer = new Function("u", "return import(u);") as (
+          u: string,
+        ) => Promise<any>;
+        const api = await importer(
+          new URL("/src/api/index.ts", document.baseURI).href,
+        );
+        const mgr = api.ObjectScriptManager;
+        const id = `soak-script-${a.slotIndex}`;
+        try {
+          if (mgr.isScriptMounted(id)) mgr.unmountScript(id); // terminate the worker
+          mgr.removeScript(id);
+        } catch {
+          /* not registered */
+        }
+      },
+      { slotIndex: p.slotIndex },
+    );
+    await page.waitForTimeout(80);
+  },
+};
+
+// ============================================================================
 // Export: Full Action Catalog
 // ============================================================================
 
@@ -1275,6 +1412,10 @@ const ALL_ACTIONS: AnyActionDef[] = [
   sparklineCreate,
   sparklineDelete,
   sparklineSelectInto,
+  // Scriptable objects (worker realm — Phase 3 dual-run gate)
+  scriptShapeMount,
+  scriptShapeRender,
+  scriptShapeUnmount,
   // Structure
   insertRow,
   deleteRow,
