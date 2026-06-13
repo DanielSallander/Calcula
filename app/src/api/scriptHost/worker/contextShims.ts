@@ -197,6 +197,45 @@ function buildBase(rt: WorkerRuntime): Record<string, unknown> {
     },
 
     api: spec.tier === "unlocked" ? buildUnlockedShim(rt) : null,
+
+    // Capabilities are orthogonal to tier — exposed to every script; the broker
+    // enforces the grant (and Rust re-checks net.fetch authoritatively). An
+    // ungranted call rejects with CapabilityRequired, or — for a local script —
+    // triggers a JIT grant prompt before the call lands.
+    caps: buildCapsShim(rt),
+  };
+}
+
+// ---- Capabilities (all scripts; broker + Rust enforce the grant) ----
+
+interface CapsFetchResponse {
+  status: number;
+  headers: Record<string, string>;
+  text(): string;
+  json(): unknown;
+}
+
+/** context.caps.* — thin RPC wrappers that add no authority of their own. */
+function buildCapsShim(rt: WorkerRuntime): {
+  fetch: (
+    url: string,
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
+  ) => Promise<CapsFetchResponse>;
+} {
+  return {
+    async fetch(url, init) {
+      const raw = (await call(rt, "cap.fetch", [url, init])) as {
+        status: number;
+        headers: Record<string, string>;
+        body: string;
+      };
+      return {
+        status: raw.status,
+        headers: raw.headers,
+        text: () => raw.body,
+        json: () => JSON.parse(raw.body),
+      };
+    },
   };
 }
 

@@ -15,7 +15,9 @@ import {
   deleteObjectScript,
   getScaffoldTemplate,
   showToast,
+  resolveCapabilityRequest,
 } from "@api";
+import type { CapabilityRequestPayload, CapabilityDecision } from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
 import { loadConsents, recordConsent, isConsentCurrent } from "./lib/consentStore";
 import { emitAppEvent, onAppEvent } from "@api/events";
@@ -28,6 +30,7 @@ import {
   ActivitySection,
 } from "./components/PermissionsPanel";
 import ScriptConsentDialog from "./components/ScriptConsentDialog";
+import CapabilityRequestDialog from "./components/CapabilityRequestDialog";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
 import type { DialogProps } from "@api/uiTypes";
@@ -240,6 +243,91 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
+  // ---- JIT capability-grant dialog + listeners ----
+  // When a LOCAL script first calls an ungranted capability, the host emits
+  // "scriptable-objects:capability-request" and AWAITS the user's decision via
+  // resolveCapabilityRequest(requestId, decision). The dialog (Task 1) signals
+  // the choice back through "scriptable-objects:capability-decided"; any close
+  // WITHOUT a decision (Escape / overlay / dismiss) must fail closed = "deny".
+  const CAPABILITY_DIALOG_ID = "scriptable-objects.capability";
+  context.ui.dialogs.register({
+    id: CAPABILITY_DIALOG_ID,
+    title: "Permission request",
+    component: CapabilityRequestDialog,
+    width: 460,
+    height: 340,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CAPABILITY_DIALOG_ID));
+
+  // One-at-a-time queue: dialog state is keyed by dialog id, so showing a
+  // second request while one is open would overwrite the first.
+  const capabilityQueue: CapabilityRequestPayload[] = [];
+  let activeCapabilityRequest: CapabilityRequestPayload | null = null;
+  // Tracks whether the active request was answered with an explicit decision.
+  // When the dialog closes and this is still false (Escape/overlay/dismiss),
+  // the request is resolved "deny".
+  let activeCapabilityDecided = false;
+
+  const showNextCapability = (): void => {
+    if (activeCapabilityRequest !== null) return;
+    const next = capabilityQueue.shift();
+    if (!next) return;
+    activeCapabilityRequest = next;
+    activeCapabilityDecided = false;
+    context.ui.dialogs.show(CAPABILITY_DIALOG_ID, next as unknown as Record<string, unknown>);
+  };
+
+  cleanupFunctions.push(
+    onAppEvent("scriptable-objects:capability-request", (detail) => {
+      const request = detail as CapabilityRequestPayload;
+      // De-dupe by requestId: each request is unique, but guard re-emits.
+      if (
+        activeCapabilityRequest?.requestId === request.requestId ||
+        capabilityQueue.some((r) => r.requestId === request.requestId)
+      ) {
+        return;
+      }
+      capabilityQueue.push(request);
+      showNextCapability();
+    }),
+  );
+
+  // The dialog emits the user's choice; record it and resolve the host request.
+  cleanupFunctions.push(
+    onAppEvent("scriptable-objects:capability-decided", (detail) => {
+      const { requestId, decision } = detail as {
+        requestId: string;
+        decision: CapabilityDecision;
+      };
+      if (activeCapabilityRequest?.requestId === requestId) {
+        activeCapabilityDecided = true;
+      }
+      resolveCapabilityRequest(requestId, decision);
+    }),
+  );
+
+  // Advance the queue when the capability dialog closes — covers Allow once,
+  // Allow always, Deny, and Escape. If the dialog closed without a decision
+  // (Escape/overlay/dismiss), fail closed by resolving "deny".
+  cleanupFunctions.push(
+    DialogExtensions.onChange(() => {
+      if (activeCapabilityRequest === null) return;
+      const stillOpen = DialogExtensions.getVisibleDialogs()
+        .some((d) => d.definition.id === CAPABILITY_DIALOG_ID);
+      if (!stillOpen) {
+        const closed = activeCapabilityRequest;
+        const decided = activeCapabilityDecided;
+        activeCapabilityRequest = null;
+        activeCapabilityDecided = false;
+        if (!decided) {
+          // No explicit answer — dismissed prompts fail closed.
+          resolveCapabilityRequest(closed.requestId, "deny");
+        }
+        showNextCapability();
+      }
+    }),
+  );
+
   // ---- Load object scripts from backend on startup ----
   try {
     await loadAndMountScripts();
@@ -253,6 +341,7 @@ async function activate(context: ExtensionContext): Promise<void> {
       resetObjectScriptManager();
       consentedPackages.clear();
       consentQueue.length = 0; // queued prompts belong to the previous workbook
+      capabilityQueue.length = 0; // pending JIT prompts belong to the previous workbook
       try {
         await loadAndMountScripts();
       } catch (e) {

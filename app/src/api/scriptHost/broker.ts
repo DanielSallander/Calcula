@@ -12,6 +12,7 @@
 
 import { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS, type CapabilityId, type MethodPolicy } from "./allowlist";
 import { appendAudit } from "./auditRing";
+import { getGrantSet } from "./capabilities";
 import { USERSCRIPT_EVENT_PREFIX, namespaceUserEvent } from "../events";
 
 // ============================================================================
@@ -76,9 +77,11 @@ export function buildHandleFromDefinition(definition: {
   packageName?: string;
 }): ScriptHandle {
   const isDistributed = definition.provenance === "distributed";
-  // ui.html is auto-granted for local scripts; distributed scripts get it
-  // through consent (Phase 4). Other capabilities arrive with Phase 4.
-  const grants = new Set<CapabilityId>();
+  // grants is the LIVE per-script set owned by capabilities.ts — so a JIT or
+  // consent grant recorded after mount takes effect for checkPolicy without
+  // rebuilding the handle. ui.html is auto-granted for local scripts;
+  // distributed scripts acquire it (and every other cap) only through consent.
+  const grants = getGrantSet(definition.id);
   if (!isDistributed) {
     grants.add("ui.html");
   }

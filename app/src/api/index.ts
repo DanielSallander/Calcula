@@ -1435,6 +1435,8 @@ export {
   hasSlicerItemBitmapRenderer,
 } from "./scriptHost/host";
 export { getCellRenderStats } from "./scriptHost/renderCache";
+export { resolveCapabilityRequest, getGrantedOrigins } from "./scriptHost/capabilities";
+export type { CapabilityRequestPayload, CapabilityDecision } from "./scriptHost/capabilities";
 
 export {
   getScaffoldTemplate,

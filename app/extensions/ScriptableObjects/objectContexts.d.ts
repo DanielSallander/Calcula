@@ -72,6 +72,13 @@ declare interface BaseObjectContext {
   /** Show a toast notification to the user. */
   notify(message: string, type?: "info" | "success" | "warning" | "error"): void;
   /**
+   * Sandboxed capability surface. Requires the net.fetch capability, granted
+   * just-in-time (Allow once / always / Deny) on first use, or via package consent.
+   */
+  caps: {
+    fetch(url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; text(): string; json(): unknown }>;
+  };
+  /**
    * Full extension API access (only available in "unlocked" mode).
    * In "restricted" mode, this is null.
    */

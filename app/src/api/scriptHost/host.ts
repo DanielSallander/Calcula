@@ -38,6 +38,18 @@ import {
   invalidateBitmap,
   invalidateSlicerBitmaps,
 } from "./renderCache";
+import { ALLOWLIST } from "./allowlist";
+import {
+  fetchOriginOf,
+  grantNetOrigin,
+  hasFetchOrigin,
+  recordCapabilityGrant,
+  requestCapabilityGrant,
+  resetAllGrants,
+  revokeBackendCapabilities,
+  syncNetOriginsToBackend,
+  wasDeniedThisSession,
+} from "./capabilities";
 import { AppEvents, emitAppEvent, onAppEvent } from "../events";
 import { showToast } from "../notifications";
 import { ExtensionRegistry } from "../extensionRegistry";
@@ -165,6 +177,9 @@ export async function hostMountScript(definition: HostMountDefinition): Promise<
   };
   mounted.set(definition.id, mw);
   mw.cleanupFns.push(registerMountedHandle(handle));
+  // Re-establish this script's net.fetch origins in the Rust store (a remount
+  // within the session keeps session grants; first mount pushes nothing).
+  void syncNetOriginsToBackend(definition.id);
 
   const snapshot = await buildSnapshot(definition, mw);
 
@@ -235,6 +250,9 @@ export function hostUnmountScript(scriptId: string): void {
     invalidateBitmap("shape", mw.definition.instanceId);
     invalidateSlicerBitmaps(mw.definition.instanceId);
   }
+  // Drop the script's Rust-side net.fetch grants so an unmounted script can
+  // never fetch (session grants in capabilities.ts survive for a remount).
+  void revokeBackendCapabilities(scriptId);
   mounted.delete(scriptId);
 }
 
@@ -247,6 +265,8 @@ export function hostResetAll(): void {
     hostUnmountScript(scriptId);
   }
   faulted.clear();
+  // Workbook reset = fresh session: forget all capability grants.
+  resetAllGrants();
 }
 
 /** Faulted scripts (crashed twice within 30s) with their last error. */
@@ -398,6 +418,12 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
 
 async function handleCall(mw: MountedWorker, callId: number, method: string, args: unknown[]): Promise<void> {
   try {
+    // JIT capability grant (R10): for a LOCAL script's first ungranted use of a
+    // capability, prompt the user before the broker denies it. On grant the live
+    // grant set (+ the Rust net.fetch store) is updated, so the broker admits the
+    // same call below. Distributed scripts are not JIT-prompted — they acquire
+    // capabilities only through package consent (Phase 4.2).
+    await maybeRequestCapabilityGrant(mw, method, args);
     const value = await brokerCall(mw.handle, method, args, () => executeImpl(mw, method, args));
     post(mw, { t: "callResult", callId, ok: true, value });
   } catch (err) {
@@ -407,6 +433,58 @@ async function handleCall(mw: MountedWorker, callId: number, method: string, arg
         : { code: "HostError" as const, message: err instanceof Error ? err.message : String(err) };
     post(mw, { t: "callResult", callId, ok: false, error });
   }
+}
+
+/**
+ * JIT capability grant (R10). LOCAL scripts only — distributed scripts acquire
+ * capabilities through package consent (Phase 4.2), never JIT. For net.fetch the
+ * prompt is per-origin (parsed from the fetch URL); other caps are blanket. On
+ * grant the live grant set is updated and a net.fetch origin is mirrored to the
+ * authoritative Rust store. A denied request is remembered for the session (no
+ * re-prompt); the broker (cap missing) or Rust (origin missing) then denies it.
+ */
+async function maybeRequestCapabilityGrant(
+  mw: MountedWorker,
+  method: string,
+  args: unknown[],
+): Promise<void> {
+  const cap = ALLOWLIST[method]?.capability;
+  if (!cap) return;
+  const { handle } = mw;
+  if (handle.origin !== "local" || cap === "ui.html") return;
+
+  if (cap === "net.fetch") {
+    const origin = fetchOriginOf(args[0]);
+    if (!origin) return; // invalid URL — vFetch / Rust will reject
+    if (handle.grants.has(cap) && hasFetchOrigin(handle.scriptId, origin)) return;
+    if (wasDeniedThisSession(handle.scriptId, cap, origin)) return;
+    const decision = await requestCapabilityGrant({
+      scriptId: handle.scriptId,
+      scriptName: handle.scriptName,
+      capability: cap,
+      origin,
+    });
+    if (decision === "deny") return;
+    recordCapabilityGrant(handle.scriptId, cap, origin);
+    try {
+      await grantNetOrigin(handle.scriptId, origin);
+    } catch (e) {
+      console.error("[caps] failed to mirror net.fetch origin to backend:", e);
+    }
+    // (decision === "always" persistence across reload lands in Phase 4.2.)
+    return;
+  }
+
+  // Blanket caps (storage, bi.query — executors land in Phase 4.3).
+  if (handle.grants.has(cap)) return;
+  if (wasDeniedThisSession(handle.scriptId, cap, null)) return;
+  const decision = await requestCapabilityGrant({
+    scriptId: handle.scriptId,
+    scriptName: handle.scriptName,
+    capability: cap,
+    origin: null,
+  });
+  if (decision !== "deny") recordCapabilityGrant(handle.scriptId, cap);
 }
 
 /** The IMPL table (design §5): today's context-builder bodies, minus closures. */
@@ -576,6 +654,29 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const [html] = args as [string];
       emitAppEvent("shape:setHtmlContent", { instanceId, html });
       return undefined;
+    }
+
+    // ---- capabilities ----
+    case "cap.fetch": {
+      // The broker already enforced net.fetch is granted (coarse gate) and
+      // vFetch validated https. The Rust command is the AUTHORITATIVE gate: it
+      // re-derives + re-checks the origin against the per-script grant store,
+      // rate-limits, strips credentials, and bounds the response — it never
+      // trusts these args for permission. Worker arg shape: [url, init?].
+      const [url, init] = args as [
+        string,
+        { method?: string; headers?: Record<string, string>; body?: string } | undefined,
+      ];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_http_fetch", {
+        request: {
+          scriptId: definition.id,
+          url,
+          method: init?.method,
+          headers: init?.headers,
+          body: init?.body,
+        },
+      });
     }
 
     default:

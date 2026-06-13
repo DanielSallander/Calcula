@@ -83,6 +83,7 @@ pub mod r1c1;
 pub mod calp_commands;
 pub mod state_digest;
 pub mod security;
+pub mod net_commands;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -3385,6 +3386,7 @@ pub fn run() {
         .manage(bi::BiState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
+        .manage(scripting::CapabilityStore::new())
         .manage(slicer::SlicerState::new())
         .manage(ribbon_filter::RibbonFilterState::new())
         .manage(timeline_slicer::TimelineSlicerState::new())
@@ -3823,6 +3825,10 @@ pub fn run() {
             scripting::save_object_script,
             scripting::delete_object_script,
             scripting::delete_object_scripts_for_instance,
+            // Script network capability commands (Phase 4 — net.fetch egress)
+            net_commands::grant_script_net_origin,
+            net_commands::revoke_script_capabilities,
+            net_commands::script_http_fetch,
             // Object template commands (scriptable objects templates)
             scripting::list_object_templates,
             scripting::save_object_template,

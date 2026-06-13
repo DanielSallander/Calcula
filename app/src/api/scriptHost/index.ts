@@ -37,3 +37,7 @@ export {
 } from "./broker";
 export type { ScriptHandle, RpcErrorCode } from "./broker";
 export { PROTOCOL_VERSION } from "./protocol";
+
+// Capability grants (Phase 4): the JIT/consent dialog resolves requests here.
+export { resolveCapabilityRequest, getGrantedOrigins } from "./capabilities";
+export type { CapabilityRequestPayload, CapabilityDecision } from "./capabilities";

@@ -7,9 +7,11 @@ pub mod commands;
 pub mod notebook_commands;
 pub mod object_script_commands;
 pub mod template_commands;
+pub mod capability_store;
 
 pub use commands::*;
 pub use notebook_commands::*;
 pub use object_script_commands::*;
 pub use template_commands::*;
+pub use capability_store::CapabilityStore;
 pub use types::{ScriptState, ScriptSummary, WorkbookScript, NotebookDocument, NotebookSummary};
