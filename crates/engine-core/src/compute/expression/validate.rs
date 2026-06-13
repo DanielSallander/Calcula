@@ -327,11 +327,38 @@ impl Expression {
             // tables are rendered as raw qualifiers during materialization.
             Expression::Window {
                 inner,
+                function,
                 order_by,
                 partition_by,
                 ..
+            } => {
+                // Only SUM/AVERAGE/MIN/MAX/COUNT can be windowed (the parser
+                // enforces this too, but a measure AST can be deserialized
+                // straight from a shared model file, bypassing the parser).
+                // Rejecting an unsupported window aggregate here — rather than
+                // letting it reach the renderer — prevents a running
+                // DISTINCTCOUNT from silently rendering a plain COUNT.
+                use crate::compute::aggregate::AggregateOp;
+                if !matches!(
+                    function,
+                    AggregateOp::Sum
+                        | AggregateOp::Average
+                        | AggregateOp::Min
+                        | AggregateOp::Max
+                        | AggregateOp::Count
+                ) {
+                    return Err(EngineError::InvalidExpression(format!(
+                        "aggregate {function:?} cannot be used as a window/running \
+                         calculation; only SUM, AVERAGE, MIN, MAX, and COUNT can be windowed"
+                    )));
+                }
+                inner.validate_inner(allow_selected_measure)?;
+                for (table, _column) in order_by.iter().chain(partition_by.iter()) {
+                    validate_identifier(table, "window table")?;
+                }
+                Ok(())
             }
-            | Expression::Offset {
+            Expression::Offset {
                 inner,
                 order_by,
                 partition_by,
@@ -410,6 +437,37 @@ mod tests {
             qualified_col("Sales", "price").multiply(qualified_col("Sales", "quantity")),
         );
         assert!(e.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_window_aggregate() {
+        // A running SUM window is fine.
+        let ok = window_expr(
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+            AggregateOp::Sum,
+            vec![("Date".into(), "day".into())],
+            vec![],
+            None,
+        );
+        assert!(ok.validate().is_ok());
+
+        // A running DISTINCTCOUNT must be rejected — it would otherwise render
+        // as a plain COUNT (silently dropping DISTINCT). Likewise statistical
+        // aggregates, which have no window form.
+        for bad in [AggregateOp::DistinctCount, AggregateOp::Mode] {
+            let e = window_expr(
+                agg(bad, qualified_col("Sales", "customer_id")),
+                bad,
+                vec![("Date".into(), "day".into())],
+                vec![],
+                None,
+            );
+            assert!(
+                matches!(e.validate(), Err(EngineError::InvalidExpression(_))),
+                "window of {bad:?} must be rejected, got {:?}",
+                e.validate()
+            );
+        }
     }
 
     #[test]

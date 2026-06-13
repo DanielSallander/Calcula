@@ -14,7 +14,7 @@ use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::compute::time_intelligence::lower_time_intelligence;
 use engine_core::model::DataModel;
 
-use crate::error::QueryResult;
+use crate::error::{QueryError, QueryResult};
 use crate::request::ColumnRef;
 
 use super::query_measures::materialize_query_in_pipeline;
@@ -114,7 +114,7 @@ impl QueryExecutor {
             }
 
             // Build the window function expression.
-            let window_sql = build_window_sql(&window_info, &stage1_group_by, group_by, name);
+            let window_sql = build_window_sql(&window_info, &stage1_group_by, group_by, name)?;
             select_parts.push(window_sql);
 
             let sql = format!("SELECT {} FROM {base_table_name}", select_parts.join(", "));
@@ -244,7 +244,7 @@ fn build_window_sql(
     _stage1_group_by: &[(String, String)],
     outer_group_by: &[ColumnRef],
     measure_name: &str,
-) -> String {
+) -> QueryResult<String> {
     use engine_core::compute::aggregate::AggregateOp;
 
     // Build ORDER BY clause.
@@ -277,18 +277,28 @@ fn build_window_sql(
 
     if let Some(function) = info.function {
         // WINDOW: AGG("__val") OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)
-        let func_name_owned;
+        //
+        // Only the aggregates the parser allows as window functions are
+        // supported (SUM/AVG/MIN/MAX/COUNT). Anything else is rejected rather
+        // than rendered: a running DISTINCTCOUNT would silently drop the
+        // DISTINCT (rendering a plain COUNT — wrong numbers), and the
+        // statistical aggregates have no valid window form in DataFusion. This
+        // fail-closed guard matters because a measure's `Expression` AST can be
+        // deserialized straight from a (shared) model file, bypassing the
+        // parser's allow-list.
         let func_name = match function {
             AggregateOp::Sum => "SUM",
             AggregateOp::Average => "AVG",
             AggregateOp::Min => "MIN",
             AggregateOp::Max => "MAX",
             AggregateOp::Count => "COUNT",
-            AggregateOp::DistinctCount => "COUNT",
-            AggregateOp::CountRows => "COUNT",
             other => {
-                func_name_owned = other.to_string();
-                &func_name_owned
+                return Err(QueryError::InvalidQuery(format!(
+                    "aggregate {other:?} is not supported as a window/running calculation; \
+                     only SUM, AVERAGE, MIN, MAX, and COUNT can be windowed \
+                     (a running DISTINCTCOUNT or statistical aggregate must be computed \
+                     as a separate measure)"
+                )));
             }
         };
 
@@ -297,31 +307,31 @@ fn build_window_sql(
             None => "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW".to_string(),
         };
 
-        format!(
+        Ok(format!(
             "{func_name}(\"__val\") OVER ({partition_sql}ORDER BY {order_sql} {frame_sql}) AS {}",
             quote_ident_double(measure_name)
-        )
+        ))
     } else if let Some(delta) = info.delta {
         // OFFSET: LAG/LEAD("__val", N) OVER (...)
         if delta < 0 {
-            format!(
+            Ok(format!(
                 "LAG(\"__val\", {}) OVER ({partition_sql}ORDER BY {order_sql}) AS {}",
                 delta.unsigned_abs(),
                 quote_ident_double(measure_name)
-            )
+            ))
         } else {
-            format!(
+            Ok(format!(
                 "LEAD(\"__val\", {delta}) OVER ({partition_sql}ORDER BY {order_sql}) AS {}",
                 quote_ident_double(measure_name)
-            )
+            ))
         }
     } else if let Some(position) = info.position {
         // INDEX: NTH_VALUE("__val", N) OVER (...) with full frame.
         if position >= 1 {
-            format!(
+            Ok(format!(
                 "NTH_VALUE(\"__val\", {position}) OVER ({partition_sql}ORDER BY {order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS {}",
                 quote_ident_double(measure_name)
-            )
+            ))
         } else {
             // Negative position: from end. Use NTH_VALUE with reversed ordering.
             let reverse_order: Vec<String> = info
@@ -331,13 +341,13 @@ fn build_window_sql(
                 .collect();
             let rev_order_sql = reverse_order.join(", ");
             let abs_pos = position.unsigned_abs();
-            format!(
+            Ok(format!(
                 "NTH_VALUE(\"__val\", {abs_pos}) OVER ({partition_sql}ORDER BY {rev_order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS {}",
                 quote_ident_double(measure_name)
-            )
+            ))
         }
     } else {
-        format!("\"__val\" AS {}", quote_ident_double(measure_name))
+        Ok(format!("\"__val\" AS {}", quote_ident_double(measure_name)))
     }
 }
 
