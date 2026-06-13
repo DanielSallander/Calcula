@@ -16,10 +16,13 @@ import {
   getScaffoldTemplate,
   showToast,
   resolveCapabilityRequest,
+  parseDeclaredCapabilities,
+  applyConsentedCapabilities,
 } from "@api";
-import type { CapabilityRequestPayload, CapabilityDecision } from "@api";
+import type { CapabilityRequestPayload, CapabilityDecision, CapabilityId } from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
 import { loadConsents, recordConsent, isConsentCurrent } from "./lib/consentStore";
+import type { CapabilityGrant } from "./lib/consentStore";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import React, { Suspense } from "react";
@@ -119,6 +122,59 @@ export const ScriptableObjectEvents = {
 /** Track which packages have been consented to run scripts (this session). */
 const consentedPackages = new Set<string>();
 
+/** Short, user-facing phrase per capability for the consent prompt. */
+const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
+  "net.fetch": "Fetch data from the web (https only, no cookies)",
+  "bi.query": "Run read-only queries on this workbook's BI connections",
+  storage: "Store script-private data in this workbook",
+  "ui.html": "Render sandboxed HTML inside its object",
+};
+
+/** Shape of one requested capability in the consent-needed event payload. */
+interface RequestedCapability {
+  capability: CapabilityId;
+  description: string;
+  origins: string[];
+}
+
+/**
+ * The union of capabilities DECLARED across a package's scripts (each script's
+ * `// @capability` pragmas). Returns both the rich list for the consent prompt
+ * and the CapabilityGrant[] persisted as the package's consent.
+ */
+function computePackageCapabilities(
+  scripts: Array<{ source: string }>,
+): { requested: RequestedCapability[]; granted: CapabilityGrant[] } {
+  const originsByCap = new Map<CapabilityId, Set<string>>();
+  for (const script of scripts) {
+    const declared = parseDeclaredCapabilities(script.source);
+    for (const cap of declared.caps) {
+      if (!originsByCap.has(cap)) originsByCap.set(cap, new Set());
+    }
+    // Origins only attach to net.fetch (parse already filtered to https origins).
+    if (declared.origins.length > 0) {
+      const set = originsByCap.get("net.fetch") ?? new Set<string>();
+      for (const o of declared.origins) set.add(o);
+      originsByCap.set("net.fetch", set);
+    }
+  }
+
+  const requested: RequestedCapability[] = [];
+  const granted: CapabilityGrant[] = [];
+  for (const [capability, origins] of originsByCap) {
+    const originList = [...origins];
+    requested.push({
+      capability,
+      description: CAPABILITY_DESCRIPTION[capability] ?? capability,
+      origins: originList,
+    });
+    granted.push(
+      originList.length > 0 ? { capability, origins: originList } : { capability },
+    );
+  }
+  return { requested, granted };
+}
+
 /**
  * Load, register, and mount all scripts. For distributed scripts,
  * check if the user has consented to run them — either in this session or
@@ -168,16 +224,25 @@ async function loadAndMountScripts(): Promise<void> {
       }
 
       if (consentedPackages.has(pkg)) {
+        // Hydrate path: consent == "all declared" in 4.2a, so re-derive each
+        // script's declared caps/origins from its own source and GRANT them
+        // into the live set BEFORE mounting, so buildHandleFromDefinition sees
+        // them when it builds the handle.
         for (const script of pkgScripts) {
+          const declared = parseDeclaredCapabilities(script.source);
+          await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
           await ObjectScriptManager.mountScript(script.id);
         }
       } else {
-        // Emit consent request event — the UI will show a prompt
+        // Emit consent request event — the UI will show a prompt. Include the
+        // union of capabilities the package's scripts declare.
+        const { requested } = computePackageCapabilities(pkgScripts);
         emitAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, {
           packageName: pkg,
           scriptCount: pkgScripts.length,
           scriptNames: pkgScripts.map((s) => s.name),
           scriptIds: pkgScripts.map((s) => s.id),
+          requestedCapabilities: requested,
         });
       }
     }
@@ -368,20 +433,28 @@ async function activate(context: ExtensionContext): Promise<void> {
     onAppEvent("scriptable-objects:consent-granted", async (detail) => {
       const { packageName } = detail as { packageName: string };
       consentedPackages.add(packageName);
-      // Mount the distributed scripts for this package
+      // Mount the distributed scripts for this package. Allowing grants ALL
+      // declared capabilities (4.2a). For each script, GRANT its declared
+      // caps/origins into the live set BEFORE mounting it, so the broker's
+      // handle (built at mount) already carries the consented grants.
       const scripts = ObjectScriptManager.getAllScripts()
         .filter((s) => s.provenance === "distributed" && s.packageName === packageName);
       for (const script of scripts) {
         if (!ObjectScriptManager.isScriptMounted(script.id)) {
+          const declared = parseDeclaredCapabilities(script.source);
+          await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
           await ObjectScriptManager.mountScript(script.id);
         }
       }
       // Persist the consent in the workbook (durable once the file is saved),
-      // keyed by source hash so changed scripts re-prompt.
+      // keyed by source hash + the granted capability union so changed scripts
+      // OR a capability expansion re-prompt.
       try {
+        const { granted } = computePackageCapabilities(scripts);
         await recordConsent(
           packageName,
           scripts.map((s) => ({ id: s.id, source: s.source })),
+          granted,
         );
       } catch (e) {
         console.warn("[ScriptableObjects] Failed to persist consent:", e);

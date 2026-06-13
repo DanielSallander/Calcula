@@ -1437,6 +1437,8 @@ export {
 export { getCellRenderStats } from "./scriptHost/renderCache";
 export { resolveCapabilityRequest, getGrantedOrigins } from "./scriptHost/capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./scriptHost/capabilities";
+export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./scriptHost/capabilities";
+export type { DeclaredCapabilities } from "./scriptHost/capabilities";
 
 export {
   getScaffoldTemplate,

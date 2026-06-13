@@ -5,6 +5,14 @@
 
 import React, { useState, useCallback, useEffect } from "react";
 import { emitAppEvent } from "@api/events";
+import type { CapabilityId } from "@api";
+
+/** One entry in the consent prompt's requested-capabilities list. */
+interface RequestedCapability {
+  capability: CapabilityId;
+  description: string;
+  origins: string[];
+}
 
 // ============================================================================
 // Styles
@@ -81,6 +89,52 @@ const scriptItemStyle: React.CSSProperties = {
   fontFamily: "'Cascadia Code', Consolas, monospace",
 };
 
+const capListStyle: React.CSSProperties = {
+  margin: "10px 0",
+  padding: "4px 0",
+  listStyle: "none",
+};
+
+const capItemStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  padding: "6px 0",
+  borderTop: "1px solid #F0F0F0",
+};
+
+const capIconStyle: React.CSSProperties = {
+  width: 18,
+  height: 18,
+  borderRadius: 4,
+  backgroundColor: "#FDECEA",
+  color: "#C0392B",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 12,
+  fontWeight: 700,
+  flexShrink: 0,
+  marginTop: 1,
+};
+
+const capOriginStyle: React.CSSProperties = {
+  display: "block",
+  marginTop: 2,
+  fontSize: 11,
+  color: "#666",
+  fontFamily: "'Cascadia Code', Consolas, monospace",
+  wordBreak: "break-all",
+};
+
+/** Per-capability glyph (ASCII) for the requested-capabilities list. */
+const CAP_ICON: Record<CapabilityId, string> = {
+  "net.fetch": "@",
+  "bi.query": "?",
+  storage: "#",
+  "ui.html": "<>",
+};
+
 const footerStyle: React.CSSProperties = {
   padding: "12px 20px",
   borderTop: "1px solid #E0E0E0",
@@ -125,6 +179,8 @@ export default function ScriptConsentDialog({
   const scriptCount = (data?.scriptCount as number) ?? 0;
   const scriptNames = (data?.scriptNames as string[]) ?? [];
   const scriptIds = (data?.scriptIds as string[]) ?? [];
+  const requestedCapabilities =
+    (data?.requestedCapabilities as RequestedCapability[]) ?? [];
   const [inspecting, setInspecting] = useState(false);
 
   // The dialog instance is reused when the consent queue advances to the
@@ -178,17 +234,48 @@ export default function ScriptConsentDialog({
             ))}
           </div>
 
-          <p>
-            Scripts run in <strong>restricted mode</strong> — they can only access
-            the objects they're attached to and cannot read or write arbitrary cells
-            unless you explicitly change their access level.
-          </p>
-
-          <p style={{ fontSize: 11, color: "#888" }}>
-            You can inspect the script source code before allowing execution.
-            Allowing is remembered with this workbook; if the package updates
-            any script's code, you will be asked again.
-          </p>
+          {requestedCapabilities.length > 0 ? (
+            <>
+              <p>
+                Allowing grants these scripts the following capabilities:
+              </p>
+              <ul style={capListStyle}>
+                {requestedCapabilities.map((cap) => (
+                  <li key={cap.capability} style={capItemStyle}>
+                    <span style={capIconStyle} aria-hidden="true">
+                      {CAP_ICON[cap.capability] ?? "*"}
+                    </span>
+                    <span>
+                      {cap.description}
+                      {cap.origins.map((origin) => (
+                        <code key={origin} style={capOriginStyle}>{origin}</code>
+                      ))}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p style={{ fontSize: 11, color: "#888" }}>
+                Anything not listed stays blocked — scripts can only reach the
+                objects they're attached to. You can inspect the source before
+                allowing. Allowing is remembered with this workbook; if the
+                package changes any script's code or requests new capabilities,
+                you will be asked again.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                Scripts run in <strong>restricted mode</strong> — they can only
+                access the objects they're attached to and cannot read or write
+                arbitrary cells, fetch from the web, or query BI connections.
+              </p>
+              <p style={{ fontSize: 11, color: "#888" }}>
+                You can inspect the script source code before allowing execution.
+                Allowing is remembered with this workbook; if the package updates
+                any script's code, you will be asked again.
+              </p>
+            </>
+          )}
         </div>
 
         <div style={footerStyle}>

@@ -41,3 +41,6 @@ export { PROTOCOL_VERSION } from "./protocol";
 // Capability grants (Phase 4): the JIT/consent dialog resolves requests here.
 export { resolveCapabilityRequest, getGrantedOrigins } from "./capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./capabilities";
+// Declared/consented capabilities (Phase 4.2a): pragma parse + grant chokepoint.
+export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./capabilities";
+export type { DeclaredCapabilities } from "./capabilities";

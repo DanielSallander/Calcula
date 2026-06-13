@@ -229,3 +229,84 @@ export function requestCapabilityGrant(args: {
 export function resolveCapabilityRequest(requestId: string, decision: CapabilityDecision): void {
   pendingRequests.get(requestId)?.(decision);
 }
+
+// ============================================================================
+// Declared capabilities (Phase 4.2a) — distributed scripts declare the caps
+// they need via a source pragma; package consent then GRANTS them into the
+// live grant set so the broker sees them. The pragma is the auditable record
+// of what a script asked for; the consent dialog renders it; this module makes
+// the consented subset (all of it, in 4.2a) live.
+//
+//   // @capability net.fetch https://api.example.com   (origin optional)
+//   // @capability storage
+//   // @capability bi.query
+//
+// Unknown capability ids are ignored. The origin arg is only meaningful for
+// net.fetch and is normalized via fetchOriginOf (agreeing with Rust).
+// ============================================================================
+
+/** The set of capability ids a script source declares it needs. */
+const KNOWN_CAPABILITY_IDS: ReadonlySet<CapabilityId> = new Set<CapabilityId>([
+  "net.fetch",
+  "bi.query",
+  "storage",
+  "ui.html",
+]);
+
+export interface DeclaredCapabilities {
+  caps: CapabilityId[];
+  origins: string[];
+}
+
+/**
+ * Scan a script source for `// @capability <id> [origin]` pragmas. Collects the
+ * (deduped) recognized capability ids; for net.fetch with an origin argument,
+ * normalizes the origin via fetchOriginOf and collects it. Unknown ids and
+ * malformed origins are ignored.
+ */
+export function parseDeclaredCapabilities(source: string): DeclaredCapabilities {
+  const caps = new Set<CapabilityId>();
+  const origins = new Set<string>();
+  if (typeof source !== "string") return { caps: [], origins: [] };
+
+  // Match a line-comment pragma: optional leading whitespace, //, then
+  // @capability, the cap id, then an optional origin argument.
+  const pragma = /^[ \t]*\/\/[ \t]*@capability[ \t]+(\S+)(?:[ \t]+(\S+))?/gm;
+  let m: RegExpExecArray | null;
+  while ((m = pragma.exec(source)) !== null) {
+    const capId = m[1] as CapabilityId;
+    if (!KNOWN_CAPABILITY_IDS.has(capId)) continue;
+    caps.add(capId);
+    if (capId === "net.fetch" && m[2]) {
+      const origin = fetchOriginOf(m[2]);
+      if (origin) origins.add(origin);
+    }
+  }
+
+  return { caps: [...caps], origins: [...origins] };
+}
+
+/**
+ * The consent chokepoint: record a distributed script's CONSENTED capabilities
+ * into the live grant set (so buildHandleFromDefinition / the broker see them)
+ * and mirror any net.fetch origin to the authoritative Rust store. Must run
+ * BEFORE the script is mounted. Origin mirroring is best-effort (the script
+ * would JIT-reprompt if Rust lacked the origin).
+ */
+export async function applyConsentedCapabilities(
+  scriptId: string,
+  caps: CapabilityId[],
+  origins: string[],
+): Promise<void> {
+  for (const cap of caps) {
+    recordCapabilityGrant(scriptId, cap);
+  }
+  for (const origin of origins) {
+    recordCapabilityGrant(scriptId, "net.fetch", origin);
+    try {
+      await grantNetOrigin(scriptId, origin);
+    } catch {
+      /* best-effort; Rust re-checks authoritatively and JIT can re-prompt */
+    }
+  }
+}
