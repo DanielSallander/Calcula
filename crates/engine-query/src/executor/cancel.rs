@@ -171,7 +171,7 @@ mod tests {
             measures: vec!["Total".into()],
             ..Default::default()
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // Pre-cancelled token: the entry checkpoint fires before any work.
         let token = CancellationToken::new();
@@ -183,6 +183,7 @@ mod tests {
             Some(&cache),
             None,
             None,
+            &[],
             &token,
         )
         .await
@@ -198,6 +199,7 @@ mod tests {
             Some(&cache),
             None,
             None,
+            &[],
             &CancellationToken::new(),
         )
         .await

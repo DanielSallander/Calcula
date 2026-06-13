@@ -385,8 +385,10 @@ impl Engine {
         &mut self,
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
-        // Fail fast (with a clear error) on unregistered UDF calls.
+        // Fail fast (with a clear error) on unregistered UDF calls and an
+        // unknown active role.
         self.validate_request_udfs(&request)?;
+        self.validate_active_role()?;
 
         // Auto-tier tables needed by this specific query. Remaining
         // candidates are deliberately NOT fetched here — hosts pre-warm them
@@ -401,13 +403,15 @@ impl Engine {
             .await
             .map_err(QueryError::Engine)?;
 
-        // Check query cache. The guard is dropped before any await.
+        // Check query cache. The guard is dropped before any await. The
+        // active role is part of the key (cross-role isolation).
         let (cache_key, cached) = {
             let mut query_cache = self.query_cache.lock();
             let key = query_cache::query_cache_key(
                 &request,
                 query_cache.model_version(),
                 self.effective_udfs.identity_hash(),
+                self.active_role(),
             );
             let cached = query_cache.get(key);
             (key, cached)
@@ -416,12 +420,17 @@ impl Engine {
             return Ok((cached, tiered));
         }
 
-        // Execute the query — tell the planner that auto-tiered tables are local.
+        // Execute the query — tell the planner that auto-tiered tables are
+        // local, and thread the active role's predicates so a cached
+        // (auto-tiered) dimension is restricted just like a connector-fetched
+        // one.
+        let role_filters = self.active_role_filters();
         let plan = PushdownPlanner::plan_with_cached(
             &request,
             &self.model,
             &self.registry,
             &self.auto_tier_state.cached,
+            role_filters,
         )?;
         let batches = crate::map_script_error(
             QueryExecutor::execute(
@@ -431,6 +440,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
+                role_filters,
             )
             .await,
         )?;
@@ -687,6 +697,7 @@ mod tests {
             &request,
             engine.query_cache.lock().model_version(),
             engine.effective_udfs.identity_hash(),
+            engine.active_role(),
         );
         engine.query_cache.lock().put(key, vec![make_test_batch()]);
 

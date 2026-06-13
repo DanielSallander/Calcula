@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use arrow::record_batch::RecordBatch;
 
+use engine_core::compute::expression::FilterPredicate;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::model::DataModel;
 use engine_core::store::InMemoryCache;
@@ -24,6 +25,9 @@ impl super::QueryExecutor {
     ///
     /// `udfs` carries host-registered UDFs into the local DataFusion session
     /// (see [`QueryExecutor::execute`](super::QueryExecutor::execute)).
+    ///
+    /// `role_filters` are the active security role's predicates (empty when no
+    /// role is active); see [`QueryExecutor::execute`](super::QueryExecutor::execute).
     pub async fn execute_explained(
         plan: &QueryPlan,
         model: &DataModel,
@@ -31,6 +35,7 @@ impl super::QueryExecutor {
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         udfs: Option<&engine_core::compute::udf::UdfRegistry>,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<(Vec<RecordBatch>, PlanNode)> {
         match plan {
             QueryPlan::PushedAggregation {
@@ -117,6 +122,7 @@ impl super::QueryExecutor {
                     cache,
                     max_inline_in_values,
                     udfs,
+                    role_filters,
                     Some(&mut node),
                     // Explained execution has no cancellation entry point;
                     // a fresh token is never cancelled.

@@ -31,6 +31,7 @@ use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
 use crate::model::relationship::Relationship;
+use crate::model::security_role::SecurityRole;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
 
@@ -67,7 +68,18 @@ use crate::model::table_variable::TableVariable;
 ///   bearing content an older engine would silently drop on a load→save
 ///   round-trip — and dropping it would turn every measure that calls the
 ///   script into an "unknown function" error — hence the bump.
-pub const MODEL_FORMAT_VERSION: u32 = 4;
+/// - `5` — row-level security: the model gained `security_roles`, a list of
+///   author-defined [`SecurityRole`](crate::model::SecurityRole)s, each with
+///   per-table row filters that restrict which rows an activated role may
+///   see. This is authored, behavior-bearing content — and, unlike most,
+///   it is a **security control**: an older engine that silently dropped it
+///   on a load→save round-trip would turn a restricted model into an
+///   unrestricted one, leaking data. The [`ModelFormatTooNew`] load gate
+///   therefore refuses v5 files on a pre-v5 engine rather than letting them
+///   round-trip without the roles.
+///
+/// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
+pub const MODEL_FORMAT_VERSION: u32 = 5;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -101,6 +113,13 @@ pub struct DataModel {
     /// serialization when empty (back-compat with pre-v4 model files).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     script_functions: Vec<ScriptFunction>,
+    /// Author-defined security roles for row-level security. Each role names
+    /// per-table row filters; a host activates one role on the engine and
+    /// every query is then restricted to the rows that role permits. Empty by
+    /// default and skipped on serialization when empty (back-compat with
+    /// pre-v5 model files). See [`SecurityRole`] for the full semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    security_roles: Vec<SecurityRole>,
 }
 
 impl DataModel {
@@ -119,6 +138,7 @@ impl DataModel {
             default_lookup_resolution: None,
             date_table: None,
             script_functions: Vec::new(),
+            security_roles: Vec::new(),
         }
     }
 
@@ -250,6 +270,23 @@ impl DataModel {
             })
     }
 
+    /// Returns all security roles defined in the model.
+    pub fn security_roles(&self) -> &[SecurityRole] {
+        &self.security_roles
+    }
+
+    /// Look up a security role by name (exact match).
+    ///
+    /// Returns [`EngineError::SecurityRoleNotFound`] when no role with that
+    /// name exists — callers must treat this as a hard error rather than
+    /// proceeding without RLS.
+    pub fn security_role(&self, name: &str) -> EngineResult<&SecurityRole> {
+        self.security_roles
+            .iter()
+            .find(|r| r.name() == name)
+            .ok_or_else(|| EngineError::SecurityRoleNotFound(name.to_string()))
+    }
+
     /// Returns all hierarchies that belong to a specific table.
     pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
         self.hierarchies
@@ -350,6 +387,9 @@ impl DataModel {
         }
         for sf in &self.script_functions {
             builder = builder.add_script_function(sf.clone());
+        }
+        for role in &self.security_roles {
+            builder = builder.add_security_role(role.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

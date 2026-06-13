@@ -88,6 +88,8 @@ mod refresh;
 #[cfg(test)]
 mod disk_cache_tests;
 #[cfg(test)]
+mod security_tests;
+#[cfg(test)]
 mod test_fixtures;
 
 use std::sync::Arc;
@@ -139,8 +141,8 @@ pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
     DataModelBuilder, DateRole, FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel,
-    JoinCondition, JoinOperator, RaggedBehavior, RefreshStrategy, Relationship, StorageMode, Table,
-    TableVariable,
+    JoinCondition, JoinOperator, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole,
+    StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -226,6 +228,12 @@ pub struct Engine {
     /// default. Never part of the model (a malicious model cannot raise its
     /// own budget).
     script_sandbox_config: ScriptSandboxConfig,
+    /// The name of the active security role, if any. Set by the host **after**
+    /// authenticating the user (see [`Engine::set_active_role`]). When set,
+    /// every query is restricted to the rows the role permits; when `None`,
+    /// queries are unrestricted by RLS. This is host-controlled session state,
+    /// never part of any model.
+    active_role: Option<String>,
     /// Error captured by the most recent effective-registry rebuild, if any
     /// (currently only a native-vs-script name collision —
     /// [`Engine::new`] is infallible, so the error is deferred and surfaced
@@ -392,6 +400,7 @@ impl Engine {
             effective_udfs: effective,
             script_sandbox_config: config,
             script_build_error,
+            active_role: None,
         }
     }
 
@@ -684,6 +693,136 @@ impl Engine {
         }
     }
 
+    /// Set (or clear) the active security role.
+    ///
+    /// The host calls this **after** authenticating the user, passing the name
+    /// of a [`SecurityRole`] defined in the model. From then on every query is
+    /// restricted to the rows that role permits — applied as a sealed
+    /// pre-aggregation filter that no measure-context operation (RESET / CLEAR
+    /// / ALL-style) can remove, and that restricts a fact table even when the
+    /// role-filtered dimension is not otherwise in the query. Passing `None`
+    /// clears the role, returning to unrestricted (no-RLS) queries.
+    ///
+    /// Changing the active role invalidates the query-result cache (a result
+    /// computed under one role must never be served to another).
+    ///
+    /// A non-existent role name is **not** rejected here — it is caught at
+    /// query time with [`EngineError::SecurityRoleNotFound`], so a typo can
+    /// never silently degrade into an unrestricted query.
+    ///
+    /// # Security model — read this
+    ///
+    /// Client-side RLS in an embedded library is **advisory**. It constrains
+    /// queries that go *through* this engine; a host that holds direct source
+    /// credentials can query the database around it. The source database's own
+    /// grants therefore remain the real authority. v1 also restricts a single
+    /// role at a time (no multi-role union), supports only static
+    /// `column op value` predicates AND-combined (no OR / IN-list, no dynamic
+    /// `USERNAME()`-style identity filters), and enforces a dimension → fact
+    /// restriction only over a single-hop active single-column equi
+    /// relationship. When a role filters a dimension that could restrict a
+    /// queried fact but reaches it only through a relationship the engine
+    /// cannot enforce (non-equi / many-to-many / composite-key / inactive /
+    /// multi-hop), the query **fails closed** with
+    /// [`EngineError::RowLevelSecurityNotEnforceable`] rather than returning
+    /// under-restricted rows.
+    ///
+    /// # Example
+    ///
+    /// Build a model with a `WestOnly` role over a star schema, then activate
+    /// it. Once active, `Revenue` is restricted to West rows on every query —
+    /// even queries that never mention `Geography` (the restriction propagates
+    /// dimension → fact). This example builds the engine over in-memory data
+    /// with no connectors; the [`query`](Self::query) call (elided here, since
+    /// it needs data loaded) would then return only the West total.
+    ///
+    /// ```
+    /// use bi_engine::{
+    ///     Column, ComparisonOp, DataModel, DataType, Engine, Relationship, SecurityRole,
+    ///     StorageMode, Table, sum_measure,
+    /// };
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = DataModel::builder()
+    ///     .add_table(
+    ///         Table::new("Sales", vec![
+    ///             Column::new("geo_id", DataType::Int64),
+    ///             Column::new("amount", DataType::Float64),
+    ///         ])?
+    ///         .with_storage_mode(StorageMode::InMemory),
+    ///     )
+    ///     .add_table(
+    ///         Table::new("Geography", vec![
+    ///             Column::new("id", DataType::Int64),
+    ///             Column::new("region", DataType::String),
+    ///         ])?
+    ///         .with_storage_mode(StorageMode::InMemory),
+    ///     )
+    ///     .add_relationship(Relationship::many_to_one(
+    ///         "Sales_Geo", "Sales", "geo_id", "Geography", "id",
+    ///     ))
+    ///     .add_measure(sum_measure("Revenue", "Sales", "amount"))
+    ///     .add_security_role(
+    ///         SecurityRole::new("WestOnly")
+    ///             .with_filter("Geography", "region", ComparisonOp::Equal, "West"),
+    ///     )
+    ///     .build()?;
+    ///
+    /// let mut engine = Engine::new(model);
+    /// // Host authenticated the user as a West-region analyst:
+    /// engine.set_active_role(Some("WestOnly".into()));
+    /// assert_eq!(engine.active_role(), Some("WestOnly"));
+    /// // A bare `SUM(Sales[amount])` query would now return only the West
+    /// // total, with Geography pulled in behind the scenes to restrict Sales.
+    ///
+    /// engine.set_active_role(None); // back to unrestricted
+    /// assert_eq!(engine.active_role(), None);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_active_role(&mut self, role: Option<String>) {
+        if self.active_role != role {
+            self.active_role = role;
+            // A result computed under one role (or none) must never be served
+            // to another — invalidate every cached result on any change.
+            self.query_cache.lock().invalidate_all();
+        }
+    }
+
+    /// Returns the name of the active security role, if any.
+    pub fn active_role(&self) -> Option<&str> {
+        self.active_role.as_deref()
+    }
+
+    /// Verify the active role (if any) names a role the model defines.
+    ///
+    /// Called by every query entry point before planning, right after
+    /// [`validate_request_udfs`](Self::validate_request_udfs). A missing role
+    /// is a hard [`EngineError::SecurityRoleNotFound`] error rather than a
+    /// silent no-RLS run, so a typo can never leak data.
+    pub(crate) fn validate_active_role(&self) -> QueryResult<()> {
+        if let Some(name) = &self.active_role {
+            self.model.security_role(name).map_err(QueryError::Engine)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve the active role to its filter predicates (an empty slice when
+    /// no role is active). Caller must have run
+    /// [`validate_active_role`](Self::validate_active_role) first; an unknown
+    /// role here degrades safely to an empty slice (no enforcement), but
+    /// validation guarantees that case never reaches a query.
+    fn active_role_filters(&self) -> &[FilterPredicate] {
+        match &self.active_role {
+            Some(name) => self
+                .model
+                .security_role(name)
+                .map(|r| r.table_filters())
+                .unwrap_or(&[]),
+            None => &[],
+        }
+    }
+
     /// Rebuild the effective UDF registry from the current model, native
     /// UDFs, and sandbox config, capturing any deferred script error.
     fn rebuild_effective_udfs(&mut self) {
@@ -870,11 +1009,15 @@ impl Engine {
             return Err(QueryError::Cancelled);
         }
 
-        // Fail fast (with a clear error) on unregistered UDF calls.
+        // Fail fast (with a clear error) on unregistered UDF calls and an
+        // unknown active role.
         self.validate_request_udfs(&request)?;
+        self.validate_active_role()?;
 
         // Check the query cache first. The guard is dropped before any
-        // await: key computation and lookup are synchronous.
+        // await: key computation and lookup are synchronous. The active role
+        // is part of the key — a result computed under one role must never be
+        // served to another.
         let (cache_key, cache_version, cached) = {
             let mut query_cache = self.query_cache.lock();
             let version = query_cache.model_version();
@@ -882,6 +1025,7 @@ impl Engine {
                 &request,
                 version,
                 self.effective_udfs.identity_hash(),
+                self.active_role.as_deref(),
             );
             let cached = query_cache.get(key);
             (key, version, cached)
@@ -890,7 +1034,8 @@ impl Engine {
             return Ok(cached);
         }
 
-        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
+        let role_filters = self.active_role_filters();
+        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry, role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute_with_cancellation(
                 &plan,
@@ -899,6 +1044,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
+                role_filters,
                 &token,
             )
             .await,
@@ -934,6 +1080,7 @@ impl Engine {
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
         self.validate_request_udfs(&request)?;
+        self.validate_active_role()?;
 
         let refreshed = self
             .refresh_stale()
@@ -942,13 +1089,15 @@ impl Engine {
             .refreshed;
 
         // Check query cache (after refresh — stale data was already
-        // invalidated). The guard is dropped before any await.
+        // invalidated). The guard is dropped before any await. The active
+        // role is part of the key (cross-role isolation).
         let (cache_key, cached) = {
             let mut query_cache = self.query_cache.lock();
             let key = query_cache::query_cache_key(
                 &request,
                 query_cache.model_version(),
                 self.effective_udfs.identity_hash(),
+                self.active_role.as_deref(),
             );
             let cached = query_cache.get(key);
             (key, cached)
@@ -957,7 +1106,8 @@ impl Engine {
             return Ok((cached, refreshed));
         }
 
-        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
+        let role_filters = self.active_role_filters();
+        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry, role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute(
                 &plan,
@@ -966,6 +1116,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
+                role_filters,
             )
             .await,
         )?;
@@ -983,11 +1134,13 @@ impl Engine {
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, ExecutionPlan)> {
         self.validate_request_udfs(&request)?;
+        self.validate_active_role()?;
 
         let start = Instant::now();
 
+        let role_filters = self.active_role_filters();
         let (query_plan, pushdown_node) =
-            PushdownPlanner::plan_explained(&request, &self.model, &self.registry)?;
+            PushdownPlanner::plan_explained(&request, &self.model, &self.registry, role_filters)?;
         let (batches, exec_node) = map_script_error(
             QueryExecutor::execute_explained(
                 &query_plan,
@@ -996,6 +1149,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
+                role_filters,
             )
             .await,
         )?;
@@ -1232,8 +1386,8 @@ mod tests {
             ..Default::default()
         };
         assert_ne!(
-            crate::query_cache::query_cache_key(&request, 0, hash1),
-            crate::query_cache::query_cache_key(&request, 0, hash2),
+            crate::query_cache::query_cache_key(&request, 0, hash1, None),
+            crate::query_cache::query_cache_key(&request, 0, hash2, None),
             "query-cache key must change when the UDF version changes"
         );
     }
@@ -1538,8 +1692,8 @@ mod tests {
             ..Default::default()
         };
         assert_ne!(
-            crate::query_cache::query_cache_key(&request, 0, hash_before),
-            crate::query_cache::query_cache_key(&request, 0, hash_after),
+            crate::query_cache::query_cache_key(&request, 0, hash_before, None),
+            crate::query_cache::query_cache_key(&request, 0, hash_after, None),
         );
     }
 

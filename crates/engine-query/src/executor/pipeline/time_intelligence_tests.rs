@@ -162,8 +162,8 @@ async fn run(
     registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
     registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry)?;
-    QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None).await
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[])?;
+    QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[]).await
 }
 
 fn request(group_by: &[(&str, &str)]) -> QueryRequest {

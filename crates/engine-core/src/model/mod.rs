@@ -7,6 +7,7 @@ pub mod global_variable;
 pub mod hierarchy;
 pub mod relationship;
 pub mod schema;
+pub mod security_role;
 pub mod table;
 pub mod table_variable;
 
@@ -17,5 +18,6 @@ pub use global_variable::GlobalVariable;
 pub use hierarchy::{Hierarchy, HierarchyLevel, RaggedBehavior};
 pub use relationship::{Cardinality, FilterPropagation, JoinCondition, JoinOperator, Relationship};
 pub use schema::{DataModel, DataModelBuilder};
+pub use security_role::SecurityRole;
 pub use table::{RefreshStrategy, StorageMode, Table};
 pub use table_variable::TableVariable;

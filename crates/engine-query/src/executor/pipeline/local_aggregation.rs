@@ -9,9 +9,11 @@ use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use tokio_util::sync::CancellationToken;
 
-use engine_connectors::InFilterCondition;
+use engine_connectors::{FilterCondition, FilterOperator, InFilterCondition};
 use engine_core::compute::context::ContextResolver;
-use engine_core::compute::expression::{expand_global_variables, expand_measure_refs, Expression};
+use engine_core::compute::expression::{
+    expand_global_variables, expand_measure_refs, ComparisonOp, Expression, FilterPredicate,
+};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
@@ -36,6 +38,34 @@ use super::sql::{
     resolve_compound_sql, OverrideJoinEntry,
 };
 use super::QueryExecutor;
+
+/// Map an engine-core [`ComparisonOp`] to a connector [`FilterOperator`].
+fn role_comparison_to_operator(op: ComparisonOp) -> FilterOperator {
+    match op {
+        ComparisonOp::Equal => FilterOperator::Equal,
+        ComparisonOp::NotEqual => FilterOperator::NotEqual,
+        ComparisonOp::GreaterThan => FilterOperator::GreaterThan,
+        ComparisonOp::GreaterThanOrEqual => FilterOperator::GreaterThanOrEqual,
+        ComparisonOp::LessThan => FilterOperator::LessThan,
+        ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
+    }
+}
+
+/// Convert a role [`FilterPredicate`] into a connector [`FilterCondition`]
+/// (column / op / value — placed on the fetch of the predicate's own table).
+fn role_filter_condition(predicate: &FilterPredicate) -> FilterCondition {
+    FilterCondition {
+        column: predicate.column.clone(),
+        operator: role_comparison_to_operator(predicate.operator),
+        value: predicate.value.clone(),
+    }
+}
+
+/// Whether two [`FilterCondition`]s are identical (column, operator, value).
+/// Used to make the defense-in-depth role re-sealing idempotent.
+fn filter_conditions_equal(a: &FilterCondition, b: &FilterCondition) -> bool {
+    a.column == b.column && a.operator == b.operator && a.value == b.value
+}
 
 impl QueryExecutor {
     /// Execute a local aggregation: fetch data, join, and aggregate via DataFusion.
@@ -72,6 +102,11 @@ impl QueryExecutor {
     /// runs the measure SQL (and every two-stage path that reuses it), so
     /// `Expression::Call` nodes resolve.
     ///
+    /// `role_filters` are the active security role's predicates. The planner
+    /// already seals them into each table's fetch; this method re-applies them
+    /// (idempotently) as a defense-in-depth guard so that even a plan
+    /// assembled without them cannot leak rows past the role.
+    ///
     /// `token` enables cooperative cancellation: it is checked at phase
     /// boundaries and raced against the connector fetches and the final
     /// DataFusion execution (see
@@ -91,12 +126,43 @@ impl QueryExecutor {
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         udfs: Option<&engine_core::compute::udf::UdfRegistry>,
+        role_filters: &[FilterPredicate],
         mut plan: Option<&mut PlanNode>,
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Cancellation checkpoint: before any work (covers pre-cancelled
         // tokens — no fetch is ever issued).
         check_cancelled(token)?;
+
+        // Defense in depth: re-seal the active role's predicates into every
+        // fetch that targets a role-filtered table. The planner already did
+        // this, so for any table that already carries its role conditions this
+        // is a no-op; it only adds a missing one (e.g. if a plan reached here
+        // assembled by a path that skipped enforcement). Role conditions never
+        // pass through ContextResolver, so RESET/CLEAR cannot strip them.
+        let owned_fetches: Vec<(String, engine_connectors::FetchRequest)>;
+        let fetches: &[(String, engine_connectors::FetchRequest)] = if role_filters.is_empty() {
+            fetches
+        } else {
+            owned_fetches = fetches
+                .iter()
+                .map(|(name, request)| {
+                    let mut request = request.clone();
+                    for predicate in role_filters.iter().filter(|p| &p.table == name) {
+                        let condition = role_filter_condition(predicate);
+                        if !request
+                            .filters
+                            .iter()
+                            .any(|f| filter_conditions_equal(f, &condition))
+                        {
+                            request.filters.push(condition);
+                        }
+                    }
+                    (name.clone(), request)
+                })
+                .collect();
+            &owned_fetches
+        };
         let rollup = totals == TotalsMode::Rollup;
         // Hierarchy transforms only apply when the ragged behavior needs
         // local work; a stopper-free ShowBlanks hierarchy expanded to plain
@@ -329,6 +395,28 @@ impl QueryExecutor {
                                 });
                         }
                     }
+                }
+            }
+        }
+
+        // Apply forward (dimension → fact) IN-filters to fact tables that are
+        // already materialized locally (in-memory / cache-served). The phase-2
+        // loop below pushes these IN-filters into connector fetches, but a
+        // cached fact is never fetched, so without this it would keep all its
+        // rows. This is what makes RLS on a dimension restrict an **in-memory**
+        // fact (the role-filtered dimension's surviving join keys are applied
+        // here), and it equally fixes forward propagation to any cached fact.
+        if !in_filters_by_table.is_empty() {
+            for (table_name, batches, row_count, _) in inmemory_results.iter_mut() {
+                if let Some(in_filters) = in_filters_by_table.get(&table_name.to_lowercase()) {
+                    for in_filter in in_filters {
+                        *batches = filter_batches_by_in_values(
+                            batches,
+                            &in_filter.column,
+                            &in_filter.values,
+                        )?;
+                    }
+                    *row_count = batches.iter().map(|b| b.num_rows()).sum();
                 }
             }
         }

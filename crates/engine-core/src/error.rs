@@ -311,6 +311,40 @@ pub enum EngineError {
         message: String,
     },
 
+    /// A security role was activated (or looked up) that the model does not
+    /// define.
+    ///
+    /// Raised when a host sets an active role whose name has no matching
+    /// [`SecurityRole`](crate::model::SecurityRole) in the model, or when the
+    /// engine resolves the active role's predicates before a query.
+    /// Surfacing this as a hard error (rather than silently running
+    /// unrestricted) is a safety property: a typo'd role name must never
+    /// degrade into a no-RLS query.
+    #[error("Security role '{0}' not found")]
+    SecurityRoleNotFound(String),
+
+    /// The active security role filters a table whose restriction cannot be
+    /// enforced for the current query, so the query is **refused** rather than
+    /// run with an under-restricted (data-leaking) result.
+    ///
+    /// This happens when a role filters a dimension that reaches a queried
+    /// fact only through a relationship the engine cannot turn into a fact
+    /// restriction: a non-equi / many-to-many / multi-condition (composite
+    /// key) relationship, an inactive relationship, or a multi-hop
+    /// (snowflake) path. Failing closed here is a security property — RLS must
+    /// never silently return rows the role was meant to hide. The supported
+    /// shape is a single-hop, active, single-column equi relationship from the
+    /// fact to the role-filtered dimension.
+    #[error(
+        "row-level security for the active role cannot be enforced for table '{table}' in this query: {reason}"
+    )]
+    RowLevelSecurityNotEnforceable {
+        /// The role-filtered table whose restriction could not be enforced.
+        table: String,
+        /// Why enforcement is impossible for this query.
+        reason: String,
+    },
+
     /// An aggregation was attempted on an unsupported column type.
     #[error("Aggregation '{operation}' is not supported on column type '{column_type}'")]
     UnsupportedAggregation {

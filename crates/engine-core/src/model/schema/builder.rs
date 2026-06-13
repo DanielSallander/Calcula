@@ -8,6 +8,7 @@ use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
 use crate::model::relationship::Relationship;
+use crate::model::security_role::SecurityRole;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
 
@@ -30,6 +31,7 @@ pub struct DataModelBuilder {
     pub(super) default_lookup_resolution: Option<String>,
     pub(super) date_table: Option<String>,
     pub(super) script_functions: Vec<ScriptFunction>,
+    pub(super) security_roles: Vec<SecurityRole>,
 }
 
 impl DataModelBuilder {
@@ -122,6 +124,39 @@ impl DataModelBuilder {
     /// ```
     pub fn add_script_function(mut self, function: ScriptFunction) -> Self {
         self.script_functions.push(function);
+        self
+    }
+
+    /// Add a security role to the model.
+    ///
+    /// The role names per-table row filters; a host activates it on the
+    /// engine via
+    /// [`Engine::set_active_role`](crate) after authenticating the user, and
+    /// every query is then restricted to the rows the role permits. At
+    /// `build()` time the engine validates that the role name is unique and a
+    /// legal identifier, and that each filter references a table and column
+    /// that exist in the model.
+    ///
+    /// ```
+    /// use engine_core::compute::expression::ComparisonOp;
+    /// use engine_core::model::{Column, DataModel, SecurityRole, Table};
+    /// use engine_core::types::DataType;
+    ///
+    /// let model = DataModel::builder()
+    ///     .add_table(Table::new("Geography", vec![
+    ///         Column::new("id", DataType::Int64),
+    ///         Column::new("region", DataType::String),
+    ///     ]).unwrap())
+    ///     .add_security_role(
+    ///         SecurityRole::new("WestOnly")
+    ///             .with_filter("Geography", "region", ComparisonOp::Equal, "West"),
+    ///     )
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(model.security_roles().len(), 1);
+    /// ```
+    pub fn add_security_role(mut self, role: SecurityRole) -> Self {
+        self.security_roles.push(role);
         self
     }
 
@@ -1022,6 +1057,52 @@ impl DataModelBuilder {
             }
         }
 
+        // 12. Validate security roles. Roles travel inside shared model files
+        // (a trust boundary) AND are a security control, so each is checked
+        // here at build time:
+        // - the role name is a unique, legal identifier (it is surfaced in
+        //   errors and folded into the query-cache key);
+        // - each filter predicate validates for safe SQL rendering and
+        //   references a table and column that exist in the model — a role
+        //   that pointed at a phantom column would silently restrict nothing.
+        {
+            let mut seen_roles = std::collections::HashSet::new();
+            for role in &self.security_roles {
+                validate_identifier(role.name(), "security role")?;
+                if !seen_roles.insert(role.name()) {
+                    return Err(EngineError::DuplicateName(format!(
+                        "Duplicate security role '{}'",
+                        role.name()
+                    )));
+                }
+                for filter in role.table_filters() {
+                    // Safe SQL rendering of the predicate's raw table qualifier.
+                    filter.validate()?;
+                    // The referenced table must exist...
+                    let table = self
+                        .tables
+                        .iter()
+                        .find(|t| t.name() == filter.table)
+                        .ok_or_else(|| {
+                            EngineError::InvalidData(format!(
+                                "security role '{}' filters unknown table '{}'",
+                                role.name(),
+                                filter.table
+                            ))
+                        })?;
+                    // ...and the referenced column must exist on it.
+                    if table.column(&filter.column).is_err() {
+                        return Err(EngineError::InvalidData(format!(
+                            "security role '{}' filters unknown column '{}' on table '{}'",
+                            role.name(),
+                            filter.column,
+                            filter.table
+                        )));
+                    }
+                }
+            }
+        }
+
         let model = DataModel {
             // Freshly built models always carry the current format version
             // (deserialized legacy models keep their stored value; note
@@ -1041,6 +1122,7 @@ impl DataModelBuilder {
             default_lookup_resolution: self.default_lookup_resolution,
             date_table: self.date_table,
             script_functions: self.script_functions,
+            security_roles: self.security_roles,
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

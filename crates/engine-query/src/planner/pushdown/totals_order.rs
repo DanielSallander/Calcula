@@ -266,7 +266,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(msg.contains("must be one of the group_by columns"), "{msg}");
@@ -287,7 +287,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(
@@ -314,7 +314,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert_eq!(
@@ -343,7 +343,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert_eq!(
@@ -372,7 +372,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert_eq!(
@@ -401,7 +401,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation {
                 order_by, limit, ..
@@ -422,7 +422,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "id")],
             ..Default::default()
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
     }
 
@@ -439,7 +439,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedJoinAggregation {
                 order_by, limit, ..
@@ -466,7 +466,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation {
                 order_by, limit, ..
@@ -503,7 +503,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert_eq!(
@@ -540,7 +540,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert!(fetch.rollup_totals);
@@ -555,7 +555,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Sales", "region")],
             ..Default::default()
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert!(!fetch.rollup_totals);
@@ -580,14 +580,14 @@ mod tests {
         };
 
         // Sanity: without totals this request pushes the join.
-        let plan = PushdownPlanner::plan(&base, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&base, &model, &registry, &[]).unwrap();
         assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
 
         let request = QueryRequest {
             totals: crate::request::TotalsMode::Rollup,
             ..base
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation { totals, .. } => {
                 assert_eq!(totals, crate::request::TotalsMode::Rollup);
@@ -609,7 +609,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(msg.contains("lookup columns"), "unexpected message: {msg}");
@@ -643,7 +643,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(msg.contains("31"), "unexpected message: {msg}");

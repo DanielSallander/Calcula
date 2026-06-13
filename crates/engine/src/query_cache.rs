@@ -246,23 +246,42 @@ fn batch_list_size(batches: &[RecordBatch]) -> usize {
 // --- Query hashing ---
 
 /// Compute a deterministic cache key for a query request + model version +
-/// UDF registry identity.
+/// UDF registry identity + active security role.
 ///
 /// The key incorporates all fields that affect query results: measures,
 /// group_by, filters, lookups, order_by, limit, totals mode, the model
-/// version (which changes on model edits and data refreshes), and the UDF
+/// version (which changes on model edits and data refreshes), the UDF
 /// registry's identity hash (which changes when a UDF is registered,
 /// replaced, or version-bumped — different function behavior must never be
-/// served from results computed with the old behavior).
+/// served from results computed with the old behavior), and the active
+/// security role (`role_identity`).
+///
+/// **`role_identity` is data-leak-critical.** Two different active roles
+/// restrict to different row universes, so they must produce different keys —
+/// otherwise one role could be served another's cached result. `None` is an
+/// explicit no-role sentinel, distinct from every named role, hashed under its
+/// own discriminant so a role literally named with the empty string still
+/// cannot collide with "no role".
 pub(crate) fn query_cache_key(
     request: &QueryRequest,
     model_version: u64,
     udf_identity: u64,
+    role_identity: Option<&str>,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
     model_version.hash(&mut hasher);
     udf_identity.hash(&mut hasher);
+
+    // Active security role. A presence discriminant first so that no named
+    // role can ever collide with the no-role sentinel.
+    match role_identity {
+        Some(name) => {
+            1u8.hash(&mut hasher);
+            name.hash(&mut hasher);
+        }
+        None => 0u8.hash(&mut hasher),
+    }
 
     // Measures (order matters).
     request.measures.len().hash(&mut hasher);
@@ -529,27 +548,39 @@ mod tests {
     fn same_request_same_hash() {
         let r1 = make_request(&["Revenue", "Profit"]);
         let r2 = make_request(&["Revenue", "Profit"]);
-        assert_eq!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_eq!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
     fn different_measures_different_hash() {
         let r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Profit"]);
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
     fn measure_order_matters() {
         let r1 = make_request(&["Revenue", "Profit"]);
         let r2 = make_request(&["Profit", "Revenue"]);
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
     fn different_model_version_different_hash() {
         let r = make_request(&["Revenue"]);
-        assert_ne!(query_cache_key(&r, 0, 0), query_cache_key(&r, 1, 0));
+        assert_ne!(
+            query_cache_key(&r, 0, 0, None),
+            query_cache_key(&r, 1, 0, None)
+        );
     }
 
     #[test]
@@ -558,7 +589,10 @@ mod tests {
         let r2 = make_request(&["Revenue"]);
         r1.group_by.push(ColumnRef::new("products", "category"));
         // r2 has no group_by.
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
@@ -570,7 +604,10 @@ mod tests {
             operator: engine_connectors::traits::FilterOperator::Equal,
             value: "US".to_string(),
         });
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
@@ -578,7 +615,10 @@ mod tests {
         let mut r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Revenue"]);
         r1.order_by.push(OrderByClause::measure_desc("Revenue"));
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
@@ -587,7 +627,10 @@ mod tests {
         let mut r2 = make_request(&["Revenue"]);
         r1.order_by.push(OrderByClause::measure("Revenue"));
         r2.order_by.push(OrderByClause::measure_desc("Revenue"));
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
@@ -597,7 +640,10 @@ mod tests {
         let mut r2 = make_request(&["Revenue"]);
         r1.order_by.push(OrderByClause::column("t", "x"));
         r2.order_by.push(OrderByClause::measure("x"));
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
@@ -605,8 +651,30 @@ mod tests {
         // Registering / version-bumping a UDF changes the registry identity,
         // which must change the cache key for the same request.
         let r = make_request(&["Revenue"]);
-        assert_ne!(query_cache_key(&r, 0, 1), query_cache_key(&r, 0, 2));
-        assert_eq!(query_cache_key(&r, 0, 1), query_cache_key(&r, 0, 1));
+        assert_ne!(
+            query_cache_key(&r, 0, 1, None),
+            query_cache_key(&r, 0, 2, None)
+        );
+        assert_eq!(
+            query_cache_key(&r, 0, 1, None),
+            query_cache_key(&r, 0, 1, None)
+        );
+    }
+
+    #[test]
+    fn active_role_affects_hash_three_distinct_keys() {
+        // Data-leak guard: the same request under two different active roles
+        // (and under no role) must produce three distinct keys, so one role's
+        // restricted result can never be served to another.
+        let r = make_request(&["Revenue"]);
+        let no_role = query_cache_key(&r, 0, 0, None);
+        let west = query_cache_key(&r, 0, 0, Some("WestOnly"));
+        let east = query_cache_key(&r, 0, 0, Some("EastOnly"));
+        assert_ne!(no_role, west);
+        assert_ne!(no_role, east);
+        assert_ne!(west, east);
+        // Same role + request: stable key (so caching actually works).
+        assert_eq!(west, query_cache_key(&r, 0, 0, Some("WestOnly")));
     }
 
     #[test]
@@ -616,7 +684,10 @@ mod tests {
         r1.totals = TotalsMode::Rollup;
         // A rollup result (extra subtotal rows + __grouping_id column) must
         // never be served for a detail-only request, and vice versa.
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
     }
 
     #[test]
@@ -633,24 +704,24 @@ mod tests {
         r_cal2.hierarchy_group_by = Some(HierarchyGroupBy::new("Calendar", 2));
 
         assert_ne!(
-            query_cache_key(&r_none, 0, 0),
-            query_cache_key(&r_geo2, 0, 0)
+            query_cache_key(&r_none, 0, 0, None),
+            query_cache_key(&r_geo2, 0, 0, None)
         );
         assert_ne!(
-            query_cache_key(&r_geo2, 0, 0),
-            query_cache_key(&r_geo3, 0, 0)
+            query_cache_key(&r_geo2, 0, 0, None),
+            query_cache_key(&r_geo3, 0, 0, None)
         );
         assert_ne!(
-            query_cache_key(&r_geo2, 0, 0),
-            query_cache_key(&r_cal2, 0, 0)
+            query_cache_key(&r_geo2, 0, 0, None),
+            query_cache_key(&r_cal2, 0, 0, None)
         );
 
         // Same hierarchy + depth: stable key.
         let mut r_geo2b = make_request(&["Revenue"]);
         r_geo2b.hierarchy_group_by = Some(HierarchyGroupBy::new("Geo", 2));
         assert_eq!(
-            query_cache_key(&r_geo2, 0, 0),
-            query_cache_key(&r_geo2b, 0, 0)
+            query_cache_key(&r_geo2, 0, 0, None),
+            query_cache_key(&r_geo2b, 0, 0, None)
         );
     }
 
@@ -659,11 +730,17 @@ mod tests {
         let mut r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Revenue"]);
         r1.limit = Some(10);
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r2, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r2, 0, 0, None)
+        );
 
         let mut r3 = make_request(&["Revenue"]);
         r3.limit = Some(20);
-        assert_ne!(query_cache_key(&r1, 0, 0), query_cache_key(&r3, 0, 0));
+        assert_ne!(
+            query_cache_key(&r1, 0, 0, None),
+            query_cache_key(&r3, 0, 0, None)
+        );
     }
 
     #[test]

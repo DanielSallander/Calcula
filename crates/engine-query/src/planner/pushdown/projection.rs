@@ -153,7 +153,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // Sales: measure column + fact-side join key. The unused "id" column
         // must NOT be fetched.
@@ -250,7 +250,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         assert_eq!(
             fetch_for(&plan, "Dates").columns,
@@ -329,7 +329,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // The QUERY's aggregate column and join key must be fetched on Sales;
         // its group-by columns (plus join key) on Dates. The unused "day"
@@ -396,7 +396,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // The calculated column's physical inputs are fetched; the calculated
         // column itself does not exist at the source and must not be requested.
@@ -465,7 +465,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // Key (group-by inferred), value, resolution reference (sort_order),
         // and join key — but not "unused".
@@ -528,7 +528,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         assert_eq!(
             fetch_for(&plan, "Products").columns,
@@ -557,7 +557,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // "id" exists in both tables; the filter heuristic applies it to both,
         // so both projections include it.
@@ -671,7 +671,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // The in-memory table is served from cache — no projection.
         assert!(fetch_for(&plan, "Products").columns.is_empty());
@@ -695,7 +695,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
         let projected = node
             .properties
             .iter()
@@ -748,7 +749,7 @@ mod tests {
         };
 
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &fallback_model, &registry).unwrap();
+            PushdownPlanner::plan_explained(&request, &fallback_model, &registry, &[]).unwrap();
         let fallbacks = node
             .properties
             .iter()

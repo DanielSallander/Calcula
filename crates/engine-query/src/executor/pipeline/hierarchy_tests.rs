@@ -125,8 +125,8 @@ async fn run(
     request: QueryRequest,
 ) -> QueryResult<Vec<RecordBatch>> {
     let (model, cache, registry) = fixture(behavior, state_stopper, rows);
-    let plan = PushdownPlanner::plan(&request, &model, &registry)?;
-    QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None).await
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[])?;
+    QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[]).await
 }
 
 fn geo_request(depth: usize) -> QueryRequest {
@@ -531,8 +531,8 @@ async fn ragged_hierarchy_with_window_measure_errors_cleanly() {
         hierarchy_group_by: Some(HierarchyGroupBy::new("Geo", 2)),
         ..Default::default()
     };
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None)
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+    let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
         .await
         .unwrap_err();
     match err {

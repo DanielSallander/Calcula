@@ -9,6 +9,8 @@ use std::time::Instant;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::model::DataModel;
 
+use engine_core::compute::expression::FilterPredicate;
+
 use crate::error::QueryResult;
 use crate::planner::pushdown::QueryPlan;
 use crate::planner::PushdownPlanner;
@@ -21,13 +23,18 @@ impl PushdownPlanner {
     /// This wraps [`PushdownPlanner::plan`] with timing and metadata collection.
     /// The returned [`PlanNode`] describes which pushdown strategy was chosen
     /// and why.
+    ///
+    /// `role_filters` are the active security role's predicates (empty when no
+    /// role is active); see [`PushdownPlanner::plan`].
     pub fn plan_explained(
         request: &QueryRequest,
         model: &DataModel,
         registry: &SourceRegistry,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<(QueryPlan, PlanNode)> {
         let start = Instant::now();
-        let (plan, projection) = Self::plan_with_diagnostics(request, model, registry)?;
+        let (plan, projection) =
+            Self::plan_with_diagnostics(request, model, registry, role_filters)?;
         let elapsed = start.elapsed();
 
         // Reconstruct decision reasoning from the plan and request.
@@ -305,7 +312,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
 
         assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
         assert_eq!(node.operation, PlanOperation::PushdownDecision);
@@ -339,7 +347,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
 
         assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
 
@@ -366,7 +375,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
 
         assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
 
@@ -391,7 +401,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
         assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
         let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
         assert_eq!(totals.value, PlanValue::Text("rollup".into()));
@@ -417,7 +428,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
         assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
         let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
         assert_eq!(totals.value, PlanValue::Text("rollup".into()));
@@ -437,7 +449,8 @@ mod tests {
             group_by: vec![ColumnRef::new("Products", "category")],
             ..Default::default()
         };
-        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
         assert!(node.properties.iter().all(|p| p.key != "totals"));
     }
 
@@ -479,7 +492,8 @@ mod tests {
             hierarchy_group_by: Some(crate::request::HierarchyGroupBy::new("Geo", 2)),
             ..Default::default()
         };
-        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
 
         let prop = |key: &str| {
             node.properties
@@ -505,7 +519,8 @@ mod tests {
             measures: vec!["TotalAmount".into()],
             ..Default::default()
         };
-        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
         assert!(node.properties.iter().all(|p| p.key != "hierarchy"));
     }
 
@@ -550,7 +565,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (_plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
 
         let reason = node.properties.iter().find(|p| p.key == "reason").unwrap();
         match &reason.value {

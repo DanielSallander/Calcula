@@ -302,7 +302,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation { .. } => {
@@ -361,7 +361,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation { .. } => {
@@ -420,7 +420,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation { .. } => {
@@ -494,7 +494,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation { .. } => {
@@ -568,7 +568,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation { .. } => {
@@ -629,7 +629,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation { .. } => {

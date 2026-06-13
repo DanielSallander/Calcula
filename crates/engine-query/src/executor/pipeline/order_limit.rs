@@ -258,8 +258,8 @@ mod order_and_limit {
     /// Plan + execute a request against the in-memory fixture.
     async fn run(request: QueryRequest) -> Vec<RecordBatch> {
         let (model, cache, registry) = fixture();
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-        QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None)
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+        QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
             .await
             .unwrap()
     }
@@ -532,8 +532,8 @@ mod totals {
     /// Plan + execute a request against the in-memory fixture.
     async fn run(request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
         let (model, cache, registry) = fixture();
-        let plan = PushdownPlanner::plan(&request, &model, &registry)?;
-        QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None).await
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[])?;
+        QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[]).await
     }
 
     /// Combine batches and extract a nullable string column by name.
@@ -740,8 +740,8 @@ mod totals {
             totals: TotalsMode::Rollup,
             ..Default::default()
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-        let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None)
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+        let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
             .await
             .unwrap_err();
         match err {
@@ -802,6 +802,7 @@ mod totals {
             Some(&cache),
             None,
             None,
+            &[],
             None,
             &tokio_util::sync::CancellationToken::new(),
         )

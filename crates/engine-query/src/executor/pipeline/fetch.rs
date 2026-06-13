@@ -29,13 +29,21 @@ pub(super) async fn filter_cached_batch(
     filter_ctx.register_batch("_cached", batch.clone())?;
 
     let mut conditions = Vec::new();
+    let schema = batch.schema();
     for filter in filters {
-        // Quote the value as a string literal for the WHERE clause.
+        // Render the comparison value as a literal typed to match the column,
+        // so DataFusion compares values numerically/temporally rather than
+        // lexically. The previous `CAST(col AS TEXT) op '<value>'` form made
+        // every comparison **lexical**, which silently broke ordering
+        // predicates on numeric and date columns (e.g. `amount >= '30'`
+        // dropped `100` because `"100" < "30"` as text). This matters for
+        // row-level-security filters, which may use `>`, `>=`, `<`, `<=`.
+        let rhs = literal_for_column(&schema, &filter.column, &filter.value);
         conditions.push(format!(
-            "CAST({} AS TEXT) {} {}",
+            "{} {} {}",
             quote_ident_double(&filter.column),
             filter.operator.as_sql(),
-            sql_quote_literal(&filter.value)
+            rhs
         ));
     }
 
@@ -47,6 +55,65 @@ pub(super) async fn filter_cached_batch(
         Ok(RecordBatch::new_empty(batch.schema()))
     } else {
         Ok(concat_batches(&batch.schema(), &batches)?)
+    }
+}
+
+/// Render a filter value as a SQL literal typed to match `column`'s Arrow type
+/// in `schema`.
+///
+/// For numeric and boolean columns the value is emitted **unquoted** (when it
+/// parses as the matching kind) so DataFusion compares it numerically /
+/// logically rather than lexically. Everything else — strings, dates,
+/// timestamps, or a value that does not parse for a numeric/boolean column —
+/// falls back to a safely-quoted string literal, which DataFusion coerces to
+/// the column type (and which keeps string equality working as before).
+fn literal_for_column(schema: &arrow::datatypes::Schema, column: &str, value: &str) -> String {
+    use arrow::datatypes::DataType;
+
+    let Ok(field) = schema.field_with_name(column) else {
+        // Unknown column: quote defensively. The subsequent SQL will error on
+        // the missing column rather than silently mis-filtering.
+        return sql_quote_literal(value);
+    };
+    match field.data_type() {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => {
+            if value.parse::<i64>().is_ok() {
+                value.to_string()
+            } else {
+                sql_quote_literal(value)
+            }
+        }
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+            if value.parse::<f64>().is_ok() {
+                value.to_string()
+            } else {
+                sql_quote_literal(value)
+            }
+        }
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => {
+            // Numeric literal (DataFusion parses it into the decimal type);
+            // fall back to a quoted literal if it is not a bare number.
+            if value.parse::<f64>().is_ok() {
+                value.to_string()
+            } else {
+                sql_quote_literal(value)
+            }
+        }
+        DataType::Boolean => match value.to_ascii_lowercase().as_str() {
+            "true" | "false" => value.to_ascii_lowercase(),
+            _ => sql_quote_literal(value),
+        },
+        // Strings, dates, timestamps, dictionaries, etc.: a quoted literal,
+        // which DataFusion coerces to the column type (and string equality
+        // stays correct).
+        _ => sql_quote_literal(value),
     }
 }
 
@@ -558,6 +625,7 @@ mod tests {
             Some(&cache),
             None,
             None,
+            &[],
             Some(&mut plan),
             &tokio_util::sync::CancellationToken::new(),
         )

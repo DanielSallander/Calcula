@@ -6,6 +6,7 @@ mod context_filters;
 mod hierarchy;
 mod lookups;
 mod projection;
+mod security;
 mod source_sql;
 #[cfg(test)]
 mod test_util;
@@ -14,6 +15,7 @@ mod totals_order;
 pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
 
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
+use engine_core::compute::expression::FilterPredicate;
 use engine_core::compute::measure::Measure;
 use engine_core::model::DataModel;
 
@@ -29,6 +31,7 @@ use context_filters::compute_pushable_context_filters;
 pub(crate) use hierarchy::resolve_hierarchy;
 use lookups::resolve_lookups;
 use projection::compute_table_projections;
+use security::{rls_relevance, role_conditions_for_table};
 use source_sql::{aggregate_op_to_function, build_join_aggregation_request, has_unpushable_ops};
 use totals_order::{
     build_pushed_order_by, canonical_effective_order, order_requires_sort_substitution,
@@ -132,12 +135,24 @@ impl PushdownPlanner {
     /// The planner resolves measure definitions from the `DataModel`, checks
     /// which tables are involved and whether they share a data source, and
     /// decides whether to push the aggregation to the source or compute locally.
+    ///
+    /// `role_filters` are the active security role's predicates (empty when no
+    /// role is active). They are applied as a sealed pre-aggregation filter on
+    /// every table they target; see the [`security`] module for the
+    /// enforcement model.
     pub fn plan(
         request: &QueryRequest,
         model: &DataModel,
         registry: &SourceRegistry,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<QueryPlan> {
-        Self::plan_with_cached(request, model, registry, &std::collections::HashSet::new())
+        Self::plan_with_cached(
+            request,
+            model,
+            registry,
+            &std::collections::HashSet::new(),
+            role_filters,
+        )
     }
 
     /// Analyze a query request and produce a plan along with column-projection
@@ -148,12 +163,14 @@ impl PushdownPlanner {
         request: &QueryRequest,
         model: &DataModel,
         registry: &SourceRegistry,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
         Self::plan_with_cached_diagnostics(
             request,
             model,
             registry,
             &std::collections::HashSet::new(),
+            role_filters,
         )
     }
 
@@ -165,8 +182,16 @@ impl PushdownPlanner {
         model: &DataModel,
         registry: &SourceRegistry,
         cached_tables: &std::collections::HashSet<String>,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<QueryPlan> {
-        Ok(Self::plan_with_cached_diagnostics(request, model, registry, cached_tables)?.0)
+        Ok(Self::plan_with_cached_diagnostics(
+            request,
+            model,
+            registry,
+            cached_tables,
+            role_filters,
+        )?
+        .0)
     }
 
     /// Analyze a query request and produce a plan plus projection diagnostics,
@@ -183,6 +208,7 @@ impl PushdownPlanner {
         model: &DataModel,
         registry: &SourceRegistry,
         cached_tables: &std::collections::HashSet<String>,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
         if request.measures.is_empty() {
             return Err(QueryError::InvalidQuery(
@@ -306,6 +332,33 @@ impl PushdownPlanner {
         // AND no measure has context operations (keep/clear/reset/etc.)
         // AND no measure references table variables (which need local context resolution).
         let unique_tables: std::collections::HashSet<&str> = all_tables.iter().copied().collect();
+
+        // --- Row-level security relevance ---
+        //
+        // Determine whether the active role's predicates touch this query and,
+        // if so, which role-filtered dimension tables must be pulled into the
+        // fetch set so their restriction propagates to the fact (see the
+        // `security` module). An RLS-active query that touches a role-filtered
+        // table is routed through LocalAggregation: the single-table and
+        // pushed-join fast paths cannot guarantee the dimension→fact
+        // restriction when the dimension is not otherwise in the query, so we
+        // forgo them (documented performance trade-off — one extra fetch buys
+        // a correct, un-bypassable restriction).
+        let query_table_set: std::collections::HashSet<String> =
+            unique_tables.iter().map(|t| t.to_string()).collect();
+        let (rls_relevant, rls_extra_tables) =
+            rls_relevance(role_filters, &query_table_set, &measure_tables, model)?;
+
+        // Force the relationship-aware LocalAggregation path when RLS must
+        // pull a role-filtered dimension into the query that is not otherwise
+        // present: only that path's two-phase IN-propagation restricts the
+        // fact to rows joined to permitted dimension rows. When every
+        // role-filtered table is already in the query, the pushed paths inject
+        // the predicates into their own WHERE and remain correct (an INNER
+        // JOIN / single-table WHERE restricts in-statement), so they stay
+        // eligible.
+        let rls_force_local = rls_relevant && !rls_extra_tables.is_empty();
+
         let all_simple = measures.iter().all(|m| m.is_simple_aggregate());
         let any_context_ops = measures.iter().any(|m| m.expression().has_context_ops());
         let any_table_var_refs = measures
@@ -335,6 +388,7 @@ impl PushdownPlanner {
             && lookup_specs.is_empty()
             && !any_in_memory
             && !hierarchy_needs_local
+            && !rls_force_local
         {
             // ORDER BY / LIMIT are rendered into the pushed SQL. Sort-by
             // substitution uses `MIN(sort_col)` on the same (single) table.
@@ -363,10 +417,17 @@ impl PushdownPlanner {
                 let group_by: Vec<String> =
                     request.group_by.iter().map(|c| c.column.clone()).collect();
 
+                // Seal the active role's predicates into the pushed WHERE for
+                // this (single) table. They go straight into the FetchRequest
+                // filters — never through ContextResolver — so RESET/CLEAR
+                // cannot remove them.
+                let mut fetch_filters = request.filters.clone();
+                fetch_filters.extend(role_conditions_for_table(role_filters, table_name));
+
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
-                    filters: request.filters.clone(),
+                    filters: fetch_filters,
                     group_by,
                     aggregates,
                     order_by: pushed_order,
@@ -387,6 +448,23 @@ impl PushdownPlanner {
                 ));
             }
         }
+
+        // Role predicates for the pushed-join paths. The role's conditions for
+        // every table in the query are appended to the query filters; inside a
+        // single JOIN statement they restrict the named table directly and the
+        // fact transitively through the INNER JOIN. Only reached when
+        // `rls_force_local` is false (every role-filtered table is already in
+        // the query), so no dimension needs pulling in. Empty when no role is
+        // active.
+        let join_role_filters: Vec<FilterCondition> = unique_tables
+            .iter()
+            .flat_map(|t| role_conditions_for_table(role_filters, t))
+            .collect();
+        let build_join_filters = || {
+            let mut f = request.filters.clone();
+            f.extend(join_role_filters.iter().cloned());
+            f
+        };
 
         // Whether any measure contains operations that cannot be expressed
         // in source SQL: RESET/CLEAR_INNER/USERELATIONSHIP-style context
@@ -414,12 +492,13 @@ impl PushdownPlanner {
             && !needs_sort_substitution
             && request.totals == TotalsMode::None
             && !hierarchy_needs_local
+            && !rls_force_local
         {
             let table_name = all_tables[0];
             if let Ok(req) = build_join_aggregation_request(
                 &measures,
                 &request.group_by,
-                &request.filters,
+                &build_join_filters(),
                 &all_tables,
                 model,
                 registry,
@@ -461,6 +540,7 @@ impl PushdownPlanner {
             && !needs_sort_substitution
             && request.totals == TotalsMode::None
             && !hierarchy_needs_local
+            && !rls_force_local
         {
             // Check if all tables share the same connector.
             let first_table = all_tables[0];
@@ -474,7 +554,7 @@ impl PushdownPlanner {
                     if let Ok(req) = build_join_aggregation_request(
                         &measures,
                         &request.group_by,
-                        &request.filters,
+                        &build_join_filters(),
                         &all_tables,
                         model,
                         registry,
@@ -571,6 +651,14 @@ impl PushdownPlanner {
                     table_filters.extend(context_filters.iter().cloned());
                 }
 
+                // Seal the active role's predicates for this table into its
+                // fetch filters. For a role-filtered dimension this is what
+                // makes the existing two-phase IN-propagation restrict the
+                // related fact: the dimension is fetched with the role filter,
+                // and only its surviving join keys reach the fact. These never
+                // pass through ContextResolver.
+                table_filters.extend(role_conditions_for_table(role_filters, table_name));
+
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
@@ -580,6 +668,26 @@ impl PushdownPlanner {
                 };
 
                 fetches.push((table_name.to_string(), fetch));
+            }
+        }
+
+        // Pull in role-filtered dimension tables that are NOT otherwise in the
+        // query. Each is fetched (full projection — we cannot statically know
+        // which of its columns a later phase needs beyond the join key, and a
+        // dimension is small) with the role's predicates as filters, so the
+        // LocalAggregation two-phase IN-propagation restricts the related fact
+        // to rows joined to permitted dimension rows — even though the
+        // dimension appears in neither group_by nor query filters.
+        for extra_table in &rls_extra_tables {
+            if seen_tables.insert(extra_table.as_str()) {
+                let binding = registry.binding_for(extra_table)?;
+                let fetch = FetchRequest {
+                    schema: Some(binding.schema.clone()),
+                    table: binding.table.clone(),
+                    filters: role_conditions_for_table(role_filters, extra_table),
+                    ..Default::default()
+                };
+                fetches.push((extra_table.clone(), fetch));
             }
         }
 
@@ -637,7 +745,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedAggregation {
@@ -669,7 +777,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedAggregation { request, .. } => {
@@ -692,7 +800,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::PushedJoinAggregation {
@@ -721,7 +829,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::LocalAggregation { fetches, .. } => {
@@ -744,7 +852,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = PushdownPlanner::plan(&request, &model, &registry);
+        let result = PushdownPlanner::plan(&request, &model, &registry, &[]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("NonExistent"));
@@ -763,7 +871,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = PushdownPlanner::plan(&request, &model, &registry);
+        let result = PushdownPlanner::plan(&request, &model, &registry, &[]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Sales"));
@@ -782,7 +890,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::LocalAggregation {
@@ -814,7 +922,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         match plan {
             QueryPlan::LocalAggregation { fetches, .. } => {
@@ -878,7 +986,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // Context ops force local aggregation even though it's single-table
         match plan {
@@ -925,7 +1033,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
         // UDF calls are unpushable: even a single-table compound measure must
         // not become a PushedJoinAggregation (the source cannot render the
@@ -997,7 +1105,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation { fetches, .. } => {
                 let sales_fetch = fetches.iter().find(|(n, _)| n == "Sales").unwrap();
@@ -1024,7 +1132,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = PushdownPlanner::plan(&request, &model, &registry);
+        let result = PushdownPlanner::plan(&request, &model, &registry, &[]);
         assert!(result.is_err());
     }
 }

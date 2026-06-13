@@ -690,8 +690,9 @@ fn accepts_valid_script_function() {
         .unwrap();
     assert_eq!(model.script_functions().len(), 1);
     assert_eq!(model.script_function("markup").unwrap().name(), "markup");
-    // Built model carries the v4 format version (script_functions bump).
-    assert_eq!(model.format_version(), 4);
+    // Built model carries the current format version (now v5 after the
+    // security_roles bump).
+    assert_eq!(model.format_version(), MODEL_FORMAT_VERSION);
 }
 
 #[test]

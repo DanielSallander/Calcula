@@ -257,7 +257,7 @@ mod tests {
             hierarchy_group_by: Some(HierarchyGroupBy::new("NoSuchHierarchy", 1)),
             ..Default::default()
         };
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         assert!(err.to_string().contains("NoSuchHierarchy"), "{err}");
     }
 
@@ -265,7 +265,7 @@ mod tests {
     fn depth_zero_is_rejected() {
         let model = geo_model(RaggedBehavior::ShowBlanks, None);
         let registry = mock_registry_single(0);
-        let err = PushdownPlanner::plan(&geo_request(0), &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&geo_request(0), &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(msg.contains("depth must be at least 1"), "{msg}");
@@ -278,7 +278,7 @@ mod tests {
     fn depth_beyond_level_count_is_rejected() {
         let model = geo_model(RaggedBehavior::ShowBlanks, None);
         let registry = mock_registry_single(0);
-        let err = PushdownPlanner::plan(&geo_request(4), &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&geo_request(4), &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(msg.contains("3 level(s), requested depth 4"), "{msg}");
@@ -295,7 +295,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Sales", "STATE")],
             ..geo_request(2)
         };
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         match err {
             QueryError::InvalidQuery(msg) => {
                 assert!(msg.contains("appended automatically"), "{msg}");
@@ -309,7 +309,7 @@ mod tests {
             group_by: vec![ColumnRef::new("Sales", "city")],
             ..geo_request(2)
         };
-        assert!(PushdownPlanner::plan(&request, &model, &registry).is_ok());
+        assert!(PushdownPlanner::plan(&request, &model, &registry, &[]).is_ok());
     }
 
     /// Depth 2 of a 3-level hierarchy appends exactly the first two level
@@ -338,7 +338,7 @@ mod tests {
     fn show_blanks_hierarchy_is_pushed_with_level_columns() {
         let model = geo_model(RaggedBehavior::ShowBlanks, None);
         let registry = mock_registry_single(0);
-        let plan = PushdownPlanner::plan(&geo_request(2), &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&geo_request(2), &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::PushedAggregation { request: fetch, .. } => {
                 assert_eq!(
@@ -357,7 +357,7 @@ mod tests {
     fn repeat_parent_forces_local_aggregation() {
         let model = geo_model(RaggedBehavior::RepeatParent, None);
         let registry = mock_registry_single(0);
-        let plan = PushdownPlanner::plan(&geo_request(2), &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&geo_request(2), &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation {
                 group_by,
@@ -389,11 +389,11 @@ mod tests {
         let registry = mock_registry_single(0);
 
         // Depth 2 includes the stoppered state level → local.
-        let plan = PushdownPlanner::plan(&geo_request(2), &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&geo_request(2), &model, &registry, &[]).unwrap();
         assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
 
         // Depth 1 (country only) excludes it → still pushed.
-        let plan = PushdownPlanner::plan(&geo_request(1), &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&geo_request(1), &model, &registry, &[]).unwrap();
         assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
     }
 
@@ -411,7 +411,7 @@ mod tests {
             lookups: vec![crate::request::LookupColumn::new("Sales", "city")],
             ..geo_request(1)
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation { lookup_specs, .. } => {
                 assert_eq!(lookup_specs.len(), 1);
@@ -426,7 +426,7 @@ mod tests {
             lookups: vec![crate::request::LookupColumn::new("Sales", "city")],
             ..geo_request(2)
         };
-        let err = PushdownPlanner::plan(&request, &model, &registry).unwrap_err();
+        let err = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap_err();
         assert!(
             err.to_string().contains("Multiple group_by columns")
                 && err.to_string().contains("Specify key_column explicitly"),
@@ -489,7 +489,7 @@ mod tests {
             hierarchy_group_by: Some(HierarchyGroupBy::new("Geo", 2)),
             ..Default::default()
         };
-        let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
         match plan {
             QueryPlan::LocalAggregation {
                 fetches, group_by, ..

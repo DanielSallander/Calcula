@@ -225,7 +225,7 @@ async fn end_to_end_pushed_aggregation() {
         ..Default::default()
     };
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
     // Should be pushed to source (single table).
     assert!(matches!(
@@ -233,7 +233,7 @@ async fn end_to_end_pushed_aggregation() {
         engine_query::QueryPlan::PushedAggregation { .. }
     ));
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None, &[])
         .await
         .unwrap();
 
@@ -258,8 +258,8 @@ async fn end_to_end_pushed_aggregation_no_groupby() {
         ..Default::default()
     };
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None, &[])
         .await
         .unwrap();
 
@@ -283,7 +283,7 @@ async fn end_to_end_local_aggregation_star_schema() {
         ..Default::default()
     };
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
     // Same-source star schema → pushed join aggregation.
     assert!(matches!(
@@ -291,7 +291,7 @@ async fn end_to_end_local_aggregation_star_schema() {
         engine_query::QueryPlan::PushedJoinAggregation { .. }
     ));
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None, &[])
         .await
         .unwrap();
 
@@ -321,8 +321,8 @@ async fn end_to_end_pushed_with_filter() {
         ..Default::default()
     };
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None, &[])
         .await
         .unwrap();
 
@@ -347,7 +347,7 @@ async fn end_to_end_cross_source_star_schema() {
         ..Default::default()
     };
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
 
     // Cross-source: must be local aggregation.
     assert!(matches!(
@@ -355,7 +355,7 @@ async fn end_to_end_cross_source_star_schema() {
         engine_query::QueryPlan::LocalAggregation { .. }
     ));
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None, &[])
         .await
         .unwrap();
 
@@ -384,8 +384,8 @@ async fn end_to_end_cross_source_no_groupby() {
         ..Default::default()
     };
 
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None)
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, None, None, None, &[])
         .await
         .unwrap();
 

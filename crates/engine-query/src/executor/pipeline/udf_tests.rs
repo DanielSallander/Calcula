@@ -118,15 +118,23 @@ async fn udf_measure_evaluates_through_full_pipeline() {
         measures: vec!["Doubled".into()],
         ..Default::default()
     };
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
     assert!(
         matches!(plan, QueryPlan::LocalAggregation { .. }),
         "UDF measures must be evaluated locally"
     );
 
-    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, Some(&udfs))
-        .await
-        .unwrap();
+    let batches = QueryExecutor::execute(
+        &plan,
+        &model,
+        &registry,
+        Some(&cache),
+        None,
+        Some(&udfs),
+        &[],
+    )
+    .await
+    .unwrap();
 
     // SUM(double(amount)) = 2 * 65 = 130.
     assert!((scalar_result(&batches) - 130.0).abs() < 1e-9);
@@ -143,10 +151,18 @@ async fn udf_measure_grouped_evaluates_through_full_pipeline() {
         group_by: vec![ColumnRef::new("fact_sales", "region")],
         ..Default::default()
     };
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, Some(&udfs))
-        .await
-        .unwrap();
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(
+        &plan,
+        &model,
+        &registry,
+        Some(&cache),
+        None,
+        Some(&udfs),
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Per-region: East 2*(10+5)=30, South 2*30=60, West 2*20=40 (group-by order).
     let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
@@ -170,8 +186,8 @@ async fn udf_measure_without_registry_fails() {
         measures: vec!["Doubled".into()],
         ..Default::default()
     };
-    let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
-    let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None)
+    let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+    let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
         .await
         .unwrap_err();
     // Raw executor error (DataFusion cannot resolve the function). The

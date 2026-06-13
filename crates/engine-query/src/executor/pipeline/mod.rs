@@ -26,6 +26,7 @@ pub(crate) use order_limit::apply_order_and_limit;
 use arrow::record_batch::RecordBatch;
 use tokio_util::sync::CancellationToken;
 
+use engine_core::compute::expression::FilterPredicate;
 use engine_core::compute::udf::UdfRegistry;
 use engine_core::model::DataModel;
 use engine_core::store::InMemoryCache;
@@ -52,6 +53,11 @@ impl QueryExecutor {
     ///
     /// Equivalent to [`execute_with_cancellation`](Self::execute_with_cancellation)
     /// with a token that is never cancelled.
+    ///
+    /// `role_filters` are the active security role's predicates (empty when no
+    /// role is active). The planner already seals them into each table's
+    /// fetch; the executor re-applies them as a defense-in-depth guard so a
+    /// plan that reached this path without them still cannot leak rows.
     pub async fn execute(
         plan: &QueryPlan,
         model: &DataModel,
@@ -59,6 +65,7 @@ impl QueryExecutor {
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         udfs: Option<&UdfRegistry>,
+        role_filters: &[FilterPredicate],
     ) -> QueryResult<Vec<RecordBatch>> {
         Self::execute_with_cancellation(
             plan,
@@ -67,6 +74,7 @@ impl QueryExecutor {
             cache,
             max_inline_in_values,
             udfs,
+            role_filters,
             &CancellationToken::new(),
         )
         .await
@@ -86,6 +94,7 @@ impl QueryExecutor {
     /// but the database server may continue executing the already-submitted
     /// statement; cancellation releases the caller, it does not guarantee
     /// the source stops working.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_with_cancellation(
         plan: &QueryPlan,
         model: &DataModel,
@@ -93,6 +102,7 @@ impl QueryExecutor {
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         udfs: Option<&UdfRegistry>,
+        role_filters: &[FilterPredicate],
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
         match plan {
@@ -147,6 +157,7 @@ impl QueryExecutor {
                     cache,
                     max_inline_in_values,
                     udfs,
+                    role_filters,
                     None,
                     token,
                 )
