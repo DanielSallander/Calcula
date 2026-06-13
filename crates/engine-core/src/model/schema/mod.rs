@@ -24,6 +24,7 @@ mod test_fixtures;
 use serde::{Deserialize, Serialize};
 
 use crate::compute::measure::{Measure, MeasureGroup};
+use crate::compute::script::ScriptFunction;
 use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
 use crate::model::context::ContextDefinition;
@@ -60,7 +61,13 @@ use crate::model::table_variable::TableVariable;
 ///   authored content an older engine would drop (or fail to parse, for
 ///   the new expression variants) on a load→save round-trip, hence the
 ///   bump.
-pub const MODEL_FORMAT_VERSION: u32 = 3;
+/// - `4` — sandboxed script functions: the model gained `script_functions`,
+///   a list of author-defined [`ScriptFunction`]s (Rhai bodies) compiled to
+///   scalar UDFs and callable from measures. This is authored, behavior-
+///   bearing content an older engine would silently drop on a load→save
+///   round-trip — and dropping it would turn every measure that calls the
+///   script into an "unknown function" error — hence the bump.
+pub const MODEL_FORMAT_VERSION: u32 = 4;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -89,6 +96,11 @@ pub struct DataModel {
     default_lookup_resolution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     date_table: Option<String>,
+    /// Author-defined sandboxed script functions (Rhai), compiled to scalar
+    /// UDFs and callable from measures. Empty by default and skipped on
+    /// serialization when empty (back-compat with pre-v4 model files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    script_functions: Vec<ScriptFunction>,
 }
 
 impl DataModel {
@@ -106,6 +118,7 @@ impl DataModel {
             hierarchies: Vec::new(),
             default_lookup_resolution: None,
             date_table: None,
+            script_functions: Vec::new(),
         }
     }
 
@@ -220,6 +233,23 @@ impl DataModel {
             .ok_or_else(|| EngineError::HierarchyNotFound(name.to_string()))
     }
 
+    /// Returns all script functions defined in the model.
+    pub fn script_functions(&self) -> &[ScriptFunction] {
+        &self.script_functions
+    }
+
+    /// Look up a script function by name (exact match).
+    pub fn script_function(&self, name: &str) -> EngineResult<&ScriptFunction> {
+        self.script_functions
+            .iter()
+            .find(|f| f.name() == name)
+            .ok_or_else(|| EngineError::ScriptError {
+                function: name.to_string(),
+                position: None,
+                message: "script function not found in model".to_string(),
+            })
+    }
+
     /// Returns all hierarchies that belong to a specific table.
     pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
         self.hierarchies
@@ -317,6 +347,9 @@ impl DataModel {
         }
         for h in &self.hierarchies {
             builder = builder.add_hierarchy(h.clone());
+        }
+        for sf in &self.script_functions {
+            builder = builder.add_script_function(sf.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

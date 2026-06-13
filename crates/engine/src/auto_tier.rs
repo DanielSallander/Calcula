@@ -407,7 +407,7 @@ impl Engine {
             let key = query_cache::query_cache_key(
                 &request,
                 query_cache.model_version(),
-                self.udfs.identity_hash(),
+                self.effective_udfs.identity_hash(),
             );
             let cached = query_cache.get(key);
             (key, cached)
@@ -423,15 +423,17 @@ impl Engine {
             &self.registry,
             &self.auto_tier_state.cached,
         )?;
-        let batches = QueryExecutor::execute(
-            &plan,
-            &self.model,
-            &self.registry,
-            Some(&self.cache),
-            Some(self.max_inline_in_values),
-            Some(self.udfs.as_ref()),
-        )
-        .await?;
+        let batches = crate::map_script_error(
+            QueryExecutor::execute(
+                &plan,
+                &self.model,
+                &self.registry,
+                Some(&self.cache),
+                Some(self.max_inline_in_values),
+                Some(self.effective_udfs.as_ref()),
+            )
+            .await,
+        )?;
 
         self.query_cache.lock().put(cache_key, batches.clone());
 
@@ -684,7 +686,7 @@ mod tests {
         let key = query_cache::query_cache_key(
             &request,
             engine.query_cache.lock().model_version(),
-            engine.udfs.identity_hash(),
+            engine.effective_udfs.identity_hash(),
         );
         engine.query_cache.lock().put(key, vec![make_test_batch()]);
 

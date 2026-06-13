@@ -232,6 +232,191 @@ pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
     Ok(expr)
 }
 
+/// Returns `true` when `name` (case-insensitively) is the name of a built-in
+/// expression-language function — i.e. one the grammar dispatches to a
+/// concrete [`Expression`] variant rather than emitting an
+/// [`Expression::Call`](crate::compute::expression::Expression::Call) UDF call.
+///
+/// This is the authoritative built-in-name list: it mirrors the dispatch
+/// `match` in `grammar::parse_function_call`, including every alias
+/// (`COUNT_IF`/`COUNTIF`, `DATE_TRUNC`/`DATETRUNC`, …). It exists so that
+/// model-level validation can reject a script function whose name shadows a
+/// built-in — such a script would be dead code (the parser would always
+/// dispatch the built-in before ever emitting a `Call` to it).
+///
+/// # Example
+///
+/// ```
+/// use engine_core::compute::parser::is_builtin_function_name;
+///
+/// assert!(is_builtin_function_name("SUM"));
+/// assert!(is_builtin_function_name("sum")); // case-insensitive
+/// assert!(is_builtin_function_name("count_if")); // alias
+/// assert!(!is_builtin_function_name("my_custom_fn"));
+/// ```
+pub fn is_builtin_function_name(name: &str) -> bool {
+    // Kept in lock-step with the dispatch in
+    // `grammar::Parser::parse_function_call`. Whenever a built-in is added
+    // there, add its name(s) here so a colliding script is rejected.
+    const BUILTINS: &[&str] = &[
+        // Aggregates
+        "SUM",
+        "COUNT",
+        "AVG",
+        "AVERAGE",
+        "MIN",
+        "MAX",
+        "DISTINCTCOUNT",
+        "MEDIAN",
+        "STDEV",
+        "STDEVP",
+        "VARIANCE",
+        "VARIANCEP",
+        "COUNTROWS",
+        "COUNTIF",
+        "COUNT_IF",
+        "ANY_VALUE",
+        "ANYVALUE",
+        "MODE",
+        "LISTAGG",
+        "STRING_AGG",
+        "MAX_BY",
+        "MAXBY",
+        "MIN_BY",
+        "MINBY",
+        // Context operations
+        "KEEP",
+        "CLEAR",
+        "RESET",
+        "CLEAR_INNER",
+        "CLEARINNER",
+        "CLEAR_OUTER",
+        "CLEAROUTER",
+        "RESET_INNER",
+        "RESETINNER",
+        "RESET_OUTER",
+        "RESETOUTER",
+        "USING",
+        "USERELATIONSHIP",
+        "CLEAREXCEPT",
+        "CLEAR_EXCEPT",
+        "ITERATE",
+        // Logical
+        "AND",
+        "OR",
+        "NOT",
+        "TRUE",
+        "FALSE",
+        "XOR",
+        // Conditional / null handling
+        "IF",
+        "SWITCH",
+        "DIVIDE",
+        "BLANK",
+        "ISBLANK",
+        "COALESCE",
+        "GREATEST",
+        "LEAST",
+        "NULLIF",
+        "IFERROR",
+        // Table-producing / windowing
+        "QUERY",
+        "WINDOW",
+        "OFFSET",
+        "INDEX",
+        "ROW_NUMBER",
+        "ROWNUMBER",
+        "RANK",
+        "DENSE_RANK",
+        "DENSERANK",
+        // Time intelligence
+        "YTD",
+        "QTD",
+        "MTD",
+        "PRIORYEAR",
+        "PRIORPERIOD",
+        // Value inspection
+        "HASONEVALUE",
+        "SELECTEDVALUE",
+        "FIRST",
+        "ISINSCOPE",
+        "PERCENTILE",
+        // Scalar math
+        "ABS",
+        "ROUND",
+        "ROUNDUP",
+        "ROUNDDOWN",
+        "INT",
+        "TRUNC",
+        "CEILING",
+        "FLOOR",
+        "MOD",
+        "POWER",
+        "SQRT",
+        "LN",
+        "LOG10",
+        "SIGN",
+        "EXP",
+        "LOG",
+        "PI",
+        // Date/time
+        "YEAR",
+        "MONTH",
+        "DAY",
+        "QUARTER",
+        "DATE",
+        "DATEDIFF",
+        "TODAY",
+        "NOW",
+        "DATEADD",
+        "DATE_TRUNC",
+        "DATETRUNC",
+        "LAST_DAY",
+        "LASTDAY",
+        "EOMONTH",
+        "DAYOFWEEK",
+        "DAYOFYEAR",
+        "WEEKNUM",
+        "DAYNAME",
+        "MONTHNAME",
+        "MONTHS_BETWEEN",
+        "MONTHSBETWEEN",
+        // Text
+        "CONCATENATE",
+        "COMBINEVALUES",
+        "EXACT",
+        "FIND",
+        "FIXED",
+        "LEFT",
+        "LEN",
+        "LOWER",
+        "MID",
+        "REPLACE",
+        "REPT",
+        "RIGHT",
+        "SEARCH",
+        "SUBSTITUTE",
+        "TRIM",
+        "UNICHAR",
+        "UNICODE",
+        "UPPER",
+        "VALUE",
+        "LTRIM",
+        "RTRIM",
+        "LPAD",
+        "RPAD",
+        "REVERSE",
+        "SPLIT",
+        "FORMAT",
+        "CONTAINS",
+        "STARTSWITH",
+        "ENDSWITH",
+        "INITCAP",
+    ];
+    let upper = name.to_uppercase();
+    BUILTINS.contains(&upper.as_str())
+}
+
 /// Parse a measure expression and infer the fact table from qualified column references.
 ///
 /// Returns the parsed expression. Validates that a fact table can be inferred

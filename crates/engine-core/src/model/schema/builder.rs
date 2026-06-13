@@ -1,6 +1,7 @@
 //! Builder for constructing a validated [`DataModel`].
 
 use crate::compute::measure::{Measure, MeasureGroup};
+use crate::compute::script::{ScriptFunction, ScriptSandboxConfig};
 use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
 use crate::model::context::ContextDefinition;
@@ -28,6 +29,7 @@ pub struct DataModelBuilder {
     pub(super) hierarchies: Vec<Hierarchy>,
     pub(super) default_lookup_resolution: Option<String>,
     pub(super) date_table: Option<String>,
+    pub(super) script_functions: Vec<ScriptFunction>,
 }
 
 impl DataModelBuilder {
@@ -82,6 +84,44 @@ impl DataModelBuilder {
     /// Add a hierarchy to the model.
     pub fn add_hierarchy(mut self, hierarchy: Hierarchy) -> Self {
         self.hierarchies.push(hierarchy);
+        self
+    }
+
+    /// Add a sandboxed script function to the model.
+    ///
+    /// The function becomes callable from measures by name
+    /// (`SUM(markup(t[cost], t[rate]))`). At `build()` time the engine
+    /// validates the function's signature, checks its name does not collide
+    /// with a built-in function or another script, and **parse-compiles** the
+    /// body under a default sandbox to surface syntax errors early
+    /// (compilation is not execution, so this is safe at build time). The
+    /// body is actually *executed* only during a query, on the host's
+    /// configured [`ScriptSandboxConfig`](crate::compute::script::ScriptSandboxConfig).
+    ///
+    /// ```
+    /// use engine_core::compute::script::{ScriptFunction, ScriptType};
+    /// use engine_core::model::{Column, DataModel, Table};
+    /// use engine_core::types::DataType;
+    ///
+    /// let markup = ScriptFunction::builder("markup")
+    ///     .param("cost", ScriptType::Float)
+    ///     .param("rate", ScriptType::Float)
+    ///     .returns(ScriptType::Float)
+    ///     .body("cost * rate")
+    ///     .build();
+    ///
+    /// let model = DataModel::builder()
+    ///     .add_table(Table::new("Sales", vec![
+    ///         Column::new("cost", DataType::Float64),
+    ///         Column::new("rate", DataType::Float64),
+    ///     ]).unwrap())
+    ///     .add_script_function(markup)
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(model.script_functions().len(), 1);
+    /// ```
+    pub fn add_script_function(mut self, function: ScriptFunction) -> Self {
+        self.script_functions.push(function);
         self
     }
 
@@ -861,7 +901,54 @@ impl DataModelBuilder {
             }
         }
 
-        // 11. Validate the date table. Only the marked table is checked:
+        // 11. Validate script functions. Script bodies travel inside shared
+        // model files (a trust boundary), so each is checked here at build
+        // time:
+        // - the signature (name follows the call-identifier rule; parameter
+        //   names are valid, unique Rhai identifiers);
+        // - the name does not collide with a built-in function name — the
+        //   parser dispatches built-ins before ever emitting a `Call`, so a
+        //   script named e.g. `SUM` would be dead and silently ignored;
+        // - the name does not duplicate another script function;
+        // - the body *parse-compiles* under a default sandbox. This catches
+        //   syntax errors early; it is parse-only (NOT execution), so it is
+        //   safe at build time — actual execution uses the host's configured
+        //   sandbox at query time.
+        {
+            let mut seen_scripts = std::collections::HashSet::new();
+            // A default sandbox is used solely to parse bodies. Limits here
+            // are irrelevant (no script runs); execution always uses the
+            // host's configured ScriptSandboxConfig.
+            let parse_sandbox = ScriptSandboxConfig::default();
+            for function in &self.script_functions {
+                function.validate_signature()?;
+
+                if crate::compute::parser::is_builtin_function_name(function.name()) {
+                    return Err(EngineError::ScriptError {
+                        function: function.name().to_string(),
+                        position: None,
+                        message: format!(
+                            "name collides with the built-in function '{}'; the parser \
+                             dispatches built-ins before script calls, so this script \
+                             could never be called",
+                            function.name()
+                        ),
+                    });
+                }
+
+                if !seen_scripts.insert(function.name()) {
+                    return Err(EngineError::DuplicateName(format!(
+                        "Duplicate script function '{}'",
+                        function.name()
+                    )));
+                }
+
+                // Parse-only compile (surfaces syntax errors as ScriptError).
+                crate::compute::script::compile_script_function(function, &parse_sandbox)?;
+            }
+        }
+
+        // 11b. Validate the date table. Only the marked table is checked:
         // date roles on unmarked tables are inert metadata until the table
         // is marked, at which point this step runs against it.
         if let Some(date_table_name) = &self.date_table {
@@ -953,6 +1040,7 @@ impl DataModelBuilder {
             hierarchies: self.hierarchies,
             default_lookup_resolution: self.default_lookup_resolution,
             date_table: self.date_table,
+            script_functions: self.script_functions,
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

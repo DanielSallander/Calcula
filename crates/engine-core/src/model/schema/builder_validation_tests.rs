@@ -666,3 +666,140 @@ fn date_roles_on_unmarked_tables_are_not_validated() {
 
     DataModel::builder().add_table(table).build().unwrap();
 }
+
+// --- Script function validation (step 11) ---
+
+use crate::compute::script::{ScriptFunction, ScriptType};
+use crate::error::EngineError;
+
+fn markup_script() -> ScriptFunction {
+    ScriptFunction::builder("markup")
+        .param("cost", ScriptType::Float)
+        .param("rate", ScriptType::Float)
+        .returns(ScriptType::Float)
+        .body("cost * rate")
+        .build()
+}
+
+#[test]
+fn accepts_valid_script_function() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(markup_script())
+        .build()
+        .unwrap();
+    assert_eq!(model.script_functions().len(), 1);
+    assert_eq!(model.script_function("markup").unwrap().name(), "markup");
+    // Built model carries the v4 format version (script_functions bump).
+    assert_eq!(model.format_version(), 4);
+}
+
+#[test]
+fn rejects_script_name_colliding_with_builtin() {
+    // SUM is a built-in; the parser would dispatch it before ever emitting a
+    // Call to a script named SUM, so the script would be dead.
+    let script = ScriptFunction::builder("sum")
+        .param("x", ScriptType::Float)
+        .returns(ScriptType::Float)
+        .body("x")
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    match err {
+        EngineError::ScriptError { message, .. } => {
+            assert!(message.contains("built-in"), "got: {message}");
+        }
+        other => panic!("expected ScriptError, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_duplicate_script_name() {
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(markup_script())
+        .add_script_function(markup_script())
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::DuplicateName(_)));
+}
+
+#[test]
+fn rejects_invalid_script_name() {
+    let script = ScriptFunction::builder("bad name")
+        .returns(ScriptType::Int)
+        .body("1")
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidIdentifier { .. }));
+}
+
+#[test]
+fn rejects_script_with_unparseable_body_at_build_time() {
+    let script = ScriptFunction::builder("broken")
+        .param("x", ScriptType::Int)
+        .returns(ScriptType::Int)
+        .body("x +") // syntax error
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    match err {
+        EngineError::ScriptError {
+            function, position, ..
+        } => {
+            assert_eq!(function, "broken");
+            assert!(position.is_some(), "syntax error should carry a position");
+        }
+        other => panic!("expected ScriptError, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_script_with_duplicate_parameter() {
+    let script = ScriptFunction::builder("dup")
+        .param("x", ScriptType::Int)
+        .param("x", ScriptType::Int)
+        .returns(ScriptType::Int)
+        .body("x")
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::ScriptError { .. }));
+}
+
+#[test]
+fn script_function_survives_json_round_trip_through_model() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(markup_script())
+        .build()
+        .unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(json.contains("script_functions"));
+    let back: DataModel = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.script_functions().len(), 1);
+    back.validate().unwrap();
+}
+
+#[test]
+fn empty_script_functions_omitted_from_json() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .build()
+        .unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(!json.contains("script_functions"));
+}

@@ -25,15 +25,16 @@ fn sales_table_with_metadata() -> Table {
 }
 
 #[test]
-fn model_format_version_is_3_for_time_intelligence() {
+fn model_format_version_is_4_for_script_functions() {
     // Version 2 introduced presentation metadata (measure format_string/
     // description/is_hidden, column display_name/description/is_hidden/
     // default_aggregation, table display_name/description/is_hidden).
     // Version 3 introduced time-intelligence metadata (column date_role,
     // model date_table, ToDate/PeriodShift expression variants).
+    // Version 4 introduced sandboxed script functions (model script_functions).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 3);
+    assert_eq!(MODEL_FORMAT_VERSION, 4);
 }
 
 #[test]

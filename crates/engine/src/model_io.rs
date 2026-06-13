@@ -387,4 +387,78 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    // -- Script function inertness (HARD RULE 1) --
+
+    /// Loading a model whose script body is an infinite loop must NOT execute
+    /// (or even compile-then-run) the script — deserialization is inert.
+    /// If load ever ran the body, this test would hang forever instead of
+    /// returning instantly.
+    #[test]
+    fn load_model_with_infinite_loop_script_is_inert_and_instant() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("calcula_engine_test_inert_script.json");
+
+        // A model JSON carrying a script whose body loops forever. The file
+        // is written by hand so we control its exact contents.
+        let json = r#"{
+            "format_version": 4,
+            "tables": [
+                { "name": "Sales", "columns": [
+                    { "name": "cost", "data_type": "Float64", "nullable": true }
+                ] }
+            ],
+            "relationships": [],
+            "measures": [],
+            "calculated_columns": [],
+            "measure_groups": [],
+            "script_functions": [
+                {
+                    "name": "spin",
+                    "params": [ { "name": "x", "ty": "Float" } ],
+                    "return_type": "Float",
+                    "body": "loop {}"
+                }
+            ]
+        }"#;
+        std::fs::write(&path, json).unwrap();
+
+        // This returns immediately. Validation parse-compiles `loop {}`
+        // (cheap; compilation is not execution), so the load succeeds without
+        // ever running the loop.
+        let loaded = Engine::load_model(&path).unwrap();
+        assert_eq!(loaded.script_functions().len(), 1);
+        assert_eq!(loaded.script_function("spin").unwrap().body(), "loop {}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_and_load_round_trips_script_functions() {
+        use crate::{ScriptFunction, ScriptType};
+
+        let model = DataModel::builder()
+            .add_table(Table::new("Sales", vec![Column::new("cost", DataType::Float64)]).unwrap())
+            .add_script_function(
+                ScriptFunction::builder("markup")
+                    .param("cost", ScriptType::Float)
+                    .returns(ScriptType::Float)
+                    .body("cost * 1.2")
+                    .build(),
+            )
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("calcula_engine_test_script_roundtrip.json");
+        Engine::new(model).save_model(&path).unwrap();
+
+        let loaded = Engine::load_model(&path).unwrap();
+        assert_eq!(loaded.script_functions().len(), 1);
+        let f = loaded.script_function("markup").unwrap();
+        assert_eq!(f.body(), "cost * 1.2");
+        assert_eq!(f.return_type(), ScriptType::Float);
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

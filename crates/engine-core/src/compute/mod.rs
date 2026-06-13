@@ -9,6 +9,7 @@ pub mod measure;
 pub mod measure_engine;
 pub mod parser;
 pub mod plan;
+pub mod script;
 pub mod sql_util;
 pub mod time_intelligence;
 pub mod udf;
@@ -39,6 +40,10 @@ pub use measure::{
 };
 pub use measure_engine::MeasureEngine;
 pub use plan::{ExecutionPlan, PlanDuration, PlanNode, PlanOperation, PlanProperty, PlanValue};
+pub use script::{
+    build_sandboxed_engine, compile_script_function, script_error_from_datafusion, ScriptFunction,
+    ScriptFunctionBuilder, ScriptParam, ScriptSandboxConfig, ScriptType,
+};
 pub use sql_util::{quote_ident_bracket, quote_ident_double, sql_quote_literal};
 pub use time_intelligence::lower_time_intelligence;
 pub use udf::{session_context_with_udfs, UdfRegistry};

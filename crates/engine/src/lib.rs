@@ -128,6 +128,9 @@ pub use engine_core::compute::parser::{
 pub use engine_core::compute::plan::{
     ExecutionPlan, PlanDuration, PlanNode, PlanOperation, PlanProperty, PlanValue,
 };
+pub use engine_core::compute::script::{
+    ScriptFunction, ScriptFunctionBuilder, ScriptParam, ScriptSandboxConfig, ScriptType,
+};
 pub use engine_core::compute::udf::{
     create_udf, ColumnarValue, ScalarUDF, UdfRegistry, Volatility,
 };
@@ -210,37 +213,174 @@ pub struct Engine {
     source_query_policy: SourceQueryPolicy,
     /// Report from the most recent [`Engine::refresh_stale`] run.
     last_refresh_report: Option<RefreshReport>,
-    /// Host-registered scalar UDFs (see [`Engine::register_udf`]). Shared
-    /// with the query pipeline; rebuilt (copy-on-write) on registration.
+    /// Host-registered **native** scalar UDFs (see [`Engine::register_udf`]).
+    /// Rebuilt (copy-on-write) on registration. This is the host's set; it is
+    /// never threaded into queries directly — [`Engine::effective_udfs`] is.
     udfs: Arc<UdfRegistry>,
+    /// Effective registry = native UDFs + compiled model script functions.
+    /// Rebuilt whenever the model, the native set, or the sandbox config
+    /// changes. This is the registry threaded into every query path and into
+    /// [`Engine::validate_request_udfs`], so calls to model scripts resolve.
+    effective_udfs: Arc<UdfRegistry>,
+    /// Host policy: resource limits for the script sandbox. Conservative by
+    /// default. Never part of the model (a malicious model cannot raise its
+    /// own budget).
+    script_sandbox_config: ScriptSandboxConfig,
+    /// Error captured by the most recent effective-registry rebuild, if any
+    /// (currently only a native-vs-script name collision —
+    /// [`Engine::new`] is infallible, so the error is deferred and surfaced
+    /// on the next query or by [`Engine::validate_scripts`]). The model
+    /// builder already rejects bad script bodies and built-in collisions at
+    /// `build()` time, so this is the one error the rebuild can produce.
+    script_build_error: Option<EngineError>,
+}
+
+/// Clone a deferred script-build [`EngineError`] so it can be returned from
+/// multiple call sites.
+///
+/// [`EngineError`] is not `Clone` (its Arrow / DataFusion `#[from]` variants
+/// wrap non-clonable errors), but a deferred script-build error is only ever
+/// one of a few owned, string-bearing variants. This reconstructs those;
+/// anything unexpected degrades to [`EngineError::InvalidData`] with the
+/// formatted message rather than panicking.
+fn clone_script_error(err: &EngineError) -> EngineError {
+    match err {
+        EngineError::ScriptError {
+            function,
+            position,
+            message,
+        } => EngineError::ScriptError {
+            function: function.clone(),
+            position: *position,
+            message: message.clone(),
+        },
+        EngineError::DuplicateName(s) => EngineError::DuplicateName(s.clone()),
+        EngineError::InvalidIdentifier { name, reason } => EngineError::InvalidIdentifier {
+            name: name.clone(),
+            reason: reason.clone(),
+        },
+        other => EngineError::InvalidData(other.to_string()),
+    }
+}
+
+/// Re-map a script UDF runtime failure into a typed
+/// [`EngineError::ScriptError`].
+///
+/// A sandbox abort (operation budget, recursion/string/array/map limit, type
+/// error) raised inside a compiled script UDF surfaces from DataFusion as a
+/// [`DataFusionError`] carrying an internal marker. This recovers the typed
+/// error at the query boundary so hosts see a clear, named `ScriptError`
+/// instead of an opaque DataFusion message. Non-script errors pass through
+/// unchanged.
+fn map_script_error<T>(result: QueryResult<T>) -> QueryResult<T> {
+    if let Err(crate::QueryError::DataFusion(e)) = &result {
+        if let Some(se) = engine_core::compute::script_error_from_datafusion(e) {
+            return Err(crate::QueryError::Engine(se));
+        }
+    }
+    result
+}
+
+/// Build the effective UDF registry = native UDFs + compiled model script
+/// functions, under the given sandbox config.
+///
+/// Native UDFs are cloned in first. Each model [`ScriptFunction`] is then
+/// compiled and registered, with its `version` set to the function's
+/// [`identity_version`](engine_core::compute::script::ScriptFunction::identity_version)
+/// (a stable hash of body + parameter/return types) so the registry's
+/// `identity_hash()` — already part of the query-cache key — automatically
+/// changes when a script is edited.
+///
+/// Returns the new registry plus an optional error. The model builder already
+/// guarantees each script compiles and does not collide with a built-in, so
+/// the only error here is a **name collision between a model script and a
+/// native UDF**: the script is skipped (native UDFs win) and the collision is
+/// reported. On any error the returned registry still contains every
+/// non-colliding function, so the engine remains usable for unrelated queries.
+fn build_effective_registry(
+    model: &DataModel,
+    native: &UdfRegistry,
+    config: &ScriptSandboxConfig,
+) -> (Arc<UdfRegistry>, Option<EngineError>) {
+    let mut effective = native.clone();
+    let mut first_error: Option<EngineError> = None;
+
+    for function in model.script_functions() {
+        // A script name that collides with a native UDF is ambiguous — the
+        // native one is already registered. Report it (deferred) rather than
+        // silently shadowing either way.
+        if native.get(function.name()).is_some() {
+            if first_error.is_none() {
+                first_error = Some(EngineError::ScriptError {
+                    function: function.name().to_string(),
+                    position: None,
+                    message: "name collides with a host-registered native UDF; \
+                              rename the script or unregister the native UDF"
+                        .to_string(),
+                });
+            }
+            continue;
+        }
+
+        match engine_core::compute::script::compile_script_function(function, config) {
+            Ok(udf) => {
+                // Version = identity of the script's behavior, so editing a
+                // body changes the registry identity and every cache key.
+                if let Err(e) = effective.register(udf, function.identity_version()) {
+                    // A compiled UDF's name is the (already validated) script
+                    // name; registration failure here would be a logic bug,
+                    // but surface it rather than panicking.
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
+                // The model builder should have caught this; keep going and
+                // report the first failure.
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    (Arc::new(effective), first_error)
 }
 
 impl Engine {
     /// Create a new engine with the given data model.
     ///
     /// Uses the default memory budget (256 MB) for the in-memory cache.
+    ///
+    /// The model's [`ScriptFunction`]s are compiled eagerly into the
+    /// effective UDF registry under a conservative default
+    /// [`ScriptSandboxConfig`]. The model builder already rejected bad bodies
+    /// and built-in collisions, so the only error this can hit is a script
+    /// whose name collides with a host-registered native UDF — and no native
+    /// UDFs are registered yet at construction, so that cannot happen here.
+    /// `Engine::new` is therefore infallible; any later collision (after
+    /// `register_udf` / `set_model`) is surfaced on the next query and by
+    /// [`Engine::validate_scripts`].
     pub fn new(model: DataModel) -> Self {
-        Self {
-            model,
-            registry: SourceRegistry::new(),
-            cache: InMemoryCache::new(),
-            max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
-            optimizer_config: OptimizerConfig::default(),
-            auto_tier_config: AutoTierConfig::default(),
-            auto_tier_state: AutoTierState::default(),
-            query_cache: Mutex::new(query_cache::QueryCache::new(QueryCacheConfig::default())),
-            source_query_policy: SourceQueryPolicy::default(),
-            last_refresh_report: None,
-            udfs: Arc::new(UdfRegistry::new()),
-        }
+        Self::build(model, InMemoryCache::new())
     }
 
     /// Create a new engine with a custom memory budget for in-memory tables.
     pub fn with_memory_budget(model: DataModel, budget_bytes: usize) -> Self {
+        Self::build(model, InMemoryCache::with_budget(budget_bytes))
+    }
+
+    /// Shared constructor: assemble the engine and build the effective UDF
+    /// registry from the model's script functions.
+    fn build(model: DataModel, cache: InMemoryCache) -> Self {
+        let native = Arc::new(UdfRegistry::new());
+        let config = ScriptSandboxConfig::default();
+        let (effective, script_build_error) = build_effective_registry(&model, &native, &config);
         Self {
             model,
             registry: SourceRegistry::new(),
-            cache: InMemoryCache::with_budget(budget_bytes),
+            cache,
             max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
             optimizer_config: OptimizerConfig::default(),
             auto_tier_config: AutoTierConfig::default(),
@@ -248,7 +388,10 @@ impl Engine {
             query_cache: Mutex::new(query_cache::QueryCache::new(QueryCacheConfig::default())),
             source_query_policy: SourceQueryPolicy::default(),
             last_refresh_report: None,
-            udfs: Arc::new(UdfRegistry::new()),
+            udfs: native,
+            effective_udfs: effective,
+            script_sandbox_config: config,
+            script_build_error,
         }
     }
 
@@ -432,6 +575,10 @@ impl Engine {
         let mut registry = (*self.udfs).clone();
         registry.register(udf, version)?;
         self.udfs = Arc::new(registry);
+        // Rebuild the effective registry (native + model scripts) so the new
+        // native UDF is visible to queries and any native-vs-script collision
+        // is re-evaluated.
+        self.rebuild_effective_udfs();
         // The new/replaced function may compute different values than
         // whatever produced the cached results; this also bumps the model
         // version that feeds the query-cache key.
@@ -439,19 +586,129 @@ impl Engine {
         Ok(())
     }
 
-    /// Names of all registered UDFs, sorted.
+    /// Names of all registered (native) UDFs, sorted.
     pub fn registered_udfs(&self) -> Vec<String> {
         self.udfs.names()
     }
 
-    /// Verify that every UDF called by the request's measures is registered.
+    /// Set the host's script sandbox resource limits.
+    ///
+    /// This is **host policy** (like the source-query policy): it bounds how
+    /// much work a single script evaluation may do (operation budget,
+    /// recursion depth, string/array size). It is **not** part of any model —
+    /// a malicious model can never raise its own budget.
+    ///
+    /// Setting it recompiles every model script function under the new limits
+    /// (compilation cost only; nothing executes) and invalidates the query
+    /// cache. Returns any deferred script error (e.g. a native-vs-script name
+    /// collision) so the host learns about it eagerly; the engine remains
+    /// usable for unrelated queries regardless.
+    ///
+    /// # Examples
+    ///
+    /// A model-defined script function `markup(cost, rate)` becomes callable
+    /// from a measure with **no** native UDF registered — the engine compiles
+    /// the script into its effective UDF registry. This builds an `Engine`
+    /// without any connectors:
+    ///
+    /// ```
+    /// use bi_engine::{
+    ///     parse_measure, Column, DataModel, DataType, Engine, Measure, ScriptFunction,
+    ///     ScriptSandboxConfig, ScriptType, Table,
+    /// };
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // markup(cost, rate) = cost * rate — a sandboxed Rhai script.
+    /// let markup = ScriptFunction::builder("markup")
+    ///     .param("cost", ScriptType::Float)
+    ///     .param("rate", ScriptType::Float)
+    ///     .returns(ScriptType::Float)
+    ///     .body("cost * rate")
+    ///     .build();
+    ///
+    /// let model = DataModel::builder()
+    ///     .add_table(Table::new(
+    ///         "Sales",
+    ///         vec![
+    ///             Column::new("cost", DataType::Float64),
+    ///             Column::new("rate", DataType::Float64),
+    ///         ],
+    ///     )?)
+    ///     .add_script_function(markup)
+    ///     .add_measure(Measure::new(
+    ///         "MarkupTotal",
+    ///         // The measure calls the model script by name — no native UDF
+    ///         // registration is required.
+    ///         parse_measure("SUM(markup(Sales[cost], Sales[rate]))")?,
+    ///     ))
+    ///     .build()?;
+    ///
+    /// let mut engine = Engine::new(model);
+    /// // Host policy: keep scripts on a conservative budget.
+    /// engine.set_script_sandbox_config(ScriptSandboxConfig::default())?;
+    ///
+    /// // The script is compiled and callable; no native UDFs are registered.
+    /// assert!(engine.registered_udfs().is_empty());
+    /// assert!(engine.validate_scripts().is_ok());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_script_sandbox_config(&mut self, config: ScriptSandboxConfig) -> EngineResult<()> {
+        self.script_sandbox_config = config;
+        self.rebuild_effective_udfs();
+        self.query_cache.lock().invalidate_all();
+        match &self.script_build_error {
+            Some(e) => Err(clone_script_error(e)),
+            None => Ok(()),
+        }
+    }
+
+    /// Returns the current script sandbox configuration (host policy).
+    pub fn script_sandbox_config(&self) -> ScriptSandboxConfig {
+        self.script_sandbox_config
+    }
+
+    /// Verify that every model script function compiled into the effective
+    /// registry without error.
+    ///
+    /// Returns the deferred error captured by the last effective-registry
+    /// rebuild — currently only a name collision between a model script and a
+    /// host-registered native UDF (model-build already rejected bad bodies
+    /// and built-in collisions). Hosts that want to fail fast can call this
+    /// after [`Engine::new`] / [`Engine::set_model`] / [`Engine::register_udf`];
+    /// otherwise the same error surfaces on the next query.
+    pub fn validate_scripts(&self) -> EngineResult<()> {
+        match &self.script_build_error {
+            Some(e) => Err(clone_script_error(e)),
+            None => Ok(()),
+        }
+    }
+
+    /// Rebuild the effective UDF registry from the current model, native
+    /// UDFs, and sandbox config, capturing any deferred script error.
+    fn rebuild_effective_udfs(&mut self) {
+        let (effective, error) =
+            build_effective_registry(&self.model, &self.udfs, &self.script_sandbox_config);
+        self.effective_udfs = effective;
+        self.script_build_error = error;
+    }
+
+    /// Verify that every UDF called by the request's measures is registered
+    /// (in the **effective** registry: native UDFs + model script functions).
     ///
     /// Called by the query entry points before planning so an unregistered
     /// (or typo'd) function name fails fast with a clear
     /// [`EngineError::UnknownFunction`] instead of a DataFusion error
     /// mid-execution. Unknown measure names are skipped here — the planner
     /// reports those with its own error.
+    ///
+    /// Also surfaces any deferred script-build error (a model script colliding
+    /// with a native UDF name) before query execution, so a query never runs
+    /// against a half-built registry.
     pub(crate) fn validate_request_udfs(&self, request: &QueryRequest) -> QueryResult<()> {
+        if let Some(e) = &self.script_build_error {
+            return Err(QueryError::Engine(clone_script_error(e)));
+        }
         for measure_name in &request.measures {
             let Ok(measure) = self.model.measure(measure_name) else {
                 continue;
@@ -468,7 +725,7 @@ impl Engine {
                 std::borrow::Cow::Borrowed(measure.expression())
             };
             for name in expression.call_names() {
-                if self.udfs.get(name).is_none() {
+                if self.effective_udfs.get(name).is_none() {
                     return Err(QueryError::Engine(EngineError::UnknownFunction {
                         name: name.to_string(),
                         referenced_by: format!("measure '{measure_name}'"),
@@ -621,7 +878,11 @@ impl Engine {
         let (cache_key, cache_version, cached) = {
             let mut query_cache = self.query_cache.lock();
             let version = query_cache.model_version();
-            let key = query_cache::query_cache_key(&request, version, self.udfs.identity_hash());
+            let key = query_cache::query_cache_key(
+                &request,
+                version,
+                self.effective_udfs.identity_hash(),
+            );
             let cached = query_cache.get(key);
             (key, version, cached)
         };
@@ -630,16 +891,18 @@ impl Engine {
         }
 
         let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
-        let batches = QueryExecutor::execute_with_cancellation(
-            &plan,
-            &self.model,
-            &self.registry,
-            Some(&self.cache),
-            Some(self.max_inline_in_values),
-            Some(self.udfs.as_ref()),
-            &token,
-        )
-        .await?;
+        let batches = map_script_error(
+            QueryExecutor::execute_with_cancellation(
+                &plan,
+                &self.model,
+                &self.registry,
+                Some(&self.cache),
+                Some(self.max_inline_in_values),
+                Some(self.effective_udfs.as_ref()),
+                &token,
+            )
+            .await,
+        )?;
 
         // Store the result unless the cache version moved while executing
         // (a concurrent `clear_query_cache`): a stale-keyed entry could
@@ -685,7 +948,7 @@ impl Engine {
             let key = query_cache::query_cache_key(
                 &request,
                 query_cache.model_version(),
-                self.udfs.identity_hash(),
+                self.effective_udfs.identity_hash(),
             );
             let cached = query_cache.get(key);
             (key, cached)
@@ -695,15 +958,17 @@ impl Engine {
         }
 
         let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
-        let batches = QueryExecutor::execute(
-            &plan,
-            &self.model,
-            &self.registry,
-            Some(&self.cache),
-            Some(self.max_inline_in_values),
-            Some(self.udfs.as_ref()),
-        )
-        .await?;
+        let batches = map_script_error(
+            QueryExecutor::execute(
+                &plan,
+                &self.model,
+                &self.registry,
+                Some(&self.cache),
+                Some(self.max_inline_in_values),
+                Some(self.effective_udfs.as_ref()),
+            )
+            .await,
+        )?;
 
         self.query_cache.lock().put(cache_key, batches.clone());
         Ok((batches, refreshed))
@@ -723,15 +988,17 @@ impl Engine {
 
         let (query_plan, pushdown_node) =
             PushdownPlanner::plan_explained(&request, &self.model, &self.registry)?;
-        let (batches, exec_node) = QueryExecutor::execute_explained(
-            &query_plan,
-            &self.model,
-            &self.registry,
-            Some(&self.cache),
-            Some(self.max_inline_in_values),
-            Some(self.udfs.as_ref()),
-        )
-        .await?;
+        let (batches, exec_node) = map_script_error(
+            QueryExecutor::execute_explained(
+                &query_plan,
+                &self.model,
+                &self.registry,
+                Some(&self.cache),
+                Some(self.max_inline_in_values),
+                Some(self.effective_udfs.as_ref()),
+            )
+            .await,
+        )?;
 
         let total_duration = start.elapsed();
 
@@ -771,9 +1038,21 @@ impl Engine {
     ///
     /// Existing table bindings remain valid as long as the new model contains
     /// the same table names. Cached in-memory tables are preserved.
-    pub fn set_model(&mut self, model: DataModel) {
+    ///
+    /// The new model's script functions are compiled into the effective UDF
+    /// registry under the host's current [`ScriptSandboxConfig`]. Returns any
+    /// deferred script error (a script colliding with a native UDF name) so
+    /// the host can react eagerly; the same error otherwise surfaces on the
+    /// next query. The model itself was already validated when it was built /
+    /// loaded, so its scripts are known to compile.
+    pub fn set_model(&mut self, model: DataModel) -> EngineResult<()> {
         self.model = model;
+        self.rebuild_effective_udfs();
         self.query_cache.lock().invalidate_all();
+        match &self.script_build_error {
+            Some(e) => Err(clone_script_error(e)),
+            None => Ok(()),
+        }
     }
 
     /// Returns a reference to the data model.
@@ -1059,5 +1338,346 @@ mod tests {
             .await
             .unwrap();
         assert!((scalar_total(&batches) - 59.97).abs() < 1e-9);
+    }
+
+    // --- Model script function integration (effective registry) ---
+
+    use crate::{ScriptFunction, ScriptSandboxConfig, ScriptType};
+    use arrow::datatypes::{Field, Schema as ArrowSchema};
+    use arrow::record_batch::RecordBatch;
+
+    /// `markup(cost, rate) -> Float` returning `cost * rate`.
+    fn markup_script() -> ScriptFunction {
+        ScriptFunction::builder("markup")
+            .param("cost", ScriptType::Float)
+            .param("rate", ScriptType::Float)
+            .returns(ScriptType::Float)
+            .body("cost * rate")
+            .build()
+    }
+
+    /// In-memory `Sales(cost, rate, region)` with a measure
+    /// `MarkupTotal = SUM(markup(Sales[cost], Sales[rate]))` and the script
+    /// `markup` registered in the model.
+    fn make_script_engine() -> Engine {
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("cost", DataType::Float64),
+                        Column::new("rate", DataType::Float64),
+                        Column::new("region", DataType::String),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_script_function(markup_script())
+            .add_measure(Measure::new(
+                "MarkupTotal",
+                parse_measure("SUM(markup(Sales[cost], Sales[rate]))").unwrap(),
+            ))
+            .build()
+            .unwrap();
+
+        let mut engine = Engine::new(model);
+        engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+        engine.cache.store("Sales", sales_markup_batch()).unwrap();
+        engine
+    }
+
+    /// cost = [10, 20, 5], rate = [1.5, 2.0, 3.0], region = [a, a, b].
+    /// markup = [15, 40, 15]; total = 70; by region a=55, b=15.
+    fn sales_markup_batch() -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("cost", ArrowDataType::Float64, true),
+            Field::new("rate", ArrowDataType::Float64, true),
+            Field::new("region", ArrowDataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 5.0])),
+                Arc::new(Float64Array::from(vec![1.5, 2.0, 3.0])),
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a", "b"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn model_script_measure_grand_total() {
+        let engine = make_script_engine();
+        let batches = engine
+            .query(QueryRequest {
+                measures: vec!["MarkupTotal".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let total = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("MarkupTotal is Float64")
+            .value(0);
+        assert!((total - 70.0).abs() < 1e-9, "got {total}");
+    }
+
+    #[tokio::test]
+    async fn model_script_measure_grouped() {
+        let engine = make_script_engine();
+        let batches = engine
+            .query(QueryRequest {
+                measures: vec!["MarkupTotal".into()],
+                group_by: vec![crate::ColumnRef::new("Sales", "region")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Two groups (a, b). Sum the measure column to verify totals
+        // independent of row order; also check each value is present.
+        let batch = &batches[0];
+        let measure_idx = batch.num_columns() - 1;
+        let vals = batch
+            .column(measure_idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("measure column Float64");
+        let mut got: Vec<f64> = (0..vals.len()).map(|i| vals.value(i)).collect();
+        got.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert_eq!(got.len(), 2);
+        assert!((got[0] - 15.0).abs() < 1e-9, "region b = 15");
+        assert!((got[1] - 55.0).abs() < 1e-9, "region a = 55");
+    }
+
+    #[test]
+    fn model_script_appears_in_effective_registry_not_native() {
+        let engine = make_script_engine();
+        // The script is in the effective registry but is NOT a native UDF.
+        assert!(engine.registered_udfs().is_empty());
+        assert!(engine.effective_udfs.get("markup").is_some());
+        assert!(engine.validate_scripts().is_ok());
+    }
+
+    #[tokio::test]
+    async fn call_to_unknown_script_errors_unknown_function() {
+        // Model references `mystery(...)` which is neither a built-in, a
+        // native UDF, nor a model script → UnknownFunction at query time.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new("Sales", vec![Column::new("cost", DataType::Float64)])
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_measure(Measure::new(
+                "Mystery",
+                parse_measure("SUM(mystery(Sales[cost]))").unwrap(),
+            ))
+            .build()
+            .unwrap();
+        let engine = Engine::new(model);
+        let err = engine
+            .query(QueryRequest {
+                measures: vec!["Mystery".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        match err {
+            QueryError::Engine(EngineError::UnknownFunction { name, .. }) => {
+                assert_eq!(name, "mystery");
+            }
+            other => panic!("expected UnknownFunction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn editing_script_body_changes_cache_key_via_identity_hash() {
+        let engine = make_script_engine();
+        let hash_before = engine.effective_udfs.identity_hash();
+
+        // Same model but with an edited script body.
+        let edited = ScriptFunction::builder("markup")
+            .param("cost", ScriptType::Float)
+            .param("rate", ScriptType::Float)
+            .returns(ScriptType::Float)
+            .body("cost * rate * 1.1")
+            .build();
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("cost", DataType::Float64),
+                        Column::new("rate", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_script_function(edited)
+            .add_measure(Measure::new(
+                "MarkupTotal",
+                parse_measure("SUM(markup(Sales[cost], Sales[rate]))").unwrap(),
+            ))
+            .build()
+            .unwrap();
+        let mut engine2 = engine;
+        engine2.set_model(model).unwrap();
+        let hash_after = engine2.effective_udfs.identity_hash();
+        assert_ne!(
+            hash_before, hash_after,
+            "editing a script body must change the registry identity hash"
+        );
+
+        // And therefore the query-cache key for the same request.
+        let request = QueryRequest {
+            measures: vec!["MarkupTotal".into()],
+            ..Default::default()
+        };
+        assert_ne!(
+            crate::query_cache::query_cache_key(&request, 0, hash_before),
+            crate::query_cache::query_cache_key(&request, 0, hash_after),
+        );
+    }
+
+    #[test]
+    fn script_colliding_with_native_udf_name_is_rejected_at_rebuild() {
+        // Register a native UDF `markup`, then set a model whose script is
+        // also named `markup` → the effective-registry rebuild reports the
+        // collision (surfaced from set_model).
+        let plain_model = DataModel::builder()
+            .add_table(Table::new("Sales", vec![Column::new("cost", DataType::Float64)]).unwrap())
+            .build()
+            .unwrap();
+        let mut engine = Engine::new(plain_model);
+
+        let native_markup = create_udf(
+            "markup",
+            vec![ArrowDataType::Float64],
+            ArrowDataType::Float64,
+            Volatility::Immutable,
+            Arc::new(|args: &[ColumnarValue]| {
+                let arrays = ColumnarValue::values_to_arrays(args)?;
+                Ok(ColumnarValue::Array(arrays[0].clone()))
+            }),
+        );
+        engine.register_udf(native_markup, 1).unwrap();
+
+        let script_model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("cost", DataType::Float64),
+                        Column::new("rate", DataType::Float64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_script_function(markup_script())
+            .build()
+            .unwrap();
+
+        let err = engine.set_model(script_model).unwrap_err();
+        match err {
+            EngineError::ScriptError {
+                function, message, ..
+            } => {
+                assert_eq!(function, "markup");
+                assert!(message.contains("native UDF"), "got: {message}");
+            }
+            other => panic!("expected ScriptError, got {other:?}"),
+        }
+        // The deferred error also surfaces from validate_scripts.
+        assert!(engine.validate_scripts().is_err());
+    }
+
+    #[tokio::test]
+    async fn script_op_budget_abort_surfaces_as_script_error_not_hang() {
+        // A model script with an infinite loop, queried with a tiny op
+        // budget — must abort with ScriptError, not hang.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new("Sales", vec![Column::new("cost", DataType::Float64)])
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_script_function(
+                ScriptFunction::builder("spin")
+                    .param("x", ScriptType::Float)
+                    .returns(ScriptType::Float)
+                    .body("loop {}")
+                    .build(),
+            )
+            .add_measure(Measure::new(
+                "Spun",
+                parse_measure("SUM(spin(Sales[cost]))").unwrap(),
+            ))
+            .build()
+            .unwrap();
+
+        let mut engine = Engine::new(model);
+        engine
+            .set_script_sandbox_config(ScriptSandboxConfig {
+                max_operations: 5_000,
+                ..ScriptSandboxConfig::default()
+            })
+            .unwrap();
+        engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "cost",
+            ArrowDataType::Float64,
+            true,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))])
+                .unwrap();
+        engine.cache.store("Sales", batch).unwrap();
+
+        let err = engine
+            .query(QueryRequest {
+                measures: vec!["Spun".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        // The query boundary re-maps the sandbox abort into a typed
+        // ScriptError naming the offending function (proves it aborted, not
+        // hung, and that hosts get a clear error rather than an opaque
+        // DataFusion message).
+        match err {
+            crate::QueryError::Engine(EngineError::ScriptError {
+                function, message, ..
+            }) => {
+                assert_eq!(function, "spin");
+                assert!(
+                    message.contains("operation") || message.contains("Number of operations"),
+                    "expected an op-budget message, got: {message}"
+                );
+            }
+            other => panic!("expected QueryError::Engine(ScriptError), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_script_sandbox_config_recompiles_and_is_host_policy() {
+        let mut engine = make_script_engine();
+        // Default config is conservative.
+        assert_eq!(
+            engine.script_sandbox_config().max_operations,
+            ScriptSandboxConfig::default().max_operations
+        );
+        // Tightening the budget recompiles scripts (no error for a benign
+        // body) and the new policy is observable.
+        engine
+            .set_script_sandbox_config(ScriptSandboxConfig {
+                max_operations: 42,
+                ..ScriptSandboxConfig::default()
+            })
+            .unwrap();
+        assert_eq!(engine.script_sandbox_config().max_operations, 42);
     }
 }

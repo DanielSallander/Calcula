@@ -284,6 +284,33 @@ pub enum EngineError {
         referenced_by: String,
     },
 
+    /// A sandboxed Rhai script function failed to compile or evaluate.
+    ///
+    /// Script function bodies travel inside shared model files (a trust
+    /// boundary), so this single variant covers every script failure mode:
+    ///
+    /// - **Compile errors** (raised at [`Engine`](crate) build time and by
+    ///   model validation): a syntax error in the body. `position` is a
+    ///   best-effort byte offset into the body, derived from Rhai's
+    ///   line/column position, suitable for inline error highlighting.
+    /// - **Runtime errors** (raised during query execution): the sandbox
+    ///   tripped a resource limit (operation budget, call-level/recursion
+    ///   depth, string/array size), a type mismatch occurred, or the body
+    ///   evaluated to an unconvertible value. `position` is `None` for these.
+    ///
+    /// The `function` field always names the offending script so the message
+    /// can be surfaced directly to model authors.
+    #[error("Script '{function}' error{}: {message}", position.map(|p| format!(" at position {p}")).unwrap_or_default())]
+    ScriptError {
+        /// The script function's name.
+        function: String,
+        /// Best-effort byte offset into the body for a compile error;
+        /// `None` for runtime failures (no source position is available).
+        position: Option<usize>,
+        /// Description of the failure.
+        message: String,
+    },
+
     /// An aggregation was attempted on an unsupported column type.
     #[error("Aggregation '{operation}' is not supported on column type '{column_type}'")]
     UnsupportedAggregation {

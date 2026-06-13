@@ -477,7 +477,10 @@ async fn main() {
     ) -> bool {
         match rebuild_model_with_measures(base_model, user_measures) {
             Ok(new_model) => {
-                engine.set_model(new_model);
+                if let Err(e) = engine.set_model(new_model) {
+                    println!("  Model script error: {e}");
+                    return false;
+                }
                 true
             }
             Err(e) => {
