@@ -461,12 +461,21 @@ pub(crate) fn temp_table_drop_sql(dialect: &impl SqlDialect, name: &str) -> Stri
     format!("DROP TABLE IF EXISTS {}", dialect.quote_ident(name))
 }
 
+/// An always-false SQL predicate, used to render an IN filter whose value set
+/// is **empty**. `x IN ()` is logically the empty set (matches nothing), so an
+/// empty IN filter must restrict the result to zero rows — NOT be dropped.
+/// Dropping it (the historical behavior) silently returned the whole table,
+/// which is a correctness bug for a zero-match dimension filter and a
+/// row-level-security leak when a role's dimension predicate matches no rows.
+/// `1 = 0` is valid on PostgreSQL, SQL Server, and DataFusion alike.
+pub(crate) const FALSE_PREDICATE: &str = "1 = 0";
+
 /// Build conditions from a request's filters and (inline) IN filters,
 /// appending bound values to `params`.
 ///
-/// IN filters with no values are skipped. Mirrors the historical connector
-/// behavior exactly, including condition ordering (filters first, IN filters
-/// after).
+/// An IN filter with no values renders as [`FALSE_PREDICATE`] (matches
+/// nothing), never skipped. Condition ordering is filters first, IN filters
+/// after.
 fn request_conditions(
     dialect: &impl SqlDialect,
     request: &FetchRequest,
@@ -474,7 +483,9 @@ fn request_conditions(
 ) -> Vec<String> {
     let mut conditions = build_filter_conditions(dialect, &request.filters, params);
     for in_filter in &request.in_filters {
-        if !in_filter.values.is_empty() {
+        if in_filter.values.is_empty() {
+            conditions.push(FALSE_PREDICATE.to_string());
+        } else {
             conditions.push(build_inline_in(dialect, in_filter));
         }
     }
@@ -1172,6 +1183,46 @@ mod tests {
              WHERE CAST([status] AS NVARCHAR(MAX)) = @P1 AND [region_id] IN (1, 2)"
         );
         assert_eq!(ss_params, vec!["active".to_string()]);
+    }
+
+    #[test]
+    fn empty_in_filter_renders_false_predicate_not_skipped() {
+        // An IN filter with no values means "match nothing" — it must render
+        // as a false predicate (1 = 0), never be dropped (which would return
+        // the whole table: a correctness bug and an RLS leak).
+        let request = FetchRequest {
+            schema: Some("sales".into()),
+            table: "orders".into(),
+            in_filters: vec![in_filter("region_id", &[], InValueKind::Integer)],
+            ..Default::default()
+        };
+        let (pg_sql, _) = build_select_sql(&PostgresDialect, &request);
+        assert!(
+            pg_sql.contains("WHERE 1 = 0"),
+            "empty IN must render WHERE 1 = 0, got: {pg_sql}"
+        );
+        let (pg_agg, _) = build_aggregate_sql(&PostgresDialect, &request);
+        assert!(pg_agg.contains("1 = 0"), "aggregate path: {pg_agg}");
+        let (ss_sql, _) = build_select_sql(&SqlServerDialect, &request);
+        assert!(ss_sql.contains("WHERE 1 = 0"), "sqlserver: {ss_sql}");
+    }
+
+    #[test]
+    fn empty_in_filter_combines_with_other_conditions() {
+        let request = FetchRequest {
+            schema: Some("sales".into()),
+            table: "orders".into(),
+            in_filters: vec![
+                in_filter("a", &["1"], InValueKind::Integer),
+                in_filter("b", &[], InValueKind::Integer),
+            ],
+            ..Default::default()
+        };
+        let (sql, _) = build_select_sql(&PostgresDialect, &request);
+        assert!(
+            sql.contains("\"a\" IN (1) AND 1 = 0"),
+            "empty IN must AND with other conditions: {sql}"
+        );
     }
 
     #[test]

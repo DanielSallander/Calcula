@@ -247,6 +247,99 @@ async fn dimension_role_restricts_fact_without_dimension_in_query() {
     );
 }
 
+// A role whose DIMENSION predicate matches ZERO dimension rows must restrict
+// the fact to zero rows — NOT leave it unrestricted. (Historically the engine
+// skipped building an empty IN-filter, so a role like `region = "Atlantis"`
+// when no such region exists would drop the restriction and expose ALL rows.)
+#[tokio::test]
+async fn role_matching_no_dimension_rows_returns_empty_not_all() {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("geo_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Geography",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Geo",
+            "Sales",
+            "geo_id",
+            "Geography",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        // The role permits a region that does not exist in the data.
+        .add_security_role(SecurityRole::new("Nowhere").with_filter(
+            "Geography",
+            "region",
+            ComparisonOp::Equal,
+            "Atlantis",
+        ))
+        .build()
+        .unwrap();
+
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Geography", 0, SourceBinding::new("public", "geography"));
+    let sales = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("geo_id", ArrowType::Int64, true),
+            Field::new("amount", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Float64Array::from(vec![100.0, 40.0, 30.0])),
+        ],
+    )
+    .unwrap();
+    let geo = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", ArrowType::Int64, true),
+            Field::new("region", ArrowType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["West", "East"])),
+        ],
+    )
+    .unwrap();
+    engine.cache.store("Sales", sales).unwrap();
+    engine.cache.store("Geography", geo).unwrap();
+    engine.set_active_role(Some("Nowhere".into()));
+
+    // Group by region so an empty fact yields zero rows (the role permits no
+    // region, so the result must be empty — not the grand total 170).
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Geography", "region")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        rows, 0,
+        "a role matching no dimension rows must return zero fact rows, not all of them"
+    );
+}
+
 // --- (a) Role on the fact restricts a pushed-simple-shaped query ---
 
 #[tokio::test]

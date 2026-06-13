@@ -309,6 +309,9 @@ impl PostgresConnector {
 
         for in_filter in &request.in_filters {
             if in_filter.values.is_empty() {
+                // An empty IN set matches nothing — restrict to zero rows
+                // rather than dropping the constraint (would return all rows).
+                conditions.push(sql_builder::FALSE_PREDICATE.to_string());
                 continue;
             }
             if in_filter.values.len() > threshold {

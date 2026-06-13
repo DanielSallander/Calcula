@@ -342,16 +342,20 @@ impl QueryExecutor {
             for (pi, dim_col, fact_table, fact_col) in &propagation_info {
                 if pi == idx {
                     let (values, kind) = extract_column_values(batches, dim_col);
-                    if !values.is_empty() {
-                        in_filters_by_table
-                            .entry(fact_table.to_lowercase())
-                            .or_default()
-                            .push(InFilterCondition {
-                                column: fact_col.clone(),
-                                values,
-                                kind,
-                            });
-                    }
+                    // Always push, even when empty: an empty key set means the
+                    // filtered dimension permits no rows, so the fact must be
+                    // restricted to zero rows (the connector renders an empty
+                    // IN as a false predicate; the in-memory path filters to
+                    // zero). Skipping it would leave the fact unrestricted — a
+                    // zero-match correctness bug and an RLS leak.
+                    in_filters_by_table
+                        .entry(fact_table.to_lowercase())
+                        .or_default()
+                        .push(InFilterCondition {
+                            column: fact_col.clone(),
+                            values,
+                            kind,
+                        });
                 }
             }
         }
@@ -384,16 +388,18 @@ impl QueryExecutor {
                         inmemory_results.iter().find(|(n, _, _, _)| n == table_name)
                     {
                         let (values, kind) = extract_column_values(batches, &dim_col);
-                        if !values.is_empty() {
-                            in_filters_by_table
-                                .entry(mt.to_lowercase())
-                                .or_default()
-                                .push(InFilterCondition {
-                                    column: fact_col,
-                                    values,
-                                    kind,
-                                });
-                        }
+                        // Always push, even when empty (see the connector
+                        // pre-fetch branch above): a zero-key in-memory
+                        // dimension must restrict the fact to zero rows, not
+                        // leave it unrestricted.
+                        in_filters_by_table
+                            .entry(mt.to_lowercase())
+                            .or_default()
+                            .push(InFilterCondition {
+                                column: fact_col,
+                                values,
+                                kind,
+                            });
                     }
                 }
             }
