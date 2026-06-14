@@ -27,6 +27,7 @@ import type {
   OverlayRegistration,
 } from "./gridOverlays";
 import type { AppEventName } from "./events";
+import type { CapabilityId } from "./scriptHost/capabilityIds";
 import type { IKeyboardAPI } from "./keyboard";
 import type { IKeybindingsAPI } from "./keybindings";
 import type { ISettingsAPI } from "./settings";
@@ -242,6 +243,22 @@ export interface ExtensionManifest {
   activationEvents?: string[];
   /** Optional description */
   description?: string;
+  /**
+   * The ambient-world capabilities this extension declares it needs (Wave 3 /
+   * S8-C7). This is the R19 declared-capability CEILING for a DISTRIBUTED
+   * (third-party) extension: nothing outside this set may be granted, and an
+   * absent/empty list means deny-by-default. Built-in (trusted) extensions
+   * ignore this field — they run with full host trust. Mirrors the script
+   * capability vocabulary (capabilityIds.ts).
+   */
+  capabilities?: CapabilityId[];
+  /**
+   * Opt-in flag for Phase B worker-realm isolation: when true, a distributed
+   * extension consents to run inside the sandboxed worker realm (no ambient
+   * DOM/Tauri access; all privileged calls broker-mediated). Phase A records it
+   * only; the worker-realm host that consumes it lands in Phase B.
+   */
+  workerSupport?: boolean;
 }
 
 // ============================================================================

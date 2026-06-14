@@ -354,6 +354,14 @@ pub struct Evaluator<'a> {
     /// Optional writeback data lookup for GATHER functions.
     /// Takes a region_id and returns pre-fetched submission data.
     gather_fn: Option<&'a dyn Fn(&str) -> GatherRegionData>,
+    /// Optional user-defined-function (UDF) resolver. A formula name that is
+    /// neither a builtin nor a LET/LAMBDA binding is offered to this closure
+    /// (uppercased) with its evaluated arguments. The closure serves results
+    /// PRE-FETCHED before this synchronous recalc (UDF implementations are JS
+    /// and cannot be called back into mid-evaluation under the recalc lock — see
+    /// the pre-fetch in app/src-tauri scripting/udf). `None` => the name is not a
+    /// (pre-fetched) UDF and evaluation falls through to #NAME?.
+    udf_fn: Option<&'a dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
@@ -371,6 +379,7 @@ impl<'a> Evaluator<'a> {
             file_reader: None,
             pivot_data_fn: None,
             gather_fn: None,
+            udf_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -385,6 +394,7 @@ impl<'a> Evaluator<'a> {
             file_reader: None,
             pivot_data_fn: None,
             gather_fn: None,
+            udf_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -399,6 +409,7 @@ impl<'a> Evaluator<'a> {
             file_reader: None,
             pivot_data_fn: None,
             gather_fn: None,
+            udf_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -428,6 +439,16 @@ impl<'a> Evaluator<'a> {
         f: &'a dyn Fn(&str) -> GatherRegionData,
     ) {
         self.gather_fn = Some(f);
+    }
+
+    /// Sets the user-defined-function resolver. The closure is offered an
+    /// uppercased function name + its evaluated arguments and returns the
+    /// pre-fetched result, or None if the name is not a (pre-fetched) UDF.
+    pub fn set_udf_fn(
+        &mut self,
+        f: &'a dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>,
+    ) {
+        self.udf_fn = Some(f);
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -1718,7 +1739,22 @@ impl<'a> Evaluator<'a> {
                         }
                         self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured)
                     }
-                    _ => EvalResult::Error(CellError::Name),
+                    // User-defined function (UDF) hook. Order matters: a LET/LAMBDA
+                    // binding above SHADOWS a same-named UDF. Args are evaluated so
+                    // the resolver receives concrete values; the resolver serves
+                    // results pre-fetched off-thread (it can never call JS back into
+                    // this synchronous, lock-held recalc). A None result (the name
+                    // is not a registered/pre-fetched UDF) falls through to #NAME?.
+                    _ => {
+                        if let Some(udf) = self.udf_fn {
+                            let eval_args: Vec<EvalResult> =
+                                args.iter().map(|a| self.evaluate(a)).collect();
+                            if let Some(result) = udf(&key, &eval_args) {
+                                return result;
+                            }
+                        }
+                        EvalResult::Error(CellError::Name)
+                    }
                 }
             },
         }
@@ -12283,6 +12319,86 @@ mod tests {
         grid.set_cell(1, 1, Cell::new_number(15.0));
         grid.set_cell(2, 1, Cell::new_text("Hello".to_string()));
         grid
+    }
+
+    // ---- User-defined function (UDF) hook (Wave 3 / C1) ----
+
+    #[test]
+    fn test_udf_resolves_custom_name() {
+        let grid = make_grid();
+        let mut eval = Evaluator::new(&grid);
+        // A UDF that doubles its single numeric argument, served from a
+        // pre-fetched closure (production resolves this off-thread, never
+        // calling JS back into the synchronous recalc).
+        let udf = |name: &str, args: &[EvalResult]| -> Option<EvalResult> {
+            if name == "MYDOUBLE" {
+                let n = args.first().and_then(|a| a.as_number()).unwrap_or(0.0);
+                Some(EvalResult::Number(n * 2.0))
+            } else {
+                None
+            }
+        };
+        eval.set_udf_fn(&udf);
+
+        // =MyDouble(21) -> 42 (name matched case-insensitively, uppercased).
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Custom("MyDouble".to_string()),
+            args: vec![Expression::Literal(Value::Number(21.0))],
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(42.0));
+    }
+
+    #[test]
+    fn test_udf_receives_all_evaluated_args() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let udf = |name: &str, args: &[EvalResult]| -> Option<EvalResult> {
+            if name == "MYSUM" {
+                Some(EvalResult::Number(args.iter().filter_map(|a| a.as_number()).sum()))
+            } else {
+                None
+            }
+        };
+        eval.set_udf_fn(&udf);
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Custom("mysum".to_string()),
+            args: vec![
+                Expression::Literal(Value::Number(2.0)),
+                Expression::Literal(Value::Number(3.0)),
+                Expression::Literal(Value::Number(4.0)),
+            ],
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(9.0));
+    }
+
+    #[test]
+    fn test_udf_none_falls_through_to_name_error() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let udf = |_n: &str, _a: &[EvalResult]| -> Option<EvalResult> { None };
+        eval.set_udf_fn(&udf);
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Custom("NOPE".to_string()),
+            args: vec![],
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Name));
+    }
+
+    #[test]
+    fn test_custom_name_without_udf_fn_is_name_error() {
+        // With no resolver set the Custom arm must still yield #NAME? (the hook
+        // must not change behavior when UDFs are absent).
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Custom("WHATEVER".to_string()),
+            args: vec![Expression::Literal(Value::Number(1.0))],
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Name));
     }
 
     #[test]

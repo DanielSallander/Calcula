@@ -128,6 +128,7 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "bi.query": "Run read-only queries on this workbook's BI connections",
   storage: "Store script-private data in this workbook",
   "ui.html": "Render sandboxed HTML inside its object",
+  "formula.udf": "Evaluate its functions in worksheet formulas",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */

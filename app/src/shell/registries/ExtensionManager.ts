@@ -83,6 +83,19 @@ import {
 import { registerCellEditor } from "../../api/cellEditors";
 import { registerFileFormat, getFileFormats } from "../../api/fileFormats";
 import { registerFunction } from "../../api/formulaFunctions";
+// Wave 3 / S8-C7: reuse the script broker's capability vocabulary, handle model,
+// and transparency registry to classify + record distributed extensions.
+import type { CapabilityId } from "../../api/scriptHost/capabilityIds";
+import {
+  buildHandleFromDefinition,
+  registerMountedHandle,
+} from "../../api/scriptHost/broker";
+import {
+  computeExtensionCeiling,
+  type ExtensionTrust,
+} from "./extensionTrust";
+
+export type { ExtensionTrust };
 
 // ============================================================================
 // Types
@@ -97,6 +110,14 @@ export interface LoadedExtension {
   status: ExtensionStatus;
   module: ExtensionModule;
   error?: Error;
+  /** Trust classification (built-in vs third-party). */
+  trust: ExtensionTrust;
+  /** The R19 declared-capability ceiling. Empty for trusted built-ins (full
+   *  authority) and for distributed extensions that declared nothing
+   *  (deny-by-default). */
+  declaredCapabilities: CapabilityId[];
+  /** Deregisters this extension's transparency-panel handle (distributed only). */
+  handleCleanup?: () => void;
 }
 
 type ChangeListener = () => void;
@@ -305,9 +326,10 @@ class ExtensionManagerImpl {
     console.log("[ExtensionManager] Initializing...");
     this.initialized = true;
 
-    // Load all built-in extensions from the manifest
+    // Load all built-in extensions from the manifest. Built-ins are TRUSTED
+    // (first-party, kernel-adjacent) — full host authority.
     for (const module of builtInExtensions) {
-      await this.activateExtension(module);
+      await this.activateExtension(module, "trusted");
     }
 
     // Load third-party extensions from the user's extensions directory
@@ -330,9 +352,13 @@ class ExtensionManagerImpl {
   // --------------------------------------------------------------------------
 
   /**
-   * Activate an extension module.
+   * Activate an extension module under a trust classification (Wave 3 / S8-C7).
+   * Built-ins pass "trusted"; third-party bundles pass "distributed".
    */
-  private async activateExtension(module: ExtensionModule): Promise<void> {
+  private async activateExtension(
+    module: ExtensionModule,
+    trust: ExtensionTrust,
+  ): Promise<void> {
     const { id, name, version } = module.manifest;
 
     // Check for duplicate
@@ -341,6 +367,11 @@ class ExtensionManagerImpl {
       return;
     }
 
+    const declaredCapabilities = computeExtensionCeiling(
+      module.manifest.capabilities,
+      trust,
+    );
+
     // Add as pending
     const entry: LoadedExtension = {
       id,
@@ -348,8 +379,30 @@ class ExtensionManagerImpl {
       version,
       status: "pending",
       module,
+      trust,
+      declaredCapabilities,
     };
     this.extensions.set(id, entry);
+
+    // Distributed extensions are surfaced in the transparency panel with their
+    // declared ceiling (deny-by-default; grants come only through consent), so
+    // the user always knows a third-party extension is present and what it may
+    // touch. This reuses the script broker's handle + transparency registry; in
+    // Phase B the same handle gates the extension's broker-mediated calls.
+    if (trust === "distributed") {
+      const handle = buildHandleFromDefinition({
+        id: `extension:${id}`,
+        name,
+        objectType: "extension",
+        instanceId: null,
+        accessLevel: "restricted",
+        provenance: "distributed",
+        packageName: id,
+        declaredCapabilities,
+      });
+      entry.handleCleanup = registerMountedHandle(handle);
+    }
+
     this.updateCachedArray();
     this.notifyChange();
 
@@ -481,7 +534,8 @@ class ExtensionManagerImpl {
         throw new Error(`Extension '${name}' does not export an 'activate' function.`);
       }
 
-      await this.activateExtension(module);
+      // Third-party bundles are DISTRIBUTED: ceiling-bounded + transparency-tracked.
+      await this.activateExtension(module, "distributed");
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
@@ -511,6 +565,9 @@ class ExtensionManagerImpl {
         console.log(`[ExtensionManager] Deactivating extension: ${id}`);
         entry.module.deactivate();
       }
+      // Drop the transparency-panel handle (distributed extensions only).
+      entry.handleCleanup?.();
+      entry.handleCleanup = undefined;
       entry.status = "inactive";
       console.log(`[ExtensionManager] Extension '${id}' deactivated.`);
     } catch (error) {

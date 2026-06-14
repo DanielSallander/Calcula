@@ -16,6 +16,7 @@
 // is suppressed for them here.
 
 import type { CapabilityId } from "./allowlist";
+import { CAPABILITY_ID_SET } from "./capabilityIds";
 import { invokeBackend } from "../backend";
 import { emitAppEvent } from "../events";
 
@@ -184,6 +185,7 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "bi.query": "run read-only BI queries",
   storage: "store data on this device",
   "ui.html": "render custom HTML UI",
+  "formula.udf": "evaluate worksheet formulas (user-defined functions)",
 };
 
 /** requestId -> resolver. */
@@ -270,13 +272,9 @@ export function resolveCapabilityRequest(requestId: string, decision: Capability
 // net.fetch and is normalized via fetchOriginOf (agreeing with Rust).
 // ============================================================================
 
-/** The set of capability ids a script source declares it needs. */
-const KNOWN_CAPABILITY_IDS: ReadonlySet<CapabilityId> = new Set<CapabilityId>([
-  "net.fetch",
-  "bi.query",
-  "storage",
-  "ui.html",
-]);
+/** The set of capability ids a script source declares it needs.
+ *  Single source of truth: capabilityIds.ts (was duplicated here pre-Wave 3). */
+const KNOWN_CAPABILITY_IDS: ReadonlySet<CapabilityId> = CAPABILITY_ID_SET;
 
 export interface DeclaredCapabilities {
   caps: CapabilityId[];

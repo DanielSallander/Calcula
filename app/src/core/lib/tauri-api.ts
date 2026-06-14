@@ -23,6 +23,35 @@ import type {
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
 
 // ============================================================================
+// UDF pre-resolution hook (Inversion of Control)
+// ----------------------------------------------------------------------------
+// User-defined formula functions (UDFs) have JS implementations, but the Rust
+// recalc is synchronous and holds a state lock, so it can never call a JS UDF
+// back mid-evaluation. Instead the @api UDF layer installs a resolver here that
+// runs BEFORE update_cell: it asks the backend which UDF calls the edit will
+// trigger (collect), resolves their JS results off-thread, and returns a
+// pre-fetched results table the backend's evaluator then serves. Core stays
+// ignorant of @api and of the UDF mechanism — it only invokes the hook when one
+// is installed. When no UDFs are registered the hook returns undefined and the
+// fast path (no extra IPC) is preserved.
+// ============================================================================
+
+/** A resolver returning the pre-fetched UDF results table (opaque to Core) for
+ *  a pending single-cell edit, or undefined when there is nothing to resolve. */
+export type UdfResolveHook = (
+  row: number,
+  col: number,
+  value: string,
+) => Promise<Record<string, unknown> | undefined>;
+
+let udfResolveHook: UdfResolveHook | null = null;
+
+/** Installed by the @api UDF layer; pass null to uninstall. */
+export function setUdfResolveHook(hook: UdfResolveHook | null): void {
+  udfResolveHook = hook;
+}
+
+// ============================================================================
 // Cell Operations
 // ============================================================================
 
@@ -118,8 +147,22 @@ export async function updateCell(
   input: string
 ): Promise<UpdateCellResult> {
   const t0 = performance.now();
+  // Pre-resolve any user-defined formula functions the edit will trigger, so the
+  // synchronous backend recalc can serve their results (see setUdfResolveHook).
+  // Best-effort: a hook failure must not block a normal edit.
+  let udfResults: Record<string, unknown> | undefined;
+  if (udfResolveHook) {
+    try {
+      udfResults = await udfResolveHook(row, col, input);
+    } catch (e) {
+      console.warn("[udf] resolve hook failed; proceeding without UDF results", e);
+    }
+  }
   // FIXED: Mapped 'input' to 'value' to match Rust command signature
-  const result = await invoke<UpdateCellResult>("update_cell", { row, col, value: input });
+  const result = await invoke<UpdateCellResult>(
+    "update_cell",
+    udfResults ? { row, col, value: input, udfResults } : { row, col, value: input },
+  );
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.cells.length} cells | ipc=${dt.toFixed(1)}ms`);
   return result;

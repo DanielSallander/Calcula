@@ -18,6 +18,7 @@ import type {
   AutocompleteInputPayload,
   AutocompleteKeyPayload,
 } from "@api/formulaAutocomplete";
+import { installUdfEvaluation, uninstallUdfEvaluation } from "@api/formulaUdf";
 import { FormulaAutocompleteOverlay } from "./FormulaAutocompleteOverlay";
 import { useAutocompleteStore } from "./useAutocompleteStore";
 import { reloadNamedRanges, subscribeToCustomFunctionChanges } from "./functionCatalog";
@@ -93,6 +94,10 @@ function activate(): void {
       console.log("[FormulaAutocomplete] Custom functions changed, autocomplete updated.");
     })
   );
+
+  // 8. Wire user-defined functions into the evaluator (Wave 3 / C1): registered
+  //    custom functions now EVALUATE in worksheet formulas, not just autocomplete.
+  installUdfEvaluation();
 }
 
 function deactivate(): void {
@@ -109,6 +114,9 @@ function deactivate(): void {
   // Reset state
   useAutocompleteStore.getState().reset();
   setFormulaAutocompleteVisible(false);
+
+  // Unwire UDF evaluation from Core's updateCell hook.
+  uninstallUdfEvaluation();
 }
 
 const extension: ExtensionModule = {

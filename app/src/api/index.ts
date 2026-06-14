@@ -802,6 +802,24 @@ export {
 export type {
   CustomFunctionDef,
 } from "./formulaFunctions";
+// UDF evaluation bridge (Wave 3 / C1): makes registered custom functions
+// actually evaluate in worksheet formulas (broker-mediated, pre-fetched).
+export {
+  installUdfEvaluation,
+  uninstallUdfEvaluation,
+  resolveUdfsForEdit,
+  type UdfValue,
+} from "./formulaUdf";
+// Unified script-surface taxonomy (Wave 3 / C3): the one queryable source of
+// truth for where code runs and what it can touch.
+export {
+  SCRIPT_SURFACES,
+  getScriptSurface,
+  executableScriptSurfaces,
+  type ScriptSurface,
+  type ScriptSurfaceId,
+  type ScriptRuntime,
+} from "./scriptSurfaces";
 
 // ============================================================================
 // Grid Overlays

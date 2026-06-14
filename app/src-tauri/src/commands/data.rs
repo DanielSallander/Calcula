@@ -19,7 +19,7 @@ use crate::{
     update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
-use engine::{self, Grid, StyleRegistry};
+use engine::{self, EvalResult, Grid, StyleRegistry};
 use crate::persistence::{FileState, UserFilesState};
 use crate::slicer::SlicerState;
 use std::collections::HashSet;
@@ -500,9 +500,15 @@ pub fn update_cell(
     row: u32,
     col: u32,
     value: String,
+    udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
 ) -> Result<UpdateCellResult, String> {
     use std::time::Instant;
     let perf_t0 = Instant::now();
+
+    // Build the apply-time UDF resolver from the pre-fetched results table (if
+    // any). When the frontend omits udfResults, this is None -> behavior is
+    // identical to before (the engine emits #NAME? for any UDF call).
+    let udf_resolver = udf_results.as_ref().map(|t| crate::scripting::udf::make_udf_resolver(t));
 
     // Lock user files for FILEREAD/FILELINES/FILEEXISTS support
     let user_files = user_files_state.files.lock().unwrap();
@@ -810,6 +816,7 @@ pub fn update_cell(
                     &user_files,
                     Some(&pivot_data_fn),
                     Some(&gather_fn),
+                    udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
                 );
 
                 // Clear any previous spill range for this cell
@@ -1039,6 +1046,7 @@ pub fn update_cell(
                         perf_cache_hits += 1;
                         let result = evaluate_formula_raw_with_ast_and_files(
                             &grids, &sheet_names, active_sheet, cached_ast, &user_files,
+                            udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
                         );
                         (result, None)
                     } else {
@@ -1065,6 +1073,7 @@ pub fn update_cell(
                         }).map_err(|e| format!("{}", e)) {
                             let result = evaluate_formula_raw_with_ast_and_files(
                                 &grids, &sheet_names, active_sheet, &engine_ast, &user_files,
+                                udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
                             );
                             (result, Some(engine_ast))
                         } else {
@@ -1523,10 +1532,15 @@ pub fn update_cells_batch(
     user_files_state: State<UserFilesState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
+    udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
 ) -> Result<Vec<CellData>, String> {
     use std::collections::HashMap;
     use std::time::Instant;
     let perf_t0 = Instant::now();
+
+    // Build the apply-time UDF resolver from the pre-fetched results table (if
+    // any). Omitting udfResults -> None -> behavior identical to before.
+    let udf_resolver = udf_results.as_ref().map(|t| crate::scripting::udf::make_udf_resolver(t));
     let user_files = user_files_state.files.lock().unwrap();
     let perf_batch_size = updates.len();
 
@@ -1842,6 +1856,7 @@ pub fn update_cells_batch(
                         &user_files,
                         Some(&pivot_data_fn),
                         Some(&gather_fn),
+                        udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
                     );
 
                     // Clear any previous spill range for this cell
@@ -4237,6 +4252,7 @@ pub fn fill_range(
                                 &user_files,
                                 Some(&pivot_data_fn),
                                 Some(&gather_fn),
+                                None, // v1: fill/on-sheets path does not resolve UDFs
                             );
 
                             // For fill, we take the simple scalar result (no spill handling)

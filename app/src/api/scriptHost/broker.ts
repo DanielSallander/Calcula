@@ -11,6 +11,7 @@
 //          Phase 2 it is the ScriptHandle the context builder closed over.
 
 import { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS, type CapabilityId, type MethodPolicy } from "./allowlist";
+import { CAPABILITY_ID_SET } from "./capabilityIds";
 import { appendAudit } from "./auditRing";
 import { getGrantSet } from "./capabilities";
 import { USERSCRIPT_EVENT_PREFIX, namespaceUserEvent } from "../events";
@@ -49,15 +50,10 @@ export interface ScriptHandle {
   declaredCapabilities: ReadonlySet<CapabilityId>;
 }
 
-/** The recognized capability ids (mirrors capabilities.ts KNOWN_CAPABILITY_IDS
- *  and the Rust KNOWN_CAPABILITY_IDS). Used to filter the declared set so an
- *  unknown id from any source can never enter the ceiling. */
-const VALID_CAPABILITY_IDS: ReadonlySet<CapabilityId> = new Set<CapabilityId>([
-  "net.fetch",
-  "bi.query",
-  "storage",
-  "ui.html",
-]);
+/** The recognized capability ids. Single source of truth: capabilityIds.ts
+ *  (was duplicated here and in capabilities.ts pre-Wave 3). Used to filter the
+ *  declared set so an unknown id from any source can never enter the ceiling. */
+const VALID_CAPABILITY_IDS: ReadonlySet<CapabilityId> = CAPABILITY_ID_SET;
 
 export type RpcErrorCode =
   | "PermissionDenied"

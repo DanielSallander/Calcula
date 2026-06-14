@@ -2695,7 +2695,7 @@ pub fn evaluate_formula_with_pivot(
 ) -> CellValue {
     evaluate_formula_raw_with_files_and_pivot(
         grids, sheet_names, current_sheet_index, ast, eval_ctx,
-        style_registry, user_files, pivot_data_fn, gather_fn,
+        style_registry, user_files, pivot_data_fn, gather_fn, None,
     )
     .to_cell_value()
 }
@@ -2736,7 +2736,7 @@ pub fn evaluate_formula_raw_with_files(
 ) -> EvalResult {
     evaluate_formula_raw_with_files_and_pivot(
         grids, sheet_names, current_sheet_index, ast, eval_ctx,
-        style_registry, user_files, None, None,
+        style_registry, user_files, None, None, None,
     )
 }
 
@@ -2751,6 +2751,7 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     user_files: &HashMap<String, Vec<u8>>,
     pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
     gather_fn: Option<&dyn Fn(&str) -> engine::GatherRegionData>,
+    udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
@@ -2772,6 +2773,9 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
     }
     if let Some(gf) = gather_fn {
         evaluator.set_gather_fn(gf);
+    }
+    if let Some(uf) = udf_fn {
+        evaluator.set_udf_fn(uf);
     }
     evaluator.evaluate(ast)
 }
@@ -2860,18 +2864,24 @@ pub fn evaluate_formula_multi_sheet_with_ast_and_files(
     ast: &EngineExpr,
     user_files: &HashMap<String, Vec<u8>>,
 ) -> CellValue {
-    evaluate_formula_raw_with_ast_and_files(grids, sheet_names, current_sheet_index, ast, user_files)
+    evaluate_formula_raw_with_ast_and_files(grids, sheet_names, current_sheet_index, ast, user_files, None)
         .to_cell_value()
 }
 
 /// Like evaluate_formula_multi_sheet_with_ast_and_files but returns the raw EvalResult,
 /// preserving array/spill information needed for cascade spill recalculation.
+///
+/// `udf_fn` (Wave 3 / C1): the dependent-recalc cascade routes through here, so a
+/// dependent cell like B1=MYFN(A1) must serve the pre-fetched UDF table too, or
+/// editing A1 would recompute B1 to #NAME?. Pivot/gather/styles remain
+/// unthreaded here (unchanged limitation); only the UDF resolver is added.
 pub fn evaluate_formula_raw_with_ast_and_files(
     grids: &[Grid],
     sheet_names: &[String],
     current_sheet_index: usize,
     ast: &EngineExpr,
     user_files: &HashMap<String, Vec<u8>>,
+    udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
@@ -2885,6 +2895,9 @@ pub fn evaluate_formula_raw_with_ast_and_files(
     };
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
     evaluator.set_file_reader(&reader);
+    if let Some(uf) = udf_fn {
+        evaluator.set_udf_fn(uf);
+    }
     evaluator.evaluate(ast)
 }
 
@@ -3401,6 +3414,7 @@ pub fn run() {
             commands::get_collection_texts,
             commands::update_cell,
             commands::update_cells_batch,
+            scripting::collect_udf_calls,
             commands::clear_cell,
             commands::clear_range,
             commands::clear_range_with_options,

@@ -27,6 +27,15 @@ export {
 
 export { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS } from "./allowlist";
 export type { MethodPolicy, Tier, CapabilityId, MethodClass } from "./allowlist";
+// Single source of truth for the capability vocabulary (Wave 3 substrate).
+export { ALL_CAPABILITY_IDS, CAPABILITY_ID_SET, isCapabilityId } from "./capabilityIds";
+// Shared broker-error -> surface-failure mapping (UDF cell errors, ext status).
+export {
+  brokerErrorCode,
+  brokerErrorToCellError,
+  brokerErrorReason,
+  type CellErrorText,
+} from "./errorMap";
 export { getAuditTail, getAuditTotal, onAudit, clearAudit } from "./auditRing";
 export type { AuditEntry } from "./auditRing";
 export {

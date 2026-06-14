@@ -8,12 +8,17 @@
 import {
   vAny, vNotify, vExpose, vCall, vHook, vGetState, vSetState, vDecl, vNone,
   vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vSql,
-  vKey, vKV, type Validator,
+  vKey, vKV, vUdf, type Validator,
 } from "./validators";
 import { AppEvents } from "../events";
+import type { CapabilityId } from "./capabilityIds";
+
+// CapabilityId now lives in the single-source-of-truth module (capabilityIds.ts);
+// re-exported here so the many existing `import { CapabilityId } from "./allowlist"`
+// consumers keep working unchanged.
+export type { CapabilityId };
 
 export type Tier = "restricted" | "unlocked";
-export type CapabilityId = "net.fetch" | "bi.query" | "storage" | "ui.html";
 export type MethodClass = "read" | "mutate" | "emit" | "net";
 
 export interface MethodPolicy {
@@ -70,6 +75,14 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.storageSet":        { tier: "restricted", capability: "storage", class: "mutate",
                              validate: vKV, limits: { maxBytes: 262_144 },
                              desc: "Store script-private data in the workbook (quota 256 KB)" },
+  // ---- formula UDF (Wave 3 / C1): a registered user-defined function invoked
+  //      from a worksheet formula. Restricted-tier + the formula.udf capability,
+  //      so a distributed script's UDFs cannot run without package consent; the
+  //      JS impl executes in its owning script's realm through this one method,
+  //      giving the same audit + R19 ceiling every other privileged call gets. ----
+  "formula.udf.invoke":    { tier: "restricted", capability: "formula.udf", class: "read",
+                             validate: vUdf, limits: { maxArgs: 255 },
+                             desc: "Evaluate a registered user-defined formula function" },
 };
 
 /**

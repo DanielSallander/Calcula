@@ -144,6 +144,15 @@ export const vSql: Validator = ([sql]) => {
   return true;
 };
 
+export const vUdf: Validator = ([name, args]) => {
+  if (!isBoundedString(name, MAX_KEY) || (name as string).length === 0) {
+    return "udf name must be a non-empty string";
+  }
+  if (!Array.isArray(args)) return "udf args must be an array";
+  if (args.length > 255) return "too many udf arguments (max 255)";
+  return true;
+};
+
 export const vKey: Validator = ([key]) =>
   isBoundedString(key, MAX_KEY) && (key as string).length > 0
     ? true
