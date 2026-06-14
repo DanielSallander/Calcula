@@ -334,6 +334,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "QTD",
         "MTD",
         "PRIORYEAR",
+        "SAMEPERIODLASTYEAR",
         "PRIORPERIOD",
         // Value inspection
         "HASONEVALUE",

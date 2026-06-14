@@ -22,6 +22,11 @@ impl Parser {
     }
 
     /// Parse `PRIORYEAR(expr)` — sugar for `PRIORPERIOD(expr, -1, YEAR)`.
+    ///
+    /// `SAMEPERIODLASTYEAR(expr)` is a synonym: it dispatches here and produces
+    /// the identical `PeriodShift { offset: -1, granularity: Year }`. In the
+    /// filter-context path a year shift moves the *entire* current date window
+    /// back one year, which is exactly the "same period, last year" semantics.
     pub(super) fn parse_prioryear_call(&mut self) -> EngineResult<Expression> {
         let inner = self.parse_expression()?;
         self.expect(&Token::RParen)?;
@@ -137,6 +142,35 @@ mod tests {
         };
         assert_eq!(*offset, -1);
         assert_eq!(*granularity, DateGranularity::Year);
+    }
+
+    #[test]
+    fn parse_sameperiodlastyear_equals_prioryear() {
+        // SAMEPERIODLASTYEAR is a synonym for PRIORYEAR: same PeriodShift node
+        // (Expression has no PartialEq, so compare the structural fields).
+        let sply = parse_measure_expression("SAMEPERIODLASTYEAR(SUM(fact_sales[amount]))").unwrap();
+        let py = parse_measure_expression("PRIORYEAR(SUM(fact_sales[amount]))").unwrap();
+        let Expression::PeriodShift {
+            offset: sply_offset,
+            granularity: sply_gran,
+            ..
+        } = &sply
+        else {
+            panic!("expected PeriodShift, got {sply:?}");
+        };
+        let Expression::PeriodShift {
+            offset: py_offset,
+            granularity: py_gran,
+            ..
+        } = &py
+        else {
+            panic!("expected PeriodShift, got {py:?}");
+        };
+        assert_eq!(*sply_offset, -1);
+        assert_eq!(*sply_gran, DateGranularity::Year);
+        assert_eq!(sply_offset, py_offset, "same offset as PRIORYEAR");
+        assert_eq!(sply_gran, py_gran, "same granularity as PRIORYEAR");
+        assert!(sply.has_window(), "time intel must route as window-ish");
     }
 
     #[test]

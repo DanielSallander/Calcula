@@ -6,6 +6,8 @@ The Engine Lib is a shared Rust crate that provides the core analytical processi
 
 **Design philosophy:** The engine is a **library**, not a server. Like SQLite, it can be embedded into any application that needs analytical processing. This enables local-first computation where data is pulled to the client and processed on the user's machine.
 
+> **For host integrators:** the per-release log of host-facing changes — every new public API, model-file field, `QueryRequest`/`DetailRequest` field, result contract, error variant, and `MODEL_FORMAT_VERSION` bump — lives in [host-integration-changelog.md](host-integration-changelog.md). Start there when moving a model or a host (Calcula / Calcula Studio) onto a newer engine.
+
 ## Position in the Ecosystem
 
 ```
@@ -58,6 +60,9 @@ Measures are named calculations defined over the data model:
 - Calculated columns (row-level computations that produce a new column)
 - Measures with context manipulation (filtering, grouping) using a DAX-inspired expression language with KEEP, CLEAR, RESET, and USING context operations
 - A built-in text parser converts DAX-like syntax (e.g., `SUM(Sales[amount], KEEP(Calendar, Calendar[Year] = 2024))`) into the internal Expression AST — shared by Calcula Studio and any other tool
+- **Time intelligence**: YTD/QTD/MTD running totals and PRIORYEAR/SAMEPERIODLASTYEAR/PRIORPERIOD shifts against a marked date table, evaluated either from the group-by axis or — new — purely from the filter context (no date column on the axis), failing closed rather than returning a silently-wrong value when the window cannot be computed
+- **Calculation groups**: named transforms (calculation items, e.g. `Current`/`YTD`/`PY`) applied across the measures in a request via a `SELECTEDMEASURE()` placeholder, producing one value column per measure×item
+- **Host-extensible functions**: native Rust scalar UDFs registered by the host, plus optionally sandboxed Rhai script functions carried inside the model file (deny-by-default, host-set budgets)
 - The measure computation engine evaluates these against the columnar store
 
 ### 4. Query Generation with Maximum Pushdown
@@ -149,6 +154,20 @@ When adding a new data source connector, you MUST:
 5. Add a variant to `AnyConnector` in `registry.rs` (the compiler enforces `ConnectorAuth`).
 6. Add tests for each supported auth method.
 
+### 9. Row-Level Security
+
+Named **security roles** carry per-table row filters that the host activates after authenticating a user (`Engine::set_active_role`). The filters are injected as a **sealed pre-aggregation layer** — applied at fetch / pushed-`WHERE` level, *not* through the measure-context machinery — so no `RESET`/`CLEAR`/`ALL`-style context operation can strip them. The role identity is folded into the query-cache key so a result computed under one role can never be served to another.
+
+Enforcement is conservative and **fails closed**: if a role-filtered table is reachable from a queried fact but not via a single-hop, single-column, active, equi relationship, the query is *refused* (`RowLevelSecurityNotEnforceable`) rather than executed with the fact left unrestricted. Because the engine is an embedded client-side library, RLS is **advisory** against a cooperative host — it governs what the engine returns, not what a determined host could read directly from the source.
+
+### 10. Drillthrough / Detail Rows
+
+`Engine::query_rows(DetailRequest)` returns the **raw fact rows** behind a pivot cell with no aggregation — the baseline spreadsheet "show the underlying transactions" gesture. It is RLS-enforced, mandatorily row-capped, and deliberately **not cached** (interactive and per-cell). It can attach related dimension attributes to each row via a deduplicated single-hop `LEFT JOIN`, so a non-unique dimension key cannot fan out or multiply rows.
+
+### 11. The Model File as a Trust Boundary
+
+The shared `.model` file travels between hosts and users, so the engine treats **everything in it except credentials as untrusted input**: identifiers and filter values are escaped through one shared quoting layer, connections are built from typed parts (never string interpolation), disk-cache filenames are sanitized against path traversal, parser recursion is depth-guarded, and a deserialized expression AST is re-validated against the parser allow-list. Sandboxed script bodies are deny-by-default and never execute on load. The file carries a `format_version`; opening a file newer than the engine supports fails closed with `ModelFormatTooNew`, and every new field is additive so older files keep loading. See [host-integration-changelog.md](host-integration-changelog.md) for the version history and the exact field/API names.
+
 ## Data Flow
 
 ```
@@ -235,7 +254,9 @@ The recommendation is to evaluate Arrow + DataFusion as the foundation and build
 
 Each stage produces a usable library that the other projects can start integrating against.
 
-**Current status:** Milestones 1–12 are complete. The engine supports columnar storage, star-schema relationships, PostgreSQL and SQL Server connectors, query pushdown, measure computation with context manipulation, table variables, execution plan visualization, text-based measure definition via a DAX-like parser, DAX-inspired functions (IF, SWITCH, DIVIDE, ROUND, math functions, etc.), named context definitions (CONTEXT), scalar variables (VAR/RETURN), two-stage aggregation via QUERY-in-VAR, and per-query lookup columns for optimized dimension property retrieval.
+**Current status:** The engine supports columnar storage, star/snowflake relationships (including many-to-many via EXISTS semi-joins, active/inactive relationships and `USERELATIONSHIP`), PostgreSQL and SQL Server connectors with an in-memory connector for testing, query pushdown (filter/aggregation/context/relationship), measure computation with context manipulation, table variables, execution plan visualization, text-based measure definition via a DAX-like parser, DAX-inspired functions (IF, SWITCH, DIVIDE, ROUND, math functions, etc.), named context definitions (CONTEXT), scalar variables (VAR/RETURN), two-stage aggregation via QUERY-in-VAR, per-query lookup columns, and ragged hierarchies.
+
+Beyond that baseline, the engine adds the host-facing capabilities catalogued in [host-integration-changelog.md](host-integration-changelog.md): presentation metadata; pivot-shaped results (`order_by`/`limit`/sort-by-column and `ROLLUP` totals with a `__grouping_id` indicator); `&self` concurrent queries with cooperative cancellation; **time intelligence** (axis and filter-context modes); **row-level security**; **drillthrough / detail rows** with dimension-attribute output; **incremental refresh** (user-defined volatility filter) with structured `RefreshReport`; **calculation groups**; and **scripting** (native UDF registry + sandboxed Rhai script functions). The shared model file is now a hardened trust boundary with `MODEL_FORMAT_VERSION` evolution (currently `7`). Across these waves the overriding rule is **never return a silently-wrong number — fail closed instead**.
 
 ## Ingest-Time Optimization and Caching Architecture
 

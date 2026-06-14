@@ -3,15 +3,22 @@
 
 use std::time::Instant;
 
+use arrow::array::{Array, Date32Array, TimestampMicrosecondArray};
+use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 
+use engine_connectors::FilterCondition;
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::Expression;
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
-use engine_core::compute::time_intelligence::lower_time_intelligence;
+use engine_core::compute::time_intelligence::{
+    lower_time_intelligence, lower_time_intelligence_filtered, time_intelligence_route,
+    FilterContextPlan, TimeIntelligenceRoute,
+};
+use engine_core::error::EngineError;
 use engine_core::model::DataModel;
 
 use crate::error::{QueryError, QueryResult};
@@ -19,6 +26,9 @@ use crate::request::ColumnRef;
 
 use super::query_measures::materialize_query_in_pipeline;
 use super::QueryExecutor;
+
+/// Microseconds in one day, for converting a `Timestamp` date key to `Date32`.
+const MICROS_PER_DAY: i64 = 86_400_000_000;
 
 impl QueryExecutor {
     /// Evaluate window measures via two-stage execution.
@@ -31,6 +41,7 @@ impl QueryExecutor {
         window_measures: &[&Measure],
         group_by: &[ColumnRef],
         model: &DataModel,
+        date_filters: &[FilterCondition],
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         let resolver = ContextResolver::new(model);
@@ -41,18 +52,45 @@ impl QueryExecutor {
             let expr = measure.expression();
             let fact_table = measure.table();
 
-            // Resolve context operations on the inner expression.
-            let (stripped_expr, _eval_ctx) = resolver.resolve(expr)?;
+            // Resolve context operations on the inner expression. The KEEP
+            // filters on the date table refine the as-of date context for the
+            // filter-context path; the axis path ignores them here (they ride
+            // through the normal stage-1 materialization).
+            let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
 
-            // Lower time-intelligence sugar (YTD/QTD/MTD/PRIORYEAR/
-            // PRIORPERIOD) onto the Window/Offset machinery, relative to the
-            // query's group_by axis and the model's marked date table.
-            // Missing prerequisites surface as typed EngineError::
-            // TimeIntelligence — never silently wrong numbers.
             let group_pairs: Vec<(String, String)> = group_by
                 .iter()
                 .map(|dim| (dim.table.clone(), dim.column.clone()))
                 .collect();
+
+            // Decide the time-intelligence evaluation route. The axis path
+            // (v1) is used when the date table's anchor role columns are on the
+            // query axis; otherwise we fall back to the filter-context path
+            // (v2). Non-time-intelligence window measures route as `None` and
+            // take the existing axis lowering (a no-op pass-through).
+            let route = time_intelligence_route(&stripped_expr, model, &group_pairs)?;
+            if let Some(TimeIntelligenceRoute::FilterContext(plan_info)) = route {
+                let batches = Self::execute_filter_context_time_intelligence(
+                    ctx,
+                    name,
+                    &stripped_expr,
+                    fact_table,
+                    group_by,
+                    model,
+                    &plan_info,
+                    date_filters,
+                    &eval_ctx,
+                    plan.as_deref_mut(),
+                )
+                .await?;
+                all_batches.extend(batches);
+                continue;
+            }
+
+            // Axis path (or non-time-intelligence window measure): lower onto
+            // the Window/Offset machinery relative to the query's group_by axis
+            // and the model's marked date table. Missing prerequisites surface
+            // as typed EngineError::TimeIntelligence — never wrong numbers.
             let (lowered_expr, time_intelligence) =
                 lower_time_intelligence(&stripped_expr, model, &group_pairs)?;
 
@@ -161,6 +199,290 @@ impl QueryExecutor {
         // If multiple window measures, we'd need to join results.
         // For now, return the batches from the last (or only) measure.
         Ok(all_batches)
+    }
+
+    /// Evaluate a filter-context time-intelligence measure (date columns NOT on
+    /// the query axis): probe the as-of date from the current date context, then
+    /// evaluate the inner aggregate over the concrete date range as a normal
+    /// context-filtered grouped aggregation.
+    ///
+    /// Unlike the axis path, the lowered expression is a plain
+    /// `Keep(Clear(inner, date cols), [DateKey range])` — a context-wrapped
+    /// aggregate, not a window function — so it is materialized through the
+    /// ordinary grouped-aggregation path (grouped by the non-date dimensions).
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_filter_context_time_intelligence(
+        ctx: &SessionContext,
+        name: &str,
+        stripped_expr: &Expression,
+        fact_table: &str,
+        group_by: &[ColumnRef],
+        model: &DataModel,
+        plan_info: &FilterContextPlan,
+        date_filters: &[FilterCondition],
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        plan: Option<&mut PlanNode>,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let probe_start = Instant::now();
+
+        // FAIL CLOSED (Fix A): the filter-context path faithfully applies only
+        // the date filter context (the probe WHERE picks up the request's and
+        // the measure's date-table filters; the lowered range replaces them).
+        // It does NOT re-apply non-date context, so a TI measure wrapped in any
+        // context op (KEEP on another table, an inner KEEP, USING/CLEAR/RESET/
+        // UseRelationship) would silently drop that context and return a wrong
+        // number (e.g. `KEEP(YTD(SUM(amount)), region='east')` would compute
+        // YTD over ALL regions). Refuse rather than mislead — the axis path
+        // (date on group_by) still composes with context and is unaffected.
+        Self::reject_unsupported_filter_context_ops(&plan_info.function, eval_ctx, model)?;
+
+        // The as-of date = MAX(date key) under the current date context (the
+        // request's date-table filters plus the measure's KEEP filters on the
+        // date table). PeriodShift additionally needs the MIN to shift the whole
+        // window. The registered date table is already pre-filtered by the
+        // request filters; re-applying them in the probe WHERE is idempotent.
+        let where_sql = Self::date_context_where_sql(plan_info, date_filters, eval_ctx, model);
+        let want_min = plan_info.needs_min_context_date;
+        let probe = Self::probe_as_of_date(ctx, plan_info, &where_sql, want_min).await?;
+        let probe_elapsed = probe_start.elapsed();
+
+        // No date rows in context (empty table or null max) → blank result.
+        let Some((as_of_days, min_days)) = probe else {
+            return Ok(Vec::new());
+        };
+
+        // Lower to Keep(Clear(inner, date cols), [DateKey >= start, < end]).
+        let (lowered_expr, description) =
+            lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?;
+
+        // Evaluate the context-wrapped aggregate grouped by the non-date
+        // dimensions (the date columns are not on the axis here). The KEEP
+        // range filter becomes a CASE WHEN context filter joined to the fact.
+        let outer_group_by: Vec<(String, String)> = group_by
+            .iter()
+            .map(|dim| (dim.table.clone(), dim.column.clone()))
+            .collect();
+        let agg_pair = vec![(lowered_expr, name.to_string())];
+
+        let exec_start = Instant::now();
+        let batch = materialize_query_in_pipeline(
+            ctx,
+            &agg_pair,
+            &outer_group_by,
+            &fact_table.to_lowercase(),
+            &[],
+            model,
+        )
+        .await?;
+        let exec_elapsed = exec_start.elapsed();
+        let result_rows = batch.num_rows();
+
+        if let Some(plan_node) = plan {
+            let mut node = PlanNode::new(
+                PlanOperation::MeasureEvaluation,
+                format!("Filter-context time intelligence: {name}"),
+            );
+            node.duration = (probe_elapsed + exec_elapsed).into();
+            node.add_property("time_intelligence", PlanValue::Text(description));
+            node.add_property("result_rows", PlanValue::Number(result_rows as f64));
+            plan_node.add_child(node);
+        }
+
+        Ok(vec![batch])
+    }
+
+    /// Fail closed (Fix A) when a filter-context TI measure's resolved
+    /// evaluation context carries anything the filter-context path cannot
+    /// faithfully apply to the final aggregation.
+    ///
+    /// The filter-context path only honours the *date* filter context (probe +
+    /// computed range on the date table). Everything else in `eval_ctx` is
+    /// dropped by this path, so allowing it through would silently produce a
+    /// wrong number. We therefore refuse when the context carries:
+    /// - any KEEP filter / boolean condition / IN filter on a table OTHER than
+    ///   the date table (a date-table KEEP filter is honoured by the probe), or
+    /// - any clear / reset (in any of the both/inner/outer variants), CLEAREXCEPT,
+    ///   relationship override (USERELATIONSHIP), table-variable traversal, or
+    ///   IN filter — composition with these is not implemented here.
+    ///
+    /// Returns [`EngineError::TimeIntelligence`] with an actionable message. The
+    /// axis path (date on group_by) is unaffected: it never reaches here.
+    fn reject_unsupported_filter_context_ops(
+        function: &str,
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        model: &DataModel,
+    ) -> QueryResult<()> {
+        let date_table = model.date_table();
+        let is_date_table =
+            |table: &str| date_table.is_some_and(|dt| dt.eq_ignore_ascii_case(table));
+
+        // KEEP filters / conditions / IN filters that target a non-date table.
+        let non_date_filter = eval_ctx.filters.iter().any(|f| !is_date_table(&f.table));
+        let non_date_in_filter = eval_ctx.in_filters.iter().any(|f| !is_date_table(&f.table));
+        // Any boolean condition is rejected: it may reference any table and the
+        // filter-context aggregation does not apply it.
+        let has_conditions = !eval_ctx.conditions.is_empty();
+
+        // Any clear/reset/relationship-override/traversal of any kind.
+        let has_clear_or_reset = eval_ctx.is_reset
+            || eval_ctx.is_reset_inner
+            || eval_ctx.is_reset_outer
+            || !eval_ctx.cleared_columns.is_empty()
+            || !eval_ctx.cleared_tables.is_empty()
+            || !eval_ctx.cleared_inner_columns.is_empty()
+            || !eval_ctx.cleared_inner_tables.is_empty()
+            || !eval_ctx.cleared_outer_columns.is_empty()
+            || !eval_ctx.cleared_outer_tables.is_empty()
+            || !eval_ctx.clear_except.is_empty();
+        let has_overrides = !eval_ctx.relationship_overrides.is_empty();
+        let has_traversals = !eval_ctx.traversals.is_empty();
+
+        if non_date_filter
+            || non_date_in_filter
+            || has_conditions
+            || has_clear_or_reset
+            || has_overrides
+            || has_traversals
+        {
+            return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                function: function.to_string(),
+                reason: "filter-context time intelligence (date not on the query axis) does not \
+                         compose with KEEP/USING/CLEAR/RESET context operations; scope the date \
+                         via query filters, or put a date column on the group-by axis"
+                    .to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Build the WHERE clause (without the `WHERE` keyword) selecting the
+    /// current date context on the date table: the request's date-table filters
+    /// plus the measure's resolved KEEP filters on the date table. Empty when no
+    /// date filter applies (probe runs over the whole date table).
+    fn date_context_where_sql(
+        plan_info: &FilterContextPlan,
+        date_filters: &[FilterCondition],
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        model: &DataModel,
+    ) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Request filters were pushed onto the date table's fetch as
+        // column/op/value (the table is implicitly the date table).
+        for f in date_filters {
+            let val = engine_core::compute::context::format_filter_value(
+                &plan_info.date_table,
+                &f.column,
+                &f.value,
+                model,
+            );
+            parts.push(format!(
+                "{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+
+        // The measure's KEEP filters that target the date table.
+        for f in eval_ctx
+            .filters
+            .iter()
+            .filter(|f| f.table.eq_ignore_ascii_case(&plan_info.date_table))
+        {
+            let val = engine_core::compute::context::format_filter_value(
+                &f.table, &f.column, &f.value, model,
+            );
+            parts.push(format!(
+                "{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+
+        parts.join(" AND ")
+    }
+
+    /// Probe `MAX(date_key)` (and `MIN(date_key)` when `want_min`) of the date
+    /// table under `where_sql`, returning the dates as `Date32` day counts since
+    /// the Unix epoch. Returns `Ok(None)` when the max is NULL (no rows / all
+    /// null) so the caller yields a blank result.
+    async fn probe_as_of_date(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        where_sql: &str,
+        want_min: bool,
+    ) -> QueryResult<Option<(i32, i32)>> {
+        let key_col = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = plan_info.date_table.to_lowercase();
+        let select = if want_min {
+            format!("MAX({key_col}) AS __max, MIN({key_col}) AS __min")
+        } else {
+            format!("MAX({key_col}) AS __max")
+        };
+        let mut sql = format!("SELECT {select} FROM {}", quote_ident_double(&table));
+        if !where_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_sql);
+        }
+
+        let df = ctx.sql(&sql).await?;
+        let batches = df.collect().await?;
+        let combined = match batches.first() {
+            Some(b) if b.num_rows() > 0 => b,
+            _ => return Ok(None),
+        };
+
+        let max_days = match read_date_as_days(combined, "__max")? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let min_days = if want_min {
+            // A non-null MAX guarantees at least one row, so MIN is non-null too.
+            read_date_as_days(combined, "__min")?.unwrap_or(max_days)
+        } else {
+            max_days
+        };
+        Ok(Some((max_days, min_days)))
+    }
+}
+
+/// Read a single-row `Date32`/`Timestamp(Microsecond)` aggregate column as a
+/// `Date32` day count since the Unix epoch. `Ok(None)` when the value is null.
+fn read_date_as_days(batch: &RecordBatch, column: &str) -> QueryResult<Option<i32>> {
+    let idx = batch.schema().index_of(column).map_err(|e| {
+        QueryError::InvalidQuery(format!("date probe is missing column '{column}': {e}"))
+    })?;
+    let array = batch.column(idx);
+    if array.is_null(0) {
+        return Ok(None);
+    }
+    match array.data_type() {
+        ArrowDataType::Date32 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| QueryError::InvalidQuery("date probe: bad Date32 array".into()))?;
+            Ok(Some(arr.value(0)))
+        }
+        ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    QueryError::InvalidQuery("date probe: bad Timestamp array".into())
+                })?;
+            // Floor to the day (Date32 = days since epoch). Negative micros
+            // (pre-1970) use floor division so partial days round toward -inf.
+            let micros = arr.value(0);
+            let days = micros.div_euclid(MICROS_PER_DAY);
+            i32::try_from(days).map(Some).map_err(|_| {
+                QueryError::InvalidQuery("date probe: timestamp out of Date32 range".into())
+            })
+        }
+        other => Err(QueryError::InvalidQuery(format!(
+            "date probe: the DateKey column resolved to {other:?}, expected Date32 or \
+             Timestamp(Microsecond); ensure the DateKey column is Date or Timestamp typed"
+        ))),
     }
 }
 

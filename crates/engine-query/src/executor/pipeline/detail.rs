@@ -36,12 +36,14 @@
 use std::collections::HashSet;
 
 use arrow::record_batch::RecordBatch;
+use datafusion::prelude::SessionContext;
 use tokio_util::sync::CancellationToken;
 
 use engine_connectors::{
     FetchRequest, FilterCondition, InFilterCondition, OrderByExpr, OrderByTarget,
 };
 use engine_core::compute::expression::FilterPredicate;
+use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::error::EngineError;
 use engine_core::model::DataModel;
 use engine_core::store::InMemoryCache;
@@ -53,7 +55,7 @@ use crate::registry::SourceRegistry;
 use crate::request::{DetailRequest, OrderByClause, OrderTarget};
 
 use super::bidirectional::filter_batches_by_in_values;
-use super::fetch::{extract_column_values, filter_cached_batch};
+use super::fetch::{extract_column_values, filter_cached_batch, register_partitioned_table};
 use super::QueryExecutor;
 
 impl QueryExecutor {
@@ -69,7 +71,11 @@ impl QueryExecutor {
     ///
     /// Returns the detail rows as Arrow `RecordBatch` values (the requested
     /// columns, or all columns when `request.columns` is empty), capped at
-    /// `request.limit`.
+    /// `request.limit`. When `request.dimension_columns` is non-empty, the
+    /// requested dimension attributes are appended to each row by a many-to-one
+    /// `LEFT JOIN` performed *after* the detail rows are fetched, RLS-restricted,
+    /// and limited (so the join is small and never changes the detail row set);
+    /// see [`DetailRequest::dimension_columns`].
     ///
     /// # Errors
     ///
@@ -77,11 +83,16 @@ impl QueryExecutor {
     ///   bound to a connector nor present in the cache.
     /// - [`QueryError::Engine`] wrapping
     ///   [`EngineError::TableNotFound`](engine_core::error::EngineError::TableNotFound)
-    ///   if the detail table is not in the model, or
+    ///   if the detail table (or a requested dimension table) is not in the
+    ///   model, [`EngineError::ColumnNotFound`](engine_core::error::EngineError::ColumnNotFound)
+    ///   for an unknown dimension attribute column, or
     ///   [`EngineError::RowLevelSecurityNotEnforceable`](engine_core::error::EngineError::RowLevelSecurityNotEnforceable)
     ///   when a relevant role restriction cannot be enforced (fail closed).
     /// - [`QueryError::InvalidQuery`] when a filter or order-by clause cannot
-    ///   be mapped to the detail table or a propagatable dimension.
+    ///   be mapped to the detail table or a propagatable dimension, or a
+    ///   requested dimension attribute is on a table not single-hop active
+    ///   single-equi related to the detail table (snowflake / multi-hop /
+    ///   non-equi / composite-key).
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_detail(
         request: &DetailRequest,
@@ -301,11 +312,55 @@ impl QueryExecutor {
 
         let order_by = convert_order_by(&request.order_by, detail_table)?;
 
-        // --- Step 5: fetch the detail rows ---
-        if detail_cached {
+        // --- Step 5: resolve the dimension-attribute plan (if any) ---
+        //
+        // Resolve and validate the requested dimension attributes BEFORE
+        // fetching the detail rows, because the join needs each relationship's
+        // detail-side key column to be present in the fetched detail batch. The
+        // resolution is fail-closed (see `resolve_dim_plans`); an empty request
+        // yields no plans and the historical code path is preserved exactly.
+        let dim_plans = resolve_dim_plans(request, model, detail_table)?;
+
+        // The detail-side join keys that must survive a column projection so the
+        // attribute LEFT JOIN can match on them. Only relevant when the request
+        // projects an explicit column subset (an empty `columns` keeps every
+        // detail column, including the keys).
+        let mut required_detail_keys: Vec<String> = Vec::new();
+        if !request.columns.is_empty() {
+            for plan in &dim_plans {
+                if !required_detail_keys.contains(&plan.detail_key) {
+                    required_detail_keys.push(plan.detail_key.clone());
+                }
+            }
+        }
+        // The columns to actually fetch/keep for the detail rows: the requested
+        // output columns plus any join keys not already requested. The final
+        // join SELECT projects back down to exactly the requested output
+        // columns (or all, when `columns` is empty) plus the attributes.
+        let detail_fetch_columns: Vec<String> = if request.columns.is_empty() {
+            Vec::new()
+        } else {
+            let mut cols = request.columns.clone();
+            for key in &required_detail_keys {
+                if !cols.contains(key) {
+                    cols.push(key.clone());
+                }
+            }
+            cols
+        };
+
+        // --- Step 6: fetch the (RLS-restricted, projected, limited) detail
+        // rows ---
+        //
+        // Both paths yield the final detail batches: the requested detail
+        // columns plus any join keys, restricted by the role and every
+        // propagated IN filter, capped at `limit`. The optional
+        // dimension-attribute join (step 7) runs afterwards on these
+        // already-limited batches, so it joins a small fixed set of rows.
+        let detail_batches = if detail_cached {
             // Served from the in-memory cache: apply the combined filters
             // locally, then the propagated IN filters, project the requested
-            // columns, and truncate to `limit`.
+            // columns (plus join keys), and truncate to `limit`.
             let batch = cache.and_then(|c| c.get(detail_table)).ok_or_else(|| {
                 QueryError::Engine(EngineError::TableNotCached(detail_table.to_string()))
             })?;
@@ -321,8 +376,8 @@ impl QueryExecutor {
                     filter_batches_by_in_values(&batches, &in_filter.column, &in_filter.values)?;
             }
 
-            let batches = project_columns(batches, &request.columns)?;
-            Ok(truncate_batches(batches, request.limit))
+            let batches = project_columns(batches, &detail_fetch_columns)?;
+            truncate_batches(batches, request.limit)
         } else {
             // Connector-bound: the connector honors columns / filters /
             // in_filters / order_by / limit directly.
@@ -330,7 +385,7 @@ impl QueryExecutor {
             let fetch = FetchRequest {
                 schema: Some(binding.schema.clone()),
                 table: binding.table.clone(),
-                columns: request.columns.clone(),
+                columns: detail_fetch_columns,
                 filters: detail_fetch_filters,
                 in_filters,
                 order_by,
@@ -341,11 +396,326 @@ impl QueryExecutor {
             let connector = registry.connector_for(detail_table)?;
             // Cancellation checkpoint, then race the fetch.
             check_cancelled(token)?;
-            let batches =
-                race_cancelled(token, async { Ok(connector.fetch_data(&fetch).await?) }).await?;
-            Ok(batches)
+            race_cancelled(token, async { Ok(connector.fetch_data(&fetch).await?) }).await?
+        };
+
+        // --- Step 7: dimension-attribute join (optional) ---
+        //
+        // With no requested dimension attributes, return the detail rows
+        // unchanged — exactly the historical behavior and code path.
+        if dim_plans.is_empty() {
+            return Ok(detail_batches);
+        }
+        join_dimension_attributes(
+            detail_batches,
+            dim_plans,
+            request,
+            model,
+            registry,
+            cache,
+            max_inline_in_values,
+            role_filters,
+            token,
+        )
+        .await
+    }
+}
+
+/// Resolve and validate the requested dimension attributes into per-dimension
+/// join plans (fail-closed), grouped by dimension table in first-seen order.
+///
+/// For each requested attribute, validates: the dimension table exists, the
+/// attribute column exists on it, and the dimension is single-hop active
+/// single-equi related to the detail table (the propagatable shape). An unknown
+/// table or column yields a typed engine error; any non-single-equi /
+/// multi-hop / missing relationship yields
+/// [`InvalidQuery`](QueryError::InvalidQuery). Snowflake / multi-hop attributes
+/// (a dimension of a dimension, with no direct relationship to the detail
+/// table) fall into the missing-relationship case and are rejected. Returns an
+/// empty `Vec` when no attributes are requested.
+fn resolve_dim_plans(
+    request: &DetailRequest,
+    model: &DataModel,
+    detail_table: &str,
+) -> QueryResult<Vec<DimAttrPlan>> {
+    let mut dims: Vec<DimAttrPlan> = Vec::new();
+    for col in &request.dimension_columns {
+        let dim_name = col.table.as_str();
+        // The dimension table must exist in the model.
+        let dim_def = model.table(dim_name).map_err(QueryError::Engine)?;
+        // The attribute column must exist on the dimension.
+        dim_def.column(&col.column).map_err(QueryError::Engine)?;
+
+        // Find or extend this dimension's plan entry.
+        if let Some(plan) = dims.iter_mut().find(|d| d.dim_table == dim_name) {
+            if !plan.attr_columns.iter().any(|a| a == &col.column) {
+                plan.attr_columns.push(col.column.clone());
+            }
+            continue;
+        }
+
+        // Resolve the single-hop active single-equi relationship (fail closed
+        // for any other shape — including a missing relationship, which covers
+        // snowflake / multi-hop attributes that are not directly related).
+        let rel = model
+            .find_relationship(detail_table, dim_name)
+            .map_err(|_| {
+                QueryError::InvalidQuery(format!(
+                    "drillthrough dimension attribute '{}.{}' targets a table with no active \
+                     relationship to the detail table '{detail_table}' (snowflake / multi-hop \
+                     attributes are out of scope)",
+                    col.table, col.column
+                ))
+            })?;
+        if rel.conditions().len() != 1 || !rel.is_equi_only() {
+            return Err(QueryError::InvalidQuery(format!(
+                "drillthrough dimension attribute '{}.{}' targets dimension '{dim_name}', related \
+                 to the detail table '{detail_table}' only through a relationship that cannot be \
+                 turned into a lookup join (non-equi / composite-key)",
+                col.table, col.column
+            )));
+        }
+        // Orient: which column is on the detail side, which on the dimension
+        // side (mirrors the step-3 propagation orientation).
+        let (detail_key, dim_key) = if rel.from_table() == detail_table {
+            (rel.from_column().to_string(), rel.to_column().to_string())
+        } else {
+            (rel.to_column().to_string(), rel.from_column().to_string())
+        };
+        dims.push(DimAttrPlan {
+            dim_table: dim_name.to_string(),
+            detail_key,
+            dim_key,
+            attr_columns: vec![col.column.clone()],
+        });
+    }
+    Ok(dims)
+}
+
+/// Append the requested dimension attributes to the already-fetched,
+/// RLS-restricted, and limited `detail_batches`, per the pre-resolved
+/// `dim_plans` (see [`resolve_dim_plans`]).
+///
+/// Fetches each dimension's [join key + requested attributes] restricted by the
+/// active role's predicates on that dimension, and `LEFT JOIN`s it onto the
+/// detail rows in a DataFusion `SessionContext`. The projection is the requested
+/// detail columns (or all when `columns` is empty) then the attributes, with
+/// collision-aware naming (see [`DetailRequest::dimension_columns`]).
+///
+/// # Security
+///
+/// The dimension fetch applies the role's predicates on that dimension, so an
+/// attribute of a role-excluded dimension row can never be fetched. Combined
+/// with the detail rows already being restricted to permitted dimension keys
+/// (the step-3 propagation), the many-to-one `LEFT JOIN` only ever attaches
+/// permitted attributes and never changes the detail row set.
+#[allow(clippy::too_many_arguments)]
+async fn join_dimension_attributes(
+    detail_batches: Vec<RecordBatch>,
+    dim_plans: Vec<DimAttrPlan>,
+    request: &DetailRequest,
+    model: &DataModel,
+    registry: &SourceRegistry,
+    cache: Option<&InMemoryCache>,
+    max_inline_in_values: Option<usize>,
+    role_filters: &[FilterPredicate],
+    token: &CancellationToken,
+) -> QueryResult<Vec<RecordBatch>> {
+    // The detail table's existence and source were already validated by
+    // `execute_detail`, and `dim_plans` were resolved/validated there too.
+
+    // The detail rows must have a schema to join against and to project from.
+    // DataFusion needs a non-empty batch list to register a table; an empty
+    // detail result means there is nothing to attach attributes to.
+    let Some(first_detail) = detail_batches.first() else {
+        return Ok(detail_batches);
+    };
+    let detail_schema = first_detail.schema();
+
+    // --- Fetch each dimension's [join key + attributes], role-restricted ---
+    //
+    // Apply the active role's predicates on the dimension to the fetch so an
+    // attribute of a role-excluded dimension row can never appear (belt and
+    // suspenders against any path mismatch with the detail-row restriction).
+    let mut dim_data: Vec<(DimAttrPlan, Vec<RecordBatch>)> = Vec::with_capacity(dim_plans.len());
+    for plan in dim_plans {
+        // The columns to fetch: the join key plus every requested attribute
+        // (the key may coincide with an attribute; de-duplicate to a stable
+        // ordered set so the fetch is minimal and well-formed).
+        let mut fetch_columns: Vec<String> = vec![plan.dim_key.clone()];
+        for attr in &plan.attr_columns {
+            if !fetch_columns.iter().any(|c| c == attr) {
+                fetch_columns.push(attr.clone());
+            }
+        }
+        let role_restrict = role_conditions_for_table(role_filters, &plan.dim_table);
+
+        let batches = if is_cached(model, cache, &plan.dim_table) {
+            let batch = cache.and_then(|c| c.get(&plan.dim_table)).ok_or_else(|| {
+                QueryError::Engine(EngineError::TableNotCached(plan.dim_table.clone()))
+            })?;
+            let filtered = if role_restrict.is_empty() {
+                batch.clone()
+            } else {
+                filter_cached_batch(batch, &role_restrict).await?
+            };
+            // Project to [key + attributes] so the registered batch carries
+            // only what the join needs. `project_columns` yields exactly one
+            // output batch per input batch (one here), and errors if a column
+            // is missing — which cannot happen as both were validated above.
+            project_columns(vec![filtered], &fetch_columns)?
+        } else {
+            let binding = registry.binding_for(&plan.dim_table)?;
+            let fetch = FetchRequest {
+                schema: Some(binding.schema.clone()),
+                table: binding.table.clone(),
+                columns: fetch_columns.clone(),
+                filters: role_restrict,
+                max_inline_in_values,
+                ..Default::default()
+            };
+            let connector = registry.connector_for(&plan.dim_table)?;
+            check_cancelled(token)?;
+            race_cancelled(token, async { Ok(connector.fetch_data(&fetch).await?) }).await?
+        };
+        dim_data.push((plan, batches));
+    }
+
+    // --- Build and run the LEFT JOIN projection in DataFusion ---
+    run_attribute_join(detail_batches, &detail_schema, request, dim_data).await
+}
+
+/// The resolved plan to look up one dimension's attributes: the oriented join
+/// columns and the (de-duplicated) attribute columns requested on it.
+struct DimAttrPlan {
+    /// Model name of the dimension table.
+    dim_table: String,
+    /// Join column on the detail side (the FK).
+    detail_key: String,
+    /// Join column on the dimension side (the PK).
+    dim_key: String,
+    /// Requested attribute columns on this dimension, in first-seen order.
+    attr_columns: Vec<String>,
+}
+
+/// Register the detail batch and each dimension batch into a DataFusion
+/// `SessionContext`, then run a `LEFT JOIN` SELECT projecting the detail
+/// columns followed by the requested dimension attributes (with collision-aware
+/// aliasing).
+///
+/// Every identifier is quoted via [`quote_ident_double`]. Tables are registered
+/// under fixed internal aliases (`__detail`, `__dim_0`, `__dim_1`, ...) so the
+/// SQL never embeds an attacker-influenced table name, and the dimension join
+/// is many-to-one + `LEFT`, preserving the detail row set exactly.
+async fn run_attribute_join(
+    detail_batches: Vec<RecordBatch>,
+    detail_schema: &arrow::datatypes::SchemaRef,
+    request: &DetailRequest,
+    dim_data: Vec<(DimAttrPlan, Vec<RecordBatch>)>,
+) -> QueryResult<Vec<RecordBatch>> {
+    let ctx = SessionContext::new();
+    register_partitioned_table(&ctx, "__detail", detail_batches)?;
+
+    // The detail columns to project, in result order: the requested columns, or
+    // (when empty) all detail-batch columns in schema order.
+    let detail_out_columns: Vec<String> = if request.columns.is_empty() {
+        detail_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    } else {
+        request.columns.clone()
+    };
+
+    // Track the set of result column names to enforce uniqueness and to decide
+    // whether an attribute needs `"{table}.{column}"` qualification.
+    let mut used_names: HashSet<String> = detail_out_columns.iter().cloned().collect();
+
+    // SELECT list: detail columns from __detail first.
+    let mut select_parts: Vec<String> = detail_out_columns
+        .iter()
+        .map(|name| format!("__detail.{}", quote_ident_double(name)))
+        .collect();
+
+    // JOIN clauses and attribute projections, one dimension at a time.
+    let mut join_parts: Vec<String> = Vec::new();
+    for (i, (plan, batches)) in dim_data.iter().enumerate() {
+        let raw_alias = format!("__dim_raw_{i}");
+        let alias = format!("__dim_{i}");
+        register_partitioned_table(&ctx, &raw_alias, batches.clone())?;
+        // Deduplicate the dimension to one row per join key before the LEFT
+        // JOIN. A single-column equi relationship is NOT guaranteed to have a
+        // unique key on the dimension side: the declared cardinality may be
+        // OneToMany/ManyToMany and the engine does not validate key uniqueness,
+        // so the dimension batch can contain duplicate join keys. Without this
+        // a many-side LEFT JOIN would fan out and duplicate detail rows (and
+        // exceed `limit`), breaking the documented "never duplicates a detail
+        // row" guarantee. `MIN` per attribute collapses each key to one row
+        // (exact for a true many-to-one, where each key has a single value;
+        // well-defined otherwise). This mirrors the lookup path's fan-out
+        // collapse.
+        let mut sub_cols = vec![format!(
+            "{} AS {}",
+            quote_ident_double(&plan.dim_key),
+            quote_ident_double(&plan.dim_key),
+        )];
+        for attr in &plan.attr_columns {
+            sub_cols.push(format!(
+                "MIN({}) AS {}",
+                quote_ident_double(attr),
+                quote_ident_double(attr),
+            ));
+        }
+        let dedup = format!(
+            "(SELECT {} FROM {raw_alias} GROUP BY {}) {alias}",
+            sub_cols.join(", "),
+            quote_ident_double(&plan.dim_key),
+        );
+        join_parts.push(format!(
+            " LEFT JOIN {dedup} ON __detail.{} = {alias}.{}",
+            quote_ident_double(&plan.detail_key),
+            quote_ident_double(&plan.dim_key),
+        ));
+
+        for attr in &plan.attr_columns {
+            // Name the attribute by its bare column name unless that collides
+            // with an already-used result name; then qualify as
+            // `"{table}.{column}"`. Either way the alias must be unique.
+            let bare = attr.clone();
+            let result_name = if used_names.contains(&bare) {
+                format!("{}.{}", plan.dim_table, attr)
+            } else {
+                bare
+            };
+            if !used_names.insert(result_name.clone()) {
+                // Two qualified names collided (e.g. the same dimension column
+                // requested twice would have been de-duplicated already; this
+                // covers a qualified name equal to an existing column). Fail
+                // closed rather than emit a duplicate-named schema.
+                return Err(QueryError::InvalidQuery(format!(
+                    "drillthrough dimension attribute '{}.{}' produces a result column name \
+                     '{result_name}' that collides with another result column",
+                    plan.dim_table, attr
+                )));
+            }
+            select_parts.push(format!(
+                "{}.{} AS {}",
+                alias,
+                quote_ident_double(attr),
+                quote_ident_double(&result_name),
+            ));
         }
     }
+
+    let sql = format!(
+        "SELECT {} FROM __detail{}",
+        select_parts.join(", "),
+        join_parts.join(""),
+    );
+    let df = ctx.sql(&sql).await?;
+    let batches = df.collect().await?;
+    Ok(batches)
 }
 
 /// Whether `table` is served from local memory (a model in-memory table or a

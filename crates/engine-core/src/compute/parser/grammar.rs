@@ -212,6 +212,8 @@ impl Parser {
             "QTD" => self.parse_to_date_call(crate::compute::expression::DateGranularity::Quarter),
             "MTD" => self.parse_to_date_call(crate::compute::expression::DateGranularity::Month),
             "PRIORYEAR" => self.parse_prioryear_call(),
+            // SAMEPERIODLASTYEAR is a synonym for PRIORYEAR (shift -1 YEAR).
+            "SAMEPERIODLASTYEAR" => self.parse_prioryear_call(),
             "PRIORPERIOD" => self.parse_priorperiod_call(),
             // Ranking window functions
             "ROW_NUMBER" | "ROWNUMBER" => {

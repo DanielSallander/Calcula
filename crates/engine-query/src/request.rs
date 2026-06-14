@@ -434,6 +434,21 @@ pub struct QueryRequest {
 /// relationship cannot restrict the detail rows and is rejected at execution
 /// time.
 ///
+/// # Dimension attributes ([`dimension_columns`](Self::dimension_columns))
+///
+/// In addition to the detail-table columns, a drillthrough may request
+/// **dimension attributes** — columns on a dimension related to the detail
+/// table — to display alongside the raw rows (e.g. `Product.name` next to a
+/// fact's `product_id`). Each requested attribute is resolved by a single-hop,
+/// active, single-column **equi** relationship between the detail table and the
+/// dimension (the same propagatable shape used for filters and RLS); snowflake
+/// / multi-hop attributes are out of scope and rejected. The attributes are
+/// looked up by a many-to-one `LEFT JOIN` applied **after** the detail rows are
+/// fetched, RLS-restricted, and limited — so the join is small, never drops or
+/// duplicates detail rows, and never re-introduces a role-excluded row. See
+/// [`dimension_columns`](Self::dimension_columns) for the naming convention and
+/// the security guarantees.
+///
 /// # Limit is mandatory
 ///
 /// DirectQuery fact tables are effectively unbounded, so a drillthrough must
@@ -463,10 +478,55 @@ pub struct DetailRequest {
     /// [`SourceNotRegistered`](crate::error::QueryError::SourceNotRegistered).
     pub table: String,
     /// Detail-table columns to return. **Empty means all columns** (`SELECT
-    /// *`). Each named column must exist on the detail table; only
-    /// detail-table columns are returned (dimension attributes are not joined
-    /// in — see the type docs for the scoped-out join-back).
+    /// *`). Each named column must exist on the detail table. These are always
+    /// detail-table columns; dimension attributes are requested separately via
+    /// [`dimension_columns`](Self::dimension_columns).
     pub columns: Vec<String>,
+    /// Dimension attributes to look up and append to each detail row.
+    ///
+    /// Each [`ColumnRef`] names a column (`column`) on a dimension table
+    /// (`table`) that is related to the detail table by a **single-hop,
+    /// active, single-column equi** relationship — the same propagatable shape
+    /// used for filters and row-level security. The attribute is resolved by a
+    /// many-to-one `LEFT JOIN` from the (already fetched, RLS-restricted, and
+    /// limited) detail rows to the dimension on the relationship's key columns.
+    /// Because the join is many-to-one and a `LEFT JOIN`, it is a pure lookup:
+    /// it never drops a detail row, never duplicates one, and a detail row
+    /// whose foreign key matches no dimension row keeps the row with `NULL`
+    /// attributes.
+    ///
+    /// # Result column ordering and naming
+    ///
+    /// The result columns are the requested detail columns (or **all** detail
+    /// columns when [`columns`](Self::columns) is empty) **first**, in their
+    /// requested order, then the requested dimension attributes, in the order
+    /// listed here. Each attribute is named by its bare `column` name; if that
+    /// name would **collide** with a detail column or with another selected
+    /// attribute, it is instead qualified as `"{table}.{column}"` (the model
+    /// table name, a literal dot, the column name). The final schema always has
+    /// unique column names.
+    ///
+    /// # Errors / scope
+    ///
+    /// Requesting an attribute on a table that is not single-hop active
+    /// single-equi related to the detail table — including snowflake /
+    /// multi-hop attributes (a dimension of a dimension) and non-equi /
+    /// many-to-many / composite-key / inactive relationships — is rejected with
+    /// [`InvalidQuery`](crate::error::QueryError::InvalidQuery). An unknown
+    /// dimension table or an attribute column not present on the dimension is
+    /// likewise a typed error. The feature is fail-closed: there is no silent
+    /// partial or wrong join.
+    ///
+    /// # Security
+    ///
+    /// The attributes returned are guaranteed to belong only to dimension rows
+    /// the active role permits. The detail rows are already restricted (by the
+    /// existing dimension→detail propagation) to permitted dimension keys, and
+    /// the dimension fetch additionally applies the active role's predicates on
+    /// that dimension. The `LEFT JOIN` therefore can only attach attributes of
+    /// permitted dimension rows, and never re-introduces a row the role
+    /// excluded or changes the detail row set.
+    pub dimension_columns: Vec<ColumnRef>,
     /// Cell-coordinate and slicer filters.
     ///
     /// Each [`FilterCondition`] is matched to the table that owns its named
@@ -499,6 +559,7 @@ impl DetailRequest {
         Self {
             table: table.into(),
             columns: Vec::new(),
+            dimension_columns: Vec::new(),
             filters: Vec::new(),
             order_by: Vec::new(),
             limit,
@@ -513,6 +574,15 @@ impl DetailRequest {
         S: Into<String>,
     {
         self.columns = columns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Append dimension attributes to look up and display alongside the detail
+    /// rows (replacing any previously set). See
+    /// [`dimension_columns`](Self::dimension_columns) for the relationship
+    /// requirements, ordering, and naming convention.
+    pub fn with_dimension_columns(mut self, columns: Vec<ColumnRef>) -> Self {
+        self.dimension_columns = columns;
         self
     }
 

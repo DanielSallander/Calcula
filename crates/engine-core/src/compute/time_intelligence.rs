@@ -28,16 +28,67 @@
 //!   ([`EngineError::TimeIntelligence`]) with corrective guidance — never
 //!   silently wrong numbers.
 //!
-//! Deferred to a future version (full-DAX behavior): filter-context
-//! `DATESYTD`-style evaluation without the date axis in group_by, value-based
-//! period matching across gaps, `DATEADD` over date keys, fiscal calendars,
-//! and composition with totals/hierarchies (the window execution path
-//! rejects those today).
+//! # v2 semantics contract (filter-context time intelligence)
+//!
+//! When the date table's anchor role columns are **not** on the query axis,
+//! the engine can no longer accumulate a running total along the result rows.
+//! Instead it evaluates the measure against the current **date filter
+//! context** (DAX `DATESYTD` / `SAMEPERIODLASTYEAR` semantics):
+//!
+//! - The **as-of date** is the MAX date-key in the current date context (the
+//!   query's filters on the date table plus the measure's resolved KEEP
+//!   filters on the date table). The host probes this MAX at execution time
+//!   and feeds it back here as a concrete day count.
+//! - `ToDate` (YTD/QTD/MTD) is rewritten to
+//!   `Keep(Clear(inner, <date-table date columns>), [DateKey >= start-of-period,
+//!   DateKey < as_of + 1 day])`. CLEAR removes any existing date filter on the
+//!   date table; KEEP installs the concrete half-open range on the date-key
+//!   column. The upper bound is **half-open** (`< as_of + 1 day`) so a
+//!   `Timestamp`-typed date key with a time component on the as-of day is still
+//!   included — the same SQL is correct for `Date` and `Timestamp` keys.
+//! - `PeriodShift` (PRIORYEAR / SAMEPERIODLASTYEAR) shifts the *entire* current
+//!   date window `[min-context-date, as-of]` back by `offset` × granularity and
+//!   installs that shifted half-open range. Shifting the whole window back one
+//!   year is exactly "the same period, last year", so PRIORYEAR and
+//!   SAMEPERIODLASTYEAR are the same lowering.
+//!
+//! ## Contiguous-calendar requirement (Fix D)
+//!
+//! In the filter-context path the window's lower bound is derived from the
+//! **minimum DateKey present** under the context (a `MIN` probe), not from the
+//! date predicate itself. For a **contiguous** date table — one row per calendar
+//! day with no gaps, which DAX time intelligence also requires — this is exact.
+//! On a sparse/gapped calendar the shifted window can be mis-sized (the prior
+//! period's first present day may differ from the shifted minimum), so callers
+//! MUST supply a contiguous date table. The math here is not changed: it is
+//! correct under that assumption.
+//!
+//! PRIORYEAR is implemented as a **whole-window-back-one-year shift**, which is
+//! identical to SAMEPERIODLASTYEAR. This differs from DAX `PREVIOUSYEAR`'s
+//! "the entire prior year" when the context is a *partial* year (e.g. Jan–Jun):
+//! PRIORYEAR here returns the same partial window shifted, not all of the prior
+//! year. Present this function to hosts with **SAMEPERIODLASTYEAR semantics**.
+//!
+//! Only the calendar-correct cases are emitted; everything the engine cannot
+//! compute exactly (unsupported inner aggregate, `QTD`/`MTD` *shifts* by
+//! quarter/month in filter context, missing date table or DateKey role) is a
+//! typed [`EngineError::TimeIntelligence`] — never a plausibly-wrong number.
+//!
+//! Deferred to a future version (full-DAX behavior): value-based period
+//! matching across gaps, `DATEADD` over date keys, fiscal calendars, and
+//! composition with totals/hierarchies (the window execution path rejects
+//! those today).
+
+use chrono::{Datelike, NaiveDate};
 
 use crate::compute::aggregate::AggregateOp;
-use crate::compute::expression::{DateGranularity, Expression};
+use crate::compute::expression::{
+    self as expr, ComparisonOp, DateGranularity, Expression, FilterPredicate,
+};
 use crate::error::{EngineError, EngineResult};
+use crate::model::context::ClearTarget;
 use crate::model::{DataModel, DateRole};
+use crate::types::DataType;
 
 /// Lower top-level time-intelligence sugar in `expr` onto Window/Offset.
 ///
@@ -413,12 +464,390 @@ fn lower_period_shift(
     ))
 }
 
+// ===========================================================================
+// Filter-context time intelligence (v2): date columns NOT on the query axis.
+// ===========================================================================
+
+/// Which evaluation strategy a top-level time-intelligence node needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeIntelligenceRoute {
+    /// The date table's anchor role columns are on the query axis: use the v1
+    /// Window/Offset lowering ([`lower_time_intelligence`]).
+    Axis,
+    /// The date columns are not on the axis: evaluate from the date filter
+    /// context. The host must probe the as-of (and, for shifts, the minimum)
+    /// date and call [`lower_time_intelligence_filtered`].
+    FilterContext(FilterContextPlan),
+}
+
+/// Everything the host needs to probe the date context and lower a
+/// filter-context time-intelligence node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterContextPlan {
+    /// Display name of the function (`YTD`, `PRIORYEAR`, …) for plan/errors.
+    pub function: String,
+    /// The date table, spelled as the model defines it.
+    pub date_table: String,
+    /// The `DateRole::DateKey` column on the date table (the column the
+    /// concrete range filter is installed on).
+    pub date_key_column: String,
+    /// Whether a `Shift` plan needs the *minimum* context date (to shift the
+    /// whole window) in addition to the as-of date. `ToDate` only needs as-of.
+    pub needs_min_context_date: bool,
+}
+
+/// Classify a top-level time-intelligence node into its evaluation route.
+///
+/// Returns `Ok(None)` when `expr` is not a top-level time-intelligence node
+/// (the caller should leave it untouched). For a time-intelligence node it
+/// returns [`TimeIntelligenceRoute::Axis`] when the v1 query-axis path applies
+/// (the required anchor role columns are in `group_by`), or
+/// [`TimeIntelligenceRoute::FilterContext`] otherwise.
+///
+/// This validates the *route-independent* prerequisites up front so both paths
+/// fail closed with the same actionable errors:
+/// - a date table must be marked and carry the required anchor roles,
+/// - the date table must have a `DateRole::DateKey` column of `Date`/`Timestamp`
+///   type (the filter-context range is installed on it),
+/// - the inner aggregate must be one v1 supports (SUM/COUNT/COUNTROWS/MIN/MAX).
+pub fn time_intelligence_route(
+    expr: &Expression,
+    model: &DataModel,
+    group_by: &[(String, String)],
+) -> EngineResult<Option<TimeIntelligenceRoute>> {
+    let (inner, function, granularity, is_shift) = match expr {
+        Expression::ToDate {
+            expr: inner,
+            granularity,
+        } => (
+            inner.as_ref(),
+            to_date_name(*granularity),
+            *granularity,
+            false,
+        ),
+        Expression::PeriodShift {
+            expr: inner,
+            offset,
+            granularity,
+        } => (
+            inner.as_ref(),
+            period_shift_name(*offset, *granularity),
+            *granularity,
+            true,
+        ),
+        _ => return Ok(None),
+    };
+
+    // The filter-context path applies ONLY when the date table contributes no
+    // columns to the query axis at all. If any date-table column is on the axis
+    // (even a finer one without the anchor), the query is in axis mode: v1
+    // owns it and reports the missing-anchor error itself. This keeps the v1
+    // contract intact (e.g. "month on axis but no year" stays a typed v1
+    // error rather than silently switching semantics).
+    let axis = resolve_date_axis(function, model, group_by)?;
+    if !axis.present.is_empty() {
+        return Ok(Some(TimeIntelligenceRoute::Axis));
+    }
+
+    // Filter-context path: validate the inner aggregate (same restriction as
+    // v1 — the per-period values must compose) and the date-key column.
+    validate_filter_context_inner(function, is_shift, inner)?;
+    let (date_table, date_key_column) = require_date_key(function, model)?;
+
+    // QTD/MTD *shifts* in filter context are not supported: shifting the whole
+    // window back N quarters/months is not the same as DAX's per-period match,
+    // and we will not emit a plausibly-wrong number. Only YEAR shifts (whole-
+    // window-back-one-year == SAMEPERIODLASTYEAR) are exact.
+    if is_shift && granularity != DateGranularity::Year {
+        return Err(time_intelligence_error(
+            function,
+            format!(
+                "{function} in filter context (date columns not on the query axis) is only \
+                 supported at YEAR granularity; a {granularity} shift would move the whole \
+                 date window by {granularity}s, which is not the same as matching the prior \
+                 {granularity}. Put the date {granularity} column on the query axis to use \
+                 the positional shift, or shift by YEAR."
+            ),
+        ));
+    }
+
+    Ok(Some(TimeIntelligenceRoute::FilterContext(
+        FilterContextPlan {
+            function: function.to_string(),
+            date_table,
+            date_key_column,
+            needs_min_context_date: is_shift,
+        },
+    )))
+}
+
+/// Validate the inner aggregate for the filter-context path.
+///
+/// `ToDate` composes a date *range* sum/min/max, so the same compose-ability
+/// restriction as the v1 running path applies. `PeriodShift` re-evaluates the
+/// whole measure over a shifted range, so any inner expression is fine.
+fn validate_filter_context_inner(
+    function: &str,
+    is_shift: bool,
+    inner: &Expression,
+) -> EngineResult<()> {
+    if is_shift {
+        return Ok(());
+    }
+    // Reuse the v1 compose-ability gate (SUM/COUNT/COUNTROWS/MIN/MAX).
+    running_window_function(function, inner).map(|_| ())
+}
+
+/// Resolve the date table's `DateRole::DateKey` column, requiring it to be a
+/// `Date` or `Timestamp` column. Returns `(date_table_name, datekey_column)`.
+fn require_date_key(function: &str, model: &DataModel) -> EngineResult<(String, String)> {
+    let date_table_name = model.date_table().ok_or_else(|| {
+        time_intelligence_error(
+            function,
+            "no date table is marked on the model; mark the calendar dimension with \
+             DataModelBuilder::mark_date_table(\"<table>\") and assign date roles to its \
+             columns with Column::with_date_role"
+                .to_string(),
+        )
+    })?;
+    let date_table = model.table(date_table_name)?;
+    let datekey = date_table
+        .columns()
+        .iter()
+        .find(|c| c.date_role() == Some(DateRole::DateKey))
+        .ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!(
+                    "{function} in filter context needs the date table '{date_table_name}' to \
+                     have a column with the DateKey role (a Date/Timestamp calendar key); \
+                     assign it with Column::with_date_role(DateRole::DateKey)"
+                ),
+            )
+        })?;
+    match datekey.data_type() {
+        DataType::Date | DataType::Timestamp => {}
+        other => {
+            return Err(time_intelligence_error(
+                function,
+                format!(
+                    "{function} in filter context requires the DateKey column \
+                     '{date_table_name}[{}]' to be Date or Timestamp typed (so the date range \
+                     filter is exact); it is {other:?}",
+                    datekey.name()
+                ),
+            ));
+        }
+    }
+    Ok((date_table_name.to_string(), datekey.name().to_string()))
+}
+
+/// The date-table columns (by name) that the filter-context CLEAR must strip,
+/// so the concrete range replaces any existing date filter on the date table.
+///
+/// Every `DateRole`-tagged column on the date table is cleared (Year, Quarter,
+/// Month, Week, Day, DateKey): a slicer might filter on any of them, and the
+/// concrete `DateKey` range is the single source of truth for the window.
+fn date_role_columns(model: &DataModel, date_table: &str) -> EngineResult<Vec<String>> {
+    let table = model.table(date_table)?;
+    Ok(table
+        .columns()
+        .iter()
+        .filter(|c| c.date_role().is_some())
+        .map(|c| c.name().to_string())
+        .collect())
+}
+
+/// Lower a filter-context time-intelligence node to a concrete
+/// `Keep(Clear(inner, date columns), [DateKey >= start, DateKey < end])`.
+///
+/// `as_of_days` and `min_context_days` are days since the Unix epoch
+/// (1970-01-01), i.e. Arrow `Date32` semantics — the host extracts them from a
+/// `MAX`/`MIN` probe of the date-key column under the current date filter
+/// context. `min_context_days` is only read for `PeriodShift` plans (where
+/// `needs_min_context_date` is true); pass `as_of_days` otherwise.
+///
+/// The produced range is **half-open**: `>= start AND < end_exclusive`, where
+/// `end_exclusive = as_of_day + 1 day`. This is exact for both `Date` and
+/// `Timestamp` date keys (a timestamp anywhere on the as-of day is included).
+///
+/// # Contiguous-calendar requirement (Fix D)
+///
+/// For a `PeriodShift`, the window's lower bound is `min_context_days` — the
+/// **minimum DateKey present** under the context (a `MIN` probe), not the date
+/// predicate's lower bound. This is exact only for a **contiguous** date table
+/// (one row per calendar day, no gaps — which DAX time intelligence also
+/// requires). On a sparse/gapped calendar the shifted window can be mis-sized;
+/// the math here is correct under the contiguous assumption and is intentionally
+/// not changed. PRIORYEAR is a whole-window-back-one-year shift, i.e.
+/// SAMEPERIODLASTYEAR semantics (it differs from DAX `PREVIOUSYEAR` for a
+/// partial-year context — see the module docs).
+pub fn lower_time_intelligence_filtered(
+    expr: &Expression,
+    model: &DataModel,
+    as_of_days: i32,
+    min_context_days: i32,
+) -> EngineResult<(Expression, String)> {
+    let (inner, function, granularity, offset, is_shift) = match expr {
+        Expression::ToDate {
+            expr: inner,
+            granularity,
+        } => (
+            inner.as_ref(),
+            to_date_name(*granularity),
+            *granularity,
+            0i64,
+            false,
+        ),
+        Expression::PeriodShift {
+            expr: inner,
+            offset,
+            granularity,
+        } => (
+            inner.as_ref(),
+            period_shift_name(*offset, *granularity),
+            *granularity,
+            *offset,
+            true,
+        ),
+        other => {
+            return Err(time_intelligence_error(
+                "time intelligence",
+                format!("expected a top-level ToDate/PeriodShift node, got {other:?}"),
+            ));
+        }
+    };
+
+    // Re-validate (the host computed the dates, but lowering is the single
+    // authority on what it will emit) and resolve the date-key column.
+    validate_filter_context_inner(function, is_shift, inner)?;
+    let (date_table, date_key_column) = require_date_key(function, model)?;
+
+    let as_of = date32_to_naive(as_of_days).ok_or_else(|| {
+        time_intelligence_error(
+            function,
+            format!("the as-of date probe returned an out-of-range value ({as_of_days} days)"),
+        )
+    })?;
+
+    // Compute the inclusive [start, end] date window, then make it half-open.
+    let (start, end_inclusive, description) = if is_shift {
+        // PeriodShift: shift the whole current window [min_ctx, as_of] back by
+        // `offset` years (Year granularity is enforced in classification).
+        let min_ctx = date32_to_naive(min_context_days).ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!(
+                    "the minimum-context-date probe returned an out-of-range value \
+                     ({min_context_days} days)"
+                ),
+            )
+        })?;
+        let start = shift_years(min_ctx, offset).ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!("shifting {min_ctx} by {offset} year(s) overflowed the calendar"),
+            )
+        })?;
+        let end = shift_years(as_of, offset).ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!("shifting {as_of} by {offset} year(s) overflowed the calendar"),
+            )
+        })?;
+        let desc = format!(
+            "{function} (filter context) shifted window [{min_ctx}..{as_of}] by {offset} year(s) \
+             to [{start}..{end}] on {date_table}.{date_key_column}"
+        );
+        (start, end, desc)
+    } else {
+        // ToDate: [start-of-period(as_of), as_of].
+        let start = start_of_period(as_of, granularity).ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!("computing the start of the {granularity} for {as_of} overflowed"),
+            )
+        })?;
+        let desc = format!(
+            "{function} (filter context) range [{start}..{as_of}] on \
+             {date_table}.{date_key_column}"
+        );
+        (start, as_of, desc)
+    };
+
+    let end_exclusive = end_inclusive.succ_opt().ok_or_else(|| {
+        time_intelligence_error(
+            function,
+            "the as-of date is the maximum representable date".to_string(),
+        )
+    })?;
+
+    // Build Keep(Clear(inner, <date columns>), [DateKey >= start, DateKey < end]).
+    let clear_targets: Vec<ClearTarget> = date_role_columns(model, &date_table)?
+        .into_iter()
+        .map(|column| ClearTarget::Column {
+            table: date_table.clone(),
+            column,
+        })
+        .collect();
+    let cleared = expr::clear(inner.clone(), clear_targets);
+
+    let filters = vec![
+        FilterPredicate::new(
+            date_table.clone(),
+            date_key_column.clone(),
+            ComparisonOp::GreaterThanOrEqual,
+            naive_to_iso(start),
+        ),
+        FilterPredicate::new(
+            date_table.clone(),
+            date_key_column.clone(),
+            ComparisonOp::LessThan,
+            naive_to_iso(end_exclusive),
+        ),
+    ];
+    let kept = expr::keep(cleared, filters);
+
+    Ok((kept, description))
+}
+
+/// Convert a `Date32` value (days since 1970-01-01) to a [`NaiveDate`].
+fn date32_to_naive(days: i32) -> Option<NaiveDate> {
+    NaiveDate::from_ymd_opt(1970, 1, 1)?.checked_add_signed(chrono::Duration::days(days as i64))
+}
+
+/// Render a [`NaiveDate`] as an ISO `YYYY-MM-DD` string (the filter value;
+/// `format_filter_value` quotes it for Date/Timestamp columns).
+fn naive_to_iso(date: NaiveDate) -> String {
+    date.format("%Y-%m-%d").to_string()
+}
+
+/// Start of the calendar period containing `date` for the given granularity.
+fn start_of_period(date: NaiveDate, granularity: DateGranularity) -> Option<NaiveDate> {
+    match granularity {
+        DateGranularity::Year => NaiveDate::from_ymd_opt(date.year(), 1, 1),
+        DateGranularity::Quarter => {
+            let q_start_month = (date.month0() / 3) * 3 + 1;
+            NaiveDate::from_ymd_opt(date.year(), q_start_month, 1)
+        }
+        DateGranularity::Month => NaiveDate::from_ymd_opt(date.year(), date.month(), 1),
+    }
+}
+
+/// Shift `date` by `years` calendar years, clamping Feb-29 to Feb-28 in a
+/// non-leap target year.
+fn shift_years(date: NaiveDate, years: i64) -> Option<NaiveDate> {
+    let target_year = i32::try_from(i64::from(date.year()) + years).ok()?;
+    NaiveDate::from_ymd_opt(target_year, date.month(), date.day()).or_else(|| {
+        // Feb 29 → Feb 28 in a non-leap year (the only day that can fail).
+        NaiveDate::from_ymd_opt(target_year, date.month(), 28)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compute::expression::{self as expr};
     use crate::model::{Column, Table};
-    use crate::types::DataType;
 
     /// fact_sales + dim_date model with the standard date roles; `dim_date`
     /// is marked as the date table. `month_name` deliberately has no role.
@@ -843,5 +1272,228 @@ mod tests {
             partition_by,
             &[("DIM_DATE".to_string(), "YEAR".to_string())]
         );
+    }
+
+    // ----- Filter-context (v2) path -----------------------------------------
+
+    /// Days since the Unix epoch for a calendar date (Arrow `Date32`).
+    fn days(y: i32, m: u32, d: u32) -> i32 {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .signed_duration_since(epoch)
+            .num_days() as i32
+    }
+
+    #[test]
+    fn route_is_axis_when_anchor_columns_present() {
+        let model = model();
+        let ytd = expr::to_date(sum_amount(), DateGranularity::Year);
+        // Year (anchor) is present → axis path.
+        let group_by = pairs(&[("dim_date", "year"), ("dim_date", "month")]);
+        let route = time_intelligence_route(&ytd, &model, &group_by).unwrap();
+        assert_eq!(route, Some(TimeIntelligenceRoute::Axis));
+    }
+
+    #[test]
+    fn route_is_filter_context_when_no_date_on_axis() {
+        let model = model();
+        let ytd = expr::to_date(sum_amount(), DateGranularity::Year);
+        // No date column on the axis → filter-context path.
+        let group_by = pairs(&[("fact_sales", "region")]);
+        let route = time_intelligence_route(&ytd, &model, &group_by).unwrap();
+        let Some(TimeIntelligenceRoute::FilterContext(plan)) = route else {
+            panic!("expected FilterContext, got {route:?}");
+        };
+        assert_eq!(plan.function, "YTD");
+        assert_eq!(plan.date_table, "dim_date");
+        assert_eq!(plan.date_key_column, "datekey");
+        assert!(!plan.needs_min_context_date, "ToDate needs only as-of");
+    }
+
+    #[test]
+    fn route_filter_context_prioryear_needs_min_context() {
+        let model = model();
+        let py = expr::period_shift(sum_amount(), -1, DateGranularity::Year);
+        let group_by = pairs(&[("fact_sales", "region")]);
+        let route = time_intelligence_route(&py, &model, &group_by).unwrap();
+        let Some(TimeIntelligenceRoute::FilterContext(plan)) = route else {
+            panic!("expected FilterContext, got {route:?}");
+        };
+        assert_eq!(plan.function, "PRIORYEAR");
+        assert!(plan.needs_min_context_date, "PeriodShift shifts the window");
+    }
+
+    #[test]
+    fn route_non_time_intelligence_is_none() {
+        let model = model();
+        let route = time_intelligence_route(&sum_amount(), &model, &[]).unwrap();
+        assert_eq!(route, None);
+    }
+
+    #[test]
+    fn route_filter_context_quarter_shift_is_rejected() {
+        // PRIORPERIOD(..., -1, QUARTER) with date NOT on axis → fail closed.
+        let model = model();
+        let pp = expr::period_shift(sum_amount(), -1, DateGranularity::Quarter);
+        let group_by = pairs(&[("fact_sales", "region")]);
+        let err = time_intelligence_route(&pp, &model, &group_by).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("only supported at YEAR granularity"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn route_filter_context_average_is_rejected() {
+        let model = model();
+        let ytd = expr::to_date(
+            expr::agg(
+                AggregateOp::Average,
+                expr::qualified_col("fact_sales", "amount"),
+            ),
+            DateGranularity::Year,
+        );
+        let group_by = pairs(&[("fact_sales", "region")]);
+        let err = time_intelligence_route(&ytd, &model, &group_by).unwrap_err();
+        assert!(
+            err.to_string().contains("not supported in v1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn route_filter_context_without_datekey_role_is_rejected() {
+        // Date table with role columns but NO DateKey column.
+        let dim_date = Table::new(
+            "dim_date",
+            vec![
+                Column::new("year", DataType::Int32).with_date_role(DateRole::Year),
+                Column::new("month", DataType::Int32).with_date_role(DateRole::Month),
+            ],
+        )
+        .unwrap();
+        let model = DataModel::builder()
+            .add_table(dim_date)
+            .mark_date_table("dim_date")
+            .build()
+            .unwrap();
+        let ytd = expr::to_date(sum_amount(), DateGranularity::Year);
+        let group_by = pairs(&[("fact_sales", "region")]);
+        let err = time_intelligence_route(&ytd, &model, &group_by).unwrap_err();
+        assert!(err.to_string().contains("DateKey role"), "got: {err}");
+    }
+
+    #[test]
+    fn filtered_ytd_builds_half_open_range_to_start_of_year() {
+        let model = model();
+        let ytd = expr::to_date(sum_amount(), DateGranularity::Year);
+        // As-of = 2024-06-15. YTD range = [2024-01-01, 2024-06-16).
+        let as_of = days(2024, 6, 15);
+        let (lowered, desc) = lower_time_intelligence_filtered(&ytd, &model, as_of, as_of).unwrap();
+
+        let Expression::Keep {
+            expr: inner,
+            filters,
+            ..
+        } = &lowered
+        else {
+            panic!("expected Keep, got {lowered:?}");
+        };
+        // Inner is a Clear over the date-role columns.
+        let Expression::Clear { targets, .. } = inner.as_ref() else {
+            panic!("expected Clear inside Keep");
+        };
+        assert!(
+            targets.iter().any(|t| matches!(
+                t,
+                ClearTarget::Column { column, .. } if column == "datekey"
+            )),
+            "datekey must be cleared"
+        );
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].operator, ComparisonOp::GreaterThanOrEqual);
+        assert_eq!(filters[0].value, "2024-01-01");
+        assert_eq!(filters[1].operator, ComparisonOp::LessThan);
+        assert_eq!(filters[1].value, "2024-06-16");
+        assert!(desc.contains("YTD"));
+    }
+
+    #[test]
+    fn filtered_qtd_uses_start_of_quarter() {
+        let model = model();
+        let qtd = expr::to_date(sum_amount(), DateGranularity::Quarter);
+        // As-of = 2024-05-10 → Q2 starts 2024-04-01; range = [04-01, 05-11).
+        let as_of = days(2024, 5, 10);
+        let (lowered, _) = lower_time_intelligence_filtered(&qtd, &model, as_of, as_of).unwrap();
+        let Expression::Keep { filters, .. } = &lowered else {
+            panic!("expected Keep");
+        };
+        assert_eq!(filters[0].value, "2024-04-01");
+        assert_eq!(filters[1].value, "2024-05-11");
+    }
+
+    #[test]
+    fn filtered_mtd_uses_start_of_month() {
+        let model = model();
+        let mtd = expr::to_date(sum_amount(), DateGranularity::Month);
+        let as_of = days(2024, 7, 20);
+        let (lowered, _) = lower_time_intelligence_filtered(&mtd, &model, as_of, as_of).unwrap();
+        let Expression::Keep { filters, .. } = &lowered else {
+            panic!("expected Keep");
+        };
+        assert_eq!(filters[0].value, "2024-07-01");
+        assert_eq!(filters[1].value, "2024-07-21");
+    }
+
+    #[test]
+    fn filtered_prioryear_shifts_whole_window_back_one_year() {
+        let model = model();
+        let py = expr::period_shift(sum_amount(), -1, DateGranularity::Year);
+        // Current window = [2024-02-01, 2024-06-15]; shifted = [2023-02-01, 2023-06-15];
+        // half-open upper bound = 2023-06-16.
+        let min_ctx = days(2024, 2, 1);
+        let as_of = days(2024, 6, 15);
+        let (lowered, _) = lower_time_intelligence_filtered(&py, &model, as_of, min_ctx).unwrap();
+        let Expression::Keep { filters, .. } = &lowered else {
+            panic!("expected Keep");
+        };
+        assert_eq!(filters[0].operator, ComparisonOp::GreaterThanOrEqual);
+        assert_eq!(filters[0].value, "2023-02-01");
+        assert_eq!(filters[1].operator, ComparisonOp::LessThan);
+        assert_eq!(filters[1].value, "2023-06-16");
+    }
+
+    #[test]
+    fn shift_years_clamps_leap_day() {
+        // 2024-02-29 shifted back one year → 2023-02-28 (2023 is not leap).
+        let d = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        assert_eq!(
+            shift_years(d, -1).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 2, 28).unwrap()
+        );
+    }
+
+    #[test]
+    fn start_of_period_quarter_boundaries() {
+        // Each month maps to the first month of its quarter.
+        for (m, q_start) in [
+            (1, 1),
+            (3, 1),
+            (4, 4),
+            (6, 4),
+            (7, 7),
+            (9, 7),
+            (10, 10),
+            (12, 10),
+        ] {
+            let d = NaiveDate::from_ymd_opt(2024, m, 15).unwrap();
+            assert_eq!(
+                start_of_period(d, DateGranularity::Quarter).unwrap(),
+                NaiveDate::from_ymd_opt(2024, q_start, 1).unwrap(),
+                "month {m}"
+            );
+        }
     }
 }

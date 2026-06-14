@@ -21,7 +21,7 @@ pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
 pub(crate) use security::{rls_relevance, role_conditions_for_table};
 
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
-use engine_core::compute::expression::FilterPredicate;
+use engine_core::compute::expression::{Expression, FilterPredicate};
 use engine_core::compute::measure::Measure;
 use engine_core::model::DataModel;
 
@@ -311,6 +311,53 @@ impl PushdownPlanner {
             .flat_map(|m| collect_query_binding_names(m.expression()))
             .collect();
 
+        // Filter-context time intelligence: when a measure is a top-level
+        // ToDate/PeriodShift AND no group_by column is on the marked date
+        // table, the executor evaluates it from the date filter context. That
+        // path probes the date table and joins it for the date-range filter, so
+        // the date table must be fetched and registered even though it appears
+        // in neither group_by nor an explicit filter.
+        //
+        // FAIL CLOSED (Fix C): the filter-context path needs the WHOLE calendar
+        // in memory — it imposes its own DateKey range (for PRIORYEAR/
+        // SAMEPERIODLASTYEAR, a shifted range that reaches dates OUTSIDE the
+        // request's date filter). A connector-fetched (DirectQuery, not cached)
+        // date table is fetched WITH the request's date filter applied at the
+        // source, so the shifted range would find no rows and silently return a
+        // blank/too-low value. Require the date table to be in-memory (or
+        // cached); otherwise refuse with an actionable error rather than mislead.
+        let time_intelligence_tables: Vec<String> = {
+            let date_on_axis = model
+                .date_table()
+                .is_some_and(|dt| group_by_tables.iter().any(|t| t.eq_ignore_ascii_case(dt)));
+            let has_filter_context_ti = measures.iter().any(|m| {
+                matches!(
+                    m.expression(),
+                    Expression::ToDate { .. } | Expression::PeriodShift { .. }
+                )
+            });
+            match model.date_table() {
+                Some(dt) if has_filter_context_ti && !date_on_axis => {
+                    let in_memory = model.table(dt).is_ok_and(|t| t.is_in_memory())
+                        || cached_tables.contains(dt);
+                    if !in_memory {
+                        return Err(QueryError::Engine(
+                            engine_core::error::EngineError::TimeIntelligence {
+                                function: "time intelligence".to_string(),
+                                reason: format!(
+                                    "filter-context time intelligence requires the date table \
+                                     '{dt}' to be in-memory; mark it with StorageMode::InMemory \
+                                     (or put a date column on the group-by axis)"
+                                ),
+                            },
+                        ));
+                    }
+                    vec![dt.to_string()]
+                }
+                _ => Vec::new(),
+            }
+        };
+
         // Collect all referenced tables (deduplication happens below).
         let all_tables: Vec<&str> = measure_tables
             .iter()
@@ -320,6 +367,7 @@ impl PushdownPlanner {
             .chain(variable_tables.iter().map(|s| s.as_str()))
             .chain(named_context_tables.iter().map(|s| s.as_str()))
             .chain(userelationship_tables.iter().map(|s| s.as_str()))
+            .chain(time_intelligence_tables.iter().map(|s| s.as_str()))
             .collect();
 
         // Verify all tables have registered sources (skip QUERY binding names).

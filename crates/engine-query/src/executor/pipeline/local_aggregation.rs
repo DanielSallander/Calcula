@@ -210,6 +210,54 @@ impl QueryExecutor {
             None => SessionContext::new(),
         };
 
+        // The marked date table is registered with its DateRole-column date
+        // filters DROPPED when a filter-context time-intelligence measure needs
+        // it (date columns not on the axis): that path CLEARs the date filter
+        // and imposes its own concrete range (which, for PRIORYEAR, reaches
+        // dates *outside* the query's date filter), so the full calendar along
+        // those date-role columns must be available.
+        //
+        // CRITICALLY, we do NOT drop every filter (Fix B + RLS): only the
+        // request filters on columns that carry a `DateRole` (year/month/datekey
+        // — the ones the TI range replaces) are removed. Request filters on
+        // NON-DateRole columns (e.g. `dim_date[is_holiday] = true`) and the
+        // active role's sealed predicates on the date table (re-sealed into
+        // `request.filters` above) MUST survive into the final aggregation —
+        // dropping them would silently widen the result (wrong number) or, for
+        // a role predicate on the date table, bypass row-level security
+        // (fail-open). `date_role_columns` is the lowercased set of those
+        // DateRole columns; `None` means no filter-context TI date table.
+        let (unfiltered_date_table, date_role_columns): (
+            Option<String>,
+            std::collections::HashSet<String>,
+        ) = {
+            let date_on_axis = model
+                .date_table()
+                .is_some_and(|dt| group_by.iter().any(|c| c.table.eq_ignore_ascii_case(dt)));
+            let has_filter_context_ti = measures.iter().any(|m| {
+                matches!(
+                    m.expression(),
+                    Expression::ToDate { .. } | Expression::PeriodShift { .. }
+                )
+            });
+            match model.date_table() {
+                Some(dt) if has_filter_context_ti && !date_on_axis => {
+                    let roles = model
+                        .table(dt)
+                        .map(|t| {
+                            t.columns()
+                                .iter()
+                                .filter(|c| c.date_role().is_some())
+                                .map(|c| c.name().to_lowercase())
+                                .collect::<std::collections::HashSet<String>>()
+                        })
+                        .unwrap_or_default();
+                    (Some(dt.to_string()), roles)
+                }
+                _ => (None, std::collections::HashSet::new()),
+            }
+        };
+
         // Two-phase fetch: identify filtered dimension tables whose filters can
         // be propagated through relationships to the fact table as IN filters.
         // Phase 1: fetch those dimensions first.
@@ -233,11 +281,31 @@ impl QueryExecutor {
                     ))
                 })?;
 
+                // For the filter-context-TI date table, drop ONLY the date-role
+                // column filters; keep non-date-role filters and sealed role
+                // predicates (Fix B + RLS). Other tables apply all their filters.
+                let is_ti_date_table = unfiltered_date_table
+                    .as_ref()
+                    .is_some_and(|dt| dt.eq_ignore_ascii_case(table_name));
+
+                let owned_filters: Vec<FilterCondition>;
+                let effective_filters: &[FilterCondition] = if is_ti_date_table {
+                    owned_filters = request
+                        .filters
+                        .iter()
+                        .filter(|f| !date_role_columns.contains(&f.column.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    &owned_filters
+                } else {
+                    &request.filters
+                };
+
                 let filter_start = Instant::now();
-                let filtered_batch = if request.filters.is_empty() {
+                let filtered_batch = if effective_filters.is_empty() {
                     batch.clone()
                 } else {
-                    filter_cached_batch(batch, &request.filters).await?
+                    filter_cached_batch(batch, effective_filters).await?
                 };
                 let filter_elapsed = filter_start.elapsed();
 
@@ -768,9 +836,29 @@ impl QueryExecutor {
             }
             // Cancellation checkpoint: before window-measure evaluation.
             check_cancelled(token)?;
-            let batches =
-                Self::execute_window_measures(&ctx, &window_measures, group_by, model, plan)
-                    .await?;
+            // Date-table filters from the request (already sealed into the
+            // date table's fetch by the planner). Filter-context time
+            // intelligence reads these to probe the as-of date; the axis path
+            // ignores them. Empty when no date table or no date filter.
+            let date_filters: Vec<FilterCondition> = model
+                .date_table()
+                .map(|date_table| {
+                    fetches
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case(date_table))
+                        .flat_map(|(_, req)| req.filters.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let batches = Self::execute_window_measures(
+                &ctx,
+                &window_measures,
+                group_by,
+                model,
+                &date_filters,
+                plan,
+            )
+            .await?;
             return apply_order_and_limit(batches, order_by, limit);
         }
 
