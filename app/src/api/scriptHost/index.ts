@@ -47,6 +47,17 @@ export {
 export type { ScriptHandle, RpcErrorCode } from "./broker";
 export { PROTOCOL_VERSION } from "./protocol";
 
+// Distributed-extension worker realm (Wave 3 / S8-C7 Phase B): sandboxed
+// execution of opted-in third-party extensions.
+export {
+  mountWorkerExtension,
+  unmountWorkerExtension,
+  listWorkerExtensions,
+  resetWorkerExtensions,
+  type WorkerExtensionMountResult,
+} from "./extensionWorkerHost";
+export { EXTENSION_PROTOCOL_VERSION } from "./extensionProtocol";
+
 // Capability grants (Phase 4): the JIT/consent dialog resolves requests here;
 // the transparency panel reads + revokes grants.
 export {

@@ -9,6 +9,7 @@
 
 import type { H2W, W2H, MountSpec, RenderCellRequest, RenderDrawTarget } from "../protocol";
 import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, type WorkerRuntime } from "./contextShims";
+import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -16,114 +17,10 @@ declare const self: DedicatedWorkerGlobalScope;
 // 1. Hardening — first statements, before any user source can exist
 // ============================================================================
 
-// Capture intrinsics into closures so user code can't clobber what the
-// runtime itself depends on.
+// Capture the few intrinsics the dispatch loop itself needs BEFORE hardening or
+// any user source can clobber them.
 const intrinsicPostMessage = self.postMessage.bind(self);
-const intrinsicSetTimeout = self.setTimeout.bind(self);
-const intrinsicClearTimeout = self.clearTimeout.bind(self);
-const intrinsicClearInterval = self.clearInterval.bind(self);
 const intrinsicFreeze = Object.freeze.bind(Object);
-
-function neuter(target: object, name: string): void {
-  try {
-    Object.defineProperty(target, name, {
-      configurable: false,
-      get() {
-        throw new Error(`${name} is not available to scripts (sandboxed realm)`);
-      },
-    });
-  } catch {
-    // Property not configurable on this platform — delete as fallback.
-    try {
-      delete (target as Record<string, unknown>)[name];
-    } catch {
-      /* best effort */
-    }
-  }
-}
-
-// Ambient network/storage authority dies here. The CSP is the second wall.
-neuter(self, "fetch");
-neuter(self, "XMLHttpRequest");
-neuter(self, "WebSocket");
-neuter(self, "EventSource");
-neuter(self, "indexedDB");
-neuter(self, "caches");
-neuter(self, "importScripts");
-if (typeof navigator !== "undefined") {
-  try {
-    neuter(Object.getPrototypeOf(navigator) as object, "sendBeacon");
-  } catch {
-    /* not present */
-  }
-  try {
-    neuter(Object.getPrototypeOf(navigator) as object, "serviceWorker");
-  } catch {
-    /* not present */
-  }
-}
-
-// Rate-capped ambient timers (R8): not a consent capability — per-script
-// workers mean timers can't jank the host and die with terminate() — but
-// capped so a runaway script only burns its own realm.
-const MIN_INTERVAL_MS = 16;
-const MAX_LIVE_TIMERS = 32;
-const liveTimers = new Set<number>();
-
-function cappedSetTimeout(handler: (...a: unknown[]) => void, timeout?: number, ...args: unknown[]): number {
-  if (liveTimers.size >= MAX_LIVE_TIMERS) {
-    throw new Error(`Too many live timers (max ${MAX_LIVE_TIMERS})`);
-  }
-  const delay = Math.max(MIN_INTERVAL_MS, timeout ?? 0);
-  const id = intrinsicSetTimeout(() => {
-    liveTimers.delete(id);
-    handler(...args);
-  }, delay);
-  liveTimers.add(id);
-  return id;
-}
-
-function cappedSetInterval(handler: (...a: unknown[]) => void, timeout?: number, ...args: unknown[]): number {
-  if (liveTimers.size >= MAX_LIVE_TIMERS) {
-    throw new Error(`Too many live timers (max ${MAX_LIVE_TIMERS})`);
-  }
-  const delay = Math.max(MIN_INTERVAL_MS, timeout ?? 0);
-  const id = self.setInterval(handler, delay, ...args);
-  liveTimers.add(id);
-  return id;
-}
-
-(self as unknown as Record<string, unknown>).setTimeout = cappedSetTimeout;
-(self as unknown as Record<string, unknown>).setInterval = cappedSetInterval;
-(self as unknown as Record<string, unknown>).clearTimeout = (id: number) => {
-  liveTimers.delete(id);
-  intrinsicClearTimeout(id);
-};
-(self as unknown as Record<string, unknown>).clearInterval = (id: number) => {
-  liveTimers.delete(id);
-  intrinsicClearInterval(id);
-};
-
-// Forward console output to the host (script editor console).
-for (const level of ["log", "warn", "error"] as const) {
-  const original = console[level].bind(console);
-  console[level] = (...args: unknown[]) => {
-    original(...args);
-    try {
-      post({ t: "console", level, args: args.map(safeClone) });
-    } catch {
-      /* console must never throw */
-    }
-  };
-}
-
-function safeClone(v: unknown): unknown {
-  try {
-    return structuredClone(v);
-  } catch {
-    return String(v);
-  }
-}
 
 function post(msg: W2H, transfer?: Transferable[]): void {
   if (transfer) {
@@ -132,6 +29,12 @@ function post(msg: W2H, transfer?: Transferable[]): void {
     intrinsicPostMessage(msg);
   }
 }
+
+// Ambient network/storage authority dies here, and timers are rate-capped —
+// shared with the extension realm (workerHardening.ts) so the two can never
+// drift. The CSP is the second wall. Console is mirrored to the host.
+hardenAmbientGlobals();
+forwardConsole((level, args) => post({ t: "console", level, args }));
 
 // ============================================================================
 // 2. Compilation — blob-ESM import (R2): import-time executes NOTHING

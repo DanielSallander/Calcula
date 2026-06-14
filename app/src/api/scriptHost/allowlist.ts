@@ -83,6 +83,14 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "formula.udf.invoke":    { tier: "restricted", capability: "formula.udf", class: "read",
                              validate: vUdf, limits: { maxArgs: 255 },
                              desc: "Evaluate a registered user-defined formula function" },
+  // ---- worker-realm extensions (Wave 3 / S8-C7 Phase B): a distributed
+  //      extension running sandboxed in a worker reaches the host ONLY through
+  //      these restricted-tier methods, audited like every other broker call.
+  //      (Capability-bearing reach — net/storage — uses the cap.* rows above.) ----
+  "ext.notify":            { tier: "restricted", class: "emit",   validate: vNotify,  desc: "Show a toast notification" },
+  "ext.log":               { tier: "restricted", class: "emit",   validate: vAny,     desc: "Write to the extension console" },
+  "ext.executeCommand":    { tier: "restricted", class: "mutate", validate: vCommand, desc: "Run a command flagged scriptSafe by its extension" },
+  "ext.emitEvent":         { tier: "restricted", class: "emit",   validate: vEvent,   desc: "Emit a custom app event (auto-namespaced userscript:*)" },
 };
 
 /**

@@ -94,6 +94,12 @@ import {
   computeExtensionCeiling,
   type ExtensionTrust,
 } from "./extensionTrust";
+// Phase B: sandboxed worker-realm execution for opted-in distributed extensions.
+import {
+  mountWorkerExtension,
+  unmountWorkerExtension,
+} from "../../api/scriptHost/extensionWorkerHost";
+import type { WorkerExtensionManifest } from "../../api/scriptHost/extensionProtocol";
 
 export type { ExtensionTrust };
 
@@ -118,6 +124,9 @@ export interface LoadedExtension {
   declaredCapabilities: CapabilityId[];
   /** Deregisters this extension's transparency-panel handle (distributed only). */
   handleCleanup?: () => void;
+  /** True for a distributed extension running SANDBOXED in a worker realm
+   *  (Phase B). Its lifecycle is owned by extensionWorkerHost, not `module`. */
+  worker?: boolean;
 }
 
 type ChangeListener = () => void;
@@ -517,16 +526,36 @@ class ExtensionManagerImpl {
   private async loadExtensionFromSource(source: string, name: string): Promise<void> {
     console.log(`[ExtensionManager] Loading third-party extension: ${name}`);
 
-    // Create a blob URL from the source code
+    // Wave 3 / S8-C7 Phase B: try to run the bundle SANDBOXED in a worker realm
+    // first. The bundle is imported inside the worker (never on the main thread);
+    // if its manifest declares workerSupport:true it stays isolated and we record
+    // a worker-extension entry. Otherwise the worker is discarded and we fall back
+    // to the main-thread Phase A path (classified + ceiling-recorded, trusted at
+    // runtime). NOTE: a non-workerSupport bundle is thus imported twice (once in
+    // the throwaway worker to read its manifest, once on the main thread) —
+    // acceptable until a sidecar/signed manifest lets us read workerSupport
+    // without executing the bundle.
+    try {
+      const result = await mountWorkerExtension(source, name);
+      if (result.ok && result.extId) {
+        this.recordWorkerExtension(result.extId, result.manifest, name);
+        return;
+      }
+    } catch (e) {
+      console.warn(
+        `[ExtensionManager] worker-realm mount failed for '${name}', falling back to main thread:`,
+        e,
+      );
+    }
+
+    // Main-thread (Phase A) path.
     const blob = new Blob([source], { type: "application/javascript" });
     const blobUrl = URL.createObjectURL(blob);
 
     try {
-      // Dynamic import of the blob URL
       const imported = await import(/* @vite-ignore */ blobUrl);
       const module: ExtensionModule = imported.default ?? imported;
 
-      // Validate
       if (!module.manifest) {
         throw new Error(`Extension '${name}' does not export a 'manifest' object.`);
       }
@@ -539,6 +568,39 @@ class ExtensionManagerImpl {
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
+  }
+
+  /** Record a sandboxed worker extension in the manager's list. The worker host
+   *  (extensionWorkerHost) owns its lifecycle + transparency handle; this entry
+   *  exists only so it shows in the extensions list. */
+  private recordWorkerExtension(
+    extId: string,
+    manifest: WorkerExtensionManifest | undefined,
+    fallbackName: string,
+  ): void {
+    if (this.extensions.has(extId)) return;
+    const displayName = manifest?.name || fallbackName;
+    const version = manifest?.version || "0.0.0";
+    const declaredCapabilities = computeExtensionCeiling(
+      manifest?.capabilities as CapabilityId[] | undefined,
+      "distributed",
+    );
+    const entry: LoadedExtension = {
+      id: extId,
+      name: displayName,
+      version,
+      status: "active",
+      // Synthetic module: the real code lives in the worker; deactivation routes
+      // through unmountWorkerExtension, so `module` is never invoked.
+      module: { manifest: { id: extId, name: displayName, version }, activate: () => {} },
+      trust: "distributed",
+      declaredCapabilities,
+      worker: true,
+    };
+    this.extensions.set(extId, entry);
+    this.updateCachedArray();
+    this.notifyChange();
+    console.log(`[ExtensionManager] Worker-isolated extension '${extId}' active.`);
   }
 
   // --------------------------------------------------------------------------
@@ -557,6 +619,22 @@ class ExtensionManagerImpl {
 
     if (entry.status !== "active") {
       console.warn(`[ExtensionManager] Extension '${id}' is not active (status: ${entry.status})`);
+      return;
+    }
+
+    // Worker-isolated (Phase B) extensions tear down through the worker host.
+    if (entry.worker) {
+      try {
+        await unmountWorkerExtension(id);
+        entry.status = "inactive";
+        console.log(`[ExtensionManager] Worker extension '${id}' deactivated.`);
+      } catch (error) {
+        console.error(`[ExtensionManager] Error deactivating worker extension '${id}':`, error);
+        entry.status = "error";
+        entry.error = error instanceof Error ? error : new Error(String(error));
+      }
+      this.updateCachedArray();
+      this.notifyChange();
       return;
     }
 
