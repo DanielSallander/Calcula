@@ -3,13 +3,14 @@
 //! CONTEXT: Phase 2 — raw subscribe-and-materialize, no override layer.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
 use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript};
 
 use crate::error::CalpError;
+use crate::integrity::TrustStatus;
 use crate::manifest::*;
 use crate::registry::LocalRegistry;
 use crate::version::{SemVer, VersionPin};
@@ -38,6 +39,12 @@ pub struct PullResult {
     pub pivot_definitions: Vec<persistence::SavedPivotDefinition>,
     /// BI pivot metadata for reconnecting to BI models.
     pub bi_pivot_metadata: Vec<serde_json::Value>,
+    /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
+    /// FirstUse means this publisher key was just pinned; Verified means it
+    /// matched a prior pin. The Tauri layer can surface this to the user.
+    pub trust_status: TrustStatus,
+    /// The publisher's display name asserted in the (now verified) manifest.
+    pub publisher_name: String,
 }
 
 /// A data source pulled from a package, ready for connection resolution.
@@ -57,22 +64,38 @@ pub struct PulledSheet {
 
 /// Pull a package from the registry. Returns sheets and metadata for the
 /// caller to integrate into the workbook.
+///
+/// `profile_dir` is the per-user profile directory holding the TOFU pin store
+/// (`trusted-publishers.json`); the manifest-signature step pins/compares the
+/// publisher key there (S5 phase 2).
 pub fn pull(
     registry: &LocalRegistry,
     request: &PullRequest,
+    profile_dir: &Path,
 ) -> Result<PullResult, CalpError> {
     let resolved = registry.resolve_version(&request.package_name, &request.version_pin)?;
     let version_str = resolved.to_string();
     let ver_manifest = registry.get_version_manifest(&request.package_name, &version_str)?;
+
+    let ver_dir = registry.version_dir(&request.package_name, &version_str);
+
+    // ORIGIN GATE (S5 phase 2): verify the manifest's Ed25519 signature and
+    // apply TOFU publisher pinning BEFORE the integrity gate below. The
+    // checksum map lives inside the manifest, so the manifest must be proven a
+    // trusted root before its checksums are believed. A tampered manifest,
+    // a wrong/changed publisher key, or an unsigned package all fail here.
+    let trust_status = crate::integrity::verify_manifest_signature(
+        &ver_dir,
+        &ver_manifest,
+        &request.package_name,
+        profile_dir,
+    )?;
 
     // INTEGRITY GATE: verify every artifact in the version directory against
     // the manifest's published SHA-256 checksums BEFORE materializing
     // anything. This single chokepoint covers both subscribe and refresh
     // (pull_all_updates delegates here), and also vouches for artifacts the
     // Tauri layer reads lazily after pull (e.g. models/{ds}/model.json).
-    // Phase 2 (Ed25519 signing + TOFU pinning) will verify the manifest
-    // signature here first — see integrity.rs.
-    let ver_dir = registry.version_dir(&request.package_name, &version_str);
     crate::integrity::verify_version_artifacts(
         &ver_dir,
         &ver_manifest,
@@ -271,6 +294,8 @@ pub fn pull(
         data_sources: pulled_data_sources,
         pivot_definitions: pulled_pivot_defs,
         bi_pivot_metadata,
+        trust_status,
+        publisher_name: ver_manifest.publisher_name.clone(),
     })
 }
 
@@ -298,7 +323,7 @@ mod tests {
         wb
     }
 
-    fn publish_test_package(reg: &LocalRegistry) -> persistence::Workbook {
+    fn publish_test_package(reg: &LocalRegistry, prof: &std::path::Path) -> persistence::Workbook {
         let wb = make_test_workbook();
         let request = PublishRequest {
             workbook: &wb,
@@ -313,15 +338,16 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
-        publish::publish(reg, &request).unwrap();
+        publish::publish(reg, &request, prof).unwrap();
         wb
     }
 
     #[test]
     fn pull_materializes_sheets() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg);
+        publish_test_package(&reg, prof.path());
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
@@ -330,11 +356,14 @@ mod tests {
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request).unwrap();
+        let result = pull(&reg, &request, prof.path()).unwrap();
         assert_eq!(result.sheets.len(), 2);
         assert_eq!(result.sheets[0].name, "Dashboard");
         assert_eq!(result.sheets[1].name, "Data");
         assert_eq!(result.resolved_version, SemVer::new(1, 0, 0));
+        // First pull pins the publisher key (trust-on-first-use).
+        assert_eq!(result.trust_status, TrustStatus::FirstUse);
+        assert!(!result.publisher_name.is_empty());
 
         // Verify cell data was materialized
         let dashboard = &result.sheets[0].sheet;
@@ -345,8 +374,9 @@ mod tests {
     #[test]
     fn pull_creates_subscription_metadata() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg);
+        publish_test_package(&reg, prof.path());
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
@@ -355,7 +385,7 @@ mod tests {
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request).unwrap();
+        let result = pull(&reg, &request, prof.path()).unwrap();
         let sub = &result.subscription;
         assert_eq!(sub.package_name, "test-pkg");
         assert_eq!(sub.resolved_version, "1.0.0");
@@ -370,6 +400,7 @@ mod tests {
     #[test]
     fn pull_with_version_resolution() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
@@ -388,7 +419,7 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
             };
-            publish::publish(&reg, &request).unwrap();
+            publish::publish(&reg, &request, prof.path()).unwrap();
         }
 
         // ^1.0 should resolve to 1.1.0
@@ -399,13 +430,14 @@ mod tests {
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request).unwrap();
+        let result = pull(&reg, &request, prof.path()).unwrap();
         assert_eq!(result.resolved_version, SemVer::new(1, 1, 0));
     }
 
     #[test]
     fn pull_nonexistent_package_fails() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
 
         let request = PullRequest {
@@ -415,7 +447,7 @@ mod tests {
             now: "2026-05-18T00:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request);
+        let result = pull(&reg, &request, prof.path());
         assert!(result.is_err());
     }
 
@@ -432,33 +464,48 @@ mod tests {
 
     /// unwrap_err() requires Debug on the Ok type; PullResult intentionally
     /// has no Debug derive (deep persistence types), so match instead.
-    fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest) -> CalpError {
-        match pull(reg, req) {
+    fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest, prof: &std::path::Path) -> CalpError {
+        match pull(reg, req, prof) {
             Ok(_) => panic!("pull unexpectedly succeeded"),
             Err(e) => e,
         }
     }
 
+    /// Re-sign a manifest after a test mutates it in place (publish signs the
+    /// ORIGINAL bytes; rewriting the manifest invalidates that signature, which
+    /// the signature gate — running first — would otherwise flag). Uses the
+    /// persisted publisher keypair so the signature is valid for the new bytes,
+    /// letting the test reach the integrity gate it is actually exercising.
+    fn resign_manifest(reg: &LocalRegistry, prof: &std::path::Path, package: &str, version: &str) {
+        let ver_dir = reg.version_dir(package, version);
+        let manifest_bytes = fs::read(ver_dir.join(crate::integrity::VERSION_MANIFEST_FILE)).unwrap();
+        let kp = crate::signing::PublisherKeypair::load_or_create(prof).unwrap();
+        let sig = kp.sign(&manifest_bytes);
+        fs::write(ver_dir.join(crate::integrity::VERSION_MANIFEST_SIG_FILE), sig).unwrap();
+    }
+
     #[test]
     fn pull_roundtrip_passes_integrity_verification() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg);
+        publish_test_package(&reg, prof.path());
 
         // Publish recorded checksums...
         let ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
         assert!(!ver.artifact_checksums.is_empty());
 
         // ...and an untampered pull passes the integrity gate.
-        let result = pull(&reg, &make_pull_request()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
         assert_eq!(result.sheets.len(), 2);
     }
 
     #[test]
     fn pull_fails_on_tampered_data_file() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        let wb = publish_test_package(&reg);
+        let wb = publish_test_package(&reg, prof.path());
 
         // Tamper with a published artifact after publish.
         let data_path = reg
@@ -466,7 +513,7 @@ mod tests {
             .join("data.json");
         fs::write(&data_path, "{\"cells\": \"tampered\"}").unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request());
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
         assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
         let msg = err.to_string();
         assert!(msg.contains("Package integrity check failed"), "msg: {}", msg);
@@ -477,8 +524,9 @@ mod tests {
     #[test]
     fn pull_fails_on_file_added_after_publish() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg);
+        publish_test_package(&reg, prof.path());
 
         // Inject a file the publisher never wrote (e.g. a smuggled script).
         let rogue = reg
@@ -487,7 +535,7 @@ mod tests {
         fs::create_dir_all(&rogue).unwrap();
         fs::write(rogue.join("rogue.json"), "{\"source\": \"evil()\"}").unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request());
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
         assert!(matches!(err, CalpError::UnlistedArtifact { .. }));
         assert!(err.to_string().contains("object_scripts/rogue.json"));
     }
@@ -495,8 +543,9 @@ mod tests {
     #[test]
     fn pull_fails_on_deleted_artifact() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        let wb = publish_test_package(&reg);
+        let wb = publish_test_package(&reg, prof.path());
 
         // Tamper-by-deletion: previously a silent skip, now a hard error.
         let styles_path = reg
@@ -504,7 +553,7 @@ mod tests {
             .join("styles.json");
         fs::remove_file(&styles_path).unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request());
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
         assert!(matches!(err, CalpError::MissingArtifact { .. }));
         assert!(err.to_string().contains("styles.json"));
     }
@@ -512,16 +561,20 @@ mod tests {
     #[test]
     fn pull_fails_on_package_published_without_checksums() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg);
+        publish_test_package(&reg, prof.path());
 
         // Simulate a pre-checksum (legacy) package: strip the checksum map
         // from the version manifest. No backward compatibility: hard error.
+        // Re-sign so we get PAST the signature gate (which runs first) and
+        // actually exercise the checksum gate this test is about.
         let mut ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
         ver.artifact_checksums = std::collections::BTreeMap::new();
         reg.write_version_manifest("test-pkg", "1.0.0", &ver).unwrap();
+        resign_manifest(&reg, prof.path(), "test-pkg", "1.0.0");
 
-        let err = expect_pull_err(&reg, &make_pull_request());
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
         assert!(matches!(err, CalpError::MissingChecksums { .. }));
         let msg = err.to_string();
         assert!(msg.contains("without integrity checksums"), "msg: {}", msg);
@@ -531,8 +584,9 @@ mod tests {
     #[test]
     fn pull_ignores_subscriber_submissions() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg);
+        publish_test_package(&reg, prof.path());
 
         // Subscriber-written submissions land inside the version directory
         // after publish — they are a separate trust domain and must not
@@ -557,15 +611,16 @@ mod tests {
         };
         reg.save_submission("test-pkg", "1.0.0", &submission).unwrap();
 
-        let result = pull(&reg, &make_pull_request()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
         assert_eq!(result.sheets.len(), 2);
     }
 
     #[test]
     fn end_to_end_publish_and_pull_roundtrip() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        let original_wb = publish_test_package(&reg);
+        let original_wb = publish_test_package(&reg, prof.path());
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
@@ -573,7 +628,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &request).unwrap();
+        let result = pull(&reg, &request, prof.path()).unwrap();
 
         // Same number of sheets
         assert_eq!(result.sheets.len(), original_wb.sheets.len());
@@ -587,5 +642,108 @@ mod tests {
         let original_cell_count = original_wb.sheets[0].cells.len();
         let pulled_cell_count = result.sheets[0].sheet.cells.len();
         assert_eq!(pulled_cell_count, original_cell_count);
+    }
+
+    // --- Signature + TOFU tests (S5 phase 2) ---
+
+    #[test]
+    fn pull_fails_on_tampered_manifest() {
+        // Tampering the manifest itself breaks the signature, which the
+        // ORIGIN gate (running before the integrity gate) catches.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        // Tamper the manifest CONTENT while keeping it valid JSON (so it still
+        // deserializes and we reach the signature gate, not a parse error).
+        // Changing a value byte changes the signed bytes -> signature mismatch.
+        let manifest_path = reg
+            .version_dir("test-pkg", "1.0.0")
+            .join(crate::integrity::VERSION_MANIFEST_FILE);
+        let text = fs::read_to_string(&manifest_path).unwrap();
+        let tampered = text.replace("\"tester\"", "\"hacker\"");
+        assert_ne!(tampered, text, "expected to find the published_by value to tamper");
+        fs::write(&manifest_path, tampered).unwrap();
+
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        assert!(matches!(err, CalpError::ManifestSignatureInvalid { .. }), "got {:?}", err);
+        assert!(err.to_string().contains("test-pkg@1.0.0"));
+    }
+
+    #[test]
+    fn pull_fails_when_signature_missing() {
+        // No backward compat: a package without a signature is rejected.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        fs::remove_file(
+            reg.version_dir("test-pkg", "1.0.0")
+                .join(crate::integrity::VERSION_MANIFEST_SIG_FILE),
+        )
+        .unwrap();
+
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        assert!(matches!(err, CalpError::MissingSignature { .. }), "got {:?}", err);
+        assert!(err.to_string().contains("not signed"));
+    }
+
+    #[test]
+    fn tofu_first_use_then_verified_on_second_pull() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        // First pull pins the publisher key.
+        let first = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        assert_eq!(first.trust_status, TrustStatus::FirstUse);
+
+        // Second pull (same package, same key) verifies against the pin.
+        let second = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        assert_eq!(second.trust_status, TrustStatus::Verified);
+    }
+
+    #[test]
+    fn tofu_rejects_different_publisher_key_for_same_package() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        // First pull pins publisher A's key.
+        let first = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        assert_eq!(first.trust_status, TrustStatus::FirstUse);
+
+        // Re-sign the SAME package with a DIFFERENT publisher (key B) — as a
+        // registry attacker who controls the manifest would. We swap in B's
+        // public key and a valid B-signature so the crypto check passes but
+        // the key differs from the pin.
+        let prof_b = TempDir::new().unwrap();
+        let kp_b = crate::signing::PublisherKeypair::load_or_create(prof_b.path()).unwrap();
+        let mut ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
+        ver.publisher_key = kp_b.public_key_hex();
+        ver.publisher_name = "attacker".to_string();
+        reg.write_version_manifest("test-pkg", "1.0.0", &ver).unwrap();
+        let manifest_bytes = fs::read(
+            reg.version_dir("test-pkg", "1.0.0")
+                .join(crate::integrity::VERSION_MANIFEST_FILE),
+        )
+        .unwrap();
+        fs::write(
+            reg.version_dir("test-pkg", "1.0.0")
+                .join(crate::integrity::VERSION_MANIFEST_SIG_FILE),
+            kp_b.sign(&manifest_bytes),
+        )
+        .unwrap();
+
+        // The signature is cryptographically valid (for B), but B != the
+        // pinned key A -> PublisherKeyChanged.
+        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        assert!(matches!(err, CalpError::PublisherKeyChanged { .. }), "got {:?}", err);
+        let msg = err.to_string();
+        assert!(msg.contains("changed since first use"), "msg: {}", msg);
     }
 }

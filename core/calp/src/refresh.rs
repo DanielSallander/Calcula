@@ -8,6 +8,7 @@
 //! 4. Rebase overrides, detect conflicts
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use identity::{CellId, SheetId};
 use serde::{Deserialize, Serialize};
@@ -236,6 +237,7 @@ pub struct RefreshPayload {
 pub fn pull_all_updates(
     registry: &LocalRegistry,
     subscriptions: &[Subscription],
+    profile_dir: &Path,
 ) -> Result<Vec<RefreshPayload>, CalpError> {
     let mut payloads = Vec::new();
 
@@ -255,7 +257,10 @@ pub fn pull_all_updates(
             now: String::new(), // Caller sets this
         };
 
-        let result = pull::pull(registry, &request)?;
+        // Shares pull()'s ORIGIN + INTEGRITY gates (signature, TOFU,
+        // checksums). The same TOFU pin store (profile_dir) is used, so a
+        // refresh to a version signed by a changed publisher key fails here.
+        let result = pull::pull(registry, &request, profile_dir)?;
 
         payloads.push(RefreshPayload {
             subscription_index: i,
@@ -389,7 +394,7 @@ mod tests {
         wb
     }
 
-    fn setup_registry_with_versions(dir: &TempDir) -> LocalRegistry {
+    fn setup_registry_with_versions(dir: &TempDir, prof: &std::path::Path) -> LocalRegistry {
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_workbook();
 
@@ -407,7 +412,7 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
             };
-            publish::publish(&reg, &request).unwrap();
+            publish::publish(&reg, &request, prof).unwrap();
         }
         reg
     }
@@ -415,7 +420,8 @@ mod tests {
     #[test]
     fn preview_detects_available_update() {
         let dir = TempDir::new().unwrap();
-        let reg = setup_registry_with_versions(&dir);
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
 
         let sub = Subscription {
             package_name: "test-pkg".to_string(),
@@ -445,7 +451,8 @@ mod tests {
     #[test]
     fn preview_no_update_when_current() {
         let dir = TempDir::new().unwrap();
-        let reg = setup_registry_with_versions(&dir);
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
 
         let sub = Subscription {
             package_name: "test-pkg".to_string(),
@@ -467,7 +474,8 @@ mod tests {
     #[test]
     fn pull_all_updates_atomic() {
         let dir = TempDir::new().unwrap();
-        let reg = setup_registry_with_versions(&dir);
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
 
         let sub = Subscription {
             package_name: "test-pkg".to_string(),
@@ -481,7 +489,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let payloads = pull_all_updates(&reg, &[sub]).unwrap();
+        let payloads = pull_all_updates(&reg, &[sub], prof.path()).unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].pull_result.resolved_version, SemVer::new(1, 1, 0));
     }
@@ -489,7 +497,8 @@ mod tests {
     #[test]
     fn pull_all_updates_detects_tampering() {
         let dir = TempDir::new().unwrap();
-        let reg = setup_registry_with_versions(&dir);
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
 
         // Tamper with an artifact of the NEW version (1.1.0) the refresh
         // would pull. The refresh path shares pull()'s integrity gate.
@@ -512,7 +521,7 @@ mod tests {
 
         // unwrap_err() requires Debug on the Ok type; RefreshPayload has no
         // Debug derive (wraps PullResult), so match instead.
-        let err = match pull_all_updates(&reg, &[sub]) {
+        let err = match pull_all_updates(&reg, &[sub], prof.path()) {
             Ok(_) => panic!("refresh pull unexpectedly succeeded"),
             Err(e) => e,
         };
@@ -525,7 +534,8 @@ mod tests {
     #[test]
     fn apply_refresh_updates_subscription() {
         let dir = TempDir::new().unwrap();
-        let reg = setup_registry_with_versions(&dir);
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
 
         let mut subs = vec![Subscription {
             package_name: "test-pkg".to_string(),
@@ -539,7 +549,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         }];
 
-        let payloads = pull_all_updates(&reg, &subs).unwrap();
+        let payloads = pull_all_updates(&reg, &subs, prof.path()).unwrap();
         let mut layer = OverrideLayer::new();
 
         let result = apply_refresh(
@@ -553,7 +563,8 @@ mod tests {
     #[test]
     fn apply_refresh_detects_conflicts_and_preserves_local_sheet_ids() {
         let dir = TempDir::new().unwrap();
-        let reg = setup_registry_with_versions(&dir);
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
 
         // Subscribe at 1.0.0
         let pull_result = pull::pull(&reg, &PullRequest {
@@ -561,7 +572,7 @@ mod tests {
             registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::parse("^1.0").unwrap(),
             now: "2026-01-01T00:00:00Z".to_string(),
-        }).unwrap();
+        }, prof.path()).unwrap();
         let mut subs = vec![pull_result.subscription.clone()];
         // Pin behind so 1.1.0 counts as an update
         subs[0].resolved_version = "1.0.0".to_string();
@@ -584,7 +595,7 @@ mod tests {
             extra: HashMap::new(),
         });
 
-        let payloads = pull_all_updates(&reg, &subs).unwrap();
+        let payloads = pull_all_updates(&reg, &subs, prof.path()).unwrap();
         // New upstream value differs from the override's baseline -> conflict.
         let mut upstream = HashMap::new();
         upstream.insert(

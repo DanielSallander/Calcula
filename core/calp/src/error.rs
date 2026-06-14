@@ -56,4 +56,15 @@ pub enum CalpError {
 
     #[error("Package {package}@{version} was published without integrity checksums — republish it")]
     MissingChecksums { package: String, version: String },
+
+    // -- Publisher signing (S5 phase 2: Ed25519 manifest signature + TOFU) --
+
+    #[error("Package {package}@{version} is not signed (missing manifest signature or publisher key) — republish it with a signing-capable publisher")]
+    MissingSignature { package: String, version: String },
+
+    #[error("Package integrity check failed: the manifest signature for {package}@{version} is invalid (manifest tampered or signed by a different key)")]
+    ManifestSignatureInvalid { package: String, version: String },
+
+    #[error("Publisher key for package {package}@{version} changed since first use: pinned {pinned} but this version is signed by {got} — refusing to trust (possible package hijack)")]
+    PublisherKeyChanged { package: String, version: String, pinned: String, got: String },
 }

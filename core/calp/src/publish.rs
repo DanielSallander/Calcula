@@ -4,6 +4,7 @@
 //! the content is written to the registry as an immutable version directory.
 
 use std::fs;
+use std::path::Path;
 
 use identity::EntityId;
 use persistence::{SavedCell, SavedTable, SavedObjectScript, Workbook};
@@ -11,6 +12,7 @@ use persistence::{SavedCell, SavedTable, SavedObjectScript, Workbook};
 use crate::error::CalpError;
 use crate::manifest::*;
 use crate::registry::LocalRegistry;
+use crate::signing::PublisherKeypair;
 use crate::version::SemVer;
 
 /// A data source to embed in the published package.
@@ -69,11 +71,21 @@ pub struct PublishResult {
 }
 
 /// Publish selected sheets from a workbook to a local registry.
+///
+/// `profile_dir` is the per-user profile directory holding the publisher's
+/// Ed25519 keypair (`publisher-key.json`, created on first publish). The
+/// version manifest carries the publisher's public key, and its raw on-disk
+/// bytes are signed into a detached `version-manifest.sig` (S5 phase 2).
 pub fn publish(
     registry: &LocalRegistry,
     request: &PublishRequest,
+    profile_dir: &Path,
 ) -> Result<PublishResult, CalpError> {
     let version_str = request.version.to_string();
+
+    // Load (or create on first publish) the publisher's signing identity.
+    // Generated with the OS CSPRNG inside PublisherKeypair::load_or_create.
+    let keypair = PublisherKeypair::load_or_create(profile_dir)?;
 
     if registry.version_exists(&request.package_name, &version_str) {
         return Err(CalpError::VersionAlreadyPublished {
@@ -148,6 +160,10 @@ pub fn publish(
         kind: request.kind.clone(),
         published_at: request.now.clone(),
         published_by: request.published_by.clone(),
+        // S5 phase 2: the asserted signer. publisher_key is what the
+        // subscriber verifies against; publisher_name is display-only.
+        publisher_key: keypair.public_key_hex(),
+        publisher_name: keypair.display_name(),
         sheets,
         named_ranges: named_ranges.clone(),
         tables: table_ids,
@@ -299,6 +315,19 @@ pub fn publish(
         crate::integrity::compute_artifact_checksums(&ver_dir)?;
     registry.write_version_manifest(&request.package_name, &version_str, &version_manifest)?;
 
+    // S5 phase 2: seal the integrity root. Sign the RAW bytes of
+    // version-manifest.json AS WRITTEN TO DISK (read it back — re-serializing
+    // the in-memory manifest may not be byte-identical to what write_version_
+    // manifest produced). The detached signature lands in the sibling
+    // version-manifest.sig, completing the publish.
+    let manifest_path = ver_dir.join(crate::integrity::VERSION_MANIFEST_FILE);
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let signature_hex = keypair.sign(&manifest_bytes);
+    fs::write(
+        ver_dir.join(crate::integrity::VERSION_MANIFEST_SIG_FILE),
+        signature_hex,
+    )?;
+
     // Update package manifest
     let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
         .unwrap_or_else(|_| PackageManifest::new(
@@ -351,6 +380,7 @@ mod tests {
     #[test]
     fn publish_creates_package() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
@@ -368,7 +398,7 @@ mod tests {
             excluded_regions: Vec::new(),
         };
 
-        let result = publish(&reg, &request).unwrap();
+        let result = publish(&reg, &request, prof.path()).unwrap();
         assert_eq!(result.sheets_published, 2);
         assert_eq!(result.version, "1.0.0");
 
@@ -383,6 +413,20 @@ mod tests {
         assert_eq!(ver.sheets[0].name, "Dashboard");
         assert_eq!(ver.sheets[1].name, "Data");
 
+        // S5 phase 2: the manifest carries the publisher's public key and a
+        // detached signature file sits next to it.
+        assert_eq!(ver.publisher_key.len(), 64, "publisher_key should be 32-byte hex");
+        assert!(!ver.publisher_name.is_empty());
+        let ver_dir = reg.version_dir("test-pkg", "1.0.0");
+        let sig_path = ver_dir.join(crate::integrity::VERSION_MANIFEST_SIG_FILE);
+        assert!(sig_path.exists(), "version-manifest.sig must be written");
+        // The signature verifies over the RAW on-disk manifest bytes.
+        let manifest_bytes = fs::read(ver_dir.join(crate::integrity::VERSION_MANIFEST_FILE)).unwrap();
+        let sig_hex = fs::read_to_string(&sig_path).unwrap();
+        crate::signing::verify_signature(
+            &ver.publisher_key, &manifest_bytes, sig_hex.trim(), "test-pkg", "1.0.0",
+        ).unwrap();
+
         // Verify sheet data files exist
         let sheet_dir = reg.sheet_dir("test-pkg", "1.0.0", &wb.sheets[0].id);
         assert!(sheet_dir.join("data.json").exists());
@@ -393,6 +437,7 @@ mod tests {
     #[test]
     fn publish_selected_sheets_only() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
@@ -410,7 +455,7 @@ mod tests {
             excluded_regions: Vec::new(),
         };
 
-        let result = publish(&reg, &request).unwrap();
+        let result = publish(&reg, &request, prof.path()).unwrap();
         assert_eq!(result.sheets_published, 1);
 
         let ver = reg.get_version_manifest("partial", "1.0.0").unwrap();
@@ -421,6 +466,7 @@ mod tests {
     #[test]
     fn publish_records_artifact_checksums() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
@@ -437,7 +483,7 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
-        publish(&reg, &request).unwrap();
+        publish(&reg, &request, prof.path()).unwrap();
 
         let ver = reg.get_version_manifest("checked", "1.0.0").unwrap();
 
@@ -445,6 +491,8 @@ mod tests {
         assert_eq!(ver.artifact_checksums.len(), 6);
         // The manifest is the integrity root: never lists itself.
         assert!(!ver.artifact_checksums.contains_key("version-manifest.json"));
+        // The detached signature is likewise not a listed artifact.
+        assert!(!ver.artifact_checksums.contains_key("version-manifest.sig"));
 
         // Keys are version-dir-relative with forward slashes; digests are
         // lowercase hex SHA-256 of the final on-disk bytes.
@@ -463,6 +511,7 @@ mod tests {
     #[test]
     fn publish_duplicate_version_fails() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
@@ -480,14 +529,15 @@ mod tests {
             excluded_regions: Vec::new(),
         };
 
-        publish(&reg, &request).unwrap();
-        let result = publish(&reg, &request);
+        publish(&reg, &request, prof.path()).unwrap();
+        let result = publish(&reg, &request, prof.path());
         assert!(matches!(result, Err(CalpError::VersionAlreadyPublished { .. })));
     }
 
     #[test]
     fn publish_multiple_versions() {
         let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
@@ -505,7 +555,7 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
             };
-            publish(&reg, &request).unwrap();
+            publish(&reg, &request, prof.path()).unwrap();
         }
 
         let pkg = reg.get_package_manifest("multi").unwrap();

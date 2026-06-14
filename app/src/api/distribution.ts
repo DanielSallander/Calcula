@@ -38,6 +38,10 @@ export interface PullResponse {
   tablesPulled: number;
   /** Number of object scripts materialized (restricted, consent-gated). */
   scriptsPulled: number;
+  /** Publisher display name from the verified manifest (S5 phase 2). */
+  publisherName: string;
+  /** "firstUse" (publisher key newly pinned) or "verified" (matched a pin). */
+  trustStatus: string;
 }
 
 /** Contents of a package version, for pre-pull review. */
@@ -50,6 +54,10 @@ export interface PackageInspection {
   writebackRegionCount: number;
   tableCount: number;
   namedRangeCount: number;
+  /** Verified publisher display name (S5 phase 2). */
+  publisherName: string;
+  /** "firstUse" or "verified"; failed verification returns an error instead. */
+  trustStatus: string;
 }
 
 export interface InspectedScript {

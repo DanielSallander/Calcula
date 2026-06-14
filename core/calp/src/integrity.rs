@@ -40,6 +40,12 @@ use crate::manifest::VersionManifest;
 /// own checksum map.
 pub const VERSION_MANIFEST_FILE: &str = "version-manifest.json";
 
+/// Detached Ed25519 signature over the raw bytes of `version-manifest.json`
+/// (S5 phase 2). A sibling of the manifest in the version directory; excluded
+/// from the checksum map (it is itself a sealing artifact over the root) for
+/// the same reason the manifest is.
+pub const VERSION_MANIFEST_SIG_FILE: &str = "version-manifest.sig";
+
 /// Top-level directories inside a version dir that are written by
 /// SUBSCRIBERS after publish (separate trust domain) and therefore excluded
 /// from the publisher's checksum map.
@@ -74,7 +80,9 @@ pub fn compute_artifact_checksums(
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if file_type.is_file() {
-            if name_str == VERSION_MANIFEST_FILE {
+            // The manifest is the integrity root; its detached signature
+            // (S5 phase 2) seals that root. Neither is listed in the map.
+            if name_str == VERSION_MANIFEST_FILE || name_str == VERSION_MANIFEST_SIG_FILE {
                 continue;
             }
             let bytes = fs::read(entry.path())?;
@@ -177,6 +185,89 @@ pub fn verify_version_artifacts(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: manifest signature verification + TOFU publisher pinning
+// ---------------------------------------------------------------------------
+
+/// The outcome of a successful manifest-signature + TOFU check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustStatus {
+    /// This package's publisher key was not pinned before; it has now been
+    /// pinned (trust-on-first-use). The caller should surface this so the user
+    /// knows they are trusting a publisher for the first time.
+    FirstUse,
+    /// The package is signed by the SAME publisher key pinned on a prior pull.
+    Verified,
+}
+
+/// Verify the manifest's Ed25519 signature and apply trust-on-first-use
+/// publisher pinning. Called at the top of `pull()` — BEFORE
+/// `verify_version_artifacts()` — so a tampered or wrongly-signed manifest is
+/// rejected before its (now-untrusted) checksum map is even consulted.
+///
+/// Steps:
+///   1. Read the RAW bytes of version-manifest.json and the detached
+///      `version-manifest.sig`. A missing signature file OR an empty
+///      `manifest.publisher_key` means the package is unsigned: hard error
+///      (MissingSignature), no backward compatibility — mirrors MissingChecksums.
+///   2. Verify the signature over those raw bytes against the manifest's
+///      asserted `publisher_key` (invalid -> ManifestSignatureInvalid).
+///   3. TOFU: consult `trusted-publishers.json` in `profile_dir`. If the
+///      package is already pinned and the pin differs from the asserted key,
+///      reject (PublisherKeyChanged). If pinned and equal -> Verified. If not
+///      yet pinned -> pin it now and report FirstUse.
+pub fn verify_manifest_signature(
+    version_dir: &Path,
+    manifest: &VersionManifest,
+    package: &str,
+    profile_dir: &Path,
+) -> Result<TrustStatus, CalpError> {
+    let version = manifest.version.as_str();
+
+    // (1) Unsigned packages are rejected outright (no backward compat).
+    let sig_path = version_dir.join(VERSION_MANIFEST_SIG_FILE);
+    if manifest.publisher_key.is_empty() || !sig_path.exists() {
+        return Err(CalpError::MissingSignature {
+            package: package.to_string(),
+            version: version.to_string(),
+        });
+    }
+
+    // Sign/verify the RAW on-disk bytes — never a re-serialization of the
+    // parsed manifest (re-serializing may not be byte-identical).
+    let manifest_path = version_dir.join(VERSION_MANIFEST_FILE);
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let sig_hex = fs::read_to_string(&sig_path)?;
+    let sig_hex = sig_hex.trim();
+
+    // (2) Cryptographic verification against the asserted publisher key.
+    crate::signing::verify_signature(
+        &manifest.publisher_key,
+        &manifest_bytes,
+        sig_hex,
+        package,
+        version,
+    )?;
+
+    // (3) Trust-on-first-use pinning.
+    let pinned = crate::signing::load_trusted_publishers(profile_dir)?;
+    match pinned.get(package) {
+        Some(pinned_key) if pinned_key != &manifest.publisher_key => {
+            Err(CalpError::PublisherKeyChanged {
+                package: package.to_string(),
+                version: version.to_string(),
+                pinned: pinned_key.clone(),
+                got: manifest.publisher_key.clone(),
+            })
+        }
+        Some(_) => Ok(TrustStatus::Verified),
+        None => {
+            crate::signing::pin_publisher(profile_dir, package, &manifest.publisher_key)?;
+            Ok(TrustStatus::FirstUse)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

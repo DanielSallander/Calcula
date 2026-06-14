@@ -54,6 +54,11 @@ pub struct PullResponse {
     pub sheets_pulled: usize,
     pub tables_pulled: usize,
     pub scripts_pulled: usize,
+    /// Publisher display name asserted in the verified manifest (S5 phase 2).
+    pub publisher_name: String,
+    /// Trust outcome: "firstUse" (publisher key newly pinned) or "verified"
+    /// (matched a prior pin). The frontend can surface a first-use notice.
+    pub trust_status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +85,15 @@ pub struct VersionInfo {
 pub struct SheetInfo {
     pub name: String,
     pub description: String,
+}
+
+/// Resolve the per-user Calcula profile directory (%LOCALAPPDATA%\Calcula).
+/// This is the SAME directory used for the subscriber identity; it also holds
+/// the publisher's Ed25519 keypair (`publisher-key.json`) and the TOFU pin
+/// store (`trusted-publishers.json`) for S5 phase 2 package signing.
+pub(crate) fn calcula_profile_dir() -> std::path::PathBuf {
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(local_app_data).join("Calcula")
 }
 
 // ============================================================================
@@ -217,7 +231,7 @@ pub fn calp_publish(
         excluded_regions,
     };
 
-    let result = calp::publish::publish(&registry, &request)
+    let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
     Ok(PublishResponse {
@@ -255,8 +269,16 @@ pub fn calp_pull(
         now,
     };
 
-    let result = calp::pull::pull(&registry, &request)
+    let result = calp::pull::pull(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
+
+    // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
+    let publisher_name = result.publisher_name.clone();
+    let trust_status = match result.trust_status {
+        calp::integrity::TrustStatus::FirstUse => "firstUse",
+        calp::integrity::TrustStatus::Verified => "verified",
+    }
+    .to_string();
 
     let sheets_pulled = result.sheets.len();
 
@@ -344,6 +366,8 @@ pub fn calp_pull(
         sheets_pulled,
         tables_pulled: result.tables.len(),
         scripts_pulled,
+        publisher_name,
+        trust_status,
     })
 }
 
@@ -406,6 +430,12 @@ pub struct PackageInspection {
     pub writeback_region_count: usize,
     pub table_count: usize,
     pub named_range_count: usize,
+    /// S5 phase 2: the verified publisher's display name. Inspect is a pre-pull
+    /// trust surface, so the manifest signature is checked here too.
+    pub publisher_name: String,
+    /// "firstUse" (publisher key newly pinned) or "verified" (matched a prior
+    /// pin). If verification fails, inspect returns an Err instead.
+    pub trust_status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -451,9 +481,28 @@ pub fn calp_inspect_package(
         .get_version_manifest(&package_name, &version)
         .map_err(|e| e.to_string())?;
 
+    // S5 phase 2: verify the manifest's Ed25519 signature + TOFU pin BEFORE
+    // surfacing the contents — inspect is a pre-pull trust surface, so an
+    // unsigned/tampered/hijacked package must fail to inspect, not just to pull.
+    let ver_dir = registry.version_dir(&package_name, &version);
+    let trust = calp::integrity::verify_manifest_signature(
+        &ver_dir,
+        &manifest,
+        &package_name,
+        &calcula_profile_dir(),
+    )
+    .map_err(|e| e.to_string())?;
+    let trust_status = match trust {
+        calp::integrity::TrustStatus::FirstUse => "firstUse",
+        calp::integrity::TrustStatus::Verified => "verified",
+    }
+    .to_string();
+
     Ok(PackageInspection {
         package_name,
         resolved_version: version,
+        publisher_name: manifest.publisher_name.clone(),
+        trust_status,
         sheets: manifest.sheets.iter().map(|s| SheetInfo {
             name: s.name.clone(),
             description: s.description.clone(),
@@ -1039,7 +1088,7 @@ pub fn calp_refresh_apply(
             let group: Vec<_> = indices.iter()
                 .map(|&i| subs.subscriptions[i].clone())
                 .collect();
-            let group_payloads = calp::refresh::pull_all_updates(&registry, &group)
+            let group_payloads = calp::refresh::pull_all_updates(&registry, &group, &calcula_profile_dir())
                 .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
             for mut payload in group_payloads {
                 // pull_all_updates indexed into the group slice; remap back to
@@ -1420,6 +1469,10 @@ pub fn calp_dev_subscribe(
         sheets_pulled,
         tables_pulled,
         scripts_pulled: 0,
+        // Dev subscriptions pull from the user's own local workbook folder
+        // (not a signed registry package), so there is no publisher to verify.
+        publisher_name: String::new(),
+        trust_status: "dev".to_string(),
     })
 }
 
@@ -1515,6 +1568,9 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         sheets_pulled,
         tables_pulled,
         scripts_pulled: 0,
+        // Dev re-pull: local-folder source, no signed publisher to verify.
+        publisher_name: String::new(),
+        trust_status: "dev".to_string(),
     })
 }
 
@@ -1786,11 +1842,7 @@ pub(crate) fn get_subscriber_identity(state: &AppState) -> Result<calp::Submitte
             return Ok(id.clone());
         }
     }
-    let profile_dir = {
-        let local_app_data = std::env::var("LOCALAPPDATA")
-            .unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(local_app_data).join("Calcula")
-    };
+    let profile_dir = calcula_profile_dir();
     let id = calp::identity_provider::load_or_create(&profile_dir)?;
     let mut cached = state.subscriber_identity.lock().map_err(|e| e.to_string())?;
     *cached = Some(id.clone());

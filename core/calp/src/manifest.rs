@@ -82,6 +82,18 @@ pub struct VersionManifest {
     pub published_at: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub published_by: String,
+    /// Ed25519 public (verifying) key of the publisher, lowercase hex of the
+    /// 32-byte key (S5 phase 2). The subscriber learns the ASSERTED signer
+    /// from this. Old manifests without it still parse (serde default), but
+    /// signature verification on pull REQUIRES it — an empty value is rejected
+    /// as MissingSignature. Detached signature lives in `version-manifest.sig`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub publisher_key: String,
+    /// Human-readable publisher display name (typically the OS username),
+    /// surfaced to the subscriber alongside the trust decision. Display only —
+    /// never used for verification (only `publisher_key` is).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub publisher_name: String,
     pub sheets: Vec<PublishedSheet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_ranges: Vec<PublishedNamedRange>,

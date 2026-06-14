@@ -16,6 +16,7 @@ pub mod overrides;
 pub mod package_kind;
 pub mod refresh;
 pub mod registry;
+pub mod signing;
 pub mod version;
 pub mod publish;
 pub mod pull;

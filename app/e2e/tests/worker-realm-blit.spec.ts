@@ -126,14 +126,17 @@ test.describe("Worker realm blit path (Phase 3)", () => {
           let pixel: number[] | null = null;
           let bw = 0;
           let bh = 0;
-          if (bmp) {
-            bw = bmp.width;
-            bh = bmp.height;
+          // bmp is assigned only inside the waitFor closure, so TS's flow
+          // analysis narrows it to null here; the cast restores its real type.
+          const drawn = bmp as ImageBitmap | null;
+          if (drawn) {
+            bw = drawn.width;
+            bh = drawn.height;
             const c = document.createElement("canvas");
             c.width = bw;
             c.height = bh;
             const cx = c.getContext("2d")!;
-            cx.drawImage(bmp, 0, 0);
+            cx.drawImage(drawn, 0, 0);
             const p = cx.getImageData(
               Math.floor(bw / 2),
               Math.floor(bh / 2),
@@ -256,14 +259,17 @@ test.describe("Worker realm blit path (Phase 3)", () => {
           let pixel: number[] | null = null;
           let bw = 0;
           let bh = 0;
-          if (bmp) {
-            bw = bmp.width;
-            bh = bmp.height;
+          // bmp is assigned only inside the waitFor closure, so TS's flow
+          // analysis narrows it to null here; the cast restores its real type.
+          const drawn = bmp as ImageBitmap | null;
+          if (drawn) {
+            bw = drawn.width;
+            bh = drawn.height;
             const c = document.createElement("canvas");
             c.width = bw;
             c.height = bh;
             const cx = c.getContext("2d")!;
-            cx.drawImage(bmp, 0, 0);
+            cx.drawImage(drawn, 0, 0);
             const p = cx.getImageData(
               Math.floor(bw / 2),
               Math.floor(bh / 2),

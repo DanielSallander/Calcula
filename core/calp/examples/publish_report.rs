@@ -586,7 +586,11 @@ fn main() {
         excluded_regions,
     };
 
-    let result = publish(&registry, &request).expect("Publish failed");
+    // Profile dir holds the publisher's Ed25519 keypair (created on first
+    // publish) for signing the manifest (S5 phase 2). Kept next to the
+    // registry for this example.
+    let profile_dir = registry_path.join(".calcula-profile");
+    let result = publish(&registry, &request, &profile_dir).expect("Publish failed");
 
     println!();
     println!("Published .calp package successfully!");
