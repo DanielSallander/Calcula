@@ -3,8 +3,77 @@
 //          calculate, window, bin).
 
 import { describe, it, expect } from "vitest";
-import { applyTransforms } from "../chartTransforms";
+import { applyTransforms, evalArithmetic } from "../chartTransforms";
 import type { ParsedChartData, TransformSpec } from "../../types";
+
+// ============================================================================
+// evalArithmetic (safe recursive-descent arithmetic parser, no eval)
+// ============================================================================
+
+describe("evalArithmetic", () => {
+  it("evaluates integers", () => {
+    expect(evalArithmetic("42")).toBe(42);
+    expect(evalArithmetic("0")).toBe(0);
+    expect(evalArithmetic("1+2+3")).toBe(6);
+  });
+
+  it("evaluates decimals", () => {
+    expect(evalArithmetic("1.5")).toBe(1.5);
+    expect(evalArithmetic(".5")).toBe(0.5);
+    expect(evalArithmetic("1.5+2.25")).toBe(3.75);
+  });
+
+  it("respects multiplication precedence over addition", () => {
+    expect(evalArithmetic("2+3*4")).toBe(14);
+    expect(evalArithmetic("2*3+4")).toBe(10);
+  });
+
+  it("respects parentheses", () => {
+    expect(evalArithmetic("(1+2)*3")).toBe(9);
+    expect(evalArithmetic("2*(3+4)")).toBe(14);
+    expect(evalArithmetic("((1+2)*(3+4))")).toBe(21);
+  });
+
+  it("handles scientific notation", () => {
+    expect(evalArithmetic("1e3")).toBe(1000);
+    expect(evalArithmetic("1.5e-3")).toBe(0.0015);
+    expect(evalArithmetic("2e2+1")).toBe(201);
+  });
+
+  it("handles unary minus and plus", () => {
+    expect(evalArithmetic("-5")).toBe(-5);
+    expect(evalArithmetic("10*-2")).toBe(-20);
+    expect(evalArithmetic("+7")).toBe(7);
+    expect(evalArithmetic("-(2+3)")).toBe(-5);
+    expect(evalArithmetic("--5")).toBe(5);
+  });
+
+  it("handles division with non-integer results", () => {
+    expect(evalArithmetic("10/4")).toBe(2.5);
+    expect(evalArithmetic("9/3")).toBe(3);
+  });
+
+  it("is left-associative for subtraction and division", () => {
+    expect(evalArithmetic("10-3-2")).toBe(5);
+    expect(evalArithmetic("16/2/2")).toBe(4);
+  });
+
+  it("returns 0 for malformed or empty input", () => {
+    expect(evalArithmetic("")).toBe(0);
+    expect(evalArithmetic("   ")).toBe(0);
+    expect(evalArithmetic("1+")).toBe(0);
+    expect(evalArithmetic("1 2")).toBe(0); // trailing tokens
+    expect(evalArithmetic("(1+2")).toBe(0); // unbalanced paren
+    expect(evalArithmetic("1+2)")).toBe(0); // trailing paren
+    expect(evalArithmetic("abc")).toBe(0); // unexpected char
+    expect(evalArithmetic("*5")).toBe(0); // leading binary op
+  });
+
+  it("returns 0 for non-finite results (division by zero)", () => {
+    expect(evalArithmetic("1/0")).toBe(0);
+    expect(evalArithmetic("-1/0")).toBe(0);
+  });
+});
 
 // ============================================================================
 // Test Helpers

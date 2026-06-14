@@ -14,6 +14,16 @@ import "./index.css";
 // NOTE: Feature extensions (pivot, etc.) are loaded in useExtensionInitializer
 // AFTER bootstrapShell() so that services (DialogExtensions, etc.) are available.
 
+// DEV/E2E ONLY: expose a dynamic-import helper so e2e tests (which run inside
+// page.evaluate as classic scripts and can't use `import` directly) can pull in
+// app modules WITHOUT `new Function` — which would require 'unsafe-eval' in the
+// CSP. `import()` is not eval and is allowed under a no-unsafe-eval policy.
+// Stripped from production builds by the `import.meta.env.DEV` guard.
+if (import.meta.env.DEV) {
+  (window as unknown as { __calcImport?: (u: string) => Promise<unknown> }).__calcImport =
+    (u: string) => import(/* @vite-ignore */ u);
+}
+
 // Render the application
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

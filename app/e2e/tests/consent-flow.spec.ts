@@ -58,10 +58,7 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
     //    emit the consent-needed event exactly as loadAndMountScripts would.
     const setup = await page.evaluate(
       async (a) => {
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const { ObjectScriptManager, getScriptGrants, emitAppEvent } = api;
@@ -153,10 +150,7 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
       //    capability actually works through the consented grant.
       const result = await page.evaluate(
         async (a) => {
-          const importer = new Function("u", "return import(u);") as (
-            u: string,
-          ) => Promise<any>;
-          const api = await importer(
+          const api = await (window as any).__calcImport(
             new URL("/src/api/index.ts", document.baseURI).href,
           );
           const {
@@ -249,12 +243,9 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
       // unit tests; this is the live-wired smoke of that guard.
       const reprompt = await page.evaluate(
         async (a) => {
-          const importer = new Function("u", "return import(u);") as (
-            u: string,
-          ) => Promise<any>;
           // The consentStore module lives under the extension tree; import it
           // by absolute Vite URL the same way we import @api.
-          const cs = await importer(
+          const cs = await (window as any).__calcImport(
             new URL(
               "/extensions/ScriptableObjects/lib/consentStore.ts",
               document.baseURI,
@@ -303,10 +294,7 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
       await page.evaluate(
         async (a) => {
           try {
-            const importer = new Function("u", "return import(u);") as (
-              u: string,
-            ) => Promise<any>;
-            const api = await importer(
+            const api = await (window as any).__calcImport(
               new URL("/src/api/index.ts", document.baseURI).href,
             );
             const { ObjectScriptManager } = api;

@@ -1281,10 +1281,7 @@ const scriptShapeMount: ActionDef<{ slotIndex: number; fill: string }> = {
   async execute(page, _grid, p) {
     await page.evaluate(
       async (a) => {
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const mgr = api.ObjectScriptManager;
@@ -1325,10 +1322,7 @@ const scriptShapeRender: ActionDef<{ slotIndex: number }> = {
     // No-op if the slot isn't mounted (deterministic given the seed).
     await page.evaluate(
       async (a) => {
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const id = `soak-script-${a.slotIndex}`;
@@ -1355,10 +1349,7 @@ const scriptShapeUnmount: ActionDef<{ slotIndex: number }> = {
   async execute(page, _grid, p) {
     await page.evaluate(
       async (a) => {
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const mgr = api.ObjectScriptManager;

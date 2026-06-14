@@ -296,20 +296,163 @@ function evaluateExpression(
   resolved = resolved.replace(/\$index/g, String(ci));
   resolved = resolved.replace(/\$category/g, `"${data.categories[ci]}"`);
 
-  // Evaluate the expression safely using Function constructor
-  // Only allow numeric operations — no access to globals
+  // Evaluate the expression safely with a pure arithmetic parser.
+  // No eval / new Function — runs under a no-unsafe-eval CSP.
   try {
-    // Validate: only allow digits, operators, parentheses, decimal points, spaces, minus
+    // Validate: only allow digits, operators, parentheses, decimal points, spaces, minus.
+    // Defense in depth — evalArithmetic rejects anything else too.
     const sanitized = resolved.replace(/"[^"]*"/g, "0"); // Replace string literals for validation
     if (!/^[\d\s+\-*/().e]+$/i.test(sanitized)) {
       return 0;
     }
-    const fn = new Function(`"use strict"; return (${resolved});`);
-    const result = fn();
+    const result = evalArithmetic(resolved);
     return typeof result === "number" && isFinite(result) ? result : 0;
   } catch {
     return 0;
   }
+}
+
+// ============================================================================
+// Safe arithmetic evaluator (recursive-descent parser, no eval/new Function)
+// ============================================================================
+
+type ArithToken =
+  | { kind: "num"; value: number }
+  | { kind: "op"; value: "+" | "-" | "*" | "/" }
+  | { kind: "lparen" }
+  | { kind: "rparen" };
+
+/**
+ * Evaluate a pure arithmetic expression containing only numbers, the binary
+ * operators + - * /, unary +/-, and parentheses. Uses a recursive-descent
+ * parser with JS-matching precedence/associativity and normal JS number
+ * arithmetic. Returns 0 on ANY tokenize/parse error or non-finite result —
+ * matching the old `try { ... } catch { return 0; }` + isFinite guard.
+ *
+ * Exported for unit testing. Does NOT use eval, new Function, or any dynamic
+ * code execution, so it is safe under a no-unsafe-eval Content-Security-Policy.
+ */
+export function evalArithmetic(resolved: string): number {
+  let tokens: ArithToken[];
+  try {
+    tokens = tokenizeArithmetic(resolved);
+  } catch {
+    return 0;
+  }
+  if (tokens.length === 0) return 0;
+
+  let pos = 0;
+
+  const peek = (): ArithToken | undefined => tokens[pos];
+
+  // expr := term (('+'|'-') term)*   [left-associative]
+  const parseExpr = (): number => {
+    let value = parseTerm();
+    for (;;) {
+      const tok = peek();
+      if (tok && tok.kind === "op" && (tok.value === "+" || tok.value === "-")) {
+        pos++;
+        const rhs = parseTerm();
+        value = tok.value === "+" ? value + rhs : value - rhs;
+      } else {
+        break;
+      }
+    }
+    return value;
+  };
+
+  // term := factor (('*'|'/') factor)*   [left-associative]
+  const parseTerm = (): number => {
+    let value = parseFactor();
+    for (;;) {
+      const tok = peek();
+      if (tok && tok.kind === "op" && (tok.value === "*" || tok.value === "/")) {
+        pos++;
+        const rhs = parseFactor();
+        value = tok.value === "*" ? value * rhs : value / rhs;
+      } else {
+        break;
+      }
+    }
+    return value;
+  };
+
+  // factor := ('-'|'+')? (number | '(' expr ')')
+  const parseFactor = (): number => {
+    const tok = peek();
+    if (tok && tok.kind === "op" && (tok.value === "-" || tok.value === "+")) {
+      pos++;
+      const operand = parseFactor();
+      return tok.value === "-" ? -operand : operand;
+    }
+    if (tok && tok.kind === "num") {
+      pos++;
+      return tok.value;
+    }
+    if (tok && tok.kind === "lparen") {
+      pos++;
+      const value = parseExpr();
+      const closing = peek();
+      if (!closing || closing.kind !== "rparen") {
+        throw new Error("expected ')'");
+      }
+      pos++;
+      return value;
+    }
+    throw new Error("unexpected token");
+  };
+
+  try {
+    const value = parseExpr();
+    if (pos !== tokens.length) {
+      // Trailing tokens — malformed expression.
+      return 0;
+    }
+    return typeof value === "number" && isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function tokenizeArithmetic(input: string): ArithToken[] {
+  const tokens: ArithToken[] = [];
+  // Numbers: optional leading digits, optional fraction, optional exponent.
+  // Matches 1, 1.5, .5, 1e3, 1.5e-3 (case-insensitive 'e').
+  const numberRe = /\d*\.?\d+(?:e[+-]?\d+)?/iy;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") {
+      i++;
+      continue;
+    }
+    if (ch === "+" || ch === "-" || ch === "*" || ch === "/") {
+      tokens.push({ kind: "op", value: ch });
+      i++;
+      continue;
+    }
+    if (ch === "(") {
+      tokens.push({ kind: "lparen" });
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      tokens.push({ kind: "rparen" });
+      i++;
+      continue;
+    }
+    // Try to match a number starting at i.
+    numberRe.lastIndex = i;
+    const m = numberRe.exec(input);
+    if (m && m.index === i) {
+      tokens.push({ kind: "num", value: parseFloat(m[0]) });
+      i = numberRe.lastIndex;
+      continue;
+    }
+    // Unexpected character.
+    throw new Error(`unexpected character '${ch}'`);
+  }
+  return tokens;
 }
 
 // ============================================================================

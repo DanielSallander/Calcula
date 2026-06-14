@@ -32,12 +32,10 @@ test.describe("Capability: storage (Phase 4.3)", () => {
 
     const result = await page.evaluate(
       async (a) => {
-        // page.evaluate is a classic script — dynamic import needs the Function
-        // wrapper + an absolute Vite URL (same trick as worker-realm-blit).
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        // page.evaluate is a classic script — dynamic import via the dev-only
+        // __calcImport helper (no `new Function`, so no 'unsafe-eval'), with an
+        // absolute Vite URL (same trick as worker-realm-blit).
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const { ObjectScriptManager, callExposedMethod, listExposedMethods, recordCapabilityGrant } = api;

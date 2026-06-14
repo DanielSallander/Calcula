@@ -98,8 +98,7 @@ test.describe("Worker realm platform spike", () => {
         // import needs an absolute URL to resolve against the dev server.
         // (location.origin is "null" under the harness; baseURI is real.)
         const moduleUrl = new URL("/src/api/scriptHost/host.ts", document.baseURI).href;
-        const importer = new Function("u", "return import(u);") as (u: string) => Promise<unknown>;
-        const host = (await importer(moduleUrl)) as {
+        const host = (await (window as any).__calcImport(moduleUrl)) as {
           hostValidateScript: (source: string) => Promise<{ valid: boolean; error?: string }>;
         };
         const good = await host.hostValidateScript("function setup(ctx) { return 42; }");

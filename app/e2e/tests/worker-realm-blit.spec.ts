@@ -63,12 +63,10 @@ test.describe("Worker realm blit path (Phase 3)", () => {
     //    production path and pull the rendered bitmap back via the host blit API.
     const result = await page.evaluate(
       async (a) => {
-        // page.evaluate is a classic script — dynamic import needs the Function
-        // wrapper + an absolute Vite URL (same trick as the spike).
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        // page.evaluate is a classic script — dynamic import via the dev-only
+        // __calcImport helper (no `new Function`, so no 'unsafe-eval'), with an
+        // absolute Vite URL (same trick as the spike).
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const { ObjectScriptManager, getShapeBitmap, hasShapeBitmapRenderer } = api;
@@ -199,10 +197,7 @@ test.describe("Worker realm blit path (Phase 3)", () => {
 
     const result = await page.evaluate(
       async (a) => {
-        const importer = new Function("u", "return import(u);") as (
-          u: string,
-        ) => Promise<any>;
-        const api = await importer(
+        const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
         const { ObjectScriptManager, getSlicerItemBitmap, hasSlicerItemBitmapRenderer } = api;

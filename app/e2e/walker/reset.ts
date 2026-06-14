@@ -72,10 +72,7 @@ export async function deepResetForWalk(page: Page): Promise<void> {
     // any leaked workers + clearing the registry gives each walk/replay a
     // deterministic empty realm.
     try {
-      const importer = new Function("u", "return import(u);") as (
-        u: string,
-      ) => Promise<any>;
-      const api = await importer(
+      const api = await (window as any).__calcImport(
         new URL("/src/api/index.ts", document.baseURI).href,
       ).catch(() => null);
       await api?.resetObjectScriptManager?.();
