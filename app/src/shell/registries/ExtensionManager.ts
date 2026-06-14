@@ -85,7 +85,7 @@ import { registerFileFormat, getFileFormats } from "../../api/fileFormats";
 import { registerFunction } from "../../api/formulaFunctions";
 // Wave 3 / S8-C7: reuse the script broker's capability vocabulary, handle model,
 // and transparency registry to classify + record distributed extensions.
-import type { CapabilityId } from "../../api/scriptHost/capabilityIds";
+import { CAPABILITY_ID_SET, type CapabilityId } from "../../api/scriptHost/capabilityIds";
 import {
   buildHandleFromDefinition,
   registerMountedHandle,
@@ -136,6 +136,21 @@ interface ExtensionFileEntry {
   fileName: string;
   path: string;
   content: string;
+  /** Raw JSON of the sidecar manifest, if present (lets the host read
+   *  workerSupport + the capability ceiling WITHOUT importing the bundle). */
+  manifestJson?: string;
+  /** Ed25519 signature trust over the sidecar manifest:
+   *  "unsigned" | "invalid" | "publisherChanged" | "firstUse" | "verified". */
+  trustStatus?: string;
+}
+
+/** The fields the host reads from a sidecar manifest. */
+interface SidecarManifest {
+  id: string;
+  name?: string;
+  version?: string;
+  capabilities?: string[];
+  workerSupport?: boolean;
 }
 
 // ============================================================================
@@ -506,7 +521,7 @@ class ExtensionManagerImpl {
 
       for (const entry of entries) {
         try {
-          await this.loadExtensionFromSource(entry.content, entry.fileName);
+          await this.loadExtension(entry);
         } catch (error) {
           console.error(
             `[ExtensionManager] Failed to load third-party extension '${entry.fileName}':`,
@@ -520,21 +535,74 @@ class ExtensionManagerImpl {
   }
 
   /**
-   * Load an extension from JavaScript source code.
-   * Creates a blob URL and uses dynamic import to load the module.
+   * Load a scanned third-party extension, routing by its (verified) sidecar
+   * manifest when present.
+   *
+   * With a sidecar manifest the host knows workerSupport + the capability
+   * ceiling WITHOUT importing the bundle: a workerSupport:true bundle goes
+   * straight to the worker realm with the AUTHORITATIVE, trust-gated ceiling
+   * (no throwaway worker, no main-thread import); otherwise it goes straight to
+   * the main thread. Without a sidecar we keep the legacy behavior (try worker
+   * first, then main thread).
    */
-  private async loadExtensionFromSource(source: string, name: string): Promise<void> {
-    console.log(`[ExtensionManager] Loading third-party extension: ${name}`);
+  private async loadExtension(entry: ExtensionFileEntry): Promise<void> {
+    const parsed = this.parseSidecarManifest(entry.manifestJson);
+    if (!parsed) {
+      await this.loadExtensionFromSourceLegacy(entry.content, entry.fileName);
+      return;
+    }
 
-    // Wave 3 / S8-C7 Phase B: try to run the bundle SANDBOXED in a worker realm
-    // first. The bundle is imported inside the worker (never on the main thread);
-    // if its manifest declares workerSupport:true it stays isolated and we record
-    // a worker-extension entry. Otherwise the worker is discarded and we fall back
-    // to the main-thread Phase A path (classified + ceiling-recorded, trusted at
-    // runtime). NOTE: a non-workerSupport bundle is thus imported twice (once in
-    // the throwaway worker to read its manifest, once on the main thread) —
-    // acceptable until a sidecar/signed manifest lets us read workerSupport
-    // without executing the bundle.
+    // The declared ceiling is honored ONLY for a verified / first-use signature;
+    // unsigned / invalid / changed -> deny-by-default (empty ceiling, still loads).
+    const trustOk = entry.trustStatus === "verified" || entry.trustStatus === "firstUse";
+    const ceiling = trustOk
+      ? (parsed.capabilities ?? []).filter((c): c is CapabilityId => CAPABILITY_ID_SET.has(c as CapabilityId))
+      : [];
+    if (!trustOk) {
+      console.warn(
+        `[ExtensionManager] '${parsed.id}' sidecar trust='${entry.trustStatus}': capabilities denied (deny-by-default).`,
+      );
+    }
+
+    const displayName = parsed.name || entry.fileName;
+    if (parsed.workerSupport === true) {
+      const result = await mountWorkerExtension(entry.content, displayName, {
+        id: parsed.id,
+        name: parsed.name ?? parsed.id,
+        version: parsed.version ?? "0.0.0",
+        capabilities: ceiling,
+        workerSupport: true,
+      });
+      if (result.ok && result.extId) {
+        this.recordWorkerExtension(result.extId, result.manifest, displayName);
+        return;
+      }
+      console.warn(
+        `[ExtensionManager] worker mount failed for '${parsed.id}', falling back to main thread:`,
+        result.error,
+      );
+    }
+    // workerSupport:false (or the worker mount failed) -> main thread directly.
+    await this.activateMainThreadExtension(entry.content, displayName);
+  }
+
+  /** Parse a sidecar manifest JSON string into the fields the host reads. */
+  private parseSidecarManifest(manifestJson?: string): SidecarManifest | null {
+    if (!manifestJson) return null;
+    try {
+      const m = JSON.parse(manifestJson) as SidecarManifest;
+      return m && typeof m.id === "string" && m.id.length > 0 ? m : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Legacy load path (no sidecar manifest): try the worker realm first (the
+   * worker reports its own manifest), then fall back to the main thread.
+   */
+  private async loadExtensionFromSourceLegacy(source: string, name: string): Promise<void> {
+    console.log(`[ExtensionManager] Loading third-party extension (no sidecar): ${name}`);
     try {
       const result = await mountWorkerExtension(source, name);
       if (result.ok && result.extId) {
@@ -547,22 +615,22 @@ class ExtensionManagerImpl {
         e,
       );
     }
+    await this.activateMainThreadExtension(source, name);
+  }
 
-    // Main-thread (Phase A) path.
+  /** Import + activate an extension on the MAIN thread (Phase A governance). */
+  private async activateMainThreadExtension(source: string, name: string): Promise<void> {
     const blob = new Blob([source], { type: "application/javascript" });
     const blobUrl = URL.createObjectURL(blob);
-
     try {
       const imported = await import(/* @vite-ignore */ blobUrl);
       const module: ExtensionModule = imported.default ?? imported;
-
       if (!module.manifest) {
         throw new Error(`Extension '${name}' does not export a 'manifest' object.`);
       }
       if (!module.activate) {
         throw new Error(`Extension '${name}' does not export an 'activate' function.`);
       }
-
       // Third-party bundles are DISTRIBUTED: ceiling-bounded + transparency-tracked.
       await this.activateExtension(module, "distributed");
     } finally {

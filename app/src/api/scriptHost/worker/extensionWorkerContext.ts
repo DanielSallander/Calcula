@@ -14,6 +14,7 @@ import {
   EXTENSION_CALL_TIMEOUT_MS,
   type WX2H,
   type ExtRpcError,
+  type ExtMenuItemData,
 } from "../extensionProtocol";
 
 type PostFn = (msg: WX2H) => void;
@@ -109,10 +110,35 @@ export function buildExtensionContext(post: PostFn): {
           void brokerCall("ext.notify", [message, opts?.type]);
         },
       },
-      // Menu registration for worker extensions is a planned fast-follow (the
-      // host menu registry has no per-item teardown yet); throws clearly for now.
-      get menus(): never {
-        return unsupported("ui.menus");
+      menus: {
+        /**
+         * Register a menu item. `command` runs a registered command id on click;
+         * `onClick` relays to a worker-side handler. The item DATA crosses; the
+         * handler stays in the worker (the host installs a proxy).
+         */
+        registerMenuItem(
+          menuId: string,
+          item: ExtMenuItemData & { command?: string; onClick?: Handler },
+        ): () => void {
+          const regId = nextRegId++;
+          let handlerId: number | undefined;
+          if (typeof item.onClick === "function") handlerId = registerHandler(item.onClick);
+          const data: ExtMenuItemData = {
+            id: item.id,
+            label: item.label,
+            icon: item.icon,
+            order: item.order,
+            separator: item.separator,
+          };
+          post({
+            t: "register",
+            reg: { kind: "menuItem", regId, menuId, item: data, commandId: item.command, handlerId },
+          });
+          return () => {
+            if (handlerId !== undefined) handlers.delete(handlerId);
+            post({ t: "unregister", regId });
+          };
+        },
       },
       get taskPanes(): never {
         return unsupported("ui.taskPanes");
@@ -165,6 +191,10 @@ export function buildExtensionContext(post: PostFn): {
       // { measures, groupBy, filters }; resolves to { columns, rows, rowCount }.
       biQuery(connectionId: string, request: unknown): Promise<unknown> {
         return brokerCall("cap.biQuery", [connectionId, request]);
+      },
+      // Higher-trust RAW SQL (read-only; needs the separate bi.sql capability).
+      biSql(connectionId: string, sql: string): Promise<unknown> {
+        return brokerCall("cap.biSql", [connectionId, sql]);
       },
       listBiConnections(): Promise<unknown> {
         return brokerCall("cap.biListConnections", []);

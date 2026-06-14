@@ -3287,6 +3287,154 @@ pub struct ExtensionFileEntry {
     pub path: String,
     /// File content (the JavaScript source)
     pub content: String,
+    /// Raw JSON of the sidecar manifest (`<base>.manifest.json`), if present.
+    /// Lets the host read workerSupport + the declared-capability ceiling WITHOUT
+    /// importing/executing the bundle (Wave 3 / S8-C7 follow-up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_json: Option<String>,
+    /// Ed25519 signature trust over the sidecar manifest (mirrors .calp / S5):
+    /// "unsigned" | "invalid" | "publisherChanged" | "firstUse" | "verified".
+    /// The host grants the manifest's declared ceiling ONLY when verified/firstUse.
+    pub trust_status: String,
+}
+
+/// Read + verify an extension's sidecar manifest (`<base>.manifest.json` +
+/// detached `<base>.manifest.sig`). Reuses the .calp Ed25519 signing + TOFU
+/// store (keyed `ext:<id>`). Returns (raw manifest JSON, trust_status).
+fn verify_extension_manifest(
+    manifest_path: &std::path::Path,
+    sig_path: &std::path::Path,
+    profile_dir: &std::path::Path,
+) -> (Option<String>, String) {
+    let manifest_bytes = match std::fs::read(manifest_path) {
+        Ok(b) => b,
+        Err(_) => return (None, "unsigned".to_string()), // no sidecar manifest
+    };
+    let manifest_json = String::from_utf8_lossy(&manifest_bytes).to_string();
+
+    let parsed: serde_json::Value = match serde_json::from_slice(&manifest_bytes) {
+        Ok(v) => v,
+        Err(_) => return (Some(manifest_json), "invalid".to_string()),
+    };
+    let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let version = parsed.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string();
+    let publisher_key = parsed.get("publisherKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // Unsigned: missing id, missing publisher key, or no signature file.
+    if id.is_empty() || publisher_key.is_empty() || !sig_path.exists() {
+        return (Some(manifest_json), "unsigned".to_string());
+    }
+    let sig_hex = match std::fs::read_to_string(sig_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return (Some(manifest_json), "unsigned".to_string()),
+    };
+
+    // Verify the detached signature over the RAW on-disk manifest bytes.
+    if calp::signing::verify_signature(&publisher_key, &manifest_bytes, &sig_hex, &id, &version)
+        .is_err()
+    {
+        return (Some(manifest_json), "invalid".to_string());
+    }
+
+    // TOFU: pin the publisher key for this extension id (namespaced `ext:<id>`).
+    let tofu_key = format!("ext:{}", id);
+    match calp::signing::load_trusted_publishers(profile_dir) {
+        Ok(pinned) => match pinned.get(&tofu_key) {
+            Some(k) if k != &publisher_key => (Some(manifest_json), "publisherChanged".to_string()),
+            Some(_) => (Some(manifest_json), "verified".to_string()),
+            None => {
+                let _ = calp::signing::pin_publisher(profile_dir, &tofu_key, &publisher_key);
+                (Some(manifest_json), "firstUse".to_string())
+            }
+        },
+        // TOFU store unreadable -> the signature already verified; treat as verified.
+        Err(_) => (Some(manifest_json), "verified".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod ext_manifest_tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    #[test]
+    fn unsigned_when_no_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (json, status) = verify_extension_manifest(
+            &dir.path().join("x.manifest.json"),
+            &dir.path().join("x.manifest.sig"),
+            dir.path(),
+        );
+        assert!(json.is_none());
+        assert_eq!(status, "unsigned");
+    }
+
+    #[test]
+    fn unsigned_when_manifest_but_no_sig() {
+        let dir = tempfile::tempdir().unwrap();
+        let mp = write(
+            dir.path(),
+            "x.manifest.json",
+            r#"{"id":"e.x","version":"1.0.0","publisherKey":"abcd"}"#,
+        );
+        let (json, status) =
+            verify_extension_manifest(&mp, &dir.path().join("x.manifest.sig"), dir.path());
+        assert!(json.is_some());
+        assert_eq!(status, "unsigned"); // has key but no signature file
+    }
+
+    #[test]
+    fn signed_first_use_then_verified_then_tamper_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let kp = calp::signing::PublisherKeypair::load_or_create(profile.path()).unwrap();
+        let manifest = format!(
+            r#"{{"id":"e.signed","version":"1.0.0","workerSupport":true,"capabilities":["storage"],"publisherKey":"{}"}}"#,
+            kp.public_key_hex()
+        );
+        let mp = write(dir.path(), "s.manifest.json", &manifest);
+        let sig = kp.sign(&std::fs::read(&mp).unwrap());
+        let sp = write(dir.path(), "s.manifest.sig", &sig);
+
+        // First scan pins the publisher (firstUse); second matches (verified).
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "firstUse");
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "verified");
+
+        // Tampering the manifest invalidates the detached signature.
+        write(dir.path(), "s.manifest.json", &manifest.replace("storage", "net.fetch"));
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "invalid");
+    }
+
+    #[test]
+    fn publisher_changed_when_key_differs_from_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let kp_a = calp::signing::PublisherKeypair::load_or_create(profile.path()).unwrap();
+        let m_a = format!(
+            r#"{{"id":"e.pc","version":"1.0.0","publisherKey":"{}"}}"#,
+            kp_a.public_key_hex()
+        );
+        let mp = write(dir.path(), "p.manifest.json", &m_a);
+        let sp = write(dir.path(), "p.manifest.sig", &kp_a.sign(&std::fs::read(&mp).unwrap()));
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "firstUse");
+
+        // A DIFFERENT publisher re-signs the same id with their own key.
+        let profile_b = tempfile::tempdir().unwrap();
+        let kp_b = calp::signing::PublisherKeypair::load_or_create(profile_b.path()).unwrap();
+        let m_b = format!(
+            r#"{{"id":"e.pc","version":"1.0.0","publisherKey":"{}"}}"#,
+            kp_b.public_key_hex()
+        );
+        write(dir.path(), "p.manifest.json", &m_b);
+        write(dir.path(), "p.manifest.sig", &kp_b.sign(&std::fs::read(&mp).unwrap()));
+        // The profile still has publisher A pinned for ext:e.pc.
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "publisherChanged");
+    }
 }
 
 /// Scan a directory for third-party extension bundles (.js files).
@@ -3305,6 +3453,7 @@ fn scan_extension_directory(dir: String, window: tauri::Window) -> Result<Vec<Ex
 
     let mut entries = Vec::new();
     let read_dir = std::fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
+    let profile_dir = crate::calp_commands::calcula_profile_dir();
 
     for entry in read_dir {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
@@ -3318,10 +3467,18 @@ fn scan_extension_directory(dir: String, window: tauri::Window) -> Result<Vec<Ex
                 .to_string();
             let content = std::fs::read_to_string(&file_path)
                 .map_err(|e| format!("Failed to read '{}': {}", file_name, e))?;
+            // Sidecar manifest + signature: "<base>.manifest.json" / ".manifest.sig".
+            let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let manifest_path = file_path.with_file_name(format!("{}.manifest.json", stem));
+            let sig_path = file_path.with_file_name(format!("{}.manifest.sig", stem));
+            let (manifest_json, trust_status) =
+                verify_extension_manifest(&manifest_path, &sig_path, &profile_dir);
             entries.push(ExtensionFileEntry {
                 file_name,
                 path: file_path.to_string_lossy().to_string(),
                 content,
+                manifest_json,
+                trust_status,
             });
         }
 
@@ -3335,10 +3492,17 @@ fn scan_extension_directory(dir: String, window: tauri::Window) -> Result<Vec<Ex
                     .to_string();
                 let content = std::fs::read_to_string(&index_path)
                     .map_err(|e| format!("Failed to read '{}/index.js': {}", dir_name, e))?;
+                // Sidecar manifest for a directory extension.
+                let manifest_path = file_path.join("extension.manifest.json");
+                let sig_path = file_path.join("extension.manifest.sig");
+                let (manifest_json, trust_status) =
+                    verify_extension_manifest(&manifest_path, &sig_path, &profile_dir);
                 entries.push(ExtensionFileEntry {
                     file_name: format!("{}/index.js", dir_name),
                     path: index_path.to_string_lossy().to_string(),
                     content,
+                    manifest_json,
+                    trust_status,
                 });
             }
         }
@@ -3624,6 +3788,7 @@ pub fn run() {
             bi::bi_disconnect,
             bi::bi_bind_table,
             bi::bi_query,
+            bi::script_bi_sql,
             bi::bi_insert_result,
             bi::bi_refresh_connection,
             bi::bi_refresh_all_in_memory,

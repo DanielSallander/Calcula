@@ -182,7 +182,8 @@ export interface CapabilityRequestPayload {
 /** Human-facing capability descriptions for the JIT dialog. */
 const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "net.fetch": "fetch data from the web",
-  "bi.query": "run read-only BI queries",
+  "bi.query": "run read-only BI queries (model-scoped)",
+  "bi.sql": "run read-only RAW SQL against your BI database",
   storage: "store data on this device",
   "ui.html": "render custom HTML UI",
   "formula.udf": "evaluate worksheet formulas (user-defined functions)",

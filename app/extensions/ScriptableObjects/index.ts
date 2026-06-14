@@ -125,7 +125,8 @@ const consentedPackages = new Set<string>();
 /** Short, user-facing phrase per capability for the consent prompt. */
 const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "net.fetch": "Fetch data from the web (https only, no cookies)",
-  "bi.query": "Run read-only queries on this workbook's BI connections",
+  "bi.query": "Run read-only, model-scoped queries on this workbook's BI connections",
+  "bi.sql": "Run read-only RAW SQL against this workbook's BI database (any reachable table)",
   storage: "Store script-private data in this workbook",
   "ui.html": "Render sandboxed HTML inside its object",
   "formula.udf": "Evaluate its functions in worksheet formulas",

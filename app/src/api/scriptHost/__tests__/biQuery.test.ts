@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("../../backend", () => ({ invokeBackend: vi.fn().mockResolvedValue([]) }));
 
-import { vBiQuery } from "../validators";
+import { vBiQuery, vBiSql } from "../validators";
 import { toBiConnectionSummary } from "../biQuerySupport";
 import { buildHandleFromDefinition, brokerCall } from "../broker";
 import { recordCapabilityGrant, resetAllGrants } from "../capabilities";
@@ -37,6 +37,21 @@ describe("vBiQuery (structured, no SQL surface)", () => {
     expect(typeof vBiQuery(["c", { measures: "x", groupBy: [], filters: [] }])).toBe("string");
     expect(typeof vBiQuery(["c", { measures: [], groupBy: [{ table: "t" }], filters: [] }])).toBe("string");
     expect(typeof vBiQuery(["c", { measures: [], groupBy: [], filters: [{ column: "c" }] }])).toBe("string");
+  });
+});
+
+describe("vBiSql (raw read-only SQL, higher trust)", () => {
+  it("accepts a single SELECT/WITH with a connectionId", () => {
+    expect(vBiSql(["c1", "SELECT * FROM sales"])).toBe(true);
+    expect(vBiSql(["c1", "  with t as (select 1) select * from t"])).toBe(true);
+  });
+
+  it("rejects non-read-only, empty, or missing connectionId", () => {
+    expect(typeof vBiSql(["c1", "DELETE FROM sales"])).toBe("string");
+    expect(typeof vBiSql(["c1", "UPDATE x SET y = 1"])).toBe("string");
+    expect(typeof vBiSql(["c1", "DROP TABLE x"])).toBe("string");
+    expect(typeof vBiSql(["", "SELECT 1"])).toBe("string");
+    expect(typeof vBiSql(["c1", 42 as unknown])).toBe("string");
   });
 });
 

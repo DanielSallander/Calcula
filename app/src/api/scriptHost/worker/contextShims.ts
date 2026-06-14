@@ -257,6 +257,7 @@ function buildCapsShim(rt: WorkerRuntime): {
     set(key: string, value: string): Promise<void>;
   };
   biQuery(connectionId: string, request: BiQueryRequestShim): Promise<BiQueryResultShim>;
+  biSql(connectionId: string, sql: string): Promise<BiQueryResultShim>;
   listBiConnections(): Promise<BiConnectionSummary[]>;
 } {
   return {
@@ -283,6 +284,9 @@ function buildCapsShim(rt: WorkerRuntime): {
     },
     async biQuery(connectionId, request) {
       return (await call(rt, "cap.biQuery", [connectionId, request])) as BiQueryResultShim;
+    },
+    async biSql(connectionId, sql) {
+      return (await call(rt, "cap.biSql", [connectionId, sql])) as BiQueryResultShim;
     },
     async listBiConnections() {
       return (await call(rt, "cap.biListConnections", [])) as BiConnectionSummary[];

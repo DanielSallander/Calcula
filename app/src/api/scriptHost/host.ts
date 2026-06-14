@@ -754,6 +754,14 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const conns = await invokeBackend<Array<Record<string, unknown>>>("bi_get_connections");
       return (conns ?? []).map(toBiConnectionSummary);
     }
+    case "cap.biSql": {
+      // Higher-trust RAW SQL: vBiSql validated read-only on the frontend; the
+      // Rust command re-validates read-only authoritatively and the connector
+      // executes it against the connection's database.
+      const [connectionId, sql] = args as [string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_sql", { connectionId, sql });
+    }
 
     default:
       throw new BrokerError("UnknownMethod", `No host implementation for ${method}`);

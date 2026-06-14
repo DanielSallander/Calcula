@@ -220,6 +220,24 @@ class MenuRegistry {
     // If menu doesn't exist yet, the item will be appended when registerMenu is called
   }
 
+  /** Remove a dynamically-registered menu item (by menu id + item id). Used to
+   *  tear down items registered by an extension on deactivation. */
+  removeMenuItem(menuId: string, itemId: string): void {
+    const dynamic = this.dynamicItems.get(menuId);
+    if (dynamic) {
+      const i = dynamic.findIndex((it) => it.id === itemId);
+      if (i >= 0) dynamic.splice(i, 1);
+    }
+    const menu = this.menus.get(menuId);
+    if (menu) {
+      const j = menu.items.findIndex((it) => it.id === itemId);
+      if (j >= 0) {
+        menu.items.splice(j, 1);
+        this.notify();
+      }
+    }
+  }
+
   /** Merge children from source into target, avoiding duplicate IDs. */
   private mergeChildren(target: MenuItemDefinition, source: MenuItemDefinition): void {
     if (!source.children || source.children.length === 0) return;
@@ -263,6 +281,10 @@ export function registerMenu(definition: MenuDefinition): void {
 
 export function registerMenuItem(menuId: string, item: MenuItemDefinition): void {
   menuRegistry.registerMenuItem(menuId, item);
+}
+
+export function unregisterMenuItem(menuId: string, itemId: string): void {
+  menuRegistry.removeMenuItem(menuId, itemId);
 }
 
 export function getMenus(): MenuDefinition[] {

@@ -919,6 +919,81 @@ pub async fn bi_query(
     Ok(result)
 }
 
+/// Run a CONSENTED, read-only RAW SQL query against a connection's connector
+/// (Wave 3 — the higher-trust `bi.sql` capability). Unlike the structured
+/// `bi_query`, this can read any table the connection's credentials reach, so it
+/// is gated by a SEPARATE capability (`bi.sql`) on the frontend (broker +
+/// explicit consent). Re-validated read-only here as defense in depth; the
+/// connector executes it.
+#[tauri::command]
+pub async fn script_bi_sql(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    sql: String,
+    window: tauri::Window,
+) -> Result<BiQueryResult, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    validate_readonly_sql(&sql)?;
+
+    auto_connect_bi_connection(&bi_state, connection_id).await?;
+
+    let (engine_arc, connector_index) = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections
+            .get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let connector_index = conn
+            .connector_index
+            .ok_or("Not connected to a database. Connect first.")?;
+        let engine_arc = conn.engine.clone().ok_or("No model loaded.")?;
+        (engine_arc, connector_index)
+    };
+
+    let batches = {
+        let engine = engine_arc.lock().await;
+        let connector = engine
+            .registry()
+            .connector_by_index(connector_index)
+            .ok_or("Connector not found for this connection")?;
+        connector
+            .execute_query(&sql)
+            .await
+            .map_err(|e| format!("SQL query failed: {}", e))?
+    };
+
+    let mut result = batches_to_result(&batches);
+    const MAX_ROWS: usize = 100_000;
+    if result.rows.len() > MAX_ROWS {
+        result.rows.truncate(MAX_ROWS);
+        result.row_count = MAX_ROWS;
+    }
+    log_info!("BI", "script_bi_sql: conn={}, returned {} rows", connection_id, result.row_count);
+    Ok(result)
+}
+
+/// Defense-in-depth read-only validation for script raw SQL: a single SELECT/WITH
+/// statement, no embedded statement separators. The frontend (vBiSql) validates
+/// too; this never trusts that.
+fn validate_readonly_sql(sql: &str) -> Result<(), String> {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return Err("Empty SQL".to_string());
+    }
+    if trimmed.len() > 100_000 {
+        return Err("SQL too long (max 100k chars)".to_string());
+    }
+    let lowered = trimmed.to_lowercase();
+    if !lowered.starts_with("select") && !lowered.starts_with("with") {
+        return Err("Only read-only queries are allowed (SELECT / WITH)".to_string());
+    }
+    // Reject multiple statements: strip one trailing ';', then reject any ';'.
+    let body = trimmed.trim_end().strip_suffix(';').unwrap_or(trimmed);
+    if body.contains(';') {
+        return Err("Only a single statement is allowed (no embedded ';')".to_string());
+    }
+    Ok(())
+}
+
 /// Get distinct values for a column from a BI connection.
 /// Executes a GROUP BY query with no measures to retrieve unique values.
 /// Used by slicers and ribbon filters that connect directly to a BI model.

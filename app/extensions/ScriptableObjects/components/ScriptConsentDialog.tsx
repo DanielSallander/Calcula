@@ -131,6 +131,7 @@ const capOriginStyle: React.CSSProperties = {
 const CAP_ICON: Record<CapabilityId, string> = {
   "net.fetch": "@",
   "bi.query": "?",
+  "bi.sql": "DB",
   storage: "#",
   "ui.html": "<>",
   "formula.udf": "fx",

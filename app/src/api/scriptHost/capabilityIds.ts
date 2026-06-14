@@ -22,7 +22,11 @@
 /**
  * Every recognized capability id, in one place.
  *  - net.fetch    : HTTPS egress to granted origins (Rust-enforced per call)
- *  - bi.query     : read-only queries against the workbook's BI connections
+ *  - bi.query     : read-only, MODEL-SCOPED queries against the workbook's BI
+ *                   connections (measures/groupBy/filters; no raw SQL)
+ *  - bi.sql       : read-only RAW SQL against a BI connection's database — a
+ *                   HIGHER-TRUST superset of bi.query (can read any table the
+ *                   connection's credentials reach); Rust re-validates read-only
  *  - storage      : per-script 256 KB workbook-local key/value store
  *  - ui.html      : render sandboxed HTML inside the object's shape
  *  - formula.udf  : evaluate a registered user-defined function from a worksheet
@@ -32,6 +36,7 @@
 export const ALL_CAPABILITY_IDS = [
   "net.fetch",
   "bi.query",
+  "bi.sql",
   "storage",
   "ui.html",
   "formula.udf",

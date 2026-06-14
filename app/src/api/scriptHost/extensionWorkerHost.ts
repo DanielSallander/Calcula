@@ -45,6 +45,7 @@ import {
 import { emitAppEvent, onAppEvent } from "../events";
 import { showToast } from "../notifications";
 import { CommandRegistry } from "../commands";
+import { registerMenuItem, unregisterMenuItem } from "../ui";
 import { toBiConnectionSummary } from "./biQuerySupport";
 
 const SCRIPT_STORAGE_QUOTA_BYTES = 262_144; // 256 KB, matches the object-script store
@@ -98,17 +99,31 @@ export interface WorkerExtensionMountResult {
 export async function mountWorkerExtension(
   source: string,
   displayName: string,
+  authoritative?: WorkerExtensionManifest,
 ): Promise<WorkerExtensionMountResult> {
   const worker = spawnExtensionWorker();
 
   // 1. Import + manifest report (no host-thread execution of extension code).
-  let manifest: WorkerExtensionManifest;
+  let reported: WorkerExtensionManifest;
   try {
-    manifest = await readManifest(worker, source);
+    reported = await readManifest(worker, source);
   } catch (e) {
     worker.terminate();
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+
+  // A verified SIDECAR manifest (Ed25519-signed, read without executing the
+  // bundle) is AUTHORITATIVE over the worker-reported one. Cross-check the id so
+  // a bundle swapped under a signed manifest is rejected; the ceiling then comes
+  // from the signed manifest (capabilities already trust-gated by the caller).
+  if (authoritative && reported.id && authoritative.id && reported.id !== authoritative.id) {
+    worker.terminate();
+    return {
+      ok: false,
+      error: `bundle id '${reported.id}' does not match the signed manifest id '${authoritative.id}'`,
+    };
+  }
+  const manifest = authoritative ?? reported;
 
   if (manifest.workerSupport !== true) {
     worker.terminate();
@@ -328,7 +343,29 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     mw.regCleanups.set(reg.regId, unsub);
     return;
   }
-  // menuItem (and any future kinds) are not wired in v1; ignore safely.
+  if (reg.kind === "menuItem") {
+    // Register a real menu item whose click either runs the extension's own
+    // (namespaced) command or relays to its worker-side onClick handler. The
+    // item id is namespaced so two extensions can't collide and cleanup is exact.
+    const itemId = `ext:${mw.extId}:${reg.item.id}`;
+    const action = () => {
+      if (reg.commandId) {
+        void CommandRegistry.execute(hostCommandId(mw.extId, reg.commandId));
+      } else if (reg.handlerId !== undefined) {
+        void invokeWorkerHandler(mw, reg.handlerId, []);
+      }
+    };
+    registerMenuItem(reg.menuId, {
+      id: itemId,
+      label: reg.item.label,
+      icon: reg.item.icon,
+      order: reg.item.order,
+      separator: reg.item.separator,
+      action,
+    });
+    mw.regCleanups.set(reg.regId, () => unregisterMenuItem(reg.menuId, itemId));
+    return;
+  }
 }
 
 /** RPC a worker-held handler and await its result (with a deadline). */
@@ -476,6 +513,11 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
       const { invokeBackend } = await import("../backend");
       const conns = await invokeBackend<Array<Record<string, unknown>>>("bi_get_connections");
       return (conns ?? []).map(toBiConnectionSummary);
+    }
+    case "cap.biSql": {
+      const [connectionId, sql] = args as [string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_sql", { connectionId, sql });
     }
     default:
       throw new BrokerError("UnknownMethod", `No extension host implementation for ${method}`);

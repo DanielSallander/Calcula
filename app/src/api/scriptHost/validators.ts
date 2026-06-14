@@ -148,6 +148,21 @@ function isBiColumnRef(v: unknown): boolean {
   return isBoundedString(r.table, MAX_KEY) && isBoundedString(r.column, MAX_KEY);
 }
 
+// Raw read-only SQL (Wave 3 / bi.sql, higher-trust). Args: [connectionId, sql].
+// Frontend gate: a single SELECT/WITH statement. Rust re-validates read-only
+// authoritatively (the connector executes it).
+export const vBiSql: Validator = ([connectionId, sql]) => {
+  if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
+  }
+  if (!isBoundedString(sql, 100_000)) return "sql must be a string (max 100k chars)";
+  const trimmed = (sql as string).trimStart().toLowerCase();
+  if (!trimmed.startsWith("select") && !trimmed.startsWith("with")) {
+    return "only read-only queries are allowed (SELECT / WITH)";
+  }
+  return true;
+};
+
 export const vBiQuery: Validator = ([connectionId, request]) => {
   if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
     return "connectionId must be a non-empty string";
