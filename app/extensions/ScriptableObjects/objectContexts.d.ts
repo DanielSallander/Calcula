@@ -77,6 +77,8 @@ declare interface BaseObjectContext {
    */
   caps: {
     fetch(url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; headers: Record<string, string>; text(): string; json(): unknown }>;
+    /** Per-script key/value store, workbook-local and private to this script. Requires the `storage` capability (declared via `// @capability storage`, granted via JIT/consent). */
+    storage: { get(key: string): Promise<string | null>; set(key: string, value: string): Promise<void> };
   };
   /**
    * Full extension API access (only available in "unlocked" mode).

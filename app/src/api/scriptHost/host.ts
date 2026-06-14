@@ -68,6 +68,36 @@ async function getLib() {
   return _libModule;
 }
 
+// ============================================================================
+// Per-script storage (Phase 4.3, design §8). HOST-SIDE + workbook-local: the
+// store lives in the .cala virtual filesystem at
+// .calcula/script-data/<scriptId>.json as a flat { key: value } of strings.
+// The scriptId is ALWAYS the authoritative handle id (definition.id), never an
+// arg — a script can only touch its OWN data.
+// ============================================================================
+
+const SCRIPT_STORAGE_QUOTA_BYTES = 262_144; // 256 KB per script (design §8)
+
+function scriptStoragePath(scriptId: string): string {
+  return `.calcula/script-data/${scriptId}.json`;
+}
+
+async function readScriptStorage(scriptId: string): Promise<Record<string, string>> {
+  const { readVirtualFile } = await import("../backend");
+  try {
+    const raw = await readVirtualFile(scriptStoragePath(scriptId));
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {}; // missing / unreadable -> empty store
+  }
+}
+
+async function writeScriptStorage(scriptId: string, store: Record<string, string>): Promise<void> {
+  const { createVirtualFile } = await import("../backend");
+  await createVirtualFile(scriptStoragePath(scriptId), JSON.stringify(store));
+}
+
 // Active sheet tracking for event payload transforms (CELL_VALUES_CHANGED
 // carries no sheet index; UI edits target the active sheet).
 let activeSheetIndexForEvents = 0;
@@ -684,6 +714,28 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
           body: init?.body,
         },
       });
+    }
+    case "cap.storageGet": {
+      // The broker already enforced `storage` is declared (R19 ceiling) and
+      // granted, and vKey validated the key. The scriptId is the AUTHORITATIVE
+      // handle id — never an arg — so a script reads only its OWN store.
+      const [key] = args as [string];
+      const store = await readScriptStorage(definition.id);
+      return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+    }
+    case "cap.storageSet": {
+      // Read-modify-write the script's own store. Reject a set that would push
+      // the serialized store over the 256 KB quota BEFORE writing (the prior
+      // store on disk is left untouched).
+      const [key, value] = args as [string, string];
+      const store = await readScriptStorage(definition.id);
+      store[key] = value;
+      const serialized = JSON.stringify(store);
+      if (serialized.length > SCRIPT_STORAGE_QUOTA_BYTES) {
+        throw new BrokerError("HostError", "script storage quota exceeded (256 KB)");
+      }
+      await writeScriptStorage(definition.id, store);
+      return undefined;
     }
 
     default:

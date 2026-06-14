@@ -221,6 +221,10 @@ function buildCapsShim(rt: WorkerRuntime): {
     url: string,
     init?: { method?: string; headers?: Record<string, string>; body?: string },
   ) => Promise<CapsFetchResponse>;
+  storage: {
+    get(key: string): Promise<string | null>;
+    set(key: string, value: string): Promise<void>;
+  };
 } {
   return {
     async fetch(url, init) {
@@ -235,6 +239,14 @@ function buildCapsShim(rt: WorkerRuntime): {
         text: () => raw.body,
         json: () => JSON.parse(raw.body),
       };
+    },
+    storage: {
+      async get(key: string): Promise<string | null> {
+        return (await call(rt, "cap.storageGet", [key])) as string | null;
+      },
+      async set(key: string, value: string): Promise<void> {
+        await call(rt, "cap.storageSet", [key, value]);
+      },
     },
   };
 }

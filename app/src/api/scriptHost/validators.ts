@@ -36,13 +36,16 @@ export const vNotify: Validator = ([message, type]) => {
   return true;
 };
 
-export const vExpose: Validator = ([name, fn, options]) => {
+export const vExpose: Validator = ([name, isPublic]) => {
+  // Worker-realm protocol: the handler stays in the worker realm (rt.exposed);
+  // only [name, isPublic] cross the RPC boundary (host's base.expose executor
+  // reads the same shape). A function can't be structured-cloned, so it is
+  // never sent here.
   if (!isBoundedString(name, MAX_KEY) || (name as string).length === 0) {
     return "method name must be a non-empty string";
   }
-  if (typeof fn !== "function") return "handler must be a function";
-  if (options !== undefined && (typeof options !== "object" || options === null)) {
-    return "options must be an object";
+  if (isPublic !== undefined && typeof isPublic !== "boolean") {
+    return "public flag must be a boolean";
   }
   return true;
 };
