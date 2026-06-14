@@ -938,6 +938,135 @@ async fn fix_a_axis_path_with_keep_does_not_raise_fix_a_error() {
     );
 }
 
+/// Item 7 regression: the KEEP filter wrapping an AXIS-mode window measure is
+/// actually applied to the running total — previously it was silently dropped,
+/// so `KEEP(YTD(SUM(amount)), region='east')` returned the all-region total.
+#[tokio::test]
+async fn axis_keep_filter_restricts_window_to_filtered_rows() {
+    let ti = expr::to_date(
+        sum_amount(),
+        engine_core::compute::expression::DateGranularity::Year,
+    );
+    let wrapped = expr::keep(
+        ti,
+        vec![FilterPredicate::new(
+            "fact_sales",
+            "region",
+            ComparisonOp::Equal,
+            "east",
+        )],
+    );
+    let model = model_with_measure_expr(expression_measure("m", wrapped), &FixtureOpts::default());
+    let batches = run_model(
+        &model,
+        dim_date_batch(),
+        &[],
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
+    )
+    .await
+    .unwrap();
+
+    let result = by_year_month(&batches);
+    // Fixture east amounts: 2023 month m → 10m; 2024 month m → m. YTD is a
+    // running sum that resets each year, so the December value is the full-year
+    // east total: 2023 → 10 * (1+…+12) = 780; 2024 → (1+…+12) = 78. These are
+    // the EAST-ONLY totals — the all-region totals (east + west = 3×east) would
+    // be 2340 and 234, which is what the dropped-KEEP bug produced.
+    assert_eq!(
+        result[&(2023, 12)],
+        Some(780.0),
+        "Dec 2023 YTD must be east-only (780), not all-region (2340)"
+    );
+    assert_eq!(
+        result[&(2024, 12)],
+        Some(78.0),
+        "Dec 2024 YTD must be east-only (78), not all-region (234)"
+    );
+}
+
+/// A window measure wrapped in context the axis path cannot apply (here a
+/// CLEAR) fails closed rather than silently dropping it.
+#[tokio::test]
+async fn axis_window_with_unapplyable_context_fails_closed() {
+    // YTD(SUM(amount)) wrapped in a RESET — the axis path cannot represent a
+    // context reset on the stage-1 aggregate, so it must refuse.
+    let ti = expr::to_date(
+        sum_amount(),
+        engine_core::compute::expression::DateGranularity::Year,
+    );
+    let wrapped = expr::reset(ti);
+    let model = model_with_measure_expr(expression_measure("m", wrapped), &FixtureOpts::default());
+    let err = run_model(
+        &model,
+        dim_date_batch(),
+        &[],
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("cannot apply"), "got: {msg}");
+}
+
+/// A July-start fiscal calendar: the `year` role column rolls over in July, so
+/// it diverges from the DateKey's Gregorian year. The filter-context path
+/// (date not on the axis) computes calendar windows, which would disagree with
+/// the axis path's role-column reset — so it must fail closed rather than return
+/// a silently calendar-based (wrong-for-fiscal) window.
+fn fiscal_dim_date_batch() -> RecordBatch {
+    let mut date_id = Vec::new();
+    let mut datekey = Vec::new();
+    let mut year = Vec::new();
+    let mut quarter = Vec::new();
+    let mut month = Vec::new();
+    for y in [2023i64, 2024] {
+        for m in 1i64..=12 {
+            date_id.push(y * 100 + m);
+            datekey.push(first_of_month_days(y, m));
+            // Fiscal year rolls over in July → July..Dec belong to next FY.
+            year.push(if m >= 7 { y + 1 } else { y });
+            quarter.push((m - 1) / 3 + 1);
+            month.push(m);
+        }
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("date_id", DataType::Int64, true),
+        Field::new("datekey", DataType::Date32, true),
+        Field::new("year", DataType::Int64, true),
+        Field::new("quarter", DataType::Int64, true),
+        Field::new("month", DataType::Int64, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(date_id)),
+            Arc::new(Date32Array::from(datekey)),
+            Arc::new(Int64Array::from(year)),
+            Arc::new(Int64Array::from(quarter)),
+            Arc::new(Int64Array::from(month)),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn filter_context_fiscal_calendar_fails_closed() {
+    let model = model_with_measure("YTD(SUM(fact_sales[amount]))", true);
+    // request(&[]) → no date column on the axis → filter-context path.
+    let err = run_model(&model, fiscal_dim_date_batch(), &[], request(&[]))
+        .await
+        .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected a typed TimeIntelligence error for a fiscal calendar, got {err:?}");
+    };
+    assert!(
+        reason.contains("Gregorian") && reason.contains("calendar"),
+        "got: {reason}"
+    );
+}
+
 // ===========================================================================
 // Fix B + RLS: non-DateRole date-table filters and role predicates on the date
 // table survive the unfiltered-registration (only DateRole filters are dropped).
@@ -1044,5 +1173,191 @@ async fn fix_c_direct_query_date_table_fails_closed() {
     assert!(
         reason.contains("requires the date table") && reason.contains("in-memory"),
         "got: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn prioryear_with_gapped_year_axis_fails_closed() {
+    // A fact whose year axis is 2023 and 2025 — 2024 is missing entirely. The
+    // axis-mode period shift is a positional LAG over the years *present*, so a
+    // bare LAG(1) would read 2023 as the "prior year" of 2025, which is wrong:
+    // 2024 has no data, so the true prior-year value is blank. The engine must
+    // fail closed (a typed TimeIntelligence error) rather than return the
+    // nearest-present-year value as if it were the prior year.
+    let model = model_with_measure("PRIORYEAR(SUM(fact_sales[amount]))", true);
+
+    let dim = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("datekey", DataType::Date32, true),
+            Field::new("year", DataType::Int64, true),
+            Field::new("quarter", DataType::Int64, true),
+            Field::new("month", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202301i64, 202501])),
+            Arc::new(Date32Array::from(vec![
+                first_of_month_days(2023, 1),
+                first_of_month_days(2025, 1),
+            ])),
+            // 2023 and 2025 — note the 2024 gap.
+            Arc::new(Int64Array::from(vec![2023i64, 2025])),
+            Arc::new(Int64Array::from(vec![1i64, 1])),
+            Arc::new(Int64Array::from(vec![1i64, 1])),
+        ],
+    )
+    .unwrap();
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202301i64, 202501])),
+            Arc::new(StringArray::from(vec!["east", "east"])),
+            Arc::new(Float64Array::from(vec![100.0, 200.0])),
+        ],
+    )
+    .unwrap();
+
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+
+    let req = request(&[("dim_date", "year")]);
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let err = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected typed TimeIntelligence error for a gapped axis, got {err:?}");
+    };
+    assert!(reason.contains("gap"), "got: {reason}");
+}
+
+/// Build a model with several named measures (each parsed from source) over the
+/// standard star fixture. The date table is marked when `mark` is true.
+fn model_with_measures(measures: &[(&str, &str)], mark: bool) -> DataModel {
+    let dim_date = Table::new(
+        "dim_date",
+        vec![
+            Column::new("date_id", EngineDataType::Int64),
+            Column::new("datekey", EngineDataType::Date).with_date_role(DateRole::DateKey),
+            Column::new("year", EngineDataType::Int64).with_date_role(DateRole::Year),
+            Column::new("quarter", EngineDataType::Int64).with_date_role(DateRole::Quarter),
+            Column::new("month", EngineDataType::Int64).with_date_role(DateRole::Month),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    let fact = Table::new(
+        "fact_sales",
+        vec![
+            Column::new("date_id", EngineDataType::Int64),
+            Column::new("region", EngineDataType::String),
+            Column::new("amount", EngineDataType::Float64),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    let mut builder = DataModel::builder()
+        .add_table(dim_date)
+        .add_table(fact)
+        .add_relationship(Relationship::many_to_one(
+            "sales_date",
+            "fact_sales",
+            "date_id",
+            "dim_date",
+            "date_id",
+        ));
+    for (name, src) in measures {
+        builder = builder
+            .add_measure(expression_measure(*name, parse_measure_expression(src).unwrap()));
+    }
+    if mark {
+        builder = builder.mark_date_table("dim_date");
+    }
+    builder.build().unwrap()
+}
+
+/// Plan + execute a request naming arbitrary measures over the standard fixture.
+async fn run_measures(
+    model: &DataModel,
+    measure_names: &[&str],
+    group_by: &[(&str, &str)],
+) -> QueryResult<Vec<RecordBatch>> {
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_batch()).unwrap();
+    cache.store("fact_sales", fact_batch()).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: measure_names.iter().map(|s| s.to_string()).collect(),
+        group_by: group_by
+            .iter()
+            .map(|(t, c)| ColumnRef::new(*t, *c))
+            .collect(),
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, model, &registry, &[])?;
+    QueryExecutor::execute(&plan, model, &registry, Some(&cache), None, None, &[]).await
+}
+
+#[tokio::test]
+async fn two_window_measures_in_one_request_fail_closed() {
+    // Two window measures emit one batch each; returning them together would be
+    // disjoint, mis-aligned row blocks. Fail closed instead of mis-shaping.
+    let model = model_with_measures(
+        &[
+            ("ytd", "YTD(SUM(fact_sales[amount]))"),
+            ("running", "WINDOW(SUM(fact_sales[amount]), SUM, ORDERBY(dim_date[month]))"),
+        ],
+        true,
+    );
+    let err = run_measures(
+        &model,
+        &["ytd", "running"],
+        &[("dim_date", "year"), ("dim_date", "month")],
+    )
+    .await
+    .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(
+        msg.contains("window") && msg.contains("combined"),
+        "got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn window_measure_mixed_with_normal_measure_fails_closed() {
+    // A window measure alongside a plain aggregate would silently drop the
+    // plain measure's column. Fail closed instead.
+    let model = model_with_measures(
+        &[
+            ("ytd", "YTD(SUM(fact_sales[amount]))"),
+            ("total", "SUM(fact_sales[amount])"),
+        ],
+        true,
+    );
+    let err = run_measures(
+        &model,
+        &["ytd", "total"],
+        &[("dim_date", "year"), ("dim_date", "month")],
+    )
+    .await
+    .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(
+        msg.contains("window") && msg.contains("combined"),
+        "got: {msg}"
     );
 }

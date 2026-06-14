@@ -375,40 +375,67 @@ impl QueryExecutor {
                 group_table_names[0]
             );
 
+            // Join each subsequent group to whichever ALREADY-JOINED groups
+            // actually share each group-by column — not a hardcoded group 0.
+            // For 3+ facts where a conformed dimension is reachable from later
+            // facts but not the first, joining only against group 0 finds no
+            // shared column and falls back to a CROSS JOIN, exploding the result
+            // into a cartesian product (a silently-wrong, inflated total).
+            // Tracking per-column ownership across the join chain fixes this: a
+            // CROSS JOIN now happens only for a group that genuinely shares no
+            // group-by column with any joined group — a scalar-measure broadcast
+            // or independent dimensions, both correct rather than a fan-out.
+            //
+            // Each equality's left side COALESCEs every already-joined group
+            // that carries the column, so a value contributed only by a later
+            // group (NULL on an earlier group's side of a FULL OUTER JOIN) still
+            // matches.
+            let mut joined: Vec<usize> = vec![0];
             for (gi, gt) in group_table_names.iter().enumerate().skip(1) {
-                // Find group-by columns shared between group 0 (or previous) and this group.
-                // Join on all columns that both sides have.
-                let prev_reachable = &group_reachable[0];
                 let this_reachable = &group_reachable[gi];
+                let mut on_parts: Vec<String> = Vec::new();
 
-                let shared_cols: Vec<&str> = group_by
-                    .iter()
-                    .filter(|dim| {
-                        prev_reachable
-                            .iter()
-                            .any(|c| c.table == dim.table && c.column == dim.column)
-                            && this_reachable
+                for dim in group_by {
+                    let this_has = this_reachable
+                        .iter()
+                        .any(|c| c.table == dim.table && c.column == dim.column);
+                    if !this_has {
+                        continue;
+                    }
+                    let owners: Vec<usize> = joined
+                        .iter()
+                        .copied()
+                        .filter(|&gj| {
+                            group_reachable[gj]
                                 .iter()
                                 .any(|c| c.table == dim.table && c.column == dim.column)
-                    })
-                    .map(|dim| dim.column.as_str())
-                    .collect();
-
-                if shared_cols.is_empty() {
-                    sql.push_str(&format!(" CROSS JOIN {gt}"));
-                } else {
-                    let on_parts: Vec<String> = shared_cols
-                        .iter()
-                        .map(|col| {
-                            let col = quote_ident_double(col);
-                            format!("__group_0.{col} = {gt}.{col}")
                         })
                         .collect();
+                    if owners.is_empty() {
+                        continue;
+                    }
+                    let col = quote_ident_double(&dim.column);
+                    let lhs = if owners.len() == 1 {
+                        format!("__group_{}.{col}", owners[0])
+                    } else {
+                        let parts: Vec<String> = owners
+                            .iter()
+                            .map(|gj| format!("__group_{gj}.{col}"))
+                            .collect();
+                        format!("COALESCE({})", parts.join(", "))
+                    };
+                    on_parts.push(format!("{lhs} = {gt}.{col}"));
+                }
+
+                if on_parts.is_empty() {
+                    sql.push_str(&format!(" CROSS JOIN {gt}"));
+                } else {
                     sql.push_str(&format!(
                         " FULL OUTER JOIN {gt} ON {}",
                         on_parts.join(" AND ")
                     ));
                 }
+                joined.push(gi);
             }
 
             let combine_start = Instant::now();

@@ -79,10 +79,19 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
         }
         Expression::DateTimeFunc { args, .. } => args.iter().any(has_unpushable_ops),
         Expression::IsInScope { .. } => false,
-        Expression::Percentile {
-            operand,
-            percentile,
-        } => has_unpushable_ops(operand) || has_unpushable_ops(percentile),
+        // Percentile renders to an EXACT `PERCENTILE_CONT(...) WITHIN GROUP` in
+        // the Postgres dialect but only an APPROXIMATE `approx_percentile_cont`
+        // in the local DataFusion dialect (DataFusion 44 ships no exact
+        // non-median percentile UDAF). If a bare Percentile were pushable, the
+        // SAME measure would return an exact value when single-source-pushed to
+        // Postgres and an approximate value whenever topology forced local
+        // execution (a cross-source join, an in-memory/cached table, or a
+        // co-measure that must run locally) — a number that silently changes
+        // with query shape, the engine's #1 forbidden failure. Force Percentile
+        // local on every path so the result is consistently the local
+        // approximation regardless of topology. (Percentile is documented as
+        // approximate on the public surface.)
+        Expression::Percentile { .. } => true,
         Expression::HasOneValue { column } | Expression::FirstValue { column, .. } => {
             has_unpushable_ops(column)
         }
@@ -530,5 +539,29 @@ mod tests {
         let expr = Expression::ColumnRef("evil\"name".into());
         let sql = expression_to_source_sql(&expr, &registry).unwrap();
         assert_eq!(sql, "\"evil\"\"name\"");
+    }
+
+    #[test]
+    fn percentile_is_forced_local_even_with_simple_operands() {
+        // Regression: a bare Percentile over plain columns must be reported as
+        // unpushable so it is always computed via the local DataFusion
+        // approximate form. If it were pushable, a single-Postgres-source query
+        // would return the exact `PERCENTILE_CONT` while any local-forcing
+        // topology (cross-source join, in-memory table) would return the
+        // approximation — the same measure silently changing value. Force local.
+        use engine_core::compute::expression::{col, lit, percentile};
+
+        let expr = percentile(col("latency"), lit(0.95));
+        assert!(
+            has_unpushable_ops(&expr),
+            "Percentile must be unpushable (forced local) to avoid exact/approx \
+             divergence across query topologies"
+        );
+
+        // Also unpushable when nested inside a compound measure, so the whole
+        // measure runs locally rather than pushing the Postgres-exact form.
+        use engine_core::compute::expression::lit_int;
+        let compound = percentile(col("latency"), lit(0.95)).multiply(lit_int(2));
+        assert!(has_unpushable_ops(&compound));
     }
 }

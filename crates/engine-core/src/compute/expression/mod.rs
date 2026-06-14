@@ -495,6 +495,22 @@ pub enum Expression {
     ///
     /// Two-stage evaluation: the inner measure is materialized grouped by
     /// ORDER BY + PARTITION BY columns, then the window aggregate is applied.
+    ///
+    /// **The window `function` is applied over the per-period values of
+    /// `inner`, not over the underlying fact rows.** This is the defining
+    /// semantics of the primitive and is exactly what a time-series window
+    /// wants: e.g. `WINDOW(SUM(fact[amount]), AVG, ORDERBY(d[month]),
+    /// ROWS(-2, REL, 0, REL))` is a 3-month moving average *of the monthly
+    /// totals* (each month weighted equally) — correct and intended. Be aware,
+    /// though, that `WINDOW(AVG(fact[x]), AVG, ...)` is the *mean of the monthly
+    /// averages*, which differs from the row-level average over the window when
+    /// periods have unequal row counts. To get a true row-level windowed
+    /// average, window `SUM` and `COUNT` separately and divide
+    /// (`WINDOW(SUM(x), SUM, ...) / WINDOW(COUNT(x), SUM, ...)`). The
+    /// single-aggregate time-intelligence sugar (`YTD`/`QTD`/`MTD`) rejects
+    /// `AVERAGE` for this reason because it has no explicit outer function to
+    /// disambiguate; the `WINDOW` primitive accepts it because the two
+    /// aggregates are stated explicitly.
     Window {
         /// The inner measure expression to evaluate per-row before windowing.
         inner: Box<Expression>,
@@ -561,10 +577,15 @@ pub enum Expression {
     /// Query-axis semantics (v1): lowered to an [`Expression::Offset`]
     /// (SQL `LAG`/`LEAD`) along the date table's anchor columns present in
     /// the query's group_by. The shift is **positional** along the sorted
-    /// distinct axis values present in the result: a year missing from the
-    /// data shifts to the nearest present year rather than producing NULL.
-    /// Never rendered to SQL directly; missing prerequisites produce
-    /// [`EngineError::TimeIntelligence`].
+    /// distinct axis values present in the result, so it requires a
+    /// **contiguous** axis at the shift granularity. If a period is missing
+    /// from the data (and therefore absent from the axis), a positional shift
+    /// would read the nearest earlier present period instead of the true prior
+    /// period — a wrong number; the executor detects this gap and fails closed
+    /// with [`EngineError::TimeIntelligence`] rather than returning it. (A
+    /// fully value-based shift that returns NULL for an absent prior period is
+    /// a planned enhancement.) Never rendered to SQL directly; missing
+    /// prerequisites also produce [`EngineError::TimeIntelligence`].
     PeriodShift {
         /// The inner measure expression to read at the shifted period.
         expr: Box<Expression>,
@@ -664,7 +685,16 @@ pub enum Expression {
     /// Percentile aggregation: `PERCENTILE(column, k)`.
     ///
     /// Returns the k-th percentile (0.0–1.0) of the column values.
-    /// SQL: `approx_percentile_cont(col, k)`.
+    ///
+    /// **Approximate.** This is always evaluated locally via DataFusion's
+    /// `approx_percentile_cont` (a t-digest approximation), never pushed to a
+    /// source — even when the source (e.g. PostgreSQL) could compute an exact
+    /// `PERCENTILE_CONT`. The pushdown planner forces it local so the result is
+    /// consistent regardless of query topology; pushing it would make the same
+    /// measure return an exact value on a single source and an approximation
+    /// whenever a cross-source join or in-memory table forced local execution.
+    /// Host applications should treat the result as approximate. (DataFusion 44
+    /// ships no exact non-median percentile aggregate.)
     Percentile {
         /// The expression to aggregate.
         operand: Box<Expression>,

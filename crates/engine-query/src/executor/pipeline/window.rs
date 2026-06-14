@@ -3,14 +3,14 @@
 
 use std::time::Instant;
 
-use arrow::array::{Array, Date32Array, TimestampMicrosecondArray};
+use arrow::array::{Array, Date32Array, Int64Array, TimestampMicrosecondArray};
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 
 use engine_connectors::FilterCondition;
 use engine_core::compute::context::ContextResolver;
-use engine_core::compute::expression::Expression;
+use engine_core::compute::expression::{DateGranularity, Expression};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
@@ -19,7 +19,7 @@ use engine_core::compute::time_intelligence::{
     FilterContextPlan, TimeIntelligenceRoute,
 };
 use engine_core::error::EngineError;
-use engine_core::model::DataModel;
+use engine_core::model::{DataModel, DateRole};
 
 use crate::error::{QueryError, QueryResult};
 use crate::request::ColumnRef;
@@ -125,6 +125,20 @@ impl QueryExecutor {
                 }
             }
 
+            // Apply the measure's resolved KEEP filter context to the inner
+            // aggregate's stage-1 materialization. Without this, a window
+            // measure wrapped in a KEEP — e.g. `KEEP(YTD(SUM(amount)),
+            // region='east')` — would silently drop the filter and accumulate
+            // the running total over ALL rows (a wrong number). Simple KEEP
+            // filters become the stage-1 WHERE, restricting the rows that feed
+            // each per-period aggregate; context this path cannot faithfully
+            // apply (boolean conditions, IN filters, CLEAR/RESET, relationship
+            // overrides, table-variable traversals) fails closed.
+            Self::reject_unapplyable_axis_window_context(name, &eval_ctx)?;
+            let context_filters = eval_ctx.effective_filters(&[]);
+            let context_filter_refs: Vec<&engine_core::compute::context::ResolvedFilter> =
+                context_filters.iter().collect();
+
             // Stage 1: Materialize inner measure grouped by stage1_group_by.
             let base_table_name = format!("__window_{}", name.to_lowercase());
             let agg_pair = vec![(inner.clone(), "__val".to_string())];
@@ -134,13 +148,35 @@ impl QueryExecutor {
                 &agg_pair,
                 &stage1_group_by,
                 &fact_table.to_lowercase(),
-                &[],
+                &context_filter_refs,
                 model,
             )
             .await?;
             let s1_elapsed = s1_start.elapsed();
             let s1_rows = batch.num_rows();
             ctx.register_batch(&base_table_name, batch)?;
+
+            // Fail closed on a gapped axis for a positional period shift
+            // (PRIORYEAR/PRIORPERIOD → LAG/LEAD). The shift is positional over
+            // the periods *present* in the materialized result, so if a period
+            // has no fact rows (and is therefore absent from the axis), the LAG
+            // would silently read the nearest earlier present period instead of
+            // the true prior period — a wrong number with no error. Detect the
+            // gap and return a typed error instead. Running ToDate (YTD/QTD/MTD)
+            // is unaffected: a missing period simply contributes nothing to the
+            // accumulation, which is correct.
+            if let Expression::PeriodShift { granularity, .. } = &stripped_expr {
+                let partition_cols = window_partition_cols(&window_info, group_by);
+                check_period_shift_axis_contiguous(
+                    ctx,
+                    &base_table_name,
+                    &window_info.order_by,
+                    &partition_cols,
+                    *granularity,
+                    name,
+                )
+                .await?;
+            }
 
             // Stage 2: Build and execute window function SQL.
             let mut select_parts: Vec<String> = Vec::new();
@@ -232,9 +268,22 @@ impl QueryExecutor {
         // context op (KEEP on another table, an inner KEEP, USING/CLEAR/RESET/
         // UseRelationship) would silently drop that context and return a wrong
         // number (e.g. `KEEP(YTD(SUM(amount)), region='east')` would compute
-        // YTD over ALL regions). Refuse rather than mislead — the axis path
-        // (date on group_by) still composes with context and is unaffected.
+        // YTD over ALL regions). Refuse rather than mislead. (The axis path —
+        // date on group_by — handles this differently: it applies simple KEEP
+        // filters to the stage-1 aggregate and fails closed on the rest; see
+        // `reject_unapplyable_axis_window_context`.)
         Self::reject_unsupported_filter_context_ops(&plan_info.function, eval_ctx, model)?;
+
+        // FAIL CLOSED (Fix: fiscal calendars): the filter-context path computes
+        // the window boundary (e.g. start-of-year for YTD) from the Gregorian
+        // calendar of the DateKey, whereas the axis path resets on the model's
+        // Year/Quarter/Month *role columns*. For a standard calendar these agree;
+        // for a NON-Gregorian calendar (a host that puts fiscal period numbers in
+        // the role columns), they would disagree — the same YTD measure would
+        // return a fiscal window on the axis and a calendar window in a slicer.
+        // Refuse rather than return a silently-different number. (A fiscal-aware
+        // filter-context window is a planned enhancement.)
+        Self::reject_non_gregorian_calendar(ctx, plan_info, model).await?;
 
         // The as-of date = MAX(date key) under the current date context (the
         // request's date-table filters plus the measure's KEEP filters on the
@@ -351,6 +400,133 @@ impl QueryExecutor {
                          via query filters, or put a date column on the group-by axis"
                     .to_string(),
             }));
+        }
+        Ok(())
+    }
+
+    /// Fail closed when an axis-path window measure's resolved context carries
+    /// anything the stage-1 materialization cannot faithfully apply.
+    ///
+    /// The axis (window) path applies the measure's KEEP **filters** to the
+    /// stage-1 aggregate as a WHERE clause (via `materialize_query_in_pipeline`'s
+    /// `source_filters`), which correctly restricts the rows that feed each
+    /// per-period value. It cannot, however, represent boolean conditions, IN
+    /// filters, CLEAR/RESET, relationship overrides (USERELATIONSHIP), or
+    /// table-variable traversals here — applying only the simple filters and
+    /// dropping these would silently return a wrong number. Refuse instead.
+    /// (Simple filters — `column op value`, on the fact or any single-hop
+    /// dimension — are honoured and do not reach this guard.)
+    fn reject_unapplyable_axis_window_context(
+        measure_name: &str,
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+    ) -> QueryResult<()> {
+        let has_conditions = !eval_ctx.conditions.is_empty();
+        let has_in_filters = !eval_ctx.in_filters.is_empty();
+        let has_clear_or_reset = eval_ctx.is_reset
+            || eval_ctx.is_reset_inner
+            || eval_ctx.is_reset_outer
+            || !eval_ctx.cleared_columns.is_empty()
+            || !eval_ctx.cleared_tables.is_empty()
+            || !eval_ctx.cleared_inner_columns.is_empty()
+            || !eval_ctx.cleared_inner_tables.is_empty()
+            || !eval_ctx.cleared_outer_columns.is_empty()
+            || !eval_ctx.cleared_outer_tables.is_empty()
+            || !eval_ctx.clear_except.is_empty();
+        let has_overrides = !eval_ctx.relationship_overrides.is_empty();
+        let has_traversals = !eval_ctx.traversals.is_empty();
+
+        if has_conditions || has_in_filters || has_clear_or_reset || has_overrides || has_traversals
+        {
+            return Err(QueryError::InvalidQuery(format!(
+                "window / running / time-intelligence measure '{measure_name}' is wrapped in \
+                 context operations that the window path cannot apply (boolean conditions, IN \
+                 filters, CLEAR/RESET, USERELATIONSHIP, or table-variable traversal). Only \
+                 simple KEEP filters (column op value) compose with a window measure; remove \
+                 the others, or compute the measure without the window"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Fail closed when the marked date table is not a standard Gregorian
+    /// calendar, because the filter-context window math is calendar-based.
+    ///
+    /// The filter-context path derives the window bounds (start-of-year for YTD,
+    /// the prior-year shift, etc.) from the Gregorian calendar of the `DateKey`
+    /// via `start_of_period`. The axis path instead resets/partitions on the
+    /// model's `Year`/`Quarter`/`Month` *role columns*. These agree only when
+    /// those columns hold the Gregorian calendar parts of the DateKey. If a host
+    /// models a fiscal (non-January) year by populating the role columns with
+    /// fiscal period numbers, the two paths would return *different* windows for
+    /// the same measure (fiscal on the axis, calendar in a slicer) — a silent
+    /// inconsistency. This check verifies each present role column equals the
+    /// calendar part extracted from the DateKey, and refuses otherwise.
+    async fn reject_non_gregorian_calendar(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        model: &DataModel,
+    ) -> QueryResult<()> {
+        let Ok(date_table) = model.table(&plan_info.date_table) else {
+            return Ok(());
+        };
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+
+        // For each present numeric period role column, the calendar part it
+        // must equal (NULL DateKey rows compare to NULL and are ignored).
+        let mut divergence: Vec<String> = Vec::new();
+        for column in date_table.columns() {
+            let part = match column.date_role() {
+                Some(DateRole::Year) => "year",
+                Some(DateRole::Quarter) => "quarter",
+                Some(DateRole::Month) => "month",
+                _ => continue,
+            };
+            let col = quote_ident_double(&column.name().to_lowercase());
+            divergence.push(format!(
+                "CAST({col} AS BIGINT) <> CAST(date_part('{part}', {dk}) AS BIGINT)"
+            ));
+        }
+        if divergence.is_empty() {
+            return Ok(());
+        }
+
+        let table = quote_ident_double(&plan_info.date_table.to_lowercase());
+        let sql = format!(
+            "SELECT COUNT(*) FROM {table} WHERE {}",
+            divergence.join(" OR ")
+        );
+
+        let fiscal_error = |detail: String| -> QueryError {
+            EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason: format!(
+                    "the date table '{}' is not a standard Gregorian calendar ({detail}), and \
+                     filter-context time intelligence (date not on the query axis) only supports \
+                     a Gregorian calendar; put a date column on the group-by axis (the axis path \
+                     honours the role columns), or use a calendar date table",
+                    plan_info.date_table
+                ),
+            }
+            .into()
+        };
+
+        let df = ctx.sql(&sql).await.map_err(|e| {
+            fiscal_error(format!(
+                "its Year/Quarter/Month role columns could not be compared to the date key: {e}"
+            ))
+        })?;
+        let batches = df.collect().await?;
+        let diverging = batches
+            .first()
+            .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+            .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+            .unwrap_or(0);
+        if diverging > 0 {
+            return Err(fiscal_error(
+                "its Year/Quarter/Month role columns do not match the calendar parts of the \
+                 date key"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
@@ -578,19 +754,7 @@ fn build_window_sql(
     let order_sql = order_clause.join(", ");
 
     // Build PARTITION BY clause (includes outer group-by columns that aren't in ORDER BY).
-    let mut partition_cols: Vec<String> = info
-        .partition_by
-        .iter()
-        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
-        .collect();
-    // Add outer group-by columns to PARTITION BY if not already in ORDER BY or PARTITION BY.
-    for dim in outer_group_by {
-        let col_lower = dim.column.to_lowercase();
-        let col_quoted = quote_ident_double(&col_lower);
-        if !partition_cols.contains(&col_quoted) && !order_clause.contains(&col_quoted) {
-            partition_cols.push(col_quoted);
-        }
-    }
+    let partition_cols = window_partition_cols(info, outer_group_by);
     let partition_sql = if partition_cols.is_empty() {
         String::new()
     } else {
@@ -671,6 +835,126 @@ fn build_window_sql(
     } else {
         Ok(format!("\"__val\" AS {}", quote_ident_double(measure_name)))
     }
+}
+
+/// The PARTITION BY columns (lowercased, quoted) for a window's stage-2 SQL:
+/// the explicit `partition_by` plus every outer group-by column that is not
+/// already an ORDER BY or PARTITION BY column. Shared by `build_window_sql`
+/// (to render the window) and the period-shift contiguity guard (to check
+/// contiguity within each partition).
+fn window_partition_cols(info: &WindowInfo, outer_group_by: &[ColumnRef]) -> Vec<String> {
+    let order_clause: Vec<String> = info
+        .order_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .collect();
+    let mut partition_cols: Vec<String> = info
+        .partition_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .collect();
+    for dim in outer_group_by {
+        let col_quoted = quote_ident_double(&dim.column.to_lowercase());
+        if !partition_cols.contains(&col_quoted) && !order_clause.contains(&col_quoted) {
+            partition_cols.push(col_quoted);
+        }
+    }
+    partition_cols
+}
+
+/// Fail closed when a positional period shift (`PRIORYEAR`/`PRIORPERIOD`, lowered
+/// to `LAG`/`LEAD`) would run over a **gapped** date axis.
+///
+/// The shift is positional over the periods actually present in the
+/// materialized stage-1 result. A correct value-based shift requires the axis
+/// to be contiguous at the shift granularity (no missing period within each
+/// PARTITION); otherwise the `LAG` reads the nearest earlier present period
+/// rather than the true prior period, returning a wrong number for the wrong
+/// period with no error. Rather than silently mislead, this verifies contiguity
+/// and returns [`EngineError::TimeIntelligence`] on a gap. (A fully value-based
+/// shift that tolerates gaps by returning NULL for an absent prior period is a
+/// planned enhancement; until then the engine fails closed.)
+///
+/// Contiguity is checked per PARTITION by comparing the span of the period
+/// ordinal (`MAX - MIN + 1`) against the distinct count: they are equal exactly
+/// when no period is missing. The ordinal is the Year value (year shift),
+/// `year*4 + quarter` (quarter shift), or `year*12 + month` (month shift) — the
+/// lowering guarantees these anchor shapes and that the anchor columns carry the
+/// extracted numeric period parts.
+async fn check_period_shift_axis_contiguous(
+    ctx: &SessionContext,
+    base_table: &str,
+    order_by: &[(String, String)],
+    partition_cols: &[String],
+    granularity: DateGranularity,
+    function_label: &str,
+) -> QueryResult<()> {
+    let ord_cols: Vec<String> = order_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .collect();
+    let ordinal = match (granularity, ord_cols.as_slice()) {
+        (DateGranularity::Year, [year]) => format!("CAST({year} AS BIGINT)"),
+        (DateGranularity::Quarter, [year, quarter]) => {
+            format!("(CAST({year} AS BIGINT) * 4 + CAST({quarter} AS BIGINT))")
+        }
+        (DateGranularity::Month, [year, month]) => {
+            format!("(CAST({year} AS BIGINT) * 12 + CAST({month} AS BIGINT))")
+        }
+        // The lowering only ever produces these anchor shapes; anything else
+        // (an unexpected shape) is left to the existing positional behavior.
+        _ => return Ok(()),
+    };
+
+    let part_select = if partition_cols.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", partition_cols.join(", "))
+    };
+    let group_clause = if partition_cols.is_empty() {
+        String::new()
+    } else {
+        format!(" GROUP BY {}", partition_cols.join(", "))
+    };
+    // Count partitions whose period axis has a gap (span != distinct count).
+    let sql = format!(
+        "SELECT COUNT(*) FROM (\
+            SELECT (MAX(__ord) - MIN(__ord) + 1) AS span, COUNT(DISTINCT __ord) AS cnt \
+            FROM (SELECT {ordinal} AS __ord{part_select} FROM {base_table}) t{group_clause}\
+         ) g WHERE g.span <> g.cnt"
+    );
+
+    let gap_error = |reason: String| -> QueryError {
+        EngineError::TimeIntelligence {
+            function: function_label.to_string(),
+            reason,
+        }
+        .into()
+    };
+
+    let df = ctx.sql(&sql).await.map_err(|e| {
+        gap_error(format!(
+            "could not verify the date axis is contiguous for a period shift \
+             (the {granularity:?} anchor columns must hold numeric period parts): {e}"
+        ))
+    })?;
+    let batches = df.collect().await?;
+    let gapped_partitions = batches
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+        .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+        .unwrap_or(0);
+
+    if gapped_partitions > 0 {
+        return Err(gap_error(format!(
+            "the date axis has gaps (one or more {granularity:?} periods are absent from the \
+             result rows), so a positional period shift would read the wrong period instead of \
+             the true prior period. Provide a contiguous date axis — e.g. group by a date \
+             dimension that has a row for every period so empty periods still appear — or remove \
+             the period shift"
+        )));
+    }
+    Ok(())
 }
 
 /// Translate a DAX-style WindowFrame to SQL ROWS BETWEEN clause.

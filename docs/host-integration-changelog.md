@@ -363,6 +363,19 @@ EngineError::ScriptError { function: String, position: Option<usize>, message: S
 
 ---
 
+## Correctness sweep — new fail-closed behaviors
+
+A sweep of silently-wrong-number paths (the engine's #1 prohibited failure) changed several queries that previously returned a wrong/mis-shaped result to either compute correctly or **fail closed** with a typed error. Host-visible effects:
+
+- **`PERCENTILE` is documented as approximate** and is now always computed locally (DataFusion `approx_percentile_cont`), so its value no longer changes when a model gains a second source or an in-memory table. Treat percentile results as approximate.
+- **Multiple window/running/time-intelligence measures, or a window measure mixed with ordinary measures, in one request are rejected** (`QueryError::InvalidQuery`) instead of returning disjoint, mis-aligned row blocks or dropping columns. Request each window/`QUERY`-in-VAR measure in its own query and combine host-side. (Same for multiple `QUERY`-in-VAR measures.)
+- **Axis-mode time intelligence now honors a wrapping `KEEP` filter** (e.g. `KEEP(YTD(SUM(amount)), region='east')` is east-only). A window measure wrapped in context the path can't represent (boolean conditions, IN filters, CLEAR/RESET, USERELATIONSHIP, table-variable traversal) is rejected rather than silently dropped.
+- **Period shifts (`PRIORYEAR`/`PRIORPERIOD`) over a gapped axis fail closed** (`EngineError::TimeIntelligence`): a missing period would otherwise read the wrong period. Supply a contiguous date axis.
+- **Filter-context time intelligence over a non-Gregorian (fiscal) date table fails closed** (`EngineError::TimeIntelligence`): the filter-context window math is calendar-based and would disagree with the axis path. Put a date column on the group-by axis (which honors the role columns), or use a Gregorian calendar table.
+- **Multi-fact-table queries no longer cartesian-explode** when a conformed dimension is reachable from the later facts but not the first — the combine now joins on the shared dimension. (A pure correctness fix; no API change.)
+
+The `WINDOW(inner, func, …)` primitive's two-stage semantics are now documented: `func` is applied over the per-period values of `inner` (so `WINDOW(SUM(x), AVG, ROWS…)` is a moving average of period totals; for a true row-level windowed average, window `SUM`/`COUNT` and divide).
+
 ## Security hardening visible to hosts
 
 The shared model file is a **trust boundary**. Beyond the per-feature notes above, the engine now:

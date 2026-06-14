@@ -12,6 +12,8 @@ mod local_aggregation;
 mod lookups;
 mod measures;
 mod multi_group;
+#[cfg(test)]
+mod multi_group_tests;
 mod order_limit;
 mod pre_aggregate;
 mod query_measures;

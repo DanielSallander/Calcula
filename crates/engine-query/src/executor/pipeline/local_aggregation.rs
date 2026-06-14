@@ -801,6 +801,22 @@ impl QueryExecutor {
         // Result rows are assembled outside the final SQL — apply ORDER BY /
         // LIMIT as a final Arrow-level step.
         if !query_measures.is_empty() {
+            // Fail closed rather than return a mis-shaped result: the
+            // QUERY-in-VAR evaluator emits one batch per measure and only the
+            // QUERY measures (any non-QUERY measures are dropped), so combining
+            // a QUERY measure with other measures — or two QUERY measures —
+            // would silently return disjoint, mis-aligned row blocks or drop
+            // columns. Until the per-measure results are joined on the group-by
+            // keys, require a single QUERY-in-VAR measure on its own.
+            if query_measures.len() > 1 || !normal_measures.is_empty() {
+                return Err(crate::error::QueryError::InvalidQuery(
+                    "a QUERY-in-VAR measure cannot currently be combined with other measures \
+                     in a single request (the results would be returned as disjoint, \
+                     mis-aligned row blocks and non-QUERY measures would be dropped); request \
+                     each QUERY-in-VAR measure in its own query and combine in the host"
+                        .into(),
+                ));
+            }
             if rollup {
                 return Err(totals_unsupported("QUERY-in-VAR measures"));
             }
@@ -822,12 +838,30 @@ impl QueryExecutor {
         }
 
         // Separate window measures from normal measures.
-        let (window_measures, _non_window): (Vec<&Measure>, Vec<&Measure>) =
+        let (window_measures, non_window): (Vec<&Measure>, Vec<&Measure>) =
             measures.iter().partition(|m| m.expression().has_window());
 
         // If we have window measures, evaluate them via two-stage window execution
         // (ordered at the Arrow level afterwards).
         if !window_measures.is_empty() {
+            // Fail closed rather than return a mis-shaped result: the window
+            // evaluator emits one batch per window measure (each shaped
+            // [dims..., that measure]) and drops any non-window measures, so
+            // combining a window/running/time-intelligence measure with other
+            // measures — or two window measures — would silently return
+            // disjoint, mis-aligned row blocks or drop columns. Until the
+            // per-measure results are joined on the group-by keys, require a
+            // single window measure on its own.
+            if window_measures.len() > 1 || !non_window.is_empty() {
+                return Err(crate::error::QueryError::InvalidQuery(
+                    "a window / running / time-intelligence measure cannot currently be \
+                     combined with other measures in a single request (the results would be \
+                     returned as disjoint, mis-aligned row blocks and non-window measures \
+                     would be dropped); request each window measure in its own query and \
+                     combine in the host"
+                        .into(),
+                ));
+            }
             if rollup {
                 return Err(totals_unsupported("window measures"));
             }

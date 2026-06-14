@@ -107,7 +107,17 @@ fn dialect_divergence_round_pinned() {
 }
 
 #[test]
-fn dialect_divergence_percentile_pinned() {
+fn dialect_percentile_render_forms_pinned() {
+    // The two dialects render Percentile differently — DataFusion has only an
+    // APPROXIMATE percentile, Postgres an EXACT ordered-set aggregate. This
+    // render-layer divergence is intentional and pinned here, but it is NOT
+    // observable at runtime: the pushdown planner forces every Percentile to
+    // local execution (`has_unpushable_ops(Percentile) == true`), so a measure
+    // is always evaluated via the DataFusion approximate form regardless of
+    // whether its source is Postgres. That is what keeps the result from
+    // silently changing with query topology. If a future change makes Percentile
+    // pushable again, this divergence would become a silently-wrong number — so
+    // keep the forced-local gate and this comment in lockstep.
     let expr = percentile(col("x"), lit(0.95));
     assert_eq!(
         SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
