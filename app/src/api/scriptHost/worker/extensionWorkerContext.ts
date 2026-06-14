@@ -161,6 +161,14 @@ export function buildExtensionContext(post: PostFn): {
           return brokerCall("cap.storageSet", [key, value]);
         },
       },
+      // Structured, model-scoped BI query (no raw SQL). request =
+      // { measures, groupBy, filters }; resolves to { columns, rows, rowCount }.
+      biQuery(connectionId: string, request: unknown): Promise<unknown> {
+        return brokerCall("cap.biQuery", [connectionId, request]);
+      },
+      listBiConnections(): Promise<unknown> {
+        return brokerCall("cap.biListConnections", []);
+      },
     },
 
     // Surfaces that cannot cross the worker boundary throw on access.

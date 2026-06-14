@@ -104,6 +104,8 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
   "cap.fetch",
   "cap.storageGet",
   "cap.storageSet",
+  "cap.biQuery",
+  "cap.biListConnections",
 ]);
 
 /** Host deadline (ms) for a relayed handler invocation before it is abandoned. */

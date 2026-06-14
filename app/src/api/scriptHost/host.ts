@@ -737,6 +737,23 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await writeScriptStorage(definition.id, store);
       return undefined;
     }
+    case "cap.biQuery": {
+      // The broker enforced bi.query is declared + granted. This is a STRUCTURED,
+      // model-scoped query (measures/group_by/filters) run through the same cached
+      // engine path the app's pivots use — no raw SQL, no DB-wide access. bi_query
+      // is MAIN-window-guarded; the host runs in the main window.
+      const [connectionId, request] = args as [string, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("bi_query", { connectionId, request });
+    }
+    case "cap.biListConnections": {
+      // Expose ONLY a non-sensitive summary — never connectionString / server /
+      // database / credentials (toBiConnectionSummary whitelists the fields).
+      const { invokeBackend } = await import("../backend");
+      const { toBiConnectionSummary } = await import("./biQuerySupport");
+      const conns = await invokeBackend<Array<Record<string, unknown>>>("bi_get_connections");
+      return (conns ?? []).map(toBiConnectionSummary);
+    }
 
     default:
       throw new BrokerError("UnknownMethod", `No host implementation for ${method}`);

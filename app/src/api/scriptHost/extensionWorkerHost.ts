@@ -45,6 +45,7 @@ import {
 import { emitAppEvent, onAppEvent } from "../events";
 import { showToast } from "../notifications";
 import { CommandRegistry } from "../commands";
+import { toBiConnectionSummary } from "./biQuerySupport";
 
 const SCRIPT_STORAGE_QUOTA_BYTES = 262_144; // 256 KB, matches the object-script store
 
@@ -464,6 +465,17 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
       }
       await writeExtStorage(mw.extId, store);
       return undefined;
+    }
+    case "cap.biQuery": {
+      // Structured, model-scoped query via the cached engine path (no raw SQL).
+      const [connectionId, request] = args as [string, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("bi_query", { connectionId, request });
+    }
+    case "cap.biListConnections": {
+      const { invokeBackend } = await import("../backend");
+      const conns = await invokeBackend<Array<Record<string, unknown>>>("bi_get_connections");
+      return (conns ?? []).map(toBiConnectionSummary);
     }
     default:
       throw new BrokerError("UnknownMethod", `No extension host implementation for ${method}`);

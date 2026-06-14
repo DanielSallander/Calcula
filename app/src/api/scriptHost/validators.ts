@@ -135,11 +135,51 @@ export const vFetch: Validator = ([url, init]) => {
   return true;
 };
 
-export const vSql: Validator = ([sql]) => {
-  if (!isBoundedString(sql, 100_000)) return "sql must be a string (max 100k chars)";
-  const trimmed = (sql as string).trimStart().toLowerCase();
-  if (!trimmed.startsWith("select") && !trimmed.startsWith("with")) {
-    return "only read-only queries are allowed (SELECT / WITH)";
+// Structured, model-scoped BI query (Wave 3 / bi.query). Args: [connectionId,
+// { measures, groupBy, filters }]. The script supplies measures/columns/filter
+// VALUES, never SQL text — so there is no injection surface; the engine plans
+// the (read-only) query against the workbook's BI model. Shapes mirror
+// backend.ts BiQueryRequest / BiColumnRef / BiFilter.
+const MAX_BI_LIST = 256;
+
+function isBiColumnRef(v: unknown): boolean {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as { table?: unknown; column?: unknown };
+  return isBoundedString(r.table, MAX_KEY) && isBoundedString(r.column, MAX_KEY);
+}
+
+export const vBiQuery: Validator = ([connectionId, request]) => {
+  if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
+  }
+  if (typeof request !== "object" || request === null) return "request must be an object";
+  const r = request as { measures?: unknown; groupBy?: unknown; filters?: unknown };
+  if (!Array.isArray(r.measures) || r.measures.length > MAX_BI_LIST) {
+    return `measures must be an array (max ${MAX_BI_LIST})`;
+  }
+  for (const m of r.measures) {
+    if (!isBoundedString(m, MAX_KEY)) return "each measure must be a string";
+  }
+  if (!Array.isArray(r.groupBy) || r.groupBy.length > MAX_BI_LIST) {
+    return `groupBy must be an array (max ${MAX_BI_LIST})`;
+  }
+  for (const g of r.groupBy) {
+    if (!isBiColumnRef(g)) return "each groupBy entry must be { table, column }";
+  }
+  if (!Array.isArray(r.filters) || r.filters.length > MAX_BI_LIST) {
+    return `filters must be an array (max ${MAX_BI_LIST})`;
+  }
+  for (const f of r.filters) {
+    if (typeof f !== "object" || f === null) return "each filter must be an object";
+    const ff = f as { column?: unknown; table?: unknown; operator?: unknown; value?: unknown };
+    if (
+      !isBoundedString(ff.column, MAX_KEY) ||
+      !isBoundedString(ff.table, MAX_KEY) ||
+      !isBoundedString(ff.operator, MAX_KEY) ||
+      !isBoundedString(ff.value, MAX_KEY)
+    ) {
+      return "each filter must be { column, table, operator, value } of strings";
+    }
   }
   return true;
 };

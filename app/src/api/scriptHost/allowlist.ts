@@ -7,7 +7,7 @@
 
 import {
   vAny, vNotify, vExpose, vCall, vHook, vGetState, vSetState, vDecl, vNone,
-  vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vSql,
+  vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vBiQuery,
   vKey, vKV, vUdf, type Validator,
 } from "./validators";
 import { AppEvents } from "../events";
@@ -68,8 +68,11 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              validate: vFetch, limits: { maxResponseBytes: 5_242_880, perMinute: 10 },
                              desc: "Fetch from the granted web origins (https only, no cookies)" },
   "cap.biQuery":           { tier: "restricted", capability: "bi.query", class: "net",
-                             validate: vSql, limits: { maxRows: 100_000 },
-                             desc: "Run read-only queries on this workbook's BI connections" },
+                             validate: vBiQuery, limits: { maxRows: 100_000 },
+                             desc: "Run read-only, model-scoped queries on this workbook's BI connections" },
+  "cap.biListConnections": { tier: "restricted", capability: "bi.query", class: "read",
+                             validate: vNone,
+                             desc: "List this workbook's BI connections (id + name only)" },
   "cap.storageGet":        { tier: "restricted", capability: "storage", class: "read",
                              validate: vKey, desc: "Read script-private data stored in the workbook" },
   "cap.storageSet":        { tier: "restricted", capability: "storage", class: "mutate",

@@ -215,6 +215,37 @@ interface CapsFetchResponse {
   json(): unknown;
 }
 
+// Structured BI query shapes (mirror backend.ts; defined inline so the worker
+// bundle never imports the Tauri backend).
+interface BiColumnRef {
+  table: string;
+  column: string;
+}
+interface BiFilter {
+  column: string;
+  table: string;
+  operator: string;
+  value: string;
+}
+interface BiQueryRequestShim {
+  measures: string[];
+  groupBy: BiColumnRef[];
+  filters: BiFilter[];
+}
+interface BiQueryResultShim {
+  columns: string[];
+  rows: (string | null)[][];
+  rowCount: number;
+}
+interface BiConnectionSummary {
+  id: string;
+  name: string;
+  connectionType?: string;
+  isConnected?: boolean;
+  tableCount?: number;
+  measureCount?: number;
+}
+
 /** context.caps.* — thin RPC wrappers that add no authority of their own. */
 function buildCapsShim(rt: WorkerRuntime): {
   fetch: (
@@ -225,6 +256,8 @@ function buildCapsShim(rt: WorkerRuntime): {
     get(key: string): Promise<string | null>;
     set(key: string, value: string): Promise<void>;
   };
+  biQuery(connectionId: string, request: BiQueryRequestShim): Promise<BiQueryResultShim>;
+  listBiConnections(): Promise<BiConnectionSummary[]>;
 } {
   return {
     async fetch(url, init) {
@@ -247,6 +280,12 @@ function buildCapsShim(rt: WorkerRuntime): {
       async set(key: string, value: string): Promise<void> {
         await call(rt, "cap.storageSet", [key, value]);
       },
+    },
+    async biQuery(connectionId, request) {
+      return (await call(rt, "cap.biQuery", [connectionId, request])) as BiQueryResultShim;
+    },
+    async listBiConnections() {
+      return (await call(rt, "cap.biListConnections", [])) as BiConnectionSummary[];
     },
   };
 }
