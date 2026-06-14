@@ -614,8 +614,8 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
           `Command '${commandId}' is not flagged scriptSafe; scripts may only run commands their extension has audited for script use`,
         );
       }
-      await mod.CommandRegistry.execute(commandId, cmdArgs);
-      return undefined;
+      // Surface the command's result back to the script.
+      return await mod.CommandRegistry.execute(commandId, cmdArgs);
     }
     case "api.beginBatch": {
       const [description] = args as [string];

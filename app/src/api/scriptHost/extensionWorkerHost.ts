@@ -324,11 +324,11 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     // The proxy command relays to the worker handler. Not scriptSafe by default:
     // other scripts cannot invoke an extension's command unless the extension
     // opts in (future). The extension itself runs it via its UI.
+    // Returns the worker handler's result, so a caller of CommandRegistry.execute
+    // (or another script via ext.executeCommand) receives the command's value.
     CommandRegistry.register(
       cmdId,
-      async (args: unknown) => {
-        await invokeWorkerHandler(mw, reg.handlerId, [args]);
-      },
+      (args: unknown) => invokeWorkerHandler(mw, reg.handlerId, [args]),
       { scriptSafe: false },
     );
     mw.regCleanups.set(reg.regId, () => CommandRegistry.unregister(cmdId));
@@ -474,8 +474,8 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
           `Command '${commandId}' is not flagged scriptSafe; extensions may only run script-safe commands`,
         );
       }
-      await CommandRegistry.execute(commandId, cmdArgs);
-      return undefined;
+      // Surface the command's result back to the caller.
+      return await CommandRegistry.execute(commandId, cmdArgs);
     }
     case "cap.fetch": {
       const [url, init] = args as [

@@ -117,6 +117,33 @@ test.describe("Worker extension follow-ups (Wave 3)", () => {
     expect(result.mismatchRejected).toBe(true);
   });
 
+  test("follow-up — a worker command's return value is surfaced to execute() callers", async ({
+    appPage: page,
+  }) => {
+    const source = `
+      export default {
+        manifest: { id:"e2e.ret.ext", name:"Ret Ext", version:"1.0.0", workerSupport:true, capabilities:[] },
+        activate(ctx){
+          ctx.commands.register("echo", (args) => ({ got: args, doubled: (args && args.n ? args.n * 2 : 0) }));
+        }
+      };`;
+    const result = await page.evaluate(async (src: string) => {
+      const host = await (window as any).__calcImport(new URL("/src/api/scriptHost/index.ts", document.baseURI).href);
+      const commandsMod = await (window as any).__calcImport(new URL("/src/api/commands.ts", document.baseURI).href);
+      const { mountWorkerExtension, unmountWorkerExtension } = host;
+      const { CommandRegistry } = commandsMod;
+
+      const mount = await mountWorkerExtension(src, "Ret Ext");
+      // execute() -> host proxy -> RPC into the worker handler -> result comes back.
+      const value = await CommandRegistry.execute("ext:e2e.ret.ext:echo", { n: 21 });
+      await unmountWorkerExtension("e2e.ret.ext");
+      return { mountOk: mount.ok === true, value };
+    }, source);
+
+    expect(result.mountOk).toBe(true);
+    expect(result.value).toEqual({ got: { n: 21 }, doubled: 42 });
+  });
+
   test("item 3 — bi.sql (raw SQL) is wired: declared + granted reaches the host executor", async ({
     appPage: page,
   }) => {

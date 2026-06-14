@@ -70,8 +70,10 @@ export interface CommandOptions {
 }
 
 export interface ICommandRegistry {
-  execute(commandId: string, args?: unknown): Promise<void>;
-  register(commandId: string, handler: (args?: unknown) => void | Promise<void>, options?: CommandOptions): void;
+  /** Run a command and return its handler's result (undefined if the handler
+   *  returns nothing or the command bridges to a grid command). */
+  execute(commandId: string, args?: unknown): Promise<unknown>;
+  register(commandId: string, handler: (args?: unknown) => unknown, options?: CommandOptions): void;
   unregister(commandId: string): void;
   has(commandId: string): boolean;
   /** Whether object scripts may execute this command (scriptSafe opt-in). */
@@ -133,7 +135,7 @@ const SCRIPT_SAFE_GRID_COMMANDS: ReadonlySet<string> = new Set([
 // CommandRegistry Implementation
 // ============================================================================
 
-type CommandHandler = (args?: unknown) => void | Promise<void>;
+type CommandHandler = (args?: unknown) => unknown;
 
 class CommandRegistryImpl implements ICommandRegistry {
   private handlers: Map<string, CommandHandler> = new Map();
@@ -207,12 +209,11 @@ class CommandRegistryImpl implements ICommandRegistry {
    * @param commandId The command ID to execute
    * @param args Optional arguments to pass to the handler
    */
-  async execute(commandId: string, args?: unknown): Promise<void> {
-    // 1. Check local handlers first
+  async execute(commandId: string, args?: unknown): Promise<unknown> {
+    // 1. Check local handlers first — return the handler's result.
     const handler = this.handlers.get(commandId);
     if (handler) {
-      await handler(args);
-      return;
+      return await handler(args);
     }
 
     // 2. Bridge to gridCommands for grid-specific commands
@@ -220,12 +221,13 @@ class CommandRegistryImpl implements ICommandRegistry {
     if (gridCommand) {
       const executed = await gridCommands.execute(gridCommand);
       if (executed) {
-        return;
+        return undefined;
       }
     }
 
     // 3. No handler found
     console.warn(`[CommandRegistry] No handler registered for command: ${commandId}`);
+    return undefined;
   }
 
   /**
