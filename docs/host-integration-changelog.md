@@ -73,6 +73,23 @@ Pure serde additions for host display. The engine does not interpret them (excep
 
 ---
 
+## Multi-select (IN-list) slicers
+
+`QueryRequest` gained `in_filters: Vec<InFilter>` — keep only rows whose column is one of a set of values (`column IN (...)`), the multi-value form of a slicer:
+
+```rust
+QueryRequest {
+    measures: vec!["Revenue".into()],
+    group_by: vec![ColumnRef::new("Product", "name")],
+    in_filters: vec![InFilter::new("region", ["East", "West"])],   // slice to two regions
+    ..Default::default()
+}
+```
+
+`InFilter { column, values: Vec<String> }` (builder `InFilter::new(column, values)`). The filter applies to whichever table owns `column` (matched by name), is **pushed to the source**, and ANDs with the scalar `filters`. A slicer on a dimension column restricts the related fact through relationship propagation — including a dimension that is **not** on the group-by axis (slice by Region, group by Product). Integer columns compare numerically (sargable); other types as escaped/quoted text. An **empty** `values` list matches nothing (an empty result), never everything. No model-file or `MODEL_FORMAT_VERSION` change (request-time only).
+
+> v1: IN-list (multi-select on one column) and AND-combined with scalar filters. Cross-column boolean OR (`Region = East OR Category = Bikes`) is a separate, deferred increment.
+
 ## Measure-value filters (HAVING)
 
 `QueryRequest` gained `measure_filters: Vec<MeasureFilter>` — keep only result rows whose computed measure value satisfies a comparison:

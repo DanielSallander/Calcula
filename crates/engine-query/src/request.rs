@@ -35,6 +35,38 @@ impl MeasureFilter {
     }
 }
 
+/// A multi-select (`IN`-list) slicer: keep only rows whose `column` is one of
+/// `values` — `column IN (v1, v2, ...)`.
+///
+/// This is the multi-value form of a slicer (e.g. `Region IN ('East', 'West')`).
+/// The filter applies to whichever table owns `column` (matched by name) and is
+/// pushed to the source; a slicer on a dimension column restricts the related
+/// fact through the engine's relationship propagation, exactly like a scalar
+/// [`FilterCondition`] does. Values are compared by the column's type
+/// (integer columns compare numerically; everything else as text, escaped and
+/// quoted). An **empty** `values` list matches nothing (an empty result), never
+/// everything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFilter {
+    /// The column to slice on.
+    pub column: String,
+    /// The set of values to keep (string representations).
+    pub values: Vec<String>,
+}
+
+impl InFilter {
+    /// Create an `IN`-list slicer `column IN (values)`.
+    pub fn new(
+        column: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            column: column.into(),
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// A reference to a specific column in a table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnRef {
@@ -434,6 +466,12 @@ pub struct QueryRequest {
     /// filter's measure must be in [`measures`](Self::measures). Empty (default)
     /// applies no measure filter. See [`MeasureFilter`].
     pub measure_filters: Vec<MeasureFilter>,
+    /// Multi-select (`IN`-list) slicers, ANDed with [`filters`](Self::filters).
+    ///
+    /// Each entry keeps only rows whose column is one of the listed values
+    /// (`column IN (...)`). Applied at fetch time and pushed to the source.
+    /// Empty (default) applies no IN slicer. See [`InFilter`].
+    pub in_filters: Vec<InFilter>,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /

@@ -94,6 +94,8 @@ mod disk_cache_tests;
 #[cfg(test)]
 mod having_tests;
 #[cfg(test)]
+mod in_filter_tests;
+#[cfg(test)]
 mod security_tests;
 #[cfg(test)]
 mod test_fixtures;
@@ -173,8 +175,9 @@ pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
-    CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn,
-    MeasureFilter, OrderByClause, OrderTarget, QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
+    CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
+    LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
+    GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,

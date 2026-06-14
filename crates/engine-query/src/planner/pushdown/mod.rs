@@ -131,6 +131,32 @@ pub struct ProjectionDiagnostics {
     pub fallbacks: Vec<(String, String)>,
 }
 
+/// Convert a user [`InFilter`](crate::request::InFilter) on `table` into a
+/// connector [`InFilterCondition`], inferring the value kind from the column's
+/// model type: integer columns render bare (sargable), everything else as
+/// escaped/quoted text (the safe default).
+fn in_filter_condition(
+    model: &DataModel,
+    table: &str,
+    filter: &crate::request::InFilter,
+) -> engine_connectors::InFilterCondition {
+    use engine_core::types::DataType;
+    let is_integer = model
+        .table(table)
+        .ok()
+        .and_then(|t| t.column(&filter.column).ok())
+        .is_some_and(|c| matches!(c.data_type(), DataType::Int32 | DataType::Int64));
+    engine_connectors::InFilterCondition {
+        column: filter.column.clone(),
+        values: filter.values.clone(),
+        kind: if is_integer {
+            engine_connectors::traits::InValueKind::Integer
+        } else {
+            engine_connectors::traits::InValueKind::Text
+        },
+    }
+}
+
 /// The pushdown planner analyzes a query request and produces an execution plan.
 pub struct PushdownPlanner;
 
@@ -360,6 +386,22 @@ impl PushdownPlanner {
             }
         };
 
+        // Tables referenced only by an IN-list slicer (e.g. slice by a
+        // dimension that is not on the group-by axis) must still be fetched so
+        // the slicer can restrict the related fact. Add every model table that
+        // owns an IN-filter column.
+        let in_filter_tables: Vec<&str> = request
+            .in_filters
+            .iter()
+            .flat_map(|f| {
+                model
+                    .tables()
+                    .iter()
+                    .filter(move |t| t.column(&f.column).is_ok())
+                    .map(|t| t.name())
+            })
+            .collect();
+
         // Collect all referenced tables (deduplication happens below).
         let all_tables: Vec<&str> = measure_tables
             .iter()
@@ -370,6 +412,7 @@ impl PushdownPlanner {
             .chain(named_context_tables.iter().map(|s| s.as_str()))
             .chain(userelationship_tables.iter().map(|s| s.as_str()))
             .chain(time_intelligence_tables.iter().map(|s| s.as_str()))
+            .chain(in_filter_tables.iter().copied())
             .collect();
 
         // Verify all tables have registered sources (skip QUERY binding names).
@@ -428,6 +471,14 @@ impl PushdownPlanner {
             model.table(t).is_ok_and(|tbl| tbl.is_in_memory()) || cached_tables.contains(*t)
         });
 
+        // User IN-list slicers (`column IN (...)`) force LocalAggregation. Each
+        // table is still fetched with its IN filter pushed to the source (the
+        // connector renders `in_filters`), and a dimension-side slicer restricts
+        // the fact through the existing two-phase IN-propagation — so this is the
+        // single, well-tested path for IN filters rather than threading them
+        // through the single-statement pushed-join builders too.
+        let has_in_filters = !request.in_filters.is_empty();
+
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
         let all_pushable = measures.iter().all(|m| {
             m.simple_operation()
@@ -444,6 +495,7 @@ impl PushdownPlanner {
             && !any_in_memory
             && !hierarchy_needs_local
             && !rls_force_local
+            && !has_in_filters
         {
             // ORDER BY / LIMIT are rendered into the pushed SQL. Sort-by
             // substitution uses `MIN(sort_col)` on the same (single) table.
@@ -548,6 +600,7 @@ impl PushdownPlanner {
             && request.totals == TotalsMode::None
             && !hierarchy_needs_local
             && !rls_force_local
+            && !has_in_filters
         {
             let table_name = all_tables[0];
             if let Ok(req) = build_join_aggregation_request(
@@ -596,6 +649,7 @@ impl PushdownPlanner {
             && request.totals == TotalsMode::None
             && !hierarchy_needs_local
             && !rls_force_local
+            && !has_in_filters
         {
             // Check if all tables share the same connector.
             let first_table = all_tables[0];
@@ -714,11 +768,28 @@ impl PushdownPlanner {
                 // pass through ContextResolver.
                 table_filters.extend(role_conditions_for_table(role_filters, table_name));
 
+                // User IN-list slicers whose column lives on this table, as
+                // pushed `column IN (...)` conditions. Integer columns render
+                // bare (sargable); other types render escaped/quoted text.
+                let table_in_filters: Vec<engine_connectors::InFilterCondition> = request
+                    .in_filters
+                    .iter()
+                    .filter(|f| {
+                        model
+                            .table(table_name)
+                            .ok()
+                            .and_then(|t| t.column(&f.column).ok())
+                            .is_some()
+                    })
+                    .map(|f| in_filter_condition(model, table_name, f))
+                    .collect();
+
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
                     columns: projections.columns_for(table_name),
                     filters: table_filters,
+                    in_filters: table_in_filters,
                     ..Default::default()
                 };
 

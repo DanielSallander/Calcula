@@ -304,18 +304,28 @@ impl QueryExecutor {
                 };
 
                 let filter_start = Instant::now();
-                let filtered_batch = if effective_filters.is_empty() {
-                    batch.clone()
+                let mut filtered_batches = if effective_filters.is_empty() {
+                    vec![batch.clone()]
                 } else {
-                    filter_cached_batch(batch, effective_filters).await?
+                    vec![filter_cached_batch(batch, effective_filters).await?]
                 };
+                // Apply user IN-list slicers (`column IN (...)`) on this cached
+                // table — the cached/in-memory equivalent of the connector's
+                // pushed `in_filters`. An empty value list yields zero rows.
+                for in_filter in &request.in_filters {
+                    filtered_batches = filter_batches_by_in_values(
+                        &filtered_batches,
+                        &in_filter.column,
+                        &in_filter.values,
+                    )?;
+                }
                 let filter_elapsed = filter_start.elapsed();
 
-                let row_count = filtered_batch.num_rows();
+                let row_count: usize = filtered_batches.iter().map(|b| b.num_rows()).sum();
                 inmemory_indices.insert(i);
                 inmemory_results.push((
                     table_name.clone(),
-                    vec![filtered_batch],
+                    filtered_batches,
                     row_count,
                     filter_elapsed,
                 ));
@@ -341,8 +351,13 @@ impl QueryExecutor {
         let mut propagation_info: Vec<(usize, String, String, String)> = Vec::new();
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
-            // Skip in-memory tables (already resolved) and tables with no filters.
-            if inmemory_indices.contains(&i) || request.filters.is_empty() {
+            // Skip in-memory tables (already resolved) and tables with no
+            // filters at all. A dimension carrying only an IN-list slicer (no
+            // scalar filter) must still propagate its surviving keys to the
+            // fact, so `in_filters` counts here too.
+            if inmemory_indices.contains(&i)
+                || (request.filters.is_empty() && request.in_filters.is_empty())
+            {
                 continue;
             }
             // Skip if this table is itself a measure table.
@@ -431,9 +446,14 @@ impl QueryExecutor {
         }
 
         // Also extract from in-memory dimension tables that have filter
-        // relationships to measure tables.
+        // relationships to measure tables. A dimension carrying only an IN-list
+        // slicer (no scalar filter) propagates too: its cached batch was already
+        // restricted to the slicer's values, so its surviving join keys must
+        // reach the fact.
         for (i, (table_name, request)) in fetches.iter().enumerate() {
-            if !inmemory_indices.contains(&i) || request.filters.is_empty() {
+            if !inmemory_indices.contains(&i)
+                || (request.filters.is_empty() && request.in_filters.is_empty())
+            {
                 continue;
             }
             // Skip if this table is itself a measure table.
