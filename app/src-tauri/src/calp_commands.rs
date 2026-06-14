@@ -414,6 +414,10 @@ pub struct InspectedScript {
     pub name: String,
     pub object_type: String,
     pub description: Option<String>,
+    /// The capability ids the package's manifest declares this script needs
+    /// (R19 ceiling). Surfaced BEFORE pulling so the user sees what the
+    /// package's scripts want before accepting.
+    pub requested_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -458,6 +462,7 @@ pub fn calp_inspect_package(
             name: s.name.clone(),
             object_type: s.object_type.clone(),
             description: s.description.clone(),
+            requested_capabilities: s.capabilities.clone(),
         }).collect(),
         data_sources: manifest.data_sources.iter().map(|ds| InspectedDataSource {
             name: ds.name.clone(),

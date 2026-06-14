@@ -35,6 +35,8 @@ interface ObjectScriptData {
   /** "local" | "distributed" — read-only; the backend preserves stored provenance on save. */
   provenance?: string | null;
   packageName?: string | null;
+  /** The R19 declared-capability ceiling (authoritative). Read-only over IPC. */
+  declaredCapabilities?: string[];
 }
 
 // ============================================================================
@@ -108,6 +110,11 @@ export async function loadAllObjectScripts(): Promise<ObjectScriptDefinition[]> 
         description: data.description ?? undefined,
         provenance: (data.provenance as ScriptProvenance | null) ?? undefined,
         packageName: data.packageName ?? undefined,
+        // The backend already filtered to recognized capability ids, so the
+        // cast is safe; the broker re-filters defensively when building the
+        // ceiling set.
+        declaredCapabilities: (data.declaredCapabilities ?? undefined) as
+          | ObjectScriptDefinition["declaredCapabilities"],
       });
     } catch (e) {
       console.warn(`[ObjectScripts] Failed to load script "${summary.name}":`, e);

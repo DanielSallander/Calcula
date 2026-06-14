@@ -950,6 +950,38 @@ impl Default for ScriptProvenance {
     }
 }
 
+/// The recognized capability ids a script source may declare (R19 ceiling).
+/// Mirrors the frontend KNOWN_CAPABILITY_IDS in capabilities.ts. The origin
+/// argument of a `// @capability net.fetch <origin>` pragma is a runtime grant
+/// hint, not part of the ceiling, so only the cap id set is collected here.
+pub const KNOWN_CAPABILITY_IDS: [&str; 4] = ["net.fetch", "bi.query", "storage", "ui.html"];
+
+/// Parse a script source for `// @capability <id> [origin]` line-comment
+/// pragmas and return the deduped set of recognized capability ids, in first-
+/// seen order. This is the Rust mirror of parseDeclaredCapabilities (TS) and is
+/// the AUTHORITATIVE ceiling for a LOCAL script. Unknown ids are ignored; the
+/// optional origin argument is not part of the ceiling.
+pub fn parse_declared_capabilities(source: &str) -> Vec<String> {
+    let mut caps: Vec<String> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("//") else { continue };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix("@capability") else { continue };
+        // Require whitespace after the directive so "@capabilityx" doesn't match.
+        if !rest.starts_with(|c: char| c.is_whitespace()) {
+            continue;
+        }
+        let mut tokens = rest.split_whitespace();
+        if let Some(cap_id) = tokens.next() {
+            if KNOWN_CAPABILITY_IDS.contains(&cap_id) && !caps.iter().any(|c| c == cap_id) {
+                caps.push(cap_id.to_string());
+            }
+        }
+    }
+    caps
+}
+
 /// A script attached to a scriptable object (primitive or component).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedObjectScript {
@@ -972,6 +1004,15 @@ pub struct SavedObjectScript {
     /// For distributed scripts: the package the script arrived from.
     #[serde(default)]
     pub package_name: Option<String>,
+    /// The AUTHORITATIVE set of capability ids this script is allowed to use
+    /// (R19 declared-capabilities ceiling). For local scripts this is derived
+    /// from the source `// @capability <id>` pragmas on save. For distributed
+    /// scripts this is set from the package manifest at pull time and is NEVER
+    /// re-derived from the (tamperable) source, so a distributed script's
+    /// source can never widen its ceiling. Recognized ids: net.fetch, bi.query,
+    /// storage, ui.html.
+    #[serde(default)]
+    pub declared_capabilities: Vec<String>,
 }
 
 // ============================================================================

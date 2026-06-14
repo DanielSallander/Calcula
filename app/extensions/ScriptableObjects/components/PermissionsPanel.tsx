@@ -17,8 +17,10 @@ import {
   listMountedHandles,
   listExposed,
   ObjectScriptManager,
+  getGrantedOrigins,
+  revokeCapability,
 } from "@api";
-import type { AuditEntry, ScriptHandle, MethodPolicy } from "@api";
+import type { AuditEntry, ScriptHandle, MethodPolicy, CapabilityId } from "@api";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent } from "@api/events";
 import { ScriptableObjectEvents } from "../index";
@@ -108,6 +110,18 @@ const btnSmallStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
+/** The small "x" that revokes a single capability grant. */
+const revokeBtnStyle: React.CSSProperties = {
+  marginLeft: 2,
+  border: "none",
+  background: "transparent",
+  color: "#C0392B",
+  cursor: "pointer",
+  fontSize: 12,
+  lineHeight: 1,
+  padding: "0 2px",
+};
+
 const cardStyle: React.CSSProperties = {
   padding: "6px 4px",
   borderBottom: "1px solid #F0F0F0",
@@ -183,20 +197,31 @@ export function MountedScriptsSection({ placement }: PanelSectionProps): React.R
   const [handles, setHandles] = useState<ScriptHandle[]>(() => listMountedHandles());
   const [exposed, setExposed] = useState<ExposedMethodInfo[]>(() => listExposed());
 
+  const refresh = useCallback(() => {
+    setHandles(listMountedHandles());
+    setExposed(listExposed());
+  }, []);
+
   useEffect(() => {
-    const refresh = () => {
-      setHandles(listMountedHandles());
-      setExposed(listExposed());
-    };
     refresh();
     return ObjectScriptManager.onScriptChange(refresh);
-  }, []);
+  }, [refresh]);
 
   const handleInspect = useCallback((scriptId: string) => {
     // Same affordance as ScriptConsentDialog: targeting by scriptId opens
     // the existing script in the editor — never scaffolds.
     emitAppEvent(ScriptableObjectEvents.EDIT_SCRIPT, { scriptId });
   }, []);
+
+  // R10: grants are revocable. revokeCapability mutates the live grant set the
+  // broker reads, so the next use of the cap re-prompts (local) or is denied;
+  // refresh re-reads the (now smaller) grant set.
+  const handleRevoke = useCallback(
+    (scriptId: string, cap: CapabilityId) => {
+      void revokeCapability(scriptId, cap).then(refresh);
+    },
+    [refresh],
+  );
 
   return (
     <div style={sectionStyle(placement)}>
@@ -237,9 +262,33 @@ export function MountedScriptsSection({ placement }: PanelSectionProps): React.R
                 <span>Grants:</span>
                 {grants.length === 0 && <span style={{ color: "#999" }}>none</span>}
                 {grants.map((g) => (
-                  <span key={g} style={capTagStyle}>{g}</span>
+                  <span key={g} style={{ display: "inline-flex", alignItems: "center" }}>
+                    <span style={capTagStyle}>{g}</span>
+                    <button
+                      style={revokeBtnStyle}
+                      title={`Revoke ${g}`}
+                      aria-label={`Revoke ${g} from ${h.scriptName}`}
+                      onClick={() => handleRevoke(h.scriptId, g)}
+                    >
+                      &times;
+                    </button>
+                  </span>
                 ))}
               </div>
+              {grants.includes("net.fetch") &&
+                (() => {
+                  const origins = getGrantedOrigins(h.scriptId);
+                  return origins.length > 0 ? (
+                    <div style={{ ...detailLineStyle, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                      <span>Allowed origins:</span>
+                      {origins.map((o) => (
+                        <span key={o} style={monoStyle}>
+                          {o}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null;
+                })()}
               {exposes.length > 0 && (
                 <div style={detailLineStyle}>
                   Exposes:{" "}

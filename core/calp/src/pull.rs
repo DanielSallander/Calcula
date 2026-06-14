@@ -178,6 +178,11 @@ pub fn pull(
             // the script cannot masquerade as locally-authored.
             script.provenance = persistence::ScriptProvenance::Distributed;
             script.package_name = Some(request.package_name.clone());
+            // R19 SECURITY: the declared-capability ceiling is server-
+            // authoritative — it comes from the package MANIFEST, never from
+            // the (tamperable) script source. A tampered source can therefore
+            // never widen a distributed script's ceiling.
+            script.declared_capabilities = pub_script.capabilities.clone();
             pulled_scripts.push(script);
         }
     }

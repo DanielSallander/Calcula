@@ -97,6 +97,9 @@ export interface HostMountDefinition {
   accessLevel: string;
   provenance?: string;
   packageName?: string;
+  /** The R19 declared-capability ceiling (authoritative). Passed to
+   *  buildHandleFromDefinition; the broker denies any cap not in this set. */
+  declaredCapabilities?: string[];
   apiVersion: string;
 }
 
@@ -452,6 +455,10 @@ async function maybeRequestCapabilityGrant(
   if (!cap) return;
   const { handle } = mw;
   if (handle.origin !== "local" || cap === "ui.html") return;
+  // R19: only JIT-prompt for capabilities the script actually DECLARED. An
+  // undeclared cap is above the ceiling — the broker denies it (PermissionDenied)
+  // and the user is never asked to grant something the script never declared.
+  if (!handle.declaredCapabilities.has(cap)) return;
 
   if (cap === "net.fetch") {
     const origin = fetchOriginOf(args[0]);

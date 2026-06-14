@@ -25,6 +25,11 @@ pub struct ObjectScriptDef {
     /// For distributed scripts: the source package name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
+    /// The authoritative declared-capability ceiling (R19). Persisted in the
+    /// .cala so a distributed script's ceiling survives save/reload without
+    /// being re-derived from its (tamperable) source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_capabilities: Vec<String>,
 }
 
 /// Object type in the .cala JSON format.
@@ -166,6 +171,7 @@ impl From<&SavedObjectScript> for ObjectScriptDef {
             description: s.description.clone(),
             provenance: ObjectScriptProvenanceDef::from(&s.provenance),
             package_name: s.package_name.clone(),
+            declared_capabilities: s.declared_capabilities.clone(),
         }
     }
 }
@@ -182,6 +188,7 @@ impl From<&ObjectScriptDef> for SavedObjectScript {
             description: d.description.clone(),
             provenance: ScriptProvenance::from(&d.provenance),
             package_name: d.package_name.clone(),
+            declared_capabilities: d.declared_capabilities.clone(),
         }
     }
 }

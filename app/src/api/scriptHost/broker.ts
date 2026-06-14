@@ -39,7 +39,25 @@ export interface ScriptHandle {
   origin: string;
   /** Granted capabilities (Phase 4 wires consent/JIT grants; ui.html is auto for local). */
   grants: ReadonlySet<CapabilityId>;
+  /**
+   * The R19 declared-capability CEILING. A capability not in this set is denied
+   * (PermissionDenied) BEFORE the grant check, so a script can never use — nor
+   * even be JIT-prompted for — a capability it did not declare. For local
+   * scripts this is the source pragmas plus auto "ui.html"; for distributed
+   * scripts it is exactly what the package manifest declared.
+   */
+  declaredCapabilities: ReadonlySet<CapabilityId>;
 }
+
+/** The recognized capability ids (mirrors capabilities.ts KNOWN_CAPABILITY_IDS
+ *  and the Rust KNOWN_CAPABILITY_IDS). Used to filter the declared set so an
+ *  unknown id from any source can never enter the ceiling. */
+const VALID_CAPABILITY_IDS: ReadonlySet<CapabilityId> = new Set<CapabilityId>([
+  "net.fetch",
+  "bi.query",
+  "storage",
+  "ui.html",
+]);
 
 export type RpcErrorCode =
   | "PermissionDenied"
@@ -75,6 +93,9 @@ export function buildHandleFromDefinition(definition: {
   accessLevel: string;
   provenance?: string;
   packageName?: string;
+  /** The authoritative declared-capability ceiling (R19). For distributed
+   *  scripts this is the manifest set; for local scripts the source pragmas. */
+  declaredCapabilities?: string[];
 }): ScriptHandle {
   const isDistributed = definition.provenance === "distributed";
   // grants is the LIVE per-script set owned by capabilities.ts — so a JIT or
@@ -85,6 +106,20 @@ export function buildHandleFromDefinition(definition: {
   if (!isDistributed) {
     grants.add("ui.html");
   }
+  // R19 ceiling. Filter to recognized cap ids so an unknown/garbage id from any
+  // source can never enter the ceiling. ui.html is auto for LOCAL scripts, so
+  // declare it too — otherwise the auto-granted local ui.html grant would be
+  // rejected by its own ceiling. For distributed scripts ui.html is in the
+  // ceiling only when the manifest declared it.
+  const declaredCapabilities = new Set<CapabilityId>();
+  for (const cap of definition.declaredCapabilities ?? []) {
+    if (VALID_CAPABILITY_IDS.has(cap as CapabilityId)) {
+      declaredCapabilities.add(cap as CapabilityId);
+    }
+  }
+  if (!isDistributed) {
+    declaredCapabilities.add("ui.html");
+  }
   return {
     scriptId: definition.id,
     scriptName: definition.name,
@@ -93,6 +128,7 @@ export function buildHandleFromDefinition(definition: {
     instanceId: definition.instanceId,
     origin: isDistributed ? (definition.packageName || "(unknown package)") : "local",
     grants,
+    declaredCapabilities,
   };
 }
 
@@ -119,6 +155,19 @@ function checkPolicy(handle: ScriptHandle, method: string, args: unknown[]): Met
     throw new BrokerError(
       "PermissionDenied",
       `${method} requires unlocked access; this script is restricted`,
+    );
+  }
+
+  // R19 ceiling: a capability the script never DECLARED can never be used —
+  // denied here (PermissionDenied) before the grant check, so it is also never
+  // JIT-prompted. A distributed script's tampered source can't widen this set;
+  // the ceiling came from the package manifest.
+  if (policy.capability && !handle.declaredCapabilities.has(policy.capability)) {
+    audit(handle, method, policy.class, false, "PermissionDenied");
+    throw new BrokerError(
+      "PermissionDenied",
+      `${method} requires the '${policy.capability}' capability, which this script did not declare`,
+      policy.capability,
     );
   }
 

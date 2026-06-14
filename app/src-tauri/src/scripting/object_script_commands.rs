@@ -27,6 +27,9 @@ pub struct ObjectScriptSummary {
     pub provenance: Option<String>,
     #[serde(default)]
     pub package_name: Option<String>,
+    /// The R19 declared-capability ceiling (authoritative). Read-only over IPC.
+    #[serde(default)]
+    pub declared_capabilities: Vec<String>,
 }
 
 /// Full object script definition for the frontend.
@@ -46,6 +49,11 @@ pub struct ObjectScriptData {
     pub provenance: Option<String>,
     #[serde(default)]
     pub package_name: Option<String>,
+    /// The R19 declared-capability ceiling (authoritative). Read-only over IPC:
+    /// save_object_script derives it from the source pragmas (local) or
+    /// preserves the manifest-set ceiling (distributed).
+    #[serde(default)]
+    pub declared_capabilities: Vec<String>,
 }
 
 // ============================================================================
@@ -120,6 +128,7 @@ fn to_summary(s: &SavedObjectScript) -> ObjectScriptSummary {
         access_level: access_level_to_string(&s.access_level),
         provenance: Some(provenance_to_string(&s.provenance)),
         package_name: s.package_name.clone(),
+        declared_capabilities: s.declared_capabilities.clone(),
     }
 }
 
@@ -134,6 +143,7 @@ fn to_data(s: &SavedObjectScript) -> ObjectScriptData {
         description: s.description.clone(),
         provenance: Some(provenance_to_string(&s.provenance)),
         package_name: s.package_name.clone(),
+        declared_capabilities: s.declared_capabilities.clone(),
     }
 }
 
@@ -152,6 +162,10 @@ fn from_data(d: &ObjectScriptData) -> Result<SavedObjectScript, String> {
         // script into a local one.
         provenance: ScriptProvenance::Local,
         package_name: None,
+        // The ceiling is derived server-side in save_object_script (from the
+        // source for local scripts) or preserved from the stored distributed
+        // entry — never taken from the payload.
+        declared_capabilities: Vec::new(),
     })
 }
 
@@ -233,10 +247,23 @@ pub fn save_object_script(
                     .to_string(),
             );
         }
+        // R19 ceiling. For a LOCAL script the source is authoritative, so
+        // re-derive the declared capabilities from the updated source. For a
+        // DISTRIBUTED script the ceiling is the package manifest's declaration
+        // (set at pull time) and must NEVER be widened by an edited source, so
+        // we preserve the stored ceiling instead.
+        if saved.provenance == ScriptProvenance::Distributed {
+            saved.declared_capabilities = existing.declared_capabilities.clone();
+        } else {
+            saved.declared_capabilities =
+                persistence::parse_declared_capabilities(&saved.source);
+        }
         *existing = saved;
     } else {
         // New scripts are always local-authored (pull materializes
         // distributed scripts directly into state, not through this command).
+        // The source is authoritative for a local script's ceiling.
+        saved.declared_capabilities = persistence::parse_declared_capabilities(&saved.source);
         scripts.push(saved);
     }
     Ok(())

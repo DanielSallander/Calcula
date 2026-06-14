@@ -867,6 +867,7 @@ mod tests {
             description: Some("Test cell script".to_string()),
             provenance: persistence::ScriptProvenance::Local,
             package_name: None,
+            declared_capabilities: Vec::new(),
         });
         workbook.object_scripts.push(persistence::SavedObjectScript {
             id: "os-2".to_string(),
@@ -878,6 +879,7 @@ mod tests {
             description: None,
             provenance: persistence::ScriptProvenance::Distributed,
             package_name: Some("test-pkg".to_string()),
+            declared_capabilities: Vec::new(),
         });
 
         let dir = tempfile::tempdir().unwrap();

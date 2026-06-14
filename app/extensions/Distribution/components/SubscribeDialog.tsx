@@ -9,6 +9,18 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getConnections, connect, updateConnection } from "../../BusinessIntelligence/lib/bi-api";
 import { pivot } from "@api/pivot";
 
+/** Short human phrase for a declared capability id (R19), for the review box. */
+const CAPABILITY_PHRASE: Record<string, string> = {
+  "net.fetch": "fetch data from the web",
+  "bi.query": "run read-only BI queries",
+  storage: "store data on this device",
+  "ui.html": "render custom HTML UI",
+};
+
+function capabilityPhrase(id: string): string {
+  return CAPABILITY_PHRASE[id] ?? id;
+}
+
 export function SubscribeDialog({ onClose }: DialogProps) {
   const [registryPath, setRegistryPath] = useState("");
   const [packageName, setPackageName] = useState("");
@@ -173,6 +185,11 @@ export function SubscribeDialog({ onClose }: DialogProps) {
             {inspection.scripts.map((s, i) => (
               <div key={i} style={{ marginLeft: 8 }}>
                 {s.name} ({s.objectType}){s.description ? ` — ${s.description}` : ""}
+                {s.requestedCapabilities.length > 0 && (
+                  <div style={{ marginLeft: 8, color: "#664d03" }}>
+                    wants: {s.requestedCapabilities.map(capabilityPhrase).join(", ")}
+                  </div>
+                )}
               </div>
             ))}
           </div>

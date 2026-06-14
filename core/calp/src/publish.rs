@@ -134,6 +134,10 @@ pub fn publish(
             object_type: format!("{:?}", s.object_type).to_lowercase(),
             instance_id: s.instance_id.clone(),
             description: s.description.clone(),
+            // R19: the publisher's declared ceiling for this script, lifted
+            // from its source pragmas. This is what the package's scripts may
+            // use; the subscriber's pull sets each script's ceiling from this.
+            capabilities: persistence::parse_declared_capabilities(&s.source),
         }
     }).collect();
 

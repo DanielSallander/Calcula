@@ -135,6 +135,31 @@ export async function revokeBackendCapabilities(scriptId: string): Promise<void>
   }
 }
 
+/** Read-only snapshot of a script's current grants (for the transparency panel). */
+export function getScriptGrants(scriptId: string): { caps: CapabilityId[]; origins: string[] } {
+  const s = grantState.get(scriptId);
+  return s ? { caps: [...s.caps], origins: [...s.origins] } : { caps: [], origins: [] };
+}
+
+/**
+ * Revoke ONE capability from a (possibly still-mounted) script — the
+ * transparency-panel "revoke" action (R10: grants are revocable). It MUTATES the
+ * live grant set in place (handle.grants references it, so the broker's check
+ * stops admitting the cap immediately) rather than replacing it. For net.fetch
+ * it also clears the script's granted origins and the authoritative Rust store.
+ * The script keeps running; its next use of the cap re-prompts (local) or is
+ * denied (distributed). ui.html and other grants are untouched.
+ */
+export async function revokeCapability(scriptId: string, cap: CapabilityId): Promise<void> {
+  const s = grantState.get(scriptId);
+  if (!s) return;
+  s.caps.delete(cap);
+  if (cap === "net.fetch") {
+    s.origins.clear();
+    await revokeBackendCapabilities(scriptId);
+  }
+}
+
 // ============================================================================
 // JIT grant request/response (R10) — request emitted host-side, the
 // ScriptableObjects extension renders the dialog and resolves the decision.

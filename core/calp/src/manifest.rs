@@ -140,6 +140,14 @@ pub struct PublishedObjectScript {
     /// Script description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The capability ids this script declares it needs (R19 ceiling). Lifted
+    /// from the script source `// @capability <id>` pragmas at publish time.
+    /// This is the publisher's authoritative declaration of what the package's
+    /// scripts may use; the subscriber sets each pulled script's ceiling from
+    /// THIS list, never from the (tamperable) source. Recognized ids:
+    /// net.fetch, bi.query, storage, ui.html.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// A sheet entry in the version manifest.

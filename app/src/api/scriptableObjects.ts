@@ -37,6 +37,8 @@ export type ScriptableObjectType =
 /** Where a script came from — local (user-created) or distributed (from a .calp package). */
 export type ScriptProvenance = "local" | "distributed";
 
+import type { CapabilityId } from "./scriptHost/allowlist";
+
 /** Stored script definition for a scriptable object. */
 export interface ObjectScriptDefinition {
   /** Unique script ID */
@@ -59,6 +61,14 @@ export interface ObjectScriptDefinition {
   packageName?: string;
   /** Minimum required API version (semver). Checked on mount. */
   requiredApiVersion?: string;
+  /**
+   * The authoritative declared-capability ceiling (R19). For local scripts the
+   * backend derives this from the source `// @capability` pragmas; for
+   * distributed scripts it comes from the package manifest at pull time. The
+   * broker rejects any capability not in this set (PermissionDenied) before the
+   * grant check, so a distributed script's source can never widen its ceiling.
+   */
+  declaredCapabilities?: CapabilityId[];
 }
 
 // ============================================================================
@@ -761,6 +771,7 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         accessLevel: definition.accessLevel,
         provenance: definition.provenance,
         packageName: definition.packageName,
+        declaredCapabilities: definition.declaredCapabilities,
         apiVersion: SCRIPT_API_VERSION,
       });
       mounted.cleanupFns.push(() => hostUnmountScript(definition.id));

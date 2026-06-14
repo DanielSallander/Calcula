@@ -56,6 +56,8 @@ export interface InspectedScript {
   name: string;
   objectType: string;
   description: string | null;
+  /** Capability ids the package's manifest declares this script needs (R19). */
+  requestedCapabilities: string[];
 }
 
 export interface InspectedDataSource {

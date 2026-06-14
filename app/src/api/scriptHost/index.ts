@@ -38,8 +38,14 @@ export {
 export type { ScriptHandle, RpcErrorCode } from "./broker";
 export { PROTOCOL_VERSION } from "./protocol";
 
-// Capability grants (Phase 4): the JIT/consent dialog resolves requests here.
-export { resolveCapabilityRequest, getGrantedOrigins } from "./capabilities";
+// Capability grants (Phase 4): the JIT/consent dialog resolves requests here;
+// the transparency panel reads + revokes grants.
+export {
+  resolveCapabilityRequest,
+  getGrantedOrigins,
+  getScriptGrants,
+  revokeCapability,
+} from "./capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./capabilities";
 // Declared/consented capabilities (Phase 4.2a): pragma parse + grant chokepoint.
 export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./capabilities";
