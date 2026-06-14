@@ -764,6 +764,18 @@ impl<'a> ContextResolver<'a> {
                     granularity: *granularity,
                 })
             }
+            Expression::DatesInPeriod {
+                expr: inner,
+                intervals,
+                granularity,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::DatesInPeriod {
+                    expr: Box::new(inner),
+                    intervals: *intervals,
+                    granularity: *granularity,
+                })
+            }
 
             Expression::InList { expr, values } => {
                 let expr = self.walk(expr, ctx)?;

@@ -43,9 +43,9 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         Expression::Window { inner, .. }
         | Expression::Offset { inner, .. }
         | Expression::Index { inner, .. } => has_measure_ref(inner),
-        Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
-            has_measure_ref(expr)
-        }
+        Expression::ToDate { expr, .. }
+        | Expression::PeriodShift { expr, .. }
+        | Expression::DatesInPeriod { expr, .. } => has_measure_ref(expr),
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -271,6 +271,15 @@ fn expand_measure_refs_inner(
         } => Ok(Expression::PeriodShift {
             expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
             offset: *offset,
+            granularity: *granularity,
+        }),
+        Expression::DatesInPeriod {
+            expr,
+            intervals,
+            granularity,
+        } => Ok(Expression::DatesInPeriod {
+            expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+            intervals: *intervals,
             granularity: *granularity,
         }),
         Expression::SafeDivide {
@@ -507,9 +516,9 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         | Expression::Index {
             inner, order_by, ..
         } => infer_fact_table(inner).or_else(|| order_by.first().map(|(table, _)| table.clone())),
-        Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
-            infer_fact_table(expr)
-        }
+        Expression::ToDate { expr, .. }
+        | Expression::PeriodShift { expr, .. }
+        | Expression::DatesInPeriod { expr, .. } => infer_fact_table(expr),
         Expression::InList { expr, values } => {
             infer_fact_table(expr).or_else(|| values.iter().find_map(infer_fact_table))
         }

@@ -184,7 +184,9 @@ impl Expression {
                 // not column refs of the fact table.
                 inner.collect_column_refs(refs);
             }
-            Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. } => {
                 // The date axis comes from the query's group_by at lowering
                 // time, not from the expression — only the inner measure
                 // contributes column refs.
@@ -419,7 +421,9 @@ impl Expression {
                     tables.push(table);
                 }
             }
-            Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. } => {
                 // The date-table axis is supplied by the query's group_by at
                 // lowering time; no structural table references live here.
                 expr.collect_context_filter_tables(tables);
@@ -622,9 +626,9 @@ impl Expression {
             Expression::Window { inner, .. }
             | Expression::Offset { inner, .. }
             | Expression::Index { inner, .. } => inner.collect_call_names(names),
-            Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
-                expr.collect_call_names(names)
-            }
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. } => expr.collect_call_names(names),
             Expression::InList { expr, values } => {
                 expr.collect_call_names(names);
                 for v in values {

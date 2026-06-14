@@ -215,6 +215,7 @@ impl Parser {
             // SAMEPERIODLASTYEAR is a synonym for PRIORYEAR (shift -1 YEAR).
             "SAMEPERIODLASTYEAR" => self.parse_prioryear_call(),
             "PRIORPERIOD" => self.parse_priorperiod_call(),
+            "DATESINPERIOD" => self.parse_dates_in_period_call(),
             // Ranking window functions
             "ROW_NUMBER" | "ROWNUMBER" => {
                 self.parse_rank_window_call(expr::RankFunction::RowNumber)

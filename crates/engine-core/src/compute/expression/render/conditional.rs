@@ -164,12 +164,14 @@ impl SqlRenderer<'_> {
             }
             // Lowered before rendering — surviving here is an internal bug
             // (mirrors the plain renderer; fail closed).
-            Expression::ToDate { .. } | Expression::PeriodShift { .. } => {
+            Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. } => {
                 return Err(EngineError::InvalidExpression(
-                    "time-intelligence expression (YTD/QTD/MTD/PRIORYEAR/PRIORPERIOD) must \
-                     be lowered to a window expression before SQL generation; this is an \
-                     internal error — the measure should have routed through the window \
-                     execution path"
+                    "time-intelligence expression (YTD/QTD/MTD/PRIORYEAR/PRIORPERIOD/\
+                     DATESINPERIOD) must be lowered to a window expression before SQL \
+                     generation; this is an internal error — the measure should have routed \
+                     through the window execution path"
                         .to_string(),
                 ));
             }

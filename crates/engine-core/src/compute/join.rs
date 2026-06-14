@@ -167,19 +167,27 @@ pub async fn aggregate_over_relationship(
             stddev(col(aggregate_column))
         }
         AggregateOp::StdevPop => {
-            use datafusion::functions_aggregate::stddev::stddev;
-            stddev(col(aggregate_column)) // approximate — sample stddev
+            use datafusion::functions_aggregate::stddev::stddev_pop;
+            stddev_pop(col(aggregate_column)) // genuine population stddev
         }
         AggregateOp::VarSample => {
             use datafusion::functions_aggregate::variance::var_sample;
             var_sample(col(aggregate_column))
         }
         AggregateOp::VarPop => {
-            use datafusion::functions_aggregate::variance::var_sample;
-            var_sample(col(aggregate_column)) // approximate — sample variance
+            use datafusion::functions_aggregate::variance::var_pop;
+            var_pop(col(aggregate_column)) // genuine population variance
         }
         AggregateOp::AnyValue => min(col(aggregate_column)),
-        AggregateOp::Mode => min(col(aggregate_column)), // approximate
+        AggregateOp::Mode => {
+            // DataFusion has no MODE aggregate; MIN is unrelated to the
+            // most-frequent value. Fail closed rather than return a wrong number.
+            return Err(crate::error::EngineError::InvalidExpression(
+                "MODE aggregation is not supported by the compute engine (no mode function is \
+                 available); compute the most-frequent value in the host application"
+                    .to_string(),
+            ));
+        }
     };
 
     let result_df = joined_df.aggregate(vec![group_expr], vec![agg_expr])?;

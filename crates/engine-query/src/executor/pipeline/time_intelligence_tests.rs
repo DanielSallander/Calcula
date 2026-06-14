@@ -1275,8 +1275,10 @@ fn model_with_measures(measures: &[(&str, &str)], mark: bool) -> DataModel {
             "date_id",
         ));
     for (name, src) in measures {
-        builder = builder
-            .add_measure(expression_measure(*name, parse_measure_expression(src).unwrap()));
+        builder = builder.add_measure(expression_measure(
+            *name,
+            parse_measure_expression(src).unwrap(),
+        ));
     }
     if mark {
         builder = builder.mark_date_table("dim_date");
@@ -1309,30 +1311,209 @@ async fn run_measures(
 }
 
 #[tokio::test]
-async fn two_window_measures_in_one_request_fail_closed() {
-    // Two window measures emit one batch each; returning them together would be
-    // disjoint, mis-aligned row blocks. Fail closed instead of mis-shaping.
+async fn two_window_measures_join_on_the_axis() {
+    // Two window measures sharing the (year, month) axis are joined into one
+    // [year, month, ytd, py] table — not returned as disjoint blocks.
     let model = model_with_measures(
         &[
             ("ytd", "YTD(SUM(fact_sales[amount]))"),
-            ("running", "WINDOW(SUM(fact_sales[amount]), SUM, ORDERBY(dim_date[month]))"),
+            ("py", "PRIORYEAR(SUM(fact_sales[amount]))"),
         ],
         true,
     );
-    let err = run_measures(
+    let batches = run_measures(
         &model,
-        &["ytd", "running"],
+        &["ytd", "py"],
         &[("dim_date", "year"), ("dim_date", "month")],
+    )
+    .await
+    .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+    assert_eq!(combined.num_rows(), 24, "one joined row per (year, month)");
+    assert!(
+        combined.schema().index_of("ytd").is_ok(),
+        "ytd column present"
+    );
+    assert!(
+        combined.schema().index_of("py").is_ok(),
+        "py column present"
+    );
+
+    let years = int_column(&combined, "year");
+    let months = int_column(&combined, "month");
+    let ytd = measure_column(&combined, "ytd");
+    let py = measure_column(&combined, "py");
+    let mut ytd_map = HashMap::new();
+    let mut py_map = HashMap::new();
+    for i in 0..combined.num_rows() {
+        ytd_map.insert((years[i], months[i]), ytd[i]);
+        py_map.insert((years[i], months[i]), py[i]);
+    }
+    // 2024 monthly total = 3m (east m + west 2m). YTD(Dec) = 3*(1+…+12) = 234.
+    assert_eq!(ytd_map[&(2024, 12)], Some(234.0));
+    // PRIORYEAR(2024, Dec) = 2023 Dec total = 30*12 = 360.
+    assert_eq!(py_map[&(2024, 12)], Some(360.0));
+    // 2023 has no prior year → py is NULL.
+    assert_eq!(py_map[&(2023, 6)], None);
+}
+
+#[tokio::test]
+async fn three_window_measures_join_on_the_axis() {
+    // Three measures → the third join exercises the COALESCE-of-prior-groups ON
+    // clause. All share the (year, month) axis.
+    let model = model_with_measures(
+        &[
+            ("ytd", "YTD(SUM(fact_sales[amount]))"),
+            ("py", "PRIORYEAR(SUM(fact_sales[amount]))"),
+            (
+                "run",
+                "WINDOW(SUM(fact_sales[amount]), SUM, ORDERBY(dim_date[month]), PARTITIONBY(dim_date[year]))",
+            ),
+        ],
+        true,
+    );
+    let batches = run_measures(
+        &model,
+        &["ytd", "py", "run"],
+        &[("dim_date", "year"), ("dim_date", "month")],
+    )
+    .await
+    .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    assert_eq!(combined.num_rows(), 24);
+    for c in ["ytd", "py", "run"] {
+        assert!(combined.schema().index_of(c).is_ok(), "{c} column present");
+    }
+    let years = int_column(&combined, "year");
+    let months = int_column(&combined, "month");
+    let run = measure_column(&combined, "run");
+    let mut run_map = HashMap::new();
+    for i in 0..combined.num_rows() {
+        run_map.insert((years[i], months[i]), run[i]);
+    }
+    // Running SUM within 2024 to December = 3*(1+…+12) = 234.
+    assert_eq!(run_map[&(2024, 12)], Some(234.0));
+}
+
+#[tokio::test]
+async fn window_measures_not_uniquely_keyed_fail_closed() {
+    // Both measures' running axis (month) is finer than the group-by (year
+    // only), so the projected result is NOT uniquely keyed by year — joining
+    // them would multiply rows. Fail closed instead.
+    let model = model_with_measures(
+        &[
+            (
+                "a",
+                "WINDOW(SUM(fact_sales[amount]), SUM, ORDERBY(dim_date[month]))",
+            ),
+            (
+                "b",
+                "WINDOW(SUM(fact_sales[amount]), SUM, ORDERBY(dim_date[month]))",
+            ),
+        ],
+        true,
+    );
+    let err = run_measures(&model, &["a", "b"], &[("dim_date", "year")])
+        .await
+        .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("uniquely keyed"), "got: {msg}");
+}
+
+// ===========================================================================
+// Compound time intelligence: arithmetic over time-intelligence terms
+// (YoY = YTD - PRIORYEAR, YoY% = DIVIDE(YTD - PRIORYEAR, PRIORYEAR)).
+// ===========================================================================
+
+#[tokio::test]
+async fn compound_yoy_delta_subtracts_prior_year() {
+    let batches = run(
+        "YTD(SUM(fact_sales[amount])) - PRIORYEAR(SUM(fact_sales[amount]))",
+        true,
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
+    )
+    .await
+    .unwrap();
+    let result = by_year_month(&batches);
+    assert_eq!(result.len(), 24, "one row per (year, month)");
+    // 2024: monthly total = 3m. YTD(Dec) = 3*78 = 234. PRIORYEAR(Dec) = 2023
+    // Dec monthly total = 360. Delta = 234 - 360 = -126.
+    assert_eq!(result[&(2024, 12)], Some(-126.0));
+    // 2023 has no prior year → PRIORYEAR is NULL → the delta is NULL.
+    assert_eq!(result[&(2023, 6)], None);
+}
+
+#[tokio::test]
+async fn compound_yoy_percent_uses_safe_divide() {
+    let batches = run(
+        "DIVIDE(YTD(SUM(fact_sales[amount])) - PRIORYEAR(SUM(fact_sales[amount])), \
+         PRIORYEAR(SUM(fact_sales[amount])))",
+        true,
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
+    )
+    .await
+    .unwrap();
+    let result = by_year_month(&batches);
+    // (234 - 360) / 360 = -0.35.
+    let v = result[&(2024, 12)].expect("2024 Dec value");
+    assert!((v - (-0.35)).abs() < 1e-9, "expected -0.35, got {v}");
+}
+
+#[tokio::test]
+async fn compound_ti_with_bare_aggregate_fails_closed() {
+    // The second term is a bare aggregate, not a time-intelligence term — it
+    // cannot be evaluated over the joined leaf columns. Fail closed.
+    let err = run(
+        "YTD(SUM(fact_sales[amount])) - SUM(fact_sales[amount])",
+        true,
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
     )
     .await
     .unwrap_err();
     let QueryError::InvalidQuery(msg) = &err else {
         panic!("expected InvalidQuery, got {err:?}");
     };
-    assert!(
-        msg.contains("window") && msg.contains("combined"),
-        "got: {msg}"
+    assert!(msg.contains("unsupported sub-expression"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn compound_ti_wrapped_in_keep_fails_closed() {
+    // An outer KEEP around the whole compound is not yet distributed into the
+    // leaves, so it must fail closed rather than be silently ignored.
+    let ytd = expr::to_date(
+        sum_amount(),
+        engine_core::compute::expression::DateGranularity::Year,
     );
+    let py = expr::period_shift(
+        sum_amount(),
+        -1,
+        engine_core::compute::expression::DateGranularity::Year,
+    );
+    let wrapped = expr::keep(
+        ytd.subtract(py),
+        vec![FilterPredicate::new(
+            "fact_sales",
+            "region",
+            ComparisonOp::Equal,
+            "east",
+        )],
+    );
+    let model = model_with_measure_expr(expression_measure("m", wrapped), &FixtureOpts::default());
+    let err = run_model(
+        &model,
+        dim_date_batch(),
+        &[],
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("cannot yet be wrapped"), "got: {msg}");
 }
 
 #[tokio::test]
@@ -1360,4 +1541,107 @@ async fn window_measure_mixed_with_normal_measure_fails_closed() {
         msg.contains("window") && msg.contains("combined"),
         "got: {msg}"
     );
+}
+
+// ===========================================================================
+// DATESINPERIOD: trailing-window time intelligence (filter-context only).
+// As-of date in the fixture = the max DateKey = 2024-12-01.
+// ===========================================================================
+
+#[tokio::test]
+async fn dates_in_period_trailing_12_months_is_full_2024() {
+    // Trailing 12 months ending 2024-12-01 = all of 2024. 2024 monthly total
+    // = 3m (east m + west 2m); sum over 2024 = 3 * 78 = 234.
+    let v = run(
+        "DATESINPERIOD(SUM(fact_sales[amount]), -12, MONTH)",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(234.0));
+}
+
+#[tokio::test]
+async fn dates_in_period_trailing_one_year_equals_twelve_months() {
+    let v = run(
+        "DATESINPERIOD(SUM(fact_sales[amount]), -1, YEAR)",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(234.0));
+}
+
+#[tokio::test]
+async fn dates_in_period_trailing_3_months() {
+    // Last 3 months ending 2024-12-01 = Oct, Nov, Dec = 3*(10+11+12) = 99.
+    let v = run(
+        "DATESINPERIOD(SUM(fact_sales[amount]), -3, MONTH)",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(99.0));
+}
+
+#[tokio::test]
+async fn dates_in_period_composes_with_non_date_dimension() {
+    // Trailing 12 months (all 2024) split by region: east = sum(m) = 78,
+    // west = sum(2m) = 156.
+    let batches = run(
+        "DATESINPERIOD(SUM(fact_sales[amount]), -12, MONTH)",
+        true,
+        request(&[("fact_sales", "region")]),
+    )
+    .await
+    .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let region = combined
+        .column(combined.schema().index_of("region").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let vals = measure_column(&combined, "m");
+    let mut by_region = HashMap::new();
+    for i in 0..combined.num_rows() {
+        by_region.insert(region.value(i).to_string(), vals[i]);
+    }
+    assert_eq!(by_region["east"], Some(78.0));
+    assert_eq!(by_region["west"], Some(156.0));
+}
+
+#[tokio::test]
+async fn dates_in_period_on_axis_fails_closed() {
+    let err = run(
+        "DATESINPERIOD(SUM(fact_sales[amount]), -12, MONTH)",
+        true,
+        request(&[("dim_date", "month")]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected TimeIntelligence error, got {err:?}");
+    };
+    assert!(
+        reason.contains("not supported with a date column on the query axis"),
+        "got: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn dates_in_period_positive_interval_fails_closed() {
+    let err = run(
+        "DATESINPERIOD(SUM(fact_sales[amount]), 12, MONTH)",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected TimeIntelligence error, got {err:?}");
+    };
+    assert!(reason.contains("negative interval"), "got: {reason}");
 }

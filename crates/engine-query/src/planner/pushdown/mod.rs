@@ -333,7 +333,9 @@ impl PushdownPlanner {
             let has_filter_context_ti = measures.iter().any(|m| {
                 matches!(
                     m.expression(),
-                    Expression::ToDate { .. } | Expression::PeriodShift { .. }
+                    Expression::ToDate { .. }
+                        | Expression::PeriodShift { .. }
+                        | Expression::DatesInPeriod { .. }
                 )
             });
             match model.date_table() {

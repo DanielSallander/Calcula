@@ -100,8 +100,14 @@ use crate::model::table_variable::TableVariable;
 ///   fail to deserialize — on a load→save round-trip, so the
 ///   [`ModelFormatTooNew`] load gate refuses v7 files on a pre-v7 engine.
 ///
+/// - `8` — the expression tree gained the
+///   [`DatesInPeriod`](crate::compute::expression::Expression::DatesInPeriod)
+///   variant (the `DATESINPERIOD` trailing-window time-intelligence function),
+///   which an older engine would fail to deserialize, so the
+///   [`ModelFormatTooNew`] gate refuses v8 files on a pre-v8 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 7;
+pub const MODEL_FORMAT_VERSION: u32 = 8;
 
 /// A data model consisting of tables and relationships between them.
 ///

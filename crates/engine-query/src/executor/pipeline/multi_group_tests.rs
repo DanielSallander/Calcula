@@ -227,11 +227,19 @@ async fn three_facts_conformed_dim_unreachable_from_first_does_not_cartesian() {
         match r {
             "West" => {
                 assert_eq!(sales.value(i), 100.0);
-                assert_eq!(returns.value(i), 10.0, "returns aligned to West, not fanned out");
+                assert_eq!(
+                    returns.value(i),
+                    10.0,
+                    "returns aligned to West, not fanned out"
+                );
             }
             "East" => {
                 assert_eq!(sales.value(i), 200.0);
-                assert_eq!(returns.value(i), 20.0, "returns aligned to East, not fanned out");
+                assert_eq!(
+                    returns.value(i),
+                    20.0,
+                    "returns aligned to East, not fanned out"
+                );
             }
             other => panic!("unexpected region {other}"),
         }

@@ -1,9 +1,10 @@
 //! Time-intelligence function parsing: `YTD`, `QTD`, `MTD`, `PRIORYEAR`,
-//! `PRIORPERIOD`.
+//! `SAMEPERIODLASTYEAR`, `PRIORPERIOD`, `DATESINPERIOD`.
 //!
-//! These parse to the [`Expression::ToDate`] / [`Expression::PeriodShift`]
-//! sugar variants, which the engine lowers onto the Window/Offset machinery
-//! at execution time (see `compute::time_intelligence`).
+//! These parse to the [`Expression::ToDate`] / [`Expression::PeriodShift`] /
+//! [`Expression::DatesInPeriod`] sugar variants, which the engine lowers onto
+//! the Window/Offset machinery (axis path) or a concrete date-range filter
+//! (filter-context path) at execution time (see `compute::time_intelligence`).
 
 use crate::compute::expression::DateGranularity;
 
@@ -86,6 +87,62 @@ impl Parser {
 
         self.expect(&Token::RParen)?;
         Ok(expr::period_shift(inner, offset, granularity))
+    }
+
+    /// Parse `DATESINPERIOD(expr, intervals, YEAR|QUARTER|MONTH)`.
+    ///
+    /// `intervals` is a (typically negative) integer count of periods in a
+    /// trailing window ending at the current context's as-of date — e.g.
+    /// `DATESINPERIOD(SUM(Sales[amount]), -12, MONTH)` is the trailing 12
+    /// months. The interval keyword is allow-listed like `PRIORPERIOD`'s.
+    pub(super) fn parse_dates_in_period_call(&mut self) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+
+        // Interval count: integer, possibly negative.
+        let intervals = match self.advance()?.clone() {
+            Token::Number(v) => v as i64,
+            Token::Minus => {
+                let v = match self.advance()?.clone() {
+                    Token::Number(v) => v as i64,
+                    tok => {
+                        return Err(self.parse_err_prev(format!(
+                            "DATESINPERIOD: expected integer after '-' for the interval count, \
+                             got {tok:?}"
+                        )));
+                    }
+                };
+                -v
+            }
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "DATESINPERIOD: expected an integer interval count, got {tok:?}"
+                )));
+            }
+        };
+
+        self.expect(&Token::Comma)?;
+
+        let granularity = match self.advance()?.clone() {
+            Token::Ident(s) | Token::StringLit(s) => match s.to_uppercase().as_str() {
+                "YEAR" => DateGranularity::Year,
+                "QUARTER" => DateGranularity::Quarter,
+                "MONTH" => DateGranularity::Month,
+                _ => {
+                    return Err(self.parse_err_prev(format!(
+                        "DATESINPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, or MONTH"
+                    )));
+                }
+            },
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "DATESINPERIOD: expected interval keyword (YEAR, QUARTER, or MONTH), got {tok:?}"
+                )));
+            }
+        };
+
+        self.expect(&Token::RParen)?;
+        Ok(expr::dates_in_period(inner, intervals, granularity))
     }
 }
 
@@ -221,6 +278,49 @@ mod tests {
     #[test]
     fn parse_priorperiod_missing_shift_errors() {
         assert!(parse_measure_expression("PRIORPERIOD(SUM(f[x]), YEAR)").is_err());
+    }
+
+    #[test]
+    fn parse_dates_in_period() {
+        let expr =
+            parse_measure_expression("DATESINPERIOD(SUM(fact_sales[amount]), -12, MONTH)").unwrap();
+        let Expression::DatesInPeriod {
+            intervals,
+            granularity,
+            ..
+        } = &expr
+        else {
+            panic!("expected DatesInPeriod, got {expr:?}");
+        };
+        assert_eq!(*intervals, -12);
+        assert_eq!(*granularity, DateGranularity::Month);
+        assert!(expr.has_window(), "DATESINPERIOD must route as window-ish");
+        assert!(expr.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_dates_in_period_quoted_quarter() {
+        let expr = parse_measure_expression("DATESINPERIOD(SUM(f[x]), -4, \"quarter\")").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::DatesInPeriod {
+                intervals: -4,
+                granularity: DateGranularity::Quarter,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_dates_in_period_bad_interval_errors() {
+        let err = parse_measure_expression("DATESINPERIOD(SUM(f[x]), -1, FORTNIGHT)").unwrap_err();
+        let EngineError::ParseError { message, .. } = err else {
+            panic!("expected ParseError, got {err:?}");
+        };
+        assert!(
+            message.contains("invalid interval 'FORTNIGHT'"),
+            "got: {message}"
+        );
     }
 
     #[test]

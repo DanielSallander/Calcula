@@ -171,6 +171,14 @@ impl SourceRegistry {
         Ok(&self.connectors[*idx])
     }
 
+    /// Look up a connector by its registration index. Used by host commands that
+    /// run a connector-level operation against a known connection (e.g. a
+    /// consented script's read-only raw-SQL query), where the index comes from
+    /// the connection rather than from a model table binding.
+    pub fn connector_by_index(&self, index: usize) -> Option<&AnyConnector> {
+        self.connectors.get(index)
+    }
+
     /// Look up the source binding for a model table.
     pub fn binding_for(&self, model_table: &str) -> QueryResult<&SourceBinding> {
         let (_, binding) = self

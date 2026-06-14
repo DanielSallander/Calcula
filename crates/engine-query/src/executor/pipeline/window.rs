@@ -11,7 +11,7 @@ use datafusion::prelude::SessionContext;
 use engine_connectors::FilterCondition;
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{DateGranularity, Expression};
-use engine_core::compute::measure::Measure;
+use engine_core::compute::measure::{expression_measure, Measure};
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::compute::time_intelligence::{
@@ -24,6 +24,7 @@ use engine_core::model::{DataModel, DateRole};
 use crate::error::{QueryError, QueryResult};
 use crate::request::ColumnRef;
 
+use super::fetch::register_partitioned_table;
 use super::query_measures::materialize_query_in_pipeline;
 use super::QueryExecutor;
 
@@ -45,7 +46,10 @@ impl QueryExecutor {
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         let resolver = ContextResolver::new(model);
-        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        // One result per window measure, each shaped [group-by dims..., measure].
+        // They share the same group-by axis, so they are joined on the dim
+        // columns at the end (a single measure is returned as-is).
+        let mut per_measure: Vec<(String, Vec<RecordBatch>)> = Vec::new();
 
         for measure in window_measures {
             let name = measure.name();
@@ -57,6 +61,44 @@ impl QueryExecutor {
             // filter-context path; the axis path ignores them here (they ride
             // through the normal stage-1 materialization).
             let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
+
+            // Compound time intelligence: the measure combines window/TI terms
+            // with arithmetic (e.g. YoY = YTD(...) - PRIORYEAR(...), or
+            // DIVIDE(YTD - PY, PY)). Decompose it into its window leaves,
+            // evaluate + join each one (recursively, through this same
+            // two-stage machinery), then apply the surrounding arithmetic over
+            // the joined per-leaf columns. A bare window/TI node skips this and
+            // takes the simple path below.
+            if !is_simple_window_leaf(&stripped_expr) {
+                reject_compound_outer_context(name, &eval_ctx)?;
+                // Decompose the ORIGINAL (un-resolved) expression so each leaf
+                // keeps its column qualifiers (so the leaf measure's fact table
+                // is inferred correctly). The outer-context reject above
+                // guarantees there is no outer context to strip here, so the
+                // original and the resolved form are structurally identical.
+                let mut leaves: Vec<(String, Expression)> = Vec::new();
+                let arithmetic = extract_window_leaves(expr, &mut leaves)?;
+                let leaf_measures: Vec<Measure> = leaves
+                    .into_iter()
+                    .map(|(ph, e)| expression_measure(ph, e))
+                    .collect();
+                let leaf_refs: Vec<&Measure> = leaf_measures.iter().collect();
+                // Recurse: each leaf is a simple window node, so this returns a
+                // joined [dims..., __leaf_0, __leaf_1, ...] table.
+                let joined = Box::pin(Self::execute_window_measures(
+                    ctx,
+                    &leaf_refs,
+                    group_by,
+                    model,
+                    date_filters,
+                    plan.as_deref_mut(),
+                ))
+                .await?;
+                let batches =
+                    apply_compound_arithmetic(ctx, joined, &arithmetic, name, group_by).await?;
+                per_measure.push((name.to_string(), batches));
+                continue;
+            }
 
             let group_pairs: Vec<(String, String)> = group_by
                 .iter()
@@ -83,7 +125,7 @@ impl QueryExecutor {
                     plan.as_deref_mut(),
                 )
                 .await?;
-                all_batches.extend(batches);
+                per_measure.push((name.to_string(), batches));
                 continue;
             }
 
@@ -198,7 +240,7 @@ impl QueryExecutor {
             let batches = df.collect().await?;
             let s2_elapsed = s2_start.elapsed();
             let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            all_batches.extend(batches);
+            per_measure.push((name.to_string(), batches));
 
             // Record plan nodes for this window measure.
             if let Some(ref mut plan_node) = plan {
@@ -232,9 +274,11 @@ impl QueryExecutor {
             }
         }
 
-        // If multiple window measures, we'd need to join results.
-        // For now, return the batches from the last (or only) measure.
-        Ok(all_batches)
+        // Combine the per-measure results into one table. A single measure is
+        // returned as-is; multiple measures (which share the group-by axis) are
+        // FULL OUTER JOINed on their dimension columns so the result is one
+        // [dims..., m1, m2, ...] table rather than disjoint per-measure blocks.
+        join_window_results(ctx, per_measure).await
     }
 
     /// Evaluate a filter-context time-intelligence measure (date columns NOT on
@@ -955,6 +999,300 @@ async fn check_period_shift_axis_contiguous(
         )));
     }
     Ok(())
+}
+
+/// Whether `expr` is a bare window/time-intelligence node (a "leaf" that is
+/// materialized into its own column), as opposed to a compound expression that
+/// combines such nodes with arithmetic.
+fn is_simple_window_leaf(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. }
+            | Expression::Window { .. }
+            | Expression::Offset { .. }
+            | Expression::Index { .. }
+            | Expression::RankWindow { .. }
+    )
+}
+
+/// Decompose a compound time-intelligence expression into (a) its window/TI
+/// *leaves*, each assigned a `__leaf_N` placeholder, and (b) the surrounding
+/// arithmetic expression with every leaf replaced by an `Expression::ColumnRef`
+/// to its placeholder. The leaves are materialized into columns and joined; the
+/// returned arithmetic is then evaluated over those columns.
+///
+/// Supported combinators are scalar arithmetic over leaves and constants —
+/// `+ - * /`, `DIVIDE`, `IF`, `COALESCE`, `IFERROR` — plus numeric/string/bool
+/// literals. Anything else (a bare aggregate, a raw column, a scalar function
+/// over the fact, a window node in an unsupported position) cannot be evaluated
+/// over the already-aggregated, joined leaf columns, so it fails closed rather
+/// than risk a wrong number.
+fn extract_window_leaves(
+    expr: &Expression,
+    leaves: &mut Vec<(String, Expression)>,
+) -> QueryResult<Expression> {
+    if is_simple_window_leaf(expr) {
+        let placeholder = format!("__leaf_{}", leaves.len());
+        leaves.push((placeholder.clone(), expr.clone()));
+        return Ok(Expression::ColumnRef(placeholder));
+    }
+    match expr {
+        Expression::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
+            left: Box::new(extract_window_leaves(left, leaves)?),
+            op: *op,
+            right: Box::new(extract_window_leaves(right, leaves)?),
+        }),
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => Ok(Expression::SafeDivide {
+            numerator: Box::new(extract_window_leaves(numerator, leaves)?),
+            denominator: Box::new(extract_window_leaves(denominator, leaves)?),
+            alternate: match alternate {
+                Some(a) => Some(Box::new(extract_window_leaves(a, leaves)?)),
+                None => None,
+            },
+        }),
+        Expression::Coalesce(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(extract_window_leaves(it, leaves)?);
+            }
+            Ok(Expression::Coalesce(out))
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Ok(Expression::If {
+            condition: Box::new(extract_window_leaves(condition, leaves)?),
+            then_expr: Box::new(extract_window_leaves(then_expr, leaves)?),
+            else_expr: Box::new(extract_window_leaves(else_expr, leaves)?),
+        }),
+        Expression::IfError { expr, alternate } => Ok(Expression::IfError {
+            expr: Box::new(extract_window_leaves(expr, leaves)?),
+            alternate: Box::new(extract_window_leaves(alternate, leaves)?),
+        }),
+        // Constants pass through unchanged (they need no materialization).
+        Expression::LiteralFloat(_)
+        | Expression::LiteralInt(_)
+        | Expression::LiteralString(_)
+        | Expression::LiteralBool(_) => Ok(expr.clone()),
+        _ => Err(QueryError::InvalidQuery(
+            "compound time-intelligence measure combines time-intelligence terms with an \
+             unsupported sub-expression. Supported: arithmetic (+, -, *, /, DIVIDE), and \
+             IF / COALESCE / IFERROR over time-intelligence terms and numeric constants — \
+             not bare aggregates or raw columns. Compute the unsupported part as a separate \
+             measure"
+                .into(),
+        )),
+    }
+}
+
+/// Fail closed when a compound time-intelligence measure carries an outer
+/// context operation (KEEP/USING/CLEAR/RESET/…). v1 evaluates each leaf without
+/// the outer context, so honouring it would require distributing it into every
+/// leaf; until then, refuse rather than silently drop it. Context applied
+/// *inside* a leaf (e.g. `YTD(SUM(KEEP(x, …)))`) is unaffected, as are
+/// query-level filters (which pre-filter the fact).
+fn reject_compound_outer_context(
+    measure_name: &str,
+    eval_ctx: &engine_core::compute::context::EvaluationContext,
+) -> QueryResult<()> {
+    let trivial = eval_ctx.filters.is_empty()
+        && eval_ctx.in_filters.is_empty()
+        && eval_ctx.conditions.is_empty()
+        && !eval_ctx.is_reset
+        && !eval_ctx.is_reset_inner
+        && !eval_ctx.is_reset_outer
+        && eval_ctx.cleared_columns.is_empty()
+        && eval_ctx.cleared_tables.is_empty()
+        && eval_ctx.cleared_inner_columns.is_empty()
+        && eval_ctx.cleared_inner_tables.is_empty()
+        && eval_ctx.cleared_outer_columns.is_empty()
+        && eval_ctx.cleared_outer_tables.is_empty()
+        && eval_ctx.clear_except.is_empty()
+        && eval_ctx.relationship_overrides.is_empty()
+        && eval_ctx.traversals.is_empty();
+    if !trivial {
+        return Err(QueryError::InvalidQuery(format!(
+            "compound time-intelligence measure '{measure_name}' cannot yet be wrapped in a \
+             KEEP / USING / CLEAR / RESET context operation; apply the context inside each \
+             time-intelligence term instead, or use a query-level filter"
+        )));
+    }
+    Ok(())
+}
+
+/// Evaluate a compound measure's arithmetic over the joined per-leaf columns.
+///
+/// `joined` is `[dims..., __leaf_0, __leaf_1, ...]`; `arithmetic` references the
+/// leaves as `__leaf_N` column refs. Renders `SELECT dims, (arithmetic) AS
+/// measure FROM joined`.
+async fn apply_compound_arithmetic(
+    ctx: &SessionContext,
+    joined: Vec<RecordBatch>,
+    arithmetic: &Expression,
+    measure_name: &str,
+    _group_by: &[ColumnRef],
+) -> QueryResult<Vec<RecordBatch>> {
+    // Dimension columns = the joined schema minus the `__leaf_*` placeholders
+    // (so both the lowercased axis-path dims and the filter-context dims work).
+    let dim_cols: Vec<String> = joined
+        .first()
+        .map(|b| {
+            b.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .filter(|n| !n.starts_with("__leaf_"))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    register_partitioned_table(ctx, "__compound", joined)?;
+
+    let arith_sql = arithmetic.to_sql_string()?;
+    let mut select_parts: Vec<String> = dim_cols.iter().map(|c| quote_ident_double(c)).collect();
+    select_parts.push(format!(
+        "({arith_sql}) AS {}",
+        quote_ident_double(measure_name)
+    ));
+    let sql = format!("SELECT {} FROM __compound", select_parts.join(", "));
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    Ok(batches)
+}
+
+/// Read a single `COUNT(*)`-style i64 from a one-cell query result.
+async fn read_count(ctx: &SessionContext, sql: &str) -> QueryResult<i64> {
+    let batches = ctx.sql(sql).await?.collect().await?;
+    Ok(batches
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+        .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+        .unwrap_or(0))
+}
+
+/// Combine per-window-measure results — each shaped `[group-by dims..., measure]`
+/// and sharing the same dimension columns — into one `[dims..., m1, m2, ...]`
+/// table by FULL OUTER JOINing on the dimension columns.
+///
+/// A single measure (or none) is returned unchanged. Each result must be
+/// uniquely keyed by its dimension columns so the join cannot fan out (the
+/// standard pivot case, where the group-by axis covers the running/shift axis);
+/// otherwise this fails closed rather than multiply rows.
+async fn join_window_results(
+    ctx: &SessionContext,
+    per_measure: Vec<(String, Vec<RecordBatch>)>,
+) -> QueryResult<Vec<RecordBatch>> {
+    if per_measure.len() <= 1 {
+        return Ok(per_measure
+            .into_iter()
+            .next()
+            .map(|(_, b)| b)
+            .unwrap_or_default());
+    }
+
+    // Dimension columns = the first result's columns minus its own measure
+    // column. All results share these (same group-by axis / route).
+    let (first_name, first_batches) = &per_measure[0];
+    let first_schema = first_batches
+        .first()
+        .map(|b| b.schema())
+        .ok_or_else(|| QueryError::InvalidQuery("a window measure produced no result".into()))?;
+    let dim_cols: Vec<String> = first_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .filter(|n| n != first_name)
+        .collect();
+    let measure_names: Vec<String> = per_measure.iter().map(|(n, _)| n.clone()).collect();
+
+    let not_uniquely_keyed = || -> QueryError {
+        QueryError::InvalidQuery(
+            "cannot combine these window/running measures: a result is not uniquely keyed by \
+             the group-by columns (the running or shift axis is finer than the group-by), so \
+             joining them would multiply rows. Add the finer date column(s) to group_by, or \
+             request the measures separately"
+                .into(),
+        )
+    };
+
+    // Register each result and verify unique keying.
+    for (i, (_, batches)) in per_measure.iter().enumerate() {
+        let alias = format!("__wjoin_{i}");
+        register_partitioned_table(ctx, &alias, batches.clone())?;
+
+        let total = read_count(ctx, &format!("SELECT COUNT(*) FROM {alias}")).await?;
+        let distinct = if dim_cols.is_empty() {
+            // No group-by: uniquely keyed only if there is at most one row.
+            if total <= 1 {
+                total
+            } else {
+                return Err(not_uniquely_keyed());
+            }
+        } else {
+            let dims = dim_cols
+                .iter()
+                .map(|c| quote_ident_double(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            read_count(
+                ctx,
+                &format!("SELECT COUNT(*) FROM (SELECT DISTINCT {dims} FROM {alias})"),
+            )
+            .await?
+        };
+        if total != distinct {
+            return Err(not_uniquely_keyed());
+        }
+    }
+
+    // SELECT: COALESCE each dim across all results, then each measure.
+    let q = |c: &str| quote_ident_double(c);
+    let mut select_parts: Vec<String> = Vec::new();
+    for dim in &dim_cols {
+        let coalesced = (0..per_measure.len())
+            .map(|i| format!("__wjoin_{i}.{}", q(dim)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        select_parts.push(format!("COALESCE({coalesced}) AS {}", q(dim)));
+    }
+    for (i, name) in measure_names.iter().enumerate() {
+        select_parts.push(format!("__wjoin_{i}.{}", q(name)));
+    }
+
+    // FROM __wjoin_0 [FULL OUTER JOIN __wjoin_i ON COALESCE(priors) = this | CROSS JOIN].
+    let mut sql = format!("SELECT {} FROM __wjoin_0", select_parts.join(", "));
+    for i in 1..per_measure.len() {
+        if dim_cols.is_empty() {
+            sql.push_str(&format!(" CROSS JOIN __wjoin_{i}"));
+            continue;
+        }
+        let on = dim_cols
+            .iter()
+            .map(|dim| {
+                let lhs = if i == 1 {
+                    format!("__wjoin_0.{}", q(dim))
+                } else {
+                    let priors = (0..i)
+                        .map(|j| format!("__wjoin_{j}.{}", q(dim)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("COALESCE({priors})")
+                };
+                format!("{lhs} = __wjoin_{i}.{}", q(dim))
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql.push_str(&format!(" FULL OUTER JOIN __wjoin_{i} ON {on}"));
+    }
+
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    Ok(batches)
 }
 
 /// Translate a DAX-style WindowFrame to SQL ROWS BETWEEN clause.

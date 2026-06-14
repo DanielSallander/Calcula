@@ -25,7 +25,7 @@ fn sales_table_with_metadata() -> Table {
 }
 
 #[test]
-fn model_format_version_is_7_for_calculation_groups() {
+fn model_format_version_is_current() {
     // Version 2 introduced presentation metadata (measure format_string/
     // description/is_hidden, column display_name/description/is_hidden/
     // default_aggregation, table display_name/description/is_hidden).
@@ -36,9 +36,11 @@ fn model_format_version_is_7_for_calculation_groups() {
     // Version 6 introduced incremental refresh (table incremental_refresh).
     // Version 7 introduced calculation groups (model calculation_groups,
     // SelectedMeasure expression variant).
+    // Version 8 introduced the DATESINPERIOD trailing-window time-intelligence
+    // function (DatesInPeriod expression variant).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 7);
+    assert_eq!(MODEL_FORMAT_VERSION, 8);
 }
 
 #[test]

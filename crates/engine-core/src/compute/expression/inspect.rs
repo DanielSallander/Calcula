@@ -85,7 +85,9 @@ impl Expression {
                 true
             }
             // Time-intelligence sugar lowers to window functions (two-stage).
-            Expression::ToDate { .. } | Expression::PeriodShift { .. } => true,
+            Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. } => true,
             Expression::InList { expr, values } => {
                 expr.has_aggregate() || values.iter().any(|v| v.has_aggregate())
             }
@@ -196,9 +198,9 @@ impl Expression {
             Expression::Window { inner, .. }
             | Expression::Offset { inner, .. }
             | Expression::Index { inner, .. } => inner.has_context_ops(),
-            Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
-                expr.has_context_ops()
-            }
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. } => expr.has_context_ops(),
             Expression::InList { expr, values } => {
                 expr.has_context_ops() || values.iter().any(|v| v.has_context_ops())
             }
@@ -278,6 +280,7 @@ impl Expression {
                 | Expression::Index { .. }
                 | Expression::ToDate { .. }
                 | Expression::PeriodShift { .. }
+                | Expression::DatesInPeriod { .. }
         )
     }
 
@@ -291,7 +294,9 @@ impl Expression {
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
                 true
             }
-            Expression::ToDate { .. } | Expression::PeriodShift { .. } => true,
+            Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. } => true,
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::And(left, right)

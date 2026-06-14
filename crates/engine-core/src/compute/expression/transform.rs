@@ -202,6 +202,15 @@ impl Expression {
                 offset: *offset,
                 granularity: *granularity,
             },
+            Expression::DatesInPeriod {
+                expr,
+                intervals,
+                granularity,
+            } => Expression::DatesInPeriod {
+                expr: Box::new(expr.substitute_vars(env)),
+                intervals: *intervals,
+                granularity: *granularity,
+            },
             // Context operations: recurse into inner expression.
             Expression::Keep {
                 expr,
@@ -510,6 +519,15 @@ impl Expression {
                 offset: *offset,
                 granularity: *granularity,
             },
+            Expression::DatesInPeriod {
+                expr,
+                intervals,
+                granularity,
+            } => Expression::DatesInPeriod {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                intervals: *intervals,
+                granularity: *granularity,
+            },
             Expression::Keep {
                 expr,
                 filters,
@@ -646,6 +664,7 @@ impl Expression {
                             | Expression::Index { .. }
                             | Expression::ToDate { .. }
                             | Expression::PeriodShift { .. }
+                            | Expression::DatesInPeriod { .. }
                     ) {
                         continue;
                     }

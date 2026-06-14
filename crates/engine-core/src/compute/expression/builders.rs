@@ -419,6 +419,22 @@ pub fn period_shift(expr: Expression, offset: i64, granularity: DateGranularity)
     }
 }
 
+/// Create a `DATESINPERIOD` trailing-window expression.
+///
+/// `intervals` is a (typically negative) count of `granularity` periods in a
+/// trailing window ending at the current context's as-of date.
+pub fn dates_in_period(
+    expr: Expression,
+    intervals: i64,
+    granularity: DateGranularity,
+) -> Expression {
+    Expression::DatesInPeriod {
+        expr: Box::new(expr),
+        intervals,
+        granularity,
+    }
+}
+
 /// Create an INDEX expression: value at absolute position.
 pub fn index_expr(
     inner: Expression,

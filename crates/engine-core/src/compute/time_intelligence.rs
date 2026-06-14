@@ -515,6 +515,50 @@ pub fn time_intelligence_route(
     model: &DataModel,
     group_by: &[(String, String)],
 ) -> EngineResult<Option<TimeIntelligenceRoute>> {
+    // DATESINPERIOD (trailing window) is filter-context only: it has no
+    // per-axis-row moving-window form in v1, so a date column on the axis fails
+    // closed rather than silently computing a whole-context window per row.
+    if let Expression::DatesInPeriod {
+        expr: inner,
+        intervals,
+        ..
+    } = expr
+    {
+        let function = "DATESINPERIOD";
+        if *intervals >= 0 {
+            return Err(time_intelligence_error(
+                function,
+                format!(
+                    "DATESINPERIOD requires a negative interval count — a trailing window, e.g. \
+                     -12 for the last 12 periods; got {intervals}"
+                ),
+            ));
+        }
+        let axis = resolve_date_axis(function, model, group_by)?;
+        if !axis.present.is_empty() {
+            return Err(time_intelligence_error(
+                function,
+                format!(
+                    "DATESINPERIOD (a trailing window) is not supported with a date column on \
+                     the query axis ({}); remove the date column from group_by to evaluate it \
+                     as a trailing window from the current context, or use a running total \
+                     (YTD/QTD/MTD)",
+                    format_group_by(group_by)
+                ),
+            ));
+        }
+        validate_filter_context_inner(function, false, inner)?;
+        let (date_table, date_key_column) = require_date_key(function, model)?;
+        return Ok(Some(TimeIntelligenceRoute::FilterContext(
+            FilterContextPlan {
+                function: function.to_string(),
+                date_table,
+                date_key_column,
+                needs_min_context_date: false,
+            },
+        )));
+    }
+
     let (inner, function, granularity, is_shift) = match expr {
         Expression::ToDate {
             expr: inner,
@@ -688,6 +732,48 @@ pub fn lower_time_intelligence_filtered(
     as_of_days: i32,
     min_context_days: i32,
 ) -> EngineResult<(Expression, String)> {
+    // DATESINPERIOD: a trailing window of |intervals| periods ending at the
+    // as-of date — [as_of − |intervals| periods + 1 day, as_of].
+    if let Expression::DatesInPeriod {
+        expr: inner,
+        intervals,
+        granularity,
+    } = expr
+    {
+        let function = "DATESINPERIOD";
+        validate_filter_context_inner(function, false, inner)?;
+        let (date_table, date_key_column) = require_date_key(function, model)?;
+        let as_of = date32_to_naive(as_of_days).ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!("the as-of date probe returned an out-of-range value ({as_of_days} days)"),
+            )
+        })?;
+        let months_back = intervals * months_per_period(*granularity);
+        let start = shift_months(as_of, months_back)
+            .and_then(|d| d.succ_opt())
+            .ok_or_else(|| {
+                time_intelligence_error(
+                    function,
+                    format!("sizing the trailing window ending {as_of} overflowed the calendar"),
+                )
+            })?;
+        let description = format!(
+            "DATESINPERIOD (filter context) trailing {} {granularity}(s) → range [{start}..{as_of}] \
+             on {date_table}.{date_key_column}",
+            intervals.unsigned_abs()
+        );
+        return build_filtered_range_keep(
+            inner,
+            model,
+            &date_table,
+            &date_key_column,
+            start,
+            as_of,
+            description,
+        );
+    }
+
     let (inner, function, granularity, offset, is_shift) = match expr {
         Expression::ToDate {
             expr: inner,
@@ -775,18 +861,41 @@ pub fn lower_time_intelligence_filtered(
         (start, as_of, desc)
     };
 
+    build_filtered_range_keep(
+        inner,
+        model,
+        &date_table,
+        &date_key_column,
+        start,
+        end_inclusive,
+        description,
+    )
+}
+
+/// Build `Keep(Clear(inner, <date role columns>), [DateKey >= start, DateKey <
+/// end_inclusive + 1 day])` — the shared tail of every filter-context
+/// time-intelligence lowering (a half-open `DateKey` range that replaces any
+/// existing date filter on the date table).
+fn build_filtered_range_keep(
+    inner: &Expression,
+    model: &DataModel,
+    date_table: &str,
+    date_key_column: &str,
+    start: NaiveDate,
+    end_inclusive: NaiveDate,
+    description: String,
+) -> EngineResult<(Expression, String)> {
     let end_exclusive = end_inclusive.succ_opt().ok_or_else(|| {
         time_intelligence_error(
-            function,
+            "time intelligence",
             "the as-of date is the maximum representable date".to_string(),
         )
     })?;
 
-    // Build Keep(Clear(inner, <date columns>), [DateKey >= start, DateKey < end]).
-    let clear_targets: Vec<ClearTarget> = date_role_columns(model, &date_table)?
+    let clear_targets: Vec<ClearTarget> = date_role_columns(model, date_table)?
         .into_iter()
         .map(|column| ClearTarget::Column {
-            table: date_table.clone(),
+            table: date_table.to_string(),
             column,
         })
         .collect();
@@ -794,21 +903,19 @@ pub fn lower_time_intelligence_filtered(
 
     let filters = vec![
         FilterPredicate::new(
-            date_table.clone(),
-            date_key_column.clone(),
+            date_table.to_string(),
+            date_key_column.to_string(),
             ComparisonOp::GreaterThanOrEqual,
             naive_to_iso(start),
         ),
         FilterPredicate::new(
-            date_table.clone(),
-            date_key_column.clone(),
+            date_table.to_string(),
+            date_key_column.to_string(),
             ComparisonOp::LessThan,
             naive_to_iso(end_exclusive),
         ),
     ];
-    let kept = expr::keep(cleared, filters);
-
-    Ok((kept, description))
+    Ok((expr::keep(cleared, filters), description))
 }
 
 /// Convert a `Date32` value (days since 1970-01-01) to a [`NaiveDate`].
@@ -842,6 +949,28 @@ fn shift_years(date: NaiveDate, years: i64) -> Option<NaiveDate> {
         // Feb 29 → Feb 28 in a non-leap year (the only day that can fail).
         NaiveDate::from_ymd_opt(target_year, date.month(), 28)
     })
+}
+
+/// Shift `date` by `months` calendar months (negative = earlier), clamping the
+/// day to the last valid day of the target month (e.g. Mar 31 − 1 month →
+/// Feb 28/29). Used by `DATESINPERIOD` to size a trailing window.
+fn shift_months(date: NaiveDate, months: i64) -> Option<NaiveDate> {
+    let total = i64::from(date.year()) * 12 + i64::from(date.month0()) + months;
+    let year = i32::try_from(total.div_euclid(12)).ok()?;
+    let month = total.rem_euclid(12) as u32 + 1;
+    // The largest valid day-of-month not exceeding the source day.
+    (1..=date.day())
+        .rev()
+        .find_map(|d| NaiveDate::from_ymd_opt(year, month, d))
+}
+
+/// Months per `DateGranularity` period (for `DATESINPERIOD` window sizing).
+fn months_per_period(granularity: DateGranularity) -> i64 {
+    match granularity {
+        DateGranularity::Year => 12,
+        DateGranularity::Quarter => 3,
+        DateGranularity::Month => 1,
+    }
 }
 
 #[cfg(test)]

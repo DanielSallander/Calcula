@@ -237,7 +237,9 @@ impl QueryExecutor {
             let has_filter_context_ti = measures.iter().any(|m| {
                 matches!(
                     m.expression(),
-                    Expression::ToDate { .. } | Expression::PeriodShift { .. }
+                    Expression::ToDate { .. }
+                        | Expression::PeriodShift { .. }
+                        | Expression::DatesInPeriod { .. }
                 )
             });
             match model.date_table() {
@@ -844,21 +846,18 @@ impl QueryExecutor {
         // If we have window measures, evaluate them via two-stage window execution
         // (ordered at the Arrow level afterwards).
         if !window_measures.is_empty() {
-            // Fail closed rather than return a mis-shaped result: the window
-            // evaluator emits one batch per window measure (each shaped
-            // [dims..., that measure]) and drops any non-window measures, so
-            // combining a window/running/time-intelligence measure with other
-            // measures — or two window measures — would silently return
-            // disjoint, mis-aligned row blocks or drop columns. Until the
-            // per-measure results are joined on the group-by keys, require a
-            // single window measure on its own.
-            if window_measures.len() > 1 || !non_window.is_empty() {
+            // Multiple window measures are joined on the group-by axis by the
+            // window evaluator. Mixing a window/running/time-intelligence measure
+            // with an ORDINARY (non-window) measure is still rejected: the two
+            // run through different execution paths and the window evaluator
+            // would drop the ordinary measure's column. Fail closed rather than
+            // silently drop it — request the ordinary measures separately.
+            if !non_window.is_empty() {
                 return Err(crate::error::QueryError::InvalidQuery(
                     "a window / running / time-intelligence measure cannot currently be \
-                     combined with other measures in a single request (the results would be \
-                     returned as disjoint, mis-aligned row blocks and non-window measures \
-                     would be dropped); request each window measure in its own query and \
-                     combine in the host"
+                     combined with an ordinary (non-window) measure in a single request (the \
+                     ordinary measure's column would be dropped); request the ordinary \
+                     measures in a separate query and combine in the host"
                         .into(),
                 ));
             }

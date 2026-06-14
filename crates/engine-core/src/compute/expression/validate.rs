@@ -388,9 +388,9 @@ impl Expression {
             }
             // Granularity is a closed enum and the offset is numeric; only
             // the inner expression carries renderable content.
-            Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
-                expr.validate_inner(allow_selected_measure)
-            }
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. } => expr.validate_inner(allow_selected_measure),
             Expression::InList { expr, values } => {
                 expr.validate_inner(allow_selected_measure)?;
                 for v in values {

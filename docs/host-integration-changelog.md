@@ -41,6 +41,7 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `5` | Row-level security — model gained `security_roles` with per-table row filters. |
 | `6` | Incremental refresh — tables gained optional `incremental_refresh` policy. |
 | `7` | Calculation groups — model gained `calculation_groups`; expression AST gained `SelectedMeasure`. |
+| `8` | `DATESINPERIOD` trailing-window time intelligence — expression AST gained `DatesInPeriod`. |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
 
@@ -71,6 +72,24 @@ Pure serde additions for host display. The engine does not interpret them (excep
 **`Table`** (`engine-core::model::table`): `display_name`, `description`, `is_hidden` with the same `.with_display_name` / `.with_description` / `.hidden()` builders and getters.
 
 ---
+
+## Measure-value filters (HAVING)
+
+`QueryRequest` gained `measure_filters: Vec<MeasureFilter>` — keep only result rows whose computed measure value satisfies a comparison:
+
+```rust
+QueryRequest {
+    measures: vec!["Revenue".into()],
+    group_by: vec![ColumnRef::new("Product", "name")],
+    order_by: vec![OrderByClause::measure_desc("Revenue")],
+    limit: Some(10),
+    measure_filters: vec![MeasureFilter::new("Revenue", FilterOperator::GreaterThan, 1000.0)],
+    ..Default::default()
+}
+// → the top 10 products whose Revenue exceeds 1000
+```
+
+`MeasureFilter { measure, operator: FilterOperator, value: f64 }` (builder `MeasureFilter::new`). The referenced `measure` must be one of the request's `measures`. Filters are applied **after** aggregation and **before** `limit`, so `order_by` a measure + `limit` + a measure filter expresses top-N-over-threshold. A `NULL` measure value never passes (the row is dropped), matching SQL `HAVING`. Not supported with `TotalsMode::Rollup` or a calculation group — those fail closed (`QueryError::InvalidQuery`). No model-file or `MODEL_FORMAT_VERSION` change (request-time only).
 
 ## Pivot-shaped queries: ordering, limit, totals
 
@@ -141,6 +160,7 @@ The parser accepts these built-ins (case-insensitive):
 | `PRIORYEAR(expr)` | Same window, shifted back one calendar year. |
 | `SAMEPERIODLASTYEAR(expr)` | Synonym of `PRIORYEAR` (whole-window shift). |
 | `PRIORPERIOD(expr, offset, "YEAR"\|"QUARTER"\|"MONTH")` | Generic period shift; negative `offset` = earlier. |
+| `DATESINPERIOD(expr, intervals, "YEAR"\|"QUARTER"\|"MONTH")` | Trailing window of \|intervals\| periods ending at the as-of date (e.g. `-12, MONTH` = trailing 12 months). `intervals` must be **negative**. **Filter-context only** — fails closed with a date column on the axis. |
 
 These lower to the expression AST variants `Expression::ToDate { expr, granularity }` and `Expression::PeriodShift { expr, offset, granularity }` (with `DateGranularity::{Year,Quarter,Month}`).
 
@@ -164,7 +184,18 @@ EngineError::TimeIntelligence { function: String, reason: String }
 // "Time intelligence: {function} cannot be evaluated: {reason}"
 ```
 
-> **Known limitation (flagged for a follow-up):** in **axis mode**, a `KEEP` filter wrapped around a *window* measure is not yet applied. The filter-context mode is correct. Fiscal calendars, `PARALLELPERIOD`/`DATESINPERIOD`, opening/closing balances, and totals×time-intel / hierarchy×time-intel composition remain deferred (the latter two error rather than mislead).
+### Compound time intelligence (YoY)
+
+Time-intelligence terms may be combined with arithmetic into a single measure, e.g. year-over-year delta and growth %:
+
+```
+YTD(SUM(Sales[amount])) - PRIORYEAR(SUM(Sales[amount]))            // YoY delta
+DIVIDE(YTD(SUM(...)) - PRIORYEAR(SUM(...)), PRIORYEAR(SUM(...)))   // YoY %
+```
+
+Supported combinators: `+ - * /`, `DIVIDE`, `IF`, `COALESCE`, `IFERROR` over time-intelligence terms and numeric constants. The engine evaluates each time-intelligence term, joins them on the group-by axis, and applies the arithmetic. A compound that mixes a time-intelligence term with a **bare aggregate** (`YTD(...) - SUM(...)`), or that is wrapped in an **outer** `KEEP`/context op, fails closed (`QueryError::InvalidQuery`) — apply context *inside* each term, or compute the bare aggregate as a separate measure.
+
+> **Known limitations (deferred):** in **axis mode**, an outer `KEEP` around a single window measure now applies (a non-date filter restricts the running total); a `KEEP` around a *compound* one fails closed. Fiscal calendars (non-Gregorian date tables) fail closed on the filter-context path. `PARALLELPERIOD`/`DATESINPERIOD`, opening/closing balances, value-based (gap-tolerant) period shifts, and totals×time-intel / hierarchy×time-intel composition remain deferred (they error rather than mislead).
 
 ---
 
@@ -367,8 +398,8 @@ EngineError::ScriptError { function: String, position: Option<usize>, message: S
 
 A sweep of silently-wrong-number paths (the engine's #1 prohibited failure) changed several queries that previously returned a wrong/mis-shaped result to either compute correctly or **fail closed** with a typed error. Host-visible effects:
 
-- **`PERCENTILE` is documented as approximate** and is now always computed locally (DataFusion `approx_percentile_cont`), so its value no longer changes when a model gains a second source or an in-memory table. Treat percentile results as approximate.
-- **Multiple window/running/time-intelligence measures, or a window measure mixed with ordinary measures, in one request are rejected** (`QueryError::InvalidQuery`) instead of returning disjoint, mis-aligned row blocks or dropping columns. Request each window/`QUERY`-in-VAR measure in its own query and combine host-side. (Same for multiple `QUERY`-in-VAR measures.)
+- **`PERCENTILE` is documented as approximate** and is now always computed locally (DataFusion `approx_percentile_cont`), so its value no longer changes when a model gains a second source or an in-memory table. Treat percentile results as approximate. **`MODE`, population `STDEV`/`VAR`** on the direct engine-core aggregation API now return correct values (`STDEVP`/`VARP` use the genuine population formula) or fail closed (`MODE` has no engine support) instead of silently substituting sample-stats / `MIN`.
+- **Multiple window/running/time-intelligence measures in one request are now joined** on the shared group-by axis into one `[dims…, m1, m2, …]` result (e.g. `YTD Sales` + `PRIORYEAR Sales` side by side). They must be uniquely keyed by the group-by columns (add the finer date column to `group_by` if the running axis is finer); otherwise the request fails closed. A window measure mixed with an **ordinary** (non-window) measure, or multiple `QUERY`-in-VAR measures, are still rejected (`QueryError::InvalidQuery`) — request those separately.
 - **Axis-mode time intelligence now honors a wrapping `KEEP` filter** (e.g. `KEEP(YTD(SUM(amount)), region='east')` is east-only). A window measure wrapped in context the path can't represent (boolean conditions, IN filters, CLEAR/RESET, USERELATIONSHIP, table-variable traversal) is rejected rather than silently dropped.
 - **Period shifts (`PRIORYEAR`/`PRIORPERIOD`) over a gapped axis fail closed** (`EngineError::TimeIntelligence`): a missing period would otherwise read the wrong period. Supply a contiguous date axis.
 - **Filter-context time intelligence over a non-Gregorian (fiscal) date table fails closed** (`EngineError::TimeIntelligence`): the filter-context window math is calendar-based and would disagree with the axis path. Put a date column on the group-by axis (which honors the role columns), or use a Gregorian calendar table.

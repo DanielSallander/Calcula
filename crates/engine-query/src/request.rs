@@ -1,8 +1,39 @@
 //! Query request types — the user-facing description of what to compute.
 
-use engine_connectors::FilterCondition;
+use engine_connectors::{FilterCondition, FilterOperator};
 
 pub use engine_connectors::GROUPING_ID_COLUMN;
+
+/// A filter on a computed **measure value** (a `HAVING` clause): keep only the
+/// result rows whose `measure` satisfies `operator value`.
+///
+/// The referenced `measure` must be one of the request's
+/// [`measures`](QueryRequest::measures). Filters are applied **after**
+/// aggregation and **before** `limit`, so `order_by` a measure + `limit` +
+/// a measure filter expresses "top N rows whose measure exceeds a threshold".
+/// A `NULL` measure value never satisfies a filter (the row is dropped), matching
+/// SQL `HAVING` semantics. Not supported with `TotalsMode::Rollup` or a
+/// calculation group (fails closed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasureFilter {
+    /// The measure to filter on (must be in [`QueryRequest::measures`]).
+    pub measure: String,
+    /// Comparison operator.
+    pub operator: FilterOperator,
+    /// The numeric threshold the measure value is compared against.
+    pub value: f64,
+}
+
+impl MeasureFilter {
+    /// Create a measure-value filter `measure operator value`.
+    pub fn new(measure: impl Into<String>, operator: FilterOperator, value: f64) -> Self {
+        Self {
+            measure: measure.into(),
+            operator,
+            value,
+        }
+    }
+}
 
 /// A reference to a specific column in a table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +427,13 @@ pub struct QueryRequest {
     /// See [`CalculationGroupApplication`] for the full ordering and naming
     /// contract. `None` (default) leaves the requested measures unchanged.
     pub calculation_group: Option<CalculationGroupApplication>,
+    /// Filter result rows by computed measure values (a `HAVING` clause).
+    ///
+    /// Applied after aggregation and before [`limit`](Self::limit), so it
+    /// composes with `order_by` + `limit` to express top-N-over-threshold. Each
+    /// filter's measure must be in [`measures`](Self::measures). Empty (default)
+    /// applies no measure filter. See [`MeasureFilter`].
+    pub measure_filters: Vec<MeasureFilter>,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /

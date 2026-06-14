@@ -224,7 +224,9 @@ fn collect_query_global_refs(
             collect_query_global_refs(sort_by, model, found);
         }
         Expression::RankWindow { .. } => {}
-        Expression::ToDate { expr, .. } | Expression::PeriodShift { expr, .. } => {
+        Expression::ToDate { expr, .. }
+        | Expression::PeriodShift { expr, .. }
+        | Expression::DatesInPeriod { expr, .. } => {
             collect_query_global_refs(expr, model, found);
         }
         Expression::Call { args, .. } => {
@@ -515,6 +517,15 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
         } => Expression::PeriodShift {
             expr: Box::new(expand_scalar_globals(inner, model)),
             offset: *offset,
+            granularity: *granularity,
+        },
+        Expression::DatesInPeriod {
+            expr: inner,
+            intervals,
+            granularity,
+        } => Expression::DatesInPeriod {
+            expr: Box::new(expand_scalar_globals(inner, model)),
+            intervals: *intervals,
             granularity: *granularity,
         },
         Expression::InList { expr, values } => Expression::InList {

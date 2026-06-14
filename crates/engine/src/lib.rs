@@ -92,6 +92,8 @@ mod detail_tests;
 #[cfg(test)]
 mod disk_cache_tests;
 #[cfg(test)]
+mod having_tests;
+#[cfg(test)]
 mod security_tests;
 #[cfg(test)]
 mod test_fixtures;
@@ -172,7 +174,7 @@ pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, LookupColumn,
-    OrderByClause, OrderTarget, QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
+    MeasureFilter, OrderByClause, OrderTarget, QueryRequest, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
@@ -292,6 +294,92 @@ fn map_script_error<T>(result: QueryResult<T>) -> QueryResult<T> {
         }
     }
     result
+}
+
+/// Whether `lhs op rhs` holds for a measure-value filter.
+fn measure_filter_passes(lhs: f64, op: FilterOperator, rhs: f64) -> bool {
+    match op {
+        FilterOperator::Equal => lhs == rhs,
+        FilterOperator::NotEqual => lhs != rhs,
+        FilterOperator::GreaterThan => lhs > rhs,
+        FilterOperator::LessThan => lhs < rhs,
+        FilterOperator::GreaterThanOrEqual => lhs >= rhs,
+        FilterOperator::LessThanOrEqual => lhs <= rhs,
+    }
+}
+
+/// Keep only the result rows whose measure columns satisfy every `MeasureFilter`
+/// (a post-aggregation `HAVING`). A `NULL` measure value never passes, matching
+/// SQL semantics. The measure column is matched by name (case-insensitive) and
+/// cast to `f64` for comparison.
+fn apply_measure_value_filters(
+    batches: &[RecordBatch],
+    filters: &[MeasureFilter],
+) -> QueryResult<Vec<RecordBatch>> {
+    use arrow::array::{Array, BooleanArray, Float64Array};
+
+    let mut out = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let rows = batch.num_rows();
+        let mut keep = vec![true; rows];
+        for mf in filters {
+            let idx = batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|f| f.name().eq_ignore_ascii_case(&mf.measure))
+                .ok_or_else(|| {
+                    QueryError::InvalidQuery(format!(
+                        "measure-value filter references measure '{}', which is not a result \
+                         column",
+                        mf.measure
+                    ))
+                })?;
+            let casted =
+                arrow::compute::cast(batch.column(idx), &arrow::datatypes::DataType::Float64)
+                    .map_err(|e| {
+                        QueryError::InvalidQuery(format!(
+                            "measure-value filter on '{}' requires a numeric measure: {e}",
+                            mf.measure
+                        ))
+                    })?;
+            let values = casted
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("cast to Float64 yields a Float64Array");
+            for (i, k) in keep.iter_mut().enumerate() {
+                if *k {
+                    *k = !values.is_null(i)
+                        && measure_filter_passes(values.value(i), mf.operator, mf.value);
+                }
+            }
+        }
+        let mask = BooleanArray::from(keep);
+        out.push(arrow::compute::filter_record_batch(batch, &mask)?);
+    }
+    Ok(out)
+}
+
+/// Take at most `limit` rows total across `batches`, preserving order. `None`
+/// returns all rows.
+fn truncate_batches_to_limit(batches: Vec<RecordBatch>, limit: Option<usize>) -> Vec<RecordBatch> {
+    let Some(mut remaining) = limit else {
+        return batches;
+    };
+    let mut out = Vec::with_capacity(batches.len());
+    for batch in batches {
+        if remaining == 0 {
+            break;
+        }
+        if batch.num_rows() <= remaining {
+            remaining -= batch.num_rows();
+            out.push(batch);
+        } else {
+            out.push(batch.slice(0, remaining));
+            remaining = 0;
+        }
+    }
+    out
 }
 
 /// Build the effective UDF registry = native UDFs + compiled model script
@@ -1091,6 +1179,15 @@ impl Engine {
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
 
+        // Measure-value filters (HAVING) are handled here — before caching and
+        // planning — so they compose uniformly with every execution path. Run
+        // the underlying query without them (and without the row limit), then
+        // filter the result rows by measure value and apply the limit. The inner
+        // query is cached normally; the filtered result is cheap to recompute.
+        if !request.measure_filters.is_empty() {
+            return self.query_with_measure_filters(request, token).await;
+        }
+
         // Resolve any calculation-group application up front (a typed error
         // for an unknown group/item/measure or a synthetic-name collision).
         // When present this yields an overlay model (self.model + ephemeral
@@ -1151,6 +1248,57 @@ impl Engine {
             }
         }
         Ok(batches)
+    }
+
+    /// Evaluate a query carrying measure-value filters (a `HAVING` clause).
+    ///
+    /// Runs the underlying query with the filters removed and **no** row limit
+    /// (so every group that could pass is present and already ordered), then
+    /// keeps only the rows whose measures satisfy the filters and applies the
+    /// limit — composing `order_by` + `limit` + filters into top-N-over-
+    /// threshold. Unsupported combinations (ROLLUP totals, calculation groups)
+    /// fail closed rather than mislead.
+    async fn query_with_measure_filters(
+        &self,
+        request: QueryRequest,
+        token: CancellationToken,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        if request.totals == TotalsMode::Rollup {
+            return Err(QueryError::InvalidQuery(
+                "measure-value filters are not supported with ROLLUP totals (a measure filter \
+                 would drop subtotal/grand-total rows by their aggregate value); request the \
+                 filtered detail and the totals separately"
+                    .into(),
+            ));
+        }
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "measure-value filters are not supported together with a calculation group; \
+                 apply the filter in a separate request"
+                    .into(),
+            ));
+        }
+        for mf in &request.measure_filters {
+            if !request
+                .measures
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(&mf.measure))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "measure-value filter references measure '{}', which is not in the request's \
+                     measures",
+                    mf.measure
+                )));
+            }
+        }
+
+        let mut inner = request.clone();
+        inner.measure_filters = Vec::new();
+        let limit = inner.limit.take();
+        let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
+
+        let filtered = apply_measure_value_filters(&batches, &request.measure_filters)?;
+        Ok(truncate_batches_to_limit(filtered, limit))
     }
 
     /// Return the **raw fact rows** behind a pivot cell (drillthrough /

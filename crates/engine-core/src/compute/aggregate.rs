@@ -236,22 +236,34 @@ async fn run_single_aggregate(
         // This code path is not normally reached for statistical aggregates
         // since they go through the SQL-based execution path.
         AggregateOp::AnyValue => min(col(column_name)),
+        AggregateOp::Mode => {
+            // DataFusion has no MODE aggregate. Returning MIN would be a
+            // silently-wrong number (the most-frequent value is unrelated to the
+            // minimum), so fail closed instead — matching the main query path,
+            // which errors on the unsupported `MODE(x)` SQL.
+            return Err(crate::error::EngineError::InvalidExpression(
+                "MODE aggregation is not supported by the compute engine (no mode function is \
+                 available); compute the most-frequent value in the host application"
+                    .to_string(),
+            ));
+        }
         AggregateOp::Median
         | AggregateOp::StdevSample
         | AggregateOp::StdevPop
         | AggregateOp::VarSample
-        | AggregateOp::VarPop
-        | AggregateOp::Mode => {
+        | AggregateOp::VarPop => {
+            // Use the genuine POPULATION functions for StdevPop/VarPop — not the
+            // sample ones (different N vs N-1 denominator). Matches the SQL path,
+            // which renders stddev_pop / var_pop.
             use datafusion::functions_aggregate::median::median;
-            use datafusion::functions_aggregate::stddev::stddev;
-            use datafusion::functions_aggregate::variance::var_sample;
+            use datafusion::functions_aggregate::stddev::{stddev, stddev_pop};
+            use datafusion::functions_aggregate::variance::{var_pop, var_sample};
             match operation {
                 AggregateOp::Median => median(col(column_name)),
                 AggregateOp::StdevSample => stddev(col(column_name)),
-                AggregateOp::StdevPop => stddev(col(column_name)), // approximate
+                AggregateOp::StdevPop => stddev_pop(col(column_name)),
                 AggregateOp::VarSample => var_sample(col(column_name)),
-                AggregateOp::VarPop => var_sample(col(column_name)), // approximate
-                AggregateOp::Mode => min(col(column_name)), // approximate: MODE not in DataFusion API
+                AggregateOp::VarPop => var_pop(col(column_name)),
                 _ => unreachable!(),
             }
         }
@@ -457,6 +469,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.as_f64(), Some(30.0));
+    }
+
+    #[tokio::test]
+    async fn population_stdev_and_variance_use_n_not_n_minus_1() {
+        // [10, 20, 30]: mean 20. Population variance = (100+0+100)/3 = 200/3;
+        // sample variance = 200/2 = 100. They must differ — the old code
+        // silently returned the sample value for the population op.
+        let data = create_test_table_with_amounts(vec![10.0, 20.0, 30.0]);
+
+        let var_pop = compute_aggregate(&data, "amount", AggregateOp::VarPop)
+            .await
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!(
+            (var_pop - 200.0 / 3.0).abs() < 1e-9,
+            "population variance must be 200/3, got {var_pop}"
+        );
+
+        let std_pop = compute_aggregate(&data, "amount", AggregateOp::StdevPop)
+            .await
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!(
+            (std_pop - (200.0f64 / 3.0).sqrt()).abs() < 1e-9,
+            "population stddev must be sqrt(200/3), got {std_pop}"
+        );
+
+        // Sanity: distinctly different from the sample variance (100).
+        let var_sample = compute_aggregate(&data, "amount", AggregateOp::VarSample)
+            .await
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!(
+            (var_sample - 100.0).abs() < 1e-9 && (var_pop - var_sample).abs() > 1.0,
+            "population and sample variance must differ"
+        );
+    }
+
+    #[tokio::test]
+    async fn mode_aggregate_fails_closed_instead_of_returning_min() {
+        // The most-frequent value is 10, the minimum is also 10 here — but the
+        // engine has no MODE, so it must error rather than silently return MIN
+        // (which would be a coincidence here and wrong in general).
+        let data = create_test_table_with_amounts(vec![30.0, 10.0, 10.0]);
+        let err = compute_aggregate(&data, "amount", AggregateOp::Mode)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::EngineError::InvalidExpression(_)),
+            "MODE must fail closed, got {err:?}"
+        );
     }
 
     #[tokio::test]

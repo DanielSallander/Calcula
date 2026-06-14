@@ -30,11 +30,11 @@ mod walkers;
 
 pub use builders::{
     agg, and, blank, block, call, clear, clear_except, clear_inner, clear_outer, coalesce, col,
-    compare, count_rows, datetime_fn, first_value, has_one_value, if_error, if_expr, index_expr,
-    is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars, lit, lit_bool,
-    lit_int, lit_str, not, offset_expr, or, percentile, period_shift, qualified_col, query_expr,
-    reset, reset_inner, reset_outer, safe_divide, scalar_fn, selected_value, switch, table_ref,
-    text_fn, to_date, traverse, use_relationship, using, window_expr, xor,
+    compare, count_rows, dates_in_period, datetime_fn, first_value, has_one_value, if_error,
+    if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars,
+    lit, lit_bool, lit_int, lit_str, not, offset_expr, or, percentile, period_shift, qualified_col,
+    query_expr, reset, reset_inner, reset_outer, safe_divide, scalar_fn, selected_value, switch,
+    table_ref, text_fn, to_date, traverse, use_relationship, using, window_expr, xor,
 };
 pub use functions::{DateTimeFunction, ScalarFunction};
 pub(crate) use functions::{
@@ -592,6 +592,35 @@ pub enum Expression {
         /// Periods to shift: negative = earlier, positive = later.
         offset: i64,
         /// The granularity of the shift.
+        granularity: DateGranularity,
+    },
+
+    /// Time-intelligence trailing window: `DATESINPERIOD` — the inner aggregate
+    /// over a window of `intervals` periods ending at the current context's
+    /// as-of date.
+    ///
+    /// ```text
+    /// DATESINPERIOD(SUM(fact[amount]), -12, "MONTH")   // trailing 12 months
+    /// ```
+    ///
+    /// `intervals` is signed (negative = trailing/backward, the common case);
+    /// the magnitude is the number of `granularity` periods in the window. The
+    /// window is half-open `[as_of + 1 day − |intervals| periods, as_of + 1 day)`
+    /// so the as-of date is included.
+    ///
+    /// **Filter-context only (v1):** evaluated by probing the as-of date from the
+    /// current date context and installing a concrete `DateKey` range (the same
+    /// machinery as filter-context `YTD`). It is **not** supported with a date
+    /// column on the group-by axis (a per-row moving window) — that fails closed
+    /// with [`EngineError::TimeIntelligence`]. Requires a Gregorian calendar
+    /// date table. Never rendered to SQL directly.
+    DatesInPeriod {
+        /// The inner measure expression to aggregate over the window.
+        expr: Box<Expression>,
+        /// Signed number of `granularity` periods in the window (negative =
+        /// trailing).
+        intervals: i64,
+        /// The window's period unit.
         granularity: DateGranularity,
     },
 

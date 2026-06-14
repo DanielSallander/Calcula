@@ -590,7 +590,8 @@ impl<'a> ProjectionCollector<'a> {
                         | Expression::Offset { .. }
                         | Expression::Index { .. }
                         | Expression::ToDate { .. }
-                        | Expression::PeriodShift { .. } => {
+                        | Expression::PeriodShift { .. }
+                        | Expression::DatesInPeriod { .. } => {
                             self.intermediate_tables.insert(name.to_lowercase());
                         }
                         _ => {
@@ -749,7 +750,8 @@ impl<'a> ProjectionCollector<'a> {
             // group_by (whose columns the planner always fetches), so only
             // the inner measure contributes column requirements.
             Expression::ToDate { expr: inner, .. }
-            | Expression::PeriodShift { expr: inner, .. } => self.walk(inner),
+            | Expression::PeriodShift { expr: inner, .. }
+            | Expression::DatesInPeriod { expr: inner, .. } => self.walk(inner),
             // UDF call: the function body is opaque, but its arguments are
             // ordinary expressions whose column requirements must be fetched.
             Expression::Call { args, .. } => {
