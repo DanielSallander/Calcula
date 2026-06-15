@@ -534,8 +534,15 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         },
       };
 
+    case "button":
+      return {
+        ...base,
+        instanceId,
+        onClick: (h: Handler) => registerHook(rt, "onClick", h),
+      };
+
     default:
-      // button / timeline / future types: base surface only.
+      // textbox / timeline / future types: base surface only.
       return base;
   }
 }

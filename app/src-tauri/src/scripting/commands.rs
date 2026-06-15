@@ -6,7 +6,91 @@
 use tauri::State;
 
 use crate::AppState;
+use crate::api_types::CellUpdateInput;
+use crate::persistence::{FileState, UserFilesState};
+use crate::{log_info, log_warn};
+use engine::{Cell, CellValue, Grid};
 use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptResponse, WorkbookScript};
+
+/// Render a cell as the input string a user would type to recreate it.
+///
+/// This is the inverse of `parse_cell_input_invariant`: a formula cell yields
+/// "=<formula>" with the formula rendered from the AST (invariant US format —
+/// '.' decimals, ',' argument separators), and a literal yields the plain text
+/// a user would enter. An empty/blank cell yields "".
+///
+/// Numbers render with '.' as the decimal separator (NOT locale-aware) because
+/// the resulting `CellUpdateInput` is fed back through the edit pipeline with
+/// `invariant = true`, which expects US-format input.
+fn cell_input_string(cell: &Cell) -> String {
+    if let Some(formula) = cell.formula_string() {
+        return format!("={}", formula);
+    }
+    match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Number(n) => {
+            // Render integers without a trailing ".0"; others via the default
+            // float formatting (always '.' decimal — invariant).
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{:.0}", n)
+            } else {
+                format!("{}", n)
+            }
+        }
+        CellValue::Text(s) => s.clone(),
+        CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        // Errors / collections have no clean user-typed input form. Fall back to
+        // their display string; this preserves the visible value through the
+        // edit pipeline (re-parsed as text) rather than losing the cell.
+        _ => cell.display_value(),
+    }
+}
+
+/// Diff two grids (before/after a script ran) into the minimal set of
+/// `CellUpdateInput`s needed to transform `before` into `after`.
+///
+/// The diff is keyed on the user-input string of each cell (see
+/// `cell_input_string`): a cell is considered changed when its effective input
+/// string differs between the two grids. Cells present in `before` but cleared
+/// in `after` produce an update with value "" (clear). The resulting updates
+/// carry `invariant = true` so the edit pipeline does not re-localize them.
+///
+/// Pure function (no Tauri State) so it is unit-testable without a running app.
+fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpdateInput> {
+    use std::collections::HashSet;
+
+    // Union of populated coordinates in both grids.
+    let mut coords: HashSet<(u32, u32)> = HashSet::new();
+    coords.extend(before.cells.keys().copied());
+    coords.extend(after.cells.keys().copied());
+
+    let mut updates = Vec::new();
+    for (row, col) in coords {
+        let before_str = before
+            .get_cell(row, col)
+            .map(cell_input_string)
+            .unwrap_or_default();
+        let after_str = after
+            .get_cell(row, col)
+            .map(cell_input_string)
+            .unwrap_or_default();
+
+        if before_str != after_str {
+            updates.push(CellUpdateInput {
+                row,
+                col,
+                value: after_str,
+                style_index: None,
+                invariant: Some(true),
+            });
+        }
+    }
+
+    // Deterministic ordering (row-major) — diffs come from a HashSet, so sort
+    // for stable behavior and reproducible logs/tests.
+    updates.sort_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
+    updates
+}
 
 /// Key under which the once-per-session "prompt" approval is stored in
 /// `ScriptState.permission_grants`.
@@ -80,13 +164,24 @@ pub fn grant_script_session_approval(
 /// Execute a script against the current spreadsheet state.
 ///
 /// 1. Clones the relevant AppState data (grids, styles, sheet names)
-/// 2. Runs the script in an isolated V8 runtime
-/// 3. If successful, applies grid changes back to AppState
+/// 2. Runs the script in an isolated QuickJS runtime (on a CLONE of the grids)
+/// 3. If successful, DIFFS the script's result against the live AppState and
+///    replays the changes through the normal edit pipeline
+///    (`update_cells_batch`) so they get formula parsing, dependency recalc,
+///    and a single undo entry — instead of a wholesale grid swap.
 /// 4. Returns the result to the frontend
+///
+/// The `file_state`, `user_files_state`, and `pivot_state` parameters exist
+/// solely so this command can forward them to `update_cells_batch`; Tauri
+/// injects them by type from the managed-state set, so no change to the
+/// `generate_handler!` registration is needed.
 #[tauri::command]
 pub fn run_script(
     state: State<AppState>,
     script_state: State<ScriptState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
     request: RunScriptRequest,
     window: tauri::Window,
 ) -> Result<RunScriptResponse, String> {
@@ -125,27 +220,84 @@ pub fn run_script(
         app_info,
     );
 
-    // 3. If successful and grids were modified, apply changes back
-    match &result {
-        script_engine::ScriptResult::Success { cells_modified, .. } => {
-            if *cells_modified > 0 && !modified_grids.is_empty() {
-                // Clone the active sheet grid before moving modified_grids
-                let active_grid_clone = modified_grids.get(active_sheet).cloned();
+    // 3. If successful and grids were modified, route the changes through the
+    //    edit pipeline so they get parsed, recalculated, and made undoable.
+    //
+    //    The engine ran on a CLONE; AppState still holds the ORIGINAL grids, so
+    //    AppState IS the "before". We diff the active sheet before -> after and
+    //    replay it via update_cells_batch (single undo entry + recalc). Writes
+    //    to non-active sheets are applied wholesale as a documented v1 limit
+    //    (no per-sheet undo/recalc for off-screen sheets yet).
+    if let script_engine::ScriptResult::Success { cells_modified, .. } = &result {
+        if *cells_modified > 0 && !modified_grids.is_empty() {
+            // Build the active-sheet diff WITHOUT mutating AppState. Hold the
+            // AppState grid locks only long enough to compute the diff, then
+            // drop them BEFORE calling update_cells_batch (which takes its own
+            // locks) to avoid a deadlock.
+            let updates: Vec<CellUpdateInput> = {
+                let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+                let empty_grid = Grid::new();
+                let before_active = app_grids.get(active_sheet).unwrap_or(&empty_grid);
+                match modified_grids.get(active_sheet) {
+                    Some(after_active) => diff_grids_to_updates(before_active, after_active),
+                    None => Vec::new(),
+                }
+            };
 
-                // Update the multi-sheet grids vector (original behavior)
+            // Apply non-active-sheet writes wholesale (documented v1 limit:
+            // not undoable / not recalc-tracked). Only touch sheets that
+            // actually differ; leave the active sheet for the batch path.
+            {
                 let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
-                *app_grids = modified_grids;
+                let mut wholesale_sheets = 0usize;
+                let empty_grid = Grid::new();
+                for (idx, after_grid) in modified_grids.iter().enumerate() {
+                    if idx == active_sheet {
+                        continue;
+                    }
+                    // `Cell` has no PartialEq, so compare via the input-string
+                    // diff: a non-empty diff means this sheet changed. Scope the
+                    // immutable borrow so the mutable write below is allowed.
+                    let differs = {
+                        let before_grid = app_grids.get(idx).unwrap_or(&empty_grid);
+                        !diff_grids_to_updates(before_grid, after_grid).is_empty()
+                    };
+                    if differs {
+                        if idx < app_grids.len() {
+                            app_grids[idx] = after_grid.clone();
+                        }
+                        wholesale_sheets += 1;
+                    }
+                }
                 drop(app_grids);
-
-                // Sync the active sheet into state.grid so that
-                // get_viewport_cells / get_cell return the updated data
-                if let Some(grid) = active_grid_clone {
-                    let mut app_grid = state.grid.lock().map_err(|e| e.to_string())?;
-                    *app_grid = grid;
+                if wholesale_sheets > 0 {
+                    log_warn!(
+                        "SCRIPT",
+                        "run_script wrote {} non-active sheet(s) wholesale: these writes are NOT undoable or recalc-tracked yet (v1 limit)",
+                        wholesale_sheets
+                    );
                 }
             }
+
+            // Replay the active-sheet diff through the edit pipeline. All
+            // AppState locks acquired above are now dropped.
+            if !updates.is_empty() {
+                let cell_count = updates.len();
+                crate::commands::data::update_cells_batch(
+                    state.clone(),
+                    file_state.clone(),
+                    user_files_state.clone(),
+                    pivot_state.clone(),
+                    updates,
+                    None,
+                )?;
+                log_info!(
+                    "SCRIPT",
+                    "run_script applied {} active-sheet cell change(s) via edit pipeline (parsed + recalc + undoable)",
+                    cell_count
+                );
+            }
         }
-        _ => {}
     }
 
     // 4. Convert to response type
@@ -303,4 +455,89 @@ pub fn rename_script(
 
     script.name = new_name;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::Cell;
+
+    /// A changed literal value produces an update carrying the new literal,
+    /// flagged invariant so the edit pipeline does not re-localize it.
+    #[test]
+    fn test_diff_changed_literal() {
+        let mut before = Grid::new();
+        before.set_cell(0, 0, Cell::new_number(1.0));
+        let mut after = Grid::new();
+        after.set_cell(0, 0, Cell::new_number(42.0));
+
+        let updates = diff_grids_to_updates(&before, &after);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].row, 0);
+        assert_eq!(updates[0].col, 0);
+        assert_eq!(updates[0].value, "42");
+        assert_eq!(updates[0].invariant, Some(true));
+        assert_eq!(updates[0].style_index, None);
+    }
+
+    /// A changed formula produces an update whose value is the "=" + formula
+    /// string (so the pipeline re-parses it into an AST and tracks deps).
+    #[test]
+    fn test_diff_changed_formula() {
+        let mut before = Grid::new();
+        before.set_cell(2, 0, Cell::new_number(0.0));
+        let mut after = Grid::new();
+        after.set_cell(2, 0, Cell::new_formula("SUM(A1:A2)".to_string()));
+
+        let updates = diff_grids_to_updates(&before, &after);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].row, 2);
+        assert_eq!(updates[0].col, 0);
+        // Rendered from the AST in invariant form, with the leading "=".
+        assert_eq!(updates[0].value, "=SUM(A1:A2)");
+        assert_eq!(updates[0].invariant, Some(true));
+    }
+
+    /// A cell present in `before` but cleared in `after` produces a clear
+    /// (value "").
+    #[test]
+    fn test_diff_deleted_cell() {
+        let mut before = Grid::new();
+        before.set_cell(0, 0, Cell::new_text("hello".to_string()));
+        let after = Grid::new();
+
+        let updates = diff_grids_to_updates(&before, &after);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].row, 0);
+        assert_eq!(updates[0].col, 0);
+        assert_eq!(updates[0].value, "");
+        assert_eq!(updates[0].invariant, Some(true));
+    }
+
+    /// Unchanged cells produce no updates.
+    #[test]
+    fn test_diff_no_change() {
+        let mut before = Grid::new();
+        before.set_cell(0, 0, Cell::new_number(5.0));
+        before.set_cell(1, 1, Cell::new_text("x".to_string()));
+        let after = before.clone();
+
+        let updates = diff_grids_to_updates(&before, &after);
+        assert!(updates.is_empty());
+    }
+
+    /// A newly-added cell (absent in `before`) produces an update with its
+    /// literal value.
+    #[test]
+    fn test_diff_added_cell() {
+        let before = Grid::new();
+        let mut after = Grid::new();
+        after.set_cell(3, 4, Cell::new_boolean(true));
+
+        let updates = diff_grids_to_updates(&before, &after);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].row, 3);
+        assert_eq!(updates[0].col, 4);
+        assert_eq!(updates[0].value, "TRUE");
+    }
 }

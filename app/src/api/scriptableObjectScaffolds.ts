@@ -222,11 +222,16 @@ function setup(pivot) {
 // Access level: restricted
 
 function setup(button) {
-  // == Custom Methods ==
-  // button.expose("onClick", () => {
-  //   button.log("Button clicked!");
-  //   button.notify("Hello from button!", "info");
-  // });
+  // == Events ==
+  // Runs your code when the user clicks the button (the classic VBA move).
+  button.onClick(({ x, y }) => {
+    button.notify("Button clicked!", "success");
+    // Unlocked scripts can touch the grid here, e.g.:
+    // button.api?.setCellValue(0, 0, "clicked");
+  });
+
+  // == Custom Methods (callable by other scripts) ==
+  // button.expose("reset", () => button.log("reset"));
 }
 `;
 

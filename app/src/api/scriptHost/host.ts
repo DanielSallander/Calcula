@@ -1133,6 +1133,15 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       }));
       break;
 
+    // ---- button ----
+    case "button.onClick":
+      addForwarder(mw, hook, onAppEvent("button:clicked", (detail) => {
+        const d = detail as { instanceId: string; x: number; y: number };
+        if (d.instanceId !== instanceId) return;
+        forwardEvent(mw, hook, { x: d.x, y: d.y });
+      }));
+      break;
+
     // ---- shape ----
     case "shape.onClick":
       addForwarder(mw, hook, onAppEvent("shape:clicked", (detail) => {

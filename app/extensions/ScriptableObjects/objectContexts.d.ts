@@ -321,6 +321,16 @@ declare interface ShapeRenderBounds {
 }
 
 /** Context for Shape control instances. */
+/** Context for Button instances — the canonical "click a button, run your
+ *  code" surface (the #1 VBA entry point). Unlocked scripts can touch the grid
+ *  via `api`; all scripts can `notify`, `log`, and `expose` methods. */
+declare interface ButtonContext extends BaseObjectContext {
+  /** Unique instance ID (e.g., "control-0-5-10"). */
+  readonly instanceId: string;
+  /** Called when the button is clicked (run mode). */
+  onClick(handler: (detail: { x: number; y: number }) => void): () => void;
+}
+
 declare interface ShapeContext extends BaseObjectContext {
   /** Unique instance ID (e.g., "control-0-195-2"). */
   readonly instanceId: string;

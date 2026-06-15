@@ -612,6 +612,18 @@ export interface ShapeContext extends BaseObjectContext {
   };
 }
 
+/** Context for Button control instances — the canonical "click a button, run
+ *  your code" surface (the #1 VBA entry point). The handler can read/write the
+ *  grid via `api` (unlocked scripts), `notify`, call exposed methods, etc. */
+export interface ButtonContext extends BaseObjectContext {
+  readonly objectType: "button";
+  /** Unique instance ID (e.g., "control-0-5-10"). */
+  readonly instanceId: string;
+
+  /** Called when the button is clicked (run mode). */
+  onClick(handler: EventHandler<{ x: number; y: number }>): CleanupFn;
+}
+
 // ============================================================================
 // Context Type Map (for generic access)
 // ============================================================================
@@ -626,7 +638,7 @@ export interface ObjectContextMap {
   slicer: SlicerContext;
   chart: ChartContext;
   pivot: PivotContext;
-  button: BaseObjectContext;
+  button: ButtonContext;
   textbox: BaseObjectContext;
   timeline: BaseObjectContext;
   shape: ShapeContext;

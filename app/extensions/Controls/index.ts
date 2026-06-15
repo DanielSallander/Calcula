@@ -1347,6 +1347,8 @@ function setupFloatingObjectEvents(): void {
       // Run mode: only buttons execute scripts
       if (ctrlType === "button") {
         executeFloatingButtonAction(controlSheet, controlRow, controlCol);
+        // Fire the scriptable button's onClick hook (the #1 VBA entry point).
+        emitAppEvent("button:clicked", { instanceId: controlId, x: 0, y: 0 });
       }
       // Emit shape click event for scriptable objects (run mode too)
       if (ctrlType === "shape") {
