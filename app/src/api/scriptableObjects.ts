@@ -758,6 +758,15 @@ export interface TableContext extends BaseObjectContext {
   /** Append a new data row to the table (async, undoable). */
   addRow(): Promise<void>;
 
+  /**
+   * A canonical-model Range over the table's data body, in TABLE-RELATIVE
+   * coordinates (row 0 = first data row, col 0 = first table column). The same
+   * ScriptRange the sheet context exposes: `table.range("A1:C5").getValues()`.
+   */
+  range(address: string): ScriptRange;
+  /** A single table cell (0-based data row + column index) as a ScriptRange. */
+  cell(row: number, colIndex: number): ScriptRange;
+
   /** Table properties (read-only, mirror-backed). */
   readonly properties: {
     readonly name: string;

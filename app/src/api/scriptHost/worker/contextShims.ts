@@ -581,7 +581,15 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         onClick: (h: Handler) => registerHook(rt, "onClick", h),
       };
 
-    case "table":
+    case "table": {
+      // Canonical-model facet (C3 polish): a Range over the table's data body in
+      // TABLE-RELATIVE coordinates (row 0 = first data row, col 0 = first table
+      // column), backed by the same own-object table.getCellValue/setCellValue
+      // aspects the flat methods use — pure sugar, no new privileged surface.
+      const readCell = (row: number, col: number): Promise<string> =>
+        getState(rt, "table.getCellValue", [row, col]) as Promise<string>;
+      const writeCell = (row: number, col: number, value: string): Promise<void> =>
+        setState(rt, "table.setCellValue", [row, col, value]) as Promise<void>;
       return {
         ...base,
         instanceId,
@@ -593,12 +601,22 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         setCellValue: (row: number, colIndex: number, value: string) =>
           setState(rt, "table.setCellValue", [row, colIndex, value]),
         addRow: () => setState(rt, "table.addRow", []),
+        range: (address: string): ScriptRange =>
+          rangeFromAddress(readCell, writeCell, address),
+        cell: (row: number, colIndex: number): ScriptRange =>
+          makeRange(readCell, writeCell, {
+            startRow: row,
+            startCol: colIndex,
+            endRow: row,
+            endCol: colIndex,
+          }),
         properties: {
           get name() { return mirror(rt, "table.name", ""); },
           get sheetIndex() { return mirror(rt, "table.sheetIndex", 0); },
           get rowCount() { return mirror(rt, "table.rowCount", 0); },
         },
       };
+    }
 
     case "namedRange":
       return {
