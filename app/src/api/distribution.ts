@@ -532,6 +532,26 @@ export function setSubmissionState(
   });
 }
 
+/** One submission row for the publisher data-collection dashboard (D5). */
+export interface RegionSubmission {
+  regionId: string;
+  cellRow: number;
+  cellCol: number;
+  submitterId: string;
+  submitterName: string;
+  valueDisplay: string;
+  valueKind: "number" | "text" | "boolean" | "empty";
+  state: "draft" | "submitted" | "approved" | "rejected";
+  submittedAt: string | null;
+  updatedAt: string;
+}
+
+/** Load every submission for a writeback region across all submitters — the
+ *  publisher's "see all" view (D5). Not filtered by per-subscriber visibility. */
+export function loadRegionSubmissions(regionId: string): Promise<RegionSubmission[]> {
+  return invokeBackend("calp_load_region_submissions", { regionId });
+}
+
 // ============================================================================
 // Live Data Sources
 // ============================================================================

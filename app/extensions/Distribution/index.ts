@@ -7,11 +7,13 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { AppEvents } from "@api/events";
 import { OverridesPane } from "./components/OverridesPane";
 import { SubscriptionManagerPane } from "./components/SubscriptionManagerPane";
+import { PublisherDashboardPane } from "./components/PublisherDashboardPane";
 import {
   DistributionManifest,
   OVERRIDES_PANE_ID,
   WRITEBACK_PANE_ID,
   SUBSCRIPTIONS_PANE_ID,
+  PUBLISHER_DASHBOARD_PANE_ID,
   PUBLISH_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
@@ -93,6 +95,17 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(SUBSCRIPTIONS_PANE_ID));
 
+  // Register the Publisher data-collection dashboard task pane (D5)
+  context.ui.taskPanes.register({
+    id: PUBLISHER_DASHBOARD_PANE_ID,
+    title: "Responses",
+    component: PublisherDashboardPane,
+    contextKeys: ["always"],
+    priority: 33,
+    closable: true,
+  });
+  cleanupFns.push(() => context.ui.taskPanes.unregister(PUBLISHER_DASHBOARD_PANE_ID));
+
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
@@ -135,6 +148,16 @@ function activate(context: ExtensionContext): void {
       context.ui.taskPanes.showContainer();
     },
     order: 903,
+  });
+
+  context.ui.menus.registerItem("data", {
+    id: "data:showPublisherDashboard",
+    label: "Collected Responses...",
+    action: () => {
+      context.ui.taskPanes.open(PUBLISHER_DASHBOARD_PANE_ID);
+      context.ui.taskPanes.showContainer();
+    },
+    order: 903.5,
   });
 
   context.ui.menus.registerItem("data", {

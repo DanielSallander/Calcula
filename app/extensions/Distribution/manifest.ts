@@ -13,6 +13,7 @@ export const DISTRIBUTION_EXTENSION_ID = "calcula.distribution";
 export const OVERRIDES_PANE_ID = "distribution:overrides";
 export const WRITEBACK_PANE_ID = "distribution:writeback";
 export const SUBSCRIPTIONS_PANE_ID = "distribution:subscriptions";
+export const PUBLISHER_DASHBOARD_PANE_ID = "distribution:publisherDashboard";
 
 export const DistributionManifest: AddInManifest = {
   id: DISTRIBUTION_EXTENSION_ID,

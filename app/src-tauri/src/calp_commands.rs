@@ -2516,6 +2516,99 @@ pub fn calp_set_submission_state(
     Ok(())
 }
 
+/// A submission row for the publisher data-collection dashboard (D5).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionSubmissionInfo {
+    pub region_id: String,
+    pub cell_row: u32,
+    pub cell_col: u32,
+    pub submitter_id: String,
+    pub submitter_name: String,
+    pub value_display: String,
+    pub value_kind: String,
+    pub state: String,
+    pub submitted_at: Option<String>,
+    pub updated_at: String,
+}
+
+/// Load EVERY submission for a writeback region across all submitters — the
+/// publisher's "see all" view for the data-collection dashboard (D5). Unlike the
+/// GATHER path, this is not filtered by per-subscriber visibility: a region's
+/// owner manages all of it. Resolves the owning subscription (package + version +
+/// registry) for the region, then collects the current record per (submitter,
+/// cell) slot across the resolved version and older ones (lenient carry-forward).
+#[tauri::command]
+pub fn calp_load_region_submissions(
+    state: State<AppState>,
+    region_id: String,
+    window: tauri::Window,
+) -> Result<Vec<RegionSubmissionInfo>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    use calp::writeback::{SubmissionState, SubmissionValue};
+
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(&state, &region_id)?;
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let mut versions = vec![resolved_version.clone()];
+    versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
+
+    // Newest version first: keep the current record per (submitter, cell) slot.
+    let mut by_slot: std::collections::HashMap<(String, u32, u32), calp::writeback::WritebackSubmission> =
+        std::collections::HashMap::new();
+    for version in &versions {
+        if let Ok(subs) = registry.load_region_submissions(&package_name, version, &region_id) {
+            for s in subs {
+                by_slot
+                    .entry((s.submitter.id.clone(), s.cell_row, s.cell_col))
+                    .or_insert(s);
+            }
+        }
+    }
+
+    let mut out: Vec<RegionSubmissionInfo> = by_slot
+        .into_values()
+        .map(|s| {
+            let (value_display, value_kind) = match &s.value {
+                SubmissionValue::Number { value } => (value.to_string(), "number"),
+                SubmissionValue::Text { value } => (value.clone(), "text"),
+                SubmissionValue::Boolean { value } => {
+                    ((if *value { "TRUE" } else { "FALSE" }).to_string(), "boolean")
+                }
+                SubmissionValue::Empty => (String::new(), "empty"),
+            };
+            let state = match s.state {
+                SubmissionState::Draft => "draft",
+                SubmissionState::Submitted => "submitted",
+                SubmissionState::Approved => "approved",
+                SubmissionState::Rejected => "rejected",
+            };
+            RegionSubmissionInfo {
+                region_id: s.region_id,
+                cell_row: s.cell_row,
+                cell_col: s.cell_col,
+                submitter_id: s.submitter.id,
+                submitter_name: s.submitter.display_name,
+                value_display,
+                value_kind: value_kind.to_string(),
+                state: state.to_string(),
+                submitted_at: s.submitted_at,
+                updated_at: s.updated_at,
+            }
+        })
+        .collect();
+    // Stable ordering: by submitter then cell.
+    out.sort_by(|a, b| {
+        a.submitter_name
+            .cmp(&b.submitter_name)
+            .then(a.cell_row.cmp(&b.cell_row))
+            .then(a.cell_col.cmp(&b.cell_col))
+    });
+    Ok(out)
+}
+
 /// Build a GatherRegionData map from the current subscriptions for formula evaluation.
 /// This is the pre-fetch step: load all submission data from the registry once,
 /// so GATHER functions can look it up synchronously during evaluation.

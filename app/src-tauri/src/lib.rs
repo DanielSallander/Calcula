@@ -4296,6 +4296,7 @@ pub fn run() {
             calp_commands::calp_get_writeback_layer,
             calp_commands::calp_submit_region,
             calp_commands::calp_set_submission_state,
+            calp_commands::calp_load_region_submissions,
             calp_commands::calp_refresh_data,
             calp_commands::calp_save_data_source_config,
             calp_commands::calp_get_data_sources,
