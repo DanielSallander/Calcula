@@ -10,6 +10,8 @@ import type { PanelPlacement } from "../../api/uiTypes";
 import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "../Ribbon/PanelContextMenu";
 import { emitAppEvent } from "../../api/events";
+import { hasObjectScript, onObjectScriptPresenceChange } from "../../api/objectScriptBadge";
+import { getDesignMode, onDesignModeChange } from "../../api/designMode";
 
 const ACTIVITY_BAR_WIDTH = 48;
 
@@ -24,6 +26,8 @@ export function ActivityBar(): React.ReactElement {
     top: ActivityViewDefinition[];
     bottom: ActivityViewDefinition[];
   }>({ top: [], bottom: [] });
+  // Bumped to re-render when script presence or design mode changes (T4 badge).
+  const [, setScriptTick] = useState(0);
 
   // Subscribe to registry changes
   useEffect(() => {
@@ -37,7 +41,19 @@ export function ActivityBar(): React.ReactElement {
     const unsub1 = ActivityBarExtensions.onRegistryChange(update);
     // Also re-render on panelRegistry changes (badge updates, etc.)
     const unsub2 = panelRegistry.onRegistryChange(update);
-    return () => { unsub1(); unsub2(); };
+    // T4: re-render the script-presence badge when scripts or design mode change.
+    const bump = () => setScriptTick((t) => t + 1);
+    const unsub3 = onObjectScriptPresenceChange(bump);
+    const unsub4 = onDesignModeChange(bump);
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
+  }, []);
+
+  // Whether a panel-backed activity view has a script attached (design mode only) —
+  // the T4 "code on the object" badge, mirroring slicers/charts/shapes.
+  const viewHasScript = useCallback((viewId: string): boolean => {
+    if (!getDesignMode()) return false;
+    const panelId = panelRegistry.getPanelByDownstreamId(viewId)?.id;
+    return !!panelId && hasObjectScript("panel", panelId);
   }, []);
 
   const handleIconClick = useCallback(
@@ -97,6 +113,7 @@ export function ActivityBar(): React.ReactElement {
             view={view}
             isActive={isOpen && activeViewId === view.id}
             badge={panelRegistry.getBadge(view.id)}
+            hasScript={viewHasScript(view.id)}
             onClick={handleIconClick}
             onContextMenu={handleIconContextMenu}
           />
@@ -111,6 +128,7 @@ export function ActivityBar(): React.ReactElement {
             view={view}
             isActive={isOpen && activeViewId === view.id}
             badge={panelRegistry.getBadge(view.id)}
+            hasScript={viewHasScript(view.id)}
             onClick={handleIconClick}
             onContextMenu={handleIconContextMenu}
           />
@@ -139,12 +157,14 @@ function ActivityBarIcon({
   view,
   isActive,
   badge,
+  hasScript,
   onClick,
   onContextMenu,
 }: {
   view: ActivityViewDefinition;
   isActive: boolean;
   badge?: string;
+  hasScript?: boolean;
   onClick: (viewId: string) => void;
   onContextMenu?: (e: React.MouseEvent, viewId: string) => void;
 }): React.ReactElement {
@@ -179,6 +199,13 @@ function ActivityBarIcon({
       {badge && (
         <div style={styles.badge}>
           {badge}
+        </div>
+      )}
+
+      {/* T4: script-presence badge (design mode) — this panel has a script. */}
+      {hasScript && (
+        <div style={styles.scriptBadge} title="This panel has a script">
+          JS
         </div>
       )}
     </button>
@@ -261,6 +288,26 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     lineHeight: 1,
     fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  },
+  // Script-presence pill (top-right, distinct from the bottom-right notification badge).
+  scriptBadge: {
+    position: "absolute" as const,
+    top: 5,
+    right: 5,
+    minWidth: 13,
+    height: 13,
+    padding: "0 3px",
+    borderRadius: 3,
+    backgroundColor: "rgba(0, 120, 212, 0.9)",
+    color: "#fff",
+    fontSize: 8,
+    fontWeight: 700,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 1,
+    letterSpacing: "0.03em",
+    pointerEvents: "none" as const,
   },
 };
 
