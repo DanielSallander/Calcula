@@ -3,7 +3,6 @@
 //! CONTEXT: The author selects sheets to publish, specifies a version, and
 //! the content is written to the registry as an immutable version directory.
 
-use std::fs;
 use std::path::Path;
 
 use identity::EntityId;
@@ -11,8 +10,8 @@ use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNo
 
 use crate::error::CalpError;
 use crate::manifest::*;
-use crate::registry::LocalRegistry;
 use crate::signing::PublisherKeypair;
+use crate::transport::RegistryTransport;
 use crate::version::SemVer;
 
 /// A data source to embed in the published package.
@@ -89,7 +88,7 @@ pub struct PublishResult {
 /// version manifest carries the publisher's public key, and its raw on-disk
 /// bytes are signed into a detached `version-manifest.sig` (S5 phase 2).
 pub fn publish(
-    registry: &LocalRegistry,
+    registry: &dyn RegistryTransport,
     request: &PublishRequest,
     profile_dir: &Path,
 ) -> Result<PublishResult, CalpError> {
@@ -240,20 +239,19 @@ pub fn publish(
 
     // The version manifest is written LAST (it is the integrity root and the
     // publish commit point — version_exists() keys off it). If the version
-    // directory already exists without a manifest, it is debris from a
-    // crashed earlier publish: clear it so stale files can't end up unlisted
-    // in the checksum map.
-    let ver_dir = registry.version_dir(&request.package_name, &version_str)?;
-    if ver_dir.exists() {
-        fs::remove_dir_all(&ver_dir)?;
-    }
-    fs::create_dir_all(&ver_dir)?;
+    // already has artifacts without a manifest, that is debris from a crashed
+    // earlier publish: clear it so stale files can't end up unlisted in the
+    // checksum map. Through the transport, never the filesystem directly.
+    let pkg = request.package_name.as_str();
+    let ver = version_str.as_str();
+    registry.clear_version(pkg, ver)?;
 
     // Write sheet data (cells, styles, layout as JSON)
     for &idx in &request.sheet_indices {
         let sheet = &request.workbook.sheets[idx];
-        let sheet_dir = registry.sheet_dir(&request.package_name, &version_str, &sheet.id)?;
-        fs::create_dir_all(&sheet_dir)?;
+        // Version-relative artifact prefix for this sheet (forward slashes — the
+        // manifest checksum-key convention). sheet.id is a path-safe UUID v7.
+        let sheet_prefix = format!("sheets/{}", sheet.id);
 
         // Filter out cells in excluded regions (e.g., pivot output areas).
         // These cells are recalculated by subscribers from the pivot definition.
@@ -278,51 +276,62 @@ pub fn publish(
 
         // Cell data
         let cell_data = calcula_format::sheet_data::cells_to_sheet_data(&cells);
-        fs::write(sheet_dir.join("data.json"), serde_json::to_string_pretty(&cell_data)?)?;
+        registry.write_artifact(
+            pkg, ver,
+            &format!("{sheet_prefix}/data.json"),
+            serde_json::to_string_pretty(&cell_data)?.as_bytes(),
+        )?;
 
         // Styles
-        fs::write(sheet_dir.join("styles.json"), serde_json::to_string_pretty(&sheet.styles)?)?;
+        registry.write_artifact(
+            pkg, ver,
+            &format!("{sheet_prefix}/styles.json"),
+            serde_json::to_string_pretty(&sheet.styles)?.as_bytes(),
+        )?;
 
         // Layout (column widths + row heights as simple JSON)
         let layout = calcula_format::sheet_layout::SheetLayout::from_dimensions(
             &sheet.column_widths,
             &sheet.row_heights,
         );
-        fs::write(sheet_dir.join("layout.json"), serde_json::to_string_pretty(&layout)?)?;
+        registry.write_artifact(
+            pkg, ver,
+            &format!("{sheet_prefix}/layout.json"),
+            serde_json::to_string_pretty(&layout)?.as_bytes(),
+        )?;
 
         // Presentation metadata (D9): merged regions, freeze panes, hidden
         // rows/cols, tab color, visibility, notes, hyperlinks, page setup,
         // gridlines. Written before the manifest, so the integrity walk
         // checksums it and pull restores it instead of dropping it.
         let metadata = crate::manifest::PublishedSheetMetadata::from_sheet(sheet);
-        fs::write(
-            sheet_dir.join("metadata.json"),
-            serde_json::to_string_pretty(&metadata)?,
+        registry.write_artifact(
+            pkg, ver,
+            &format!("{sheet_prefix}/metadata.json"),
+            serde_json::to_string_pretty(&metadata)?.as_bytes(),
         )?;
     }
 
     // Write tables
     for table in &published_tables {
-        let tables_dir = registry.tables_dir(&request.package_name, &version_str)?;
-        fs::create_dir_all(&tables_dir)?;
-        fs::write(
-            tables_dir.join(format!("{}.json", table.id)),
-            serde_json::to_string_pretty(table)?,
+        registry.write_artifact(
+            pkg, ver,
+            &format!("tables/{}.json", table.id),
+            serde_json::to_string_pretty(table)?.as_bytes(),
         )?;
     }
 
     // Write named ranges
     if !named_ranges.is_empty() {
-        fs::write(
-            ver_dir.join("named_ranges.json"),
-            serde_json::to_string_pretty(&named_ranges)?,
+        registry.write_artifact(
+            pkg, ver,
+            "named_ranges.json",
+            serde_json::to_string_pretty(&named_ranges)?.as_bytes(),
         )?;
     }
 
     // Write object scripts
     if !scripts_to_publish.is_empty() {
-        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str)?;
-        fs::create_dir_all(&scripts_dir)?;
         for script in &scripts_to_publish {
             let mut def = calcula_format::features::object_scripts::ObjectScriptDef::from(*script);
             // Packages ship provenance-clean: the subscriber stamps
@@ -330,9 +339,10 @@ pub fn publish(
             // workbook that itself contains pulled (distributed) scripts.
             def.provenance = Default::default();
             def.package_name = None;
-            fs::write(
-                scripts_dir.join(format!("{}.json", script.id)),
-                serde_json::to_string_pretty(&def)?,
+            registry.write_artifact(
+                pkg, ver,
+                &format!("object_scripts/{}.json", script.id),
+                serde_json::to_string_pretty(&def)?.as_bytes(),
             )?;
         }
     }
@@ -343,17 +353,16 @@ pub fn publish(
     // capability stamping. Written BEFORE the manifest so the integrity walk
     // checksums them and the Ed25519 signature seals them.
     if !modules_to_publish.is_empty() {
-        let modules_dir = registry.modules_dir(&request.package_name, &version_str)?;
-        fs::create_dir_all(&modules_dir)?;
         for script in &modules_to_publish {
             let mut def = calcula_format::features::scripts::ScriptDef::from(*script);
             // Clear any distribution provenance: the SUBSCRIBER stamps this with
             // the new package name on pull. A publisher who in turn subscribed to
             // some upstream package must not leak that upstream attribution.
             def.source_package = None;
-            fs::write(
-                modules_dir.join(format!("{}.json", script.id)),
-                serde_json::to_string_pretty(&def)?,
+            registry.write_artifact(
+                pkg, ver,
+                &format!("modules/{}.json", script.id),
+                serde_json::to_string_pretty(&def)?.as_bytes(),
             )?;
         }
     }
@@ -365,8 +374,6 @@ pub fn publish(
     // cell id + source ship. Written BEFORE the manifest so they are covered
     // by the integrity checksums and the Ed25519 signature.
     if !notebooks_to_publish.is_empty() {
-        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str)?;
-        fs::create_dir_all(&notebooks_dir)?;
         for notebook in &notebooks_to_publish {
             let mut def = calcula_format::features::notebooks::NotebookDef::from(*notebook);
             // Clear provenance (subscriber re-stamps on pull) + strip exec metadata.
@@ -378,64 +385,66 @@ pub fn publish(
                 cell.duration_ms = 0;
                 cell.execution_index = None;
             }
-            fs::write(
-                notebooks_dir.join(format!("{}.json", notebook.id)),
-                serde_json::to_string_pretty(&def)?,
+            registry.write_artifact(
+                pkg, ver,
+                &format!("notebooks/{}.json", notebook.id),
+                serde_json::to_string_pretty(&def)?.as_bytes(),
             )?;
         }
     }
 
     // Write pivot definitions
     if !request.workbook.pivot_definitions.is_empty() {
-        let pivot_dir = ver_dir.join("pivot_definitions");
-        fs::create_dir_all(&pivot_dir)?;
         for pivot_def in &request.workbook.pivot_definitions {
-            fs::write(
-                pivot_dir.join(format!("{}.json", pivot_def.id)),
-                serde_json::to_string_pretty(pivot_def)?,
+            registry.write_artifact(
+                pkg, ver,
+                &format!("pivot_definitions/{}.json", pivot_def.id),
+                serde_json::to_string_pretty(pivot_def)?.as_bytes(),
             )?;
         }
     }
 
     // Write BI pivot metadata (needed for BI-connected pivots)
     if !request.workbook.bi_pivot_metadata.is_empty() {
-        let pivot_dir = ver_dir.join("pivot_definitions");
-        fs::create_dir_all(&pivot_dir)?;
-        fs::write(
-            pivot_dir.join("bi_metadata.json"),
-            serde_json::to_string_pretty(&request.workbook.bi_pivot_metadata)?,
+        registry.write_artifact(
+            pkg, ver,
+            "pivot_definitions/bi_metadata.json",
+            serde_json::to_string_pretty(&request.workbook.bi_pivot_metadata)?.as_bytes(),
         )?;
     }
 
     // Write embedded data source models
     for ds in &request.data_sources {
-        let model_dir = ver_dir.join("models").join(&ds.id);
-        fs::create_dir_all(&model_dir)?;
-        fs::write(
-            model_dir.join("model.json"),
-            serde_json::to_string_pretty(&ds.model_json)?,
+        registry.write_artifact(
+            pkg, ver,
+            &format!("models/{}/model.json", ds.id),
+            serde_json::to_string_pretty(&ds.model_json)?.as_bytes(),
         )?;
     }
 
     // All artifacts are on disk in final form: compute SHA-256 checksums over
-    // the actual bytes, then write the version manifest LAST. The manifest is
-    // the integrity root — it cannot contain its own hash, so it covers all
-    // OTHER artifacts and is itself the commit point of the publish.
+    // the actual bytes via the transport, then write the version manifest LAST.
+    // The manifest is the integrity root — it cannot contain its own hash, so it
+    // covers all OTHER artifacts and is itself the commit point of the publish.
     version_manifest.artifact_checksums =
-        crate::integrity::compute_artifact_checksums(&ver_dir)?;
-    registry.write_version_manifest(&request.package_name, &version_str, &version_manifest)?;
+        crate::integrity::compute_artifact_checksums_via(registry, pkg, ver)?;
+    registry.write_version_manifest(pkg, ver, &version_manifest)?;
 
     // S5 phase 2: seal the integrity root. Sign the RAW bytes of
-    // version-manifest.json AS WRITTEN TO DISK (read it back — re-serializing
-    // the in-memory manifest may not be byte-identical to what write_version_
-    // manifest produced). The detached signature lands in the sibling
-    // version-manifest.sig, completing the publish.
-    let manifest_path = ver_dir.join(crate::integrity::VERSION_MANIFEST_FILE);
-    let manifest_bytes = fs::read(&manifest_path)?;
+    // version-manifest.json AS WRITTEN (read it back via the transport —
+    // re-serializing the in-memory manifest may not be byte-identical to what
+    // write_version_manifest produced). The detached signature lands in the
+    // sibling version-manifest.sig, completing the publish.
+    let manifest_bytes = registry
+        .read_artifact(pkg, ver, crate::integrity::VERSION_MANIFEST_FILE)?
+        .ok_or_else(|| CalpError::Registry(format!(
+            "version manifest missing immediately after write for {pkg}@{ver}"
+        )))?;
     let signature_hex = keypair.sign(&manifest_bytes);
-    fs::write(
-        ver_dir.join(crate::integrity::VERSION_MANIFEST_SIG_FILE),
-        signature_hex,
+    registry.write_artifact(
+        pkg, ver,
+        crate::integrity::VERSION_MANIFEST_SIG_FILE,
+        signature_hex.as_bytes(),
     )?;
 
     // Update the package manifest under the registry lock (D7): the version-list
@@ -477,9 +486,11 @@ pub fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
     use persistence::Sheet;
     use engine::cell::Cell;
+    use crate::registry::LocalRegistry;
 
     fn make_test_workbook() -> Workbook {
         let mut sheet1 = Sheet::new("Dashboard".to_string());

@@ -2,7 +2,6 @@
 //! PURPOSE: Pull (subscribe and materialize) a .calp package into a workbook.
 //! CONTEXT: Phase 2 — raw subscribe-and-materialize, no override layer.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
@@ -12,7 +11,7 @@ use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
 use crate::manifest::*;
-use crate::registry::LocalRegistry;
+use crate::transport::RegistryTransport;
 use crate::version::{SemVer, VersionPin};
 
 /// Request to pull (subscribe to) a package.
@@ -76,89 +75,84 @@ pub struct PulledSheet {
 /// (`trusted-publishers.json`); the manifest-signature step pins/compares the
 /// publisher key there (S5 phase 2).
 pub fn pull(
-    registry: &LocalRegistry,
+    registry: &dyn RegistryTransport,
     request: &PullRequest,
     profile_dir: &Path,
 ) -> Result<PullResult, CalpError> {
     let resolved = registry.resolve_version(&request.package_name, &request.version_pin)?;
     let version_str = resolved.to_string();
-    let ver_manifest = registry.get_version_manifest(&request.package_name, &version_str)?;
-
-    let ver_dir = registry.version_dir(&request.package_name, &version_str)?;
+    let pkg = request.package_name.as_str();
+    let ver = version_str.as_str();
+    let ver_manifest = registry.get_version_manifest(pkg, ver)?;
 
     // ORIGIN GATE (S5 phase 2): verify the manifest's Ed25519 signature and
     // apply TOFU publisher pinning BEFORE the integrity gate below. The
     // checksum map lives inside the manifest, so the manifest must be proven a
     // trusted root before its checksums are believed. A tampered manifest,
     // a wrong/changed publisher key, or an unsigned package all fail here.
-    let trust_status = crate::integrity::verify_manifest_signature(
-        &ver_dir,
+    let trust_status = crate::integrity::verify_manifest_signature_via(
+        registry,
+        pkg,
+        ver,
         &ver_manifest,
-        &request.package_name,
         profile_dir,
     )?;
 
-    // INTEGRITY GATE: verify every artifact in the version directory against
-    // the manifest's published SHA-256 checksums BEFORE materializing
-    // anything. This single chokepoint covers both subscribe and refresh
-    // (pull_all_updates delegates here), and also vouches for artifacts the
-    // Tauri layer reads lazily after pull (e.g. models/{ds}/model.json).
-    crate::integrity::verify_version_artifacts(
-        &ver_dir,
+    // INTEGRITY GATE: verify every artifact the transport exposes for this
+    // version against the manifest's published SHA-256 checksums BEFORE
+    // materializing anything. This single chokepoint covers both subscribe and
+    // refresh (pull_all_updates delegates here), and also vouches for artifacts
+    // the Tauri layer reads lazily after pull (e.g. models/{ds}/model.json).
+    crate::integrity::verify_version_artifacts_via(
+        registry,
+        pkg,
+        ver,
         &ver_manifest,
-        &request.package_name,
-        &version_str,
     )?;
 
     // Read sheets
     let mut pulled_sheets = Vec::new();
     for pub_sheet in &ver_manifest.sheets {
-        let sheet_dir = registry.sheet_dir(
-            &request.package_name, &version_str, &pub_sheet.sheet_id,
-        )?;
+        // Version-relative artifact prefix for this sheet (forward slashes).
+        let sheet_prefix = format!("sheets/{}", pub_sheet.sheet_id);
 
         // Read cell data
         let cells: HashMap<(u32, u32), SavedCell> = {
-            let data_path = sheet_dir.join("data.json");
-            if data_path.exists() {
-                let content = fs::read_to_string(&data_path)?;
-                let sd: calcula_format::sheet_data::SheetData = serde_json::from_str(&content)?;
-                calcula_format::sheet_data::sheet_data_to_cells(&sd)
-            } else {
-                HashMap::new()
+            match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/data.json"))? {
+                Some(bytes) => {
+                    let sd: calcula_format::sheet_data::SheetData = serde_json::from_slice(&bytes)?;
+                    calcula_format::sheet_data::sheet_data_to_cells(&sd)
+                }
+                None => HashMap::new(),
             }
         };
 
         // Read styles
         let styles: Vec<engine::style::CellStyle> = {
-            let path = sheet_dir.join("styles.json");
-            if path.exists() {
-                serde_json::from_str(&fs::read_to_string(&path)?)?
-            } else {
-                vec![engine::style::CellStyle::new()]
+            match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/styles.json"))? {
+                Some(bytes) => serde_json::from_slice(&bytes)?,
+                None => vec![engine::style::CellStyle::new()],
             }
         };
 
         // Read layout
         let (column_widths, row_heights) = {
-            let path = sheet_dir.join("layout.json");
-            if path.exists() {
-                let layout: calcula_format::sheet_layout::SheetLayout =
-                    serde_json::from_str(&fs::read_to_string(&path)?)?;
-                layout.to_dimensions()
-            } else {
-                (HashMap::new(), HashMap::new())
+            match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/layout.json"))? {
+                Some(bytes) => {
+                    let layout: calcula_format::sheet_layout::SheetLayout =
+                        serde_json::from_slice(&bytes)?;
+                    layout.to_dimensions()
+                }
+                None => (HashMap::new(), HashMap::new()),
             }
         };
 
         // Read presentation metadata (D9). Absent in pre-D9 packages -> the
         // (correct) per-field defaults via PublishedSheetMetadata::default().
         let metadata: crate::manifest::PublishedSheetMetadata = {
-            let path = sheet_dir.join("metadata.json");
-            if path.exists() {
-                serde_json::from_str(&fs::read_to_string(&path)?)?
-            } else {
-                crate::manifest::PublishedSheetMetadata::default()
+            match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/metadata.json"))? {
+                Some(bytes) => serde_json::from_slice(&bytes)?,
+                None => crate::manifest::PublishedSheetMetadata::default(),
             }
         };
 
@@ -196,10 +190,10 @@ pub fn pull(
     // Read tables
     let mut pulled_tables = Vec::new();
     for table_id in &ver_manifest.tables {
-        let tables_dir = registry.tables_dir(&request.package_name, &version_str)?;
-        let path = tables_dir.join(format!("{}.json", table_id));
-        if path.exists() {
-            let table: SavedTable = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        if let Some(bytes) =
+            registry.read_artifact(pkg, ver, &format!("tables/{}.json", table_id))?
+        {
+            let table: SavedTable = serde_json::from_slice(&bytes)?;
             pulled_tables.push(table);
         }
     }
@@ -207,12 +201,11 @@ pub fn pull(
     // Read object scripts
     let mut pulled_scripts: Vec<SavedObjectScript> = Vec::new();
     for pub_script in &ver_manifest.object_scripts {
-        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str)?;
-        let path = scripts_dir.join(format!("{}.json", pub_script.id));
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
+        if let Some(bytes) =
+            registry.read_artifact(pkg, ver, &format!("object_scripts/{}.json", pub_script.id))?
+        {
             let def: calcula_format::features::object_scripts::ObjectScriptDef =
-                serde_json::from_str(&content)?;
+                serde_json::from_slice(&bytes)?;
             let mut script = SavedObjectScript::from(&def);
             // SECURITY: Force all distributed scripts to restricted mode.
             // Subscribers control their own access level.
@@ -236,12 +229,11 @@ pub fn pull(
     // and never auto-executed — no provenance/access-level stamping.
     let mut pulled_modules: Vec<SavedScript> = Vec::new();
     for pub_module in &ver_manifest.module_scripts {
-        let modules_dir = registry.modules_dir(&request.package_name, &version_str)?;
-        let path = modules_dir.join(format!("{}.json", pub_module.id));
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
+        if let Some(bytes) =
+            registry.read_artifact(pkg, ver, &format!("modules/{}.json", pub_module.id))?
+        {
             let def: calcula_format::features::scripts::ScriptDef =
-                serde_json::from_str(&content)?;
+                serde_json::from_slice(&bytes)?;
             let mut s = SavedScript::from(&def);
             // Stamp distribution provenance so refresh + dedupe can tell this
             // module belongs to THIS package (vs a subscriber-authored local one).
@@ -263,12 +255,11 @@ pub fn pull(
     // rule ("the user must not be misled about what they ran").
     let mut pulled_notebooks: Vec<SavedNotebook> = Vec::new();
     for pub_notebook in &ver_manifest.notebooks {
-        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str)?;
-        let path = notebooks_dir.join(format!("{}.json", pub_notebook.id));
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
+        if let Some(bytes) =
+            registry.read_artifact(pkg, ver, &format!("notebooks/{}.json", pub_notebook.id))?
+        {
             let def: calcula_format::features::notebooks::NotebookDef =
-                serde_json::from_str(&content)?;
+                serde_json::from_slice(&bytes)?;
             let mut nb = SavedNotebook::from(&def);
             nb.source_package = Some(request.package_name.clone());
             for cell in &mut nb.cells {
@@ -296,7 +287,7 @@ pub fn pull(
         package_name: request.package_name.clone(),
         registry_url: request.registry_url.clone(),
         version_pin: request.version_pin.to_string(),
-        resolved_version: version_str,
+        resolved_version: version_str.clone(),
         resolved_at: request.now.clone(),
         sheets: subscribed_sheets,
         channel: String::new(), // default/production channel
@@ -304,22 +295,23 @@ pub fn pull(
         extra: HashMap::new(),
     };
 
-    // Read pivot definitions
+    // Read pivot definitions. They are not enumerated by id in the manifest, so
+    // discover them from the transport's artifact listing (already gated by the
+    // integrity check above) — every pivot_definitions/*.json EXCEPT the BI
+    // metadata sidecar. This replaces the prior fs::read_dir scan.
     let mut pulled_pivot_defs: Vec<persistence::SavedPivotDefinition> = Vec::new();
     {
-        let pivot_dir = registry
-            .version_dir(&request.package_name, subscription.resolved_version.as_str())?
-            .join("pivot_definitions");
-        if pivot_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&pivot_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "json") {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            if let Ok(def) = serde_json::from_str::<persistence::SavedPivotDefinition>(&content) {
-                                pulled_pivot_defs.push(def);
-                            }
-                        }
+        let rel_paths = registry.list_artifacts(pkg, ver)?;
+        for rel in &rel_paths {
+            if rel.starts_with("pivot_definitions/")
+                && rel.ends_with(".json")
+                && rel != "pivot_definitions/bi_metadata.json"
+            {
+                if let Some(bytes) = registry.read_artifact(pkg, ver, rel)? {
+                    if let Ok(def) =
+                        serde_json::from_slice::<persistence::SavedPivotDefinition>(&bytes)
+                    {
+                        pulled_pivot_defs.push(def);
                     }
                 }
             }
@@ -328,30 +320,30 @@ pub fn pull(
 
     // Read BI pivot metadata (if present)
     let bi_pivot_metadata: Vec<serde_json::Value> = {
-        let meta_path = registry
-            .version_dir(&request.package_name, subscription.resolved_version.as_str())?
-            .join("pivot_definitions")
-            .join("bi_metadata.json");
-        if meta_path.exists() {
-            fs::read_to_string(&meta_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        match registry.read_artifact(pkg, ver, "pivot_definitions/bi_metadata.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            None => Vec::new(),
         }
     };
 
-    // Resolve data source model paths
-    let ds_ver_dir = registry
-        .version_dir(&request.package_name, subscription.resolved_version.as_str())?;
-    let pulled_data_sources: Vec<PulledDataSource> = ver_manifest.data_sources.iter().map(|ds| {
-        let model_path = ds_ver_dir.join(&ds.model_path);
-        PulledDataSource {
-            definition: ds.clone(),
-            model_path,
-        }
-    }).collect();
+    // Resolve data source model paths. The Tauri layer reads embedded BI model
+    // JSON lazily by path after pull; for the local transport we hand it the
+    // absolute on-disk path (those bytes were already integrity-verified above).
+    // A non-local transport returns None here — it would instead surface bytes
+    // via read_artifact (a later HTTP effort, out of scope).
+    let pulled_data_sources: Vec<PulledDataSource> = ver_manifest
+        .data_sources
+        .iter()
+        .map(|ds| {
+            let model_path = registry
+                .local_artifact_path(pkg, ver, &ds.model_path)?
+                .unwrap_or_default();
+            Ok(PulledDataSource {
+                definition: ds.clone(),
+                model_path,
+            })
+        })
+        .collect::<Result<Vec<_>, CalpError>>()?;
 
     Ok(PullResult {
         package_name: request.package_name.clone(),
@@ -377,8 +369,10 @@ pub fn pull(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
     use crate::publish::{self, PublishRequest};
+    use crate::registry::LocalRegistry;
 
     fn make_test_workbook() -> persistence::Workbook {
         let mut sheet1 = Sheet::new("Dashboard".to_string());

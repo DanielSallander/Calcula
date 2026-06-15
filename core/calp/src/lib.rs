@@ -17,6 +17,7 @@ pub mod package_kind;
 pub mod refresh;
 pub mod registry;
 pub mod signing;
+pub mod transport;
 pub mod version;
 pub mod publish;
 pub mod pull;
@@ -32,5 +33,6 @@ pub use manifest::{
 };
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
+pub use transport::RegistryTransport;
 pub use version::{VersionPin, SemVer};
 pub use writeback::{GatherCache, WritebackIndex, WritebackRegionDeclaration, WritebackRegionEntry};

@@ -9,11 +9,14 @@ use std::fs;
 use std::time::Duration;
 
 use crate::error::CalpError;
+use crate::integrity::{VERSION_MANIFEST_FILE, VERSION_MANIFEST_SIG_FILE};
 use crate::manifest::PackageManifest;
 #[cfg(test)]
 use crate::manifest::VersionEntry;
 use crate::manifest::VersionManifest;
+use crate::transport::RegistryTransport;
 use crate::version::{SemVer, VersionPin};
+use crate::writeback::WritebackSubmission;
 
 // ---------------------------------------------------------------------------
 // D7 — registry robustness primitives
@@ -443,6 +446,146 @@ impl LocalRegistry {
     }
 
     // -----------------------------------------------------------------------
+    // Artifact storage (D8 — RegistryTransport surface)
+    // -----------------------------------------------------------------------
+
+    /// Resolve a version-relative artifact path (forward slashes) to an absolute
+    /// on-disk path under the version directory. `package_name`/`version` are
+    /// validated at the registry boundary (D7) via `version_dir`. The rel_path
+    /// itself is a publisher-controlled string, so reject any component that
+    /// could escape the version directory ('..', absolute markers, etc.) — the
+    /// same boundary the directory names get.
+    fn artifact_path(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+    ) -> Result<PathBuf, CalpError> {
+        let mut path = self.version_dir(package_name, version)?;
+        let mut any = false;
+        for component in rel_path.split('/') {
+            if component.is_empty() {
+                continue;
+            }
+            // Each segment is validated like any other untrusted path component:
+            // rejects "", ".", "..", separators, ':', null/control chars.
+            validate_component(component, "artifact path component")?;
+            path.push(component);
+            any = true;
+        }
+        if !any {
+            return Err(CalpError::Registry(format!(
+                "Invalid artifact path '{rel_path}': must name a file"
+            )));
+        }
+        Ok(path)
+    }
+
+    /// Write an artifact atomically at a version-relative path.
+    pub fn write_artifact(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), CalpError> {
+        let path = self.artifact_path(package_name, version, rel_path)?;
+        atomic_write(&path, bytes)
+    }
+
+    /// Read an artifact at a version-relative path; `Ok(None)` when absent.
+    pub fn read_artifact(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        let path = self.artifact_path(package_name, version, rel_path)?;
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List ALL checksummable artifact rel-paths under a version (forward
+    /// slashes), EXCLUDING `version-manifest.json`, `version-manifest.sig`, and
+    /// the `submissions/` subtree — the exact set the integrity walk hashes.
+    pub fn list_artifacts(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<String>, CalpError> {
+        let base = self.version_dir(package_name, version)?;
+        let mut out = Vec::new();
+        if !base.exists() {
+            return Ok(out);
+        }
+        for entry in fs::read_dir(&base)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if file_type.is_file() {
+                // The manifest is the integrity root; its detached signature
+                // seals that root. Neither is a listed artifact.
+                if name_str == VERSION_MANIFEST_FILE || name_str == VERSION_MANIFEST_SIG_FILE {
+                    continue;
+                }
+                out.push(name_str.into_owned());
+            } else if file_type.is_dir() {
+                // Subscriber-written submissions are a separate trust domain.
+                if name_str == "submissions" {
+                    continue;
+                }
+                Self::list_artifacts_walk(&entry.path(), &base, &mut out)?;
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    fn list_artifacts_walk(
+        dir: &Path,
+        base: &Path,
+        out: &mut Vec<String>,
+    ) -> Result<(), CalpError> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let path = entry.path();
+            if file_type.is_dir() {
+                Self::list_artifacts_walk(&path, base, out)?;
+            } else if file_type.is_file() {
+                let rel = path.strip_prefix(base).map_err(|e| {
+                    CalpError::Registry(format!(
+                        "Artifact path {} escapes version directory: {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+                let rel_str = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(rel_str);
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a version's artifacts (used to clear crashed-publish debris before
+    /// a republish). No-op if the version directory does not exist.
+    pub fn clear_version(&self, package_name: &str, version: &str) -> Result<(), CalpError> {
+        let ver_dir = self.version_dir(package_name, version)?;
+        if ver_dir.exists() {
+            fs::remove_dir_all(&ver_dir)?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Helper paths
     // -----------------------------------------------------------------------
 
@@ -470,6 +613,140 @@ impl LocalRegistry {
             .version_dir(package_name, version)?
             .join("submissions")
             .join(submitter_id))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D8 — LocalRegistry is one RegistryTransport implementation behind the seam.
+// Every method delegates to the inherent fs implementation above; an HTTP
+// transport is a later effort (out of scope) and slots in here without
+// touching publish/pull/integrity, which operate on `&dyn RegistryTransport`.
+// ---------------------------------------------------------------------------
+impl RegistryTransport for LocalRegistry {
+    fn list_packages(&self) -> Result<Vec<String>, CalpError> {
+        LocalRegistry::list_packages(self)
+    }
+
+    fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
+        LocalRegistry::get_package_manifest(self, package_name)
+    }
+
+    fn write_package_manifest(&self, manifest: &PackageManifest) -> Result<(), CalpError> {
+        LocalRegistry::write_package_manifest(self, manifest)
+    }
+
+    fn get_version_manifest(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<VersionManifest, CalpError> {
+        LocalRegistry::get_version_manifest(self, package_name, version)
+    }
+
+    fn write_version_manifest(
+        &self,
+        package_name: &str,
+        version: &str,
+        manifest: &VersionManifest,
+    ) -> Result<(), CalpError> {
+        LocalRegistry::write_version_manifest(self, package_name, version, manifest)
+    }
+
+    fn version_exists(&self, package_name: &str, version: &str) -> bool {
+        LocalRegistry::version_exists(self, package_name, version)
+    }
+
+    fn resolve_version(
+        &self,
+        package_name: &str,
+        pin: &VersionPin,
+    ) -> Result<SemVer, CalpError> {
+        LocalRegistry::resolve_version(self, package_name, pin)
+    }
+
+    fn list_versions(&self, package_name: &str) -> Result<Vec<SemVer>, CalpError> {
+        LocalRegistry::list_versions(self, package_name)
+    }
+
+    fn write_artifact(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), CalpError> {
+        LocalRegistry::write_artifact(self, package_name, version, rel_path, bytes)
+    }
+
+    fn read_artifact(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        LocalRegistry::read_artifact(self, package_name, version, rel_path)
+    }
+
+    fn list_artifacts(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<String>, CalpError> {
+        LocalRegistry::list_artifacts(self, package_name, version)
+    }
+
+    fn clear_version(&self, package_name: &str, version: &str) -> Result<(), CalpError> {
+        LocalRegistry::clear_version(self, package_name, version)
+    }
+
+    fn local_artifact_path(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+    ) -> Result<Option<PathBuf>, CalpError> {
+        // Validated like any artifact path (D7 boundary). For the local
+        // transport this is the absolute on-disk location.
+        Ok(Some(self.artifact_path(package_name, version, rel_path)?))
+    }
+
+    fn save_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        LocalRegistry::save_submission(self, package_name, version, submission)
+    }
+
+    fn load_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+        submitter_id: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        LocalRegistry::load_submissions(self, package_name, version, submitter_id)
+    }
+
+    fn load_region_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+        region_id: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        LocalRegistry::load_region_submissions(self, package_name, version, region_id)
+    }
+
+    fn load_all_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        LocalRegistry::load_all_submissions(self, package_name, version)
+    }
+
+    fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
+        Ok(Box::new(RegistryLock::acquire(&self.root)?))
     }
 }
 
@@ -852,5 +1129,59 @@ mod tests {
         assert!(!lockfile.exists(), "lockfile removed on drop");
         // Re-acquire after release works.
         let _g2 = RegistryLock::acquire(dir.path()).unwrap();
+    }
+
+    // --- D8: RegistryTransport seam ---
+
+    #[test]
+    fn transport_artifact_roundtrip_and_list_exclusions() {
+        let (_dir, reg) = create_test_registry();
+        // Drive the registry purely through the trait object.
+        let t: &dyn RegistryTransport = &reg;
+
+        // write_artifact -> read_artifact round-trip (version-relative path).
+        t.write_artifact("pkg", "1.0.0", "sheets/abc/data.json", b"hello")
+            .unwrap();
+        assert_eq!(
+            t.read_artifact("pkg", "1.0.0", "sheets/abc/data.json").unwrap(),
+            Some(b"hello".to_vec())
+        );
+        // Absent artifact -> None (not an error).
+        assert_eq!(
+            t.read_artifact("pkg", "1.0.0", "sheets/abc/missing.json").unwrap(),
+            None
+        );
+
+        // The integrity root, its signature, and the submissions subtree are
+        // all present on disk but excluded from list_artifacts.
+        t.write_artifact("pkg", "1.0.0", VERSION_MANIFEST_FILE, b"{}").unwrap();
+        t.write_artifact("pkg", "1.0.0", VERSION_MANIFEST_SIG_FILE, b"deadbeef").unwrap();
+        t.write_artifact("pkg", "1.0.0", "named_ranges.json", b"[]").unwrap();
+        t.write_artifact("pkg", "1.0.0", "submissions/user-1/r1_0_0.json", b"{}").unwrap();
+
+        let listed = t.list_artifacts("pkg", "1.0.0").unwrap();
+        assert_eq!(listed, vec!["named_ranges.json", "sheets/abc/data.json"]);
+
+        // A hostile rel_path cannot escape the version directory.
+        assert!(t.write_artifact("pkg", "1.0.0", "../escape.json", b"x").is_err());
+        assert!(t.read_artifact("pkg", "1.0.0", "../escape.json").is_err());
+
+        // clear_version removes the version's artifacts.
+        t.clear_version("pkg", "1.0.0").unwrap();
+        assert!(t.list_artifacts("pkg", "1.0.0").unwrap().is_empty());
+    }
+
+    #[test]
+    fn transport_lock_returns_guard_that_releases_on_drop() {
+        let (_dir, reg) = create_test_registry();
+        let t: &dyn RegistryTransport = &reg;
+        let lockfile = reg.root().join(".calp-lock");
+        {
+            let _g = t.lock().unwrap();
+            assert!(lockfile.exists(), "lockfile present while the trait guard is held");
+        }
+        assert!(!lockfile.exists(), "lockfile removed when the boxed guard drops");
+        // Re-acquire after release works through the trait.
+        let _g2 = t.lock().unwrap();
     }
 }

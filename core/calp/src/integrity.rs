@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CalpError;
 use crate::manifest::VersionManifest;
+use crate::transport::RegistryTransport;
 
 /// The version manifest filename — the integrity root. Never listed in its
 /// own checksum map.
@@ -151,7 +152,20 @@ pub fn verify_version_artifacts(
     }
 
     let actual = compute_artifact_checksums(version_dir)?;
+    compare_checksums(&actual, manifest, package, version)
+}
 
+/// Compare a freshly-computed checksum map against the manifest's published
+/// checksums. The trust gate shared by the fs-path and transport-agnostic
+/// verify paths: a listed file missing/changed, or an unlisted file present,
+/// each fails. The empty-map (pre-checksum package) case is handled by the
+/// callers BEFORE they compute `actual`.
+fn compare_checksums(
+    actual: &BTreeMap<String, String>,
+    manifest: &VersionManifest,
+    package: &str,
+    version: &str,
+) -> Result<(), CalpError> {
     // Every listed artifact must exist with matching bytes.
     for (file, expected) in &manifest.artifact_checksums {
         match actual.get(file) {
@@ -185,6 +199,56 @@ pub fn verify_version_artifacts(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// D8: transport-agnostic integrity — same trust gate over `&dyn RegistryTransport`
+// ---------------------------------------------------------------------------
+
+/// Compute SHA-256 digests of every checksummable artifact via the transport
+/// (not the filesystem). For each rel-path the transport lists, read its bytes
+/// and hash them. The transport's `list_artifacts` already excludes the
+/// integrity root, its signature, and the submissions subtree — exactly the set
+/// the fs walk excludes — so the resulting map matches the manifest convention.
+pub fn compute_artifact_checksums_via(
+    t: &dyn RegistryTransport,
+    package: &str,
+    version: &str,
+) -> Result<BTreeMap<String, String>, CalpError> {
+    let mut map = BTreeMap::new();
+    for rel in t.list_artifacts(package, version)? {
+        // list_artifacts only returns paths that exist; a None here would mean
+        // the artifact vanished between listing and reading — treat as missing.
+        let bytes = t
+            .read_artifact(package, version, &rel)?
+            .ok_or_else(|| CalpError::MissingArtifact {
+                package: package.to_string(),
+                version: version.to_string(),
+                file: rel.clone(),
+            })?;
+        map.insert(rel, sha256_hex(&bytes));
+    }
+    Ok(map)
+}
+
+/// Transport-agnostic counterpart to `verify_version_artifacts`: verify every
+/// artifact the transport exposes for a version against the manifest's
+/// published checksums BEFORE any artifact is materialized.
+pub fn verify_version_artifacts_via(
+    t: &dyn RegistryTransport,
+    package: &str,
+    version: &str,
+    manifest: &VersionManifest,
+) -> Result<(), CalpError> {
+    if manifest.artifact_checksums.is_empty() {
+        // Pre-checksum package. No backward compatibility: hard error.
+        return Err(CalpError::MissingChecksums {
+            package: package.to_string(),
+            version: version.to_string(),
+        });
+    }
+    let actual = compute_artifact_checksums_via(t, package, version)?;
+    compare_checksums(&actual, manifest, package, version)
 }
 
 // ---------------------------------------------------------------------------
@@ -240,12 +304,34 @@ pub fn verify_manifest_signature(
     let manifest_path = version_dir.join(VERSION_MANIFEST_FILE);
     let manifest_bytes = fs::read(&manifest_path)?;
     let sig_hex = fs::read_to_string(&sig_path)?;
-    let sig_hex = sig_hex.trim();
+
+    verify_manifest_signature_bytes(
+        &manifest_bytes,
+        sig_hex.trim(),
+        manifest,
+        package,
+        profile_dir,
+    )
+}
+
+/// The byte-level core of manifest-signature verification + TOFU pinning,
+/// shared by the fs-path `verify_manifest_signature` and the transport-agnostic
+/// `verify_manifest_signature_via`. Given the RAW manifest bytes and the
+/// detached signature hex (already read by whichever transport), do the
+/// cryptographic check against the asserted publisher key and apply TOFU.
+fn verify_manifest_signature_bytes(
+    manifest_bytes: &[u8],
+    sig_hex: &str,
+    manifest: &VersionManifest,
+    package: &str,
+    profile_dir: &Path,
+) -> Result<TrustStatus, CalpError> {
+    let version = manifest.version.as_str();
 
     // (2) Cryptographic verification against the asserted publisher key.
     crate::signing::verify_signature(
         &manifest.publisher_key,
-        &manifest_bytes,
+        manifest_bytes,
         sig_hex,
         package,
         version,
@@ -268,6 +354,48 @@ pub fn verify_manifest_signature(
             Ok(TrustStatus::FirstUse)
         }
     }
+}
+
+/// Transport-agnostic counterpart to `verify_manifest_signature`: read the raw
+/// `version-manifest.json` bytes and the detached `version-manifest.sig` via the
+/// transport, then run the same crypto + TOFU gate. An absent signature (or an
+/// empty asserted `publisher_key`) means the package is unsigned -> hard error.
+pub fn verify_manifest_signature_via(
+    t: &dyn RegistryTransport,
+    package: &str,
+    version: &str,
+    manifest: &VersionManifest,
+    profile_dir: &Path,
+) -> Result<TrustStatus, CalpError> {
+    // (1) Unsigned packages are rejected outright (no backward compat).
+    let sig_bytes = t.read_artifact(package, version, VERSION_MANIFEST_SIG_FILE)?;
+    let sig_bytes = match (manifest.publisher_key.is_empty(), sig_bytes) {
+        (false, Some(sig)) => sig,
+        _ => {
+            return Err(CalpError::MissingSignature {
+                package: package.to_string(),
+                version: version.to_string(),
+            });
+        }
+    };
+
+    // Read the RAW manifest bytes via the transport — never a re-serialization
+    // of the parsed manifest (re-serializing may not be byte-identical).
+    let manifest_bytes = t
+        .read_artifact(package, version, VERSION_MANIFEST_FILE)?
+        .ok_or_else(|| CalpError::MissingSignature {
+            package: package.to_string(),
+            version: version.to_string(),
+        })?;
+
+    let sig_hex = String::from_utf8_lossy(&sig_bytes);
+    verify_manifest_signature_bytes(
+        &manifest_bytes,
+        sig_hex.trim(),
+        manifest,
+        package,
+        profile_dir,
+    )
 }
 
 // ---------------------------------------------------------------------------
