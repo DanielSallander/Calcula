@@ -5,6 +5,7 @@
 
 pub mod application;
 pub mod bookmarks;
+pub mod canonical_model;
 pub mod cells;
 pub mod extended;
 pub mod sheets;

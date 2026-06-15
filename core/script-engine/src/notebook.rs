@@ -236,6 +236,9 @@ fn register_calcula_api<'js>(
     ops::worksheet_props::register_worksheet_props_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::extended::register_extended_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Canonical shared object model (Calcula.workbook -> Sheet -> Range).
+    ops::canonical_model::register_canonical_model(ctx, &calcula, shared_ctx.clone())?;
+
     globals
         .set("Calcula", calcula)
         .map_err(|e| format!("Failed to set Calcula global: {}", e))?;

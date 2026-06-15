@@ -9,10 +9,89 @@
  */
 
 // ============================================================================
+// Canonical Shared Object Model (Workbook -> Sheet -> Range -> Cell)
+// ============================================================================
+//
+// The notebook/QuickJS runtime binds the SAME Workbook -> Sheet -> Range model
+// that extensions (api/range.ts, api/objectModel.ts) and object scripts
+// (scriptHost/worker/canonicalModel.ts) expose. Member set is pinned by
+// api/canonicalModelSpec.ts via the canonicalModelCoverage drift guard.
+//
+// This runtime is SYNCHRONOUS: methods return values directly (NOT Promises).
+// Reach it via `Calcula.workbook`.
+
+/**
+ * A rectangular range (a single cell is a 1x1 range) on a sheet.
+ * Values are display strings. All offsets/indices are 0-based.
+ */
+interface NotebookRange {
+  /** A1 address ("A1" or "A1:B5"). */
+  readonly address: string;
+  /** Number of rows in the range. */
+  readonly rowCount: number;
+  /** Number of columns in the range. */
+  readonly colCount: number;
+  /** True when the range covers exactly one cell. */
+  readonly isSingleCell: boolean;
+  /** A new range shifted by (rowOffset, colOffset), same size. */
+  offset(rowOffset: number, colOffset: number): NotebookRange;
+  /** A new range, same top-left, resized to rows x cols. */
+  resize(rows: number, cols: number): NotebookRange;
+  /** A single-cell range at the given offset within this range (throws if outside). */
+  getCell(rowOffset: number, colOffset: number): NotebookRange;
+  /** The top-left cell's display value. */
+  getValue(): string;
+  /** All values as a rows x cols grid of display strings. */
+  getValues(): string[][];
+  /** Set the top-left cell's value. */
+  setValue(value: string): void;
+  /** Set values from a 2D array (clamped to the range's dimensions). */
+  setValues(values: string[][]): void;
+}
+
+/** A worksheet: the navigation level above a NotebookRange. */
+interface NotebookSheet {
+  /** 0-based sheet index. */
+  readonly index: number;
+  /** Sheet name (tab label). */
+  readonly name: string;
+  /** A range on THIS sheet by A1 address (a "Sheet!" prefix is ignored). */
+  range(address: string): NotebookRange;
+  /** A single cell on this sheet (0-based). */
+  cell(row: number, col: number): NotebookRange;
+  /** Make this the active sheet. */
+  activate(): void;
+}
+
+/** The workbook: navigate Workbook -> Sheet -> Range across sheets. */
+interface NotebookWorkbook {
+  /** All sheets, in tab order. */
+  sheets(): NotebookSheet[];
+  /** The active sheet. */
+  activeSheet(): NotebookSheet;
+  /** A sheet by exact name or 0-based index; null if not found. */
+  sheet(nameOrIndex: string | number): NotebookSheet | null;
+}
+
+// ============================================================================
 // Calcula Namespace
 // ============================================================================
 
 declare namespace Calcula {
+  // --------------------------------------------------------------------------
+  // Canonical Object Model
+  // --------------------------------------------------------------------------
+
+  /**
+   * The canonical shared object model entry point. Navigate
+   * Workbook -> Sheet -> Range -> Cell. Synchronous (no Promises).
+   *
+   * @example
+   * Calcula.workbook.sheet(0).range("A1:B2").setValues([["x","y"],["z","w"]]);
+   * const v = Calcula.workbook.activeSheet().cell(0, 0).getValue();
+   */
+  const workbook: NotebookWorkbook;
+
   // --------------------------------------------------------------------------
   // Cell Operations
   // --------------------------------------------------------------------------

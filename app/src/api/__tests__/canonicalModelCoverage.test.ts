@@ -23,6 +23,11 @@ const DTS_PATH = path.resolve(
   __dirname,
   "../../../extensions/ScriptableObjects/objectContexts.d.ts",
 );
+// The notebook/QuickJS IntelliSense surface (C3 step 5) — synchronous model.
+const NOTEBOOK_DTS_PATH = path.resolve(
+  __dirname,
+  "../../../extensions/ScriptEditor/calcula.d.ts",
+);
 
 /** Remove block + line comments so doc text can't mask a missing member or skew
  *  brace matching. (The canonical decls contain no `//`/`/*` inside strings.) */
@@ -79,6 +84,10 @@ const SURFACES: Surface[] = [
   { label: "d.ts ScriptRange (objectContexts.d.ts)", file: DTS_PATH, decl: /interface\s+ScriptRange\b/, manifest: CANONICAL_RANGE_MEMBERS },
   { label: "d.ts ScriptSheet (objectContexts.d.ts)", file: DTS_PATH, decl: /interface\s+ScriptSheet\b/, manifest: CANONICAL_SHEET_MEMBERS },
   { label: "d.ts ScriptWorkbook (objectContexts.d.ts)", file: DTS_PATH, decl: /interface\s+ScriptWorkbook\b/, manifest: CANONICAL_WORKBOOK_MEMBERS },
+  // Notebook/QuickJS IntelliSense .d.ts (C3 step 5 — synchronous model)
+  { label: "notebook NotebookRange (calcula.d.ts)", file: NOTEBOOK_DTS_PATH, decl: /interface\s+NotebookRange\b/, manifest: CANONICAL_RANGE_MEMBERS },
+  { label: "notebook NotebookSheet (calcula.d.ts)", file: NOTEBOOK_DTS_PATH, decl: /interface\s+NotebookSheet\b/, manifest: CANONICAL_SHEET_MEMBERS },
+  { label: "notebook NotebookWorkbook (calcula.d.ts)", file: NOTEBOOK_DTS_PATH, decl: /interface\s+NotebookWorkbook\b/, manifest: CANONICAL_WORKBOOK_MEMBERS },
 ];
 
 describe("canonical model spec sanity", () => {

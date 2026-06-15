@@ -94,6 +94,10 @@ fn register_calcula_api<'js>(
     // Extended operations (view, navigation, formatting, data, display)
     ops::extended::register_extended_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Canonical shared object model (Calcula.workbook -> Sheet -> Range).
+    // Must be attached before Calcula goes on globals.
+    ops::canonical_model::register_canonical_model(ctx, &calcula, shared_ctx.clone())?;
+
     // Set Calcula on globals BEFORE application ops (application.rs uses eval
     // that references the global Calcula object for defineProperty wiring)
     globals
