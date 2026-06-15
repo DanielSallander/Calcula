@@ -1404,7 +1404,9 @@ export { CellRange } from "./range";
 // Canonical shared object model — Workbook/Sheet levels above the CellRange seed
 // (C3). See docs/design/c3-shared-object-model.md.
 export { Workbook, Sheet, workbook } from "./objectModel";
-export type { SheetVisibility } from "./objectModel";
+// SheetVisibility is already re-exported from "./lib" (the canonical tauri-api
+// type); objectModel.ts declares a structurally-identical local copy for its
+// own use. Re-exporting it here too would be a duplicate-identifier clash.
 
 // ============================================================================
 // Scriptable Objects API
@@ -1503,3 +1505,33 @@ export {
   deleteObjectScriptsForInstance,
   loadAllObjectScripts,
 } from "./objectScriptBackend";
+
+// ---- Code inventory (T1: "Code in This File" transparency inspector) ----
+// Read-path @api bindings for the notebook and module-script populations
+// (previously reachable only from inside their owning extensions), plus the
+// unified inventory aggregator that joins all code-residence surfaces.
+export {
+  listNotebooks,
+  loadNotebook,
+} from "./notebookBackend";
+export type {
+  NotebookSummaryData,
+  NotebookDocumentData,
+  NotebookCellData,
+} from "./notebookBackend";
+export {
+  listModuleScripts,
+  getModuleScript,
+  describeModuleScriptScope,
+} from "./moduleScriptBackend";
+export type {
+  ModuleScriptSummary,
+  ModuleScriptData,
+  ModuleScriptScope,
+} from "./moduleScriptBackend";
+export {
+  getWorkbookCodeUnits,
+  summarizeCodeInventory,
+  codeUnitReachesBeyondGrid,
+} from "./codeInventory";
+export type { CodeUnit, CodeInventorySummary } from "./codeInventory";

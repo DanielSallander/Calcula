@@ -32,6 +32,7 @@ import {
   PolicyTableSection,
   ActivitySection,
 } from "./components/PermissionsPanel";
+import { CodeInThisFileSection } from "./components/CodeInThisFilePanel";
 import ScriptConsentDialog from "./components/ScriptConsentDialog";
 import CapabilityRequestDialog from "./components/CapabilityRequestDialog";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
@@ -78,6 +79,7 @@ const cleanupFunctions: Array<() => void> = [];
 // ============================================================================
 
 const PERMISSIONS_PANEL_ID = "scriptable-objects.permissions";
+const CODE_IN_FILE_PANEL_ID = "scriptable-objects.codeInThisFile";
 
 /** SVG shield icon for the Script Permissions panel */
 const ShieldIcon = React.createElement(
@@ -583,6 +585,27 @@ async function activate(context: ExtensionContext): Promise<void> {
     priority: 8,
   });
   cleanupFunctions.push(() => context.ui.panels.unregister(PERMISSIONS_PANEL_ID));
+
+  // ---- Register the "Code in This File" transparency inspector (T1) ----
+  // A per-workbook inventory of EVERY code unit (object scripts, module scripts,
+  // notebooks): where it resides, where it came from, what it can touch, and its
+  // source inline. Complements the (runtime-focused) Script Permissions panel by
+  // answering the vision's question about the FILE rather than the live session.
+  context.ui.panels.register({
+    id: CODE_IN_FILE_PANEL_ID,
+    title: "Code in This File",
+    icon: ShieldIcon,
+    sections: [
+      {
+        id: `${CODE_IN_FILE_PANEL_ID}.inventory`,
+        label: "Code in This File",
+        component: CodeInThisFileSection,
+      },
+    ],
+    defaultPlacement: "sidebar",
+    priority: 9,
+  });
+  cleanupFunctions.push(() => context.ui.panels.unregister(CODE_IN_FILE_PANEL_ID));
 
   // ---- Cross-window event bridge: Object Script Editor separate window ----
 

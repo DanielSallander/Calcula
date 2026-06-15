@@ -888,7 +888,10 @@ class ExtensionManagerImpl {
     // backing code AND no way to retry (the entry would be gone). Abort instead.
     if (entry.status === "active") {
       await this.deactivateExtension(id);
-      if (entry.status === "error") {
+      // deactivateExtension mutates entry.status to "error" on a teardown
+      // failure, but TS keeps the "active" narrowing across the await — read it
+      // back through a widening cast so the (intentional) check type-checks.
+      if ((entry.status as string) === "error") {
         throw new Error(
           `Cannot uninstall '${id}': teardown failed (${entry.error?.message ?? "unknown error"}). ` +
           `Files were left on disk to avoid dangling live registrations — reload and retry.`,
