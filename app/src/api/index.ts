@@ -445,6 +445,7 @@ export { getReferenceStyle, changeReferenceStyle, convertFormulaStyle } from "./
 
 export { ExtensionManager } from "../shell/registries/ExtensionManager";
 export type { LoadedExtension, ExtensionStatus } from "../shell/registries/ExtensionManager";
+export { exposeExtensionRuntimeGlobals, getExtensionReact, REACT_GLOBAL } from "./extensionRuntime";
 
 // ============================================================================
 // UI Registration API

@@ -9,7 +9,14 @@ installLogFilter();
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./shell";
+import { exposeExtensionRuntimeGlobals } from "./api/extensionRuntime";
 import "./index.css";
+
+// C2: publish the host's React singleton BEFORE any extension loads, so
+// runtime-loaded third-party extensions render UI with the host's React (a
+// second bundled React would break hooks/context). @api is NOT globalized —
+// extensions receive it via the per-extension ExtensionContext (scoped).
+exposeExtensionRuntimeGlobals();
 
 // NOTE: Feature extensions (pivot, etc.) are loaded in useExtensionInitializer
 // AFTER bootstrapShell() so that services (DialogExtensions, etc.) are available.
