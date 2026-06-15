@@ -439,11 +439,21 @@ impl OrderByClause {
 ///
 /// # Unsupported combinations
 ///
+/// Filter-context time-intelligence measures **do** compose with `Rollup`:
+/// `YTD`/`QTD`/`MTD`, `DATESINPERIOD`, `CLOSINGBALANCE`/`OPENINGBALANCE`,
+/// `PRIORYEAR`/`PRIORPERIOD`/`PARALLELPERIOD`, and compound forms (YoY =
+/// `YTD − PRIORYEAR`) — evaluated when the date is *not* on the group-by axis —
+/// lower to ordinary aggregates, so each subtotal / grand total is the measure
+/// re-evaluated over the rolled-up row set. They also compose with a ragged
+/// hierarchy group-by. Axis-mode running windows and ranking still fail closed.
+///
 /// Requests with `totals = Rollup` return a typed `InvalidQuery` error when
 /// combined with (support may be added later):
 ///
 /// - lookup columns ([`QueryRequest::lookups`]),
-/// - window measures (`WINDOW` / `OFFSET` / `INDEX`),
+/// - axis-mode window/running measures (`WINDOW` / `OFFSET` / `INDEX`, or any
+///   time intelligence with a date column on the group-by axis), and ranking
+///   (`RANK` / `ROW_NUMBER` / `DENSE_RANK`),
 /// - QUERY-in-VAR measures (two-stage `QUERY(...)` bindings),
 /// - measures spanning multiple fact tables in one request,
 /// - GROUP BY dimensions reached through unsafe (many-to-many / non-equi)

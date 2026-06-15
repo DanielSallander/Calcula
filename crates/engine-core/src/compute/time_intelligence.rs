@@ -56,12 +56,19 @@
 //!
 //! In the filter-context path the window's lower bound is derived from the
 //! **minimum DateKey present** under the context (a `MIN` probe), not from the
-//! date predicate itself. For a **contiguous** date table — one row per calendar
-//! day with no gaps, which DAX time intelligence also requires — this is exact.
-//! On a sparse/gapped calendar the shifted window can be mis-sized (the prior
-//! period's first present day may differ from the shifted minimum), so callers
-//! MUST supply a contiguous date table. The math here is not changed: it is
-//! correct under that assumption.
+//! date predicate itself. For a **contiguous** context — every date-table row in
+//! the window's `[min, max]` span is in the context, which DAX time intelligence
+//! also requires — the whole-window shift is exact. If the context filter punches
+//! an internal hole (a slicer that keeps Jan and Mar but not Feb), the shifted
+//! *range* still spans the hole and would silently over-count. The **executor
+//! verifies this for a `PeriodShift`** before lowering (`check_filter_context_
+//! window_contiguous` in the window pipeline) and **fails closed** on a gap —
+//! restoring the same guarantee the axis path gives via
+//! `check_period_shift_axis_contiguous`. `ToDate`/`DATESINPERIOD` build their
+//! range purely from the as-of date (a hole simply contributes nothing), so they
+//! are unaffected. The residual assumption — a calendar uniform across the
+//! shifted span (e.g. the same months present in the current and prior period) —
+//! is documented, not checked.
 //!
 //! PRIORYEAR is implemented as a **whole-window-back-one-year shift**, which is
 //! identical to SAMEPERIODLASTYEAR. This differs from DAX `PREVIOUSYEAR`'s
@@ -74,9 +81,19 @@
 //! quarter/month in filter context, missing date table or DateKey role) is a
 //! typed [`EngineError::TimeIntelligence`] — never a plausibly-wrong number.
 //!
+//! `TotalsMode::Rollup` and ragged hierarchies compose with the **filter-context**
+//! families — `ToDate` (YTD/QTD/MTD), `DatesInPeriod`, `SemiAdditiveBalance`,
+//! `PeriodShift` (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD), and compound forms
+//! (YoY = `YTD − PRIORYEAR`): each lowers to an ordinary `Keep(Clear(inner),
+//! [range])` aggregate, so `GROUP BY ROLLUP` (and the hierarchy level transforms)
+//! recompute it per level — a subtotal / grand total / rolled-up level is the
+//! measure re-evaluated over the rolled-up row set, never a sum of detail values.
+//! The AXIS route (a date column on the group-by axis), `Window`/`Offset`/`Index`
+//! frames, and ranking still reject ROLLUP / hierarchies.
+//!
 //! Deferred to a future version (full-DAX behavior): value-based period
 //! matching across gaps, `DATEADD` over date keys, fiscal calendars, and
-//! composition with totals/hierarchies (the window execution path rejects
+//! axis-mode windows/period-shifts × totals (the window execution path rejects
 //! those today).
 
 use chrono::{Datelike, NaiveDate};
@@ -719,11 +736,12 @@ fn date_role_columns(model: &DataModel, date_table: &str) -> EngineResult<Vec<St
 ///
 /// For a `PeriodShift`, the window's lower bound is `min_context_days` — the
 /// **minimum DateKey present** under the context (a `MIN` probe), not the date
-/// predicate's lower bound. This is exact only for a **contiguous** date table
-/// (one row per calendar day, no gaps — which DAX time intelligence also
-/// requires). On a sparse/gapped calendar the shifted window can be mis-sized;
-/// the math here is correct under the contiguous assumption and is intentionally
-/// not changed. PRIORYEAR is a whole-window-back-one-year shift, i.e.
+/// predicate's lower bound. This is exact only for a **contiguous** context
+/// (no in-span date row excluded by the filter — which DAX time intelligence
+/// also requires). The executor verifies this before calling here and fails
+/// closed on a gap (see the module-level "Contiguous-calendar requirement"); the
+/// math here is correct under that verified assumption. PRIORYEAR is a
+/// whole-window-back-one-year shift, i.e.
 /// SAMEPERIODLASTYEAR semantics (it differs from DAX `PREVIOUSYEAR` for a
 /// partial-year context — see the module docs).
 pub fn lower_time_intelligence_filtered(

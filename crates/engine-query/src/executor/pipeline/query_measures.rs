@@ -15,8 +15,11 @@ use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use engine_core::model::DataModel;
 
 use crate::error::QueryResult;
+use crate::planner::HierarchySpec;
 use crate::request::ColumnRef;
 
+use super::hierarchy::hierarchy_display_sql;
+use super::order_limit::grouping_id_select_sql;
 use super::sql::build_condition_sql;
 use super::QueryExecutor;
 
@@ -139,6 +142,8 @@ impl QueryExecutor {
                             fact_table,
                             &source_filters,
                             model,
+                            false,
+                            None,
                         )
                         .await?;
                         let mat_elapsed = mat_start.elapsed();
@@ -231,6 +236,7 @@ impl QueryExecutor {
 ///
 /// Runs a grouped aggregation SQL query using the already-registered tables
 /// in the DataFusion SessionContext.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn materialize_query_in_pipeline(
     ctx: &SessionContext,
     aggregates: &[(Expression, String)],
@@ -238,6 +244,8 @@ pub(super) async fn materialize_query_in_pipeline(
     fact_table: &str,
     source_filters: &[&ResolvedFilter],
     model: &DataModel,
+    rollup: bool,
+    hier: Option<&HierarchySpec>,
 ) -> QueryResult<RecordBatch> {
     let fact_lower = fact_table.to_lowercase();
 
@@ -246,9 +254,22 @@ pub(super) async fn materialize_query_in_pipeline(
 
     for (table, column) in group_by {
         let tbl = table.to_lowercase();
-        let qualified = format!("{tbl}.{}", quote_ident_double(column));
-        select_parts.push(qualified.clone());
-        group_parts.push(qualified);
+        // A hierarchy level with an active ragged transform groups ON the
+        // transformed expression (stopper NULLIF / parent COALESCE / leaf CASE),
+        // aliased to the plain column name (so the result schema is unchanged);
+        // other columns group on the raw column. Mirrors the main aggregation path.
+        let col_ref = ColumnRef::new(table.clone(), column.clone());
+        match hier.and_then(|h| hierarchy_display_sql(h, &col_ref)) {
+            Some(expr) => {
+                select_parts.push(format!("{expr} AS {}", quote_ident_double(column)));
+                group_parts.push(expr);
+            }
+            None => {
+                let qualified = format!("{tbl}.{}", quote_ident_double(column));
+                select_parts.push(qualified.clone());
+                group_parts.push(qualified);
+            }
+        }
     }
 
     // Resolve context on each aggregate expression, tracking dimension tables
@@ -279,6 +300,12 @@ pub(super) async fn materialize_query_in_pipeline(
                 }
             }
         }
+    }
+
+    // ROLLUP: append the trailing __grouping_id bitmask column (LSB = group_by[0],
+    // bit set = rolled up). With no group_by, this is the literal-0 grand total.
+    if rollup {
+        select_parts.push(grouping_id_select_sql(&group_parts));
     }
 
     let select_clause = select_parts.join(", ");
@@ -347,7 +374,16 @@ pub(super) async fn materialize_query_in_pipeline(
         sql.push_str(&filter_parts.join(" AND "));
     }
 
-    if !group_parts.is_empty() {
+    if rollup && !group_parts.is_empty() {
+        // ROLLUP totals: one pass yields detail rows + every group_by-prefix
+        // subtotal + the grand total. DataFusion rewrites this into GROUPING SETS,
+        // so each level re-evaluates the aggregate from scratch over its own row
+        // set — exactly what a non-additive measure (and a lowered filter-context
+        // time-intelligence aggregate) needs to be correct per level.
+        sql.push_str(" GROUP BY ROLLUP (");
+        sql.push_str(&group_parts.join(", "));
+        sql.push(')');
+    } else if !group_parts.is_empty() {
         sql.push_str(" GROUP BY ");
         sql.push_str(&group_parts.join(", "));
     }

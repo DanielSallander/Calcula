@@ -21,7 +21,7 @@ pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
 pub(crate) use security::{rls_relevance, role_conditions_for_table};
 
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
-use engine_core::compute::expression::{Expression, FilterPredicate};
+use engine_core::compute::expression::FilterPredicate;
 use engine_core::compute::measure::Measure;
 use engine_core::model::DataModel;
 
@@ -446,15 +446,13 @@ impl PushdownPlanner {
             let date_on_axis = model
                 .date_table()
                 .is_some_and(|dt| group_by_tables.iter().any(|t| t.eq_ignore_ascii_case(dt)));
-            let has_filter_context_ti = measures.iter().any(|m| {
-                matches!(
-                    m.expression(),
-                    Expression::ToDate { .. }
-                        | Expression::PeriodShift { .. }
-                        | Expression::DatesInPeriod { .. }
-                        | Expression::SemiAdditiveBalance { .. }
-                )
-            });
+            // Detect a filter-context time-intelligence node at the top level OR
+            // inside a compound combinator (YoY = YTD − PRIORYEAR, DIVIDE, IF,
+            // COALESCE, IFERROR), so a compound TI measure also pulls in the
+            // off-axis date table.
+            let has_filter_context_ti = measures
+                .iter()
+                .any(|m| m.expression().contains_time_intelligence());
             match model.date_table() {
                 Some(dt) if has_filter_context_ti && !date_on_axis => {
                     let in_memory = model.table(dt).is_ok_and(|t| t.is_in_memory())

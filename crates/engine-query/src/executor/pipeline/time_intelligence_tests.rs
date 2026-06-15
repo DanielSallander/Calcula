@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, Date32Array, Float64Array, Int64Array, StringArray};
+use arrow::array::{Array, Date32Array, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -22,7 +22,9 @@ use engine_core::error::EngineError;
 use engine_core::model::column::Column;
 use engine_core::model::context::{ContextDefinition, ContextOp};
 use engine_core::model::table::{StorageMode, Table};
-use engine_core::model::{DataModel, DateRole, Relationship};
+use engine_core::model::{
+    DataModel, DateRole, Hierarchy, HierarchyLevel, RaggedBehavior, Relationship,
+};
 use engine_core::store::InMemoryCache;
 use engine_core::types::DataType as EngineDataType;
 
@@ -30,7 +32,7 @@ use super::QueryExecutor;
 use crate::error::{QueryError, QueryResult};
 use crate::planner::PushdownPlanner;
 use crate::registry::{SourceBinding, SourceRegistry};
-use crate::request::{ColumnRef, QueryRequest, TotalsMode};
+use crate::request::{ColumnRef, HierarchyGroupBy, QueryRequest, TotalsMode, GROUPING_ID_COLUMN};
 
 /// Build the model: `fact_sales(date_id, region, amount)` →
 /// `dim_date(date_id, year, quarter, month)` with `dim_date` marked as the
@@ -714,6 +716,53 @@ async fn filter_context_prioryear_first_year_is_blank() {
     .await
     .unwrap();
     assert_eq!(scalar_measure(&batches), None, "no prior-year data → NULL");
+}
+
+#[tokio::test]
+async fn filter_context_prioryear_gapped_context_fails_closed() {
+    // Context = year=2024 EXCEPT June (month <> 6): an internal hole in the
+    // window [Jan, Dec] 2024. A whole-window PRIORYEAR shift would span the hole
+    // and silently include June 2023 (an over-count). It must fail closed — the
+    // same guarantee the axis path gives via `check_period_shift_axis_contiguous`.
+    let err = run(
+        "PRIORYEAR(SUM(fact_sales[amount]))",
+        true,
+        request_with_filters(
+            &[],
+            &[
+                ("year", FilterOperator::Equal, "2024"),
+                ("month", FilterOperator::NotEqual, "6"),
+            ],
+        ),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected a typed TimeIntelligence error for a gapped context, got {err:?}");
+    };
+    assert!(reason.contains("not contiguous"), "got: {reason}");
+}
+
+#[tokio::test]
+async fn filter_context_prioryear_partial_contiguous_context_is_exact() {
+    // A PARTIAL but CONTIGUOUS context (year=2024, month<=6 → Jan..Jun) must
+    // pass the contiguity guard and shift the whole window back one year:
+    // PRIORYEAR = Jan..Jun 2023 over both regions = (east 10*(1..6)=210) +
+    // (west = double = 420) = 630.
+    let batches = run(
+        "PRIORYEAR(SUM(fact_sales[amount]))",
+        true,
+        request_with_filters(
+            &[],
+            &[
+                ("year", FilterOperator::Equal, "2024"),
+                ("month", FilterOperator::LessThanOrEqual, "6"),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(630.0));
 }
 
 #[tokio::test]
@@ -2151,4 +2200,584 @@ async fn dates_in_period_positive_interval_fails_closed() {
         panic!("expected TimeIntelligence error, got {err:?}");
     };
     assert!(reason.contains("negative interval"), "got: {reason}");
+}
+
+// ===========================================================================
+// Totals (ROLLUP) × filter-context time intelligence (Phase 1).
+//
+// A filter-context TI measure (YTD/QTD/MTD, DATESINPERIOD, CLOSING/OPENING-
+// BALANCE) lowers to an ordinary `Keep(Clear(inner),[range])` aggregate, so
+// `GROUP BY ROLLUP` recomputes it correctly per level: each subtotal / grand
+// total is the measure RE-EVALUATED over the rolled-up row set, never a sum of
+// detail values. The result carries the trailing `__grouping_id` bitmask.
+// ===========================================================================
+
+/// Read a ROLLUP-by-region result into `(region, grouping_id) → value` for the
+/// named measure. `region` is `None` for a rolled-up (subtotal / grand-total)
+/// row; `grouping_id` is `0` for detail rows and `1` when `region` is rolled up.
+fn rollup_region_map(
+    batches: &[RecordBatch],
+    measure: &str,
+) -> HashMap<(Option<String>, i32), Option<f64>> {
+    let combined = concat_batches(&batches[0].schema(), batches).unwrap();
+    let region = combined
+        .column(combined.schema().index_of("region").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .clone();
+    let gid = {
+        let idx = combined.schema().index_of(GROUPING_ID_COLUMN).unwrap();
+        arrow::compute::cast(combined.column(idx), &DataType::Int32)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .clone()
+    };
+    let vals = measure_column(&combined, measure);
+    let mut map = HashMap::new();
+    for i in 0..combined.num_rows() {
+        let r = if region.is_null(i) {
+            None
+        } else {
+            Some(region.value(i).to_string())
+        };
+        map.insert((r, gid.value(i)), vals[i]);
+    }
+    map
+}
+
+/// Plan + execute a multi-measure ROLLUP request with `(column, op, value)`
+/// filters over the standard star fixture.
+async fn run_measures_rollup(
+    model: &DataModel,
+    measure_names: &[&str],
+    group_by: &[(&str, &str)],
+    filters: &[(&str, FilterOperator, &str)],
+) -> QueryResult<Vec<RecordBatch>> {
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_batch()).unwrap();
+    cache.store("fact_sales", fact_batch()).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: measure_names.iter().map(|s| s.to_string()).collect(),
+        group_by: group_by
+            .iter()
+            .map(|(t, c)| ColumnRef::new(*t, *c))
+            .collect(),
+        filters: filters
+            .iter()
+            .map(|(c, op, v)| FilterCondition::new(*c, *op, *v))
+            .collect(),
+        totals: TotalsMode::Rollup,
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, model, &registry, &[])?;
+    QueryExecutor::execute(&plan, model, &registry, Some(&cache), None, None, &[]).await
+}
+
+#[tokio::test]
+async fn rollup_ytd_by_region_recomputes_grand_total() {
+    // YTD(SUM(amount)) BY region WITH ROLLUP, context year=2024 (as-of Dec).
+    // Per region = whole-2024 total: east 78, west 156. The rolled-up grand total
+    // re-evaluates YTD over BOTH regions = 234 (gid=1), not a stale value.
+    let mut req = request_with_filters(
+        &[("fact_sales", "region")],
+        &[("year", FilterOperator::Equal, "2024")],
+    );
+    req.totals = TotalsMode::Rollup;
+    let batches = run("YTD(SUM(fact_sales[amount]))", true, req).await.unwrap();
+    let map = rollup_region_map(&batches, "m");
+    assert_eq!(map.len(), 3, "two region detail rows + one grand total");
+    assert_eq!(map[&(Some("east".into()), 0)], Some(78.0));
+    assert_eq!(map[&(Some("west".into()), 0)], Some(156.0));
+    assert_eq!(map[&(None, 1)], Some(234.0));
+}
+
+#[tokio::test]
+async fn rollup_qtd_beside_ordinary_measure() {
+    // A filter-context TI measure composes with an ordinary measure under ROLLUP:
+    // both sides roll up and the join carries one __grouping_id. Sales (ordinary)
+    // over 2024 = 78/156/234; QTD as-of Dec = Q4 (Oct+Nov+Dec) = 33/66/99.
+    let model = model_with_measures(
+        &[
+            ("Sales", "SUM(fact_sales[amount])"),
+            ("QTD", "QTD(SUM(fact_sales[amount]))"),
+        ],
+        true,
+    );
+    let batches = run_measures_rollup(
+        &model,
+        &["Sales", "QTD"],
+        &[("fact_sales", "region")],
+        &[("year", FilterOperator::Equal, "2024")],
+    )
+    .await
+    .unwrap();
+    let sales = rollup_region_map(&batches, "Sales");
+    let qtd = rollup_region_map(&batches, "QTD");
+    assert_eq!(sales[&(Some("east".into()), 0)], Some(78.0));
+    assert_eq!(sales[&(Some("west".into()), 0)], Some(156.0));
+    assert_eq!(sales[&(None, 1)], Some(234.0));
+    assert_eq!(qtd[&(Some("east".into()), 0)], Some(33.0));
+    assert_eq!(qtd[&(Some("west".into()), 0)], Some(66.0));
+    assert_eq!(qtd[&(None, 1)], Some(99.0));
+}
+
+#[tokio::test]
+async fn rollup_ytd_distinctcount_recomputes_per_level() {
+    // The cardinal-sin guard: a NON-ADDITIVE inner must be recomputed per level,
+    // never summed. East customers {c1,c2}, West {c2,c3} (c2 shared). YTD over a
+    // single in-context month → east=2, west=2, grand=3 (c1,c2,c3), NOT 2+2=4.
+    let dim_date = Table::new(
+        "dim_date",
+        vec![
+            Column::new("date_id", EngineDataType::Int64),
+            Column::new("datekey", EngineDataType::Date).with_date_role(DateRole::DateKey),
+            Column::new("year", EngineDataType::Int64).with_date_role(DateRole::Year),
+            Column::new("quarter", EngineDataType::Int64).with_date_role(DateRole::Quarter),
+            Column::new("month", EngineDataType::Int64).with_date_role(DateRole::Month),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    let fact = Table::new(
+        "fact_sales",
+        vec![
+            Column::new("date_id", EngineDataType::Int64),
+            Column::new("region", EngineDataType::String),
+            Column::new("customer", EngineDataType::String),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    let model = DataModel::builder()
+        .add_table(dim_date)
+        .add_table(fact)
+        .add_relationship(Relationship::many_to_one(
+            "sales_date",
+            "fact_sales",
+            "date_id",
+            "dim_date",
+            "date_id",
+        ))
+        .add_measure(expression_measure(
+            "m",
+            parse_measure_expression("YTD(DISTINCTCOUNT(fact_sales[customer]))").unwrap(),
+        ))
+        .mark_date_table("dim_date")
+        .build()
+        .unwrap();
+
+    let dim = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("datekey", DataType::Date32, true),
+            Field::new("year", DataType::Int64, true),
+            Field::new("quarter", DataType::Int64, true),
+            Field::new("month", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401i64])),
+            Arc::new(Date32Array::from(vec![first_of_month_days(2024, 1)])),
+            Arc::new(Int64Array::from(vec![2024i64])),
+            Arc::new(Int64Array::from(vec![1i64])),
+            Arc::new(Int64Array::from(vec![1i64])),
+        ],
+    )
+    .unwrap();
+    let fact_rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("customer", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401i64, 202401, 202401, 202401])),
+            Arc::new(StringArray::from(vec!["east", "east", "west", "west"])),
+            Arc::new(StringArray::from(vec!["c1", "c2", "c2", "c3"])),
+        ],
+    )
+    .unwrap();
+
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim).unwrap();
+    cache.store("fact_sales", fact_rows).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["m".into()],
+        group_by: vec![ColumnRef::new("fact_sales", "region")],
+        totals: TotalsMode::Rollup,
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let map = rollup_region_map(&batches, "m");
+    assert_eq!(map[&(Some("east".into()), 0)], Some(2.0));
+    assert_eq!(map[&(Some("west".into()), 0)], Some(2.0));
+    assert_eq!(
+        map[&(None, 1)],
+        Some(3.0),
+        "grand DISTINCTCOUNT recomputed (c1,c2,c3), not 2+2"
+    );
+}
+
+#[tokio::test]
+async fn rollup_closingbalance_by_region() {
+    // CLOSINGBALANCE(SUM(amount)) pins to the last context day (Dec 2024): east
+    // Dec=12, west Dec=24. The grand total re-evaluates the balance over BOTH
+    // regions on the boundary day = 36 — NOT a sum that assumes additivity.
+    let mut req = request_with_filters(
+        &[("fact_sales", "region")],
+        &[("year", FilterOperator::Equal, "2024")],
+    );
+    req.totals = TotalsMode::Rollup;
+    let batches = run("CLOSINGBALANCE(SUM(fact_sales[amount]))", true, req)
+        .await
+        .unwrap();
+    let map = rollup_region_map(&batches, "m");
+    assert_eq!(map[&(Some("east".into()), 0)], Some(12.0));
+    assert_eq!(map[&(Some("west".into()), 0)], Some(24.0));
+    assert_eq!(map[&(None, 1)], Some(36.0));
+}
+
+#[tokio::test]
+async fn filter_context_compound_yoy_by_region() {
+    // A compound filter-context measure (no totals): YoY = YTD − PRIORYEAR with
+    // the date NOT on the axis. Each leaf evaluates against the date context, so
+    // PRIORYEAR must see the prior year (the date table stays un-pre-filtered).
+    // east 78−780 = −702, west 156−1560 = −1404.
+    let model = model_with_measures(
+        &[(
+            "yoy",
+            "YTD(SUM(fact_sales[amount])) - PRIORYEAR(SUM(fact_sales[amount]))",
+        )],
+        true,
+    );
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_batch()).unwrap();
+    cache.store("fact_sales", fact_batch()).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["yoy".into()],
+        group_by: vec![ColumnRef::new("fact_sales", "region")],
+        filters: vec![FilterCondition::new("year", FilterOperator::Equal, "2024")],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let region = combined
+        .column(combined.schema().index_of("region").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .clone();
+    let vals = measure_column(&combined, "yoy");
+    let mut by_region: HashMap<String, Option<f64>> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        by_region.insert(region.value(i).to_string(), vals[i]);
+    }
+    assert_eq!(by_region["east"], Some(-702.0));
+    assert_eq!(by_region["west"], Some(-1404.0));
+}
+
+#[tokio::test]
+async fn rollup_compound_yoy_by_region() {
+    // Compound YoY (YTD − PRIORYEAR) × ROLLUP: both leaves are composable
+    // filter-context families, so each rolls up and the arithmetic is applied per
+    // level. Context year=2024: YTD = 2024, PRIORYEAR = 2023.
+    // east 78−780 = −702, west 156−1560 = −1404, grand 234−2340 = −2106.
+    let model = model_with_measures(
+        &[(
+            "yoy",
+            "YTD(SUM(fact_sales[amount])) - PRIORYEAR(SUM(fact_sales[amount]))",
+        )],
+        true,
+    );
+    let batches = run_measures_rollup(
+        &model,
+        &["yoy"],
+        &[("fact_sales", "region")],
+        &[("year", FilterOperator::Equal, "2024")],
+    )
+    .await
+    .unwrap();
+    let map = rollup_region_map(&batches, "yoy");
+    assert_eq!(map[&(Some("east".into()), 0)], Some(-702.0));
+    assert_eq!(map[&(Some("west".into()), 0)], Some(-1404.0));
+    assert_eq!(map[&(None, 1)], Some(-2106.0));
+}
+
+#[tokio::test]
+async fn rollup_prioryear_by_region_recomputes() {
+    // PeriodShift × ROLLUP (Phase 2): PRIORYEAR shifts the whole 2024 window back
+    // to 2023. east 2023 = 10*(1..12) = 780, west = 1560; the rolled-up grand
+    // total re-evaluates over BOTH regions = 2340 (gid=1).
+    let mut req = request_with_filters(
+        &[("fact_sales", "region")],
+        &[("year", FilterOperator::Equal, "2024")],
+    );
+    req.totals = TotalsMode::Rollup;
+    let batches = run("PRIORYEAR(SUM(fact_sales[amount]))", true, req)
+        .await
+        .unwrap();
+    let map = rollup_region_map(&batches, "m");
+    assert_eq!(map[&(Some("east".into()), 0)], Some(780.0));
+    assert_eq!(map[&(Some("west".into()), 0)], Some(1560.0));
+    assert_eq!(map[&(None, 1)], Some(2340.0));
+}
+
+#[tokio::test]
+async fn rollup_prioryear_gapped_context_fails_closed() {
+    // A whole-window shift over a GAPPED context (Jun excluded) is ill-defined at
+    // every rollup level identically — the global contiguity guard fails the whole
+    // query closed, rather than silently over-counting June 2023 in any subtotal.
+    let mut req = request_with_filters(
+        &[("fact_sales", "region")],
+        &[
+            ("year", FilterOperator::Equal, "2024"),
+            ("month", FilterOperator::NotEqual, "6"),
+        ],
+    );
+    req.totals = TotalsMode::Rollup;
+    let err = run("PRIORYEAR(SUM(fact_sales[amount]))", true, req)
+        .await
+        .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected a TimeIntelligence contiguity error, got {err:?}");
+    };
+    assert!(reason.contains("not contiguous"), "got: {reason}");
+}
+
+#[tokio::test]
+async fn rollup_axis_ytd_still_fails_closed() {
+    // YTD with the date on the GROUP-BY axis is the AXIS route — a running window
+    // whose subtotal value is ill-defined — so ROLLUP stays fail-closed.
+    let mut req = request(&[("dim_date", "year"), ("dim_date", "month")]);
+    req.totals = TotalsMode::Rollup;
+    let err = run("YTD(SUM(fact_sales[amount]))", true, req)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, QueryError::InvalidQuery(_)), "got: {err:?}");
+    assert!(err.to_string().contains("totals"), "got: {err}");
+}
+
+// ===========================================================================
+// Hierarchy (ragged) × filter-context time intelligence (Phase 3).
+//
+// A filter-context TI measure groups on the hierarchy's TRANSFORMED level
+// expression (RepeatParent COALESCE / stopper NULLIF / ShowAsLeaf CASE), and
+// HideMembers drops blank-level rows post-aggregation — exactly like an ordinary
+// measure, because the lowered TI form is an ordinary aggregate.
+// ===========================================================================
+
+/// `fact_sales(date_id, country, state, city, amount)` → marked `dim_date`, with
+/// a 3-level `Geo` hierarchy (country → optional state → city) and a single TI
+/// measure. Queried at depth 2 (country, state) so `state` is the ragged level.
+fn geo_ti_model(behavior: RaggedBehavior, measure_src: &str) -> DataModel {
+    let dim_date = Table::new(
+        "dim_date",
+        vec![
+            Column::new("date_id", EngineDataType::Int64),
+            Column::new("datekey", EngineDataType::Date).with_date_role(DateRole::DateKey),
+            Column::new("year", EngineDataType::Int64).with_date_role(DateRole::Year),
+            Column::new("quarter", EngineDataType::Int64).with_date_role(DateRole::Quarter),
+            Column::new("month", EngineDataType::Int64).with_date_role(DateRole::Month),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    let fact = Table::new(
+        "fact_sales",
+        vec![
+            Column::new("date_id", EngineDataType::Int64),
+            Column::new("country", EngineDataType::String),
+            Column::new("state", EngineDataType::String),
+            Column::new("city", EngineDataType::String),
+            Column::new("amount", EngineDataType::Float64),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    DataModel::builder()
+        .add_table(dim_date)
+        .add_table(fact)
+        .add_relationship(Relationship::many_to_one(
+            "sales_date",
+            "fact_sales",
+            "date_id",
+            "dim_date",
+            "date_id",
+        ))
+        .add_measure(expression_measure(
+            "m",
+            parse_measure_expression(measure_src).unwrap(),
+        ))
+        .add_hierarchy(
+            Hierarchy::new(
+                "Geo",
+                "fact_sales",
+                vec![
+                    HierarchyLevel::new("country"),
+                    HierarchyLevel::new("state").with_optional(true),
+                    HierarchyLevel::new("city"),
+                ],
+            )
+            .with_ragged_behavior(behavior),
+        )
+        .mark_date_table("dim_date")
+        .build()
+        .unwrap()
+}
+
+/// Run the Geo-hierarchy TI request. One fact month (Jan 2024), so YTD = the
+/// month total. `France/IDF=40, USA/WA=10, USA/<blank state>=30`.
+async fn run_geo_ti(
+    model: &DataModel,
+    depth: usize,
+    rollup: bool,
+) -> QueryResult<Vec<RecordBatch>> {
+    let dim = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("datekey", DataType::Date32, true),
+            Field::new("year", DataType::Int64, true),
+            Field::new("quarter", DataType::Int64, true),
+            Field::new("month", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401i64])),
+            Arc::new(Date32Array::from(vec![first_of_month_days(2024, 1)])),
+            Arc::new(Int64Array::from(vec![2024i64])),
+            Arc::new(Int64Array::from(vec![1i64])),
+            Arc::new(Int64Array::from(vec![1i64])),
+        ],
+    )
+    .unwrap();
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("country", DataType::Utf8, true),
+            Field::new("state", DataType::Utf8, true),
+            Field::new("city", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401i64, 202401, 202401])),
+            Arc::new(StringArray::from(vec!["France", "USA", "USA"])),
+            Arc::new(StringArray::from(vec![Some("IDF"), Some("WA"), None])),
+            Arc::new(StringArray::from(vec!["Paris", "Seattle", "DC"])),
+            Arc::new(Float64Array::from(vec![40.0, 10.0, 30.0])),
+        ],
+    )
+    .unwrap();
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["m".into()],
+        hierarchy_group_by: Some(HierarchyGroupBy::new("Geo", depth)),
+        totals: if rollup {
+            TotalsMode::Rollup
+        } else {
+            TotalsMode::None
+        },
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, model, &registry, &[])?;
+    QueryExecutor::execute(&plan, model, &registry, Some(&cache), None, None, &[]).await
+}
+
+/// `(country, state) -> m` map; a NULL (blank / rolled-up) level reads as `"*"`.
+fn geo_map(batches: &[RecordBatch]) -> HashMap<(String, String), f64> {
+    let combined = concat_batches(&batches[0].schema(), batches).unwrap();
+    let read = |name: &str| {
+        let idx = combined.schema().index_of(name).unwrap();
+        arrow::compute::cast(combined.column(idx), &DataType::Utf8)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone()
+    };
+    let country = read("country");
+    let state = read("state");
+    let m = measure_column(&combined, "m");
+    let cell = |a: &StringArray, i: usize| {
+        if a.is_null(i) {
+            "*".to_string()
+        } else {
+            a.value(i).to_string()
+        }
+    };
+    let mut map = HashMap::new();
+    for i in 0..combined.num_rows() {
+        map.insert(
+            (cell(&country, i), cell(&state, i)),
+            m[i].unwrap_or(f64::NAN),
+        );
+    }
+    map
+}
+
+#[tokio::test]
+async fn hierarchy_repeat_parent_with_ytd_groups_on_filled_values() {
+    // RepeatParent fills the blank state with the country. YTD (date not on the
+    // axis) groups on the TRANSFORMED level COALESCE(state, country), so the USA
+    // row with no state groups under state="USA" (not its own blank group).
+    let model = geo_ti_model(RaggedBehavior::RepeatParent, "YTD(SUM(fact_sales[amount]))");
+    let map = geo_map(&run_geo_ti(&model, 2, false).await.unwrap());
+    assert_eq!(map[&("France".into(), "IDF".into())], 40.0);
+    assert_eq!(map[&("USA".into(), "WA".into())], 10.0);
+    assert_eq!(
+        map[&("USA".into(), "USA".into())],
+        30.0,
+        "blank state filled with the country via the hierarchy transform"
+    );
+    assert_eq!(map.len(), 3);
+}
+
+#[tokio::test]
+async fn hierarchy_hide_members_with_ytd_drops_blank_branch() {
+    // HideMembers: the YTD is computed, then the row whose state is blank is
+    // dropped post-aggregation (the transform + filter ride the lowered aggregate).
+    let model = geo_ti_model(RaggedBehavior::HideMembers, "YTD(SUM(fact_sales[amount]))");
+    let map = geo_map(&run_geo_ti(&model, 2, false).await.unwrap());
+    assert_eq!(map.len(), 2, "the blank-state USA branch is hidden");
+    assert_eq!(map[&("France".into(), "IDF".into())], 40.0);
+    assert_eq!(map[&("USA".into(), "WA".into())], 10.0);
+    assert!(!map.contains_key(&("USA".into(), "*".into())));
+}
+
+#[tokio::test]
+async fn hierarchy_repeat_parent_with_ytd_and_rollup() {
+    // RepeatParent × ROLLUP × YTD together: detail rows on the filled levels plus
+    // a country subtotal (state rolled up → "*") that re-evaluates YTD over the
+    // rolled-up rows, and a grand total.
+    let model = geo_ti_model(RaggedBehavior::RepeatParent, "YTD(SUM(fact_sales[amount]))");
+    let map = geo_map(&run_geo_ti(&model, 2, true).await.unwrap());
+    // Detail (filled state).
+    assert_eq!(map[&("France".into(), "IDF".into())], 40.0);
+    assert_eq!(map[&("USA".into(), "WA".into())], 10.0);
+    assert_eq!(map[&("USA".into(), "USA".into())], 30.0);
+    // Country subtotals (state rolled up) — recomputed, not summed from a stale value.
+    assert_eq!(map[&("France".into(), "*".into())], 40.0);
+    assert_eq!(map[&("USA".into(), "*".into())], 40.0);
+    // Grand total.
+    assert_eq!(map[&("*".into(), "*".into())], 80.0);
 }

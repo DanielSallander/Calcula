@@ -237,14 +237,13 @@ impl QueryExecutor {
             let date_on_axis = model
                 .date_table()
                 .is_some_and(|dt| group_by.iter().any(|c| c.table.eq_ignore_ascii_case(dt)));
-            let has_filter_context_ti = measures.iter().any(|m| {
-                matches!(
-                    m.expression(),
-                    Expression::ToDate { .. }
-                        | Expression::PeriodShift { .. }
-                        | Expression::DatesInPeriod { .. }
-                )
-            });
+            // Detect a filter-context TI node at the top level OR inside a compound
+            // (YoY = YTD − PRIORYEAR, …) so a compound TI measure also keeps the
+            // date table un-pre-filtered (its shifted ranges reach the full
+            // calendar). Matches the planner's date-table fetch decision.
+            let has_filter_context_ti = measures
+                .iter()
+                .any(|m| m.expression().contains_time_intelligence());
             match model.date_table() {
                 Some(dt) if has_filter_context_ti && !date_on_axis => {
                     let roles = model
@@ -877,10 +876,22 @@ impl QueryExecutor {
         // If we have window measures, evaluate them via two-stage window execution
         // (ordered at the Arrow level afterwards).
         if !window_measures.is_empty() {
-            if rollup {
+            // FILTER-CONTEXT time intelligence (YTD/QTD/MTD, DATESINPERIOD,
+            // CLOSING/OPENINGBALANCE, PRIORYEAR/PRIORPERIOD) lowers to an ordinary
+            // `Keep(Clear(inner),[range])` aggregate, so it composes with ROLLUP
+            // (GROUP BY ROLLUP recomputes it per level — the subtotal/grand-total
+            // is the measure re-evaluated over the rolled-up row set, not a sum of
+            // detail values) and with a ragged hierarchy (it can group on the
+            // transformed level expression). Axis-route running windows, compound
+            // TI, and ranking are NOT composable (subtotal value ill-defined) and
+            // stay fail-closed.
+            let all_composable = window_measures
+                .iter()
+                .all(|m| super::window::is_composable_filter_context_ti(m, model, group_by));
+            if rollup && !all_composable {
                 return Err(totals_unsupported("window measures"));
             }
-            if hier.is_some() {
+            if hier.is_some() && !all_composable {
                 return Err(hierarchy_unsupported("window measures"));
             }
             // A window/TI measure combined with an ordinary measure joins two
@@ -917,11 +928,14 @@ impl QueryExecutor {
                 group_by,
                 model,
                 &date_filters,
+                rollup,
+                hier,
                 plan.as_deref_mut(),
             )
             .await?;
 
             // No ordinary measures alongside → the window result is the answer.
+            // (With ROLLUP it already carries the trailing __grouping_id column.)
             if non_window.is_empty() {
                 return apply_order_and_limit(window_batches, order_by, limit);
             }
@@ -933,6 +947,12 @@ impl QueryExecutor {
             // this honest — a non-uniquely-keyed side fails closed rather than
             // multiplying rows. ORDER BY / LIMIT are applied once, to the
             // combined result, so top-N over a window measure still works.
+            //
+            // Under ROLLUP, the ordinary side rolls up too (passing `totals`), so
+            // both sides produce the same detail+subtotal+grand-total rows with an
+            // identical trailing `__grouping_id`; the NULL-safe join aligns them
+            // (subtotal NULL-marked dims included) and carries `__grouping_id`
+            // through. (Phase 1 supports only filter-context TI here, gated above.)
             check_cancelled(token)?;
             let normal_measures: Vec<Measure> = non_window.iter().map(|m| (*m).clone()).collect();
             let normal_batches = Box::pin(Self::execute_local_aggregation(
@@ -942,8 +962,8 @@ impl QueryExecutor {
                 &[],
                 &[],
                 None,
-                TotalsMode::None,
-                None,
+                totals,
+                hierarchy,
                 model,
                 registry,
                 cache,

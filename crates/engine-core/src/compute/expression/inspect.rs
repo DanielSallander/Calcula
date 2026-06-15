@@ -359,6 +359,55 @@ impl Expression {
             _ => false,
         }
     }
+
+    /// Returns `true` if this expression contains a FILTER-CONTEXT
+    /// time-intelligence node (`ToDate`/`PeriodShift`/`DatesInPeriod`/
+    /// `SemiAdditiveBalance`) — at the top level or nested inside a compound
+    /// combinator (`+ - * /`, `DIVIDE`, `IF`, `COALESCE`, `IFERROR`), the shapes
+    /// a compound time-intelligence measure (e.g. YoY = `YTD − PRIORYEAR`) uses.
+    ///
+    /// Unlike [`has_window`](Self::has_window), this **excludes** the axis-only
+    /// `Window`/`Offset`/`Index`/`RankWindow` nodes: it drives the off-axis
+    /// date-table fetch and the date-filter handling for filter-context time
+    /// intelligence (so a compound such as YoY pulls in the full calendar, not
+    /// just the request's date-filtered slice). The recursion covers exactly the
+    /// combinators a compound time-intelligence measure may use.
+    pub fn contains_time_intelligence(&self) -> bool {
+        match self {
+            Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. }
+            | Expression::SemiAdditiveBalance { .. } => true,
+            Expression::BinaryOp { left, right, .. } => {
+                left.contains_time_intelligence() || right.contains_time_intelligence()
+            }
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
+                numerator.contains_time_intelligence()
+                    || denominator.contains_time_intelligence()
+                    || alternate
+                        .as_ref()
+                        .is_some_and(|a| a.contains_time_intelligence())
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.contains_time_intelligence()
+                    || then_expr.contains_time_intelligence()
+                    || else_expr.contains_time_intelligence()
+            }
+            Expression::Coalesce(exprs) => exprs.iter().any(|e| e.contains_time_intelligence()),
+            Expression::IfError { expr, alternate } => {
+                expr.contains_time_intelligence() || alternate.contains_time_intelligence()
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

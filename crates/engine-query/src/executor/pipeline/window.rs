@@ -19,12 +19,15 @@ use engine_core::compute::time_intelligence::{
     FilterContextPlan, TimeIntelligenceRoute,
 };
 use engine_core::error::EngineError;
-use engine_core::model::{DataModel, DateRole};
+use engine_core::model::{DataModel, DateRole, RaggedBehavior};
 
 use crate::error::{QueryError, QueryResult};
-use crate::request::ColumnRef;
+use crate::planner::HierarchySpec;
+use crate::request::{ColumnRef, GROUPING_ID_COLUMN};
 
 use super::fetch::register_partitioned_table;
+use super::hierarchy::{apply_hide_members_filter, hierarchy_unsupported};
+use super::order_limit::totals_unsupported;
 use super::query_measures::materialize_query_in_pipeline;
 use super::QueryExecutor;
 
@@ -37,12 +40,15 @@ impl QueryExecutor {
     /// Stage 1: Materialize inner measure grouped by ORDER BY + PARTITION BY
     ///          columns (+ outer GROUP BY for context propagation).
     /// Stage 2: Apply SQL window function over the materialized result.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_window_measures(
         ctx: &SessionContext,
         window_measures: &[&Measure],
         group_by: &[ColumnRef],
         model: &DataModel,
         date_filters: &[FilterCondition],
+        rollup: bool,
+        hier: Option<&HierarchySpec>,
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         let resolver = ContextResolver::new(model);
@@ -70,6 +76,14 @@ impl QueryExecutor {
             // the joined per-leaf columns. A bare window/TI node skips this and
             // takes the simple path below.
             if !is_simple_window_leaf(&stripped_expr) {
+                // A compound TI measure composes with ROLLUP when every leaf is a
+                // composable filter-context family (the gate enforces this): each
+                // leaf rolls up, the leaves are joined carrying `__grouping_id`, and
+                // the arithmetic is applied per level. Compound × hierarchy is
+                // deferred (each leaf would need the level transform) — fail closed.
+                if hier.is_some() {
+                    return Err(hierarchy_unsupported("compound time-intelligence measures"));
+                }
                 reject_compound_outer_context(name, &eval_ctx)?;
                 // Decompose the ORIGINAL (un-resolved) expression so each leaf
                 // keeps its column qualifiers (so the leaf measure's fact table
@@ -91,6 +105,8 @@ impl QueryExecutor {
                     group_by,
                     model,
                     date_filters,
+                    rollup,
+                    None,
                     plan.as_deref_mut(),
                 ))
                 .await?;
@@ -110,6 +126,16 @@ impl QueryExecutor {
                 partition_by,
             } = &stripped_expr
             {
+                // Ranking a subtotal row against detail rows is meaningless (a
+                // different grain/identity), so ranking measures do not compose
+                // with ROLLUP totals. The upstream gate excludes this; fail closed
+                // here too.
+                if rollup {
+                    return Err(totals_unsupported("ranking measures"));
+                }
+                if hier.is_some() {
+                    return Err(hierarchy_unsupported("ranking measures"));
+                }
                 // A KEEP context around the ranking restricts which fact rows
                 // feed the aggregated order key; context this stage cannot apply
                 // fails closed.
@@ -156,11 +182,29 @@ impl QueryExecutor {
                     &plan_info,
                     date_filters,
                     &eval_ctx,
+                    rollup,
+                    hier,
                     plan.as_deref_mut(),
                 )
                 .await?;
                 per_measure.push((name.to_string(), batches));
                 continue;
+            }
+
+            // ROLLUP / hierarchy compose only with the filter-context route
+            // (handled above); an AXIS-route running window is a genuine SQL window
+            // function whose value at a subtotal / rolled-up level is ill-defined,
+            // so it fails closed. The upstream gate excludes this; fail closed here
+            // too (defense in depth).
+            if rollup {
+                return Err(totals_unsupported(
+                    "axis-mode running / window measures (a date column on the group-by axis)",
+                ));
+            }
+            if hier.is_some() {
+                return Err(hierarchy_unsupported(
+                    "axis-mode running / window measures (a date column on the group-by axis)",
+                ));
             }
 
             // Axis path (or non-time-intelligence window measure): lower onto
@@ -226,6 +270,8 @@ impl QueryExecutor {
                 &fact_table.to_lowercase(),
                 &context_filter_refs,
                 model,
+                false,
+                None,
             )
             .await?;
             let s1_elapsed = s1_start.elapsed();
@@ -313,7 +359,17 @@ impl QueryExecutor {
         // returned as-is; multiple measures (which share the group-by axis) are
         // FULL OUTER JOINed on their dimension columns so the result is one
         // [dims..., m1, m2, ...] table rather than disjoint per-measure blocks.
-        join_window_results(ctx, per_measure).await
+        let combined = join_window_results(ctx, per_measure).await?;
+
+        // HideMembers: drop result rows whose value at an included hierarchy level
+        // is blank (NULL / normalized stopper), exempting ROLLUP subtotal rows for
+        // their rolled-up levels (via `__grouping_id`). Applied to the window
+        // result here so it matches the ordinary side (the combine recursion runs
+        // the same filter), keeping the FULL OUTER JOIN aligned.
+        match hier.filter(|h| h.behavior == RaggedBehavior::HideMembers) {
+            Some(spec) => apply_hide_members_filter(combined, spec, group_by, rollup),
+            None => Ok(combined),
+        }
     }
 
     /// Evaluate a `RANK` / `ROW_NUMBER` / `DENSE_RANK` measure over the query's
@@ -426,6 +482,8 @@ impl QueryExecutor {
             &fact_table.to_lowercase(),
             context_filters,
             model,
+            false,
+            None,
         )
         .await?;
         let s1_rows = batch.num_rows();
@@ -518,6 +576,8 @@ impl QueryExecutor {
         plan_info: &FilterContextPlan,
         date_filters: &[FilterCondition],
         eval_ctx: &engine_core::compute::context::EvaluationContext,
+        rollup: bool,
+        hier: Option<&HierarchySpec>,
         plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         let probe_start = Instant::now();
@@ -561,6 +621,26 @@ impl QueryExecutor {
             return Ok(Vec::new());
         };
 
+        // FAIL CLOSED: a filter-context PERIOD SHIFT (PRIORYEAR/PRIORPERIOD/
+        // PARALLELPERIOD/DATEADD) moves the WHOLE current window back by calendar
+        // periods and installs a contiguous shifted DateKey range. If the current
+        // context has an internal hole (e.g. a slicer selects Jan and Mar but not
+        // Feb), the shifted range still spans the hole and would silently include
+        // a period the context excludes — an over-count. The axis path enforces the
+        // analogous guard (`check_period_shift_axis_contiguous`); restore it here.
+        // ToDate/DATESINPERIOD build their range purely from the as-of date (a hole
+        // simply contributes nothing) and single-day balances are a single day, so
+        // only `PeriodShift` is checked.
+        if matches!(stripped_expr, Expression::PeriodShift { .. }) {
+            Self::check_filter_context_window_contiguous(
+                ctx,
+                plan_info,
+                &where_sql,
+                &plan_info.function,
+            )
+            .await?;
+        }
+
         // Lower to Keep(Clear(inner, date cols), [DateKey >= start, < end]).
         let (lowered_expr, description) =
             lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?;
@@ -582,6 +662,8 @@ impl QueryExecutor {
             &fact_table.to_lowercase(),
             &[],
             model,
+            rollup,
+            hier,
         )
         .await?;
         let exec_elapsed = exec_start.elapsed();
@@ -792,6 +874,99 @@ impl QueryExecutor {
         Ok(())
     }
 
+    /// Fail closed when the date context of a filter-context PERIOD SHIFT is not
+    /// contiguous — i.e. the context filter excludes one or more date-table rows
+    /// that fall *inside the context's own `[min, max]` span*.
+    ///
+    /// A filter-context shift (PRIORYEAR / PRIORPERIOD / PARALLELPERIOD / DATEADD)
+    /// moves the whole current window `[min_ctx, as_of]` back by a whole number of
+    /// calendar periods and installs the shifted half-open `DateKey` *range*. That
+    /// contiguous range faithfully represents "the same window, shifted" only when
+    /// the context is itself the full set of date rows in its span: a hole (e.g. a
+    /// slicer that selects Jan and Mar but not Feb) is still spanned by the shifted
+    /// range, so the shifted aggregate silently includes a period the current
+    /// context excludes — an over-count with no error. This mirrors the axis path's
+    /// `check_period_shift_axis_contiguous` guard.
+    ///
+    /// The comparison is against the *date table's* rows in the span (not raw
+    /// calendar days), so a coarse calendar — e.g. one row per month — is accepted
+    /// as long as no in-span row is filtered out. The reference therefore matches
+    /// the granularity the calendar is modelled at.
+    ///
+    /// Residual assumption (documented, not checked): the calendar must be uniform
+    /// across the shifted span — e.g. a monthly calendar must carry the same months
+    /// in the current and the prior period. A calendar gapped *differently* across
+    /// periods is malformed for time intelligence (the same assumption the module
+    /// docs already state).
+    async fn check_filter_context_window_contiguous(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        where_sql: &str,
+        function_label: &str,
+    ) -> QueryResult<()> {
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = quote_ident_double(&plan_info.date_table.to_lowercase());
+        let ctx_where = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {where_sql}")
+        };
+
+        let gap_error = |reason: String| -> QueryError {
+            EngineError::TimeIntelligence {
+                function: function_label.to_string(),
+                reason,
+            }
+            .into()
+        };
+        let read_count = |batches: &[RecordBatch]| -> i64 {
+            batches
+                .first()
+                .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+                .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+                .unwrap_or(0)
+        };
+
+        // Distinct date rows present in the current context.
+        let ctx_sql = format!("SELECT COUNT(DISTINCT {dk}) FROM {table}{ctx_where}");
+        let ctx_days = read_count(
+            &ctx.sql(&ctx_sql)
+                .await
+                .map_err(|e| gap_error(format!("could not count the date context rows: {e}")))?
+                .collect()
+                .await?,
+        );
+
+        // Distinct date rows the table has across the context's [min, max] span,
+        // ignoring the context filter. A scalar MIN/MAX subquery avoids rendering
+        // date literals (no chrono dependency here) and stays exact.
+        let span_sql = format!(
+            "SELECT COUNT(DISTINCT {dk}) FROM {table} \
+             WHERE {dk} >= (SELECT MIN({dk}) FROM {table}{ctx_where}) \
+               AND {dk} <= (SELECT MAX({dk}) FROM {table}{ctx_where})"
+        );
+        let span_days = read_count(
+            &ctx.sql(&span_sql)
+                .await
+                .map_err(|e| gap_error(format!("could not count the date span rows: {e}")))?
+                .collect()
+                .await?,
+        );
+
+        if span_days > ctx_days {
+            return Err(gap_error(format!(
+                "the date context is not contiguous: the filter keeps {ctx_days} date row(s) but \
+                 its date range spans {span_days} row(s), so {} period(s) inside its own range are \
+                 excluded. A filter-context period shift moves the whole window by calendar periods \
+                 and would include the excluded period(s) in the shifted range (a wrong number). \
+                 Remove the internal date gap from the filter, or put a date column on the \
+                 group-by axis (the axis path shifts each period positionally)",
+                span_days - ctx_days
+            )));
+        }
+        Ok(())
+    }
+
     /// Build the WHERE clause (without the `WHERE` keyword) selecting the
     /// current date context on the date table: the request's date-table filters
     /// plus the measure's resolved KEEP filters on the date table. Empty when no
@@ -921,6 +1096,86 @@ fn read_date_as_days(batch: &RecordBatch, column: &str) -> QueryResult<Option<i3
              Timestamp(Microsecond); ensure the DateKey column is Date or Timestamp typed"
         ))),
     }
+}
+
+/// Whether a window-family measure is a FILTER-CONTEXT time-intelligence node
+/// that composes with `TotalsMode::Rollup` **or** a ragged hierarchy (v1).
+///
+/// Only a bare `ToDate` (YTD/QTD/MTD), `DatesInPeriod`, `SemiAdditiveBalance`
+/// (CLOSING/OPENINGBALANCE), or `PeriodShift` (PRIORYEAR/PRIORPERIOD/
+/// PARALLELPERIOD) whose route is [`TimeIntelligenceRoute::FilterContext`]
+/// qualifies: each lowers to an ordinary `Keep(Clear(inner),[DateKey range])`
+/// aggregate, so per-level recomputation under `GROUP BY ROLLUP` is exact — the
+/// subtotal / grand-total is the measure re-evaluated over the rolled-up row set,
+/// never the (wrong) sum of detail values. A filter-context `PeriodShift` shifts
+/// the whole *date* window — a global property, identical at every rollup level —
+/// and its contiguity guard (`check_filter_context_window_contiguous`) already
+/// fails the whole query closed when the filter punches a hole in the context.
+///
+/// NOT composable (subtotal value ill-defined, so they keep the fail-closed
+/// `totals_unsupported` error): compound time intelligence, the AXIS route (a date
+/// column on the group-by axis), `Window`/`Offset`/`Index` frames, and
+/// `RankWindow`. Resolution or routing errors classify as not-composable (fail
+/// closed). The same families compose with a ragged hierarchy's level transforms
+/// for the same reason (an ordinary aggregate can group on the transformed level
+/// expression).
+pub(super) fn is_composable_filter_context_ti(
+    measure: &Measure,
+    model: &DataModel,
+    group_by: &[ColumnRef],
+) -> bool {
+    let resolver = ContextResolver::new(model);
+    let Ok((stripped, _eval_ctx)) = resolver.resolve(measure.expression()) else {
+        return false;
+    };
+    let group_pairs: Vec<(String, String)> = group_by
+        .iter()
+        .map(|d| (d.table.clone(), d.column.clone()))
+        .collect();
+
+    // A bare composable family.
+    if is_composable_ti_leaf(&stripped, model, &group_pairs) {
+        return true;
+    }
+    // A COMPOUND time-intelligence measure (YoY = YTD − PRIORYEAR, DIVIDE, IF,
+    // COALESCE, IFERROR over TI terms) composes iff EVERY window leaf is itself a
+    // composable filter-context family — then each leaf rolls up and the
+    // arithmetic is applied per level. A bare-but-non-composable leaf (axis route,
+    // Window/Offset/Index, Rank) is not compound and was rejected above.
+    if is_simple_window_leaf(&stripped) {
+        return false;
+    }
+    let mut leaves: Vec<(String, Expression)> = Vec::new();
+    if extract_window_leaves(&stripped, &mut leaves).is_err() {
+        return false;
+    }
+    !leaves.is_empty()
+        && leaves
+            .iter()
+            .all(|(_, e)| is_composable_ti_leaf(e, model, &group_pairs))
+}
+
+/// A single time-intelligence node that composes with ROLLUP / a hierarchy: a
+/// bare filter-context `ToDate` / `DatesInPeriod` / `SemiAdditiveBalance` /
+/// `PeriodShift`.
+fn is_composable_ti_leaf(
+    expr: &Expression,
+    model: &DataModel,
+    group_pairs: &[(String, String)],
+) -> bool {
+    if !matches!(
+        expr,
+        Expression::ToDate { .. }
+            | Expression::DatesInPeriod { .. }
+            | Expression::SemiAdditiveBalance { .. }
+            | Expression::PeriodShift { .. }
+    ) {
+        return false;
+    }
+    matches!(
+        time_intelligence_route(expr, model, group_pairs),
+        Ok(Some(TimeIntelligenceRoute::FilterContext(_)))
+    )
 }
 
 /// Whether `fact_table` is a genuine fact for a ranking measure's query — it
@@ -1388,8 +1643,14 @@ async fn apply_compound_arithmetic(
     measure_name: &str,
     _group_by: &[ColumnRef],
 ) -> QueryResult<Vec<RecordBatch>> {
-    // Dimension columns = the joined schema minus the `__leaf_*` placeholders
-    // (so both the lowercased axis-path dims and the filter-context dims work).
+    // Dimension columns = the joined schema minus the `__leaf_*` placeholders and
+    // the trailing `__grouping_id` (so both the lowercased axis-path dims and the
+    // filter-context dims work). `__grouping_id` (present under ROLLUP) is carried
+    // through as the trailing column, after the computed measure.
+    let has_gid = joined
+        .first()
+        .map(|b| b.schema().field_with_name(GROUPING_ID_COLUMN).is_ok())
+        .unwrap_or(false);
     let dim_cols: Vec<String> = joined
         .first()
         .map(|b| {
@@ -1397,7 +1658,7 @@ async fn apply_compound_arithmetic(
                 .fields()
                 .iter()
                 .map(|f| f.name().clone())
-                .filter(|n| !n.starts_with("__leaf_"))
+                .filter(|n| !n.starts_with("__leaf_") && n != GROUPING_ID_COLUMN)
                 .collect()
         })
         .unwrap_or_default();
@@ -1410,6 +1671,9 @@ async fn apply_compound_arithmetic(
         "({arith_sql}) AS {}",
         quote_ident_double(measure_name)
     ));
+    if has_gid {
+        select_parts.push(quote_ident_double(GROUPING_ID_COLUMN));
+    }
     let sql = format!("SELECT {} FROM __compound", select_parts.join(", "));
     let batches = ctx.sql(&sql).await?.collect().await?;
     Ok(batches)
@@ -1452,11 +1716,15 @@ async fn join_window_results(
         .first()
         .map(|b| b.schema())
         .ok_or_else(|| QueryError::InvalidQuery("a window measure produced no result".into()))?;
+    // ROLLUP: a `__grouping_id` column rides each result. It is identical across
+    // results (same GROUP BY ROLLUP over the same group_by), so it is excluded
+    // from the join key/dim set and carried through as a trailing column.
+    let has_gid = first_schema.field_with_name(GROUPING_ID_COLUMN).is_ok();
     let dim_cols: Vec<String> = first_schema
         .fields()
         .iter()
         .map(|f| f.name().clone())
-        .filter(|n| n != first_name)
+        .filter(|n| n != first_name && n != GROUPING_ID_COLUMN)
         .collect();
     let measure_names: Vec<String> = per_measure.iter().map(|(n, _)| n.clone()).collect();
 
@@ -1512,6 +1780,13 @@ async fn join_window_results(
     }
     for (i, name) in measure_names.iter().enumerate() {
         select_parts.push(format!("__wjoin_{i}.{}", q(name)));
+    }
+    if has_gid {
+        let coalesced = (0..per_measure.len())
+            .map(|i| format!("__wjoin_{i}.{}", q(GROUPING_ID_COLUMN)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        select_parts.push(format!("COALESCE({coalesced}) AS {}", q(GROUPING_ID_COLUMN)));
     }
 
     // FROM __wjoin_0 [FULL OUTER JOIN __wjoin_i ON COALESCE(priors) = this | CROSS JOIN].
@@ -1586,6 +1861,14 @@ pub(super) async fn join_window_with_normal(
     let win_dims = dims_of(&window_batches)?;
     let norm_dims = dims_of(&normal_batches)?;
 
+    // ROLLUP: both sides ran the same GROUP BY ROLLUP over the same group_by, so
+    // each carries an identical trailing `__grouping_id`. Detect it (on the window
+    // side) before the batches are moved into the session, and carry it through.
+    let has_gid = window_batches
+        .first()
+        .map(|b| b.schema().field_with_name(GROUPING_ID_COLUMN).is_ok())
+        .unwrap_or(false);
+
     register_partitioned_table(ctx, "__wn_win", window_batches)?;
     register_partitioned_table(ctx, "__wn_norm", normal_batches)?;
 
@@ -1642,6 +1925,10 @@ pub(super) async fn join_window_with_normal(
             "__wn_norm"
         };
         select_parts.push(format!("{side}.{}", q(name)));
+    }
+    if has_gid {
+        let gid = q(GROUPING_ID_COLUMN);
+        select_parts.push(format!("COALESCE(__wn_win.{gid}, __wn_norm.{gid}) AS {gid}"));
     }
 
     let mut sql = format!("SELECT {} FROM __wn_win", select_parts.join(", "));
