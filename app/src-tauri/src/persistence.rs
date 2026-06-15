@@ -2384,6 +2384,7 @@ pub(crate) fn collect_scripts_for_save(
                     name: name.clone(),
                 },
             },
+            source_package: s.source_package.clone(),
         })
         .collect()
 }
@@ -2411,6 +2412,7 @@ pub(crate) fn collect_notebooks_for_save(
                     execution_index: c.execution_index,
                 })
                 .collect(),
+            source_package: n.source_package.clone(),
         })
         .collect()
 }
@@ -2437,6 +2439,7 @@ fn restore_scripts(
                         name: name.clone(),
                     },
                 },
+                source_package: s.source_package.clone(),
             },
         );
     }
@@ -2574,6 +2577,7 @@ fn restore_notebooks(
                         execution_index: c.execution_index,
                     })
                     .collect(),
+                source_package: n.source_package.clone(),
             },
         );
     }

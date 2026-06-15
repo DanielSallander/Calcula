@@ -262,27 +262,56 @@ pub fn calp_publish(
     })
 }
 
-/// Materialize distributed standalone module scripts + notebooks into ScriptState
-/// (C8). Used by BOTH the initial pull and the version refresh so upstream updates
-/// propagate identically. Distributed standalone scripts/notebooks are
-/// upstream-owned and inert — they appear in the workbook's script/notebook list
+/// Materialize ONE package's distributed standalone module scripts + notebooks
+/// into ScriptState (C8). Used by BOTH the initial pull and the version refresh so
+/// upstream updates propagate identically. Distributed standalone scripts/notebooks
+/// are upstream-owned and inert — they appear in the workbook's script/notebook list
 /// but are NEVER auto-executed; they run only on explicit, sandboxed user action.
-/// They REPLACE same-id entries (upstream-authoritative), which is how a corrected
-/// helper module or notebook actually reaches a subscriber on refresh — matching
-/// distributed object-script semantics. To customize one, copy it to a NEW id; an
-/// in-place edit is overwritten on the next pull/refresh. (v1 limit: a module or
-/// notebook the publisher REMOVED upstream lingers locally — they carry no
-/// per-package attribution yet, unlike object scripts.) Notebooks arrive
-/// run-clean: their execution metadata is stripped defensively at pull.
+///
+/// Provenance-driven semantics (parity with distributed object scripts):
+/// - REMOVAL-ON-REFRESH: a module/notebook this package shipped before but no longer
+///   ships is dropped (so a publisher's deletion reaches the subscriber).
+/// - UPDATE: a same-id entry owned by THIS package is replaced (the corrected
+///   version lands).
+/// - PRESERVE-LOCAL: a same-id entry that is subscriber-authored (no source_package)
+///   or owned by a DIFFERENT package is kept — a package never silently shadows it
+///   (the incoming one is skipped + logged). To customize distributed content, copy
+///   it to a NEW id. `modules`/`notebooks` are already stamped source_package =
+///   package_name at pull. Notebooks arrive run-clean (exec metadata stripped at pull).
 fn materialize_distributed_scripts(
     script_state: &crate::scripting::types::ScriptState,
+    package_name: &str,
     modules: &[persistence::SavedScript],
     notebooks: &[persistence::SavedNotebook],
 ) -> Result<(), String> {
-    if !modules.is_empty() {
+    use std::collections::HashSet;
+
+    {
         use crate::scripting::types::{ScriptScope, WorkbookScript};
         let mut scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+        let new_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
+        // Removal-on-refresh: drop this package's prior modules it no longer ships.
+        scripts.retain(|id, s| {
+            !(s.source_package.as_deref() == Some(package_name) && !new_ids.contains(id.as_str()))
+        });
         for module in modules {
+            // Conflict = an existing same-id entry NOT owned by this package
+            // (local, or a different package). Compute (and clone) up front so the
+            // immutable borrow is released before the insert.
+            let conflict: Option<Option<String>> = scripts.get(&module.id).and_then(|e| {
+                if e.source_package.as_deref() == Some(package_name) { None }
+                else { Some(e.source_package.clone()) }
+            });
+            if let Some(existing_owner) = conflict {
+                crate::log_warn!(
+                    "CALP",
+                    "module '{}' from package '{}' not applied: id already used by {}",
+                    module.id, package_name,
+                    existing_owner.map(|p| format!("package '{}'", p))
+                        .unwrap_or_else(|| "a local script".to_string()),
+                );
+                continue;
+            }
             scripts.insert(
                 module.id.clone(),
                 WorkbookScript {
@@ -296,14 +325,34 @@ fn materialize_distributed_scripts(
                             ScriptScope::Sheet { name: name.clone() }
                         }
                     },
+                    source_package: module.source_package.clone(),
                 },
             );
         }
     }
-    if !notebooks.is_empty() {
+
+    {
         use crate::scripting::types::{NotebookCell, NotebookDocument};
         let mut nbs = script_state.workbook_notebooks.lock().map_err(|e| e.to_string())?;
+        let new_ids: HashSet<&str> = notebooks.iter().map(|n| n.id.as_str()).collect();
+        nbs.retain(|id, n| {
+            !(n.source_package.as_deref() == Some(package_name) && !new_ids.contains(id.as_str()))
+        });
         for nb in notebooks {
+            let conflict: Option<Option<String>> = nbs.get(&nb.id).and_then(|e| {
+                if e.source_package.as_deref() == Some(package_name) { None }
+                else { Some(e.source_package.clone()) }
+            });
+            if let Some(existing_owner) = conflict {
+                crate::log_warn!(
+                    "CALP",
+                    "notebook '{}' from package '{}' not applied: id already used by {}",
+                    nb.id, package_name,
+                    existing_owner.map(|p| format!("package '{}'", p))
+                        .unwrap_or_else(|| "a local notebook".to_string()),
+                );
+                continue;
+            }
             nbs.insert(
                 nb.id.clone(),
                 NotebookDocument {
@@ -322,6 +371,7 @@ fn materialize_distributed_scripts(
                             execution_index: c.execution_index,
                         })
                         .collect(),
+                    source_package: nb.source_package.clone(),
                 },
             );
         }
@@ -422,7 +472,12 @@ pub fn calp_pull(
 
     // Materialize pulled standalone module scripts + notebooks (C8) into
     // ScriptState. Shared with the refresh path so updates propagate identically.
-    materialize_distributed_scripts(&script_state, &result.module_scripts, &result.notebooks)?;
+    materialize_distributed_scripts(
+        &script_state,
+        &result.package_name,
+        &result.module_scripts,
+        &result.notebooks,
+    )?;
 
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(&state);
@@ -1375,15 +1430,20 @@ pub fn calp_refresh_apply(
     // C8: likewise collect the refreshed standalone module scripts + notebooks
     // before the move, so the refresh can materialize them (without this they are
     // pulled then silently dropped, leaving a subscriber stuck on the version
-    // present at first subscribe). Flattened across packages — they replace by id.
-    let module_updates: Vec<persistence::SavedScript> = payloads
-        .iter()
-        .flat_map(|p| p.pull_result.module_scripts.clone())
-        .collect();
-    let notebook_updates: Vec<persistence::SavedNotebook> = payloads
-        .iter()
-        .flat_map(|p| p.pull_result.notebooks.clone())
-        .collect();
+    // present at first subscribe). Kept PER PACKAGE so removal-on-refresh +
+    // preserve-local can scope to the owning package.
+    #[allow(clippy::type_complexity)]
+    let module_notebook_updates: Vec<(String, Vec<persistence::SavedScript>, Vec<persistence::SavedNotebook>)> =
+        payloads
+            .iter()
+            .map(|p| {
+                (
+                    p.pull_result.package_name.clone(),
+                    p.pull_result.module_scripts.clone(),
+                    p.pull_result.notebooks.clone(),
+                )
+            })
+            .collect();
 
     // Apply refresh: update subscription metadata and rebase overrides.
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
@@ -1445,9 +1505,12 @@ pub fn calp_refresh_apply(
         }
     }
 
-    // C8: materialize the refreshed packages' standalone module scripts +
-    // notebooks (replace by id) so upstream updates actually land on refresh.
-    materialize_distributed_scripts(&script_state, &module_updates, &notebook_updates)?;
+    // C8: materialize each refreshed package's standalone module scripts +
+    // notebooks so upstream updates (incl. removals) actually land on refresh,
+    // while preserving subscriber-local same-id documents.
+    for (pkg, modules, notebooks) in &module_notebook_updates {
+        materialize_distributed_scripts(&script_state, pkg, modules, notebooks)?;
+    }
 
     rebuild_writeback_index(&state);
 
@@ -3618,19 +3681,21 @@ fn validate_dimension_field(
 #[cfg(test)]
 mod c8_materialize_tests {
     use super::materialize_distributed_scripts;
-    use crate::scripting::types::ScriptState;
+    use crate::scripting::types::{ScriptScope, ScriptState, WorkbookScript};
 
-    fn mk_module(id: &str, source: &str) -> persistence::SavedScript {
+    /// A pulled module, stamped with its source package (as pull does).
+    fn mk_module(pkg: &str, id: &str, source: &str) -> persistence::SavedScript {
         persistence::SavedScript {
             id: id.to_string(),
             name: "M".to_string(),
             description: None,
             source: source.to_string(),
             scope: persistence::SavedScriptScope::Workbook,
+            source_package: Some(pkg.to_string()),
         }
     }
 
-    fn mk_notebook(id: &str, src: &str) -> persistence::SavedNotebook {
+    fn mk_notebook(pkg: &str, id: &str, src: &str) -> persistence::SavedNotebook {
         persistence::SavedNotebook {
             id: id.to_string(),
             name: "N".to_string(),
@@ -3643,34 +3708,73 @@ mod c8_materialize_tests {
                 duration_ms: 0,
                 execution_index: None,
             }],
+            source_package: Some(pkg.to_string()),
         }
     }
 
     #[test]
     fn materializes_modules_and_notebooks_into_script_state() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&st, &[mk_module("m1", "v1")], &[mk_notebook("n1", "x")]).unwrap();
-        assert_eq!(st.workbook_scripts.lock().unwrap().get("m1").unwrap().source, "v1");
-        assert_eq!(
-            st.workbook_notebooks.lock().unwrap().get("n1").unwrap().cells[0].source,
-            "x"
-        );
+        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "x")]).unwrap();
+        let scripts = st.workbook_scripts.lock().unwrap();
+        assert_eq!(scripts.get("m1").unwrap().source, "v1");
+        assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg"));
+        assert_eq!(st.workbook_notebooks.lock().unwrap().get("n1").unwrap().cells[0].source, "x");
     }
 
     #[test]
-    fn replace_by_id_lets_an_upstream_refresh_update_land() {
-        // The C8 fix: a refreshed package shipping the same id must REPLACE the
-        // prior version (without this, updates were silently dropped after the
-        // first subscribe).
+    fn same_package_refresh_replaces_the_prior_version() {
         let st = ScriptState::new();
-        materialize_distributed_scripts(&st, &[mk_module("m1", "v1")], &[mk_notebook("n1", "old")]).unwrap();
-        materialize_distributed_scripts(&st, &[mk_module("m1", "v2-updated")], &[mk_notebook("n1", "new")]).unwrap();
-
+        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "v1")], &[mk_notebook("pkg", "n1", "old")]).unwrap();
+        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "v2-updated")], &[mk_notebook("pkg", "n1", "new")]).unwrap();
         let scripts = st.workbook_scripts.lock().unwrap();
         assert_eq!(scripts.len(), 1, "same id replaces, not duplicates");
         assert_eq!(scripts.get("m1").unwrap().source, "v2-updated");
-        let notebooks = st.workbook_notebooks.lock().unwrap();
-        assert_eq!(notebooks.len(), 1);
-        assert_eq!(notebooks.get("n1").unwrap().cells[0].source, "new");
+        assert_eq!(st.workbook_notebooks.lock().unwrap().get("n1").unwrap().cells[0].source, "new");
+    }
+
+    #[test]
+    fn removal_on_refresh_drops_a_module_the_package_no_longer_ships() {
+        let st = ScriptState::new();
+        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "a"), mk_module("pkg", "m2", "b")], &[]).unwrap();
+        // The next version ships only m1 -> m2 must be removed.
+        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "a2")], &[]).unwrap();
+        let scripts = st.workbook_scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts.contains_key("m1"));
+        assert!(!scripts.contains_key("m2"), "removed-upstream module must be dropped on refresh");
+    }
+
+    #[test]
+    fn preserves_a_subscriber_local_same_id_module() {
+        let st = ScriptState::new();
+        // A genuinely local (subscriber-authored) module with id "m1".
+        st.workbook_scripts.lock().unwrap().insert(
+            "m1".to_string(),
+            WorkbookScript {
+                id: "m1".to_string(),
+                name: "Local".to_string(),
+                description: None,
+                source: "my local edit".to_string(),
+                scope: ScriptScope::Workbook,
+                source_package: None,
+            },
+        );
+        // A package ships its own "m1" -> the local one is preserved, package skipped.
+        materialize_distributed_scripts(&st, "pkg", &[mk_module("pkg", "m1", "upstream")], &[]).unwrap();
+        let scripts = st.workbook_scripts.lock().unwrap();
+        assert_eq!(scripts.get("m1").unwrap().source, "my local edit");
+        assert_eq!(scripts.get("m1").unwrap().source_package, None);
+    }
+
+    #[test]
+    fn does_not_let_one_package_shadow_anothers_same_id() {
+        let st = ScriptState::new();
+        materialize_distributed_scripts(&st, "pkg-a", &[mk_module("pkg-a", "m1", "from-a")], &[]).unwrap();
+        // A second package reuses the id -> the first package keeps ownership.
+        materialize_distributed_scripts(&st, "pkg-b", &[mk_module("pkg-b", "m1", "from-b")], &[]).unwrap();
+        let scripts = st.workbook_scripts.lock().unwrap();
+        assert_eq!(scripts.get("m1").unwrap().source, "from-a");
+        assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg-a"));
     }
 }

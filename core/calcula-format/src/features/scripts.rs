@@ -30,6 +30,10 @@ pub struct ScriptDef {
     pub source: String,
     #[serde(default)]
     pub scope: ScriptScopeDef,
+    /// .calp distribution provenance (C8). None = local. See
+    /// persistence::SavedScript::source_package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 impl From<&SavedScript> for ScriptDef {
@@ -43,6 +47,7 @@ impl From<&SavedScript> for ScriptDef {
                 SavedScriptScope::Workbook => ScriptScopeDef::Workbook,
                 SavedScriptScope::Sheet { name } => ScriptScopeDef::Sheet { name: name.clone() },
             },
+            source_package: s.source_package.clone(),
         }
     }
 }
@@ -58,6 +63,7 @@ impl From<&ScriptDef> for SavedScript {
                 ScriptScopeDef::Workbook => SavedScriptScope::Workbook,
                 ScriptScopeDef::Sheet { name } => SavedScriptScope::Sheet { name: name.clone() },
             },
+            source_package: d.source_package.clone(),
         }
     }
 }

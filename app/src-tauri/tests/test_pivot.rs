@@ -28,7 +28,7 @@ mod common;
 use common::{
     AdventureWorksFixture, TestHarness, SalesFixture,
     pivot_grand_total, pivot_row_labels, pivot_col_labels,
-    pivot_cell_type_count, pivot_data_sum,
+    pivot_cell_type_count, pivot_data_sum, pid,
 };
 use engine::Cell;
 use pivot_engine::{
@@ -63,7 +63,7 @@ const AW_END: (u32, u32) = (40, 12);
 fn test_empty_pivot_no_fields() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let def = PivotDefinition::new(1, AW_START, AW_END);
+    let def = PivotDefinition::new(pid(1), AW_START, AW_END);
     let view = calculate_pivot(&def, &mut cache);
 
     // An empty pivot should produce a minimal view with no data cells.
@@ -279,7 +279,7 @@ fn test_hidden_items_filter() {
     let h = aw_harness();
     // Hide "Clothing" from Category — only Bikes should remain
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     let mut cat_field = PivotField::new(2, "Category".into());
     cat_field.hidden_items = vec!["Clothing".to_string()];
@@ -306,7 +306,7 @@ fn test_hidden_items_filter() {
 fn test_page_filter_via_hidden_items() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     // Filter to US only by hiding non-US countries on the Country row field
     // (Page filters with ValueList are not yet applied by the engine — use
@@ -346,7 +346,7 @@ fn test_page_filter_via_hidden_items() {
 fn test_hidden_items_multiple_values() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     // Hide several territories
     let mut territory = PivotField::new(0, "Territory".into());
@@ -375,7 +375,7 @@ fn test_hidden_items_multiple_values() {
 fn test_sort_ascending() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     let mut field = PivotField::new(0, "Territory".into());
     field.sort_order = SortOrder::Ascending;
@@ -395,7 +395,7 @@ fn test_sort_ascending() {
 fn test_sort_descending() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     let mut field = PivotField::new(0, "Territory".into());
     field.sort_order = SortOrder::Descending;
@@ -419,7 +419,7 @@ fn test_sort_descending() {
 fn test_compact_layout() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.report_layout = ReportLayout::Compact;
     def.row_fields = vec![
         PivotField::new(0, "Territory".into()),
@@ -437,7 +437,7 @@ fn test_compact_layout() {
 fn test_tabular_layout() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.report_layout = ReportLayout::Tabular;
     def.row_fields = vec![
         PivotField::new(0, "Territory".into()),
@@ -455,7 +455,7 @@ fn test_tabular_layout() {
 fn test_outline_layout() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.report_layout = ReportLayout::Outline;
     def.row_fields = vec![
         PivotField::new(0, "Territory".into()),
@@ -477,7 +477,7 @@ fn test_outline_layout() {
 fn test_no_row_grand_totals() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.show_row_grand_totals = false;
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     def.value_fields = vec![ValueField::new(12, "Sum".into(), AggregationType::Sum)];
@@ -493,7 +493,7 @@ fn test_no_row_grand_totals() {
 fn test_no_column_grand_totals() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.show_column_grand_totals = false;
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     def.column_fields = vec![PivotField::new(2, "Category".into())];
@@ -510,7 +510,7 @@ fn test_no_column_grand_totals() {
 fn test_both_grand_totals_off() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.show_row_grand_totals = false;
     def.layout.show_column_grand_totals = false;
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
@@ -533,7 +533,7 @@ fn test_both_grand_totals_off() {
 fn test_subtotals_off() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     let mut outer = PivotField::new(0, "Territory".into());
     outer.show_subtotals = false;
@@ -550,7 +550,7 @@ fn test_subtotals_off() {
 fn test_subtotals_on() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     let outer = PivotField::new(0, "Territory".into()); // show_subtotals defaults true
     def.row_fields = vec![outer, PivotField::new(2, "Category".into())];
@@ -572,7 +572,7 @@ fn test_subtotals_on() {
 fn test_subtotals_location_off() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.subtotal_location = SubtotalLocation::Off;
 
     def.row_fields = vec![
@@ -595,7 +595,7 @@ fn test_subtotals_location_off() {
 fn test_number_binning() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     // Group UnitPrice (col 11) into bins: 0-100, 100-1000, 1000-4000
     let mut price_field = PivotField::new(11, "UnitPrice".into());
@@ -627,7 +627,7 @@ fn test_number_binning() {
 fn test_manual_grouping() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     // Group territories into "Domestic" and "International"
     let mut territory_field = PivotField::new(0, "Territory".into());
@@ -671,7 +671,7 @@ fn test_manual_grouping() {
 fn test_calculated_field() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     def.value_fields = vec![
@@ -700,7 +700,7 @@ fn test_calculated_field() {
 fn test_show_values_as_percent_of_grand_total() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     let mut vf = ValueField::new(12, "% of Total".into(), AggregationType::Sum);
@@ -729,7 +729,7 @@ fn test_show_values_as_percent_of_grand_total() {
 fn test_show_values_as_percent_of_row() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     def.column_fields = vec![PivotField::new(2, "Category".into())];
@@ -753,7 +753,7 @@ fn test_show_values_as_percent_of_row() {
 fn test_values_position_rows() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.layout.values_position = ValuesPosition::Rows;
 
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
@@ -779,7 +779,7 @@ fn test_values_position_rows() {
 fn test_drill_down_retrieves_source_rows() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     def.value_fields = vec![ValueField::new(12, "Sum".into(), AggregationType::Sum)];
@@ -812,7 +812,7 @@ fn test_aggregation_product() {
     let h = aw_harness();
     // Use a small dataset to make product tractable
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.row_fields = vec![PivotField::new(2, "Category".into())];
     def.value_fields = vec![ValueField::new(10, "Product of Qty".into(), AggregationType::Product)];
 
@@ -876,7 +876,7 @@ fn test_aggregation_variance() {
 fn test_show_values_as_rank_ascending() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     let mut vf = ValueField::new(12, "Rank".into(), AggregationType::Sum);
@@ -1020,7 +1020,7 @@ fn test_create_protected_region() {
     let region = ProtectedRegion {
         id: "pivot-1".to_string(),
         region_type: "pivot".to_string(),
-        owner_id: 1,
+        owner_id: pid(1),
         sheet_index: 0,
         start_row: 0,
         start_col: 10,
@@ -1039,7 +1039,7 @@ fn test_protected_region_boundaries() {
         regions.push(ProtectedRegion {
             id: "pivot-1".into(),
             region_type: "pivot".into(),
-            owner_id: 1,
+            owner_id: pid(1),
             sheet_index: 0,
             start_row: 5,
             start_col: 5,
@@ -1065,11 +1065,11 @@ fn test_protected_regions_different_sheets() {
     {
         let mut regions = h.state.protected_regions.lock().unwrap();
         regions.push(ProtectedRegion {
-            id: "pivot-1".into(), region_type: "pivot".into(), owner_id: 1,
+            id: "pivot-1".into(), region_type: "pivot".into(), owner_id: pid(1),
             sheet_index: 0, start_row: 0, start_col: 0, end_row: 10, end_col: 5,
         });
         regions.push(ProtectedRegion {
-            id: "pivot-2".into(), region_type: "pivot".into(), owner_id: 2,
+            id: "pivot-2".into(), region_type: "pivot".into(), owner_id: pid(2),
             sheet_index: 1, start_row: 0, start_col: 0, end_row: 10, end_col: 5,
         });
     }
@@ -1236,7 +1236,7 @@ fn test_aw_yearly_comparison() {
 fn test_filter_and_sort_combined() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
 
     // Filter to US only via hidden_items on Territory, sort descending
     let mut territory = PivotField::new(0, "Territory".into());
@@ -1301,7 +1301,7 @@ fn test_count_numbers_vs_count() {
     // Row 4, col 1 is empty
 
     let (mut cache, _) = h.build_pivot_cache((0, 0), (4, 1), true);
-    let mut def = PivotDefinition::new(1, (0, 0), (4, 1));
+    let mut def = PivotDefinition::new(pid(1), (0, 0), (4, 1));
     def.row_fields = vec![PivotField::new(0, "Group".into())];
     def.value_fields = vec![
         ValueField::new(1, "Count".into(), AggregationType::Count),
@@ -1407,7 +1407,7 @@ fn test_recalculate_after_field_change() {
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
 
     // First: pivot by Territory
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
     def.value_fields = vec![ValueField::new(12, "Sum".into(), AggregationType::Sum)];
 
@@ -1434,7 +1434,7 @@ fn test_recalculate_after_field_change() {
 fn test_change_aggregation_type() {
     let h = aw_harness();
     let (mut cache, _) = h.build_pivot_cache(AW_START, AW_END, true);
-    let mut def = PivotDefinition::new(1, AW_START, AW_END);
+    let mut def = PivotDefinition::new(pid(1), AW_START, AW_END);
     def.row_fields = vec![PivotField::new(0, "Territory".into())];
 
     // Sum first

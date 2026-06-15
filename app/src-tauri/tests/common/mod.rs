@@ -10,6 +10,18 @@ use pivot_engine::{
 };
 
 // ============================================================================
+// PIVOT ID HELPER
+// ============================================================================
+
+/// Deterministic, distinct PivotId from a small integer (for tests that used
+/// integer pivot ids before the EntityId migration). n>=1 (n=0 would be ZERO).
+pub fn pid(n: u32) -> pivot_engine::PivotId {
+    let mut b = [0u8; 16];
+    b[12..16].copy_from_slice(&n.to_be_bytes());
+    pivot_engine::PivotId::from_bytes(b)
+}
+
+// ============================================================================
 // TEST HARNESS
 // ============================================================================
 
@@ -110,7 +122,7 @@ impl TestHarness {
             }
         }
 
-        let mut cache = PivotCache::new(1, col_count);
+        let mut cache = PivotCache::new(pid(1), col_count);
         for (i, name) in headers.iter().enumerate() {
             cache.set_field_name(i, name.clone());
         }
@@ -141,7 +153,7 @@ impl TestHarness {
     ) -> (PivotDefinition, PivotCache, PivotView) {
         let (mut cache, _headers) = self.build_pivot_cache(source_start, source_end, true);
 
-        let mut def = PivotDefinition::new(1, source_start, source_end);
+        let mut def = PivotDefinition::new(pid(1), source_start, source_end);
         def.source_has_headers = true;
         def.row_fields = row_fields;
         def.column_fields = column_fields;

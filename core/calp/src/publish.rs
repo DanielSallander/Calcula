@@ -336,7 +336,11 @@ pub fn publish(
         let modules_dir = registry.modules_dir(&request.package_name, &version_str);
         fs::create_dir_all(&modules_dir)?;
         for script in &modules_to_publish {
-            let def = calcula_format::features::scripts::ScriptDef::from(*script);
+            let mut def = calcula_format::features::scripts::ScriptDef::from(*script);
+            // Clear any distribution provenance: the SUBSCRIBER stamps this with
+            // the new package name on pull. A publisher who in turn subscribed to
+            // some upstream package must not leak that upstream attribution.
+            def.source_package = None;
             fs::write(
                 modules_dir.join(format!("{}.json", script.id)),
                 serde_json::to_string_pretty(&def)?,
@@ -355,6 +359,8 @@ pub fn publish(
         fs::create_dir_all(&notebooks_dir)?;
         for notebook in &notebooks_to_publish {
             let mut def = calcula_format::features::notebooks::NotebookDef::from(*notebook);
+            // Clear provenance (subscriber re-stamps on pull) + strip exec metadata.
+            def.source_package = None;
             for cell in &mut def.cells {
                 cell.last_output = Vec::new();
                 cell.last_error = None;

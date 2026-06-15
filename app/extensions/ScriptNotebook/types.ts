@@ -7,6 +7,9 @@ export interface NotebookDocument {
   id: string;
   name: string;
   cells: NotebookCell[];
+  /** The .calp package this notebook was distributed from (C8 provenance).
+   *  Absent for local/subscriber-authored notebooks. */
+  sourcePackage?: string;
 }
 
 /** A single cell in a notebook. */

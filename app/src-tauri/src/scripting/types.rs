@@ -64,6 +64,12 @@ pub struct WorkbookScript {
     /// Where this script lives: workbook-level or scoped to a sheet.
     #[serde(default)]
     pub scope: ScriptScope,
+    /// The .calp package this module script was distributed from (C8 provenance).
+    /// None for local/subscriber-authored scripts. Drives refresh: a package's
+    /// prior modules are replaced/removed on its version bump, while local
+    /// same-id scripts are preserved (parity with distributed object scripts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// Lightweight summary of a script (for listing without source code).
@@ -137,6 +143,10 @@ pub struct NotebookDocument {
     pub id: String,
     pub name: String,
     pub cells: Vec<NotebookCell>,
+    /// The .calp package this notebook was distributed from (C8 provenance).
+    /// None for local/subscriber-authored notebooks. See WorkbookScript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// A single cell in a notebook.

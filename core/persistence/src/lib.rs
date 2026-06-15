@@ -875,6 +875,11 @@ pub struct SavedScript {
     /// Where this script lives: workbook-level or scoped to a sheet.
     #[serde(default)]
     pub scope: SavedScriptScope,
+    /// The .calp package this module script was distributed from (C8 provenance).
+    /// None = local. Persisted so a refresh AFTER a save/reload still knows which
+    /// modules belong to which package (replace/remove on refresh; keep locals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// A workbook-embedded notebook for .cala persistence.
@@ -883,6 +888,10 @@ pub struct SavedNotebook {
     pub id: String,
     pub name: String,
     pub cells: Vec<SavedNotebookCell>,
+    /// The .calp package this notebook was distributed from (C8 provenance).
+    /// None = local. See SavedScript.source_package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// A single cell in a saved notebook.

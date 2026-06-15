@@ -12,6 +12,10 @@ pub struct NotebookDef {
     pub id: String,
     pub name: String,
     pub cells: Vec<NotebookCellDef>,
+    /// .calp distribution provenance (C8). None = local. See
+    /// persistence::SavedNotebook::source_package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// JSON-friendly notebook cell definition.
@@ -38,6 +42,7 @@ impl From<&SavedNotebook> for NotebookDef {
             id: n.id.clone(),
             name: n.name.clone(),
             cells: n.cells.iter().map(NotebookCellDef::from).collect(),
+            source_package: n.source_package.clone(),
         }
     }
 }
@@ -62,6 +67,7 @@ impl From<&NotebookDef> for SavedNotebook {
             id: d.id.clone(),
             name: d.name.clone(),
             cells: d.cells.iter().map(SavedNotebookCell::from).collect(),
+            source_package: d.source_package.clone(),
         }
     }
 }

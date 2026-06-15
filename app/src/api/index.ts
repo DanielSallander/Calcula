@@ -1401,6 +1401,11 @@ export type {
 
 export { CellRange } from "./range";
 
+// Canonical shared object model — Workbook/Sheet levels above the CellRange seed
+// (C3). See docs/design/c3-shared-object-model.md.
+export { Workbook, Sheet, workbook } from "./objectModel";
+export type { SheetVisibility } from "./objectModel";
+
 // ============================================================================
 // Scriptable Objects API
 // ============================================================================

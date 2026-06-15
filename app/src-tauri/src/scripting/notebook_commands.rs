@@ -35,6 +35,7 @@ pub fn notebook_create(
             duration_ms: 0,
             execution_index: None,
         }],
+        source_package: None,
     };
 
     let mut notebooks = script_state

@@ -229,7 +229,11 @@ pub fn pull(
             let content = fs::read_to_string(&path)?;
             let def: calcula_format::features::scripts::ScriptDef =
                 serde_json::from_str(&content)?;
-            pulled_modules.push(SavedScript::from(&def));
+            let mut s = SavedScript::from(&def);
+            // Stamp distribution provenance so refresh + dedupe can tell this
+            // module belongs to THIS package (vs a subscriber-authored local one).
+            s.source_package = Some(request.package_name.clone());
+            pulled_modules.push(s);
         }
     }
 
@@ -253,6 +257,7 @@ pub fn pull(
             let def: calcula_format::features::notebooks::NotebookDef =
                 serde_json::from_str(&content)?;
             let mut nb = SavedNotebook::from(&def);
+            nb.source_package = Some(request.package_name.clone());
             for cell in &mut nb.cells {
                 cell.last_output = Vec::new();
                 cell.last_error = None;
@@ -721,6 +726,7 @@ mod tests {
             description: Some("a helper module".to_string()),
             source: "export function add(a, b) { return a + b; }".to_string(),
             scope: persistence::SavedScriptScope::Sheet { name: "Data".to_string() },
+            source_package: None,
         }];
         wb.notebooks = vec![SavedNotebook {
             id: "nb-1".to_string(),
@@ -735,6 +741,7 @@ mod tests {
                 duration_ms: 123,
                 execution_index: Some(3),
             }],
+            source_package: None,
         }];
 
         let request = PublishRequest {
@@ -787,11 +794,14 @@ mod tests {
             &m.scope,
             persistence::SavedScriptScope::Sheet { name } if name == "Data"
         ));
+        // Provenance is stamped with the package name on pull.
+        assert_eq!(m.source_package.as_deref(), Some("c8-pkg"));
 
         assert_eq!(result.notebooks.len(), 1);
         let nb = &result.notebooks[0];
         assert_eq!(nb.id, "nb-1");
         assert_eq!(nb.name, "Analysis");
+        assert_eq!(nb.source_package.as_deref(), Some("c8-pkg"));
         assert_eq!(nb.cells.len(), 1);
         let cell = &nb.cells[0];
         assert_eq!(cell.id, "cell-1");
@@ -848,6 +858,7 @@ mod tests {
                 duration_ms: 0,
                 execution_index: None,
             }],
+            source_package: None,
         }];
         let request = PublishRequest {
             workbook: &wb,
@@ -883,6 +894,8 @@ mod tests {
                 duration_ms: 42,
                 execution_index: Some(7),
             }],
+            // Also try to forge a different package's attribution.
+            source_package: Some("trusted-other-pkg".to_string()),
         };
         fs::write(
             ver_dir.join("notebooks").join("nb-evil.json"),
@@ -905,6 +918,9 @@ mod tests {
         let result = pull(&reg, &pull_req, prof.path()).unwrap();
 
         assert_eq!(result.notebooks.len(), 1);
+        // Provenance is re-stamped with the ACTUAL package on pull, overriding the
+        // publisher's forged "trusted-other-pkg" attribution.
+        assert_eq!(result.notebooks[0].source_package.as_deref(), Some("evil-pkg"));
         let cell = &result.notebooks[0].cells[0];
         assert_eq!(cell.source, "1 + 1", "the real payload (source) must survive");
         assert!(cell.last_output.is_empty(), "forged last_output must be stripped at pull");

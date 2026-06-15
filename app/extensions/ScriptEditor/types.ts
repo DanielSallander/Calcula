@@ -86,4 +86,7 @@ export interface WorkbookScript {
   description: string | null;
   source: string;
   scope?: ScriptScope;
+  /** The .calp package this module was distributed from (C8 provenance).
+   *  Absent for local/subscriber-authored scripts. */
+  sourcePackage?: string;
 }
