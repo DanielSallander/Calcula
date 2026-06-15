@@ -228,6 +228,95 @@ pub struct PublishedSheet {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// Per-sheet presentation metadata carried in a package (D9 — content fidelity).
+/// Written as `sheets/{sheet_id}/metadata.json` at publish and restored at pull.
+/// Without this a subscriber's sheets lost their merged headers, freeze panes,
+/// notes, hyperlinks, hidden rows/cols, tab color and print setup. Mirrors the
+/// `persistence::Sheet` metadata fields; an older package without this file
+/// falls back to the (correct) per-field defaults at pull.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedSheetMetadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_regions: Vec<persistence::SavedMergedRegion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze_row: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze_col: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub hidden_rows: std::collections::HashSet<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub hidden_cols: std::collections::HashSet<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tab_color: String,
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<persistence::SavedNote>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hyperlinks: Vec<persistence::SavedHyperlink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_setup: Option<persistence::SavedPageSetup>,
+    #[serde(default = "default_true")]
+    pub show_gridlines: bool,
+}
+
+fn default_visibility() -> String {
+    "visible".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for PublishedSheetMetadata {
+    fn default() -> Self {
+        Self {
+            merged_regions: Vec::new(),
+            freeze_row: None,
+            freeze_col: None,
+            hidden_rows: std::collections::HashSet::new(),
+            hidden_cols: std::collections::HashSet::new(),
+            tab_color: String::new(),
+            visibility: "visible".to_string(),
+            notes: Vec::new(),
+            hyperlinks: Vec::new(),
+            page_setup: None,
+            show_gridlines: true,
+        }
+    }
+}
+
+impl PublishedSheetMetadata {
+    /// Build from a workbook sheet at publish time.
+    pub fn from_sheet(sheet: &persistence::Sheet) -> Self {
+        Self {
+            merged_regions: sheet.merged_regions.clone(),
+            freeze_row: sheet.freeze_row,
+            freeze_col: sheet.freeze_col,
+            hidden_rows: sheet.hidden_rows.clone(),
+            hidden_cols: sheet.hidden_cols.clone(),
+            tab_color: sheet.tab_color.clone(),
+            visibility: sheet.visibility.clone(),
+            notes: sheet.notes.clone(),
+            hyperlinks: sheet.hyperlinks.clone(),
+            page_setup: sheet.page_setup.clone(),
+            show_gridlines: sheet.show_gridlines,
+        }
+    }
+
+    /// Total count of presentation features carried (for the disclosure surface).
+    pub fn feature_count(&self) -> usize {
+        self.merged_regions.len()
+            + self.notes.len()
+            + self.hyperlinks.len()
+            + self.hidden_rows.len()
+            + self.hidden_cols.len()
+            + usize::from(self.freeze_row.is_some() || self.freeze_col.is_some())
+            + usize::from(!self.tab_color.is_empty())
+            + usize::from(self.page_setup.is_some())
+    }
+}
+
 /// A named range included in the published package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

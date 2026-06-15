@@ -151,7 +151,20 @@ pub fn pull(
             }
         };
 
-        // Build Sheet with fresh local SheetId
+        // Read presentation metadata (D9). Absent in pre-D9 packages -> the
+        // (correct) per-field defaults via PublishedSheetMetadata::default().
+        let metadata: crate::manifest::PublishedSheetMetadata = {
+            let path = sheet_dir.join("metadata.json");
+            if path.exists() {
+                serde_json::from_str(&fs::read_to_string(&path)?)?
+            } else {
+                crate::manifest::PublishedSheetMetadata::default()
+            }
+        };
+
+        // Build Sheet with fresh local SheetId, restoring the carried metadata
+        // (merged regions, freeze panes, hidden rows/cols, tab color, visibility,
+        // notes, hyperlinks, page setup, gridlines) instead of dropping it.
         let local_id = SheetId::from_bytes(identity::generate_uuid_v7());
         let sheet = Sheet {
             id: local_id,
@@ -160,17 +173,17 @@ pub fn pull(
             column_widths,
             row_heights,
             styles,
-            merged_regions: Vec::new(),
-            freeze_row: None,
-            freeze_col: None,
-            hidden_rows: std::collections::HashSet::new(),
-            hidden_cols: std::collections::HashSet::new(),
-            tab_color: String::new(),
-            visibility: "visible".to_string(),
-            notes: Vec::new(),
-            hyperlinks: Vec::new(),
-            page_setup: None,
-            show_gridlines: true,
+            merged_regions: metadata.merged_regions,
+            freeze_row: metadata.freeze_row,
+            freeze_col: metadata.freeze_col,
+            hidden_rows: metadata.hidden_rows,
+            hidden_cols: metadata.hidden_cols,
+            tab_color: metadata.tab_color,
+            visibility: metadata.visibility,
+            notes: metadata.notes,
+            hyperlinks: metadata.hyperlinks,
+            page_setup: metadata.page_setup,
+            show_gridlines: metadata.show_gridlines,
         };
 
         pulled_sheets.push(PulledSheet {
@@ -707,6 +720,84 @@ mod tests {
         let original_cell_count = original_wb.sheets[0].cells.len();
         let pulled_cell_count = result.sheets[0].sheet.cells.len();
         assert_eq!(pulled_cell_count, original_cell_count);
+    }
+
+    // --- D9: sheet presentation-metadata fidelity ---
+
+    #[test]
+    fn pull_restores_sheet_presentation_metadata() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        // A sheet carrying rich metadata a pre-D9 pull would have dropped.
+        let mut wb = make_test_workbook();
+        {
+            let s = &mut wb.sheets[0];
+            s.merged_regions = vec![persistence::SavedMergedRegion {
+                start_row: 0, start_col: 0, end_row: 0, end_col: 3,
+            }];
+            s.freeze_row = Some(1);
+            s.freeze_col = Some(2);
+            s.hidden_rows = [3u32, 4].into_iter().collect();
+            s.hidden_cols = [5u32].into_iter().collect();
+            s.tab_color = "#ff0000".to_string();
+            s.visibility = "hidden".to_string();
+            s.notes = vec![persistence::SavedNote {
+                row: 0, col: 0, text: "hi".to_string(), author: "me".to_string(),
+            }];
+            s.hyperlinks = vec![persistence::SavedHyperlink {
+                row: 1, col: 1, target: "https://x".to_string(), display_text: None, tooltip: None,
+            }];
+            s.show_gridlines = false;
+        }
+
+        let request = PublishRequest {
+            workbook: &wb,
+            package_name: "d9-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish::publish(&reg, &request, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "d9-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        // The metadata-rich sheet round-trips fully.
+        let pulled = &result.sheets[0].sheet;
+        assert_eq!(pulled.merged_regions.len(), 1);
+        assert_eq!(pulled.merged_regions[0].end_col, 3);
+        assert_eq!(pulled.freeze_row, Some(1));
+        assert_eq!(pulled.freeze_col, Some(2));
+        assert!(pulled.hidden_rows.contains(&3) && pulled.hidden_rows.contains(&4));
+        assert!(pulled.hidden_cols.contains(&5));
+        assert_eq!(pulled.tab_color, "#ff0000");
+        assert_eq!(pulled.visibility, "hidden");
+        assert_eq!(pulled.notes.len(), 1);
+        assert_eq!(pulled.notes[0].text, "hi");
+        assert_eq!(pulled.hyperlinks.len(), 1);
+        assert_eq!(pulled.hyperlinks[0].target, "https://x");
+        assert!(!pulled.show_gridlines);
+
+        // A plain sheet with no metadata round-trips to the correct defaults.
+        let plain = &result.sheets[1].sheet;
+        assert!(plain.merged_regions.is_empty());
+        assert_eq!(plain.visibility, "visible");
+        assert!(plain.show_gridlines);
     }
 
     // --- C8: standalone module scripts + notebooks ---

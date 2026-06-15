@@ -289,6 +289,16 @@ pub fn publish(
             &sheet.row_heights,
         );
         fs::write(sheet_dir.join("layout.json"), serde_json::to_string_pretty(&layout)?)?;
+
+        // Presentation metadata (D9): merged regions, freeze panes, hidden
+        // rows/cols, tab color, visibility, notes, hyperlinks, page setup,
+        // gridlines. Written before the manifest, so the integrity walk
+        // checksums it and pull restores it instead of dropping it.
+        let metadata = crate::manifest::PublishedSheetMetadata::from_sheet(sheet);
+        fs::write(
+            sheet_dir.join("metadata.json"),
+            serde_json::to_string_pretty(&metadata)?,
+        )?;
     }
 
     // Write tables
@@ -601,8 +611,8 @@ mod tests {
 
         let ver = reg.get_version_manifest("checked", "1.0.0").unwrap();
 
-        // 2 sheets x (data.json + styles.json + layout.json)
-        assert_eq!(ver.artifact_checksums.len(), 6);
+        // 2 sheets x (data.json + styles.json + layout.json + metadata.json)
+        assert_eq!(ver.artifact_checksums.len(), 8);
         // The manifest is the integrity root: never lists itself.
         assert!(!ver.artifact_checksums.contains_key("version-manifest.json"));
         // The detached signature is likewise not a listed artifact.
