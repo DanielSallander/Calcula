@@ -8,12 +8,14 @@ import { AppEvents } from "@api/events";
 import { OverridesPane } from "./components/OverridesPane";
 import { SubscriptionManagerPane } from "./components/SubscriptionManagerPane";
 import { PublisherDashboardPane } from "./components/PublisherDashboardPane";
+import { AuditLogPane } from "./components/AuditLogPane";
 import {
   DistributionManifest,
   OVERRIDES_PANE_ID,
   WRITEBACK_PANE_ID,
   SUBSCRIPTIONS_PANE_ID,
   PUBLISHER_DASHBOARD_PANE_ID,
+  AUDIT_LOG_PANE_ID,
   PUBLISH_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
@@ -106,6 +108,16 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(PUBLISHER_DASHBOARD_PANE_ID));
 
+  context.ui.taskPanes.register({
+    id: AUDIT_LOG_PANE_ID,
+    title: "Audit Log",
+    component: AuditLogPane,
+    contextKeys: ["always"],
+    priority: 35,
+    closable: true,
+  });
+  cleanupFns.push(() => context.ui.taskPanes.unregister(AUDIT_LOG_PANE_ID));
+
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
@@ -158,6 +170,16 @@ function activate(context: ExtensionContext): void {
       context.ui.taskPanes.showContainer();
     },
     order: 903.5,
+  });
+
+  context.ui.menus.registerItem("data", {
+    id: "data:showAuditLog",
+    label: "Distribution Audit Log...",
+    action: () => {
+      context.ui.taskPanes.open(AUDIT_LOG_PANE_ID);
+      context.ui.taskPanes.showContainer();
+    },
+    order: 903.7,
   });
 
   context.ui.menus.registerItem("data", {
