@@ -358,7 +358,25 @@ impl QueryExecutor {
                 "the ranking measure '{name}' requires ORDERBY(...)"
             )));
         }
-        // v1: every ORDER BY column is a measure column on the fact table,
+        // The fact table is inferred from the measure's ORDER BY column (it has
+        // no other anchor). That inference is only meaningful when the order key
+        // is a genuine measure column — i.e. `fact_table` is actually the fact of
+        // this query: it owns a group-by column, or it is the *many* side of a
+        // relationship to a group-by dimension. Otherwise an ORDER BY on a
+        // **dimension** attribute (e.g. `ORDERBY(dim_date[year])`) would be
+        // mis-taken as the fact and `SUM(dimension_attribute)` would be a
+        // nonsensical (silently-wrong) order key. Reject that — rank by a fact
+        // measure column, or order the result by a dimension at the request
+        // level (`QueryRequest.order_by`).
+        if !rank_fact_is_genuine(model, fact_table, group_by) {
+            return Err(QueryError::InvalidQuery(format!(
+                "the ranking measure '{name}' must ORDER BY a measure column of the query's fact \
+                 table, but '{fact_table}' is a dimension here; rank by a fact column (the measure \
+                 you are ranking by), or order the result by a dimension with the request-level \
+                 `order_by`"
+            )));
+        }
+        // v1: every ORDER BY column is a measure column on that fact table,
         // aggregated with SUM. (Ranking by a dimension value alphabetically is
         // not yet supported — order such a query at the request level instead.)
         for (t, c) in order_by {
@@ -890,6 +908,34 @@ fn read_date_as_days(batch: &RecordBatch, column: &str) -> QueryResult<Option<i3
              Timestamp(Microsecond); ensure the DateKey column is Date or Timestamp typed"
         ))),
     }
+}
+
+/// Whether `fact_table` is a genuine fact for a ranking measure's query — it
+/// either owns one of the `group_by` columns (the query groups on the fact) or
+/// is the *many* side of a relationship to a group-by dimension table. A pure
+/// dimension table (the *one* side) is not a genuine fact, so a measure whose
+/// `ORDERBY` resolved its fact to that dimension is rejected upstream.
+fn rank_fact_is_genuine(model: &DataModel, fact_table: &str, group_by: &[ColumnRef]) -> bool {
+    use engine_core::model::Cardinality;
+
+    if group_by
+        .iter()
+        .any(|g| g.table.eq_ignore_ascii_case(fact_table))
+    {
+        return true;
+    }
+    group_by.iter().any(|g| {
+        model
+            .find_relationship(fact_table, &g.table)
+            .map(|rel| match rel.cardinality() {
+                Cardinality::ManyToOne => rel.from_table().eq_ignore_ascii_case(fact_table),
+                Cardinality::OneToMany => rel.to_table().eq_ignore_ascii_case(fact_table),
+                // A 1:1 link is ambiguous (allow); M:N is never a clean fact join.
+                Cardinality::OneToOne => true,
+                Cardinality::ManyToMany => false,
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Extracted window function parameters.

@@ -27,7 +27,7 @@ An integer representing the dense rank of each row. Tied rows receive the same r
 - DENSE_RANK always uses local aggregation (never pushed to data sources).
 - It is materialized via two-stage evaluation: stage 1 produces one row per query group-by combination with each `ORDERBY` column aggregated as `SUM(fact[col])`; stage 2 applies `DENSE_RANK() OVER (PARTITION BY … ORDER BY … DESC)` locally via DataFusion.
 - The ranking is over the query's **group-by rows**, ordered **descending** by the aggregated order key (the largest value is rank 1).
-- **v1 constraints (fail closed otherwise):** the query must have a `group_by`; every `ORDERBY` column must be a column of the measure's fact table (aggregated with `SUM`); every `PARTITIONBY` column must be one of the query's `group_by` columns.
+- **v1 constraints (fail closed otherwise):** the query must have a `group_by`; every `ORDERBY` column must be a measure column of the query's genuine fact table (aggregated with `SUM`) — ordering by a **dimension** attribute fails closed (order a dimension at the request level instead); every `PARTITIONBY` column must be one of the query's `group_by` columns.
 
 ## Example 1: Dense rank products by revenue
 

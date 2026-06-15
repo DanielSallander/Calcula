@@ -1732,6 +1732,21 @@ async fn rank_measure_combines_with_an_ordinary_measure() {
 }
 
 #[tokio::test]
+async fn rank_measure_order_by_dimension_fails_closed() {
+    // ORDER BY a DIMENSION attribute (dim_date[year]) resolves the measure's
+    // fact to dim_date — a dimension, not a fact. Ranking by SUM(year) would be
+    // nonsensical, so this fails closed rather than returning a wrong number.
+    let model = model_with_measures(&[("rnk", "RANK(ORDERBY(dim_date[year]))")], true);
+    let err = run_measures(&model, &["rnk"], &[("fact_sales", "region")])
+        .await
+        .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("is a dimension here"), "got: {msg}");
+}
+
+#[tokio::test]
 async fn rank_measure_without_group_by_fails_closed() {
     // A ranking measure ranks the group-by rows; with no group_by axis there is
     // nothing to rank → typed error rather than a meaningless single row.
