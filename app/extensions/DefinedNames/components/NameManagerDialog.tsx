@@ -431,6 +431,18 @@ export function NameManagerDialog(
     }
   }, [selectedName, loadData]);
 
+  const handleEditScript = useCallback(() => {
+    if (!selectedName) return;
+    // Generic scriptable-objects seam: the ScriptableObjects extension scaffolds
+    // + registers a "namedRange" script keyed by the name, then opens the editor.
+    emitAppEvent("scriptable-objects:edit-script", {
+      objectType: "namedRange",
+      instanceId: selectedName,
+      objectName: selectedName,
+    });
+    onClose();
+  }, [selectedName, onClose]);
+
   const toggleFolder = useCallback((folderName: string) => {
     setCollapsedFolders((prev) => {
       const next = new Set(prev);
@@ -713,6 +725,17 @@ export function NameManagerDialog(
               disabled={!selectedName}
             >
               Edit...
+            </button>
+            <button
+              style={
+                selectedName
+                  ? styles.btn
+                  : { ...styles.btn, ...styles.btnDisabled }
+              }
+              onClick={handleEditScript}
+              disabled={!selectedName}
+            >
+              Edit Script
             </button>
             <button
               style={

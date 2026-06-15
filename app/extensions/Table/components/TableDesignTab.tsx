@@ -316,6 +316,18 @@ export function TableDesignTab({
     showDialog("table:removeDuplicatesDialog", { table });
   }, [table]);
 
+  const handleEditScript = useCallback(() => {
+    if (!table) return;
+    // Generic scriptable-objects seam: the ScriptableObjects extension scaffolds
+    // + registers a "table" script keyed by the table's EntityId, then opens the
+    // editor.
+    emitAppEvent("scriptable-objects:edit-script", {
+      objectType: "table",
+      instanceId: String(table.id),
+      objectName: table.name,
+    });
+  }, [table]);
+
   const handleStyleSelect = useCallback((_styleId: string) => {
     setSelectedStyleId(_styleId);
   }, []);
@@ -366,6 +378,9 @@ export function TableDesignTab({
       </button>
       <button className={tabStyles.toolButton} onClick={handleRemoveDuplicates}>
         Remove Duplicates
+      </button>
+      <button className={tabStyles.toolButton} onClick={handleEditScript}>
+        Edit Script...
       </button>
       <button className={tabStyles.toolButton} onClick={handleConvertToRange}>
         Convert to Range

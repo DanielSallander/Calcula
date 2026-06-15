@@ -31,6 +31,8 @@ export type ScriptableObjectType =
   | "textbox"
   | "timeline"
   | "shape"
+  | "table"
+  | "namedRange"
   // UI objects (per-instance scripts, keyed by panel ID)
   | "panel";
 
@@ -624,6 +626,66 @@ export interface ButtonContext extends BaseObjectContext {
   onClick(handler: EventHandler<{ x: number; y: number }>): CleanupFn;
 }
 
+/** Context for Table (ListObject) instances — the most-automated VBA object.
+ *  The instanceId is the table's EntityId. Cell reads/writes resolve through
+ *  the table's grid coordinates (host-side) so they recalc and are undoable. */
+export interface TableContext extends BaseObjectContext {
+  readonly objectType: "table";
+  /** The table instance ID (the table's EntityId string). */
+  readonly instanceId: string;
+  /** The table name. */
+  readonly name: string;
+
+  /** Called when any cell inside the table's range changes. */
+  onDataChange(handler: EventHandler<{ changes: Array<{ row: number; col: number; newValue: string }> }>): CleanupFn;
+
+  /** Get the table's column header names (sync, seeded from the mount snapshot). */
+  getHeaders(): string[];
+  /** Get the number of data rows in the table (sync, seeded). */
+  getRowCount(): number;
+
+  /** Read a table cell by 0-based data row + 0-based column index (async). */
+  getCellValue(row: number, colIndex: number): Promise<string>;
+  /** Write a table cell by 0-based data row + 0-based column index (async, undoable). */
+  setCellValue(row: number, colIndex: number, value: string): Promise<void>;
+  /** Append a new data row to the table (async, undoable). */
+  addRow(): Promise<void>;
+
+  /** Table properties (read-only, mirror-backed). */
+  readonly properties: {
+    readonly name: string;
+    readonly sheetIndex: number;
+    readonly rowCount: number;
+  };
+}
+
+/** Context for Named Range instances — the Excel `Name` object. The instanceId
+ *  is the name string. Reads are seeded/refreshed from the resolved range;
+ *  writes resolve to grid coordinates host-side (recalc + undoable). */
+export interface NamedRangeContext extends BaseObjectContext {
+  readonly objectType: "namedRange";
+  /** The named range instance ID (the name string). */
+  readonly instanceId: string;
+  /** The name. */
+  readonly name: string;
+
+  /** Called when any cell inside the resolved range changes. */
+  onChange(handler: EventHandler<{ changes: Array<{ row: number; col: number; newValue: string }> }>): CleanupFn;
+
+  /** Get the resolved A1 address (e.g., "Sheet1!A1:B10"). Sync, seeded. */
+  getAddress(): string;
+  /** Get the range's values as a 2D array of display strings. Sync, seeded + refreshed on change. */
+  getValues(): string[][];
+  /** Write a 2D array of values into the range (async, undoable). */
+  setValues(values: string[][]): Promise<void>;
+
+  /** Named range properties (read-only, mirror-backed). */
+  readonly properties: {
+    readonly refersTo: string;
+    readonly scope: string;
+  };
+}
+
 // ============================================================================
 // Context Type Map (for generic access)
 // ============================================================================
@@ -642,6 +704,8 @@ export interface ObjectContextMap {
   textbox: BaseObjectContext;
   timeline: BaseObjectContext;
   shape: ShapeContext;
+  table: TableContext;
+  namedRange: NamedRangeContext;
   panel: PanelContext;
 }
 

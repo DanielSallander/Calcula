@@ -329,6 +329,20 @@ export type {
 export { DEFAULT_NOTE_SIZE, DEFAULT_NOTE_AUTHOR } from "../core/types";
 
 // ============================================================================
+// Tables & Named Ranges (object-script support)
+// ============================================================================
+
+export {
+  getTableById,
+  addTableRow,
+  resolveNamedRangeCoords,
+} from "./backend";
+
+export type {
+  NamedRangeCoords,
+} from "./backend";
+
+// ============================================================================
 // AutoFilter API
 // ============================================================================
 

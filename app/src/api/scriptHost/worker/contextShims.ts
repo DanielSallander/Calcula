@@ -541,6 +541,40 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         onClick: (h: Handler) => registerHook(rt, "onClick", h),
       };
 
+    case "table":
+      return {
+        ...base,
+        instanceId,
+        name: spec.scriptName,
+        onDataChange: (h: Handler) => registerHook(rt, "onDataChange", h),
+        getHeaders: () => [...mirror<string[]>(rt, "table.headers", [])],
+        getRowCount: () => mirror(rt, "table.rowCount", 0),
+        getCellValue: (row: number, colIndex: number) => getState(rt, "table.getCellValue", [row, colIndex]),
+        setCellValue: (row: number, colIndex: number, value: string) =>
+          setState(rt, "table.setCellValue", [row, colIndex, value]),
+        addRow: () => setState(rt, "table.addRow", []),
+        properties: {
+          get name() { return mirror(rt, "table.name", ""); },
+          get sheetIndex() { return mirror(rt, "table.sheetIndex", 0); },
+          get rowCount() { return mirror(rt, "table.rowCount", 0); },
+        },
+      };
+
+    case "namedRange":
+      return {
+        ...base,
+        instanceId,
+        name: spec.scriptName,
+        onChange: (h: Handler) => registerHook(rt, "onChange", h),
+        getAddress: () => mirror(rt, "namedRange.address", ""),
+        getValues: () => mirror<string[][]>(rt, "namedRange.values", []),
+        setValues: (values: string[][]) => setState(rt, "namedRange.setValues", [values]),
+        properties: {
+          get refersTo() { return mirror(rt, "namedRange.refersTo", ""); },
+          get scope() { return mirror(rt, "namedRange.scope", "workbook"); },
+        },
+      };
+
     default:
       // textbox / timeline / future types: base surface only.
       return base;

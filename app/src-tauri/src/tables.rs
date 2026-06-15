@@ -658,6 +658,16 @@ pub fn delete_table(
         "Delete table",
     );
 
+    // C10 cleanup: prune any object scripts attached to this table so a deleted
+    // table leaves no dangling scripts behind. instanceId == the table id.
+    let table_id_str = table_id.to_string();
+    if let Ok(mut scripts) = state.object_scripts.lock() {
+        scripts.retain(|s| {
+            !(s.object_type == persistence::ScriptableObjectType::Table
+                && s.instance_id.as_deref() == Some(table_id_str.as_str()))
+        });
+    }
+
     TableResult::ok_empty()
 }
 
@@ -1298,6 +1308,50 @@ pub fn get_table(
     tables
         .get(&active_sheet)
         .and_then(|sheet_tables| sheet_tables.get(&table_id).cloned())
+}
+
+/// Get a table by ID across ALL sheets (not just the active sheet).
+/// Used by object scripts, which pin the table by id and may run while a
+/// different sheet is active.
+#[tauri::command]
+pub fn get_table_by_id(
+    state: State<AppState>,
+    table_id: identity::EntityId,
+) -> Option<Table> {
+    let tables = state.tables.lock().unwrap();
+    for sheet_tables in tables.values() {
+        if let Some(table) = sheet_tables.get(&table_id) {
+            return Some(table.clone());
+        }
+    }
+    None
+}
+
+/// Append one data row to a table by expanding its end_row by 1, across any
+/// sheet. The host writes the new row's cells via the cell ops (recalc + undo)
+/// and emits the dataChanged event; this command only grows the table bounds.
+#[tauri::command]
+pub fn add_table_row(
+    state: State<AppState>,
+    table_id: identity::EntityId,
+) -> Result<(), String> {
+    let mut tables = state.tables.lock().unwrap();
+    for sheet_tables in tables.values_mut() {
+        if let Some(table) = sheet_tables.get_mut(&table_id) {
+            table.end_row += 1;
+            // Keep the AutoFilter range in sync if the table has filters.
+            if table.style_options.show_filter_button {
+                let sheet_index = table.sheet_index;
+                let new_end = table.end_row;
+                let mut auto_filters = state.auto_filters.lock().unwrap();
+                if let Some(af) = auto_filters.get_mut(&sheet_index) {
+                    af.end_row = new_end;
+                }
+            }
+            return Ok(());
+        }
+    }
+    Err("Table not found".to_string())
 }
 
 /// Get a table by name

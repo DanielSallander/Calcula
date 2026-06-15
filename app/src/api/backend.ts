@@ -2650,6 +2650,25 @@ export async function getTable(tableId: string): Promise<Table | null> {
 }
 
 /**
+ * Get a table by ID across ALL sheets (not just the active sheet).
+ * Used by object scripts that pin a table by id while another sheet is active.
+ * @param tableId - ID of the table
+ * @returns The table or null if not found
+ */
+export async function getTableById(tableId: string): Promise<Table | null> {
+  return invoke<Table | null>("get_table_by_id", { tableId });
+}
+
+/**
+ * Append one data row to a table (expands end_row by 1). The caller is
+ * responsible for writing the new row's cells and emitting any events.
+ * @param tableId - ID of the table
+ */
+export async function addTableRow(tableId: string): Promise<void> {
+  return invoke<void>("add_table_row", { tableId });
+}
+
+/**
  * Get a table by name.
  * @param name - Name of the table
  * @returns The table or null if not found
@@ -2688,6 +2707,28 @@ export async function resolveStructuredReference(
   reference: string
 ): Promise<StructuredRefResult> {
   return invoke<StructuredRefResult>("resolve_structured_reference", { reference });
+}
+
+/**
+ * Resolved grid coordinates for a named range (used by object scripts).
+ */
+export interface NamedRangeCoords {
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * Resolve a named range to 0-based grid coordinates.
+ * @param name - The name
+ * @returns The resolved coordinates
+ */
+export async function resolveNamedRangeCoords(
+  name: string
+): Promise<NamedRangeCoords> {
+  return invoke<NamedRangeCoords>("resolve_named_range_coords", { name });
 }
 
 /**

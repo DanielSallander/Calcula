@@ -48,6 +48,8 @@ pub enum ObjectScriptObjectTypeDef {
     Textbox,
     Timeline,
     Shape,
+    Table,
+    NamedRange,
     Panel,
 }
 
@@ -98,6 +100,8 @@ impl From<&ScriptableObjectType> for ObjectScriptObjectTypeDef {
             ScriptableObjectType::Textbox => ObjectScriptObjectTypeDef::Textbox,
             ScriptableObjectType::Timeline => ObjectScriptObjectTypeDef::Timeline,
             ScriptableObjectType::Shape => ObjectScriptObjectTypeDef::Shape,
+            ScriptableObjectType::Table => ObjectScriptObjectTypeDef::Table,
+            ScriptableObjectType::NamedRange => ObjectScriptObjectTypeDef::NamedRange,
             ScriptableObjectType::Panel => ObjectScriptObjectTypeDef::Panel,
         }
     }
@@ -118,6 +122,8 @@ impl From<&ObjectScriptObjectTypeDef> for ScriptableObjectType {
             ObjectScriptObjectTypeDef::Textbox => ScriptableObjectType::Textbox,
             ObjectScriptObjectTypeDef::Timeline => ScriptableObjectType::Timeline,
             ObjectScriptObjectTypeDef::Shape => ScriptableObjectType::Shape,
+            ObjectScriptObjectTypeDef::Table => ScriptableObjectType::Table,
+            ObjectScriptObjectTypeDef::NamedRange => ScriptableObjectType::NamedRange,
             ObjectScriptObjectTypeDef::Panel => ScriptableObjectType::Panel,
         }
     }

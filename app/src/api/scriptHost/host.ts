@@ -51,6 +51,16 @@ import {
   wasDeniedThisSession,
 } from "./capabilities";
 import { AppEvents, emitAppEvent, onAppEvent } from "../events";
+import {
+  tableCellCoord,
+  tableDataRowCount,
+  tableHeaders,
+  tableContains,
+  namedRangeCells,
+  namedRangeContains,
+  type TableLike,
+  type NamedRangeCoordsLike,
+} from "./objectCoords";
 import { showToast } from "../notifications";
 import { ExtensionRegistry } from "../extensionRegistry";
 import { getSlicerStoreService, getChartStoreService, getPivotStoreService } from "../componentStoreRegistry";
@@ -159,6 +169,12 @@ interface MountedWorker {
   shapeProps: Map<string, string>;
   /** Render hooks the worker declared (onRender/canvasRenderer/itemRenderer). */
   declaredRenderHooks: Set<string>;
+  /**
+   * Host-side copy of the seeded snapshot properties + subsequent mirror pushes,
+   * used by event forwarders to filter by object bounds (table/namedRange range
+   * membership) without an IPC refetch per change event.
+   */
+  hostMirror: Map<string, unknown>;
 }
 
 const mounted = new Map<string, MountedWorker>();
@@ -207,6 +223,7 @@ export async function hostMountScript(definition: HostMountDefinition): Promise<
     respawned: false,
     shapeProps: new Map(),
     declaredRenderHooks: new Set(),
+    hostMirror: new Map(),
   };
   mounted.set(definition.id, mw);
   mw.cleanupFns.push(registerMountedHandle(handle));
@@ -215,6 +232,11 @@ export async function hostMountScript(definition: HostMountDefinition): Promise<
   void syncNetOriginsToBackend(definition.id);
 
   const snapshot = await buildSnapshot(definition, mw);
+  if (snapshot.properties) {
+    for (const [k, v] of Object.entries(snapshot.properties)) {
+      mw.hostMirror.set(k, v);
+    }
+  }
 
   const spec: MountSpec = {
     protocolVersion: PROTOCOL_VERSION,
@@ -675,7 +697,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     case "object.getState": {
       const [aspect, aspectArgs] = args as [string, unknown[]];
-      return executeGetState(aspect, aspectArgs);
+      return executeGetState(instanceId, aspect, aspectArgs);
     }
 
     // ---- render ----
@@ -822,6 +844,53 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       emitAppEvent("shape:sendMessage", { instanceId, type, data });
       return undefined;
     }
+    case "table.setCellValue": {
+      const [row, colIndex, value] = args as [number, number, string];
+      const lib = await getLib();
+      const table = (await lib.getTableById(instanceId)) as TableLike | null;
+      if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
+      const coord = tableCellCoord(table, row, colIndex);
+      if (!coord) {
+        throw new BrokerError("ValidationError", `Table cell out of range: row=${row} col=${colIndex}`);
+      }
+      await writeCellOnSheet(lib, coord.sheetIndex, coord.row, coord.col, String(value));
+      emitAppEvent("table:dataChanged", { tableId: instanceId });
+      return undefined;
+    }
+    case "table.addRow": {
+      const lib = await getLib();
+      await lib.addTableRow(instanceId);
+      emitAppEvent("table:dataChanged", { tableId: instanceId });
+      pushTableMirror(mw, instanceId);
+      return undefined;
+    }
+    case "namedRange.setValues": {
+      const [values] = args as [string[][]];
+      const lib = await getLib();
+      const coords = (await lib.resolveNamedRangeCoords(instanceId)) as NamedRangeCoordsLike;
+      const active = await lib.getActiveSheet();
+      const updates: Array<{ row: number; col: number; value: string }> = [];
+      const rows = coords.endRow - coords.startRow + 1;
+      const cols = coords.endCol - coords.startCol + 1;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const v = values?.[r]?.[c];
+          if (v === undefined) continue;
+          const gridRow = coords.startRow + r;
+          const gridCol = coords.startCol + c;
+          if (coords.sheetIndex === active) {
+            updates.push({ row: gridRow, col: gridCol, value: String(v) });
+          } else {
+            await lib.updateCellOnSheets([coords.sheetIndex], gridRow, gridCol, String(v));
+          }
+        }
+      }
+      if (updates.length > 0) {
+        await lib.updateCellsBatch(updates);
+      }
+      emitAppEvent("namedRange:changed", { name: instanceId });
+      return undefined;
+    }
     case "panel.open":
       emitAppEvent("panel:open", { panelId: instanceId });
       return undefined;
@@ -843,7 +912,7 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
   }
 }
 
-async function executeGetState(aspect: string, args: unknown[]): Promise<unknown> {
+async function executeGetState(instanceId: string, aspect: string, args: unknown[]): Promise<unknown> {
   switch (aspect) {
     case "shape.cellValue": {
       const [cellRef] = args as [string];
@@ -853,8 +922,56 @@ async function executeGetState(aspect: string, args: unknown[]): Promise<unknown
       const cell = await lib.getCell(parsed.row, parsed.col);
       return cell?.display ?? "";
     }
+    case "table.getCellValue": {
+      const [row, colIndex] = args as [number, number];
+      const lib = await getLib();
+      const table = (await lib.getTableById(instanceId)) as TableLike | null;
+      if (!table) return "";
+      const coord = tableCellCoord(table, row, colIndex);
+      if (!coord) return "";
+      return readCellOnSheet(lib, coord.sheetIndex, coord.row, coord.col);
+    }
     default:
       throw new BrokerError("ValidationError", `Unknown getState aspect: ${aspect}`);
+  }
+}
+
+/**
+ * Read a single cell's display value on a specific sheet. Uses the active-sheet
+ * fast path (getCell) when the target IS the active sheet; otherwise reads
+ * cross-sheet via getWatchCells. Both recalc-aware reads return display strings.
+ */
+async function readCellOnSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number,
+  row: number,
+  col: number,
+): Promise<string> {
+  const active = await lib.getActiveSheet();
+  if (sheetIndex === active) {
+    const cell = await lib.getCell(row, col);
+    return cell?.display ?? "";
+  }
+  const results = await lib.getWatchCells([[sheetIndex, row, col]]);
+  return results[0]?.display ?? "";
+}
+
+/**
+ * Write a single cell on a specific sheet, recalc + undoable. Uses updateCell
+ * on the active sheet, otherwise updateCellOnSheets for a non-active sheet.
+ */
+async function writeCellOnSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number,
+  row: number,
+  col: number,
+  value: string,
+): Promise<void> {
+  const active = await lib.getActiveSheet();
+  if (sheetIndex === active) {
+    await lib.updateCell(row, col, value);
+  } else {
+    await lib.updateCellOnSheets([sheetIndex], row, col, value);
   }
 }
 
@@ -1142,6 +1259,88 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       }));
       break;
 
+    // ---- table ----
+    case "table.onDataChange": {
+      // Fire when a cell inside the table's range changes, or when an explicit
+      // table:dataChanged for THIS table is emitted (e.g. by our own setters /
+      // addRow). Range membership uses the seeded mirror coords; over-firing on
+      // ambiguity is acceptable for v1.
+      const inTableRange = (changes: Array<{ row: number; col: number }>): boolean => {
+        const startRow = getMirror(mw, "table.startRow");
+        const startCol = getMirror(mw, "table.startCol");
+        const endRow = getMirror(mw, "table.endRow");
+        const endCol = getMirror(mw, "table.endCol");
+        if (startRow == null || startCol == null || endRow == null || endCol == null) {
+          return true; // unknown bounds -> over-fire
+        }
+        const t: TableLike = {
+          sheetIndex: 0,
+          startRow, startCol, endRow, endCol,
+          styleOptions: { headerRow: false, totalRow: false },
+          columns: [],
+        };
+        return changes.some((c) => tableContains(t, c.row, c.col));
+      };
+      const unsubCells = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
+        const d = detail as { changes?: Array<{ row: number; col: number; newValue: string }> };
+        const changes = d.changes ?? [];
+        if (!inTableRange(changes)) return;
+        pushTableMirror(mw, instanceId);
+        forwardEvent(mw, hook, { changes });
+      });
+      const unsubExplicit = onAppEvent("table:dataChanged", (detail) => {
+        const d = detail as { tableId?: string } | undefined;
+        if (d?.tableId !== undefined && String(d.tableId) !== instanceId) return;
+        pushTableMirror(mw, instanceId);
+        forwardEvent(mw, hook, { changes: [] });
+      });
+      addForwarder(mw, hook, () => {
+        unsubCells();
+        unsubExplicit();
+      });
+      break;
+    }
+
+    // ---- namedRange ----
+    case "namedRange.onChange": {
+      const coordsFromMirror = (): NamedRangeCoordsLike | null => {
+        const startRow = getMirror(mw, "namedRange.startRow");
+        const startCol = getMirror(mw, "namedRange.startCol");
+        const endRow = getMirror(mw, "namedRange.endRow");
+        const endCol = getMirror(mw, "namedRange.endCol");
+        const sheetIndex = getMirror(mw, "namedRange.sheetIndex");
+        if (
+          startRow == null || startCol == null || endRow == null ||
+          endCol == null || sheetIndex == null
+        ) {
+          return null;
+        }
+        return { sheetIndex, startRow, startCol, endRow, endCol };
+      };
+      const unsubCells = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
+        const d = detail as { changes?: Array<{ row: number; col: number; newValue: string }> };
+        const changes = d.changes ?? [];
+        const coords = coordsFromMirror();
+        // Unknown bounds -> over-fire. Known bounds -> only when a change lands
+        // inside (sheet filter omitted; CELL_VALUES_CHANGED carries no sheet).
+        const hit = !coords || changes.some((c) => namedRangeContains(coords, c.row, c.col));
+        if (!hit) return;
+        pushNamedRangeMirror(mw, instanceId);
+        forwardEvent(mw, hook, { changes });
+      });
+      const unsubExplicit = onAppEvent("namedRange:changed", (detail) => {
+        const d = detail as { name?: string } | undefined;
+        if (d?.name !== undefined && String(d.name) !== instanceId) return;
+        pushNamedRangeMirror(mw, instanceId);
+        forwardEvent(mw, hook, { changes: [] });
+      });
+      addForwarder(mw, hook, () => {
+        unsubCells();
+        unsubExplicit();
+      });
+      break;
+    }
+
     // ---- shape ----
     case "shape.onClick":
       addForwarder(mw, hook, onAppEvent("shape:clicked", (detail) => {
@@ -1308,12 +1507,99 @@ async function buildSnapshot(definition: HostMountDefinition, mw: MountedWorker)
         }
         break;
       }
+      case "table": {
+        const lib = await getLib();
+        const table = (await lib.getTableById(instanceId)) as TableLike & { name?: string } | null;
+        if (table) {
+          properties["table.headers"] = tableHeaders(table);
+          properties["table.rowCount"] = tableDataRowCount(table);
+          properties["table.name"] = table.name ?? "";
+          properties["table.sheetIndex"] = table.sheetIndex;
+          properties["table.startRow"] = table.startRow;
+          properties["table.startCol"] = table.startCol;
+          properties["table.endRow"] = table.endRow;
+          properties["table.endCol"] = table.endCol;
+        }
+        break;
+      }
+      case "namedRange": {
+        const lib = await getLib();
+        try {
+          const coords = (await lib.resolveNamedRangeCoords(instanceId)) as NamedRangeCoordsLike;
+          properties["namedRange.address"] = await formatRangeAddress(lib, coords);
+          properties["namedRange.values"] = await readRangeValues(lib, coords);
+          properties["namedRange.sheetIndex"] = coords.sheetIndex;
+          properties["namedRange.startRow"] = coords.startRow;
+          properties["namedRange.startCol"] = coords.startCol;
+          properties["namedRange.endRow"] = coords.endRow;
+          properties["namedRange.endCol"] = coords.endCol;
+        } catch { /* unresolvable range — defaults */ }
+        try {
+          const nr = await lib.getNamedRange(instanceId);
+          if (nr) {
+            properties["namedRange.refersTo"] = nr.refersTo;
+            properties["namedRange.scope"] = nr.sheetIndex == null ? "workbook" : "sheet";
+          }
+        } catch { /* defaults */ }
+        break;
+      }
     }
   } catch {
     // Snapshot failures degrade to defaults — scripts still mount.
   }
 
   return { properties, selection };
+}
+
+/** Build an "Sheet!A1:B10" address from resolved coords (sheet name resolved). */
+async function formatRangeAddress(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  coords: NamedRangeCoordsLike,
+): Promise<string> {
+  const a1 = `${colIndexToLetters(coords.startCol)}${coords.startRow + 1}:${colIndexToLetters(coords.endCol)}${coords.endRow + 1}`;
+  try {
+    const sheets = await lib.getSheets();
+    const name = sheets.sheets[coords.sheetIndex]?.name;
+    return name ? `${name}!${a1}` : a1;
+  } catch {
+    return a1;
+  }
+}
+
+/** Read a named range's cells into a 2D array of display strings (row-major). */
+async function readRangeValues(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  coords: NamedRangeCoordsLike,
+): Promise<string[][]> {
+  const cells = namedRangeCells(coords);
+  if (cells.length === 0) return [];
+  const requests = cells.map((c) => [c.sheetIndex, c.row, c.col] as [number, number, number]);
+  const results = await lib.getWatchCells(requests);
+  const rows = coords.endRow - coords.startRow + 1;
+  const cols = coords.endCol - coords.startCol + 1;
+  const out: string[][] = [];
+  let i = 0;
+  for (let r = 0; r < rows; r++) {
+    const rowArr: string[] = [];
+    for (let c = 0; c < cols; c++) {
+      rowArr.push(results[i]?.display ?? "");
+      i++;
+    }
+    out.push(rowArr);
+  }
+  return out;
+}
+
+/** 0-based column index to A1 letters (0 -> "A", 26 -> "AA"). */
+function colIndexToLetters(col: number): string {
+  let n = col + 1;
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 function pushWorkbookMirror(mw: MountedWorker): void {
@@ -1347,6 +1633,60 @@ function pushPivotFieldsMirror(mw: MountedWorker, instanceId: string): void {
   if (store) {
     post(mw, { t: "mirror", path: "pivot.fields", value: store.getPivotFields(instanceId) });
   }
+}
+
+/** Read a numeric host-side mirror value (snapshot-seeded + push-updated). */
+function getMirror(mw: MountedWorker, path: string): number | null {
+  const v = mw.hostMirror.get(path);
+  return typeof v === "number" ? v : null;
+}
+
+/** Post a mirror to the worker AND keep the host-side mirror in sync. */
+function postMirror(mw: MountedWorker, path: string, value: unknown): void {
+  mw.hostMirror.set(path, value);
+  post(mw, { t: "mirror", path, value });
+}
+
+/**
+ * Refetch a table and push its mirrors (rowCount/headers/name/sheetIndex +
+ * bounds for host-side range filtering). Mirror of pushPivotFieldsMirror.
+ */
+function pushTableMirror(mw: MountedWorker, instanceId: string): void {
+  void (async () => {
+    try {
+      const lib = await getLib();
+      const table = (await lib.getTableById(instanceId)) as (TableLike & { name?: string }) | null;
+      if (!table) return;
+      postMirror(mw, "table.rowCount", tableDataRowCount(table));
+      postMirror(mw, "table.headers", tableHeaders(table));
+      postMirror(mw, "table.name", table.name ?? "");
+      postMirror(mw, "table.sheetIndex", table.sheetIndex);
+      postMirror(mw, "table.startRow", table.startRow);
+      postMirror(mw, "table.startCol", table.startCol);
+      postMirror(mw, "table.endRow", table.endRow);
+      postMirror(mw, "table.endCol", table.endCol);
+    } catch { /* keep stale mirror */ }
+  })();
+}
+
+/**
+ * Refetch a named range and push its mirrors (values/address + bounds for
+ * host-side range filtering). Mirror of pushPivotFieldsMirror.
+ */
+function pushNamedRangeMirror(mw: MountedWorker, instanceId: string): void {
+  void (async () => {
+    try {
+      const lib = await getLib();
+      const coords = (await lib.resolveNamedRangeCoords(instanceId)) as NamedRangeCoordsLike;
+      postMirror(mw, "namedRange.values", await readRangeValues(lib, coords));
+      postMirror(mw, "namedRange.address", await formatRangeAddress(lib, coords));
+      postMirror(mw, "namedRange.sheetIndex", coords.sheetIndex);
+      postMirror(mw, "namedRange.startRow", coords.startRow);
+      postMirror(mw, "namedRange.startCol", coords.startCol);
+      postMirror(mw, "namedRange.endRow", coords.endRow);
+      postMirror(mw, "namedRange.endCol", coords.endCol);
+    } catch { /* keep stale mirror */ }
+  })();
 }
 
 // ============================================================================

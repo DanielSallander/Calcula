@@ -38,6 +38,17 @@ pub struct NamedRangeResult {
     pub error: Option<String>,
 }
 
+/// Resolved grid coordinates for a named range (used by object scripts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedRangeCoords {
+    pub sheet_index: usize,
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
 impl NamedRange {
     /// Validate that the name is a valid identifier.
     /// Names must start with a letter or underscore, and contain only
@@ -243,6 +254,20 @@ pub fn delete_named_range(
                 Some(removed.clone()),
                 "Delete name",
             );
+
+            // C10 cleanup: prune any object scripts attached to this name so a
+            // deleted name leaves no dangling scripts behind. instanceId == the
+            // name string (matched case-insensitively to be safe).
+            if let Ok(mut scripts) = state.object_scripts.lock() {
+                scripts.retain(|s| {
+                    !(s.object_type == persistence::ScriptableObjectType::NamedRange
+                        && s.instance_id
+                            .as_deref()
+                            .map(|id| id.eq_ignore_ascii_case(&name))
+                            .unwrap_or(false))
+                });
+            }
+
             NamedRangeResult {
                 success: true,
                 named_range: Some(removed),
@@ -385,6 +410,92 @@ fn col_letters_to_index(letters: &str) -> u32 {
         result = result * 26 + val;
     }
     result.saturating_sub(1) // Convert to 0-based
+}
+
+/// Resolve a parsed `refers_to` expression (a single CellRef or a Range of two
+/// CellRefs) to 0-based grid coordinates. Returns the referenced sheet name (if
+/// the expression carried one) so the caller can map it to a sheet index.
+/// Returns None for constants, formulas, or anything that is not a plain
+/// cell/range reference.
+fn resolve_ref_to_coords(
+    expr: &parser::ast::Expression,
+) -> Option<(Option<String>, u32, u32, u32, u32)> {
+    use parser::ast::Expression;
+    match expr {
+        Expression::CellRef { sheet, col, row, .. } => {
+            let c = col_letters_to_index(col);
+            let r = row.saturating_sub(1);
+            Some((sheet.clone(), r, c, r, c))
+        }
+        Expression::Range { sheet, start, end, .. } => {
+            if let (
+                Expression::CellRef { col: sc, row: sr, .. },
+                Expression::CellRef { col: ec, row: er, .. },
+            ) = (start.as_ref(), end.as_ref())
+            {
+                let sc_idx = col_letters_to_index(sc);
+                let sr_idx = sr.saturating_sub(1);
+                let ec_idx = col_letters_to_index(ec);
+                let er_idx = er.saturating_sub(1);
+                Some((
+                    sheet.clone(),
+                    sr_idx.min(er_idx),
+                    sc_idx.min(ec_idx),
+                    sr_idx.max(er_idx),
+                    sc_idx.max(ec_idx),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a named range to grid coordinates for object scripts.
+/// Reuses the existing `refers_to` parsing and extends single-cell handling to
+/// full ranges (A1:B10). The sheet is resolved from the formula's sheet prefix
+/// (mapped to its index), or falls back to the name's scope, or sheet 0.
+#[tauri::command]
+pub fn resolve_named_range_coords(
+    state: State<AppState>,
+    name: String,
+) -> Result<NamedRangeCoords, String> {
+    let named_ranges = state.named_ranges.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+
+    let key = name.to_uppercase();
+    let nr = named_ranges
+        .get(&key)
+        .ok_or_else(|| format!("Named range '{}' does not exist.", name))?;
+
+    let parsed = parser::parse(&nr.refers_to)
+        .map_err(|_| format!("Named range '{}' does not refer to a parseable range.", name))?;
+
+    let (sheet_ref, start_row, start_col, end_row, end_col) = resolve_ref_to_coords(&parsed)
+        .ok_or_else(|| {
+            format!("Named range '{}' does not refer to a cell or range.", name)
+        })?;
+
+    // Resolve the sheet index: prefer the formula's sheet prefix, then the
+    // name's own scope, then the first sheet.
+    let sheet_index = if let Some(sname) = sheet_ref {
+        sheet_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(&sname))
+            .or(nr.sheet_index)
+            .unwrap_or(0)
+    } else {
+        nr.sheet_index.unwrap_or(0)
+    };
+
+    Ok(NamedRangeCoords {
+        sheet_index,
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+    })
 }
 
 /// Rename a named range.

@@ -917,6 +917,8 @@ pub enum ScriptableObjectType {
     Textbox,
     Timeline,
     Shape,
+    Table,
+    NamedRange,
     Panel,
 }
 

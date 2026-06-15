@@ -3776,6 +3776,7 @@ pub fn run() {
             named_ranges::get_named_range,
             named_ranges::get_all_named_ranges,
             named_ranges::get_named_range_for_selection,
+            named_ranges::resolve_named_range_coords,
             named_ranges::rename_named_range,
             named_ranges::apply_names_to_formulas,
             // BI (Business Intelligence) commands
@@ -3934,6 +3935,8 @@ pub fn run() {
             tables::enforce_table_header,
             tables::set_calculated_column,
             tables::get_table,
+            tables::get_table_by_id,
+            tables::add_table_row,
             tables::get_table_by_name,
             tables::get_table_at_cell,
             tables::get_all_tables,

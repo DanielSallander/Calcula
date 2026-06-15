@@ -235,6 +235,71 @@ function setup(button) {
 }
 `;
 
+    case "table":
+      return `// Table: "${name}"
+// Access level: restricted (unlock full API via access level setting)
+//
+// Scripts attached to a table (Excel ListObject) — the most-automated VBA
+// object. Cell reads/writes resolve through the table's grid coordinates, so
+// they recalc and are undoable.
+
+function setup(table) {
+  // == Events ==
+  // table.onDataChange(({ changes }) => {
+  //   table.log("Table data changed:", changes.length, "cell(s)");
+  // });
+
+  // == Structure (sync, seeded) ==
+  // const headers = table.getHeaders();      // e.g. ["Name", "Amount"]
+  // const rows = table.getRowCount();        // number of data rows
+  // table.log("Headers:", headers, "Rows:", rows);
+
+  // == Data Access (async) ==
+  // row + colIndex are 0-based (data rows only; header excluded).
+  // const v = await table.getCellValue(0, 1); // first data row, 2nd column
+  // await table.setCellValue(0, 1, "100");
+  // await table.addRow();                     // append a new data row
+
+  // == Properties (read-only) ==
+  // const tableName = table.properties.name;
+  // const sheetIndex = table.properties.sheetIndex;
+
+  // == Custom Methods (callable by other scripts) ==
+  // table.expose("total", async () => {
+  //   let sum = 0;
+  //   for (let r = 0; r < table.getRowCount(); r++) {
+  //     sum += Number(await table.getCellValue(r, 1)) || 0;
+  //   }
+  //   return sum;
+  // });
+}
+`;
+
+    case "namedRange":
+      return `// Named Range: "${name}"
+// Access level: restricted (unlock full API via access level setting)
+//
+// Scripts attached to a defined name (Excel Name object). Reads are seeded from
+// the resolved range; writes resolve to grid coordinates (recalc + undoable).
+
+function setup(namedRange) {
+  // == Events ==
+  // namedRange.onChange(({ changes }) => {
+  //   namedRange.log("Range changed:", changes.length, "cell(s)");
+  //   namedRange.log("Values now:", namedRange.getValues());
+  // });
+
+  // == Data Access ==
+  // const address = namedRange.getAddress();  // e.g. "Sheet1!A1:B10"
+  // const values = namedRange.getValues();    // 2D array of display strings
+  // await namedRange.setValues([["1", "2"], ["3", "4"]]);
+
+  // == Properties (read-only) ==
+  // const refersTo = namedRange.properties.refersTo;  // "=Sheet1!$A$1:$B$10"
+  // const scope = namedRange.properties.scope;        // "workbook" | "sheet"
+}
+`;
+
     case "textbox":
       return `// Text Box: "${name}"
 // Access level: restricted
@@ -551,6 +616,46 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
             { name: "render.onMessage", signature: "render.onMessage(handler)", description: "Listen for messages from the shape's HTML (via calcula.sendMessage)" },
             { name: "render.canvasRenderer", signature: "render.canvasRenderer(fn)", description: "Provide a custom canvas render function" },
             { name: "render.declareProperties", signature: "render.declareProperties(props)", description: "Declare custom properties for the Properties pane" },
+          ],
+        },
+      ];
+
+    case "table":
+      return [
+        common,
+        {
+          category: "Events",
+          methods: [
+            { name: "onDataChange", signature: "onDataChange(handler)", description: "Called when a cell inside the table changes" },
+          ],
+        },
+        {
+          category: "Data",
+          methods: [
+            { name: "getHeaders", signature: "getHeaders()", description: "Get column header names (sync)" },
+            { name: "getRowCount", signature: "getRowCount()", description: "Get number of data rows (sync)" },
+            { name: "getCellValue", signature: "getCellValue(row, colIndex)", description: "Read a table cell (0-based data row + column index)" },
+            { name: "setCellValue", signature: "setCellValue(row, colIndex, value)", description: "Write a table cell (undoable)" },
+            { name: "addRow", signature: "addRow()", description: "Append a new data row" },
+          ],
+        },
+      ];
+
+    case "namedRange":
+      return [
+        common,
+        {
+          category: "Events",
+          methods: [
+            { name: "onChange", signature: "onChange(handler)", description: "Called when a cell inside the range changes" },
+          ],
+        },
+        {
+          category: "Data",
+          methods: [
+            { name: "getAddress", signature: "getAddress()", description: "Get the resolved A1 address (sync)" },
+            { name: "getValues", signature: "getValues()", description: "Get the range values as a 2D array (sync)" },
+            { name: "setValues", signature: "setValues(values)", description: "Write a 2D array of values into the range (undoable)" },
           ],
         },
       ];

@@ -382,9 +382,11 @@ fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
         filters: request
             .filters
             .iter()
-            .map(|f| bi_engine::FilterCondition {
-                column: f.column.clone(),
-                operator: match f.operator.as_str() {
+            .map(|f| {
+                // Use the constructor so engine-lib additions to FilterCondition
+                // (e.g. the `kind` value-rendering field) get their documented
+                // defaults; the planner upgrades the kind when it can.
+                let operator = match f.operator.as_str() {
                     "=" | "eq" => bi_engine::FilterOperator::Equal,
                     "!=" | "ne" => bi_engine::FilterOperator::NotEqual,
                     ">" | "gt" => bi_engine::FilterOperator::GreaterThan,
@@ -392,8 +394,8 @@ fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
                     ">=" | "gte" => bi_engine::FilterOperator::GreaterThanOrEqual,
                     "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
                     _ => bi_engine::FilterOperator::Equal,
-                },
-                value: f.value.clone(),
+                };
+                bi_engine::FilterCondition::new(f.column.clone(), operator, f.value.clone())
             })
             .collect(),
         lookups: vec![],
