@@ -24,8 +24,9 @@ An integer starting at 1, incrementing by 1 for each row in the partition accord
 - ROW_NUMBER generates SQL `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` internally.
 - Unlike RANK and DENSE_RANK, ROW_NUMBER always produces unique values -- tied rows receive different numbers (the tiebreaker is nondeterministic unless the ORDER BY columns are unique).
 - ROW_NUMBER always uses local aggregation (never pushed to data sources).
-- It is materialized via two-stage evaluation like other window functions: the inner data is grouped and fetched first, then the window function is applied locally via DataFusion.
-- When the outer query groups by dimensions not in ORDER BY or PARTITION BY, those dimensions are automatically injected into PARTITION BY.
+- It is materialized via two-stage evaluation: stage 1 produces one row per query group-by combination with each `ORDERBY` column aggregated as `SUM(fact[col])`; stage 2 applies `ROW_NUMBER() OVER (PARTITION BY … ORDER BY … DESC)` locally via DataFusion.
+- The numbering is over the query's **group-by rows**, ordered **descending** by the aggregated order key (the largest value is row 1).
+- **v1 constraints (fail closed otherwise):** the query must have a `group_by`; every `ORDERBY` column must be a column of the measure's fact table (aggregated with `SUM`); every `PARTITIONBY` column must be one of the query's `group_by` columns.
 
 ## Example 1: Number products by revenue
 

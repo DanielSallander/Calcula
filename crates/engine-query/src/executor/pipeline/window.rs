@@ -100,6 +100,40 @@ impl QueryExecutor {
                 continue;
             }
 
+            // RANK / ROW_NUMBER / DENSE_RANK measure: rank the group-by rows by
+            // an aggregated fact order key (descending), partitioned by group-by
+            // columns. Distinct from the running-window path below (no inner
+            // accumulation).
+            if let Expression::RankWindow {
+                function,
+                order_by,
+                partition_by,
+            } = &stripped_expr
+            {
+                // A KEEP context around the ranking restricts which fact rows
+                // feed the aggregated order key; context this stage cannot apply
+                // fails closed.
+                Self::reject_unapplyable_axis_window_context(name, &eval_ctx)?;
+                let context_filters = eval_ctx.effective_filters(&[]);
+                let context_filter_refs: Vec<&engine_core::compute::context::ResolvedFilter> =
+                    context_filters.iter().collect();
+                let batches = Self::execute_rank_window(
+                    ctx,
+                    name,
+                    *function,
+                    order_by,
+                    partition_by,
+                    fact_table,
+                    group_by,
+                    model,
+                    &context_filter_refs,
+                    plan.as_deref_mut(),
+                )
+                .await?;
+                per_measure.push((name.to_string(), batches));
+                continue;
+            }
+
             let group_pairs: Vec<(String, String)> = group_by
                 .iter()
                 .map(|dim| (dim.table.clone(), dim.column.clone()))
@@ -279,6 +313,158 @@ impl QueryExecutor {
         // FULL OUTER JOINed on their dimension columns so the result is one
         // [dims..., m1, m2, ...] table rather than disjoint per-measure blocks.
         join_window_results(ctx, per_measure).await
+    }
+
+    /// Evaluate a `RANK` / `ROW_NUMBER` / `DENSE_RANK` measure over the query's
+    /// group-by rows.
+    ///
+    /// Two stages, like the running-window path, but the order key is an
+    /// **aggregate** rather than a per-period value:
+    /// - Stage 1: materialize one row per group-by combination, aggregating each
+    ///   `ORDERBY` column as `SUM(fact[col])` (the measure being ranked by).
+    /// - Stage 2: `<fn>() OVER (PARTITION BY <partition group-by cols> ORDER BY
+    ///   <order keys> DESC)` — **descending**, so the largest value ranks `1`
+    ///   (the DAX `RANKX` convention used by the function docs).
+    ///
+    /// v1 constraints (fail closed otherwise): a non-empty `group_by`; every
+    /// `ORDERBY` column on the measure's fact table (aggregated with `SUM`); and
+    /// every `PARTITIONBY` column among the query's `group_by` columns. The
+    /// result is shaped `[group-by dims…, <measure>]`, so it combines with other
+    /// window/ordinary measures through the same axis join.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_rank_window(
+        ctx: &SessionContext,
+        name: &str,
+        function: engine_core::compute::expression::RankFunction,
+        order_by: &[(String, String)],
+        partition_by: &[(String, String)],
+        fact_table: &str,
+        group_by: &[ColumnRef],
+        model: &DataModel,
+        context_filters: &[&engine_core::compute::context::ResolvedFilter],
+        plan: Option<&mut PlanNode>,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression::{agg, qualified_col, RankFunction};
+
+        if group_by.is_empty() {
+            return Err(QueryError::InvalidQuery(format!(
+                "the ranking measure '{name}' (RANK / ROW_NUMBER / DENSE_RANK) needs a group_by \
+                 axis to rank over"
+            )));
+        }
+        if order_by.is_empty() {
+            return Err(QueryError::InvalidQuery(format!(
+                "the ranking measure '{name}' requires ORDERBY(...)"
+            )));
+        }
+        // v1: every ORDER BY column is a measure column on the fact table,
+        // aggregated with SUM. (Ranking by a dimension value alphabetically is
+        // not yet supported — order such a query at the request level instead.)
+        for (t, c) in order_by {
+            if !t.eq_ignore_ascii_case(fact_table) {
+                return Err(QueryError::InvalidQuery(format!(
+                    "the ranking measure '{name}' can only ORDER BY columns of its fact table \
+                     '{fact_table}' (got '{t}[{c}]')"
+                )));
+            }
+        }
+        // v1: every PARTITION BY column must be one of the query's group_by
+        // columns (so the ranking grain stays one row per group-by row).
+        for (t, c) in partition_by {
+            if !group_by
+                .iter()
+                .any(|g| g.table.eq_ignore_ascii_case(t) && g.column.eq_ignore_ascii_case(c))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "the ranking measure '{name}' can only PARTITION BY a group_by column \
+                     (got '{t}[{c}]')"
+                )));
+            }
+        }
+
+        // Stage 1: one row per group-by combination, each order key aggregated.
+        let stage1_group_by: Vec<(String, String)> = group_by
+            .iter()
+            .map(|d| (d.table.clone(), d.column.clone()))
+            .collect();
+        let aggregates: Vec<(Expression, String)> = order_by
+            .iter()
+            .enumerate()
+            .map(|(i, (t, c))| {
+                (
+                    agg(AggregateOp::Sum, qualified_col(t, c)),
+                    format!("__rank_order_{i}"),
+                )
+            })
+            .collect();
+        let base = format!("__rankwin_{}", name.to_lowercase());
+        let s1_start = Instant::now();
+        let batch = materialize_query_in_pipeline(
+            ctx,
+            &aggregates,
+            &stage1_group_by,
+            &fact_table.to_lowercase(),
+            context_filters,
+            model,
+        )
+        .await?;
+        let s1_rows = batch.num_rows();
+        let s1_elapsed = s1_start.elapsed();
+        ctx.register_batch(&base, batch)?;
+
+        // Stage 2: the SQL ranking window function, descending (largest = 1).
+        let fn_sql = match function {
+            RankFunction::RowNumber => "ROW_NUMBER",
+            RankFunction::Rank => "RANK",
+            RankFunction::DenseRank => "DENSE_RANK",
+        };
+        let order_terms: Vec<String> = (0..order_by.len())
+            .map(|i| format!("{} DESC", quote_ident_double(&format!("__rank_order_{i}"))))
+            .collect();
+        let partition_terms: Vec<String> = partition_by
+            .iter()
+            .map(|(_, c)| quote_ident_double(&c.to_lowercase()))
+            .collect();
+        let over = if partition_terms.is_empty() {
+            format!("OVER (ORDER BY {})", order_terms.join(", "))
+        } else {
+            format!(
+                "OVER (PARTITION BY {} ORDER BY {})",
+                partition_terms.join(", "),
+                order_terms.join(", ")
+            )
+        };
+        let mut select_parts: Vec<String> = group_by
+            .iter()
+            .map(|d| quote_ident_double(&d.column.to_lowercase()))
+            .collect();
+        select_parts.push(format!("{fn_sql}() {over} AS {}", quote_ident_double(name)));
+        let sql = format!("SELECT {} FROM {base}", select_parts.join(", "));
+        let s2_start = Instant::now();
+        let batches = ctx.sql(&sql).await?.collect().await?;
+        let s2_elapsed = s2_start.elapsed();
+        let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        if let Some(plan_node) = plan {
+            let mut node =
+                PlanNode::new(PlanOperation::MeasureEvaluation, format!("Rank window: {name}"));
+            node.duration = (s1_elapsed + s2_elapsed).into();
+            node.add_child(
+                PlanNode::new(PlanOperation::DataFusionExecution, "Aggregate Order Key (Stage 1)")
+                    .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                    .with_duration(s1_elapsed),
+            );
+            node.add_child(
+                PlanNode::new(PlanOperation::DataFusionExecution, "Rank Function (Stage 2)")
+                    .with_property("sql", PlanValue::Text(sql))
+                    .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+                    .with_duration(s2_elapsed),
+            );
+            plan_node.add_child(node);
+        }
+
+        Ok(batches)
     }
 
     /// Evaluate a filter-context time-intelligence measure (date columns NOT on
@@ -774,11 +960,8 @@ fn extract_window_info(expr: &Expression) -> QueryResult<(Expression, WindowInfo
                 position: Some(*position),
             },
         )),
-        Expression::RankWindow { .. } => Err(crate::error::QueryError::InvalidQuery(
-            "RANK / ROW_NUMBER / DENSE_RANK measures are not yet executable; rank result rows \
-             with the request-level `rank_by` option instead, or use WINDOW/OFFSET/INDEX"
-                .into(),
-        )),
+        // RankWindow is handled by the dedicated `execute_rank_window` branch
+        // before this function is reached.
         _ => Err(crate::error::QueryError::InvalidQuery(
             "expected Window, Offset, or Index expression".into(),
         )),

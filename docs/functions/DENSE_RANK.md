@@ -25,8 +25,9 @@ An integer representing the dense rank of each row. Tied rows receive the same r
 - When rows have equal values in the ORDER BY columns, they receive the same rank. Unlike RANK, the next rank after a tie does not skip. For example, if two rows tie for rank 2, the next row gets rank 3 (not 4).
 - To get ranks with gaps after ties, use [RANK](RANK.md) instead.
 - DENSE_RANK always uses local aggregation (never pushed to data sources).
-- It is materialized via two-stage evaluation: the inner data is grouped and fetched first, then the window function is applied locally via DataFusion.
-- When the outer query groups by dimensions not in ORDER BY or PARTITION BY, those dimensions are automatically injected into PARTITION BY.
+- It is materialized via two-stage evaluation: stage 1 produces one row per query group-by combination with each `ORDERBY` column aggregated as `SUM(fact[col])`; stage 2 applies `DENSE_RANK() OVER (PARTITION BY … ORDER BY … DESC)` locally via DataFusion.
+- The ranking is over the query's **group-by rows**, ordered **descending** by the aggregated order key (the largest value is rank 1).
+- **v1 constraints (fail closed otherwise):** the query must have a `group_by`; every `ORDERBY` column must be a column of the measure's fact table (aggregated with `SUM`); every `PARTITIONBY` column must be one of the query's `group_by` columns.
 
 ## Example 1: Dense rank products by revenue
 

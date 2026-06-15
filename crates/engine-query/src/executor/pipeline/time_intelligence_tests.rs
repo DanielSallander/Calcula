@@ -1580,19 +1580,186 @@ async fn window_measure_combines_with_normal_measure_on_the_axis() {
     assert_eq!(total_map[&(2024, 1)], Some(3.0));
 }
 
+/// Read a (possibly dictionary-encoded) string column as plain `String`s.
+fn string_column(batch: &RecordBatch, name: &str) -> Vec<String> {
+    let idx = batch.schema().index_of(name).unwrap();
+    let cast = arrow::compute::cast(batch.column(idx), &DataType::Utf8).unwrap();
+    let arr = cast.as_any().downcast_ref::<StringArray>().unwrap();
+    (0..arr.len()).map(|i| arr.value(i).to_string()).collect()
+}
+
 #[tokio::test]
-async fn rank_window_measure_builds_and_fails_closed_cleanly() {
-    // RANK/ROW_NUMBER/DENSE_RANK measures are not yet executable. The model must
-    // BUILD (no TableNotFound("") panic from infer_fact_table) and the query
-    // must return a clean typed error — never broken SQL.
-    let model = model_with_measures(&[("rn", "ROW_NUMBER(ORDERBY(fact_sales[amount]))")], true);
-    let err = run_measures(&model, &["rn"], &[("dim_date", "year")])
+async fn rank_measure_ranks_groups_by_aggregate_descending() {
+    // Per-region total amount: east = 858, west = 1716 (west is double east).
+    // RANK / ROW_NUMBER order DESCENDING (largest = rank 1) → west 1, east 2.
+    let model = model_with_measures(
+        &[
+            ("rnk", "RANK(ORDERBY(fact_sales[amount]))"),
+            ("rn", "ROW_NUMBER(ORDERBY(fact_sales[amount]))"),
+        ],
+        true,
+    );
+    let batches = run_measures(&model, &["rnk", "rn"], &[("fact_sales", "region")])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let regions = string_column(&combined, "region");
+    let rnk = measure_column(&combined, "rnk");
+    let rn = measure_column(&combined, "rn");
+    let mut rank_by: HashMap<String, Option<f64>> = HashMap::new();
+    let mut rn_by: HashMap<String, Option<f64>> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        rank_by.insert(regions[i].clone(), rnk[i]);
+        rn_by.insert(regions[i].clone(), rn[i]);
+    }
+    assert_eq!(rank_by["west"], Some(1.0), "west ranks 1 (highest total)");
+    assert_eq!(rank_by["east"], Some(2.0), "east ranks 2");
+    assert_eq!(rn_by["west"], Some(1.0));
+    assert_eq!(rn_by["east"], Some(2.0));
+}
+
+#[tokio::test]
+async fn rank_vs_dense_rank_tie_handling() {
+    // Three regions, two tied at 100: RANK gaps (1,1,3); DENSE_RANK doesn't (1,1,2).
+    let model = model_with_measures(
+        &[
+            ("rnk", "RANK(ORDERBY(fact_sales[amount]))"),
+            ("drnk", "DENSE_RANK(ORDERBY(fact_sales[amount]))"),
+        ],
+        true,
+    );
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401, 202401, 202401])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![100.0, 100.0, 50.0])),
+        ],
+    )
+    .unwrap();
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_batch()).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["rnk".into(), "drnk".into()],
+        group_by: vec![ColumnRef::new("fact_sales", "region")],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let regions = string_column(&combined, "region");
+    let rnk = measure_column(&combined, "rnk");
+    let drnk = measure_column(&combined, "drnk");
+    let mut rk: HashMap<String, Option<f64>> = HashMap::new();
+    let mut dr: HashMap<String, Option<f64>> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        rk.insert(regions[i].clone(), rnk[i]);
+        dr.insert(regions[i].clone(), drnk[i]);
+    }
+    assert_eq!(rk["a"], Some(1.0));
+    assert_eq!(rk["b"], Some(1.0));
+    assert_eq!(rk["c"], Some(3.0), "RANK skips to 3 after the tie");
+    assert_eq!(dr["a"], Some(1.0));
+    assert_eq!(dr["b"], Some(1.0));
+    assert_eq!(dr["c"], Some(2.0), "DENSE_RANK does not skip");
+}
+
+#[tokio::test]
+async fn rank_measure_partitions_by_a_group_by_column() {
+    // Rank regions WITHIN each year. Per (year, region): 2023 east=780/west=1560,
+    // 2024 east=78/west=156 → within each year west=1, east=2.
+    let model = model_with_measures(
+        &[(
+            "rnk",
+            "RANK(ORDERBY(fact_sales[amount]), PARTITIONBY(dim_date[year]))",
+        )],
+        true,
+    );
+    let batches = run_measures(
+        &model,
+        &["rnk"],
+        &[("dim_date", "year"), ("fact_sales", "region")],
+    )
+    .await
+    .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let years = int_column(&combined, "year");
+    let regions = string_column(&combined, "region");
+    let rnk = measure_column(&combined, "rnk");
+    let mut by_cell: HashMap<(i64, String), Option<f64>> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        by_cell.insert((years[i], regions[i].clone()), rnk[i]);
+    }
+    assert_eq!(by_cell[&(2023, "west".into())], Some(1.0));
+    assert_eq!(by_cell[&(2023, "east".into())], Some(2.0));
+    assert_eq!(by_cell[&(2024, "west".into())], Some(1.0));
+    assert_eq!(by_cell[&(2024, "east".into())], Some(2.0));
+}
+
+#[tokio::test]
+async fn rank_measure_combines_with_an_ordinary_measure() {
+    // A RANK measure sits beside the plain Revenue it ranks by, in one query.
+    let model = model_with_measures(
+        &[
+            ("rev", "SUM(fact_sales[amount])"),
+            ("rnk", "RANK(ORDERBY(fact_sales[amount]))"),
+        ],
+        true,
+    );
+    let batches = run_measures(&model, &["rev", "rnk"], &[("fact_sales", "region")])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let regions = string_column(&combined, "region");
+    let rev = measure_column(&combined, "rev");
+    let rnk = measure_column(&combined, "rnk");
+    let mut by: HashMap<String, (Option<f64>, Option<f64>)> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        by.insert(regions[i].clone(), (rev[i], rnk[i]));
+    }
+    assert_eq!(by["west"], (Some(1716.0), Some(1.0)));
+    assert_eq!(by["east"], (Some(858.0), Some(2.0)));
+}
+
+#[tokio::test]
+async fn rank_measure_without_group_by_fails_closed() {
+    // A ranking measure ranks the group-by rows; with no group_by axis there is
+    // nothing to rank → typed error rather than a meaningless single row.
+    let model = model_with_measures(&[("rnk", "RANK(ORDERBY(fact_sales[amount]))")], true);
+    let err = run_measures(&model, &["rnk"], &[]).await.unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("group_by axis"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn rank_measure_partition_by_non_group_by_column_fails_closed() {
+    let model = model_with_measures(
+        &[(
+            "rnk",
+            "RANK(ORDERBY(fact_sales[amount]), PARTITIONBY(dim_date[year]))",
+        )],
+        true,
+    );
+    // year is not in the group_by → fail closed.
+    let err = run_measures(&model, &["rnk"], &[("fact_sales", "region")])
         .await
         .unwrap_err();
     let QueryError::InvalidQuery(msg) = &err else {
         panic!("expected InvalidQuery, got {err:?}");
     };
-    assert!(msg.contains("not yet executable"), "got: {msg}");
+    assert!(msg.contains("PARTITION BY"), "got: {msg}");
 }
 
 #[tokio::test]
