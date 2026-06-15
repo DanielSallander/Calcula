@@ -1,8 +1,84 @@
 //! Query request types — the user-facing description of what to compute.
 
 use engine_connectors::{FilterCondition, FilterOperator};
+use engine_core::types::DataType;
 
 pub use engine_connectors::GROUPING_ID_COLUMN;
+
+/// What a result column represents, for host rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultColumnKind {
+    /// A group-by dimension column (the axis).
+    Dimension,
+    /// A computed measure value column (including calculation-group columns).
+    Measure,
+    /// The `__grouping_id` bitmask column emitted by `TotalsMode::Rollup`.
+    GroupingId,
+    /// The integer ranking column appended by [`RankBy`].
+    Rank,
+}
+
+/// Describes one column of a query result so a host need not re-derive it from
+/// the column name.
+///
+/// Returned by `Engine::query_with_meta` alongside the `RecordBatch`es. The
+/// engine owns every fact a host would otherwise reconstruct by string-matching
+/// column names — the measure's `format_string`/`display_name`, the dimension's
+/// `display_name`, which synthetic `"M [I]"` column came from which measure and
+/// calculation item, and which column is the `__grouping_id` or rank column —
+/// so the two host applications cannot drift on that mapping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResultColumn {
+    /// The exact result column name (as it appears in the `RecordBatch` schema).
+    pub name: String,
+    /// What this column represents.
+    pub kind: ResultColumnKind,
+    /// The column's engine data type, mapped best-effort from the Arrow result
+    /// type (`None` for a type with no clean engine mapping). Note grouped
+    /// string dimensions arrive dictionary-encoded; this reports the underlying
+    /// `String` so the host need not inspect the encoding.
+    pub data_type: Option<DataType>,
+    /// For a [`Dimension`](ResultColumnKind::Dimension): the model table that
+    /// owns the column.
+    pub source_table: Option<String>,
+    /// For a [`Dimension`](ResultColumnKind::Dimension): the model column name.
+    pub source_column: Option<String>,
+    /// For a [`Measure`](ResultColumnKind::Measure): the measure name (the
+    /// **base** measure for a calculation-group column).
+    pub measure: Option<String>,
+    /// For a calculation-group [`Measure`](ResultColumnKind::Measure) column:
+    /// the applied calculation item.
+    pub calculation_item: Option<String>,
+    /// Measure format string (e.g. `"#,##0.00"`), when the model defines one.
+    pub format_string: Option<String>,
+    /// Friendly display name from the model (measure or column), when defined.
+    pub display_name: Option<String>,
+    /// Model description for the measure/column, when defined.
+    pub description: Option<String>,
+    /// Whether the model marks the underlying measure/column hidden.
+    pub is_hidden: bool,
+}
+
+impl ResultColumn {
+    /// Create a metadata entry with only the name + kind populated; the engine
+    /// fills in the attribution fields. Hosts normally consume these via
+    /// `Engine::query_with_meta` rather than constructing them.
+    pub fn bare(name: impl Into<String>, kind: ResultColumnKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            data_type: None,
+            source_table: None,
+            source_column: None,
+            measure: None,
+            calculation_item: None,
+            format_string: None,
+            display_name: None,
+            description: None,
+            is_hidden: false,
+        }
+    }
+}
 
 /// A filter on a computed **measure value** (a `HAVING` clause): keep only the
 /// result rows whose `measure` satisfies `operator value`.
@@ -32,6 +108,72 @@ impl MeasureFilter {
             operator,
             value,
         }
+    }
+}
+
+/// A request-level ranking of result rows by a measure value (DAX `RANKX`-style),
+/// added to the result as an extra integer column.
+///
+/// Computed **after** aggregation — exactly like a `HAVING`
+/// [`MeasureFilter`] — so it composes with `order_by` + `limit` for "top N by
+/// measure". The engine runs the underlying grouped query, ranks each row by
+/// `measure`, and appends `output_column`. By default rank `1` is the **largest**
+/// measure value (descending), ties share a rank and the next rank skips
+/// (standard competition ranking); set [`ascending`](Self::ascending) to make
+/// `1` the smallest, or [`dense`](Self::dense) for gap-free ranks. With
+/// [`partition_by`](Self::partition_by) the rank restarts within each group of
+/// those columns (e.g. rank products *within each region*).
+///
+/// The referenced `measure` must be in [`QueryRequest::measures`]; every
+/// `partition_by` column must be in [`QueryRequest::group_by`]; and
+/// `output_column` must not collide with an existing result column. Not
+/// supported with [`TotalsMode::Rollup`] or a calculation group (fails closed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankBy {
+    /// The measure to rank by (must be in [`QueryRequest::measures`]).
+    pub measure: String,
+    /// Name of the integer rank column appended to the result.
+    pub output_column: String,
+    /// Columns to rank *within* (the rank restarts per distinct combination).
+    /// Each must be in [`QueryRequest::group_by`]. Empty = rank over all rows.
+    pub partition_by: Vec<ColumnRef>,
+    /// Gap-free ranking (`DENSE_RANK`): ties share a rank and the next rank is
+    /// the next integer (1,1,2). Default `false` = standard ranking (1,1,3).
+    pub dense: bool,
+    /// Rank ascending (`1` = smallest value). Default `false` = descending
+    /// (`1` = largest), the usual "top" sense.
+    pub ascending: bool,
+}
+
+impl RankBy {
+    /// Rank by `measure` descending (rank 1 = largest), standard ties, no
+    /// partition, producing an integer column named `output_column`.
+    pub fn new(measure: impl Into<String>, output_column: impl Into<String>) -> Self {
+        Self {
+            measure: measure.into(),
+            output_column: output_column.into(),
+            partition_by: Vec::new(),
+            dense: false,
+            ascending: false,
+        }
+    }
+
+    /// Rank ascending (`1` = smallest value).
+    pub fn ascending(mut self) -> Self {
+        self.ascending = true;
+        self
+    }
+
+    /// Use gap-free (`DENSE_RANK`) ranking.
+    pub fn dense(mut self) -> Self {
+        self.dense = true;
+        self
+    }
+
+    /// Restart the ranking within each distinct combination of `columns`.
+    pub fn within(mut self, columns: Vec<ColumnRef>) -> Self {
+        self.partition_by = columns;
+        self
     }
 }
 
@@ -481,6 +623,12 @@ pub struct QueryRequest {
     /// conditions spanning different tables fail closed. Empty (default) applies
     /// no OR slicer.
     pub or_filters: Vec<FilterCondition>,
+    /// Append a measure-value ranking column to the result (DAX `RANKX`-style).
+    ///
+    /// Computed after aggregation (like [`measure_filters`](Self::measure_filters)),
+    /// so it composes with `order_by` + `limit` for "top N by measure". `None`
+    /// (default) adds no ranking. See [`RankBy`].
+    pub rank_by: Option<RankBy>,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /
@@ -726,11 +874,7 @@ mod tests {
 
     #[test]
     fn detail_request_builders_replace_fields() {
-        let filters = vec![FilterCondition {
-            column: "region".into(),
-            operator: FilterOperator::Equal,
-            value: "West".into(),
-        }];
+        let filters = vec![FilterCondition::new("region", FilterOperator::Equal, "West")];
         let request = DetailRequest::new("Sales", 50)
             .with_columns(["order_id", "amount"])
             .with_filters(filters.clone())

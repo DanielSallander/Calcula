@@ -347,11 +347,16 @@ fn push_order_by(dialect: &impl SqlDialect, sql: &mut String, request: &FetchReq
     sql.push_str(&parts.join(", "));
 }
 
-/// Build parameterized WHERE conditions from filter conditions.
+/// Build WHERE conditions from filter conditions.
 ///
-/// Each filter's value is appended to `params` and referenced via the
-/// dialect's placeholder for its 1-based position; the column side is
-/// text-cast so arbitrary column types compare against the bound string.
+/// - [`InValueKind::Integer`] (re-validated via
+///   [`FilterCondition::effective_kind`]): the value is an unquoted numeric
+///   literal compared against the **uncast** column, so a comparison on an
+///   (typically indexed) integer column stays sargable on both dialects. The
+///   value is validated as `i128`, so no untrusted string is ever inlined.
+/// - [`InValueKind::Text`] (or failed integer validation): the value is a
+///   bound parameter and the column is text-cast, so an arbitrary column type
+///   compares safely against the bound string (the historical behavior).
 pub(crate) fn build_filter_conditions(
     dialect: &impl SqlDialect,
     filters: &[FilterCondition],
@@ -360,13 +365,23 @@ pub(crate) fn build_filter_conditions(
     filters
         .iter()
         .map(|filter| {
-            params.push(filter.value.clone());
-            format!(
-                "{} {} {}",
-                dialect.text_filter_cast(&dialect.quote_ident(&filter.column)),
-                filter.operator.as_sql(),
-                dialect.placeholder(params.len())
-            )
+            let quoted_column = dialect.quote_ident(&filter.column);
+            match filter.effective_kind() {
+                InValueKind::Integer => format!(
+                    "{quoted_column} {} {}",
+                    filter.operator.as_sql(),
+                    filter.value
+                ),
+                InValueKind::Text => {
+                    params.push(filter.value.clone());
+                    format!(
+                        "{} {} {}",
+                        dialect.text_filter_cast(&quoted_column),
+                        filter.operator.as_sql(),
+                        dialect.placeholder(params.len())
+                    )
+                }
+            }
         })
         .collect()
 }
@@ -731,16 +746,8 @@ mod tests {
     #[test]
     fn build_filter_conditions_numbers_placeholders_sequentially() {
         let filters = vec![
-            FilterCondition {
-                column: "status".into(),
-                operator: FilterOperator::Equal,
-                value: "active".into(),
-            },
-            FilterCondition {
-                column: "region".into(),
-                operator: FilterOperator::NotEqual,
-                value: "north".into(),
-            },
+            FilterCondition::new("status", FilterOperator::Equal, "active"),
+            FilterCondition::new("region", FilterOperator::NotEqual, "north"),
         ];
 
         let mut params = Vec::new();
@@ -754,6 +761,43 @@ mod tests {
         assert_eq!(ss[0], "CAST([status] AS NVARCHAR(MAX)) = @P1");
         assert_eq!(ss[1], "CAST([region] AS NVARCHAR(MAX)) <> @P2");
         assert_eq!(params, vec!["active".to_string(), "north".to_string()]);
+    }
+
+    #[test]
+    fn build_filter_conditions_integer_kind_is_sargable_uncast_literal() {
+        // An integer-kind scalar filter renders as `col op <literal>` against
+        // the UNcast column with no bind parameter, so a source index is
+        // usable — the scalar analogue of the integer IN-list optimization.
+        let filters = vec![
+            FilterCondition::new("region_id", FilterOperator::Equal, "5")
+                .with_kind(InValueKind::Integer),
+            FilterCondition::new("qty", FilterOperator::GreaterThan, "100")
+                .with_kind(InValueKind::Integer),
+        ];
+
+        let mut params = Vec::new();
+        let pg = build_filter_conditions(&PostgresDialect, &filters, &mut params);
+        assert_eq!(pg[0], "\"region_id\" = 5");
+        assert_eq!(pg[1], "\"qty\" > 100");
+        assert!(params.is_empty(), "integer literals are inlined, not bound");
+
+        let mut params = Vec::new();
+        let ss = build_filter_conditions(&SqlServerDialect, &filters, &mut params);
+        assert_eq!(ss[0], "[region_id] = 5");
+        assert_eq!(ss[1], "[qty] > 100");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn build_filter_conditions_integer_kind_falls_back_when_value_not_integer() {
+        // Defense in depth: a value that does not parse as an integer is never
+        // inlined unquoted — it falls back to the safe bound-parameter path.
+        let filters = vec![FilterCondition::new("region_id", FilterOperator::Equal, "5; DROP")
+            .with_kind(InValueKind::Integer)];
+        let mut params = Vec::new();
+        let pg = build_filter_conditions(&PostgresDialect, &filters, &mut params);
+        assert_eq!(pg[0], "\"region_id\"::text = $1");
+        assert_eq!(params, vec!["5; DROP".to_string()]);
     }
 
     #[test]
@@ -861,11 +905,7 @@ mod tests {
                 function: AggregateFunction::Sum,
                 alias: Some("total".into()),
             }],
-            filters: vec![FilterCondition {
-                column: "status".into(),
-                operator: FilterOperator::Equal,
-                value: "active".into(),
-            }],
+            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
             group_by: vec!["region".into()],
             limit: Some(10),
             ..Default::default()
@@ -1181,11 +1221,7 @@ mod tests {
             schema: Some("sales".into()),
             table: "orders".into(),
             columns: vec!["id".into(), "amount".into()],
-            filters: vec![FilterCondition {
-                column: "status".into(),
-                operator: FilterOperator::Equal,
-                value: "active".into(),
-            }],
+            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
             in_filters: vec![in_filter("region_id", &["1", "2"], InValueKind::Integer)],
             limit: Some(5),
             ..Default::default()

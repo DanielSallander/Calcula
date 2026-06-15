@@ -16,7 +16,7 @@ It is the authoritative hand-off surface between the engine and its hosts. It is
 The shared model file carries a `format_version: u32` field (serde key `format_version`, defaults to `0` for legacy files). The engine's current maximum is:
 
 ```rust
-pub const MODEL_FORMAT_VERSION: u32 = 8; // engine-core::model::schema
+pub const MODEL_FORMAT_VERSION: u32 = 9; // engine-core::model::schema
 ```
 
 Opening a model whose `format_version` is **higher** than the engine supports fails closed with:
@@ -42,6 +42,7 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `6` | Incremental refresh — tables gained optional `incremental_refresh` policy. |
 | `7` | Calculation groups — model gained `calculation_groups`; expression AST gained `SelectedMeasure`. |
 | `8` | `DATESINPERIOD` trailing-window time intelligence — expression AST gained `DatesInPeriod`. |
+| `9` | Semi-additive balances `CLOSINGBALANCE` / `OPENINGBALANCE` — expression AST gained `SemiAdditiveBalance`. |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
 
@@ -129,6 +130,70 @@ QueryRequest {
 
 `MeasureFilter { measure, operator: FilterOperator, value: f64 }` (builder `MeasureFilter::new`). The referenced `measure` must be one of the request's `measures`. Filters are applied **after** aggregation and **before** `limit`, so `order_by` a measure + `limit` + a measure filter expresses top-N-over-threshold. A `NULL` measure value never passes (the row is dropped), matching SQL `HAVING`. Not supported with `TotalsMode::Rollup` or a calculation group — those fail closed (`QueryError::InvalidQuery`). No model-file or `MODEL_FORMAT_VERSION` change (request-time only).
 
+## Measure-value ranking (`RANKX`)
+
+`QueryRequest` gained `rank_by: Option<RankBy>` — append an integer ranking column computed from a measure value (DAX `RANKX`-style):
+
+```rust
+QueryRequest {
+    measures: vec!["Revenue".into()],
+    group_by: vec![ColumnRef::new("Product", "name")],
+    rank_by: Some(RankBy::new("Revenue", "Revenue Rank")),   // rank 1 = largest
+    ..Default::default()
+}
+```
+
+`RankBy { measure, output_column, partition_by: Vec<ColumnRef>, dense: bool, ascending: bool }` — builder `RankBy::new(measure, output_column)` then `.ascending()`, `.dense()`, `.within(cols)`. Defaults: descending (rank `1` = largest), standard competition ranking (`1,1,3` — ties share a rank, the next rank skips), ranked over all rows. `.dense()` gives gap-free ranks (`1,1,2`); `.within(group_by_cols)` restarts the rank inside each group. Computed **after** aggregation (like `measure_filters`), so it composes with `order_by` + `limit` for "top N by measure". The `measure` must be in `measures`; every `partition_by` column must be in `group_by`; `output_column` must not collide with an existing result column. A `NULL` measure value ranks **last**. Not supported with `TotalsMode::Rollup` or a calculation group (fails closed). No `MODEL_FORMAT_VERSION` change (request-time only).
+
+## Window/time-intelligence measure beside an ordinary measure
+
+A window / running / time-intelligence measure (`YTD`, `PRIORYEAR`, a `WINDOW(...)` running total, a YoY compound, …) may now be requested **in the same query** as an ordinary aggregate (plain `Revenue`). Previously this was rejected and the host had to run two queries and stitch them.
+
+```rust
+QueryRequest {
+    measures: vec!["YTD Revenue".into(), "Revenue".into()],   // trend + base, one grid
+    group_by: vec![ColumnRef::new("Calendar", "year"), ColumnRef::new("Calendar", "month")],
+    ..Default::default()
+}
+```
+
+The engine computes the ordinary measures on the normal grouped path and FULL OUTER JOINs them onto the window result on the group-by axis, producing one `[dims…, measures-in-request-order…]` table. **Fail-closed guarantee:** if a side is not uniquely keyed by `group_by` (the running/shift axis is finer than the axis) the join would multiply rows, so it errors (`QueryError::InvalidQuery`) rather than mislead — add the finer column to `group_by`, or request the measures separately. Lookup columns combined with this specific mix are not yet supported (fail closed); `ROLLUP`/hierarchy with window measures remain fail-closed as before. No `MODEL_FORMAT_VERSION` change.
+
+## Result-column metadata sidecar
+
+New `Engine::query_with_meta(request) -> (Vec<RecordBatch>, Vec<ResultColumn>)` returns the same results as `query` **plus** a [`ResultColumn`] describing each output column, so a host need not re-derive it by string-matching column names:
+
+```rust
+pub struct ResultColumn {
+    pub name: String,                       // exact result column name
+    pub kind: ResultColumnKind,             // Dimension | Measure | GroupingId | Rank
+    pub data_type: Option<DataType>,        // engine type (dictionary-encoded dims report String)
+    pub source_table: Option<String>,       // dimension: owning model table
+    pub source_column: Option<String>,      // dimension: model column
+    pub measure: Option<String>,            // measure (base measure for a calc-group column)
+    pub calculation_item: Option<String>,   // calc-group item, if any
+    pub format_string: Option<String>,      // measure format string
+    pub display_name: Option<String>,       // measure/column display name
+    pub description: Option<String>,
+    pub is_hidden: bool,
+}
+```
+
+The engine owns the `format_string`/`display_name`/`is_hidden` (from the `Measure`/`Column`), the `"M [I]"` calculation-group → (base measure, item) mapping, and which column is the `__grouping_id` or rank column — so Calcula and Calcula Studio cannot drift on that mapping. Derived from the executed request + result schema, so it reflects calculation-group expansion and the appended rank column. No `MODEL_FORMAT_VERSION` change.
+
+## Measure-authoring APIs (Studio)
+
+Two **request-free** helpers for the measure editor — neither rebuilds the model:
+
+- `Engine::validate_measure_text(name, text) -> QueryResult<()>` — parse a candidate measure's source text (a `ParseError` with source position on a syntax error) and validate it against the live model: circular / unknown measure references, unknown qualified columns (`Table[Column]`), and unregistered UDF calls. `name` may match an existing measure (validating an edit). A fast pre-check, not a full guarantee (relationship reachability and bare-column refs are not checked here); `add_measure` / planning remain the final authority. Backed by `DataModel::validate_candidate_measure(&Measure)`.
+- Dependency graph: `Measure::referenced_measures() -> Vec<&str>` (direct deps), `DataModel::measure_dependents(name) -> Vec<&str>` (reverse edge — "who references X"), and `Expression::measure_references()` / `Expression::qualified_column_references()` walkers. For the lineage panel, safe-rename, and impact-on-delete.
+
+No `MODEL_FORMAT_VERSION` change (read-only/request-time).
+
+## CSV file connector
+
+New `Engine::add_csv_source(ConnectionTarget, AuthMethod) -> ConnectorResult<usize>` registers a directory of CSV files (`<dir>/<table>.csv`, header row required) as a source — load flat-file data with zero database setup. The `target.database` field is the directory; `target.default_schema` (default `"public"`) is the cosmetic source schema. CSV is local, so only `AuthMethod::Integrated` (the process's own file-system access) is accepted — credential methods return `ConnectorError::AuthMethodNotSupported`. Schema is inferred from the file; scalar filters are applied; the engine performs aggregation/joins/ordering locally (a simple scan-with-filters source like the in-memory connector). Table names are validated against path traversal. `bi_engine::CsvConnector`.
+
 ## Pivot-shaped queries: ordering, limit, totals
 
 `QueryRequest` (`engine-query::request`) gained the fields hosts need to render sorted, capped, and subtotaled pivots:
@@ -200,8 +265,12 @@ The parser accepts these built-ins (case-insensitive):
 | `PRIORPERIOD(expr, offset, "YEAR"\|"QUARTER"\|"MONTH")` | Generic period shift; negative `offset` = earlier. |
 | `PARALLELPERIOD(expr, offset, "YEAR"\|"QUARTER"\|"MONTH")` | Synonym of `PRIORPERIOD`: the whole window shifted by `offset` periods of the given granularity (for a single-period context this equals the parallel prior/next period). |
 | `DATESINPERIOD(expr, intervals, "YEAR"\|"QUARTER"\|"MONTH")` | Trailing window of \|intervals\| periods ending at the as-of date (e.g. `-12, MONTH` = trailing 12 months). `intervals` must be **negative**. **Filter-context only** — fails closed with a date column on the axis. |
+| `CLOSINGBALANCE(expr)` | **(format version 9)** Semi-additive balance: `expr` evaluated at the **last** date of the current context (e.g. inventory/account balance at period end — summing across days would be wrong). **Filter-context only** — fails closed with a date column on the axis. |
+| `OPENINGBALANCE(expr)` | **(format version 9)** As `CLOSINGBALANCE` but at the **first** date of the current context (period start). |
 
-These lower to the expression AST variants `Expression::ToDate { expr, granularity }` and `Expression::PeriodShift { expr, offset, granularity }` (with `DateGranularity::{Year,Quarter,Month}`).
+These lower to the expression AST variants `Expression::ToDate { expr, granularity }`, `Expression::PeriodShift { expr, offset, granularity }` (with `DateGranularity::{Year,Quarter,Month}`), and `Expression::SemiAdditiveBalance { expr, opening }`.
+
+> **Behavior change:** in **filter-context** mode, `YTD`/`QTD`/`MTD` now accept **any** range-computable aggregate inner — including `AVERAGE` / `DISTINCTCOUNT` / `MEDIAN` — because the window lowers to a single evaluation over the date range. (The **axis** running-window path still rejects non-additive aggregates, which genuinely cannot accumulate from per-period values.) Previously `YTD(AVERAGE(x))` failed closed even in filter context; it now computes the correct range average.
 
 ### Two evaluation modes (this is the v2 change)
 
@@ -454,7 +523,7 @@ EngineError::ScriptError { function: String, position: Option<usize>, message: S
 A sweep of silently-wrong-number paths (the engine's #1 prohibited failure) changed several queries that previously returned a wrong/mis-shaped result to either compute correctly or **fail closed** with a typed error. Host-visible effects:
 
 - **`PERCENTILE` is documented as approximate** and is now always computed locally (DataFusion `approx_percentile_cont`), so its value no longer changes when a model gains a second source or an in-memory table. Treat percentile results as approximate. **`MODE`, population `STDEV`/`VAR`** on the direct engine-core aggregation API now return correct values (`STDEVP`/`VARP` use the genuine population formula) or fail closed (`MODE` has no engine support) instead of silently substituting sample-stats / `MIN`.
-- **Multiple window/running/time-intelligence measures in one request are now joined** on the shared group-by axis into one `[dims…, m1, m2, …]` result (e.g. `YTD Sales` + `PRIORYEAR Sales` side by side). They must be uniquely keyed by the group-by columns (add the finer date column to `group_by` if the running axis is finer); otherwise the request fails closed. A window measure mixed with an **ordinary** (non-window) measure, or multiple `QUERY`-in-VAR measures, are still rejected (`QueryError::InvalidQuery`) — request those separately.
+- **Multiple window/running/time-intelligence measures in one request are now joined** on the shared group-by axis into one `[dims…, m1, m2, …]` result (e.g. `YTD Sales` + `PRIORYEAR Sales` side by side), **as is a window measure mixed with an ordinary (non-window) measure** (see [the dedicated section](#windowtime-intelligence-measure-beside-an-ordinary-measure)). They must be uniquely keyed by the group-by columns (add the finer date column to `group_by` if the running axis is finer); otherwise the request fails closed. Multiple `QUERY`-in-VAR measures in one request are still rejected (`QueryError::InvalidQuery`) — request those separately.
 - **Axis-mode time intelligence now honors a wrapping `KEEP` filter** (e.g. `KEEP(YTD(SUM(amount)), region='east')` is east-only). A window measure wrapped in context the path can't represent (boolean conditions, IN filters, CLEAR/RESET, USERELATIONSHIP, table-variable traversal) is rejected rather than silently dropped.
 - **Period shifts (`PRIORYEAR`/`PRIORPERIOD`) over a gapped axis fail closed** (`EngineError::TimeIntelligence`): a missing period would otherwise read the wrong period. Supply a contiguous date axis.
 - **Filter-context time intelligence over a non-Gregorian (fiscal) date table fails closed** (`EngineError::TimeIntelligence`): the filter-context window math is calendar-based and would disagree with the axis path. Put a date column on the group-by axis (which honors the role columns), or use a Gregorian calendar table.
@@ -472,6 +541,10 @@ The shared model file is a **trust boundary**. Beyond the per-feature notes abov
 - Preserves numeric fidelity on fetch (fraction-preserving unconstrained `NUMERIC`, checked+rounded decimal scaling, wire-typed decode of `float4`/`timestamptz`/`smallint`/`tinyint`/`real`/`money`/`datetimeoffset`, `COUNT_BIG` on SQL Server).
 
 These do not change the host API surface but **do** change behavior: a model that previously produced wrong numbers or relied on lax types now produces correct numbers or a clear error.
+
+## Performance (transparent — no API change)
+
+- **Sargable integer filters.** A scalar filter or `OR`-slicer condition on a column the model declares as an **integer** type now renders to the source as an uncast, unquoted comparison (`col = 5`), so a source index on that column is usable — previously every filter was text-cast (`col::text = $1`), forcing a sequential scan. This closes the asymmetry with the IN-list path, which was already sargable by the same model-type rule. (Date/decimal sargability remains future work; those still text-cast.) **Contract:** a model's declared column type must match the source's physical type. The optimization keys off the *declared* type, so a column declared integer but physically `VARCHAR` at the source now renders `col = 5` — on PostgreSQL this is a loud error (operator type mismatch); on SQL Server it compares numerically rather than as text, which can differ for non-canonical strings (`'05'`). This only affects models that misdeclare their own column types; a faithful model is unaffected. (Same caveat already applied to the IN-list slicer path.)
 
 ---
 

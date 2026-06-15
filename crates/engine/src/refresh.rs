@@ -504,11 +504,7 @@ fn conjunct_to_filter(conjunct: &RefreshConjunct) -> FilterCondition {
         ComparisonOp::LessThan => FilterOperator::LessThan,
         ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
     };
-    FilterCondition {
-        column: conjunct.column.clone(),
-        operator,
-        value: conjunct.value.clone(),
-    }
+    FilterCondition::new(conjunct.column.clone(), operator, conjunct.value.clone())
 }
 
 #[cfg(test)]

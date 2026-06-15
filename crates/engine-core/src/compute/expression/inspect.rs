@@ -87,7 +87,8 @@ impl Expression {
             // Time-intelligence sugar lowers to window functions (two-stage).
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
-            | Expression::DatesInPeriod { .. } => true,
+            | Expression::DatesInPeriod { .. }
+            | Expression::SemiAdditiveBalance { .. } => true,
             Expression::InList { expr, values } => {
                 expr.has_aggregate() || values.iter().any(|v| v.has_aggregate())
             }
@@ -200,7 +201,8 @@ impl Expression {
             | Expression::Index { inner, .. } => inner.has_context_ops(),
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
-            | Expression::DatesInPeriod { expr, .. } => expr.has_context_ops(),
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => expr.has_context_ops(),
             Expression::InList { expr, values } => {
                 expr.has_context_ops() || values.iter().any(|v| v.has_context_ops())
             }
@@ -281,6 +283,7 @@ impl Expression {
                 | Expression::ToDate { .. }
                 | Expression::PeriodShift { .. }
                 | Expression::DatesInPeriod { .. }
+                | Expression::SemiAdditiveBalance { .. }
         )
     }
 
@@ -294,9 +297,16 @@ impl Expression {
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
                 true
             }
+            // RankWindow (RANK/ROW_NUMBER/DENSE_RANK) also routes through the
+            // window two-stage path. Omitting it sent the node down the normal
+            // SQL path, which emitted a `/* RANK_WINDOW … */` placeholder and
+            // produced a broken statement; routing it here yields a clean typed
+            // error until execution lands.
+            Expression::RankWindow { .. } => true,
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
-            | Expression::DatesInPeriod { .. } => true,
+            | Expression::DatesInPeriod { .. }
+            | Expression::SemiAdditiveBalance { .. } => true,
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::And(left, right)

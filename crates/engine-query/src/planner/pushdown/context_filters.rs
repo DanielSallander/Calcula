@@ -230,10 +230,12 @@ pub(super) fn compute_pushable_context_filters(
         if !intersection.is_empty() {
             let conditions: Vec<FilterCondition> = intersection
                 .iter()
-                .map(|pred| FilterCondition {
-                    column: pred.column.clone(),
-                    operator: comparison_to_filter_op(&pred.operator),
-                    value: pred.value.clone(),
+                .map(|pred| {
+                    FilterCondition::new(
+                        pred.column.clone(),
+                        comparison_to_filter_op(&pred.operator),
+                        pred.value.clone(),
+                    )
                 })
                 .collect();
             result.insert(table.clone(), conditions);

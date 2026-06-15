@@ -378,8 +378,6 @@ impl<'a> ContextResolver<'a> {
                 }
                 let inner = self.walk(expr, ctx)?;
                 for filter in filters {
-                    // Validate cross-table filter propagation
-                    self.validate_filter_propagation(filter)?;
                     ctx.filters.push(ResolvedFilter::from_predicate(filter));
                 }
                 // Collect expression-based conditions into the context.
@@ -776,6 +774,16 @@ impl<'a> ContextResolver<'a> {
                     granularity: *granularity,
                 })
             }
+            Expression::SemiAdditiveBalance {
+                expr: inner,
+                opening,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::SemiAdditiveBalance {
+                    expr: Box::new(inner),
+                    opening: *opening,
+                })
+            }
 
             Expression::InList { expr, values } => {
                 let expr = self.walk(expr, ctx)?;
@@ -942,7 +950,6 @@ impl<'a> ContextResolver<'a> {
             match op {
                 ContextOp::Keep(filters) => {
                     for filter in filters {
-                        self.validate_filter_propagation(filter)?;
                         ctx.filters.push(ResolvedFilter::from_predicate(filter));
                     }
                 }
@@ -1019,18 +1026,6 @@ impl<'a> ContextResolver<'a> {
         Ok(())
     }
 
-    /// Validate that a filter on a cross-table column can propagate.
-    ///
-    /// If the filter references a table different from the measure's table,
-    /// check that there's a relationship with appropriate propagation.
-    fn validate_filter_propagation(&self, _filter: &FilterPredicate) -> EngineResult<()> {
-        // For now, we trust that filters reference valid tables.
-        // Full validation (checking that the filter's table has a relationship
-        // to the measure's table with Auto/Both propagation) requires knowing
-        // the measure's table, which happens at a higher level.
-        // The ContextResolver focuses on structural resolution.
-        Ok(())
-    }
 
     /// Validate that a traversal path consists of valid relationship hops.
     fn validate_traversal_path(&self, path: &RelationshipPath) -> EngineResult<()> {

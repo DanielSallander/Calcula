@@ -200,11 +200,7 @@ fn order_ids(batches: &[RecordBatch]) -> Vec<i64> {
 }
 
 fn cell_eq(column: &str, value: &str) -> FilterCondition {
-    FilterCondition {
-        column: column.into(),
-        operator: FilterOperator::Equal,
-        value: value.into(),
-    }
+    FilterCondition::new(column, FilterOperator::Equal, value)
 }
 
 /// Read the value of a (nullable) string column at `row`, or `None` for NULL.

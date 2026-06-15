@@ -10,6 +10,7 @@ use engine_connectors::traits::{Connector, FetchRequest, SourceTable};
 use engine_connectors::ConnectorResult;
 use engine_core::model::Table;
 
+use crate::csv_connector::CsvConnector;
 use crate::in_memory_connector::InMemoryConnector;
 
 use crate::error::{QueryError, QueryResult};
@@ -45,6 +46,9 @@ pub enum AnyConnector {
     /// In-process connector serving canned Arrow batches (testing and simple
     /// file-less in-memory sources). See [`InMemoryConnector`].
     InMemory(InMemoryConnector),
+    /// File-backed connector serving CSV files from a directory. See
+    /// [`CsvConnector`].
+    Csv(CsvConnector),
 }
 
 impl AnyConnector {
@@ -54,6 +58,7 @@ impl AnyConnector {
             AnyConnector::Postgres(c) => c.fetch_data(request).await,
             AnyConnector::SqlServer(c) => c.fetch_data(request).await,
             AnyConnector::InMemory(c) => c.fetch_data(request).await,
+            AnyConnector::Csv(c) => c.fetch_data(request).await,
         }
     }
 
@@ -63,6 +68,7 @@ impl AnyConnector {
             AnyConnector::Postgres(c) => c.execute_query(sql).await,
             AnyConnector::SqlServer(c) => c.execute_query(sql).await,
             AnyConnector::InMemory(c) => c.execute_query(sql).await,
+            AnyConnector::Csv(c) => c.execute_query(sql).await,
         }
     }
 
@@ -72,6 +78,7 @@ impl AnyConnector {
             AnyConnector::Postgres(c) => c.list_tables().await,
             AnyConnector::SqlServer(c) => c.list_tables().await,
             AnyConnector::InMemory(c) => c.list_tables().await,
+            AnyConnector::Csv(c) => c.list_tables().await,
         }
     }
 
@@ -81,6 +88,7 @@ impl AnyConnector {
             AnyConnector::Postgres(c) => c.introspect_table(schema, table_name).await,
             AnyConnector::SqlServer(c) => c.introspect_table(schema, table_name).await,
             AnyConnector::InMemory(c) => c.introspect_table(schema, table_name).await,
+            AnyConnector::Csv(c) => c.introspect_table(schema, table_name).await,
         }
     }
 
@@ -90,6 +98,7 @@ impl AnyConnector {
             AnyConnector::Postgres(c) => c.row_count(schema, table_name).await,
             AnyConnector::SqlServer(c) => c.row_count(schema, table_name).await,
             AnyConnector::InMemory(c) => c.row_count(schema, table_name).await,
+            AnyConnector::Csv(c) => c.row_count(schema, table_name).await,
         }
     }
 
@@ -107,6 +116,7 @@ impl AnyConnector {
             AnyConnector::Postgres(_) => PostgresConnector::supported_auth_methods(),
             AnyConnector::SqlServer(_) => SqlServerConnector::supported_auth_methods(),
             AnyConnector::InMemory(_) => Vec::new(),
+            AnyConnector::Csv(_) => CsvConnector::supported_auth_methods(),
         }
     }
 
@@ -119,6 +129,7 @@ impl AnyConnector {
             AnyConnector::Postgres(c) => c.execute_join_aggregation(request).await,
             AnyConnector::SqlServer(c) => c.execute_join_aggregation(request).await,
             AnyConnector::InMemory(c) => c.execute_join_aggregation(request).await,
+            AnyConnector::Csv(c) => c.execute_join_aggregation(request).await,
         }
     }
 }

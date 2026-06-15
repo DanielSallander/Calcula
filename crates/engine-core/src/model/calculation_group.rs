@@ -310,7 +310,8 @@ fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::Index { inner, .. }
         | Expression::ToDate { expr: inner, .. }
         | Expression::PeriodShift { expr: inner, .. }
-        | Expression::DatesInPeriod { expr: inner, .. } => out.push(inner),
+        | Expression::DatesInPeriod { expr: inner, .. }
+        | Expression::SemiAdditiveBalance { expr: inner, .. } => out.push(inner),
         Expression::If {
             condition,
             then_expr,

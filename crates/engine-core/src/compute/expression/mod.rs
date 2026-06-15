@@ -29,12 +29,13 @@ mod validate;
 mod walkers;
 
 pub use builders::{
-    agg, and, blank, block, call, clear, clear_except, clear_inner, clear_outer, coalesce, col,
-    compare, count_rows, dates_in_period, datetime_fn, first_value, has_one_value, if_error,
-    if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars,
-    lit, lit_bool, lit_int, lit_str, not, offset_expr, or, percentile, period_shift, qualified_col,
-    query_expr, reset, reset_inner, reset_outer, safe_divide, scalar_fn, selected_value, switch,
-    table_ref, text_fn, to_date, traverse, use_relationship, using, window_expr, xor,
+    agg, and, blank, block, call, clear, clear_except, clear_inner, clear_outer, closing_balance,
+    coalesce, col, compare, count_rows, dates_in_period, datetime_fn, first_value, has_one_value,
+    if_error, if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in,
+    keep_vars, lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
+    period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,
+    scalar_fn, selected_value, switch, table_ref, text_fn, to_date, traverse, use_relationship,
+    using, window_expr, xor,
 };
 pub use functions::{DateTimeFunction, ScalarFunction};
 pub(crate) use functions::{
@@ -631,6 +632,33 @@ pub enum Expression {
         intervals: i64,
         /// The window's period unit.
         granularity: DateGranularity,
+    },
+
+    /// Semi-additive balance: the inner measure evaluated at a **single date
+    /// boundary** of the current date context — `CLOSINGBALANCE` (the last date)
+    /// or `OPENINGBALANCE` (the first date).
+    ///
+    /// ```text
+    /// CLOSINGBALANCE(SUM(fact[on_hand]))   // inventory at the period end
+    /// OPENINGBALANCE(SUM(fact[on_hand]))   // inventory at the period start
+    /// ```
+    ///
+    /// This is the canonical pattern for non-additive-over-time stock measures
+    /// (inventory, account balance, headcount): summing across days is wrong, so
+    /// the value is pinned to the boundary day instead.
+    ///
+    /// **Filter-context only (v1):** evaluated by probing the last (closing) /
+    /// first (opening) `DateKey` of the current date context and installing a
+    /// single-day `DateKey = boundary` filter (the same machinery as
+    /// filter-context `YTD` / `DATESINPERIOD`). It is **not** supported with a
+    /// date column on the group-by axis, fails closed on a non-Gregorian
+    /// calendar, and is never rendered to SQL directly.
+    SemiAdditiveBalance {
+        /// The inner measure to evaluate at the boundary date.
+        expr: Box<Expression>,
+        /// `true` = `OPENINGBALANCE` (first date in context); `false` =
+        /// `CLOSINGBALANCE` (last date in context).
+        opening: bool,
     },
 
     /// Get measure value at an absolute position within a partition.

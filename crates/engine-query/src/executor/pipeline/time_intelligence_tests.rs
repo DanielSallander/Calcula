@@ -359,11 +359,7 @@ fn request_with_filters(
             .collect(),
         filters: filters
             .iter()
-            .map(|(col, op, val)| FilterCondition {
-                column: (*col).to_string(),
-                operator: *op,
-                value: (*val).to_string(),
-            })
+            .map(|(col, op, val)| FilterCondition::new(*col, *op, *val))
             .collect(),
         ..Default::default()
     }
@@ -761,19 +757,44 @@ async fn filter_context_ytd_composes_with_non_date_dimension() {
 }
 
 #[tokio::test]
-async fn filter_context_average_inner_is_rejected() {
-    // AVERAGE does not compose over a date range → typed error (fail closed).
-    let err = run(
+async fn filter_context_average_inner_is_computed_over_the_range() {
+    // In FILTER-CONTEXT mode YTD lowers to a single evaluation over the date
+    // range, so AVERAGE is exact (unlike the AXIS path, which rejects it).
+    // Context year=2024, month<=6 → YTD range = Jan..Jun 2024. east amounts
+    // 1..6 → average 21/6 = 3.5; west is double → 42/6 = 7.0.
+    let batches = run(
         "YTD(AVERAGE(fact_sales[amount]))",
         true,
-        request(&[("fact_sales", "region")]),
+        request_with_filters(
+            &[("fact_sales", "region")],
+            &[
+                ("year", FilterOperator::Equal, "2024"),
+                ("month", FilterOperator::LessThanOrEqual, "6"),
+            ],
+        ),
     )
     .await
-    .unwrap_err();
-    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
-        panic!("expected typed TimeIntelligence error, got {err:?}");
+    .unwrap();
+
+    let combined = concat_batches(&batches[0].schema(), batches.as_slice()).unwrap();
+    let values = measure_column(&combined, "m");
+    let regions = {
+        let idx = combined.schema().index_of("region").unwrap();
+        let arr = combined
+            .column(idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        (0..arr.len())
+            .map(|i| arr.value(i).to_string())
+            .collect::<Vec<_>>()
     };
-    assert!(reason.contains("not supported in v1"), "got: {reason}");
+    let mut by_region: HashMap<String, Option<f64>> = HashMap::new();
+    for i in 0..regions.len() {
+        by_region.insert(regions[i].clone(), values[i]);
+    }
+    assert_eq!(by_region["east"], Some(3.5));
+    assert_eq!(by_region["west"], Some(7.0));
 }
 
 #[tokio::test]
@@ -1517,9 +1538,11 @@ async fn compound_ti_wrapped_in_keep_fails_closed() {
 }
 
 #[tokio::test]
-async fn window_measure_mixed_with_normal_measure_fails_closed() {
-    // A window measure alongside a plain aggregate would silently drop the
-    // plain measure's column. Fail closed instead.
+async fn window_measure_combines_with_normal_measure_on_the_axis() {
+    // A window/TI measure (YTD) sits beside a plain aggregate (total) in one
+    // request: the two are computed on separate paths and FULL OUTER JOINed on
+    // the (year, month) axis into a single [year, month, ytd, total] table.
+    // 2024 month m: monthly total = 3m; YTD = 3 * m(m+1)/2.
     let model = model_with_measures(
         &[
             ("ytd", "YTD(SUM(fact_sales[amount]))"),
@@ -1527,20 +1550,111 @@ async fn window_measure_mixed_with_normal_measure_fails_closed() {
         ],
         true,
     );
-    let err = run_measures(
+    let batches = run_measures(
         &model,
         &["ytd", "total"],
         &[("dim_date", "year"), ("dim_date", "month")],
     )
     .await
-    .unwrap_err();
+    .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    assert_eq!(combined.num_rows(), 24, "one joined row per (year, month)");
+    assert!(combined.schema().index_of("ytd").is_ok());
+    assert!(combined.schema().index_of("total").is_ok());
+
+    let years = int_column(&combined, "year");
+    let months = int_column(&combined, "month");
+    let ytd = measure_column(&combined, "ytd");
+    let total = measure_column(&combined, "total");
+    let mut ytd_map = HashMap::new();
+    let mut total_map = HashMap::new();
+    for i in 0..combined.num_rows() {
+        ytd_map.insert((years[i], months[i]), ytd[i]);
+        total_map.insert((years[i], months[i]), total[i]);
+    }
+    // 2024 December: ytd = 3*78 = 234; plain total = 3*12 = 36.
+    assert_eq!(ytd_map[&(2024, 12)], Some(234.0));
+    assert_eq!(total_map[&(2024, 12)], Some(36.0));
+    // 2024 January: ytd = total = 3.
+    assert_eq!(ytd_map[&(2024, 1)], Some(3.0));
+    assert_eq!(total_map[&(2024, 1)], Some(3.0));
+}
+
+#[tokio::test]
+async fn rank_window_measure_builds_and_fails_closed_cleanly() {
+    // RANK/ROW_NUMBER/DENSE_RANK measures are not yet executable. The model must
+    // BUILD (no TableNotFound("") panic from infer_fact_table) and the query
+    // must return a clean typed error — never broken SQL.
+    let model = model_with_measures(&[("rn", "ROW_NUMBER(ORDERBY(fact_sales[amount]))")], true);
+    let err = run_measures(&model, &["rn"], &[("dim_date", "year")])
+        .await
+        .unwrap_err();
     let QueryError::InvalidQuery(msg) = &err else {
         panic!("expected InvalidQuery, got {err:?}");
     };
-    assert!(
-        msg.contains("window") && msg.contains("combined"),
-        "got: {msg}"
+    assert!(msg.contains("not yet executable"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn window_plus_normal_null_dimension_group_does_not_split() {
+    // A NULL group-by member must join to itself across the window and normal
+    // sides (null-safe join key), not split into two half-blank rows.
+    let model = model_with_measures(
+        &[
+            ("ytd", "YTD(SUM(fact_sales[amount]))"),
+            ("total", "SUM(fact_sales[amount])"),
+        ],
+        true,
     );
+    // 2024-01: a NULL-region fact (amount 5) and an east fact (amount 1).
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401, 202401])),
+            Arc::new(StringArray::from(vec![None, Some("east")])),
+            Arc::new(Float64Array::from(vec![5.0, 1.0])),
+        ],
+    )
+    .unwrap();
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_batch()).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["ytd".into(), "total".into()],
+        group_by: vec![
+            ColumnRef::new("dim_date", "year"),
+            ColumnRef::new("dim_date", "month"),
+            ColumnRef::new("fact_sales", "region"),
+        ],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+    let region = combined.column(combined.schema().index_of("region").unwrap());
+    let ytd = measure_column(&combined, "ytd");
+    let total = measure_column(&combined, "total");
+    let null_rows: Vec<usize> = (0..combined.num_rows())
+        .filter(|&i| region.is_null(i))
+        .collect();
+    assert_eq!(
+        null_rows.len(),
+        1,
+        "the NULL-region group must be ONE combined row, not split"
+    );
+    let r = null_rows[0];
+    assert_eq!(ytd[r], Some(5.0), "NULL-region YTD present");
+    assert_eq!(total[r], Some(5.0), "NULL-region total present on the same row");
 }
 
 // ===========================================================================
@@ -1585,6 +1699,68 @@ async fn dates_in_period_trailing_3_months() {
     .await
     .unwrap();
     assert_eq!(scalar_measure(&v), Some(99.0));
+}
+
+// ===========================================================================
+// CLOSINGBALANCE / OPENINGBALANCE: semi-additive balance pinned to a single
+// boundary date of the context (filter-context only).
+// ===========================================================================
+
+#[tokio::test]
+async fn closing_balance_pins_to_last_date_in_context() {
+    // No date filter → context = the full calendar; last day = 2024-12-01.
+    // CLOSINGBALANCE = the December-2024 value = 3*12 = 36 (NOT a sum over time).
+    let v = run(
+        "CLOSINGBALANCE(SUM(fact_sales[amount]))",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(36.0));
+}
+
+#[tokio::test]
+async fn opening_balance_pins_to_first_date_in_context() {
+    // First day = 2023-01-01 → January-2023 value = 30*1 = 30.
+    let v = run(
+        "OPENINGBALANCE(SUM(fact_sales[amount]))",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(30.0));
+}
+
+#[tokio::test]
+async fn closing_balance_respects_the_date_filter() {
+    // Restricted to 2023 → last day = 2023-12-01 → December-2023 = 30*12 = 360.
+    let v = run(
+        "CLOSINGBALANCE(SUM(fact_sales[amount]))",
+        true,
+        request_with_filters(&[], &[("year", FilterOperator::Equal, "2023")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(360.0));
+}
+
+#[tokio::test]
+async fn closing_balance_on_date_axis_fails_closed() {
+    // A per-row balance over a date axis is the deferred LAST/FIRST primitive;
+    // a date column on the axis must fail closed, never silently mis-compute.
+    let err = run(
+        "CLOSINGBALANCE(SUM(fact_sales[amount]))",
+        true,
+        request(&[("dim_date", "year"), ("dim_date", "month")]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
+        panic!("expected typed TimeIntelligence error, got {err:?}");
+    };
+    assert!(reason.contains("axis"), "got: {reason}");
 }
 
 #[tokio::test]

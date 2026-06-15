@@ -338,6 +338,8 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "PRIORPERIOD",
         "PARALLELPERIOD",
         "DATESINPERIOD",
+        "CLOSINGBALANCE",
+        "OPENINGBALANCE",
         // Value inspection
         "HASONEVALUE",
         "SELECTEDVALUE",

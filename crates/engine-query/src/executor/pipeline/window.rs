@@ -774,6 +774,11 @@ fn extract_window_info(expr: &Expression) -> QueryResult<(Expression, WindowInfo
                 position: Some(*position),
             },
         )),
+        Expression::RankWindow { .. } => Err(crate::error::QueryError::InvalidQuery(
+            "RANK / ROW_NUMBER / DENSE_RANK measures are not yet executable; rank result rows \
+             with the request-level `rank_by` option instead, or use WINDOW/OFFSET/INDEX"
+                .into(),
+        )),
         _ => Err(crate::error::QueryError::InvalidQuery(
             "expected Window, Offset, or Index expression".into(),
         )),
@@ -1010,6 +1015,7 @@ fn is_simple_window_leaf(expr: &Expression) -> bool {
         Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
             | Expression::DatesInPeriod { .. }
+            | Expression::SemiAdditiveBalance { .. }
             | Expression::Window { .. }
             | Expression::Offset { .. }
             | Expression::Index { .. }
@@ -1284,11 +1290,135 @@ async fn join_window_results(
                         .join(", ");
                     format!("COALESCE({priors})")
                 };
-                format!("{lhs} = __wjoin_{i}.{}", q(dim))
+                let rhs = format!("__wjoin_{i}.{}", q(dim));
+                // NULL-safe: a NULL group-by member must match itself across
+                // sides (plain `=` yields NULL for NULL = NULL, splitting the
+                // group into half-blank rows).
+                format!("({lhs} = {rhs} OR ({lhs} IS NULL AND {rhs} IS NULL))")
             })
             .collect::<Vec<_>>()
             .join(" AND ");
         sql.push_str(&format!(" FULL OUTER JOIN __wjoin_{i} ON {on}"));
+    }
+
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    Ok(batches)
+}
+
+/// FULL OUTER JOIN a window-measure result `[dims..., w...]` with an ordinary
+/// (non-window) measure result `[dims..., n...]` on the group-by dimensions,
+/// producing one `[dims..., measures-in-request-order...]` table.
+///
+/// This is what lets a trend measure (YTD / YoY / PRIORYEAR) sit beside its base
+/// measure (plain Revenue) in a single request. The two results come from
+/// different execution paths (the window two-stage path vs. the normal grouped
+/// path), which name the group-by columns with different casing, so the join is
+/// done **by position**: both paths emit the `group_by` dimensions first, in the
+/// same order, so column `i` on each side is the same dimension regardless of
+/// case. Each side must be uniquely keyed by those dimensions — otherwise the
+/// join would multiply rows, so it **fails closed** (the same guard
+/// [`join_window_results`] uses). Output dimension names follow the window side.
+pub(super) async fn join_window_with_normal(
+    ctx: &SessionContext,
+    window_batches: Vec<RecordBatch>,
+    normal_batches: Vec<RecordBatch>,
+    group_by: &[ColumnRef],
+    ordered_measure_names: &[String],
+    window_measure_names: &[String],
+) -> QueryResult<Vec<RecordBatch>> {
+    let n = group_by.len();
+
+    // Read the dimension column names as actually emitted by each side (first
+    // `n` columns, in group_by order). A side that produced no batch at all has
+    // no schema — fail closed rather than guess the shape.
+    let dims_of = |batches: &[RecordBatch]| -> QueryResult<Vec<String>> {
+        let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
+            QueryError::InvalidQuery(
+                "could not combine window and ordinary measures: a sub-result produced no batch"
+                    .into(),
+            )
+        })?;
+        Ok((0..n).map(|i| schema.field(i).name().clone()).collect())
+    };
+    let win_dims = dims_of(&window_batches)?;
+    let norm_dims = dims_of(&normal_batches)?;
+
+    register_partitioned_table(ctx, "__wn_win", window_batches)?;
+    register_partitioned_table(ctx, "__wn_norm", normal_batches)?;
+
+    let fanout = || -> QueryError {
+        QueryError::InvalidQuery(
+            "cannot combine a window/running/time-intelligence measure with an ordinary measure: \
+             a result is not uniquely keyed by the group-by columns (the running or shift axis is \
+             finer than group_by), so joining them would multiply rows. Add the finer column(s) \
+             to group_by, or request the measures separately"
+                .into(),
+        )
+    };
+
+    // Unique-keying guard on both sides.
+    for (alias, dims) in [("__wn_win", &win_dims), ("__wn_norm", &norm_dims)] {
+        let total = read_count(ctx, &format!("SELECT COUNT(*) FROM {alias}")).await?;
+        let distinct = if dims.is_empty() {
+            if total <= 1 {
+                total
+            } else {
+                return Err(fanout());
+            }
+        } else {
+            let d = dims
+                .iter()
+                .map(|c| quote_ident_double(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            read_count(
+                ctx,
+                &format!("SELECT COUNT(*) FROM (SELECT DISTINCT {d} FROM {alias})"),
+            )
+            .await?
+        };
+        if total != distinct {
+            return Err(fanout());
+        }
+    }
+
+    let q = quote_ident_double;
+    let mut select_parts: Vec<String> = Vec::new();
+    for i in 0..n {
+        select_parts.push(format!(
+            "COALESCE(__wn_win.{}, __wn_norm.{}) AS {}",
+            q(&win_dims[i]),
+            q(&norm_dims[i]),
+            q(&win_dims[i])
+        ));
+    }
+    for name in ordered_measure_names {
+        let side = if window_measure_names.iter().any(|w| w == name) {
+            "__wn_win"
+        } else {
+            "__wn_norm"
+        };
+        select_parts.push(format!("{side}.{}", q(name)));
+    }
+
+    let mut sql = format!("SELECT {} FROM __wn_win", select_parts.join(", "));
+    if n == 0 {
+        sql.push_str(" CROSS JOIN __wn_norm");
+    } else {
+        // NULL-SAFE equality: a NULL group-by value (a legitimate dimension
+        // member) must match itself across the two sides. Plain `=` is not
+        // null-safe (`NULL = NULL` is NULL, not TRUE), which would split a NULL
+        // group into two half-blank rows. (`IS NOT DISTINCT FROM` does not
+        // compile under DataFusion 44's coercion, so use the OR form.)
+        let on = (0..n)
+            .map(|i| {
+                let l = format!("__wn_win.{}", q(&win_dims[i]));
+                let r = format!("__wn_norm.{}", q(&norm_dims[i]));
+                format!("({l} = {r} OR ({l} IS NULL AND {r} IS NULL))")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql.push_str(&format!(" FULL OUTER JOIN __wn_norm ON {on}"));
     }
 
     let batches = ctx.sql(&sql).await?.collect().await?;

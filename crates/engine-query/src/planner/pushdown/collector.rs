@@ -591,7 +591,8 @@ impl<'a> ProjectionCollector<'a> {
                         | Expression::Index { .. }
                         | Expression::ToDate { .. }
                         | Expression::PeriodShift { .. }
-                        | Expression::DatesInPeriod { .. } => {
+                        | Expression::DatesInPeriod { .. }
+                        | Expression::SemiAdditiveBalance { .. } => {
                             self.intermediate_tables.insert(name.to_lowercase());
                         }
                         _ => {
@@ -751,7 +752,8 @@ impl<'a> ProjectionCollector<'a> {
             // the inner measure contributes column requirements.
             Expression::ToDate { expr: inner, .. }
             | Expression::PeriodShift { expr: inner, .. }
-            | Expression::DatesInPeriod { expr: inner, .. } => self.walk(inner),
+            | Expression::DatesInPeriod { expr: inner, .. }
+            | Expression::SemiAdditiveBalance { expr: inner, .. } => self.walk(inner),
             // UDF call: the function body is opaque, but its arguments are
             // ordinary expressions whose column requirements must be fetched.
             Expression::Call { args, .. } => {

@@ -256,12 +256,13 @@ impl SqlRenderer<'_> {
             // closed in every dialect rather than emit wrong SQL.
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
-            | Expression::DatesInPeriod { .. } => {
+            | Expression::DatesInPeriod { .. }
+            | Expression::SemiAdditiveBalance { .. } => {
                 return Err(EngineError::InvalidExpression(
                     "time-intelligence expression (YTD/QTD/MTD/PRIORYEAR/PRIORPERIOD/\
-                     DATESINPERIOD) must be lowered to a window expression before SQL \
-                     generation; this is an internal error — the measure should have routed \
-                     through the window execution path"
+                     DATESINPERIOD/CLOSINGBALANCE/OPENINGBALANCE) must be lowered to a window \
+                     expression before SQL generation; this is an internal error — the measure \
+                     should have routed through the window execution path"
                         .to_string(),
                 ));
             }

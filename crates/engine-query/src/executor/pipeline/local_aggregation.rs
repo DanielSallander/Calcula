@@ -57,11 +57,11 @@ fn role_comparison_to_operator(op: ComparisonOp) -> FilterOperator {
 /// Convert a role [`FilterPredicate`] into a connector [`FilterCondition`]
 /// (column / op / value — placed on the fetch of the predicate's own table).
 fn role_filter_condition(predicate: &FilterPredicate) -> FilterCondition {
-    FilterCondition {
-        column: predicate.column.clone(),
-        operator: role_comparison_to_operator(predicate.operator),
-        value: predicate.value.clone(),
-    }
+    FilterCondition::new(
+        predicate.column.clone(),
+        role_comparison_to_operator(predicate.operator),
+        predicate.value.clone(),
+    )
 }
 
 /// Whether two [`FilterCondition`]s are identical (column, operator, value).
@@ -877,26 +877,23 @@ impl QueryExecutor {
         // If we have window measures, evaluate them via two-stage window execution
         // (ordered at the Arrow level afterwards).
         if !window_measures.is_empty() {
-            // Multiple window measures are joined on the group-by axis by the
-            // window evaluator. Mixing a window/running/time-intelligence measure
-            // with an ORDINARY (non-window) measure is still rejected: the two
-            // run through different execution paths and the window evaluator
-            // would drop the ordinary measure's column. Fail closed rather than
-            // silently drop it — request the ordinary measures separately.
-            if !non_window.is_empty() {
-                return Err(crate::error::QueryError::InvalidQuery(
-                    "a window / running / time-intelligence measure cannot currently be \
-                     combined with an ordinary (non-window) measure in a single request (the \
-                     ordinary measure's column would be dropped); request the ordinary \
-                     measures in a separate query and combine in the host"
-                        .into(),
-                ));
-            }
             if rollup {
                 return Err(totals_unsupported("window measures"));
             }
             if hier.is_some() {
                 return Err(hierarchy_unsupported("window measures"));
+            }
+            // A window/TI measure combined with an ordinary measure joins two
+            // result sets on the group-by axis (below). Lookup columns would add
+            // dimension columns to only the ordinary side, breaking that join —
+            // so that specific combination fails closed for now.
+            if !non_window.is_empty() && !lookup_specs.is_empty() {
+                return Err(crate::error::QueryError::InvalidQuery(
+                    "a window / running / time-intelligence measure combined with an ordinary \
+                     measure does not yet support lookup columns in the same request; request \
+                     the lookup query separately"
+                        .into(),
+                ));
             }
             // Cancellation checkpoint: before window-measure evaluation.
             check_cancelled(token)?;
@@ -914,16 +911,63 @@ impl QueryExecutor {
                         .collect()
                 })
                 .unwrap_or_default();
-            let batches = Self::execute_window_measures(
+            let window_batches = Self::execute_window_measures(
                 &ctx,
                 &window_measures,
                 group_by,
                 model,
                 &date_filters,
-                plan,
+                plan.as_deref_mut(),
             )
             .await?;
-            return apply_order_and_limit(batches, order_by, limit);
+
+            // No ordinary measures alongside → the window result is the answer.
+            if non_window.is_empty() {
+                return apply_order_and_limit(window_batches, order_by, limit);
+            }
+
+            // Combine with ordinary measures: compute them via the normal grouped
+            // path (a recursion over the non-window subset, reusing the same
+            // fetches and role filters), then FULL OUTER JOIN onto the window
+            // result on the group-by axis. The join's unique-keying guard keeps
+            // this honest — a non-uniquely-keyed side fails closed rather than
+            // multiplying rows. ORDER BY / LIMIT are applied once, to the
+            // combined result, so top-N over a window measure still works.
+            check_cancelled(token)?;
+            let normal_measures: Vec<Measure> = non_window.iter().map(|m| (*m).clone()).collect();
+            let normal_batches = Box::pin(Self::execute_local_aggregation(
+                fetches,
+                &normal_measures,
+                group_by,
+                &[],
+                &[],
+                None,
+                TotalsMode::None,
+                None,
+                model,
+                registry,
+                cache,
+                max_inline_in_values,
+                udfs,
+                role_filters,
+                None,
+                token,
+            ))
+            .await?;
+            let ordered_names: Vec<String> =
+                measures.iter().map(|m| m.name().to_string()).collect();
+            let window_names: Vec<String> =
+                window_measures.iter().map(|m| m.name().to_string()).collect();
+            let combined = super::window::join_window_with_normal(
+                &ctx,
+                window_batches,
+                normal_batches,
+                group_by,
+                &ordered_names,
+                &window_names,
+            )
+            .await?;
+            return apply_order_and_limit(combined, order_by, limit);
         }
 
         // Partition measures by home table to detect multi-fact-table queries.

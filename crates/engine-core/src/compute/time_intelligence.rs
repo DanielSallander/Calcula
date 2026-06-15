@@ -518,12 +518,7 @@ pub fn time_intelligence_route(
     // DATESINPERIOD (trailing window) is filter-context only: it has no
     // per-axis-row moving-window form in v1, so a date column on the axis fails
     // closed rather than silently computing a whole-context window per row.
-    if let Expression::DatesInPeriod {
-        expr: inner,
-        intervals,
-        ..
-    } = expr
-    {
+    if let Expression::DatesInPeriod { intervals, .. } = expr {
         let function = "DATESINPERIOD";
         if *intervals >= 0 {
             return Err(time_intelligence_error(
@@ -547,7 +542,6 @@ pub fn time_intelligence_route(
                 ),
             ));
         }
-        validate_filter_context_inner(function, false, inner)?;
         let (date_table, date_key_column) = require_date_key(function, model)?;
         return Ok(Some(TimeIntelligenceRoute::FilterContext(
             FilterContextPlan {
@@ -559,22 +553,49 @@ pub fn time_intelligence_route(
         )));
     }
 
-    let (inner, function, _granularity, is_shift) = match expr {
+    // CLOSINGBALANCE / OPENINGBALANCE: a semi-additive balance pinned to a single
+    // boundary date of the current context. Filter-context only — a date on the
+    // axis fails closed (the per-row balance is the AXIS LAST/FIRST primitive,
+    // deferred). OPENINGBALANCE needs the min context date (the first day).
+    if let Expression::SemiAdditiveBalance { opening, .. } = expr {
+        let function = if *opening {
+            "OPENINGBALANCE"
+        } else {
+            "CLOSINGBALANCE"
+        };
+        let axis = resolve_date_axis(function, model, group_by)?;
+        if !axis.present.is_empty() {
+            return Err(time_intelligence_error(
+                function,
+                format!(
+                    "{function} (a single-boundary balance) is not supported with a date column \
+                     on the query axis ({}); remove the date column from group_by to evaluate it \
+                     from the current context",
+                    format_group_by(group_by)
+                ),
+            ));
+        }
+        let (date_table, date_key_column) = require_date_key(function, model)?;
+        return Ok(Some(TimeIntelligenceRoute::FilterContext(
+            FilterContextPlan {
+                function: function.to_string(),
+                date_table,
+                date_key_column,
+                needs_min_context_date: *opening,
+            },
+        )));
+    }
+
+    let (function, _granularity, is_shift) = match expr {
         Expression::ToDate {
-            expr: inner,
+            expr: _,
             granularity,
-        } => (
-            inner.as_ref(),
-            to_date_name(*granularity),
-            *granularity,
-            false,
-        ),
+        } => (to_date_name(*granularity), *granularity, false),
         Expression::PeriodShift {
-            expr: inner,
+            expr: _,
             offset,
             granularity,
         } => (
-            inner.as_ref(),
             period_shift_name(*offset, *granularity),
             *granularity,
             true,
@@ -593,9 +614,14 @@ pub fn time_intelligence_route(
         return Ok(Some(TimeIntelligenceRoute::Axis));
     }
 
-    // Filter-context path: validate the inner aggregate (same restriction as
-    // v1 — the per-period values must compose) and the date-key column.
-    validate_filter_context_inner(function, is_shift, inner)?;
+    // Filter-context path: resolve the date-key column. Unlike the AXIS
+    // (positional running-window) path, there is NO compose-ability restriction
+    // on the inner aggregate here: both ToDate and PeriodShift lower to a single
+    // evaluation of the inner measure over a date *range*
+    // (`Keep(Clear(inner), [DateKey in range])`), so any range-computable
+    // aggregate is exact — including AVERAGE / DISTINCTCOUNT / MEDIAN, which the
+    // axis path must still reject because they cannot be accumulated from
+    // per-period values.
     let (date_table, date_key_column) = require_date_key(function, model)?;
 
     // A filter-context shift (PRIORYEAR/PRIORPERIOD/DATEADD/PARALLELPERIOD) moves
@@ -614,23 +640,6 @@ pub fn time_intelligence_route(
             needs_min_context_date: is_shift,
         },
     )))
-}
-
-/// Validate the inner aggregate for the filter-context path.
-///
-/// `ToDate` composes a date *range* sum/min/max, so the same compose-ability
-/// restriction as the v1 running path applies. `PeriodShift` re-evaluates the
-/// whole measure over a shifted range, so any inner expression is fine.
-fn validate_filter_context_inner(
-    function: &str,
-    is_shift: bool,
-    inner: &Expression,
-) -> EngineResult<()> {
-    if is_shift {
-        return Ok(());
-    }
-    // Reuse the v1 compose-ability gate (SUM/COUNT/COUNTROWS/MIN/MAX).
-    running_window_function(function, inner).map(|_| ())
 }
 
 /// Resolve the date table's `DateRole::DateKey` column, requiring it to be a
@@ -732,7 +741,6 @@ pub fn lower_time_intelligence_filtered(
     } = expr
     {
         let function = "DATESINPERIOD";
-        validate_filter_context_inner(function, false, inner)?;
         let (date_table, date_key_column) = require_date_key(function, model)?;
         let as_of = date32_to_naive(as_of_days).ok_or_else(|| {
             time_intelligence_error(
@@ -761,6 +769,45 @@ pub fn lower_time_intelligence_filtered(
             &date_key_column,
             start,
             as_of,
+            description,
+        );
+    }
+
+    // CLOSINGBALANCE / OPENINGBALANCE: pin the inner measure to a single boundary
+    // day of the context — the LAST day (closing) or the FIRST day (opening) — by
+    // installing a single-day `DateKey = boundary` filter (a [boundary, boundary]
+    // range). The boundary day is supplied by the host's MIN/MAX probe of the
+    // context: `as_of_days` is the last day; `min_context_days` is the first.
+    if let Expression::SemiAdditiveBalance {
+        expr: inner,
+        opening,
+    } = expr
+    {
+        let function = if *opening {
+            "OPENINGBALANCE"
+        } else {
+            "CLOSINGBALANCE"
+        };
+        let (date_table, date_key_column) = require_date_key(function, model)?;
+        let boundary_days = if *opening { min_context_days } else { as_of_days };
+        let boundary = date32_to_naive(boundary_days).ok_or_else(|| {
+            time_intelligence_error(
+                function,
+                format!("the date probe returned an out-of-range value ({boundary_days} days)"),
+            )
+        })?;
+        let description = format!(
+            "{function} (filter context) at the {} date {boundary} on \
+             {date_table}.{date_key_column}",
+            if *opening { "first" } else { "last" }
+        );
+        return build_filtered_range_keep(
+            inner,
+            model,
+            &date_table,
+            &date_key_column,
+            boundary,
+            boundary,
             description,
         );
     }
@@ -795,9 +842,9 @@ pub fn lower_time_intelligence_filtered(
         }
     };
 
-    // Re-validate (the host computed the dates, but lowering is the single
-    // authority on what it will emit) and resolve the date-key column.
-    validate_filter_context_inner(function, is_shift, inner)?;
+    // Resolve the date-key column. No compose-ability restriction on the inner
+    // aggregate here: the filter-context lowering evaluates it once over a date
+    // range (see `time_intelligence_route`).
     let (date_table, date_key_column) = require_date_key(function, model)?;
 
     let as_of = date32_to_naive(as_of_days).ok_or_else(|| {
@@ -1461,7 +1508,10 @@ mod tests {
     }
 
     #[test]
-    fn route_filter_context_average_is_rejected() {
+    fn route_filter_context_average_is_accepted() {
+        // In FILTER-CONTEXT mode (no date on the axis), YTD lowers to a single
+        // range evaluation, so AVERAGE is exact and must route — unlike the AXIS
+        // path (see `ytd_average_is_rejected`), which still rejects it.
         let model = model();
         let ytd = expr::to_date(
             expr::agg(
@@ -1471,10 +1521,10 @@ mod tests {
             DateGranularity::Year,
         );
         let group_by = pairs(&[("fact_sales", "region")]);
-        let err = time_intelligence_route(&ytd, &model, &group_by).unwrap_err();
+        let route = time_intelligence_route(&ytd, &model, &group_by).unwrap();
         assert!(
-            err.to_string().contains("not supported in v1"),
-            "got: {err}"
+            matches!(route, Some(TimeIntelligenceRoute::FilterContext(_))),
+            "got: {route:?}"
         );
     }
 

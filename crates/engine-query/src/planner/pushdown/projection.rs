@@ -548,11 +548,7 @@ mod tests {
         let request = QueryRequest {
             measures: vec!["TotalAmount".into()],
             group_by: vec![ColumnRef::new("Products", "category")],
-            filters: vec![FilterCondition {
-                column: "id".into(),
-                operator: FilterOperator::Equal,
-                value: "42".into(),
-            }],
+            filters: vec![FilterCondition::new("id", FilterOperator::Equal, "42")],
             lookups: vec![],
             ..Default::default()
         };

@@ -141,11 +141,9 @@ fn build_fetches(filter_customers: bool) -> Vec<(String, FetchRequest)> {
         ..Default::default()
     };
     if filter_customers {
-        customers_request.filters.push(FilterCondition {
-            column: "region".to_string(),
-            operator: FilterOperator::Equal,
-            value: "EU".to_string(),
-        });
+        customers_request
+            .filters
+            .push(FilterCondition::new("region", FilterOperator::Equal, "EU"));
     }
     vec![
         (

@@ -107,7 +107,7 @@ use crate::model::table_variable::TableVariable;
 ///   [`ModelFormatTooNew`] gate refuses v8 files on a pre-v8 engine.
 ///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 8;
+pub const MODEL_FORMAT_VERSION: u32 = 9;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -226,6 +226,82 @@ impl DataModel {
             .iter()
             .find(|m| m.name() == name)
             .ok_or_else(|| EngineError::MeasureNotFound(name.to_string()))
+    }
+
+    /// Returns the names of the measures that **directly reference** `name`
+    /// (the reverse dependency edge), deduplicated and sorted.
+    ///
+    /// This is the "who depends on me?" query a host (Calcula Studio) needs for
+    /// safe-rename/refactor, impact analysis before deleting a measure, and the
+    /// lineage panel. It is the inverse of [`Measure::referenced_measures`]: `B`
+    /// is in `measure_dependents("A")` iff `A` is in
+    /// `model.measure("B").referenced_measures()`. Only **direct** dependents
+    /// are returned; walk transitively for the full impact set. An unknown
+    /// `name` simply yields an empty list (no measure references it).
+    ///
+    /// [`Measure::referenced_measures`]: crate::compute::measure::Measure::referenced_measures
+    pub fn measure_dependents(&self, name: &str) -> Vec<&str> {
+        let mut dependents: Vec<&str> = self
+            .measures
+            .iter()
+            .filter(|m| m.referenced_measures().contains(&name))
+            .map(|m| m.name())
+            .collect();
+        dependents.sort_unstable();
+        dependents.dedup();
+        dependents
+    }
+
+    /// Validate a **candidate** measure against this model without a full
+    /// rebuild — the primitive a designer (Calcula Studio) needs for editor-time
+    /// validation on every keystroke/save.
+    ///
+    /// Much cheaper than [`DataModelBuilder::build`]: it checks only the
+    /// candidate, not every existing measure, relationship, and table. The
+    /// candidate may be new or replace an existing measure of the same name (so
+    /// editing is supported). It catches:
+    ///
+    /// - **circular / unknown measure references** (`[OtherMeasure]`), including
+    ///   a self-reference and a reference that would close a cycle with existing
+    ///   measures ([`EngineError::InvalidData`] / [`EngineError::MeasureNotFound`]);
+    /// - **unknown qualified columns** (`Table[Column]`): the referenced table
+    ///   must exist and own the column ([`EngineError::ColumnNotFound`] /
+    ///   [`EngineError::TableNotFound`]).
+    ///
+    /// It does **not** check relationship reachability, bare (unqualified)
+    /// column references, or UDF registration (the engine facade's
+    /// `validate_measure_text` adds the UDF check, which needs the registered
+    /// set). `build` and query planning remain the full authority.
+    ///
+    /// [`DataModelBuilder::build`]: crate::model::DataModelBuilder::build
+    pub fn validate_candidate_measure(&self, candidate: &Measure) -> EngineResult<()> {
+        use crate::compute::expression::expand_measure_refs;
+
+        // A temporary view in which the candidate's name resolves to its (new)
+        // definition, so self/forward references and any newly-introduced cycle
+        // with existing measures are detected.
+        let mut temp = self.clone();
+        match temp
+            .measures
+            .iter_mut()
+            .find(|m| m.name() == candidate.name())
+        {
+            Some(slot) => *slot = candidate.clone(),
+            None => temp.measures.push(candidate.clone()),
+        }
+
+        // Measure references: cycle detection + unknown-target resolution.
+        expand_measure_refs(candidate.expression(), &temp)?;
+
+        // Qualified `Table[Column]` references must resolve. A qualifier that is
+        // not a model table is a VAR/QUERY/context binding name (validated
+        // elsewhere) and is skipped here.
+        for (table, column) in candidate.expression().qualified_column_references() {
+            if let Ok(t) = temp.table(table) {
+                t.column(column)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns all calculated columns in the model.
@@ -585,6 +661,73 @@ mod tests {
         assert_eq!(deserialized.relationships().len(), 1);
         assert_eq!(deserialized.table("Sales").unwrap().columns().len(), 4);
         assert!(deserialized.validate().is_ok());
+    }
+
+    #[test]
+    fn measure_dependents_returns_direct_reverse_edges() {
+        use crate::compute::expression::Expression;
+        use crate::compute::measure::{sum_measure, Measure};
+
+        // Revenue, Cost (base); Profit = [Revenue] - [Cost]; Margin = [Profit].
+        let profit = Measure::new(
+            "Profit",
+            Expression::MeasureRef("Revenue".into())
+                .subtract(Expression::MeasureRef("Cost".into())),
+        );
+        let margin = Measure::new("Margin", Expression::MeasureRef("Profit".into()));
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .add_measure(sum_measure("Cost", "Sales", "amount"))
+            .add_measure(profit)
+            .add_measure(margin)
+            .build()
+            .unwrap();
+
+        // Forward edge.
+        assert_eq!(
+            model.measure("Profit").unwrap().referenced_measures(),
+            vec!["Cost", "Revenue"]
+        );
+        // Reverse edges (direct dependents only).
+        assert_eq!(model.measure_dependents("Revenue"), vec!["Profit"]);
+        assert_eq!(model.measure_dependents("Cost"), vec!["Profit"]);
+        assert_eq!(model.measure_dependents("Profit"), vec!["Margin"]);
+        assert!(model.measure_dependents("Margin").is_empty());
+        assert!(model.measure_dependents("Nonexistent").is_empty());
+    }
+
+    #[test]
+    fn validate_candidate_measure_accepts_valid_and_rejects_bad() {
+        use crate::compute::expression::Expression;
+        use crate::compute::measure::{sum_measure, Measure};
+        use crate::compute::parser::parse_measure_expression;
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        // Valid: references an existing measure and a real qualified column.
+        let good = Measure::new("Double", parse_measure_expression("[Revenue] * 2").unwrap());
+        assert!(model.validate_candidate_measure(&good).is_ok());
+        let good2 = Measure::new("More", parse_measure_expression("SUM(Sales[amount])").unwrap());
+        assert!(model.validate_candidate_measure(&good2).is_ok());
+
+        // Unknown referenced measure.
+        let bad_ref = Measure::new("X", Expression::MeasureRef("Ghost".into()));
+        assert!(model.validate_candidate_measure(&bad_ref).is_err());
+
+        // Unknown qualified column on a real table.
+        let bad_col =
+            Measure::new("Y", parse_measure_expression("SUM(Sales[nope])").unwrap());
+        assert!(model.validate_candidate_measure(&bad_col).is_err());
+
+        // Self-reference closes a cycle.
+        let cyclic = Measure::new("Loop", Expression::MeasureRef("Loop".into()));
+        assert!(model.validate_candidate_measure(&cyclic).is_err());
     }
 
     #[test]

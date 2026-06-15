@@ -211,6 +211,12 @@ impl Expression {
                 intervals: *intervals,
                 granularity: *granularity,
             },
+            Expression::SemiAdditiveBalance { expr, opening } => {
+                Expression::SemiAdditiveBalance {
+                    expr: Box::new(expr.substitute_vars(env)),
+                    opening: *opening,
+                }
+            }
             // Context operations: recurse into inner expression.
             Expression::Keep {
                 expr,
@@ -528,6 +534,12 @@ impl Expression {
                 intervals: *intervals,
                 granularity: *granularity,
             },
+            Expression::SemiAdditiveBalance { expr, opening } => {
+                Expression::SemiAdditiveBalance {
+                    expr: Box::new(expr.substitute_selected_measure(replacement)),
+                    opening: *opening,
+                }
+            }
             Expression::Keep {
                 expr,
                 filters,
@@ -665,6 +677,7 @@ impl Expression {
                             | Expression::ToDate { .. }
                             | Expression::PeriodShift { .. }
                             | Expression::DatesInPeriod { .. }
+                            | Expression::SemiAdditiveBalance { .. }
                     ) {
                         continue;
                     }

@@ -190,11 +190,7 @@ async fn fetch_with_filter() {
             schema: Some("sales".into()),
             table: "salesorderheader".into(),
             columns: vec!["salesorderid".into(), "customerid".into()],
-            filters: vec![FilterCondition {
-                column: "customerid".into(),
-                operator: FilterOperator::Equal,
-                value: "29825".into(),
-            }],
+            filters: vec![FilterCondition::new("customerid", FilterOperator::Equal, "29825")],
             ..Default::default()
         })
         .await

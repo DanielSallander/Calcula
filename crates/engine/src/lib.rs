@@ -94,6 +94,10 @@ mod disk_cache_tests;
 #[cfg(test)]
 mod having_tests;
 #[cfg(test)]
+mod meta_tests;
+#[cfg(test)]
+mod rank_tests;
+#[cfg(test)]
 mod in_filter_tests;
 #[cfg(test)]
 mod security_tests;
@@ -172,12 +176,13 @@ pub use engine_connectors::{ConnectorError, ConnectorResult};
 // --- Re-exports from engine-query ---
 
 pub use engine_query::error::{QueryError, QueryResult};
+pub use engine_query::csv_connector::CsvConnector;
 pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
-    LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
-    GROUPING_ID_COLUMN,
+    LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy, ResultColumn,
+    ResultColumnKind, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
@@ -311,11 +316,7 @@ fn predicate_to_filter_condition(p: &FilterPredicate) -> FilterCondition {
         ComparisonOp::LessThan => FilterOperator::LessThan,
         ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
     };
-    FilterCondition {
-        column: p.column.clone(),
-        operator,
-        value: p.value.clone(),
-    }
+    FilterCondition::new(p.column.clone(), operator, p.value.clone())
 }
 
 /// Whether `lhs op rhs` holds for a measure-value filter.
@@ -380,6 +381,295 @@ fn apply_measure_value_filters(
         out.push(arrow::compute::filter_record_batch(batch, &mask)?);
     }
     Ok(out)
+}
+
+/// Append a measure-value ranking column (`RANKX`-style) to the result rows.
+///
+/// Ranks each row by its `rank.measure` value (descending by default), within
+/// the `rank.partition_by` groups, and appends an `Int64` `rank.output_column`.
+/// A `NULL` measure value sorts last (worst rank). Standard competition ranking
+/// (`1,1,3`) unless [`RankBy::dense`] (`1,1,2`). Implemented with Arrow only (no
+/// DataFusion in the facade): the rows are partitioned by a string key built
+/// from the partition columns, sorted within each partition by the measure, and
+/// ranks assigned back in original row order.
+#[allow(clippy::float_cmp)] // exact equality is the intended ranking tie test
+fn apply_ranking(batches: &[RecordBatch], rank: &RankBy) -> QueryResult<Vec<RecordBatch>> {
+    use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Work on a single concatenated batch so ranks span all rows.
+    let schema = batches[0].schema();
+    let batch = arrow::compute::concat_batches(&schema, batches)?;
+    let rows = batch.num_rows();
+
+    if schema.index_of(&rank.output_column).is_ok()
+        || schema
+            .fields()
+            .iter()
+            .any(|f| f.name().eq_ignore_ascii_case(&rank.output_column))
+    {
+        return Err(QueryError::InvalidQuery(format!(
+            "rank_by output column '{}' collides with an existing result column",
+            rank.output_column
+        )));
+    }
+
+    // Resolve a result column index by case-insensitive name.
+    let resolve = |name: &str, what: &str| -> QueryResult<usize> {
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|f| f.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                QueryError::InvalidQuery(format!(
+                    "rank_by {what} '{name}' is not a result column"
+                ))
+            })
+    };
+
+    // Measure values as f64 (NULL preserved).
+    let measure_idx = resolve(&rank.measure, "measure")?;
+    let measure_f64 = arrow::compute::cast(batch.column(measure_idx), &ArrowType::Float64)
+        .map_err(|e| {
+            QueryError::InvalidQuery(format!(
+                "rank_by measure '{}' must be numeric: {e}",
+                rank.measure
+            ))
+        })?;
+    let measure = measure_f64
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("cast to Float64 yields a Float64Array");
+
+    // Partition key per row: the partition columns cast to text and joined.
+    let partition_text: Vec<StringArray> = rank
+        .partition_by
+        .iter()
+        .map(|c| {
+            let idx = resolve(&c.column, "partition column")?;
+            let utf8 = arrow::compute::cast(batch.column(idx), &ArrowType::Utf8).map_err(|e| {
+                QueryError::InvalidQuery(format!(
+                    "rank_by partition column '{}' could not be keyed: {e}",
+                    c.column
+                ))
+            })?;
+            Ok(utf8
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("cast to Utf8 yields a StringArray")
+                .clone())
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+    // A partition key is the tuple of (nullable) string-cast partition values.
+    // Keying on the structured `Vec<Option<String>>` is collision-free for any
+    // value bytes — a flattened sentinel-joined string could merge two distinct
+    // partitions when a value itself contains the sentinel byte.
+    let key_of = |row: usize| -> Vec<Option<String>> {
+        partition_text
+            .iter()
+            .map(|a| {
+                if a.is_null(row) {
+                    None
+                } else {
+                    Some(a.value(row).to_string())
+                }
+            })
+            .collect()
+    };
+
+    // Group row indices by partition key.
+    let mut partitions: std::collections::HashMap<Vec<Option<String>>, Vec<usize>> =
+        std::collections::HashMap::new();
+    for row in 0..rows {
+        partitions.entry(key_of(row)).or_default().push(row);
+    }
+
+    let mut ranks = vec![0i64; rows];
+    for indices in partitions.values() {
+        // Sort the partition's rows by measure value; NULLs always last.
+        let mut sorted = indices.clone();
+        sorted.sort_by(|&a, &b| {
+            match (measure.is_null(a), measure.is_null(b)) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater, // NULL last
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => {
+                    let (va, vb) = (measure.value(a), measure.value(b));
+                    let ord = va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal);
+                    if rank.ascending {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
+                }
+            }
+        });
+        // Assign ranks with tie handling.
+        let mut current_rank = 0i64;
+        let mut prev: Option<(bool, f64)> = None; // (is_null, value)
+        for (pos, &row) in sorted.iter().enumerate() {
+            let cell = (measure.is_null(row), measure.value(row));
+            let is_tie = prev.is_some_and(|(pn, pv)| {
+                pn == cell.0 && (cell.0 || pv == cell.1)
+            });
+            if is_tie {
+                // Same rank as the previous row (dense and standard agree on ties).
+            } else if rank.dense {
+                current_rank += 1;
+            } else {
+                current_rank = pos as i64 + 1;
+            }
+            ranks[row] = current_rank;
+            prev = Some(cell);
+        }
+    }
+
+    // Append the rank column.
+    let mut columns: Vec<arrow::array::ArrayRef> = batch.columns().to_vec();
+    columns.push(std::sync::Arc::new(Int64Array::from(ranks)));
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| (**f).clone()).collect();
+    fields.push(Field::new(&rank.output_column, ArrowType::Int64, false));
+    let out = RecordBatch::try_new(std::sync::Arc::new(Schema::new(fields)), columns)?;
+    Ok(vec![out])
+}
+
+/// Map an Arrow result type back to the engine [`DataType`] best-effort,
+/// unwrapping dictionary encoding (grouped string dimensions arrive
+/// dictionary-encoded). Returns `None` for a type with no clean engine mapping.
+fn arrow_to_engine_type(arrow: &arrow::datatypes::DataType) -> Option<DataType> {
+    use arrow::datatypes::DataType as A;
+    match arrow {
+        A::Int32 => Some(DataType::Int32),
+        A::Int64 => Some(DataType::Int64),
+        A::Float64 | A::Float32 => Some(DataType::Float64),
+        A::Decimal128(p, s) => Some(DataType::Decimal(*p, *s)),
+        A::Utf8 | A::LargeUtf8 => Some(DataType::String),
+        A::Boolean => Some(DataType::Boolean),
+        A::Date32 | A::Date64 => Some(DataType::Date),
+        A::Timestamp(_, _) => Some(DataType::Timestamp),
+        // Grouped low-cardinality strings are dictionary-encoded — report the
+        // underlying value type so the host need not inspect the encoding.
+        A::Dictionary(_, value) => arrow_to_engine_type(value),
+        _ => None,
+    }
+}
+
+/// Build the per-column metadata describing a query result (see
+/// [`ResultColumn`]). Classifies each result column by name against the request
+/// and model: the `__grouping_id` bitmask, the rank column, measures (including
+/// `"M [I]"` calculation-group columns), and group-by dimensions — attaching the
+/// model's format string / display name / description for each.
+fn build_result_metadata(
+    model: &DataModel,
+    request: &QueryRequest,
+    schema: &arrow::datatypes::Schema,
+) -> Vec<ResultColumn> {
+    use engine_core::model::calculation_group::synthetic_measure_name;
+
+    // Pre-compute the calculation-group synthetic name → (base measure, item)
+    // mapping when a group is applied, so those value columns attribute back.
+    let mut calc_map: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    if let Some(app) = &request.calculation_group {
+        if let Ok(group) = model.calculation_group(&app.group) {
+            for measure in &request.measures {
+                for item in group.items() {
+                    if app.items.is_empty()
+                        || app.items.iter().any(|i| i.eq_ignore_ascii_case(item.name()))
+                    {
+                        calc_map.insert(
+                            synthetic_measure_name(measure, item.name()),
+                            (measure.clone(), item.name().to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let rank_output = request.rank_by.as_ref().map(|r| r.output_column.as_str());
+
+    schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field.name();
+            let data_type = arrow_to_engine_type(field.data_type());
+
+            // Grouping-id bitmask.
+            if name == GROUPING_ID_COLUMN {
+                let mut c = ResultColumn::bare(name, ResultColumnKind::GroupingId);
+                c.data_type = data_type;
+                return c;
+            }
+            // Rank column.
+            if rank_output.is_some_and(|r| r.eq_ignore_ascii_case(name)) {
+                let mut c = ResultColumn::bare(name, ResultColumnKind::Rank);
+                c.data_type = data_type;
+                return c;
+            }
+            // Calculation-group synthetic measure column.
+            if let Some((base, item)) = calc_map
+                .iter()
+                .find(|(syn, _)| syn.as_str() == name)
+                .map(|(_, v)| v.clone())
+            {
+                let mut c = ResultColumn::bare(name, ResultColumnKind::Measure);
+                c.data_type = data_type;
+                c.measure = Some(base.clone());
+                c.calculation_item = Some(item);
+                if let Ok(m) = model.measure(&base) {
+                    c.format_string = m.format_string().map(str::to_string);
+                    c.description = m.description().map(str::to_string);
+                    c.is_hidden = m.is_hidden();
+                }
+                return c;
+            }
+            // A plain measure column. Match the measure name **exactly**:
+            // measures are aliased with their exact name, so an exact match
+            // identifies the real measure column, while a dimension column whose
+            // name only *case-insensitively* coincides with a measure name (e.g.
+            // dim `Tier` vs measure `TIER`) is correctly left to the dimension
+            // branch below. (An exact name collision can't reach here — it fails
+            // earlier at DataFusion as an ambiguous reference.)
+            if let Some(measure_name) = request.measures.iter().find(|m| m.as_str() == name) {
+                let mut c = ResultColumn::bare(name, ResultColumnKind::Measure);
+                c.data_type = data_type;
+                c.measure = Some(measure_name.clone());
+                if let Ok(m) = model.measure(measure_name) {
+                    c.format_string = m.format_string().map(str::to_string);
+                    c.description = m.description().map(str::to_string);
+                    c.is_hidden = m.is_hidden();
+                }
+                return c;
+            }
+            // Otherwise a dimension: attribute it to a group-by column (the
+            // result lowercases dimension names, so match case-insensitively).
+            let mut c = ResultColumn::bare(name, ResultColumnKind::Dimension);
+            c.data_type = data_type;
+            if let Some(col_ref) = request
+                .group_by
+                .iter()
+                .find(|g| g.column.eq_ignore_ascii_case(name))
+            {
+                c.source_table = Some(col_ref.table.clone());
+                c.source_column = Some(col_ref.column.clone());
+                if let Ok(column) = model
+                    .table(&col_ref.table)
+                    .and_then(|t| t.column(&col_ref.column))
+                {
+                    c.display_name = column.display_name().map(str::to_string);
+                    c.description = column.description().map(str::to_string);
+                    c.is_hidden = column.is_hidden();
+                }
+            }
+            c
+        })
+        .collect()
 }
 
 /// Take at most `limit` rows total across `batches`, preserving order. `None`
@@ -623,6 +913,25 @@ impl Engine {
     pub fn add_in_memory_source(&mut self, connector: InMemoryConnector) -> usize {
         self.registry
             .add_connector(AnyConnector::InMemory(connector))
+    }
+
+    /// Register a CSV file source (a directory of `<table>.csv` files) and
+    /// return its connector index.
+    ///
+    /// The `target.database` field is the **directory** holding the CSV files;
+    /// `target.default_schema` (default `"public"`) is the cosmetic source
+    /// schema. CSV is local, so the only applicable [`AuthMethod`] is
+    /// [`AuthMethod::Integrated`] (the process's own file-system access);
+    /// credential methods are rejected. Synchronous (the directory is validated;
+    /// files are read lazily per query). See [`CsvConnector`].
+    pub fn add_csv_source(
+        &mut self,
+        target: ConnectionTarget,
+        auth: AuthMethod,
+    ) -> ConnectorResult<usize> {
+        let connector = CsvConnector::from_target(target, auth)?;
+        let idx = self.registry.add_connector(AnyConnector::Csv(connector));
+        Ok(idx)
     }
 
     /// Register a host-provided scalar UDF, replacing any UDF with the same
@@ -1183,6 +1492,47 @@ impl Engine {
         Ok(())
     }
 
+    /// Validate a candidate measure definition (source text) against the live
+    /// model **without rebuilding it** — editor-time feedback for measure
+    /// authoring (Calcula Studio).
+    ///
+    /// Parses `text` (a [`ParseError`](EngineError) carrying the source position
+    /// on a syntax error), then validates the parsed measure against the model:
+    /// circular / unknown measure references, unknown qualified columns
+    /// (`Table[Column]`), and unregistered UDF calls. Much cheaper than
+    /// reconstructing the whole model on every keystroke (it checks only the
+    /// candidate). Returns `Ok(())` if the measure would be accepted on those
+    /// axes.
+    ///
+    /// This is a fast pre-check, not a full guarantee: relationship reachability
+    /// and bare (unqualified) column references are not validated here —
+    /// [`add_measure`](Self::add_measure) / query planning remain the final
+    /// authority. `name` may match an existing measure (validating an edit) or
+    /// be new.
+    pub fn validate_measure_text(&self, name: &str, text: &str) -> QueryResult<()> {
+        let expr = parse_measure_expression(text).map_err(QueryError::Engine)?;
+        let candidate = Measure::new(name, expr);
+
+        // Structural checks against the model (measure refs + qualified columns).
+        self.model
+            .validate_candidate_measure(&candidate)
+            .map_err(QueryError::Engine)?;
+
+        // UDF calls must be registered (needs the engine's effective UDF set).
+        if let Some(e) = &self.script_build_error {
+            return Err(QueryError::Engine(clone_script_error(e)));
+        }
+        for call in candidate.expression().call_names() {
+            if self.effective_udfs.get(call).is_none() {
+                return Err(QueryError::Engine(EngineError::UnknownFunction {
+                    name: call.to_string(),
+                    referenced_by: format!("measure '{name}'"),
+                }));
+            }
+        }
+        Ok(())
+    }
+
     /// Bind a model table name to a registered connector and source location.
     pub fn bind_table(
         &mut self,
@@ -1272,6 +1622,33 @@ impl Engine {
             .await
     }
 
+    /// Execute a query and return the results **with per-column metadata**.
+    ///
+    /// Identical execution to [`query`](Self::query), plus a [`ResultColumn`]
+    /// for each result column describing what it is — dimension vs. measure vs.
+    /// `__grouping_id` vs. rank — and attaching the model facts a host would
+    /// otherwise re-derive by string-matching column names: the measure's
+    /// `format_string` / `display_name` / `description`, the dimension's source
+    /// `Table[Column]` and `display_name`, and (for a calculation group) which
+    /// base measure and item produced each `"M [I]"` column. Centralizing this
+    /// keeps Calcula and Calcula Studio from drifting on the mapping.
+    ///
+    /// The metadata is derived from the executed request and the result schema,
+    /// so it reflects calculation-group expansion and the appended rank column.
+    /// An empty result still yields metadata (from the result schema).
+    pub async fn query_with_meta(
+        &self,
+        request: QueryRequest,
+    ) -> QueryResult<(Vec<RecordBatch>, Vec<ResultColumn>)> {
+        let batches = self.query(request.clone()).await?;
+        let meta = match batches.first() {
+            Some(batch) => build_result_metadata(&self.model, &request, batch.schema().as_ref()),
+            // No batch at all (not even an empty one) → no schema to describe.
+            None => Vec::new(),
+        };
+        Ok((batches, meta))
+    }
+
     /// Execute a query that can be cancelled from another task.
     ///
     /// Like [`query`](Self::query), but stops with [`QueryError::Cancelled`]
@@ -1321,6 +1698,14 @@ impl Engine {
         // unknown active role.
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
+
+        // Measure-value ranking (RANKX) is the OUTERMOST post-aggregation step:
+        // run the underlying query (which may itself apply a HAVING filter),
+        // append the rank column, then apply the row limit. Handled before
+        // caching/planning so it composes with every execution path.
+        if request.rank_by.is_some() {
+            return self.query_with_ranking(request, token).await;
+        }
 
         // Measure-value filters (HAVING) are handled here — before caching and
         // planning — so they compose uniformly with every execution path. Run
@@ -1402,6 +1787,73 @@ impl Engine {
             }
         }
         Ok(batches)
+    }
+
+    /// Evaluate a query carrying a measure-value ranking (`RANKX`-style).
+    ///
+    /// Runs the underlying query with the ranking removed and **no** row limit
+    /// (so every group is ranked), appends the rank column, then applies the
+    /// limit — composing `order_by` + `limit` + rank into "top N by measure".
+    /// The inner query (including any HAVING measure filter) is evaluated by
+    /// [`query_with_cancellation`](Self::query_with_cancellation); only the rank
+    /// append + limit are added here. Unsupported combinations (ROLLUP totals,
+    /// calculation groups) fail closed rather than mislead.
+    async fn query_with_ranking(
+        &self,
+        request: QueryRequest,
+        token: CancellationToken,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        // Safe: the caller (`query_with_cancellation`) only routes here when set.
+        let rank = request
+            .rank_by
+            .clone()
+            .expect("query_with_ranking is only called when rank_by is set");
+
+        if request.totals == TotalsMode::Rollup {
+            return Err(QueryError::InvalidQuery(
+                "rank_by is not supported with ROLLUP totals (ranking would order subtotal and \
+                 grand-total rows among the details); request the ranked detail and the totals \
+                 separately"
+                    .into(),
+            ));
+        }
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "rank_by is not supported together with a calculation group; apply the ranking in \
+                 a separate request"
+                    .into(),
+            ));
+        }
+        if !request
+            .measures
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&rank.measure))
+        {
+            return Err(QueryError::InvalidQuery(format!(
+                "rank_by references measure '{}', which is not in the request's measures",
+                rank.measure
+            )));
+        }
+        for pc in &rank.partition_by {
+            if !request
+                .group_by
+                .iter()
+                .any(|g| g.column.eq_ignore_ascii_case(&pc.column))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "rank_by partition column '{}' must be one of the request's group_by columns",
+                    pc.column
+                )));
+            }
+        }
+
+        let mut inner = request.clone();
+        inner.rank_by = None;
+        let limit = inner.limit.take();
+        let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
+
+        let ranked = apply_ranking(&batches, &rank)?;
+        Ok(truncate_batches_to_limit(ranked, limit))
     }
 
     /// Evaluate a query carrying measure-value filters (a `HAVING` clause).

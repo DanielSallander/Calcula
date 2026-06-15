@@ -623,11 +623,11 @@ mod tests {
     fn filters_affect_hash() {
         let mut r1 = make_request(&["Revenue"]);
         let r2 = make_request(&["Revenue"]);
-        r1.filters.push(FilterCondition {
-            column: "region".to_string(),
-            operator: engine_connectors::traits::FilterOperator::Equal,
-            value: "US".to_string(),
-        });
+        r1.filters.push(FilterCondition::new(
+            "region",
+            engine_connectors::traits::FilterOperator::Equal,
+            "US",
+        ));
         assert_ne!(
             query_cache_key(&r1, 0, 0, None),
             query_cache_key(&r2, 0, 0, None)

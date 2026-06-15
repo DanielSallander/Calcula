@@ -833,11 +833,7 @@ mod tests {
                 function: AggregateFunction::Count,
                 alias: Some("cnt".into()),
             }],
-            filters: vec![FilterCondition {
-                column: "status".into(),
-                operator: FilterOperator::Equal,
-                value: "active".into(),
-            }],
+            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
             ..Default::default()
         };
         let (sql, params) = SqlServerConnector::build_aggregate_sql(&request);

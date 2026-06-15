@@ -47,11 +47,11 @@ pub(super) fn comparison_to_filter_operator(op: ComparisonOp) -> FilterOperator 
 /// The [`FilterCondition`] is table-agnostic (column / op / value); callers
 /// place it on the fetch of the predicate's own [`FilterPredicate::table`].
 pub(super) fn predicate_to_condition(predicate: &FilterPredicate) -> FilterCondition {
-    FilterCondition {
-        column: predicate.column.clone(),
-        operator: comparison_to_filter_operator(predicate.operator),
-        value: predicate.value.clone(),
-    }
+    FilterCondition::new(
+        predicate.column.clone(),
+        comparison_to_filter_operator(predicate.operator),
+        predicate.value.clone(),
+    )
 }
 
 /// Collect the role's [`FilterCondition`]s that target a specific table.

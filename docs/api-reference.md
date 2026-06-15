@@ -65,10 +65,33 @@ engine.bind_table("Products", ss_idx, SourceBinding::new("dbo", "product"));
 let results = engine.query(QueryRequest {
     measures: vec!["Revenue".into()],
     group_by: vec![ColumnRef::new("Sales", "region")],
-    filters: vec![],
-    lookups: vec![],
+    filters: vec![FilterCondition::new("year", FilterOperator::Equal, "2024")],
+    ..Default::default()
 }).await?;
 ```
+
+`QueryRequest` implements `Default`, so set only the fields you need and spread
+`..Default::default()` for the rest. The full field set:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `measures` | `Vec<String>` | Measure names to compute (required). |
+| `group_by` | `Vec<ColumnRef>` | Dimension columns to group by. |
+| `filters` | `Vec<FilterCondition>` | Scalar slicers, ANDed and pushed to the source. |
+| `in_filters` | `Vec<InFilter>` | Multi-select (`IN`-list) slicers. |
+| `or_filters` | `Vec<FilterCondition>` | Cross-column `OR` slicer (single table). |
+| `measure_filters` | `Vec<MeasureFilter>` | `HAVING` — keep rows by computed measure value. |
+| `rank_by` | `Option<RankBy>` | Append a `RANKX`-style ranking column. |
+| `order_by` | `Vec<OrderByClause>` | Result ordering (by group-by column or measure). |
+| `limit` | `Option<usize>` | Max result rows (after ordering / ranking). |
+| `totals` | `TotalsMode` | `Rollup` adds subtotals + a `__grouping_id` column. |
+| `hierarchy_group_by` | `Option<HierarchyGroupBy>` | Group by a model hierarchy's levels. |
+| `calculation_group` | `Option<CalculationGroupApplication>` | Cross-apply calculation items. |
+| `lookups` | `Vec<LookupColumn>` | Resolve dimension attributes post-aggregation. |
+
+For results **with per-column metadata** (dimension vs. measure, format string,
+display name, calculation-item attribution), use `engine.query_with_meta(req)`,
+which returns `(Vec<RecordBatch>, Vec<ResultColumn>)`.
 
 ### Query with Execution Plan
 
@@ -78,8 +101,7 @@ Returns results alongside a structured execution plan describing each phase:
 let (results, plan) = engine.query_explained(QueryRequest {
     measures: vec!["Revenue".into()],
     group_by: vec![ColumnRef::new("Products", "category")],
-    filters: vec![],
-    lookups: vec![],
+    ..Default::default()
 }).await?;
 
 // plan.summary → "Query: [Revenue] grouped by [Products.category]"

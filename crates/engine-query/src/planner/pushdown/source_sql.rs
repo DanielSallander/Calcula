@@ -44,7 +44,9 @@ pub(super) fn aggregate_op_to_function(
 }
 
 /// Check if an expression contains RESET, UseRelationship, or other context ops
-/// that cannot be pushed to a source. KEEP and CLEAR are pushable.
+/// that cannot be pushed to a source. KEEP is pushable (rendered as conditional
+/// aggregation); a CLEAR over a fact-internal measure is also treated as
+/// pushable here (it widens the aggregation grain, which the connector renders).
 pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
     match expr {
         Expression::ClearInner { .. }
@@ -212,6 +214,13 @@ impl ColumnQualifier for RegistryQualifier<'_> {
 /// Uses source bindings to translate model column refs into `"source_table"."column"`.
 /// Delegates to the unified [`SqlRenderer`] (Postgres dialect, registry
 /// qualifier, KEEP rendered as conditional aggregation).
+///
+/// **Status:** a tested **reference** renderer, retained for the planned
+/// CLEAR-pushdown path but **not currently on a live path** — the structured
+/// join-aggregation request (`build_join_aggregation_request`) passes the raw
+/// `Expression` to the connector, which renders it with its own dialect. Kept
+/// (with `#[allow(dead_code)]`) rather than deleted because it is the worked
+/// implementation the pushdown wiring will use; its tests pin the rendering.
 #[allow(dead_code)]
 fn expression_to_source_sql(expr: &Expression, registry: &SourceRegistry) -> QueryResult<String> {
     let qualifier = RegistryQualifier { registry };

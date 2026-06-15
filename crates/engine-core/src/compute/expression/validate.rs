@@ -390,7 +390,10 @@ impl Expression {
             // the inner expression carries renderable content.
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
-            | Expression::DatesInPeriod { expr, .. } => expr.validate_inner(allow_selected_measure),
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => {
+                expr.validate_inner(allow_selected_measure)
+            }
             Expression::InList { expr, values } => {
                 expr.validate_inner(allow_selected_measure)?;
                 for v in values {

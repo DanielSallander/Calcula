@@ -186,7 +186,8 @@ impl Expression {
             }
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
-            | Expression::DatesInPeriod { expr, .. } => {
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => {
                 // The date axis comes from the query's group_by at lowering
                 // time, not from the expression — only the inner measure
                 // contributes column refs.
@@ -423,7 +424,8 @@ impl Expression {
             }
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
-            | Expression::DatesInPeriod { expr, .. } => {
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => {
                 // The date-table axis is supplied by the query's group_by at
                 // lowering time; no structural table references live here.
                 expr.collect_context_filter_tables(tables);
@@ -470,6 +472,369 @@ impl Expression {
                 for arg in args {
                     arg.collect_context_filter_tables(tables);
                 }
+            }
+        }
+    }
+
+    /// Returns the names of all measures referenced (via `[Measure]` /
+    /// [`Expression::MeasureRef`]) anywhere in this expression tree
+    /// (deduplicated, sorted).
+    ///
+    /// This is the **direct** dependency set of a measure — the measures it
+    /// names, not their transitive closure. Hosts (notably Calcula Studio) use
+    /// it for the measure-dependency view, safe-rename/refactor ("who
+    /// references X before I rename it?"), impact analysis on delete, and
+    /// lineage ordering. Pair with [`DataModel::measure_dependents`] for the
+    /// reverse edge.
+    ///
+    /// [`DataModel::measure_dependents`]: crate::model::DataModel::measure_dependents
+    pub fn measure_references(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        self.collect_measure_refs(&mut names);
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    fn collect_measure_refs<'a>(&'a self, names: &mut Vec<&'a str>) {
+        match self {
+            Expression::MeasureRef(name) => names.push(name),
+            Expression::ColumnRef(_)
+            | Expression::QualifiedColumnRef { .. }
+            | Expression::TableRef(_)
+            | Expression::SelectedMeasure
+            | Expression::LiteralFloat(_)
+            | Expression::LiteralInt(_)
+            | Expression::LiteralString(_)
+            | Expression::LiteralBool(_)
+            | Expression::Blank
+            | Expression::IsInScope { .. }
+            | Expression::RankWindow { .. } => {}
+            Expression::BinaryOp { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::And(left, right)
+            | Expression::Or(left, right)
+            | Expression::Xor(left, right) => {
+                left.collect_measure_refs(names);
+                right.collect_measure_refs(names);
+            }
+            Expression::Not(inner) | Expression::IsBlank(inner) => {
+                inner.collect_measure_refs(names);
+            }
+            Expression::Aggregate { operand, .. } => operand.collect_measure_refs(names),
+            Expression::Keep {
+                expr, conditions, ..
+            } => {
+                expr.collect_measure_refs(names);
+                for c in conditions {
+                    c.collect_measure_refs(names);
+                }
+            }
+            Expression::Clear { expr, .. }
+            | Expression::Reset { expr }
+            | Expression::ClearInner { expr, .. }
+            | Expression::ClearOuter { expr, .. }
+            | Expression::ResetInner { expr }
+            | Expression::ResetOuter { expr }
+            | Expression::Traverse { expr, .. }
+            | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
+            | Expression::KeepIn { expr, .. }
+            | Expression::ClearExcept { expr, .. }
+            | Expression::Iterate {
+                expression: expr, ..
+            } => expr.collect_measure_refs(names),
+            Expression::Block { bindings, result } => {
+                for (_, binding_expr) in bindings {
+                    binding_expr.collect_measure_refs(names);
+                }
+                result.collect_measure_refs(names);
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.collect_measure_refs(names);
+                then_expr.collect_measure_refs(names);
+                else_expr.collect_measure_refs(names);
+            }
+            Expression::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                expr.collect_measure_refs(names);
+                for (v, r) in cases {
+                    v.collect_measure_refs(names);
+                    r.collect_measure_refs(names);
+                }
+                if let Some(d) = default {
+                    d.collect_measure_refs(names);
+                }
+            }
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
+                numerator.collect_measure_refs(names);
+                denominator.collect_measure_refs(names);
+                if let Some(alt) = alternate {
+                    alt.collect_measure_refs(names);
+                }
+            }
+            Expression::Coalesce(exprs)
+            | Expression::Greatest(exprs)
+            | Expression::Least(exprs) => {
+                for e in exprs {
+                    e.collect_measure_refs(names);
+                }
+            }
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. }
+            | Expression::Call { args, .. } => {
+                for arg in args {
+                    arg.collect_measure_refs(names);
+                }
+            }
+            Expression::IfError { expr, alternate } => {
+                expr.collect_measure_refs(names);
+                alternate.collect_measure_refs(names);
+            }
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                operand.collect_measure_refs(names);
+                percentile.collect_measure_refs(names);
+            }
+            Expression::Query { aggregates, .. } => {
+                for (e, _) in aggregates {
+                    e.collect_measure_refs(names);
+                }
+            }
+            Expression::HasOneValue { column } => column.collect_measure_refs(names),
+            Expression::SelectedValue { column, alternate } => {
+                column.collect_measure_refs(names);
+                if let Some(alt) = alternate {
+                    alt.collect_measure_refs(names);
+                }
+            }
+            Expression::FirstValue { column, order_by } => {
+                column.collect_measure_refs(names);
+                order_by.collect_measure_refs(names);
+            }
+            Expression::Window { inner, .. }
+            | Expression::Offset { inner, .. }
+            | Expression::Index { inner, .. } => inner.collect_measure_refs(names),
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_measure_refs(names),
+            Expression::InList { expr, values } => {
+                expr.collect_measure_refs(names);
+                for v in values {
+                    v.collect_measure_refs(names);
+                }
+            }
+            Expression::NullIf { expr, value } => {
+                expr.collect_measure_refs(names);
+                value.collect_measure_refs(names);
+            }
+            Expression::CountIf { condition } => condition.collect_measure_refs(names),
+            Expression::ListAgg { column, delimiter } => {
+                column.collect_measure_refs(names);
+                delimiter.collect_measure_refs(names);
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                value.collect_measure_refs(names);
+                sort_by.collect_measure_refs(names);
+            }
+        }
+    }
+
+    /// Returns all **qualified** `Table[Column]` references in this expression
+    /// tree as `(table_or_var, column)` pairs (deduplicated, sorted).
+    ///
+    /// Unlike [`column_references`](Self::column_references), which returns bare
+    /// column names a host cannot attribute to a table, this preserves the
+    /// qualifier so a host can resolve each reference against the data model
+    /// (lineage, reachability checks, impact analysis). The first element is
+    /// the qualifier as written: usually a model table name, but it may be a
+    /// `VAR`/`QUERY` binding name in a table-variable expression — resolve it
+    /// against the model's tables to keep only physical columns.
+    pub fn qualified_column_references(&self) -> Vec<(&str, &str)> {
+        let mut refs = Vec::new();
+        self.collect_qualified_column_refs(&mut refs);
+        refs.sort_unstable();
+        refs.dedup();
+        refs
+    }
+
+    fn collect_qualified_column_refs<'a>(&'a self, refs: &mut Vec<(&'a str, &'a str)>) {
+        // Reuse the same traversal shape as `measure_references`: every node
+        // recurses into its sub-expressions; only the QualifiedColumnRef leaf
+        // contributes a pair. Bare ColumnRef has no attributable table and is
+        // intentionally ignored here (use `column_references` for those).
+        match self {
+            Expression::QualifiedColumnRef {
+                table_or_var,
+                column,
+            } => refs.push((table_or_var, column)),
+            Expression::ColumnRef(_)
+            | Expression::MeasureRef(_)
+            | Expression::TableRef(_)
+            | Expression::SelectedMeasure
+            | Expression::LiteralFloat(_)
+            | Expression::LiteralInt(_)
+            | Expression::LiteralString(_)
+            | Expression::LiteralBool(_)
+            | Expression::Blank
+            | Expression::IsInScope { .. }
+            | Expression::RankWindow { .. } => {}
+            Expression::BinaryOp { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::And(left, right)
+            | Expression::Or(left, right)
+            | Expression::Xor(left, right) => {
+                left.collect_qualified_column_refs(refs);
+                right.collect_qualified_column_refs(refs);
+            }
+            Expression::Not(inner) | Expression::IsBlank(inner) => {
+                inner.collect_qualified_column_refs(refs);
+            }
+            Expression::Aggregate { operand, .. } => operand.collect_qualified_column_refs(refs),
+            Expression::Keep {
+                expr, conditions, ..
+            } => {
+                expr.collect_qualified_column_refs(refs);
+                for c in conditions {
+                    c.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::Clear { expr, .. }
+            | Expression::Reset { expr }
+            | Expression::ClearInner { expr, .. }
+            | Expression::ClearOuter { expr, .. }
+            | Expression::ResetInner { expr }
+            | Expression::ResetOuter { expr }
+            | Expression::Traverse { expr, .. }
+            | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
+            | Expression::KeepIn { expr, .. }
+            | Expression::ClearExcept { expr, .. }
+            | Expression::Iterate {
+                expression: expr, ..
+            } => expr.collect_qualified_column_refs(refs),
+            Expression::Block { bindings, result } => {
+                for (_, binding_expr) in bindings {
+                    binding_expr.collect_qualified_column_refs(refs);
+                }
+                result.collect_qualified_column_refs(refs);
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.collect_qualified_column_refs(refs);
+                then_expr.collect_qualified_column_refs(refs);
+                else_expr.collect_qualified_column_refs(refs);
+            }
+            Expression::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                expr.collect_qualified_column_refs(refs);
+                for (v, r) in cases {
+                    v.collect_qualified_column_refs(refs);
+                    r.collect_qualified_column_refs(refs);
+                }
+                if let Some(d) = default {
+                    d.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
+                numerator.collect_qualified_column_refs(refs);
+                denominator.collect_qualified_column_refs(refs);
+                if let Some(alt) = alternate {
+                    alt.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::Coalesce(exprs)
+            | Expression::Greatest(exprs)
+            | Expression::Least(exprs) => {
+                for e in exprs {
+                    e.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. }
+            | Expression::Call { args, .. } => {
+                for arg in args {
+                    arg.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::IfError { expr, alternate } => {
+                expr.collect_qualified_column_refs(refs);
+                alternate.collect_qualified_column_refs(refs);
+            }
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                operand.collect_qualified_column_refs(refs);
+                percentile.collect_qualified_column_refs(refs);
+            }
+            Expression::Query { aggregates, .. } => {
+                for (e, _) in aggregates {
+                    e.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::HasOneValue { column } => column.collect_qualified_column_refs(refs),
+            Expression::SelectedValue { column, alternate } => {
+                column.collect_qualified_column_refs(refs);
+                if let Some(alt) = alternate {
+                    alt.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::FirstValue { column, order_by } => {
+                column.collect_qualified_column_refs(refs);
+                order_by.collect_qualified_column_refs(refs);
+            }
+            Expression::Window { inner, .. }
+            | Expression::Offset { inner, .. }
+            | Expression::Index { inner, .. } => inner.collect_qualified_column_refs(refs),
+            Expression::ToDate { expr, .. }
+            | Expression::PeriodShift { expr, .. }
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_qualified_column_refs(refs),
+            Expression::InList { expr, values } => {
+                expr.collect_qualified_column_refs(refs);
+                for v in values {
+                    v.collect_qualified_column_refs(refs);
+                }
+            }
+            Expression::NullIf { expr, value } => {
+                expr.collect_qualified_column_refs(refs);
+                value.collect_qualified_column_refs(refs);
+            }
+            Expression::CountIf { condition } => condition.collect_qualified_column_refs(refs),
+            Expression::ListAgg { column, delimiter } => {
+                column.collect_qualified_column_refs(refs);
+                delimiter.collect_qualified_column_refs(refs);
+            }
+            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+                value.collect_qualified_column_refs(refs);
+                sort_by.collect_qualified_column_refs(refs);
             }
         }
     }
@@ -628,7 +993,8 @@ impl Expression {
             | Expression::Index { inner, .. } => inner.collect_call_names(names),
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
-            | Expression::DatesInPeriod { expr, .. } => expr.collect_call_names(names),
+            | Expression::DatesInPeriod { expr, .. }
+            | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_call_names(names),
             Expression::InList { expr, values } => {
                 expr.collect_call_names(names);
                 for v in values {
@@ -793,6 +1159,50 @@ mod tests {
     fn call_names_empty_without_calls() {
         let expr = agg(AggregateOp::Sum, col("amount"));
         assert!(expr.call_names().is_empty());
+    }
+
+    #[test]
+    fn measure_references_collected_deduped_and_sorted() {
+        // ([Revenue] - [Cost]) / [Revenue] references Revenue twice + Cost.
+        let expr = Expression::MeasureRef("Revenue".into())
+            .subtract(Expression::MeasureRef("Cost".into()))
+            .divide(Expression::MeasureRef("Revenue".into()));
+        assert_eq!(expr.measure_references(), vec!["Cost", "Revenue"]);
+    }
+
+    #[test]
+    fn measure_references_found_inside_nested_variadic_nodes() {
+        // A MeasureRef buried in GREATEST(...) must still be found (a node the
+        // old `has_measure_ref` walker missed via its `_ => false` arm).
+        let expr = Expression::Greatest(vec![
+            col("x"),
+            Expression::MeasureRef("Buried".into()),
+        ]);
+        assert_eq!(expr.measure_references(), vec!["Buried"]);
+    }
+
+    #[test]
+    fn measure_references_empty_without_refs() {
+        let expr = agg(AggregateOp::Sum, qualified_col("Sales", "amount"));
+        assert!(expr.measure_references().is_empty());
+    }
+
+    #[test]
+    fn qualified_column_references_keep_table_qualifier() {
+        // SUM(Sales[amount]) / SUM(Sales[cost]) → two attributable pairs.
+        let expr = agg(AggregateOp::Sum, qualified_col("Sales", "amount"))
+            .divide(agg(AggregateOp::Sum, qualified_col("Sales", "cost")));
+        assert_eq!(
+            expr.qualified_column_references(),
+            vec![("Sales", "amount"), ("Sales", "cost")]
+        );
+    }
+
+    #[test]
+    fn qualified_column_references_ignore_bare_columns() {
+        // A bare (unqualified) column has no attributable table.
+        let expr = agg(AggregateOp::Sum, col("amount"));
+        assert!(expr.qualified_column_references().is_empty());
     }
 
     #[test]

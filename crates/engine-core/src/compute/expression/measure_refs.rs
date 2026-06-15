@@ -45,7 +45,8 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         | Expression::Index { inner, .. } => has_measure_ref(inner),
         Expression::ToDate { expr, .. }
         | Expression::PeriodShift { expr, .. }
-        | Expression::DatesInPeriod { expr, .. } => has_measure_ref(expr),
+        | Expression::DatesInPeriod { expr, .. }
+        | Expression::SemiAdditiveBalance { expr, .. } => has_measure_ref(expr),
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -97,6 +98,18 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
             has_measure_ref(column) || alternate.as_ref().is_some_and(|a| has_measure_ref(a))
         }
         Expression::Call { args, .. } => args.iter().any(has_measure_ref),
+        // Variadic / multi-arg aggregates that can carry a measure ref in any
+        // operand — omitting these let a cyclic/unknown ref buried inside
+        // `GREATEST([A], 0)` / `MAX_BY([X], k)` slip past the build-time gate.
+        Expression::Greatest(args) | Expression::Least(args) => args.iter().any(has_measure_ref),
+        Expression::NullIf { expr, value } => has_measure_ref(expr) || has_measure_ref(value),
+        Expression::CountIf { condition } => has_measure_ref(condition),
+        Expression::ListAgg { column, delimiter } => {
+            has_measure_ref(column) || has_measure_ref(delimiter)
+        }
+        Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
+            has_measure_ref(value) || has_measure_ref(sort_by)
+        }
         _ => false,
     }
 }
@@ -282,6 +295,12 @@ fn expand_measure_refs_inner(
             intervals: *intervals,
             granularity: *granularity,
         }),
+        Expression::SemiAdditiveBalance { expr, opening } => {
+            Ok(Expression::SemiAdditiveBalance {
+                expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+                opening: *opening,
+            })
+        }
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -419,6 +438,64 @@ fn expand_measure_refs_inner(
                 .map(|a| expand_measure_refs_inner(a, model, visited))
                 .collect::<crate::error::EngineResult<Vec<_>>>()?,
         }),
+        // Variadic / multi-arg nodes that can carry a MeasureRef — must recurse
+        // so a cyclic/unknown ref buried here is detected, not cloned verbatim.
+        Expression::Greatest(args) => Ok(Expression::Greatest(
+            args.iter()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+        )),
+        Expression::Least(args) => Ok(Expression::Least(
+            args.iter()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+        )),
+        Expression::NullIf { expr, value } => Ok(Expression::NullIf {
+            expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+            value: Box::new(expand_measure_refs_inner(value, model, visited)?),
+        }),
+        Expression::CountIf { condition } => Ok(Expression::CountIf {
+            condition: Box::new(expand_measure_refs_inner(condition, model, visited)?),
+        }),
+        Expression::ListAgg { column, delimiter } => Ok(Expression::ListAgg {
+            column: Box::new(expand_measure_refs_inner(column, model, visited)?),
+            delimiter: Box::new(expand_measure_refs_inner(delimiter, model, visited)?),
+        }),
+        Expression::MaxBy { value, sort_by } => Ok(Expression::MaxBy {
+            value: Box::new(expand_measure_refs_inner(value, model, visited)?),
+            sort_by: Box::new(expand_measure_refs_inner(sort_by, model, visited)?),
+        }),
+        Expression::MinBy { value, sort_by } => Ok(Expression::MinBy {
+            value: Box::new(expand_measure_refs_inner(value, model, visited)?),
+            sort_by: Box::new(expand_measure_refs_inner(sort_by, model, visited)?),
+        }),
+        Expression::HasOneValue { column } => Ok(Expression::HasOneValue {
+            column: Box::new(expand_measure_refs_inner(column, model, visited)?),
+        }),
+        Expression::SelectedValue { column, alternate } => Ok(Expression::SelectedValue {
+            column: Box::new(expand_measure_refs_inner(column, model, visited)?),
+            alternate: alternate
+                .as_ref()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .transpose()?
+                .map(Box::new),
+        }),
+        Expression::FirstValue { column, order_by } => Ok(Expression::FirstValue {
+            column: Box::new(expand_measure_refs_inner(column, model, visited)?),
+            order_by: Box::new(expand_measure_refs_inner(order_by, model, visited)?),
+        }),
+        Expression::Query {
+            aggregates,
+            group_by,
+        } => Ok(Expression::Query {
+            aggregates: aggregates
+                .iter()
+                .map(|(e, alias)| {
+                    Ok((expand_measure_refs_inner(e, model, visited)?, alias.clone()))
+                })
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+            group_by: group_by.clone(),
+        }),
         // Leaf nodes and anything without MeasureRef pass through unchanged.
         _ => Ok(expr.clone()),
     }
@@ -518,7 +595,8 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         } => infer_fact_table(inner).or_else(|| order_by.first().map(|(table, _)| table.clone())),
         Expression::ToDate { expr, .. }
         | Expression::PeriodShift { expr, .. }
-        | Expression::DatesInPeriod { expr, .. } => infer_fact_table(expr),
+        | Expression::DatesInPeriod { expr, .. }
+        | Expression::SemiAdditiveBalance { expr, .. } => infer_fact_table(expr),
         Expression::InList { expr, values } => {
             infer_fact_table(expr).or_else(|| values.iter().find_map(infer_fact_table))
         }
@@ -546,7 +624,17 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
             infer_fact_table(value).or_else(|| infer_fact_table(sort_by))
         }
-        Expression::RankWindow { .. } => None,
+        // Mirror Window/Offset/Index: the fact table is the order-by / partition
+        // table. Returning None here cached an empty table name on the measure
+        // and made the model fail to build with TableNotFound("").
+        Expression::RankWindow {
+            order_by,
+            partition_by,
+            ..
+        } => order_by
+            .first()
+            .or_else(|| partition_by.first())
+            .map(|(table, _)| table.clone()),
         Expression::Call { args, .. } => args.iter().find_map(infer_fact_table),
         _ => None,
     }
@@ -718,6 +806,58 @@ mod tests {
             expand_measure_refs(model.measure("Top").unwrap().expression(), &model).unwrap();
         // Should fully expand to SUM(Sales.amount)
         assert!(matches!(expanded, Expression::Aggregate { .. }));
+    }
+
+    #[test]
+    fn cyclic_or_unknown_measure_ref_buried_in_variadic_node_is_detected() {
+        use crate::compute::measure::{sum_measure, Measure};
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = || {
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("amount", DataType::Float64),
+                    Column::new("k", DataType::Int64),
+                ],
+            )
+            .unwrap()
+        };
+
+        // A = GREATEST([A], 0): a self-cycle buried in GREATEST must be caught
+        // at build time (previously slipped past the has_measure_ref gate).
+        let cyclic = Measure::new(
+            "A",
+            Expression::Greatest(vec![
+                Expression::MeasureRef("A".into()),
+                Expression::LiteralFloat(0.0),
+            ]),
+        );
+        let err = DataModel::builder()
+            .add_table(table())
+            .add_measure(cyclic)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("circular"), "got: {err}");
+
+        // B = MAX_BY([DoesNotExist], Sales[k]): an unknown ref buried in MAX_BY.
+        let unknown = Measure::new(
+            "B",
+            Expression::MaxBy {
+                value: Box::new(Expression::MeasureRef("DoesNotExist".into())),
+                sort_by: Box::new(qualified_col("Sales", "k")),
+            },
+        );
+        let err = DataModel::builder()
+            .add_table(table())
+            .add_measure(sum_measure("Real", "Sales", "amount"))
+            .add_measure(unknown)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("DoesNotExist"), "got: {err}");
     }
 
     #[test]

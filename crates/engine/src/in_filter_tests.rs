@@ -21,11 +21,7 @@ use crate::{
 };
 
 fn cond(column: &str, operator: FilterOperator, value: &str) -> FilterCondition {
-    FilterCondition {
-        column: column.into(),
-        operator,
-        value: value.into(),
-    }
+    FilterCondition::new(column, operator, value)
 }
 
 fn slicer_model() -> DataModel {

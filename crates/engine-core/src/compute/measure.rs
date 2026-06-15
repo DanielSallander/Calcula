@@ -204,6 +204,16 @@ impl Measure {
         &self.expression
     }
 
+    /// Returns the names of the measures this measure **directly** references
+    /// (via `[OtherMeasure]`), deduplicated and sorted.
+    ///
+    /// This is its direct dependency set, not the transitive closure. See
+    /// [`Expression::measure_references`] and
+    /// [`DataModel::measure_dependents`](crate::model::DataModel::measure_dependents).
+    pub fn referenced_measures(&self) -> Vec<&str> {
+        self.expression.measure_references()
+    }
+
     /// Returns the original expression source text, if the measure was
     /// created from text.
     ///

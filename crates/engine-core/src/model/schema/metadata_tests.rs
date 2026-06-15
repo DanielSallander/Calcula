@@ -38,9 +38,11 @@ fn model_format_version_is_current() {
     // SelectedMeasure expression variant).
     // Version 8 introduced the DATESINPERIOD trailing-window time-intelligence
     // function (DatesInPeriod expression variant).
+    // Version 9 introduced semi-additive balances CLOSINGBALANCE/OPENINGBALANCE
+    // (SemiAdditiveBalance expression variant).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 8);
+    assert_eq!(MODEL_FORMAT_VERSION, 9);
 }
 
 #[test]

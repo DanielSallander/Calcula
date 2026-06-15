@@ -345,11 +345,11 @@ mod tests {
             ..Default::default()
         };
         if fact_filtered {
-            fact_request.filters.push(FilterCondition {
-                column: "customer_id".to_string(),
-                operator: FilterOperator::Equal,
-                value: "10".to_string(),
-            });
+            fact_request.filters.push(FilterCondition::new(
+                "customer_id",
+                FilterOperator::Equal,
+                "10",
+            ));
         }
         vec![
             ("fact_sales".to_string(), fact_request),

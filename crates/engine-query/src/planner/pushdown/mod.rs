@@ -157,6 +157,73 @@ fn in_filter_condition(
     }
 }
 
+/// Upgrade integer-typed scalar and OR filters in a finished plan to a sargable
+/// rendering.
+///
+/// Every filter is built with [`InValueKind::Text`] (the column is text-cast
+/// and the value bound as a parameter — correct for any column type but
+/// non-sargable, defeating source indexes). Once planning is done each fetch
+/// carries a known model table, so a filter whose column is an integer type can
+/// be rendered as `col op <literal>` against the *uncast* column, which an index
+/// can serve. This is the scalar analogue of the IN-list `InValueKind::Integer`
+/// optimization. Only integer columns are upgraded; the value is re-validated as
+/// an integer at render time ([`FilterCondition::effective_kind`]), so nothing
+/// untrusted is ever inlined.
+fn apply_sargable_filter_kinds(plan: &mut QueryPlan, model: &DataModel) {
+    use engine_connectors::FilterCondition;
+
+    /// Stamp `Integer` onto each filter whose column is *unambiguously* an
+    /// integer column across the candidate tables (integer in at least one, and
+    /// never a non-integer type in any — so an ambiguous name stays text-safe).
+    fn stamp(model: &DataModel, tables: &[&str], filters: &mut [FilterCondition]) {
+        use engine_connectors::traits::InValueKind;
+        use engine_core::types::DataType;
+        for filter in filters.iter_mut() {
+            let mut integer_somewhere = false;
+            let mut conflicting = false;
+            for table in tables {
+                if let Some(col) = model
+                    .table(table)
+                    .ok()
+                    .and_then(|t| t.column(&filter.column).ok())
+                {
+                    match col.data_type() {
+                        DataType::Int32 | DataType::Int64 => integer_somewhere = true,
+                        _ => conflicting = true,
+                    }
+                }
+            }
+            if integer_somewhere && !conflicting {
+                filter.kind = InValueKind::Integer;
+            }
+        }
+    }
+
+    fn stamp_fetch(model: &DataModel, tables: &[&str], request: &mut FetchRequest) {
+        stamp(model, tables, &mut request.filters);
+        for group in request.or_groups.iter_mut() {
+            stamp(model, tables, group);
+        }
+    }
+
+    match plan {
+        QueryPlan::PushedAggregation {
+            source_table,
+            request,
+        } => stamp_fetch(model, &[source_table.as_str()], request),
+        QueryPlan::LocalAggregation { fetches, .. } => {
+            for (table, request) in fetches.iter_mut() {
+                stamp_fetch(model, &[table.as_str()], request);
+            }
+        }
+        QueryPlan::PushedJoinAggregation { request, .. } => {
+            let tables: Vec<&str> =
+                request.table_map.iter().map(|(m, _)| m.as_str()).collect();
+            stamp(model, &tables, &mut request.filters);
+        }
+    }
+}
+
 /// The pushdown planner analyzes a query request and produces an execution plan.
 pub struct PushdownPlanner;
 
@@ -235,6 +302,29 @@ impl PushdownPlanner {
     /// determined fall back to a full fetch (empty `columns`), with the reason
     /// recorded in the returned [`ProjectionDiagnostics`].
     pub fn plan_with_cached_diagnostics(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+        cached_tables: &std::collections::HashSet<String>,
+        role_filters: &[FilterPredicate],
+    ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
+        let (mut plan, diagnostics) = Self::plan_with_cached_diagnostics_inner(
+            request,
+            model,
+            registry,
+            cached_tables,
+            role_filters,
+        )?;
+        // Post-pass: now that every fetch in the plan carries a known model
+        // table, upgrade integer-typed scalar/OR filters to a sargable
+        // (uncast column, unquoted integer literal) rendering so source
+        // indexes are usable. Correct-by-default text rendering is kept for
+        // every other column type. See `apply_sargable_filter_kinds`.
+        apply_sargable_filter_kinds(&mut plan, model);
+        Ok((plan, diagnostics))
+    }
+
+    fn plan_with_cached_diagnostics_inner(
         request: &QueryRequest,
         model: &DataModel,
         registry: &SourceRegistry,
@@ -362,6 +452,7 @@ impl PushdownPlanner {
                     Expression::ToDate { .. }
                         | Expression::PeriodShift { .. }
                         | Expression::DatesInPeriod { .. }
+                        | Expression::SemiAdditiveBalance { .. }
                 )
             });
             match model.date_table() {
@@ -922,6 +1013,42 @@ mod tests {
                 assert_eq!(request.group_by, vec!["region".to_string()]);
                 assert_eq!(request.schema.as_deref(), Some("sales"));
                 assert_eq!(request.table, "salesorderheader");
+            }
+            other => panic!("Expected PushedAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn integer_filter_is_stamped_sargable_but_text_filter_is_not() {
+        use engine_connectors::traits::InValueKind;
+        use engine_connectors::{FilterCondition, FilterOperator};
+
+        let model = test_model_single_table();
+        let registry = mock_registry_single(0);
+
+        // One filter on an integer column (`id`), one on a text column
+        // (`region`). The post-pass upgrades only the integer one to a
+        // sargable rendering; the text one stays the safe text-cast default.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            filters: vec![
+                FilterCondition::new("id", FilterOperator::Equal, "42"),
+                FilterCondition::new("region", FilterOperator::Equal, "West"),
+            ],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+        match plan {
+            QueryPlan::PushedAggregation { request, .. } => {
+                let id = request.filters.iter().find(|f| f.column == "id").unwrap();
+                let region = request
+                    .filters
+                    .iter()
+                    .find(|f| f.column == "region")
+                    .unwrap();
+                assert_eq!(id.kind, InValueKind::Integer, "integer column → sargable");
+                assert_eq!(region.kind, InValueKind::Text, "text column → text-cast");
             }
             other => panic!("Expected PushedAggregation, got {other:?}"),
         }

@@ -226,7 +226,8 @@ fn collect_query_global_refs(
         Expression::RankWindow { .. } => {}
         Expression::ToDate { expr, .. }
         | Expression::PeriodShift { expr, .. }
-        | Expression::DatesInPeriod { expr, .. } => {
+        | Expression::DatesInPeriod { expr, .. }
+        | Expression::SemiAdditiveBalance { expr, .. } => {
             collect_query_global_refs(expr, model, found);
         }
         Expression::Call { args, .. } => {
@@ -527,6 +528,13 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
             expr: Box::new(expand_scalar_globals(inner, model)),
             intervals: *intervals,
             granularity: *granularity,
+        },
+        Expression::SemiAdditiveBalance {
+            expr: inner,
+            opening,
+        } => Expression::SemiAdditiveBalance {
+            expr: Box::new(expand_scalar_globals(inner, model)),
+            opening: *opening,
         },
         Expression::InList { expr, values } => Expression::InList {
             expr: Box::new(expand_scalar_globals(expr, model)),

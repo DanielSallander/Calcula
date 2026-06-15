@@ -465,19 +465,11 @@ fn parse_filters(input: &str) -> Result<Vec<FilterCondition>, String> {
         if let Some(idx) = part.find("!=") {
             let col = part[..idx].trim().to_string();
             let val = part[idx + 2..].trim().to_string();
-            filters.push(FilterCondition {
-                column: col,
-                operator: FilterOperator::NotEqual,
-                value: val,
-            });
+            filters.push(FilterCondition::new(col, FilterOperator::NotEqual, val));
         } else if let Some(idx) = part.find('=') {
             let col = part[..idx].trim().to_string();
             let val = part[idx + 1..].trim().to_string();
-            filters.push(FilterCondition {
-                column: col,
-                operator: FilterOperator::Equal,
-                value: val,
-            });
+            filters.push(FilterCondition::new(col, FilterOperator::Equal, val));
         } else {
             return Err(format!("Invalid filter '{}' — use column = value", part));
         }

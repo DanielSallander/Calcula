@@ -220,6 +220,10 @@ impl Parser {
             // the scalar single-date `DATEADD(date, n, unit)` function.)
             "PARALLELPERIOD" => self.parse_priorperiod_call(),
             "DATESINPERIOD" => self.parse_dates_in_period_call(),
+            // Semi-additive balances: the measure pinned to the last (closing)
+            // or first (opening) date of the current context.
+            "CLOSINGBALANCE" => self.parse_balance_call(false),
+            "OPENINGBALANCE" => self.parse_balance_call(true),
             // Ranking window functions
             "ROW_NUMBER" | "ROWNUMBER" => {
                 self.parse_rank_window_call(expr::RankFunction::RowNumber)

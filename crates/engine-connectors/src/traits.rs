@@ -121,15 +121,62 @@ pub struct FilterCondition {
     /// Value to compare against (string representation; connector handles
     /// quoting and parameterization).
     pub value: String,
+    /// How the value should be rendered in SQL. Defaults to
+    /// [`InValueKind::Text`] (the column is text-cast and the value is a bound
+    /// parameter — correct for any column type, but non-sargable). The planner
+    /// upgrades this to [`InValueKind::Integer`] when it knows the filtered
+    /// column is an integer type, so the comparison stays index-friendly
+    /// (see [`FilterCondition::effective_kind`]).
+    pub kind: InValueKind,
 }
 
-/// Classification of IN-list filter values, controlling how connectors
-/// render them in SQL.
+impl FilterCondition {
+    /// Create a text-kind filter condition (the column is text-cast and the
+    /// value bound as a parameter — correct for any column type). The planner
+    /// upgrades the kind for integer columns via [`with_kind`](Self::with_kind).
+    pub fn new(
+        column: impl Into<String>,
+        operator: FilterOperator,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            column: column.into(),
+            operator,
+            value: value.into(),
+            kind: InValueKind::Text,
+        }
+    }
+
+    /// Set the value-rendering kind (builder style).
+    pub fn with_kind(mut self, kind: InValueKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// The value kind connectors must actually render with.
+    ///
+    /// Re-validates [`InValueKind::Integer`] defensively: the value is rendered
+    /// as an unquoted numeric literal only if it parses as `i128`; otherwise
+    /// the kind is downgraded to [`InValueKind::Text`] so no unvalidated string
+    /// is ever inlined unquoted into SQL. Connectors must call this rather than
+    /// trusting the `kind` field directly.
+    pub fn effective_kind(&self) -> InValueKind {
+        match self.kind {
+            InValueKind::Text => InValueKind::Text,
+            InValueKind::Integer if self.value.parse::<i128>().is_ok() => InValueKind::Integer,
+            InValueKind::Integer => InValueKind::Text,
+        }
+    }
+}
+
+/// Classification of filter values, controlling how connectors render them in
+/// SQL — for both scalar [`FilterCondition`]s and [`InFilterCondition`] lists.
 ///
-/// Integer join keys (the common case for surrogate keys) must be rendered
-/// as unquoted numeric literals compared against the *uncast* column —
-/// casting the fact column to text (`"col"::text IN ('1', ...)`) makes the
-/// predicate non-sargable and forces a sequential scan over the fact table.
+/// Integer keys (the common case for surrogate keys and integer dimensions)
+/// must be rendered as unquoted numeric literals compared against the *uncast*
+/// column — casting the fact column to text (`"col"::text = '1'` / `IN ('1',
+/// ...)`) makes the predicate non-sargable and forces a sequential scan over
+/// the fact table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InValueKind {
     /// Values are arbitrary strings; connectors escape and quote them.
@@ -137,7 +184,8 @@ pub enum InValueKind {
     Text,
     /// Values are decimal integer literals; connectors render them unquoted
     /// (index-friendly) **after re-validating** that every value parses as
-    /// an integer. See [`InFilterCondition::effective_kind`].
+    /// an integer. See [`InFilterCondition::effective_kind`] /
+    /// [`FilterCondition::effective_kind`].
     Integer,
 }
 

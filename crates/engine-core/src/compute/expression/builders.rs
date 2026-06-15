@@ -435,6 +435,24 @@ pub fn dates_in_period(
     }
 }
 
+/// Create a `CLOSINGBALANCE` semi-additive balance (the inner measure at the
+/// **last** date of the current context).
+pub fn closing_balance(expr: Expression) -> Expression {
+    Expression::SemiAdditiveBalance {
+        expr: Box::new(expr),
+        opening: false,
+    }
+}
+
+/// Create an `OPENINGBALANCE` semi-additive balance (the inner measure at the
+/// **first** date of the current context).
+pub fn opening_balance(expr: Expression) -> Expression {
+    Expression::SemiAdditiveBalance {
+        expr: Box::new(expr),
+        opening: true,
+    }
+}
+
 /// Create an INDEX expression: value at absolute position.
 pub fn index_expr(
     inner: Expression,

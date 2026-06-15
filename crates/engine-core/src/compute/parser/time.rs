@@ -34,6 +34,19 @@ impl Parser {
         Ok(expr::period_shift(inner, -1, DateGranularity::Year))
     }
 
+    /// Parse `CLOSINGBALANCE(expr)` / `OPENINGBALANCE(expr)` — a single-argument
+    /// semi-additive balance pinned to the last (closing) / first (opening) date
+    /// of the current context.
+    pub(super) fn parse_balance_call(&mut self, opening: bool) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        Ok(if opening {
+            expr::opening_balance(inner)
+        } else {
+            expr::closing_balance(inner)
+        })
+    }
+
     /// Parse `PRIORPERIOD(expr, n, YEAR|QUARTER|MONTH)`.
     ///
     /// `n` is an integer shift: negative = earlier periods, positive =
@@ -199,6 +212,23 @@ mod tests {
         };
         assert_eq!(*offset, -1);
         assert_eq!(*granularity, DateGranularity::Year);
+    }
+
+    #[test]
+    fn parse_closing_and_opening_balance() {
+        let closing =
+            parse_measure_expression("CLOSINGBALANCE(SUM(fact_sales[amount]))").unwrap();
+        let Expression::SemiAdditiveBalance { opening, .. } = &closing else {
+            panic!("expected SemiAdditiveBalance, got {closing:?}");
+        };
+        assert!(!*opening, "CLOSINGBALANCE is a closing (last-date) balance");
+
+        let opening_expr =
+            parse_measure_expression("OPENINGBALANCE(SUM(fact_sales[amount]))").unwrap();
+        let Expression::SemiAdditiveBalance { opening, .. } = &opening_expr else {
+            panic!("expected SemiAdditiveBalance, got {opening_expr:?}");
+        };
+        assert!(*opening, "OPENINGBALANCE is an opening (first-date) balance");
     }
 
     #[test]
