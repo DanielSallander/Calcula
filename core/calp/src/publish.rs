@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use identity::EntityId;
-use persistence::{SavedCell, SavedTable, SavedObjectScript, Workbook};
+use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, Workbook};
 
 use crate::error::CalpError;
 use crate::manifest::*;
@@ -53,6 +53,14 @@ pub struct PublishRequest<'a> {
     /// Object scripts to include in the package.
     /// If None, all workbook object scripts are published.
     pub object_scripts: Option<Vec<SavedObjectScript>>,
+    /// Standalone module scripts to include in the package (C8).
+    /// If None, all workbook module scripts (`workbook.scripts`) are published;
+    /// Some means exactly these. Distributed inert — never auto-executed.
+    pub module_scripts: Option<Vec<SavedScript>>,
+    /// Standalone notebooks to include in the package (C8).
+    /// If None, all workbook notebooks (`workbook.notebooks`) are published;
+    /// Some means exactly these. Execution metadata is stripped at write time.
+    pub notebooks: Option<Vec<SavedNotebook>>,
     /// Data source definitions to embed in the package for live data.
     pub data_sources: Vec<PublishDataSource>,
     /// Cell regions to exclude from published sheet data (e.g., pivot output).
@@ -68,6 +76,10 @@ pub struct PublishResult {
     pub tables_published: usize,
     pub named_ranges_published: usize,
     pub scripts_published: usize,
+    /// Number of standalone module scripts published (C8).
+    pub modules_published: usize,
+    /// Number of standalone notebooks published (C8).
+    pub notebooks_published: usize,
 }
 
 /// Publish selected sheets from a workbook to a local registry.
@@ -153,6 +165,44 @@ pub fn publish(
         }
     }).collect();
 
+    // Collect standalone module scripts to publish (C8). Override-or-all,
+    // mirroring object_scripts. These are inert, transparent data.
+    let modules_to_publish: Vec<&SavedScript> = match &request.module_scripts {
+        Some(scripts) => scripts.iter().collect(),
+        None => request.workbook.scripts.iter().collect(),
+    };
+
+    let published_modules: Vec<PublishedModuleScript> = modules_to_publish.iter().map(|s| {
+        PublishedModuleScript {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            // Discriminated so a sheet literally named "workbook" can't be
+            // confused with workbook-global scope in the pre-pull review surface.
+            // (The authoritative scope still round-trips via the artifact's
+            // tagged ScriptScopeDef; this manifest string is display-only.)
+            scope: match &s.scope {
+                persistence::SavedScriptScope::Workbook => "workbook".to_string(),
+                persistence::SavedScriptScope::Sheet { name } => format!("sheet:{}", name),
+            },
+            description: s.description.clone(),
+        }
+    }).collect();
+
+    // Collect standalone notebooks to publish (C8). Override-or-all.
+    let notebooks_to_publish: Vec<&SavedNotebook> = match &request.notebooks {
+        Some(notebooks) => notebooks.iter().collect(),
+        None => request.workbook.notebooks.iter().collect(),
+    };
+
+    let published_notebooks: Vec<PublishedNotebook> = notebooks_to_publish.iter().map(|n| {
+        PublishedNotebook {
+            id: n.id.clone(),
+            name: n.name.clone(),
+            cell_count: n.cells.len(),
+            description: None,
+        }
+    }).collect();
+
     let mut version_manifest = VersionManifest {
         format_version: 1,
         package_name: request.package_name.clone(),
@@ -171,6 +221,8 @@ pub fn publish(
         locked_cells: Vec::new(),
         writeback_regions: request.writeback_regions.clone(),
         object_scripts: published_scripts,
+        module_scripts: published_modules,
+        notebooks: published_notebooks,
         data_sources: request.data_sources.iter().map(|ds| PackageDataSource {
             id: ds.id.clone(),
             name: ds.name.clone(),
@@ -275,6 +327,48 @@ pub fn publish(
         }
     }
 
+    // Write standalone module scripts (C8) as modules/{id}.json using the
+    // calcula-format ScriptDef (camelCase). Module scripts are inert,
+    // transparent data — distributed as-is, no provenance/access-level/
+    // capability stamping. Written BEFORE the manifest so the integrity walk
+    // checksums them and the Ed25519 signature seals them.
+    if !modules_to_publish.is_empty() {
+        let modules_dir = registry.modules_dir(&request.package_name, &version_str);
+        fs::create_dir_all(&modules_dir)?;
+        for script in &modules_to_publish {
+            let def = calcula_format::features::scripts::ScriptDef::from(*script);
+            fs::write(
+                modules_dir.join(format!("{}.json", script.id)),
+                serde_json::to_string_pretty(&def)?,
+            )?;
+        }
+    }
+
+    // Write standalone notebooks (C8) as notebooks/{id}.json using the
+    // calcula-format NotebookDef (camelCase). Execution metadata is STRIPPED:
+    // last_output/last_error/cells_modified/duration_ms/execution_index are
+    // zeroed so cached output can never leak in a published package — only
+    // cell id + source ship. Written BEFORE the manifest so they are covered
+    // by the integrity checksums and the Ed25519 signature.
+    if !notebooks_to_publish.is_empty() {
+        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str);
+        fs::create_dir_all(&notebooks_dir)?;
+        for notebook in &notebooks_to_publish {
+            let mut def = calcula_format::features::notebooks::NotebookDef::from(*notebook);
+            for cell in &mut def.cells {
+                cell.last_output = Vec::new();
+                cell.last_error = None;
+                cell.cells_modified = 0;
+                cell.duration_ms = 0;
+                cell.execution_index = None;
+            }
+            fs::write(
+                notebooks_dir.join(format!("{}.json", notebook.id)),
+                serde_json::to_string_pretty(&def)?,
+            )?;
+        }
+    }
+
     // Write pivot definitions
     if !request.workbook.pivot_definitions.is_empty() {
         let pivot_dir = ver_dir.join("pivot_definitions");
@@ -349,6 +443,8 @@ pub fn publish(
         tables_published: published_tables.len(),
         named_ranges_published: named_ranges.len(),
         scripts_published: scripts_to_publish.len(),
+        modules_published: modules_to_publish.len(),
+        notebooks_published: notebooks_to_publish.len(),
     })
 }
 
@@ -394,6 +490,8 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
@@ -451,6 +549,8 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
@@ -480,6 +580,8 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
@@ -525,6 +627,8 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
@@ -552,6 +656,8 @@ mod tests {
                 published_by: "tester".to_string(),
                 writeback_regions: None,
                 object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
             };

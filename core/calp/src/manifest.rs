@@ -113,6 +113,21 @@ pub struct VersionManifest {
     /// scripts but can add their own script layers on top.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_scripts: Vec<PublishedObjectScript>,
+    /// Standalone module scripts bundled with the package (C8). Unlike object
+    /// scripts these are inert, transparent data: materialized into the
+    /// subscriber's workbook on pull but NEVER auto-executed — they run only on
+    /// explicit user action in the sandboxed Rust QuickJS interpreter. No
+    /// provenance/access-level/capability fields: they are distributed as-is and
+    /// covered by the same Ed25519 signing + SHA-256 integrity as every other
+    /// artifact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub module_scripts: Vec<PublishedModuleScript>,
+    /// Standalone notebooks bundled with the package (C8). Inert, transparent
+    /// data like module_scripts. Notebook execution metadata (outputs, errors,
+    /// timings, execution indices) is STRIPPED at publish time — only cell
+    /// id + source ship — so cached output can never leak in a package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notebooks: Vec<PublishedNotebook>,
     /// Data source definitions for live data. Each data source embeds a BI
     /// model and table bindings; subscribers refresh against the original
     /// database through pivots (and CUBE formulas, planned).
@@ -160,6 +175,45 @@ pub struct PublishedObjectScript {
     /// net.fetch, bi.query, storage, ui.html.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+}
+
+/// A standalone module script bundled with a .calp package (C8).
+/// Module scripts are inert, transparent data — the manifest entry exists so
+/// the subscriber can list/review them BEFORE pulling and locate the on-disk
+/// artifact (`modules/{id}.json`). No provenance/access-level/capability
+/// fields: module scripts run only on explicit user action, sandboxed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedModuleScript {
+    /// Script ID (stable across versions). Names the `modules/{id}.json` file.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Scope: "workbook" or a sheet name. Lifted from the script's scope so the
+    /// pre-pull review can show where the script attaches.
+    pub scope: String,
+    /// Script description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A standalone notebook bundled with a .calp package (C8).
+/// Inert, transparent data. The manifest entry locates the on-disk artifact
+/// (`notebooks/{id}.json`) and lets the subscriber review the notebook BEFORE
+/// pulling. Execution metadata is stripped from the artifact at publish time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedNotebook {
+    /// Notebook ID (stable across versions). Names the `notebooks/{id}.json` file.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Number of cells in the notebook (surfaced in the pre-pull review).
+    pub cell_count: usize,
+    /// Notebook description, if any. Notebooks have no description field today,
+    /// so this is reserved for forward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A sheet entry in the version manifest.

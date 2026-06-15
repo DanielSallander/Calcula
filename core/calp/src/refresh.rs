@@ -409,6 +409,8 @@ mod tests {
                 published_by: "tester".to_string(),
                 writeback_regions: None,
                 object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
             };

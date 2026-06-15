@@ -582,6 +582,8 @@ fn main() {
         published_by: "Calcula CLI".to_string(),
         writeback_regions: None,
         object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
         data_sources,
         excluded_regions,
     };

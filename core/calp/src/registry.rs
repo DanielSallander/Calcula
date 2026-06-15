@@ -147,6 +147,19 @@ impl LocalRegistry {
         self.version_dir(package_name, version).join("object_scripts")
     }
 
+    /// Get the standalone module-scripts directory for a version (C8).
+    /// Each module script is stored as `modules/{id}.json` (ScriptDef JSON).
+    pub fn modules_dir(&self, package_name: &str, version: &str) -> PathBuf {
+        self.version_dir(package_name, version).join("modules")
+    }
+
+    /// Get the standalone notebooks directory for a version (C8).
+    /// Each notebook is stored as `notebooks/{id}.json` (NotebookDef JSON,
+    /// execution metadata stripped at publish time).
+    pub fn notebooks_dir(&self, package_name: &str, version: &str) -> PathBuf {
+        self.version_dir(package_name, version).join("notebooks")
+    }
+
     /// Resolve a version pin to the best matching version.
     pub fn resolve_version(
         &self,
@@ -402,6 +415,8 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            module_scripts: Vec::new(),
+            notebooks: Vec::new(),
             data_sources: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
@@ -476,6 +491,8 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            module_scripts: Vec::new(),
+            notebooks: Vec::new(),
             data_sources: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
@@ -530,6 +547,8 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            module_scripts: Vec::new(),
+            notebooks: Vec::new(),
             data_sources: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
@@ -572,6 +591,8 @@ mod tests {
             locked_cells: Vec::new(),
             writeback_regions: None,
             object_scripts: Vec::new(),
+            module_scripts: Vec::new(),
+            notebooks: Vec::new(),
             data_sources: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),

@@ -3527,6 +3527,141 @@ fn get_extensions_directory(app_handle: tauri::AppHandle, window: tauri::Window)
     Ok(ext_dir.to_string_lossy().to_string())
 }
 
+/// Resolve the on-disk targets to delete when uninstalling an extension bundle,
+/// rejecting any `file_name` that could escape `ext_dir`. Pure (no fs) so it is
+/// unit-testable. `file_name` is the value `scan_extension_directory` reported:
+/// "<bundle>.js" for a single-file bundle, or "<dir>/index.js" for a directory
+/// bundle. Returns candidate paths to remove (the directory for a dir bundle; the
+/// bundle + its two sidecars for a file bundle — some may not exist on disk).
+fn resolve_uninstall_targets(
+    ext_dir: &std::path::Path,
+    file_name: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    // Reject anything that could traverse out of the extensions directory.
+    if file_name.is_empty()
+        || file_name.contains("..")
+        || file_name.contains('\\')
+        || file_name.starts_with('/')
+    {
+        return Err("Invalid extension name".to_string());
+    }
+
+    if let Some(dir) = file_name.strip_suffix("/index.js") {
+        // Directory bundle: remove the whole "<dir>/" folder.
+        if dir.is_empty() || dir.contains('/') {
+            return Err("Invalid extension directory name".to_string());
+        }
+        Ok(vec![ext_dir.join(dir)])
+    } else {
+        // Single-file bundle: "<stem>.js" + its two sidecars.
+        if file_name.contains('/') {
+            return Err("Invalid extension file name".to_string());
+        }
+        let stem = file_name
+            .strip_suffix(".js")
+            .ok_or_else(|| "Not an extension bundle (.js expected)".to_string())?;
+        if stem.is_empty() {
+            return Err("Invalid extension file name".to_string());
+        }
+        Ok(vec![
+            ext_dir.join(format!("{}.js", stem)),
+            ext_dir.join(format!("{}.manifest.json", stem)),
+            ext_dir.join(format!("{}.manifest.sig", stem)),
+        ])
+    }
+}
+
+/// Uninstall a third-party extension by deleting its bundle + sidecar files (or
+/// its directory) from the extensions directory (C7). The extensions directory is
+/// ALWAYS app_data/extensions (never caller-supplied); `file_name` is the value
+/// reported by `scan_extension_directory` and is validated to stay within it. The
+/// TOFU publisher pin (`ext:{id}`) is intentionally left in place so a later
+/// re-install of the same id from the same key still verifies.
+#[tauri::command]
+fn uninstall_extension(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    file_name: String,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    use tauri::Manager;
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let ext_dir = app_data.join("extensions");
+    let ext_dir_canon = ext_dir
+        .canonicalize()
+        .map_err(|e| format!("Extensions directory not available: {}", e))?;
+
+    let targets = resolve_uninstall_targets(&ext_dir, &file_name)?;
+
+    let mut removed_any = false;
+    for target in targets {
+        if !target.exists() {
+            continue;
+        }
+        // Defense in depth: the target's parent must canonicalize to within the
+        // extensions directory before anything is deleted.
+        let parent_canon = target
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .ok_or_else(|| "Failed to resolve extension path".to_string())?;
+        if !parent_canon.starts_with(&ext_dir_canon) {
+            return Err("Refusing to delete outside the extensions directory".to_string());
+        }
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target)
+                .map_err(|e| format!("Failed to remove '{}': {}", target.display(), e))?;
+        } else {
+            std::fs::remove_file(&target)
+                .map_err(|e| format!("Failed to remove '{}': {}", target.display(), e))?;
+        }
+        removed_any = true;
+    }
+
+    if !removed_any {
+        return Err(format!("Extension '{}' not found", file_name));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod uninstall_extension_tests {
+    use super::resolve_uninstall_targets;
+    use std::path::Path;
+
+    #[test]
+    fn file_bundle_resolves_bundle_plus_two_sidecars() {
+        let t = resolve_uninstall_targets(Path::new("/ext"), "myext.js").unwrap();
+        assert_eq!(t.len(), 3);
+        assert!(t[0].ends_with("myext.js"));
+        assert!(t[1].ends_with("myext.manifest.json"));
+        assert!(t[2].ends_with("myext.manifest.sig"));
+    }
+
+    #[test]
+    fn directory_bundle_resolves_the_directory() {
+        let t = resolve_uninstall_targets(Path::new("/ext"), "my-ext/index.js").unwrap();
+        assert_eq!(t.len(), 1);
+        assert!(t[0].ends_with("my-ext"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_junk() {
+        for bad in [
+            "../evil.js", "..\\evil.js", "/etc/passwd.js", "a/b.js",
+            "sub/../../x.js", "../../index.js", "x/../../y/index.js",
+            "/index.js", "", ".js", "notjs.txt",
+        ] {
+            assert!(
+                resolve_uninstall_targets(Path::new("/ext"), bad).is_err(),
+                "should reject {bad}",
+            );
+        }
+    }
+}
+
 // ============================================================================
 // TAURI APP ENTRY
 // ============================================================================
@@ -4125,6 +4260,7 @@ pub fn run() {
             // Third-party extension loading
             scan_extension_directory,
             get_extensions_directory,
+            uninstall_extension,
             // .calp distribution commands
             calp_commands::calp_publish,
             calp_commands::calp_pull,

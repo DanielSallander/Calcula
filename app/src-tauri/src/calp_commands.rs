@@ -36,6 +36,10 @@ pub struct PublishResponse {
     pub tables_published: usize,
     pub named_ranges_published: usize,
     pub scripts_published: usize,
+    /// Number of standalone module scripts published (C8).
+    pub modules_published: usize,
+    /// Number of standalone notebooks published (C8).
+    pub notebooks_published: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +110,7 @@ pub fn calp_publish(
     state: State<AppState>,
     bi_state: State<BiState>,
     pivot_state: State<crate::pivot::types::PivotState>,
+    script_state: State<crate::scripting::types::ScriptState>,
     params: PublishParams,
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
@@ -120,6 +125,13 @@ pub fn calp_publish(
 
     // Build a lightweight workbook snapshot for publishing
     let mut workbook = crate::persistence::build_workbook_snapshot(&state)?;
+
+    // build_workbook_snapshot does not carry standalone module scripts /
+    // notebooks (they live in ScriptState, not AppState), so populate them
+    // here. With these present, the publish request's None ("all from the
+    // workbook") ships every module script + notebook (C8).
+    workbook.scripts = crate::persistence::collect_scripts_for_save(&script_state);
+    workbook.notebooks = crate::persistence::collect_notebooks_for_save(&script_state);
 
     // Ship pivot definitions + BI pivot metadata so subscribers can rebuild
     // live pivots; per-pivot data source routing reads the dataSourceId
@@ -227,6 +239,10 @@ pub fn calp_publish(
         published_by: params.published_by,
         writeback_regions,
         object_scripts,
+        // None => publish all standalone module scripts / notebooks carried in
+        // the snapshot above (C8). They distribute as inert, transparent data.
+        module_scripts: None,
+        notebooks: None,
         data_sources,
         excluded_regions,
     };
@@ -241,7 +257,76 @@ pub fn calp_publish(
         tables_published: result.tables_published,
         named_ranges_published: result.named_ranges_published,
         scripts_published: result.scripts_published,
+        modules_published: result.modules_published,
+        notebooks_published: result.notebooks_published,
     })
+}
+
+/// Materialize distributed standalone module scripts + notebooks into ScriptState
+/// (C8). Used by BOTH the initial pull and the version refresh so upstream updates
+/// propagate identically. Distributed standalone scripts/notebooks are
+/// upstream-owned and inert — they appear in the workbook's script/notebook list
+/// but are NEVER auto-executed; they run only on explicit, sandboxed user action.
+/// They REPLACE same-id entries (upstream-authoritative), which is how a corrected
+/// helper module or notebook actually reaches a subscriber on refresh — matching
+/// distributed object-script semantics. To customize one, copy it to a NEW id; an
+/// in-place edit is overwritten on the next pull/refresh. (v1 limit: a module or
+/// notebook the publisher REMOVED upstream lingers locally — they carry no
+/// per-package attribution yet, unlike object scripts.) Notebooks arrive
+/// run-clean: their execution metadata is stripped defensively at pull.
+fn materialize_distributed_scripts(
+    script_state: &crate::scripting::types::ScriptState,
+    modules: &[persistence::SavedScript],
+    notebooks: &[persistence::SavedNotebook],
+) -> Result<(), String> {
+    if !modules.is_empty() {
+        use crate::scripting::types::{ScriptScope, WorkbookScript};
+        let mut scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+        for module in modules {
+            scripts.insert(
+                module.id.clone(),
+                WorkbookScript {
+                    id: module.id.clone(),
+                    name: module.name.clone(),
+                    description: module.description.clone(),
+                    source: module.source.clone(),
+                    scope: match &module.scope {
+                        persistence::SavedScriptScope::Workbook => ScriptScope::Workbook,
+                        persistence::SavedScriptScope::Sheet { name } => {
+                            ScriptScope::Sheet { name: name.clone() }
+                        }
+                    },
+                },
+            );
+        }
+    }
+    if !notebooks.is_empty() {
+        use crate::scripting::types::{NotebookCell, NotebookDocument};
+        let mut nbs = script_state.workbook_notebooks.lock().map_err(|e| e.to_string())?;
+        for nb in notebooks {
+            nbs.insert(
+                nb.id.clone(),
+                NotebookDocument {
+                    id: nb.id.clone(),
+                    name: nb.name.clone(),
+                    cells: nb
+                        .cells
+                        .iter()
+                        .map(|c| NotebookCell {
+                            id: c.id.clone(),
+                            source: c.source.clone(),
+                            last_output: c.last_output.clone(),
+                            last_error: c.last_error.clone(),
+                            cells_modified: c.cells_modified,
+                            duration_ms: c.duration_ms,
+                            execution_index: c.execution_index,
+                        })
+                        .collect(),
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Pull (subscribe to) a package.
@@ -250,6 +335,7 @@ pub fn calp_pull(
     state: State<AppState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, BiState>,
+    script_state: State<'_, crate::scripting::types::ScriptState>,
     params: PullParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
@@ -333,6 +419,10 @@ pub fn calp_pull(
             }
         }
     }
+
+    // Materialize pulled standalone module scripts + notebooks (C8) into
+    // ScriptState. Shared with the refresh path so updates propagate identically.
+    materialize_distributed_scripts(&script_state, &result.module_scripts, &result.notebooks)?;
 
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(&state);
@@ -426,6 +516,12 @@ pub struct PackageInspection {
     pub resolved_version: String,
     pub sheets: Vec<SheetInfo>,
     pub scripts: Vec<InspectedScript>,
+    /// Standalone module scripts bundled with the package (C8). Surfaced in the
+    /// pre-pull review for transparency — they are inert (never auto-executed).
+    pub module_scripts: Vec<InspectedModuleScript>,
+    /// Standalone notebooks bundled with the package (C8). Surfaced in the
+    /// pre-pull review for transparency — inert until the user runs them.
+    pub notebooks: Vec<InspectedNotebook>,
     pub data_sources: Vec<InspectedDataSource>,
     pub writeback_region_count: usize,
     pub table_count: usize,
@@ -448,6 +544,22 @@ pub struct InspectedScript {
     /// (R19 ceiling). Surfaced BEFORE pulling so the user sees what the
     /// package's scripts want before accepting.
     pub requested_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectedModuleScript {
+    pub name: String,
+    /// "workbook" or a sheet name.
+    pub scope: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectedNotebook {
+    pub name: String,
+    pub cell_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -512,6 +624,15 @@ pub fn calp_inspect_package(
             object_type: s.object_type.clone(),
             description: s.description.clone(),
             requested_capabilities: s.capabilities.clone(),
+        }).collect(),
+        module_scripts: manifest.module_scripts.iter().map(|m| InspectedModuleScript {
+            name: m.name.clone(),
+            scope: m.scope.clone(),
+            description: m.description.clone(),
+        }).collect(),
+        notebooks: manifest.notebooks.iter().map(|n| InspectedNotebook {
+            name: n.name.clone(),
+            cell_count: n.cell_count,
         }).collect(),
         data_sources: manifest.data_sources.iter().map(|ds| InspectedDataSource {
             name: ds.name.clone(),
@@ -1073,6 +1194,7 @@ pub fn calp_refresh_apply(
     state: State<AppState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
+    script_state: State<crate::scripting::types::ScriptState>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -1250,6 +1372,19 @@ pub fn calp_refresh_apply(
         .map(|p| (p.pull_result.package_name.clone(), p.pull_result.object_scripts.clone()))
         .collect();
 
+    // C8: likewise collect the refreshed standalone module scripts + notebooks
+    // before the move, so the refresh can materialize them (without this they are
+    // pulled then silently dropped, leaving a subscriber stuck on the version
+    // present at first subscribe). Flattened across packages — they replace by id.
+    let module_updates: Vec<persistence::SavedScript> = payloads
+        .iter()
+        .flat_map(|p| p.pull_result.module_scripts.clone())
+        .collect();
+    let notebook_updates: Vec<persistence::SavedNotebook> = payloads
+        .iter()
+        .flat_map(|p| p.pull_result.notebooks.clone())
+        .collect();
+
     // Apply refresh: update subscription metadata and rebase overrides.
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
@@ -1309,6 +1444,10 @@ pub fn calp_refresh_apply(
             }
         }
     }
+
+    // C8: materialize the refreshed packages' standalone module scripts +
+    // notebooks (replace by id) so upstream updates actually land on refresh.
+    materialize_distributed_scripts(&script_state, &module_updates, &notebook_updates)?;
 
     rebuild_writeback_index(&state);
 
@@ -3473,5 +3612,65 @@ fn validate_dimension_field(
             pivot_name, area, name, table_name,
             if available.is_empty() { "(none)".to_string() } else { available },
         ));
+    }
+}
+
+#[cfg(test)]
+mod c8_materialize_tests {
+    use super::materialize_distributed_scripts;
+    use crate::scripting::types::ScriptState;
+
+    fn mk_module(id: &str, source: &str) -> persistence::SavedScript {
+        persistence::SavedScript {
+            id: id.to_string(),
+            name: "M".to_string(),
+            description: None,
+            source: source.to_string(),
+            scope: persistence::SavedScriptScope::Workbook,
+        }
+    }
+
+    fn mk_notebook(id: &str, src: &str) -> persistence::SavedNotebook {
+        persistence::SavedNotebook {
+            id: id.to_string(),
+            name: "N".to_string(),
+            cells: vec![persistence::SavedNotebookCell {
+                id: "c1".to_string(),
+                source: src.to_string(),
+                last_output: Vec::new(),
+                last_error: None,
+                cells_modified: 0,
+                duration_ms: 0,
+                execution_index: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn materializes_modules_and_notebooks_into_script_state() {
+        let st = ScriptState::new();
+        materialize_distributed_scripts(&st, &[mk_module("m1", "v1")], &[mk_notebook("n1", "x")]).unwrap();
+        assert_eq!(st.workbook_scripts.lock().unwrap().get("m1").unwrap().source, "v1");
+        assert_eq!(
+            st.workbook_notebooks.lock().unwrap().get("n1").unwrap().cells[0].source,
+            "x"
+        );
+    }
+
+    #[test]
+    fn replace_by_id_lets_an_upstream_refresh_update_land() {
+        // The C8 fix: a refreshed package shipping the same id must REPLACE the
+        // prior version (without this, updates were silently dropped after the
+        // first subscribe).
+        let st = ScriptState::new();
+        materialize_distributed_scripts(&st, &[mk_module("m1", "v1")], &[mk_notebook("n1", "old")]).unwrap();
+        materialize_distributed_scripts(&st, &[mk_module("m1", "v2-updated")], &[mk_notebook("n1", "new")]).unwrap();
+
+        let scripts = st.workbook_scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1, "same id replaces, not duplicates");
+        assert_eq!(scripts.get("m1").unwrap().source, "v2-updated");
+        let notebooks = st.workbook_notebooks.lock().unwrap();
+        assert_eq!(notebooks.len(), 1);
+        assert_eq!(notebooks.get("n1").unwrap().cells[0].source, "new");
     }
 }

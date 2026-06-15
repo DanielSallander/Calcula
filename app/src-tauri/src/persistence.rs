@@ -2366,7 +2366,7 @@ pub fn write_text_file(path: String, content: String, encoding: Option<String>, 
 // ============================================================================
 
 /// Collect scripts from ScriptState into SavedScript format for persistence.
-fn collect_scripts_for_save(
+pub(crate) fn collect_scripts_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
 ) -> Vec<persistence::SavedScript> {
     use crate::scripting::types::ScriptScope;
@@ -2389,7 +2389,7 @@ fn collect_scripts_for_save(
 }
 
 /// Collect notebooks from ScriptState into SavedNotebook format for persistence.
-fn collect_notebooks_for_save(
+pub(crate) fn collect_notebooks_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
 ) -> Vec<persistence::SavedNotebook> {
     let notebooks = script_state.workbook_notebooks.lock().unwrap();

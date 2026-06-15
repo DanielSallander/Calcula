@@ -137,6 +137,10 @@ export interface LoadedExtension {
    *  distributed extension is skipped on next launch; the entry stays listed so
    *  it can be re-enabled. Set by updateCachedArray from the persisted set. */
   disabled?: boolean;
+  /** The scan-reported file name for a distributed extension ("ext.js" or
+   *  "ext-dir/index.js"). Lets the manager UNINSTALL (delete the bundle +
+   *  sidecars) without re-deriving the path. Undefined for built-ins. */
+  fileName?: string;
 }
 
 type ChangeListener = () => void;
@@ -404,6 +408,7 @@ class ExtensionManagerImpl {
     module: ExtensionModule,
     trust: ExtensionTrust,
     trustStatus?: string,
+    fileName?: string,
   ): Promise<void> {
     const { id, name, version } = module.manifest;
 
@@ -428,6 +433,7 @@ class ExtensionManagerImpl {
       trust,
       declaredCapabilities,
       trustStatus,
+      fileName,
     };
     this.extensions.set(id, entry);
 
@@ -579,7 +585,7 @@ class ExtensionManagerImpl {
     // just list it as inactive so it can be re-enabled. Persisted-disable works
     // for sidecar-manifest extensions because the id is known before loading.
     if (this.disabledIds.has(parsed.id)) {
-      this.recordDisabledExtension(parsed, entry.trustStatus);
+      this.recordDisabledExtension(parsed, entry.trustStatus, entry.fileName);
       return;
     }
 
@@ -605,7 +611,7 @@ class ExtensionManagerImpl {
         workerSupport: true,
       });
       if (result.ok && result.extId) {
-        this.recordWorkerExtension(result.extId, result.manifest, displayName, entry.trustStatus);
+        this.recordWorkerExtension(result.extId, result.manifest, displayName, entry.trustStatus, entry.fileName);
         return;
       }
       console.warn(
@@ -614,13 +620,13 @@ class ExtensionManagerImpl {
       );
     }
     // workerSupport:false (or the worker mount failed) -> main thread directly.
-    await this.activateMainThreadExtension(entry.content, displayName, entry.trustStatus);
+    await this.activateMainThreadExtension(entry.content, displayName, entry.trustStatus, entry.fileName);
   }
 
   /** List a disabled distributed extension WITHOUT loading its code, so the
    *  manager UI can show it (with its declared ceiling + signature) and offer to
    *  re-enable it. The ceiling shown is what it WOULD get if trusted + enabled. */
-  private recordDisabledExtension(parsed: SidecarManifest, trustStatus?: string): void {
+  private recordDisabledExtension(parsed: SidecarManifest, trustStatus?: string, fileName?: string): void {
     if (this.extensions.has(parsed.id)) return;
     const declaredCapabilities = computeExtensionCeiling(
       (parsed.capabilities ?? []).filter((c): c is CapabilityId => CAPABILITY_ID_SET.has(c as CapabilityId)),
@@ -638,6 +644,7 @@ class ExtensionManagerImpl {
       declaredCapabilities,
       trustStatus,
       worker: parsed.workerSupport === true,
+      fileName,
     };
     this.extensions.set(parsed.id, entry);
     this.updateCachedArray();
@@ -665,7 +672,8 @@ class ExtensionManagerImpl {
     try {
       const result = await mountWorkerExtension(source, name);
       if (result.ok && result.extId) {
-        this.recordWorkerExtension(result.extId, result.manifest, name);
+        // Legacy path: `name` IS the scan file name (used for uninstall).
+        this.recordWorkerExtension(result.extId, result.manifest, name, undefined, name);
         return;
       }
     } catch (e) {
@@ -674,11 +682,11 @@ class ExtensionManagerImpl {
         e,
       );
     }
-    await this.activateMainThreadExtension(source, name);
+    await this.activateMainThreadExtension(source, name, undefined, name);
   }
 
   /** Import + activate an extension on the MAIN thread (Phase A governance). */
-  private async activateMainThreadExtension(source: string, name: string, trustStatus?: string): Promise<void> {
+  private async activateMainThreadExtension(source: string, name: string, trustStatus?: string, fileName?: string): Promise<void> {
     const blob = new Blob([source], { type: "application/javascript" });
     const blobUrl = URL.createObjectURL(blob);
     try {
@@ -691,7 +699,7 @@ class ExtensionManagerImpl {
         throw new Error(`Extension '${name}' does not export an 'activate' function.`);
       }
       // Third-party bundles are DISTRIBUTED: ceiling-bounded + transparency-tracked.
-      await this.activateExtension(module, "distributed", trustStatus);
+      await this.activateExtension(module, "distributed", trustStatus, fileName);
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
@@ -705,6 +713,7 @@ class ExtensionManagerImpl {
     manifest: WorkerExtensionManifest | undefined,
     fallbackName: string,
     trustStatus?: string,
+    fileName?: string,
   ): void {
     if (this.extensions.has(extId)) return;
     const displayName = manifest?.name || fallbackName;
@@ -725,6 +734,7 @@ class ExtensionManagerImpl {
       declaredCapabilities,
       trustStatus,
       worker: true,
+      fileName,
     };
     this.extensions.set(extId, entry);
     this.updateCachedArray();
@@ -849,6 +859,54 @@ class ExtensionManagerImpl {
   /** Whether an extension is currently disabled (persisted). */
   isDisabled(id: string): boolean {
     return this.disabledIds.has(id);
+  }
+
+  /**
+   * Uninstall a third-party extension: tear it down (if running), delete its
+   * bundle + sidecar files from the extensions directory, and drop it from the
+   * list. Built-ins cannot be uninstalled. Idempotent on the list side even if
+   * the backend delete fails (the error propagates to the caller).
+   */
+  async uninstallExtension(id: string): Promise<void> {
+    const entry = this.extensions.get(id);
+    if (!entry) {
+      console.warn(`[ExtensionManager] Cannot uninstall unknown extension: ${id}`);
+      return;
+    }
+    if (entry.trust === "trusted") {
+      console.warn(`[ExtensionManager] Built-in extension '${id}' cannot be uninstalled.`);
+      return;
+    }
+    if (!entry.fileName) {
+      throw new Error(`Extension '${id}' has no known file on disk to uninstall.`);
+    }
+
+    // Tear down a running extension before deleting its files. deactivateExtension
+    // records status="error" instead of throwing on a teardown failure, so check
+    // it explicitly: deleting the bundle while its command handlers / ribbon tabs /
+    // event subscriptions are still live would leave dangling registrations with no
+    // backing code AND no way to retry (the entry would be gone). Abort instead.
+    if (entry.status === "active") {
+      await this.deactivateExtension(id);
+      if (entry.status === "error") {
+        throw new Error(
+          `Cannot uninstall '${id}': teardown failed (${entry.error?.message ?? "unknown error"}). ` +
+          `Files were left on disk to avoid dangling live registrations — reload and retry.`,
+        );
+      }
+    }
+
+    // Delete the bundle + sidecars on disk (path-traversal-guarded in Rust).
+    await invokeBackend("uninstall_extension", { fileName: entry.fileName });
+
+    // Drop it from the list + any persisted disabled flag.
+    this.extensions.delete(id);
+    if (this.disabledIds.delete(id)) {
+      persistDisabledIds(this.disabledIds);
+    }
+    this.updateCachedArray();
+    this.notifyChange();
+    console.log(`[ExtensionManager] Extension '${id}' uninstalled.`);
   }
 
   /**

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -33,6 +33,13 @@ pub struct PullResult {
     /// Object scripts bundled with the package.
     /// These should be loaded in restricted mode and marked as read-only.
     pub object_scripts: Vec<SavedObjectScript>,
+    /// Standalone module scripts bundled with the package (C8). Inert,
+    /// transparent data: materialized into the workbook on pull but NEVER
+    /// auto-executed — they run only on explicit user action, sandboxed.
+    pub module_scripts: Vec<SavedScript>,
+    /// Standalone notebooks bundled with the package (C8). Inert, transparent
+    /// data like module_scripts; execution metadata was stripped at publish.
+    pub notebooks: Vec<SavedNotebook>,
     /// Data source definitions from the package, with resolved model paths.
     pub data_sources: Vec<PulledDataSource>,
     /// Pivot table definitions from the package.
@@ -210,6 +217,53 @@ pub fn pull(
         }
     }
 
+    // Read standalone module scripts (C8). Behind the same integrity gate as
+    // everything else (the UnlistedArtifact check already rejects any
+    // modules/*.json the publisher did not list). These are materialized as-is
+    // and never auto-executed — no provenance/access-level stamping.
+    let mut pulled_modules: Vec<SavedScript> = Vec::new();
+    for pub_module in &ver_manifest.module_scripts {
+        let modules_dir = registry.modules_dir(&request.package_name, &version_str);
+        let path = modules_dir.join(format!("{}.json", pub_module.id));
+        if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            let def: calcula_format::features::scripts::ScriptDef =
+                serde_json::from_str(&content)?;
+            pulled_modules.push(SavedScript::from(&def));
+        }
+    }
+
+    // Read standalone notebooks (C8). Same integrity gate. Execution metadata is
+    // stripped HERE, defensively, on the bytes actually delivered + signed — not
+    // just at publish. The signature only proves the publisher signed these
+    // bytes; it does NOT prove the bytes are benign. A malicious/compromised
+    // publisher could hand-write notebooks/{id}.json with forged last_output /
+    // last_error / execution_index, sign the manifest, and the subscriber's UI
+    // would render the fabricated output as if it were their own genuine run.
+    // Stripping at pull (mirroring how object scripts are force-normalized to
+    // Restricted/Distributed regardless of on-disk source) makes the run-clean
+    // guarantee hold against the delivered content, upholding the transparency
+    // rule ("the user must not be misled about what they ran").
+    let mut pulled_notebooks: Vec<SavedNotebook> = Vec::new();
+    for pub_notebook in &ver_manifest.notebooks {
+        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str);
+        let path = notebooks_dir.join(format!("{}.json", pub_notebook.id));
+        if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            let def: calcula_format::features::notebooks::NotebookDef =
+                serde_json::from_str(&content)?;
+            let mut nb = SavedNotebook::from(&def);
+            for cell in &mut nb.cells {
+                cell.last_output = Vec::new();
+                cell.last_error = None;
+                cell.cells_modified = 0;
+                cell.duration_ms = 0;
+                cell.execution_index = None;
+            }
+            pulled_notebooks.push(nb);
+        }
+    }
+
     // Build subscription metadata
     let subscribed_sheets: Vec<SubscribedSheet> = pulled_sheets.iter().map(|ps| {
         SubscribedSheet {
@@ -291,6 +345,8 @@ pub fn pull(
         tables: pulled_tables,
         subscription,
         object_scripts: pulled_scripts,
+        module_scripts: pulled_modules,
+        notebooks: pulled_notebooks,
         data_sources: pulled_data_sources,
         pivot_definitions: pulled_pivot_defs,
         bi_pivot_metadata,
@@ -335,6 +391,8 @@ mod tests {
             published_by: "tester".to_string(),
             writeback_regions: None,
             object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
         };
@@ -416,6 +474,8 @@ mod tests {
                 published_by: "tester".to_string(),
                 writeback_regions: None,
                 object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
             };
@@ -642,6 +702,216 @@ mod tests {
         let original_cell_count = original_wb.sheets[0].cells.len();
         let pulled_cell_count = result.sheets[0].sheet.cells.len();
         assert_eq!(pulled_cell_count, original_cell_count);
+    }
+
+    // --- C8: standalone module scripts + notebooks ---
+
+    #[test]
+    fn pull_materializes_modules_and_notebooks_with_stripped_exec_metadata() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        // A workbook carrying one module script and one notebook whose cell
+        // has non-trivial execution metadata that MUST be stripped on publish.
+        let mut wb = make_test_workbook();
+        wb.scripts = vec![SavedScript {
+            id: "mod-1".to_string(),
+            name: "Helper".to_string(),
+            description: Some("a helper module".to_string()),
+            source: "export function add(a, b) { return a + b; }".to_string(),
+            scope: persistence::SavedScriptScope::Sheet { name: "Data".to_string() },
+        }];
+        wb.notebooks = vec![SavedNotebook {
+            id: "nb-1".to_string(),
+            name: "Analysis".to_string(),
+            cells: vec![persistence::SavedNotebookCell {
+                id: "cell-1".to_string(),
+                source: "1 + 1".to_string(),
+                // Runtime artifacts that must NOT leak into the package.
+                last_output: vec!["2".to_string(), "cached".to_string()],
+                last_error: Some("stale error".to_string()),
+                cells_modified: 7,
+                duration_ms: 123,
+                execution_index: Some(3),
+            }],
+        }];
+
+        let request = PublishRequest {
+            workbook: &wb,
+            package_name: "c8-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None, // None => all from the workbook
+            notebooks: None,      // None => all from the workbook
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        let pub_result = publish::publish(&reg, &request, prof.path()).unwrap();
+        assert_eq!(pub_result.modules_published, 1);
+        assert_eq!(pub_result.notebooks_published, 1);
+
+        // The manifest lists both, and the on-disk artifacts are covered by the
+        // integrity checksum walk (they were written before the manifest).
+        let ver = reg.get_version_manifest("c8-pkg", "1.0.0").unwrap();
+        assert_eq!(ver.module_scripts.len(), 1);
+        assert_eq!(ver.module_scripts[0].id, "mod-1");
+        assert_eq!(ver.module_scripts[0].scope, "sheet:Data");
+        assert_eq!(ver.notebooks.len(), 1);
+        assert_eq!(ver.notebooks[0].id, "nb-1");
+        assert_eq!(ver.notebooks[0].cell_count, 1);
+        assert!(ver.artifact_checksums.contains_key("modules/mod-1.json"));
+        assert!(ver.artifact_checksums.contains_key("notebooks/nb-1.json"));
+
+        // Pull and assert content round-trips (and passes the integrity gate).
+        let pull_req = PullRequest {
+            package_name: "c8-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.module_scripts.len(), 1);
+        let m = &result.module_scripts[0];
+        assert_eq!(m.id, "mod-1");
+        assert_eq!(m.name, "Helper");
+        assert_eq!(m.description.as_deref(), Some("a helper module"));
+        assert_eq!(m.source, "export function add(a, b) { return a + b; }");
+        assert!(matches!(
+            &m.scope,
+            persistence::SavedScriptScope::Sheet { name } if name == "Data"
+        ));
+
+        assert_eq!(result.notebooks.len(), 1);
+        let nb = &result.notebooks[0];
+        assert_eq!(nb.id, "nb-1");
+        assert_eq!(nb.name, "Analysis");
+        assert_eq!(nb.cells.len(), 1);
+        let cell = &nb.cells[0];
+        assert_eq!(cell.id, "cell-1");
+        assert_eq!(cell.source, "1 + 1");
+        // Execution metadata MUST have been stripped at publish time.
+        assert!(cell.last_output.is_empty(), "last_output should be stripped");
+        assert!(cell.last_error.is_none(), "last_error should be stripped");
+        assert_eq!(cell.cells_modified, 0, "cells_modified should be stripped");
+        assert_eq!(cell.duration_ms, 0, "duration_ms should be stripped");
+        assert!(cell.execution_index.is_none(), "execution_index should be stripped");
+    }
+
+    #[test]
+    fn pull_with_no_modules_or_notebooks_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        // The base workbook has no module scripts / notebooks; the manifest
+        // omits the (empty) fields on the wire and pull returns empty vecs.
+        let ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
+        assert!(ver.module_scripts.is_empty());
+        assert!(ver.notebooks.is_empty());
+
+        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        assert!(result.module_scripts.is_empty());
+        assert!(result.notebooks.is_empty());
+    }
+
+    /// A malicious/compromised publisher controls the notebook bytes AND signs
+    /// the manifest, so a hand-forged notebook with populated execution output
+    /// passes the Ed25519 signature + SHA-256 integrity gates. The pull-time
+    /// strip must still neutralize it so the subscriber is never shown fabricated
+    /// "execution output" as if it were their own genuine run.
+    #[test]
+    fn pull_strips_forged_notebook_exec_metadata_from_a_signed_malicious_package() {
+        use calcula_format::features::notebooks::{NotebookCellDef, NotebookDef};
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        // Publish a package carrying one (clean) notebook.
+        let mut wb = make_test_workbook();
+        wb.notebooks = vec![SavedNotebook {
+            id: "nb-evil".to_string(),
+            name: "Report".to_string(),
+            cells: vec![persistence::SavedNotebookCell {
+                id: "c1".to_string(),
+                source: "1 + 1".to_string(),
+                last_output: Vec::new(),
+                last_error: None,
+                cells_modified: 0,
+                duration_ms: 0,
+                execution_index: None,
+            }],
+        }];
+        let request = PublishRequest {
+            workbook: &wb,
+            package_name: "evil-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "attacker".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish::publish(&reg, &request, prof.path()).unwrap();
+
+        // Forge the on-disk notebook: populate cached output + an execution_index
+        // (which would make the cell render as a genuine "executed" cell), then
+        // recompute the checksum and re-sign the manifest — a publisher with the
+        // signing key can do all of this.
+        let ver_dir = reg.version_dir("evil-pkg", "1.0.0");
+        let forged = NotebookDef {
+            id: "nb-evil".to_string(),
+            name: "Report".to_string(),
+            cells: vec![NotebookCellDef {
+                id: "c1".to_string(),
+                source: "1 + 1".to_string(),
+                last_output: vec!["All checks passed".to_string()],
+                last_error: Some("phishing".to_string()),
+                cells_modified: 9,
+                duration_ms: 42,
+                execution_index: Some(7),
+            }],
+        };
+        fs::write(
+            ver_dir.join("notebooks").join("nb-evil.json"),
+            serde_json::to_string_pretty(&forged).unwrap(),
+        )
+        .unwrap();
+        let mut manifest = reg.get_version_manifest("evil-pkg", "1.0.0").unwrap();
+        manifest.artifact_checksums = crate::integrity::compute_artifact_checksums(&ver_dir).unwrap();
+        reg.write_version_manifest("evil-pkg", "1.0.0", &manifest).unwrap();
+        resign_manifest(&reg, prof.path(), "evil-pkg", "1.0.0");
+
+        // The pull passes the (now-consistent) gates, but the forged metadata is
+        // stripped defensively at pull.
+        let pull_req = PullRequest {
+            package_name: "evil-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.notebooks.len(), 1);
+        let cell = &result.notebooks[0].cells[0];
+        assert_eq!(cell.source, "1 + 1", "the real payload (source) must survive");
+        assert!(cell.last_output.is_empty(), "forged last_output must be stripped at pull");
+        assert!(cell.last_error.is_none(), "forged last_error must be stripped at pull");
+        assert_eq!(cell.cells_modified, 0);
+        assert_eq!(cell.duration_ms, 0);
+        assert!(cell.execution_index.is_none(), "forged execution_index must be stripped at pull");
     }
 
     // --- Signature + TOFU tests (S5 phase 2) ---

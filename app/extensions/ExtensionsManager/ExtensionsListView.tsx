@@ -87,6 +87,8 @@ export function ExtensionsListView(_props: ActivityViewProps): React.ReactElemen
 function ExtensionItem({ extension }: { extension: LoadedExtension }): React.ReactElement {
   const [isHovered, setIsHovered] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirmingUninstall, setConfirmingUninstall] = useState(false);
+  const [uninstallError, setUninstallError] = useState<string | null>(null);
   const statusColor = STATUS_COLORS[extension.status];
 
   const isBuiltIn = extension.trust === "trusted";
@@ -95,6 +97,7 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
   const pendingReload = !isBuiltIn && !isDisabled && extension.status === "inactive";
   const signature = extension.trustStatus ? SIGNATURE_BADGES[extension.trustStatus] : undefined;
   const caps = extension.declaredCapabilities ?? [];
+  const canUninstall = !isBuiltIn && !!extension.fileName;
 
   const toggle = useCallback(async () => {
     setBusy(true);
@@ -104,6 +107,19 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
       setBusy(false);
     }
   }, [extension.id, isDisabled]);
+
+  const uninstall = useCallback(async () => {
+    setBusy(true);
+    setUninstallError(null);
+    try {
+      await ExtensionManager.uninstallExtension(extension.id);
+      // On success the entry disappears from the list (no further state needed).
+    } catch (e) {
+      setUninstallError(e instanceof Error ? e.message : String(e));
+      setConfirmingUninstall(false);
+      setBusy(false);
+    }
+  }, [extension.id]);
 
   return (
     <div
@@ -170,20 +186,59 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
         <div style={styles.itemError}>{extension.error.message}</div>
       )}
 
+      {uninstallError && (
+        <div style={styles.itemError}>Uninstall failed: {uninstallError}</div>
+      )}
+
       {/* Actions (third-party only) */}
       {!isBuiltIn && (
         <div style={styles.actionRow}>
-          {pendingReload && (
+          {pendingReload && !confirmingUninstall && (
             <span style={styles.reloadHint}>Reload to apply</span>
           )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={toggle}
-            style={{ ...styles.actionButton, ...(isDisabled ? styles.enableButton : styles.disableButton) }}
-          >
-            {isDisabled ? "Enable" : "Disable"}
-          </button>
+          {confirmingUninstall ? (
+            <>
+              <span style={styles.confirmHint}>Remove permanently?</span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmingUninstall(false)}
+                style={{ ...styles.actionButton, ...styles.disableButton }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={uninstall}
+                style={{ ...styles.actionButton, ...styles.uninstallButton }}
+              >
+                Remove
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={toggle}
+                style={{ ...styles.actionButton, ...(isDisabled ? styles.enableButton : styles.disableButton) }}
+              >
+                {isDisabled ? "Enable" : "Disable"}
+              </button>
+              {canUninstall && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => { setUninstallError(null); setConfirmingUninstall(true); }}
+                  style={{ ...styles.actionButton, ...styles.disableButton }}
+                  title="Delete this extension's files from disk"
+                >
+                  Uninstall
+                </button>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -333,6 +388,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 10,
     color: "#b06000",
     fontStyle: "italic" as const,
+  },
+  confirmHint: {
+    fontSize: 11,
+    color: "#c5221f",
+    fontWeight: 500,
+  },
+  uninstallButton: {
+    backgroundColor: "#c5221f",
+    color: "#fff",
   },
   actionButton: {
     fontSize: 11,
