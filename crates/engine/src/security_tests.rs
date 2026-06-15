@@ -879,6 +879,545 @@ fn builder_rejects_bad_role_name() {
     );
 }
 
+// --- Multi-role union (a row is visible if ANY active role permits it) ---
+
+/// A three-region star schema with one role per region, for union tests.
+/// Sales(geo, cat, amount): West/Bikes 100, East/Helmets 60, North/Bikes 25,
+/// West/Helmets 30, North/Helmets 15. Region totals: West 130, East 60,
+/// North 40 (grand 230). West∪East = 190.
+fn union_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("geo_id", DataType::Int64),
+                    Column::new("cat_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Geography",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Category",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Geo",
+            "Sales",
+            "geo_id",
+            "Geography",
+            "id",
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Cat",
+            "Sales",
+            "cat_id",
+            "Category",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(SecurityRole::new("WestOnly").with_filter(
+            "Geography",
+            "region",
+            ComparisonOp::Equal,
+            "West",
+        ))
+        .add_security_role(SecurityRole::new("EastOnly").with_filter(
+            "Geography",
+            "region",
+            ComparisonOp::Equal,
+            "East",
+        ))
+        .add_security_role(SecurityRole::new("NorthOnly").with_filter(
+            "Geography",
+            "region",
+            ComparisonOp::Equal,
+            "North",
+        ))
+        .build()
+        .unwrap();
+
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Geography", 0, SourceBinding::new("public", "geography"));
+    engine.bind_table("Category", 0, SourceBinding::new("public", "category"));
+    let sales = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("geo_id", ArrowType::Int64, true),
+            Field::new("cat_id", ArrowType::Int64, true),
+            Field::new("amount", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 1, 3])),
+            Arc::new(Int64Array::from(vec![10, 20, 10, 20, 20])),
+            Arc::new(Float64Array::from(vec![100.0, 60.0, 25.0, 30.0, 15.0])),
+        ],
+    )
+    .unwrap();
+    let geo = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", ArrowType::Int64, true),
+            Field::new("region", ArrowType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["West", "East", "North"])),
+        ],
+    )
+    .unwrap();
+    let cat = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", ArrowType::Int64, true),
+            Field::new("name", ArrowType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![10, 20])),
+            Arc::new(StringArray::from(vec!["Bikes", "Helmets"])),
+        ],
+    )
+    .unwrap();
+    engine.cache.store("Sales", sales).unwrap();
+    engine.cache.store("Geography", geo).unwrap();
+    engine.cache.store("Category", cat).unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn multi_role_union_includes_both_regions_excludes_third() {
+    // HEADLINE: WestOnly ∪ EastOnly restricts the fact to West+East rows
+    // (190) even though Geography is in neither group_by nor filters. North
+    // (40) is excluded; the grand total (230) must never appear.
+    let mut engine = union_engine();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    assert_eq!(engine.active_roles().len(), 2);
+
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        (scalar(&batches, "Revenue") - 190.0).abs() < 1e-9,
+        "West∪East = 190, never 230 (grand) or 130 (West alone); got {}",
+        scalar(&batches, "Revenue")
+    );
+}
+
+#[tokio::test]
+async fn single_role_via_set_active_roles_matches_single_role() {
+    // A one-element role set behaves exactly like the legacy single role.
+    let mut engine = union_engine();
+    engine.set_active_roles(vec!["WestOnly".into()]);
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!((scalar(&batches, "Revenue") - 130.0).abs() < 1e-9);
+    assert_eq!(engine.active_role(), Some("WestOnly"));
+}
+
+#[tokio::test]
+async fn multi_role_union_composes_with_group_by_on_another_dimension() {
+    // West∪East, grouped by Category. Bikes: West 100 (North 25 excluded) =
+    // 100. Helmets: East 60 + West 30 (North 15 excluded) = 90.
+    let mut engine = union_engine();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    let by_cat = grouped(
+        &engine
+            .query(QueryRequest {
+                measures: vec!["Revenue".into()],
+                group_by: vec![ColumnRef::new("Category", "name")],
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        "name",
+        "Revenue",
+    );
+    assert!((by_cat["Bikes"] - 100.0).abs() < 1e-9, "Bikes: {by_cat:?}");
+    assert!((by_cat["Helmets"] - 90.0).abs() < 1e-9, "Helmets: {by_cat:?}");
+}
+
+#[tokio::test]
+async fn multi_role_union_cache_isolation() {
+    // The union has its own cache identity, distinct from any single role and
+    // from no role: switching among them never serves another's cached result.
+    let mut engine = union_engine();
+    engine.set_query_cache_config(QueryCacheConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let request = || QueryRequest {
+        measures: vec!["Revenue".into()],
+        ..Default::default()
+    };
+
+    engine.set_active_roles(vec!["WestOnly".into()]);
+    assert!((scalar(&engine.query(request()).await.unwrap(), "Revenue") - 130.0).abs() < 1e-9);
+
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    let union = scalar(&engine.query(request()).await.unwrap(), "Revenue");
+    assert!(
+        (union - 190.0).abs() < 1e-9,
+        "union must not serve the West-only cache; got {union}"
+    );
+
+    // Role-set ORDER must not matter (the key is canonicalized): East∪West is
+    // the same identity as West∪East — still 190, still cached.
+    engine.set_active_roles(vec!["EastOnly".into(), "WestOnly".into()]);
+    let reordered = scalar(&engine.query(request()).await.unwrap(), "Revenue");
+    assert!((reordered - 190.0).abs() < 1e-9, "got {reordered}");
+
+    engine.set_active_roles(vec![]);
+    assert!((scalar(&engine.query(request()).await.unwrap(), "Revenue") - 230.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn multi_role_union_on_fact_column_combines_predicates() {
+    // Roles that filter the FACT directly (Sales.region) union by OR on the
+    // fact. region IN effect = West OR East → 100 + 60 + 30 = 190 (North 40
+    // excluded), with no dimension hop involved.
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("region", DataType::String),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(SecurityRole::new("WestOnly").with_filter(
+            "Sales",
+            "region",
+            ComparisonOp::Equal,
+            "West",
+        ))
+        .add_security_role(SecurityRole::new("EastOnly").with_filter(
+            "Sales",
+            "region",
+            ComparisonOp::Equal,
+            "East",
+        ))
+        .build()
+        .unwrap();
+
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    let sales = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("region", ArrowType::Utf8, true),
+            Field::new("amount", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec![
+                "West", "East", "North", "West", "North",
+            ])),
+            Arc::new(Float64Array::from(vec![100.0, 60.0, 25.0, 30.0, 15.0])),
+        ],
+    )
+    .unwrap();
+    engine.cache.store("Sales", sales).unwrap();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        (scalar(&batches, "Revenue") - 190.0).abs() < 1e-9,
+        "West∪East on the fact = 190; got {}",
+        scalar(&batches, "Revenue")
+    );
+}
+
+#[tokio::test]
+async fn multi_role_union_across_tables_fails_closed() {
+    // WestOnly filters Geography; a role filtering Category targets a DIFFERENT
+    // table. The union is not a single-table OR slicer → refuse rather than
+    // run with an unenforceable (potentially under-restricted) shape.
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("geo_id", DataType::Int64),
+                    Column::new("cat_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Geography",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Category",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Geo",
+            "Sales",
+            "geo_id",
+            "Geography",
+            "id",
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Cat",
+            "Sales",
+            "cat_id",
+            "Category",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(SecurityRole::new("WestOnly").with_filter(
+            "Geography",
+            "region",
+            ComparisonOp::Equal,
+            "West",
+        ))
+        .add_security_role(SecurityRole::new("BikesOnly").with_filter(
+            "Category",
+            "name",
+            ComparisonOp::Equal,
+            "Bikes",
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Geography", 0, SourceBinding::new("public", "geography"));
+    engine.bind_table("Category", 0, SourceBinding::new("public", "category"));
+    engine.cache.store("Sales", sales_batch()).unwrap();
+    engine.cache.store("Geography", geo_batch()).unwrap();
+    engine.cache.store("Category", cat_batch()).unwrap();
+    engine.set_active_roles(vec!["WestOnly".into(), "BikesOnly".into()]);
+
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("same table"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn multi_role_union_multi_predicate_role_fails_closed() {
+    // A role with TWO predicates is not a single OR-term; pairing it with
+    // another active role must fail closed (the AND-of-predicates union is not
+    // a flat single-table OR).
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("region", DataType::String),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(
+            SecurityRole::new("WestBig")
+                .with_filter("Sales", "region", ComparisonOp::Equal, "West")
+                .with_filter("Sales", "amount", ComparisonOp::GreaterThan, "50"),
+        )
+        .add_security_role(SecurityRole::new("EastOnly").with_filter(
+            "Sales",
+            "region",
+            ComparisonOp::Equal,
+            "East",
+        ))
+        .build()
+        .unwrap();
+
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    let sales = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("region", ArrowType::Utf8, true),
+            Field::new("amount", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["West", "East"])),
+            Arc::new(Float64Array::from(vec![100.0, 60.0])),
+        ],
+    )
+    .unwrap();
+    engine.cache.store("Sales", sales).unwrap();
+    engine.set_active_roles(vec!["WestBig".into(), "EastOnly".into()]);
+
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("one predicate per role"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn multi_role_union_unenforceable_dimension_fails_closed() {
+    // Two roles on a dimension reachable only through a NON-EQUI many-to-many
+    // relationship: the enforceability probe (single-role plan) refuses, so the
+    // union refuses too — never an under-restricted fact.
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("order_day", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Periods",
+                vec![
+                    Column::new("start_day", DataType::Int64),
+                    Column::new("end_day", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::with_conditions(
+            "Sales_Periods",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("order_day", "start_day", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("order_day", "end_day", JoinOperator::LessThanOrEqual),
+            ],
+            Cardinality::ManyToMany,
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(SecurityRole::new("WestOnly").with_filter(
+            "Periods",
+            "region",
+            ComparisonOp::Equal,
+            "West",
+        ))
+        .add_security_role(SecurityRole::new("EastOnly").with_filter(
+            "Periods",
+            "region",
+            ComparisonOp::Equal,
+            "East",
+        ))
+        .build()
+        .unwrap();
+
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Periods", 0, SourceBinding::new("public", "periods"));
+    let sales = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("order_day", ArrowType::Int64, true),
+            Field::new("amount", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+        ],
+    )
+    .unwrap();
+    engine.cache.store("Sales", sales).unwrap();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    match err {
+        QueryError::Engine(EngineError::RowLevelSecurityNotEnforceable { table, .. }) => {
+            assert_eq!(table, "Periods");
+        }
+        other => panic!("expected RowLevelSecurityNotEnforceable, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multi_role_rejected_on_drillthrough_path() {
+    // Drillthrough (query_rows) does not implement the union rewrite; under
+    // multiple active roles it must fail closed, never emit unrestricted rows.
+    use crate::DetailRequest;
+    let mut engine = union_engine();
+    engine.set_active_roles(vec!["WestOnly".into(), "EastOnly".into()]);
+    let err = engine
+        .query_rows(DetailRequest::new("Sales", 10))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::InvalidQuery(ref m) if m.contains("single active role")),
+        "got {err:?}"
+    );
+}
+
 // --- Active-role cache invalidation ---
 
 #[test]

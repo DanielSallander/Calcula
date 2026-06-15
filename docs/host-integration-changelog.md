@@ -16,7 +16,7 @@ It is the authoritative hand-off surface between the engine and its hosts. It is
 The shared model file carries a `format_version: u32` field (serde key `format_version`, defaults to `0` for legacy files). The engine's current maximum is:
 
 ```rust
-pub const MODEL_FORMAT_VERSION: u32 = 7; // engine-core::model::schema
+pub const MODEL_FORMAT_VERSION: u32 = 8; // engine-core::model::schema
 ```
 
 Opening a model whose `format_version` is **higher** than the engine supports fails closed with:
@@ -88,7 +88,28 @@ QueryRequest {
 
 `InFilter { column, values: Vec<String> }` (builder `InFilter::new(column, values)`). The filter applies to whichever table owns `column` (matched by name), is **pushed to the source**, and ANDs with the scalar `filters`. A slicer on a dimension column restricts the related fact through relationship propagation — including a dimension that is **not** on the group-by axis (slice by Region, group by Product). Integer columns compare numerically (sargable); other types as escaped/quoted text. An **empty** `values` list matches nothing (an empty result), never everything. No model-file or `MODEL_FORMAT_VERSION` change (request-time only).
 
-> v1: IN-list (multi-select on one column) and AND-combined with scalar filters. Cross-column boolean OR (`Region = East OR Category = Bikes`) is a separate, deferred increment.
+> IN-list = multi-select on one column, AND-combined with scalar filters. Cross-column boolean OR is the separate `or_filters` field below.
+
+## Cross-column OR slicers
+
+`QueryRequest` gained `or_filters: Vec<FilterCondition>` — a disjunction (`OR`) of single-column conditions, ANDed with the rest of the request. It expresses the slicer shape `in_filters` cannot: a boolean OR **across columns** (`amount > 90 OR region_id = 1`):
+
+```rust
+QueryRequest {
+    measures: vec!["Revenue".into()],
+    group_by: vec![ColumnRef::new("Product", "name")],
+    or_filters: vec![
+        FilterCondition { column: "amount".into(),    operator: FilterOperator::GreaterThan, value: "90".into() },
+        FilterCondition { column: "region_id".into(), operator: FilterOperator::Equal,       value: "1".into() },
+    ],
+    ..Default::default()
+}
+// → rows where amount > 90 OR region_id = 1
+```
+
+The conditions OR together; the whole disjunction ANDs with the scalar `filters` and any `in_filters`. Every condition is **pushed to the source** (rendered as `((cond) OR (cond) …)`). Like a slicer, an OR over a **dimension** column restricts the related fact through relationship propagation, even when that dimension is off the group-by axis.
+
+**Single-table only (fail closed):** every `or_filters` column must resolve to **one** table (the per-table fetch can push a single `OR` group). Conditions spanning different tables are rejected with `QueryError::InvalidQuery` ("must reference columns of a single table") rather than executed with a wrong scope. No model-file or `MODEL_FORMAT_VERSION` change (request-time only).
 
 ## Measure-value filters (HAVING)
 
@@ -177,6 +198,7 @@ The parser accepts these built-ins (case-insensitive):
 | `PRIORYEAR(expr)` | Same window, shifted back one calendar year. |
 | `SAMEPERIODLASTYEAR(expr)` | Synonym of `PRIORYEAR` (whole-window shift). |
 | `PRIORPERIOD(expr, offset, "YEAR"\|"QUARTER"\|"MONTH")` | Generic period shift; negative `offset` = earlier. |
+| `PARALLELPERIOD(expr, offset, "YEAR"\|"QUARTER"\|"MONTH")` | Synonym of `PRIORPERIOD`: the whole window shifted by `offset` periods of the given granularity (for a single-period context this equals the parallel prior/next period). |
 | `DATESINPERIOD(expr, intervals, "YEAR"\|"QUARTER"\|"MONTH")` | Trailing window of \|intervals\| periods ending at the as-of date (e.g. `-12, MONTH` = trailing 12 months). `intervals` must be **negative**. **Filter-context only** — fails closed with a date column on the axis. |
 
 These lower to the expression AST variants `Expression::ToDate { expr, granularity }` and `Expression::PeriodShift { expr, offset, granularity }` (with `DateGranularity::{Year,Quarter,Month}`).
@@ -212,7 +234,9 @@ DIVIDE(YTD(SUM(...)) - PRIORYEAR(SUM(...)), PRIORYEAR(SUM(...)))   // YoY %
 
 Supported combinators: `+ - * /`, `DIVIDE`, `IF`, `COALESCE`, `IFERROR` over time-intelligence terms and numeric constants. The engine evaluates each time-intelligence term, joins them on the group-by axis, and applies the arithmetic. A compound that mixes a time-intelligence term with a **bare aggregate** (`YTD(...) - SUM(...)`), or that is wrapped in an **outer** `KEEP`/context op, fails closed (`QueryError::InvalidQuery`) — apply context *inside* each term, or compute the bare aggregate as a separate measure.
 
-> **Known limitations (deferred):** in **axis mode**, an outer `KEEP` around a single window measure now applies (a non-date filter restricts the running total); a `KEEP` around a *compound* one fails closed. Fiscal calendars (non-Gregorian date tables) fail closed on the filter-context path. `PARALLELPERIOD`/`DATESINPERIOD`, opening/closing balances, value-based (gap-tolerant) period shifts, and totals×time-intel / hierarchy×time-intel composition remain deferred (they error rather than mislead).
+**Period shift at any granularity (filter-context):** a `PRIORPERIOD`/`PARALLELPERIOD` shift in filter-context mode now lowers at **any** granularity (year, quarter, **and month**), not just year — the as-of window is shifted by `offset × months-per-period` calendar months. Previously a non-year filter-context shift was rejected.
+
+> **Known limitations (deferred):** in **axis mode**, an outer `KEEP` around a single window measure now applies (a non-date filter restricts the running total); a `KEEP` around a *compound* one fails closed. Fiscal calendars (non-Gregorian date tables) fail closed on the filter-context path. Opening/closing balances, value-based (gap-tolerant) period shifts, and totals×time-intel / hierarchy×time-intel composition remain deferred (they error rather than mislead).
 
 ---
 
@@ -236,9 +260,23 @@ SecurityRole::new(name)
 | Method | Signature | Notes |
 |---|---|---|
 | `set_active_role` | `(&mut self, role: Option<String>)` | Host calls **after** authenticating the user. `None` = unrestricted. Changing the role invalidates the query cache. |
-| `active_role` | `(&self) -> Option<&str>` | |
+| `set_active_roles` | `(&mut self, roles: Vec<String>)` | Activate a **set** of roles whose permitted rows **union** (a row is visible if any active role permits it). Empty = unrestricted; one element ≡ `set_active_role(Some(_))`. Changing the set invalidates the query cache. |
+| `active_role` | `(&self) -> Option<&str>` | The first active role (or `None`). |
+| `active_roles` | `(&self) -> &[String]` | All active roles. |
 
-A non-existent role name is **not** rejected by `set_active_role` — it is caught at query time so a typo can never silently degrade into an unrestricted query.
+A non-existent role name is **not** rejected by `set_active_role(s)` — it is caught at query time so a typo can never silently degrade into an unrestricted query.
+
+#### Multi-role union (a row is visible if **any** active role permits it)
+
+When two or more roles are active, `query`/`query_with_cancellation` combine them with Power BI's union semantics. v1 supports the union when **every active role restricts the same table with exactly one predicate** — the engine rewrites the set into a sealed single-table `OR` slicer that rides the same enforceable single-hop propagation as a single role. Cross-role isolation is preserved: the canonicalized (order-independent) role set is part of the query-cache key.
+
+Shapes that are **not** a flat single-table disjunction **fail closed** (`QueryError::InvalidQuery`), never under-restrict:
+- roles filtering **different** tables ("requires all active roles to filter the same table");
+- a role with **more than one** predicate ("supports one predicate per role");
+- a table that is not enforceable for this query (refused with `RowLevelSecurityNotEnforceable`, same gate as single-role);
+- combining multi-role with a calculation group or a user `or_filters` (rejected).
+
+Multi-role union is wired only through the aggregate `query` path. The other query paths — `query_auto_refresh`, `query_explained`, and drillthrough `query_rows` — **fail closed under multiple active roles** ("this path requires a single active role") rather than run with no restriction. Activate a single role for those paths.
 
 ### Error variants
 
@@ -249,7 +287,7 @@ EngineError::RowLevelSecurityNotEnforceable { table, reason }
 //  '{table}' in this query: {reason}"
 ```
 
-**Enforcement model (v1):** a single active role; static AND-combined predicates; enforcement only through **single-hop, single-column, active, equi** relationships. If a role-filtered table is reachable from a queried fact but **not** via such a relationship, the query is refused (`RowLevelSecurityNotEnforceable`) rather than left unrestricted — the engine fails closed. The role identity is folded into the query-cache key so results never leak across roles.
+**Enforcement model (v1):** a single active role, or a union of roles under the constraint above; static AND-combined predicates within a role; enforcement only through **single-hop, single-column, active, equi** relationships. If a role-filtered table is reachable from a queried fact but **not** via such a relationship, the query is refused (`RowLevelSecurityNotEnforceable`) rather than left unrestricted — the engine fails closed. The (canonicalized) active-role identity is folded into the query-cache key so results never leak across roles or role sets.
 
 > **Honesty note for hosts:** RLS in an embedded, client-side library is **advisory** against a cooperative host — it prevents a role from *seeing* rows through the engine, not from bypassing the engine and reading the source directly. Document it as such to end users.
 

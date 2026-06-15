@@ -472,6 +472,15 @@ pub struct QueryRequest {
     /// (`column IN (...)`). Applied at fetch time and pushed to the source.
     /// Empty (default) applies no IN slicer. See [`InFilter`].
     pub in_filters: Vec<InFilter>,
+    /// A cross-column **OR** slicer: keep rows matching **any** of these
+    /// conditions, ANDed with [`filters`](Self::filters).
+    ///
+    /// E.g. `[status = 'open', priority > 5]` keeps rows where `status = 'open'
+    /// OR priority > 5`. All conditions must reference columns of a **single**
+    /// table (the fact, or one dimension whose match restricts the fact);
+    /// conditions spanning different tables fail closed. Empty (default) applies
+    /// no OR slicer.
+    pub or_filters: Vec<FilterCondition>,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /

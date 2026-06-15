@@ -235,6 +235,15 @@ pub struct FetchRequest {
     /// Each entry produces a `column IN (v1, v2, ...)` clause. Used for
     /// relationship-based filter propagation from dimension tables.
     pub in_filters: Vec<InFilterCondition>,
+    /// A disjunctive (OR) restriction in DNF, ANDed with `filters`/`in_filters`.
+    ///
+    /// The outer `Vec` is OR-combined; each inner `Vec` is an AND-group of
+    /// conditions: `(g1c1 AND g1c2) OR (g2c1) OR ...`. Used for cross-column OR
+    /// slicers and multi-role row-level-security union (one role per group).
+    /// All conditions reference columns of this fetch's table. Empty (the
+    /// default) adds nothing; an empty AND-group matches everything, so if any
+    /// group is empty the whole OR is omitted (no restriction).
+    pub or_groups: Vec<Vec<FilterCondition>>,
     /// Maximum number of rows to return.
     pub limit: Option<usize>,
     /// Columns to group by. When non-empty, `aggregates` must also be non-empty.

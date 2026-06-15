@@ -1632,6 +1632,46 @@ async fn dates_in_period_on_axis_fails_closed() {
 }
 
 #[tokio::test]
+async fn parallelperiod_shifts_filter_context_window_back_one_month() {
+    // Context filtered to June 2024 (single month). PARALLELPERIOD(-1, MONTH)
+    // shifts the window back one month → May 2024 = 3 * 5 = 15.
+    let v = run(
+        "PARALLELPERIOD(SUM(fact_sales[amount]), -1, MONTH)",
+        true,
+        request_with_filters(
+            &[],
+            &[
+                ("year", FilterOperator::Equal, "2024"),
+                ("month", FilterOperator::Equal, "6"),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(15.0));
+}
+
+#[tokio::test]
+async fn parallelperiod_shifts_filter_context_window_back_one_quarter() {
+    // Context filtered to Q2 2024 (months 4–6). PARALLELPERIOD(-1, QUARTER)
+    // shifts the window back one quarter → Q1 2024 = 3 * (1+2+3) = 18.
+    let v = run(
+        "PARALLELPERIOD(SUM(fact_sales[amount]), -1, QUARTER)",
+        true,
+        request_with_filters(
+            &[],
+            &[
+                ("year", FilterOperator::Equal, "2024"),
+                ("quarter", FilterOperator::Equal, "2"),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(18.0));
+}
+
+#[tokio::test]
 async fn dates_in_period_positive_interval_fails_closed() {
     let err = run(
         "DATESINPERIOD(SUM(fact_sales[amount]), 12, MONTH)",

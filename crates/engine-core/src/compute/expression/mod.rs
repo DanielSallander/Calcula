@@ -567,12 +567,21 @@ pub enum Expression {
         granularity: DateGranularity,
     },
 
-    /// Time-intelligence period shift: `PRIORYEAR` / `PRIORPERIOD`.
+    /// Time-intelligence period shift: `PRIORYEAR` / `PRIORPERIOD` /
+    /// `PARALLELPERIOD`.
     ///
     /// ```text
     /// PRIORYEAR(SUM(fact[amount]))          // PeriodShift(-1, Year)
     /// PRIORPERIOD(SUM(fact[amount]), -2, "QUARTER")
+    /// PARALLELPERIOD(SUM(fact[amount]), -1, "MONTH")
     /// ```
+    ///
+    /// In the **filter-context** path (no date column on the axis) this shifts
+    /// the whole current date window back `offset` periods (Year/Quarter/Month);
+    /// for a context spanning exactly one period that equals "the prior period".
+    /// `PARALLELPERIOD` is a synonym that makes the whole-window-shift intent
+    /// explicit. (DAX `DATEADD` is the scalar single-date function here, not this
+    /// node.)
     ///
     /// Query-axis semantics (v1): lowered to an [`Expression::Offset`]
     /// (SQL `LAG`/`LEAD`) along the date table's anchor columns present in

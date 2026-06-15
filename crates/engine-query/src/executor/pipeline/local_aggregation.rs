@@ -27,7 +27,10 @@ use crate::registry::SourceRegistry;
 use crate::request::{ColumnRef, OrderByClause, OrderTarget, TotalsMode};
 
 use super::bidirectional::{compute_bidirectional_filters, filter_batches_by_in_values};
-use super::fetch::{extract_column_values, filter_cached_batch, register_partitioned_table};
+use super::fetch::{
+    extract_column_values, filter_cached_batch, filter_cached_batch_or_groups,
+    register_partitioned_table,
+};
 use super::hierarchy::{apply_hide_members_filter, hierarchy_display_sql, hierarchy_unsupported};
 use super::measures::partition_measures_by_table;
 use super::order_limit::{
@@ -319,6 +322,14 @@ impl QueryExecutor {
                         &in_filter.values,
                     )?;
                 }
+                // Apply a cross-column OR restriction (DNF) on this cached table.
+                if !request.or_groups.is_empty() {
+                    let mut next = Vec::with_capacity(filtered_batches.len());
+                    for b in &filtered_batches {
+                        next.push(filter_cached_batch_or_groups(b, &request.or_groups).await?);
+                    }
+                    filtered_batches = next;
+                }
                 let filter_elapsed = filter_start.elapsed();
 
                 let row_count: usize = filtered_batches.iter().map(|b| b.num_rows()).sum();
@@ -356,7 +367,7 @@ impl QueryExecutor {
             // scalar filter) must still propagate its surviving keys to the
             // fact, so `in_filters` counts here too.
             if inmemory_indices.contains(&i)
-                || (request.filters.is_empty() && request.in_filters.is_empty())
+                || (request.filters.is_empty() && request.in_filters.is_empty() && request.or_groups.is_empty())
             {
                 continue;
             }
@@ -452,7 +463,7 @@ impl QueryExecutor {
         // reach the fact.
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             if !inmemory_indices.contains(&i)
-                || (request.filters.is_empty() && request.in_filters.is_empty())
+                || (request.filters.is_empty() && request.in_filters.is_empty() && request.or_groups.is_empty())
             {
                 continue;
             }

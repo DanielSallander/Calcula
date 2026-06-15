@@ -16,9 +16,17 @@ use arrow::datatypes::{DataType as ArrowType, Field, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::{
-    sum_measure, Column, ColumnRef, DataModel, DataType, Engine, InFilter, QueryRequest,
-    Relationship, SourceBinding, StorageMode, Table,
+    sum_measure, Column, ColumnRef, DataModel, DataType, Engine, FilterCondition, FilterOperator,
+    InFilter, QueryError, QueryRequest, Relationship, SourceBinding, StorageMode, Table,
 };
+
+fn cond(column: &str, operator: FilterOperator, value: &str) -> FilterCondition {
+    FilterCondition {
+        column: column.into(),
+        operator,
+        value: value.into(),
+    }
+}
 
 fn slicer_model() -> DataModel {
     let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
@@ -264,4 +272,65 @@ async fn empty_in_filter_matches_nothing() {
         0,
         "an empty IN-list matches nothing, never everything"
     );
+}
+
+#[tokio::test]
+async fn or_filter_single_table_on_fact() {
+    // (region_id = 1) OR (amount > 90), both on the fact (Sales). Surviving
+    // rows: region 1 → (Bikes,100),(Helmets,40); amount>90 → (Bikes,100).
+    // Union → Bikes 100, Helmets 40.
+    let engine = slicer_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Product", "name")],
+        or_filters: vec![
+            cond("region_id", FilterOperator::Equal, "1"),
+            cond("amount", FilterOperator::GreaterThan, "90"),
+        ],
+        ..Default::default()
+    };
+    let r = by_product(&engine.query(req).await.unwrap());
+    assert_eq!(r["Bikes"], 100.0);
+    assert_eq!(r["Helmets"], 40.0);
+}
+
+#[tokio::test]
+async fn or_filter_combines_with_and_filters() {
+    // filters (AND): region_id = 1; or_filters (OR): amount>90 OR amount<25.
+    // region 1 rows: (Bikes,100),(Helmets,40). OR keeps amount 100 (>90); 40
+    // fails both → only Bikes 100.
+    let engine = slicer_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Product", "name")],
+        filters: vec![cond("region_id", FilterOperator::Equal, "1")],
+        or_filters: vec![
+            cond("amount", FilterOperator::GreaterThan, "90"),
+            cond("amount", FilterOperator::LessThan, "25"),
+        ],
+        ..Default::default()
+    };
+    let r = by_product(&engine.query(req).await.unwrap());
+    assert_eq!(r.len(), 1, "only Bikes (amount 100) survives");
+    assert_eq!(r["Bikes"], 100.0);
+}
+
+#[tokio::test]
+async fn or_filter_across_tables_fails_closed() {
+    // (region = 'East') OR (name = 'Bikes') — Region and Product dims → refuse.
+    let engine = slicer_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Product", "name")],
+        or_filters: vec![
+            cond("region", FilterOperator::Equal, "East"),
+            cond("name", FilterOperator::Equal, "Bikes"),
+        ],
+        ..Default::default()
+    };
+    let err = engine.query(req).await.unwrap_err();
+    let QueryError::InvalidQuery(msg) = &err else {
+        panic!("expected InvalidQuery, got {err:?}");
+    };
+    assert!(msg.contains("single table"), "got: {msg}");
 }

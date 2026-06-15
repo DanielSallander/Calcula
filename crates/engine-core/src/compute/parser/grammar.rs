@@ -215,6 +215,10 @@ impl Parser {
             // SAMEPERIODLASTYEAR is a synonym for PRIORYEAR (shift -1 YEAR).
             "SAMEPERIODLASTYEAR" => self.parse_prioryear_call(),
             "PRIORPERIOD" => self.parse_priorperiod_call(),
+            // PARALLELPERIOD shifts the whole window by `n` periods — the same
+            // `PeriodShift` node as PRIORPERIOD. (DAX `DATEADD` is taken here by
+            // the scalar single-date `DATEADD(date, n, unit)` function.)
+            "PARALLELPERIOD" => self.parse_priorperiod_call(),
             "DATESINPERIOD" => self.parse_dates_in_period_call(),
             // Ranking window functions
             "ROW_NUMBER" | "ROWNUMBER" => {

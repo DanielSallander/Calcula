@@ -58,6 +58,52 @@ pub(super) async fn filter_cached_batch(
     }
 }
 
+/// Apply a DNF OR restriction `(g1) OR (g2) OR ...` (each group AND-combined)
+/// to a cached batch, the local equivalent of the connector's `or_groups`.
+/// Returns the batch unchanged when there are no groups or any group is empty
+/// (an empty AND-group matches everything).
+pub(super) async fn filter_cached_batch_or_groups(
+    batch: &RecordBatch,
+    groups: &[Vec<engine_connectors::FilterCondition>],
+) -> crate::error::QueryResult<RecordBatch> {
+    if groups.is_empty() || groups.iter().any(|g| g.is_empty()) {
+        return Ok(batch.clone());
+    }
+    let filter_ctx = SessionContext::new();
+    filter_ctx.register_batch("_cached", batch.clone())?;
+    let schema = batch.schema();
+
+    let group_sqls: Vec<String> = groups
+        .iter()
+        .map(|group| {
+            let conds: Vec<String> = group
+                .iter()
+                .map(|f| {
+                    let rhs = literal_for_column(&schema, &f.column, &f.value);
+                    format!(
+                        "{} {} {}",
+                        quote_ident_double(&f.column),
+                        f.operator.as_sql(),
+                        rhs
+                    )
+                })
+                .collect();
+            format!("({})", conds.join(" AND "))
+        })
+        .collect();
+
+    let sql = format!(
+        "SELECT * FROM _cached WHERE ({})",
+        group_sqls.join(" OR ")
+    );
+    let batches = filter_ctx.sql(&sql).await?.collect().await?;
+    if batches.is_empty() {
+        Ok(RecordBatch::new_empty(batch.schema()))
+    } else {
+        Ok(concat_batches(&batch.schema(), &batches)?)
+    }
+}
+
 /// Render a filter value as a SQL literal typed to match `column`'s Arrow type
 /// in `schema`.
 ///

@@ -26,9 +26,14 @@
 //! credentials can bypass it, so the source database's own grants remain the
 //! real authority. In addition, v1:
 //!
-//! - activates a **single** role at a time (multi-role union is deferred);
-//! - supports only static `column op value` predicates, AND-combined (no
-//!   OR / IN-list, and no dynamic `USERNAME()`-style identity filters);
+//! - activates a single role, or a **union of roles** ("a row is visible if
+//!   *any* active role permits it" — Power BI semantics) when every active
+//!   role restricts the **same** table with a **single** predicate; richer
+//!   multi-role shapes (cross-table or multi-predicate roles) are deferred and
+//!   **fail closed** rather than under-restrict (the union is applied by the
+//!   engine facade's `set_active_roles` / `query` path);
+//! - supports only static `column op value` predicates, AND-combined within a
+//!   role (no IN-list, and no dynamic `USERNAME()`-style identity filters);
 //! - enforces a dimension restriction on a fact only over a **single-hop,
 //!   active, single-column equi** relationship (the shape the executor can
 //!   turn into a fact restriction).

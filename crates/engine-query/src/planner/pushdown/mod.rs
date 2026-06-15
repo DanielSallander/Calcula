@@ -402,6 +402,32 @@ impl PushdownPlanner {
             })
             .collect();
 
+        // A cross-column OR slicer must reference columns of a SINGLE table (the
+        // fetch is per-table; a cross-table OR cannot be pushed to one fetch).
+        // Resolve that table now and fail closed if no single table owns every
+        // OR-condition column. That table is fetched and the OR restricts it.
+        let or_filter_table: Option<&str> = if request.or_filters.is_empty() {
+            None
+        } else {
+            let cols: Vec<&str> = request.or_filters.iter().map(|f| f.column.as_str()).collect();
+            match model
+                .tables()
+                .iter()
+                .find(|t| cols.iter().all(|c| t.column(c).is_ok()))
+                .map(|t| t.name())
+            {
+                Some(t) => Some(t),
+                None => {
+                    return Err(QueryError::InvalidQuery(
+                        "an OR slicer (`or_filters`) must reference columns of a single table; \
+                         conditions spanning different tables are not yet supported — use \
+                         separate IN-list slicers, or model the columns on one table"
+                            .into(),
+                    ))
+                }
+            }
+        };
+
         // Collect all referenced tables (deduplication happens below).
         let all_tables: Vec<&str> = measure_tables
             .iter()
@@ -413,6 +439,7 @@ impl PushdownPlanner {
             .chain(userelationship_tables.iter().map(|s| s.as_str()))
             .chain(time_intelligence_tables.iter().map(|s| s.as_str()))
             .chain(in_filter_tables.iter().copied())
+            .chain(or_filter_table.iter().copied())
             .collect();
 
         // Verify all tables have registered sources (skip QUERY binding names).
@@ -471,13 +498,13 @@ impl PushdownPlanner {
             model.table(t).is_ok_and(|tbl| tbl.is_in_memory()) || cached_tables.contains(*t)
         });
 
-        // User IN-list slicers (`column IN (...)`) force LocalAggregation. Each
-        // table is still fetched with its IN filter pushed to the source (the
-        // connector renders `in_filters`), and a dimension-side slicer restricts
-        // the fact through the existing two-phase IN-propagation — so this is the
-        // single, well-tested path for IN filters rather than threading them
-        // through the single-statement pushed-join builders too.
-        let has_in_filters = !request.in_filters.is_empty();
+        // User IN-list and cross-column OR slicers force LocalAggregation. Each
+        // table is still fetched with its IN/OR filter pushed to the source (the
+        // connector renders `in_filters` and `or_groups`), and a dimension-side
+        // slicer restricts the fact through the existing two-phase propagation —
+        // so this is the single, well-tested path for these filters rather than
+        // threading them through the single-statement pushed-join builders too.
+        let has_in_filters = !request.in_filters.is_empty() || !request.or_filters.is_empty();
 
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
         let all_pushable = measures.iter().all(|m| {
@@ -784,12 +811,22 @@ impl PushdownPlanner {
                     .map(|f| in_filter_condition(model, table_name, f))
                     .collect();
 
+                // A cross-column OR slicer (DNF: each condition its own group →
+                // OR-combined) goes on the single table that owns its columns.
+                let table_or_groups: Vec<Vec<FilterCondition>> =
+                    if or_filter_table == Some(*table_name) {
+                        request.or_filters.iter().map(|c| vec![c.clone()]).collect()
+                    } else {
+                        Vec::new()
+                    };
+
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
                     columns: projections.columns_for(table_name),
                     filters: table_filters,
                     in_filters: table_in_filters,
+                    or_groups: table_or_groups,
                     ..Default::default()
                 };
 

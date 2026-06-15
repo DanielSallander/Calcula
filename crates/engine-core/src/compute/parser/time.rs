@@ -281,6 +281,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_parallelperiod_is_a_period_shift() {
+        let expr = parse_measure_expression("PARALLELPERIOD(SUM(f[x]), -2, MONTH)").unwrap();
+        assert!(
+            matches!(
+                expr,
+                Expression::PeriodShift {
+                    offset: -2,
+                    granularity: DateGranularity::Month,
+                    ..
+                }
+            ),
+            "PARALLELPERIOD should parse to a PeriodShift, got {expr:?}"
+        );
+    }
+
+    #[test]
     fn parse_dates_in_period() {
         let expr =
             parse_measure_expression("DATESINPERIOD(SUM(fact_sales[amount]), -12, MONTH)").unwrap();

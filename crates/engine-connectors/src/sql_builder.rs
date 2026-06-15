@@ -489,7 +489,32 @@ fn request_conditions(
             conditions.push(build_inline_in(dialect, in_filter));
         }
     }
+    if let Some(or_clause) = build_or_groups(dialect, &request.or_groups, params) {
+        conditions.push(or_clause);
+    }
     conditions
+}
+
+/// Render a DNF OR restriction `(g1) OR (g2) OR ...` (each group AND-combined),
+/// appending bound values to `params`. Returns `None` (no clause) when there
+/// are no groups or any group is empty (an empty AND-group matches everything,
+/// making the whole OR always true).
+fn build_or_groups(
+    dialect: &impl SqlDialect,
+    or_groups: &[Vec<FilterCondition>],
+    params: &mut Vec<String>,
+) -> Option<String> {
+    if or_groups.is_empty() || or_groups.iter().any(|g| g.is_empty()) {
+        return None;
+    }
+    let groups: Vec<String> = or_groups
+        .iter()
+        .map(|group| {
+            let conds = build_filter_conditions(dialect, group, params);
+            format!("({})", conds.join(" AND "))
+        })
+        .collect();
+    Some(format!("({})", groups.join(" OR ")))
 }
 
 /// Build a complete aggregate (`GROUP BY`) query from a request.
@@ -508,9 +533,8 @@ pub(crate) fn build_aggregate_sql(
     );
 
     let mut params: Vec<String> = Vec::new();
-    let has_conditions = !request.filters.is_empty() || !request.in_filters.is_empty();
-    if has_conditions {
-        let conditions = request_conditions(dialect, request, &mut params);
+    let conditions = request_conditions(dialect, request, &mut params);
+    if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }
@@ -565,9 +589,8 @@ pub(crate) fn build_select_sql(
     );
 
     let mut params: Vec<String> = Vec::new();
-    let has_conditions = !request.filters.is_empty() || !request.in_filters.is_empty();
-    if has_conditions {
-        let conditions = request_conditions(dialect, request, &mut params);
+    let conditions = request_conditions(dialect, request, &mut params);
+    if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }

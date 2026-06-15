@@ -559,7 +559,7 @@ pub fn time_intelligence_route(
         )));
     }
 
-    let (inner, function, granularity, is_shift) = match expr {
+    let (inner, function, _granularity, is_shift) = match expr {
         Expression::ToDate {
             expr: inner,
             granularity,
@@ -598,22 +598,13 @@ pub fn time_intelligence_route(
     validate_filter_context_inner(function, is_shift, inner)?;
     let (date_table, date_key_column) = require_date_key(function, model)?;
 
-    // QTD/MTD *shifts* in filter context are not supported: shifting the whole
-    // window back N quarters/months is not the same as DAX's per-period match,
-    // and we will not emit a plausibly-wrong number. Only YEAR shifts (whole-
-    // window-back-one-year == SAMEPERIODLASTYEAR) are exact.
-    if is_shift && granularity != DateGranularity::Year {
-        return Err(time_intelligence_error(
-            function,
-            format!(
-                "{function} in filter context (date columns not on the query axis) is only \
-                 supported at YEAR granularity; a {granularity} shift would move the whole \
-                 date window by {granularity}s, which is not the same as matching the prior \
-                 {granularity}. Put the date {granularity} column on the query axis to use \
-                 the positional shift, or shift by YEAR."
-            ),
-        ));
-    }
+    // A filter-context shift (PRIORYEAR/PRIORPERIOD/DATEADD/PARALLELPERIOD) moves
+    // the WHOLE current date window by `offset` periods (Year, Quarter, or
+    // Month). For a context that spans exactly one period this equals "the prior
+    // period"; for a wider context it is a whole-window shift — the only
+    // well-defined shift when no date column is on the axis. (The positional
+    // per-period shift is the AXIS path; put a date column on the group-by axis
+    // for that.)
 
     Ok(Some(TimeIntelligenceRoute::FilterContext(
         FilterContextPlan {
@@ -818,8 +809,12 @@ pub fn lower_time_intelligence_filtered(
 
     // Compute the inclusive [start, end] date window, then make it half-open.
     let (start, end_inclusive, description) = if is_shift {
-        // PeriodShift: shift the whole current window [min_ctx, as_of] back by
-        // `offset` years (Year granularity is enforced in classification).
+        // PeriodShift / DATEADD / PARALLELPERIOD: shift the whole current window
+        // [min_ctx, as_of] by `offset` periods. The shift is by calendar months
+        // (offset × months-per-period) so YEAR/QUARTER/MONTH all work; for a
+        // context that already spans exactly one period this equals "the prior
+        // period".
+        let months = offset * months_per_period(granularity);
         let min_ctx = date32_to_naive(min_context_days).ok_or_else(|| {
             time_intelligence_error(
                 function,
@@ -829,21 +824,21 @@ pub fn lower_time_intelligence_filtered(
                 ),
             )
         })?;
-        let start = shift_years(min_ctx, offset).ok_or_else(|| {
+        let start = shift_months(min_ctx, months).ok_or_else(|| {
             time_intelligence_error(
                 function,
-                format!("shifting {min_ctx} by {offset} year(s) overflowed the calendar"),
+                format!("shifting {min_ctx} by {offset} {granularity}(s) overflowed the calendar"),
             )
         })?;
-        let end = shift_years(as_of, offset).ok_or_else(|| {
+        let end = shift_months(as_of, months).ok_or_else(|| {
             time_intelligence_error(
                 function,
-                format!("shifting {as_of} by {offset} year(s) overflowed the calendar"),
+                format!("shifting {as_of} by {offset} {granularity}(s) overflowed the calendar"),
             )
         })?;
         let desc = format!(
-            "{function} (filter context) shifted window [{min_ctx}..{as_of}] by {offset} year(s) \
-             to [{start}..{end}] on {date_table}.{date_key_column}"
+            "{function} (filter context) shifted window [{min_ctx}..{as_of}] by {offset} \
+             {granularity}(s) to [{start}..{end}] on {date_table}.{date_key_column}"
         );
         (start, end, desc)
     } else {
@@ -939,16 +934,6 @@ fn start_of_period(date: NaiveDate, granularity: DateGranularity) -> Option<Naiv
         }
         DateGranularity::Month => NaiveDate::from_ymd_opt(date.year(), date.month(), 1),
     }
-}
-
-/// Shift `date` by `years` calendar years, clamping Feb-29 to Feb-28 in a
-/// non-leap target year.
-fn shift_years(date: NaiveDate, years: i64) -> Option<NaiveDate> {
-    let target_year = i32::try_from(i64::from(date.year()) + years).ok()?;
-    NaiveDate::from_ymd_opt(target_year, date.month(), date.day()).or_else(|| {
-        // Feb 29 → Feb 28 in a non-leap year (the only day that can fail).
-        NaiveDate::from_ymd_opt(target_year, date.month(), 28)
-    })
 }
 
 /// Shift `date` by `months` calendar months (negative = earlier), clamping the
@@ -1461,16 +1446,17 @@ mod tests {
     }
 
     #[test]
-    fn route_filter_context_quarter_shift_is_rejected() {
-        // PRIORPERIOD(..., -1, QUARTER) with date NOT on axis → fail closed.
+    fn route_filter_context_quarter_shift_is_a_window_shift() {
+        // PRIORPERIOD/DATEADD/PARALLELPERIOD(..., -1, QUARTER) with date NOT on
+        // the axis now routes to the filter-context path as a whole-window
+        // shift (no longer rejected).
         let model = model();
         let pp = expr::period_shift(sum_amount(), -1, DateGranularity::Quarter);
         let group_by = pairs(&[("fact_sales", "region")]);
-        let err = time_intelligence_route(&pp, &model, &group_by).unwrap_err();
-        let msg = err.to_string();
+        let route = time_intelligence_route(&pp, &model, &group_by).unwrap();
         assert!(
-            msg.contains("only supported at YEAR granularity"),
-            "got: {msg}"
+            matches!(route, Some(TimeIntelligenceRoute::FilterContext(_))),
+            "got: {route:?}"
         );
     }
 
@@ -1595,11 +1581,12 @@ mod tests {
     }
 
     #[test]
-    fn shift_years_clamps_leap_day() {
-        // 2024-02-29 shifted back one year → 2023-02-28 (2023 is not leap).
+    fn shift_months_clamps_leap_day() {
+        // 2024-02-29 shifted back twelve months (one year) → 2023-02-28
+        // (2023 is not a leap year). A whole-year shift is just 12 months.
         let d = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
         assert_eq!(
-            shift_years(d, -1).unwrap(),
+            shift_months(d, -12).unwrap(),
             NaiveDate::from_ymd_opt(2023, 2, 28).unwrap()
         );
     }

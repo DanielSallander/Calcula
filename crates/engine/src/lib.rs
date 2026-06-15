@@ -238,12 +238,13 @@ pub struct Engine {
     /// default. Never part of the model (a malicious model cannot raise its
     /// own budget).
     script_sandbox_config: ScriptSandboxConfig,
-    /// The name of the active security role, if any. Set by the host **after**
-    /// authenticating the user (see [`Engine::set_active_role`]). When set,
-    /// every query is restricted to the rows the role permits; when `None`,
-    /// queries are unrestricted by RLS. This is host-controlled session state,
-    /// never part of any model.
-    active_role: Option<String>,
+    /// The active security roles, if any. Set by the host **after**
+    /// authenticating the user (see [`Engine::set_active_role`] /
+    /// [`Engine::set_active_roles`]). With one role, every query is restricted to
+    /// the rows that role permits; with several, to the **union** (a row visible
+    /// if *any* active role permits it). Empty = unrestricted by RLS. This is
+    /// host-controlled session state, never part of any model.
+    active_roles: Vec<String>,
     /// Error captured by the most recent effective-registry rebuild, if any
     /// (currently only a native-vs-script name collision —
     /// [`Engine::new`] is infallible, so the error is deferred and surfaced
@@ -297,6 +298,24 @@ fn map_script_error<T>(result: QueryResult<T>) -> QueryResult<T> {
         }
     }
     result
+}
+
+/// Convert a role [`FilterPredicate`] to a request [`FilterCondition`].
+fn predicate_to_filter_condition(p: &FilterPredicate) -> FilterCondition {
+    use engine_core::compute::expression::ComparisonOp;
+    let operator = match p.operator {
+        ComparisonOp::Equal => FilterOperator::Equal,
+        ComparisonOp::NotEqual => FilterOperator::NotEqual,
+        ComparisonOp::GreaterThan => FilterOperator::GreaterThan,
+        ComparisonOp::GreaterThanOrEqual => FilterOperator::GreaterThanOrEqual,
+        ComparisonOp::LessThan => FilterOperator::LessThan,
+        ComparisonOp::LessThanOrEqual => FilterOperator::LessThanOrEqual,
+    };
+    FilterCondition {
+        column: p.column.clone(),
+        operator,
+        value: p.value.clone(),
+    }
 }
 
 /// Whether `lhs op rhs` holds for a measure-value filter.
@@ -496,7 +515,7 @@ impl Engine {
             effective_udfs: effective,
             script_sandbox_config: config,
             script_build_error,
-            active_role: None,
+            active_roles: Vec::new(),
         }
     }
 
@@ -892,17 +911,47 @@ impl Engine {
     /// # }
     /// ```
     pub fn set_active_role(&mut self, role: Option<String>) {
-        if self.active_role != role {
-            self.active_role = role;
-            // A result computed under one role (or none) must never be served
-            // to another — invalidate every cached result on any change.
+        self.set_active_roles(role.into_iter().collect());
+    }
+
+    /// Set (or clear) the active security **roles**. With several roles a row is
+    /// visible if **any** of them permits it (the union).
+    ///
+    /// v1 union support: all roles must restrict a single common table with one
+    /// predicate each (e.g. several `Region = '…'` roles), and that table must be
+    /// enforceable (single-hop equi to the fact). A union spanning different
+    /// tables, a role with multiple predicates, or a non-enforceable table fails
+    /// closed at query time (`QueryError::InvalidQuery` /
+    /// `RowLevelSecurityNotEnforceable`) — never a silent unrestricted result.
+    pub fn set_active_roles(&mut self, roles: Vec<String>) {
+        if self.active_roles != roles {
+            self.active_roles = roles;
+            // A result computed under one role set must never be served to
+            // another — invalidate every cached result on any change.
             self.query_cache.lock().invalidate_all();
         }
     }
 
-    /// Returns the name of the active security role, if any.
+    /// Returns the name of the first active security role, if any. With multiple
+    /// active roles use [`active_roles`](Self::active_roles).
     pub fn active_role(&self) -> Option<&str> {
-        self.active_role.as_deref()
+        self.active_roles.first().map(String::as_str)
+    }
+
+    /// Returns all active security roles (empty when RLS is off).
+    pub fn active_roles(&self) -> &[String] {
+        &self.active_roles
+    }
+
+    /// A stable cache-key fragment for the active role set (order-independent),
+    /// or `None` when no role is active.
+    fn role_cache_key(&self) -> Option<String> {
+        if self.active_roles.is_empty() {
+            return None;
+        }
+        let mut roles = self.active_roles.clone();
+        roles.sort();
+        Some(roles.join("\u{1}"))
     }
 
     /// Verify the active role (if any) names a role the model defines.
@@ -912,10 +961,98 @@ impl Engine {
     /// is a hard [`EngineError::SecurityRoleNotFound`] error rather than a
     /// silent no-RLS run, so a typo can never leak data.
     pub(crate) fn validate_active_role(&self) -> QueryResult<()> {
-        if let Some(name) = &self.active_role {
+        for name in &self.active_roles {
             self.model.security_role(name).map_err(QueryError::Engine)?;
         }
         Ok(())
+    }
+
+    /// Fail closed when more than one role is active on a query path that does
+    /// not yet implement the union (auto-refresh, auto-tier, explain,
+    /// drillthrough). The main `query` path handles the union itself.
+    fn reject_multi_role(&self) -> QueryResult<()> {
+        if self.active_roles.len() > 1 {
+            return Err(QueryError::InvalidQuery(
+                "multiple active security roles (role union) are supported on query() / \
+                 query_with_cancellation only in this version; this path requires a single \
+                 active role"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rewrite a multi-role query into a single-table OR slicer.
+    ///
+    /// The union "a row is visible if any active role permits it" is, when every
+    /// role restricts the **same** table with **one** predicate, exactly an
+    /// `OR`-list slicer on that table — which is sealed (request-level, never
+    /// stripped by a measure context op) and restricts the fact through the same
+    /// enforceable single-hop propagation as a single role. This validates that
+    /// shape, verifies the table is enforceable by planning one role (reusing the
+    /// RLS relevance/`RowLevelSecurityNotEnforceable` gate), and returns the
+    /// request with `or_filters` injected. Unsupported shapes fail closed.
+    fn build_role_union_request(&self, request: QueryRequest) -> QueryResult<QueryRequest> {
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "multi-role union is not supported together with a calculation group".into(),
+            ));
+        }
+        if !request.or_filters.is_empty() {
+            return Err(QueryError::InvalidQuery(
+                "multi-role union is not supported together with a user OR filter (`or_filters`)"
+                    .into(),
+            ));
+        }
+
+        let mut conditions: Vec<FilterCondition> = Vec::new();
+        let mut union_table: Option<String> = None;
+        for name in &self.active_roles {
+            let role = self.model.security_role(name).map_err(QueryError::Engine)?;
+            let preds = role.table_filters();
+            if preds.is_empty() {
+                // A role with no filters permits every row → the union permits
+                // every row → no restriction at all.
+                return Ok(request);
+            }
+            if preds.len() != 1 {
+                return Err(QueryError::InvalidQuery(format!(
+                    "multi-role union (v1) supports one predicate per role; role '{name}' has {} \
+                     — model it as a single-predicate role, or activate one role at a time",
+                    preds.len()
+                )));
+            }
+            let predicate = &preds[0];
+            match &union_table {
+                None => union_table = Some(predicate.table.clone()),
+                Some(t) if !t.eq_ignore_ascii_case(&predicate.table) => {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "multi-role union (v1) requires all active roles to filter the same \
+                         table; got '{t}' and '{}'",
+                        predicate.table
+                    )));
+                }
+                _ => {}
+            }
+            conditions.push(predicate_to_filter_condition(predicate));
+        }
+
+        // Enforceability: the union table must restrict the fact for THIS query.
+        // Reuse the single-role RLS gate by planning one role; if the planner
+        // refuses (RowLevelSecurityNotEnforceable for a non-single-hop-equi
+        // table), refuse too rather than risk leaving the fact unrestricted.
+        if let Some(name) = self.active_roles.first() {
+            let preds = self
+                .model
+                .security_role(name)
+                .map_err(QueryError::Engine)?
+                .table_filters();
+            PushdownPlanner::plan(&request, &self.model, &self.registry, preds)?;
+        }
+
+        let mut rewritten = request;
+        rewritten.or_filters = conditions;
+        Ok(rewritten)
     }
 
     /// Resolve a calculation-group application against the current model.
@@ -981,13 +1118,16 @@ impl Engine {
     /// role here degrades safely to an empty slice (no enforcement), but
     /// validation guarantees that case never reaches a query.
     fn active_role_filters(&self) -> &[FilterPredicate] {
-        match &self.active_role {
-            Some(name) => self
+        // Single-role enforcement. The multi-role union is handled separately
+        // (see `query_multi_role_union`) and never reaches a path that calls
+        // this, so returning a single role's predicates here is safe.
+        match self.active_roles.first() {
+            Some(name) if self.active_roles.len() == 1 => self
                 .model
                 .security_role(name)
                 .map(|r| r.table_filters())
                 .unwrap_or(&[]),
-            None => &[],
+            _ => &[],
         }
     }
 
@@ -1191,6 +1331,17 @@ impl Engine {
             return self.query_with_measure_filters(request, token).await;
         }
 
+        // Multi-role row-level-security union: rewrite the role set into an
+        // equivalent sealed single-table OR slicer (`or_filters`) and plan
+        // WITHOUT roles. The OR rides the same enforceable single-hop propagation
+        // as a single role; unsupported shapes (cross-table roles, multi-predicate
+        // roles, a non-enforceable table) fail closed inside the builder.
+        let request = if self.active_roles.len() > 1 {
+            self.build_role_union_request(request)?
+        } else {
+            request
+        };
+
         // Resolve any calculation-group application up front (a typed error
         // for an unknown group/item/measure or a synthetic-name collision).
         // When present this yields an overlay model (self.model + ephemeral
@@ -1216,7 +1367,7 @@ impl Engine {
                 &request,
                 version,
                 self.effective_udfs.identity_hash(),
-                self.active_role.as_deref(),
+                self.role_cache_key().as_deref(),
             );
             let cached = query_cache.get(key);
             (key, version, cached)
@@ -1391,6 +1542,10 @@ impl Engine {
         // is a hard error, never a silent no-RLS run). There are no measures
         // in a DetailRequest, so no UDF validation is needed.
         self.validate_active_role()?;
+        // Drillthrough returns raw fact rows; the multi-role union rewrite is
+        // only wired through the aggregate `query` path. Fail closed rather
+        // than emit unrestricted detail rows under multiple active roles.
+        self.reject_multi_role()?;
         let role_filters = self.active_role_filters();
 
         // Drillthrough results are intentionally NOT cached (see the doc
@@ -1426,6 +1581,11 @@ impl Engine {
     ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
+        // Multi-role union is implemented only on the concurrent `query` path
+        // (it rewrites the request before planning). This path uses the raw
+        // per-role filters, which are empty under multi-role — fail closed
+        // rather than run with no row-level restriction.
+        self.reject_multi_role()?;
 
         let refreshed = self
             .refresh_stale()
@@ -1451,7 +1611,7 @@ impl Engine {
                 &request,
                 query_cache.model_version(),
                 self.effective_udfs.identity_hash(),
-                self.active_role.as_deref(),
+                self.role_cache_key().as_deref(),
             );
             let cached = query_cache.get(key);
             (key, cached)
@@ -1489,6 +1649,9 @@ impl Engine {
     ) -> QueryResult<(Vec<RecordBatch>, ExecutionPlan)> {
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
+        // Explain reports the single-role plan; the multi-role union rewrite is
+        // only applied on the `query` path. Fail closed here.
+        self.reject_multi_role()?;
 
         let start = Instant::now();
 
