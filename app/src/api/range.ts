@@ -5,7 +5,15 @@
 
 import { columnToLetter, letterToColumn } from "./types";
 import type { CellData, FormattingOptions, FormattingResult } from "./types";
-import { getCell, updateCellsBatch, applyFormatting, applyBorderPreset } from "./lib";
+import {
+  getCell,
+  updateCellsBatch,
+  applyFormatting,
+  applyBorderPreset,
+  getActiveSheet,
+  getWatchCells,
+  updateCellOnSheets,
+} from "./lib";
 import type { CellUpdateInput } from "./lib";
 import { navigateToCell, navigateToRange, borderAround } from "./grid";
 
@@ -86,25 +94,39 @@ export class CellRange {
     public readonly startCol: number,
     public readonly endRow: number,
     public readonly endCol: number,
+    /**
+     * The 0-based sheet this range targets (C3 step 2). `undefined` means the
+     * ACTIVE sheet — the default for extension-created ranges, byte-identical to
+     * pre-C3 behavior. A `Sheet.range()` / `Sheet.cell()` binds this so the
+     * range's data ops read/write THAT sheet, not whichever happens to be active.
+     */
+    public readonly sheetIndex?: number,
   ) {}
 
   // --------------------------------------------------------------------------
   // Factory Methods
   // --------------------------------------------------------------------------
 
-  /** Create a single-cell range. */
-  static fromCell(row: number, col: number): CellRange {
-    return new CellRange(row, col, row, col);
+  /** Create a single-cell range, optionally bound to a sheet. */
+  static fromCell(row: number, col: number, sheetIndex?: number): CellRange {
+    return new CellRange(row, col, row, col, sheetIndex);
   }
 
   /**
-   * Create a range from an address string.
+   * Create a range from an address string, optionally bound to a sheet.
    * Supports "A1", "A1:B5", "$A$1:$B$5", "Sheet1!A1:B5".
-   * Note: the sheet component is parsed but not stored on the range.
+   * Note: a "Sheet1!" name prefix is parsed but not resolved here; pass an
+   * explicit `sheetIndex` (as `Sheet.range()` does) to bind the target sheet.
    */
-  static fromAddress(address: string): CellRange {
+  static fromAddress(address: string, sheetIndex?: number): CellRange {
     const parsed = parseAddress(address);
-    return new CellRange(parsed.startRow, parsed.startCol, parsed.endRow, parsed.endCol);
+    return new CellRange(
+      parsed.startRow,
+      parsed.startCol,
+      parsed.endRow,
+      parsed.endCol,
+      sheetIndex,
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -155,6 +177,7 @@ export class CellRange {
       this.startCol + colOffset,
       this.endRow + rowOffset,
       this.endCol + colOffset,
+      this.sheetIndex,
     );
   }
 
@@ -168,6 +191,7 @@ export class CellRange {
       this.startCol,
       this.startRow + rows - 1,
       this.startCol + cols - 1,
+      this.sheetIndex,
     );
   }
 
@@ -181,7 +205,7 @@ export class CellRange {
     if (row > this.endRow || col > this.endCol) {
       throw new Error(`Offset (${rowOffset}, ${colOffset}) is outside range ${this.address}`);
     }
-    return CellRange.fromCell(row, col);
+    return CellRange.fromCell(row, col, this.sheetIndex);
   }
 
   /**
@@ -193,7 +217,7 @@ export class CellRange {
     if (row > this.endRow) {
       throw new Error(`Row offset ${rowOffset} is outside range ${this.address}`);
     }
-    return new CellRange(row, this.startCol, row, this.endCol);
+    return new CellRange(row, this.startCol, row, this.endCol, this.sheetIndex);
   }
 
   /**
@@ -205,7 +229,7 @@ export class CellRange {
     if (col > this.endCol) {
       throw new Error(`Column offset ${colOffset} is outside range ${this.address}`);
     }
-    return new CellRange(this.startRow, col, this.endRow, col);
+    return new CellRange(this.startRow, col, this.endRow, col, this.sheetIndex);
   }
 
   // --------------------------------------------------------------------------
@@ -240,6 +264,7 @@ export class CellRange {
       Math.max(this.startCol, other.startCol),
       Math.min(this.endRow, other.endRow),
       Math.min(this.endCol, other.endCol),
+      this.sheetIndex,
     );
   }
 
@@ -250,6 +275,7 @@ export class CellRange {
       Math.min(this.startCol, other.startCol),
       Math.max(this.endRow, other.endRow),
       Math.max(this.endCol, other.endCol),
+      this.sheetIndex,
     );
   }
 
@@ -285,10 +311,28 @@ export class CellRange {
   // --------------------------------------------------------------------------
 
   /**
+   * Resolve whether this range targets a NON-active sheet, returning that sheet
+   * index (else null = use the active-sheet fast paths). Mirrors the routing the
+   * object-script host uses (scriptHost/host.ts readCellOnSheet/writeCellOnSheet):
+   * a range bound to the active sheet, or unbound, takes the authoritative
+   * active-sheet path; only a bound non-active sheet needs the cross-sheet path.
+   */
+  private async resolveBackgroundSheet(): Promise<number | null> {
+    if (this.sheetIndex === undefined) return null;
+    const active = await getActiveSheet();
+    return this.sheetIndex === active ? null : this.sheetIndex;
+  }
+
+  /**
    * Get the display value of a single cell.
    * Only meaningful for single-cell ranges; uses the top-left cell otherwise.
    */
   async getValue(): Promise<string | null> {
+    const bg = await this.resolveBackgroundSheet();
+    if (bg !== null) {
+      const results = await getWatchCells([[bg, this.startRow, this.startCol]]);
+      return results[0]?.display ?? null;
+    }
     const cell = await getCell(this.startRow, this.startCol);
     return cell ? cell.display : null;
   }
@@ -299,8 +343,28 @@ export class CellRange {
    */
   async getValues(): Promise<Map<string, CellData>> {
     const results = new Map<string, CellData>();
-    // Fetch cells individually. For large ranges this could be optimized
-    // with a batch API in the future.
+    const bg = await this.resolveBackgroundSheet();
+
+    if (bg !== null) {
+      // Bound to a non-active sheet: one batched cross-sheet read.
+      const requests: [number, number, number][] = [];
+      for (let r = this.startRow; r <= this.endRow; r++) {
+        for (let c = this.startCol; c <= this.endCol; c++) {
+          requests.push([bg, r, c]);
+        }
+      }
+      const cells = await getWatchCells(requests);
+      let i = 0;
+      for (let r = this.startRow; r <= this.endRow; r++) {
+        for (let c = this.startCol; c <= this.endCol; c++) {
+          const cell = cells[i++];
+          if (cell) results.set(`${r},${c}`, cell);
+        }
+      }
+      return results;
+    }
+
+    // Active sheet: fetch cells individually (full-fidelity, merge-aware path).
     const promises: Promise<void>[] = [];
     for (let r = this.startRow; r <= this.endRow; r++) {
       for (let c = this.startCol; c <= this.endCol; c++) {
@@ -321,6 +385,11 @@ export class CellRange {
    * Set the value of a single cell (top-left of the range).
    */
   async setValue(value: string): Promise<void> {
+    const bg = await this.resolveBackgroundSheet();
+    if (bg !== null) {
+      await updateCellOnSheets([bg], this.startRow, this.startCol, value);
+      return;
+    }
     await updateCellsBatch([{ row: this.startRow, col: this.startCol, value }]);
   }
 
@@ -329,6 +398,21 @@ export class CellRange {
    * The array must match or be smaller than the range dimensions.
    */
   async setValues(values: string[][]): Promise<void> {
+    const bg = await this.resolveBackgroundSheet();
+
+    if (bg !== null) {
+      // Non-active sheet: route through the grouped-sheet write path (the same
+      // command the object-script host uses for cross-sheet writes), one cell at
+      // a time, sequentially so the writes land (and undo) in a stable order.
+      for (let r = 0; r < values.length && r < this.rowCount; r++) {
+        const row = values[r];
+        for (let c = 0; c < row.length && c < this.colCount; c++) {
+          await updateCellOnSheets([bg], this.startRow + r, this.startCol + c, row[c]);
+        }
+      }
+      return;
+    }
+
     const updates: CellUpdateInput[] = [];
     for (let r = 0; r < values.length && r < this.rowCount; r++) {
       const row = values[r];
@@ -347,6 +431,10 @@ export class CellRange {
 
   // --------------------------------------------------------------------------
   // Formatting Operations (async - call Tauri backend)
+  // NOTE (C3 step 2): formatting/border ops still target the ACTIVE sheet even
+  // on a sheet-bound range; only the data ops (get/setValue(s)) are sheet-aware
+  // this increment. Sheet-aware formatting (via applyFormattingToSheets /
+  // clearRangeOnSheets) is a follow-up — see docs/design/c3-shared-object-model.md.
   // --------------------------------------------------------------------------
 
   /**

@@ -27,18 +27,18 @@ export class Sheet {
   /**
    * A range on this sheet by A1 address ("A1", "A1:B5").
    *
-   * NOTE (v1): the returned CellRange's data ops (getValues/setValues/…)
-   * read/write the ACTIVE sheet. Call `activate()` first for writes to a
-   * non-active sheet — sheet-aware ranges are the next C3 increment (see
-   * docs/design/c3-shared-object-model.md).
+   * The returned CellRange is BOUND to this sheet (C3 step 2): its data ops
+   * (getValue/getValues/setValue/setValues) read/write THIS sheet whether or not
+   * it is the active one — no `activate()` needed first. (Formatting ops still
+   * target the active sheet; see range.ts.)
    */
   range(address: string): CellRange {
-    return CellRange.fromAddress(address);
+    return CellRange.fromAddress(address, this.index);
   }
 
-  /** A single cell on this sheet (0-based). Same active-sheet caveat as range(). */
+  /** A single cell on this sheet (0-based), bound to this sheet (see range()). */
   cell(row: number, col: number): CellRange {
-    return CellRange.fromCell(row, col);
+    return CellRange.fromCell(row, col, this.index);
   }
 
   /** Make this the active sheet. */

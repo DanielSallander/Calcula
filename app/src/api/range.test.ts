@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock Tauri backend and grid dependencies to isolate pure logic tests
 vi.mock("./lib", () => ({
@@ -6,6 +6,9 @@ vi.mock("./lib", () => ({
   updateCellsBatch: vi.fn(),
   applyFormatting: vi.fn(),
   applyBorderPreset: vi.fn(),
+  getActiveSheet: vi.fn(),
+  getWatchCells: vi.fn(),
+  updateCellOnSheets: vi.fn(),
 }));
 vi.mock("./grid", () => ({
   navigateToCell: vi.fn(),
@@ -16,6 +19,13 @@ vi.mock("./grid", () => ({
 // CellRange is exported, but parseAddress and parseSingleCellRef are not.
 // We test them indirectly via CellRange.fromAddress and the address property.
 import { CellRange } from "./range";
+import {
+  getCell,
+  updateCellsBatch,
+  getActiveSheet,
+  getWatchCells,
+  updateCellOnSheets,
+} from "./lib";
 
 // ---------------------------------------------------------------------------
 // parseAddress (tested via CellRange.fromAddress)
@@ -453,5 +463,106 @@ describe("CellRange", () => {
       const r = CellRange.fromCell(0, 0);
       expect(r.toString()).toBe("CellRange(A1)");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C3 step 2 — sheet-aware ranges (sheetIndex binding + read/write routing)
+// ---------------------------------------------------------------------------
+describe("sheet-aware ranges (C3 step 2)", () => {
+  const mGetCell = vi.mocked(getCell);
+  const mBatch = vi.mocked(updateCellsBatch);
+  const mActive = vi.mocked(getActiveSheet);
+  const mWatch = vi.mocked(getWatchCells);
+  const mOnSheets = vi.mocked(updateCellOnSheets);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mGetCell.mockResolvedValue(null);
+    mBatch.mockResolvedValue([] as never);
+    mActive.mockResolvedValue(0);
+    mWatch.mockResolvedValue([]);
+    mOnSheets.mockResolvedValue(undefined);
+  });
+
+  it("defaults to undefined sheetIndex (active-sheet behavior, unchanged)", () => {
+    expect(CellRange.fromCell(1, 1).sheetIndex).toBeUndefined();
+    expect(CellRange.fromAddress("A1:B2").sheetIndex).toBeUndefined();
+  });
+
+  it("binds sheetIndex via the factories", () => {
+    expect(CellRange.fromCell(1, 1, 3).sheetIndex).toBe(3);
+    expect(CellRange.fromAddress("A1:B2", 2).sheetIndex).toBe(2);
+  });
+
+  it("preserves sheetIndex through navigation", () => {
+    const r = CellRange.fromAddress("B2:D4", 5);
+    expect(r.offset(1, 1).sheetIndex).toBe(5);
+    expect(r.resize(2, 2).sheetIndex).toBe(5);
+    expect(r.getCell(0, 0).sheetIndex).toBe(5);
+    expect(r.getRow(0).sheetIndex).toBe(5);
+    expect(r.getColumn(0).sheetIndex).toBe(5);
+    expect(r.union(CellRange.fromAddress("A1")).sheetIndex).toBe(5);
+  });
+
+  it("an unbound range reads/writes the active sheet (no routing calls)", async () => {
+    const r = CellRange.fromCell(0, 0);
+    await r.getValue();
+    await r.setValue("x");
+    expect(mActive).not.toHaveBeenCalled();
+    expect(mWatch).not.toHaveBeenCalled();
+    expect(mOnSheets).not.toHaveBeenCalled();
+    expect(mGetCell).toHaveBeenCalledWith(0, 0);
+    expect(mBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a range bound to the ACTIVE sheet uses the active fast paths", async () => {
+    mActive.mockResolvedValue(2);
+    const r = CellRange.fromCell(4, 1, 2); // bound to sheet 2, which is active
+    await r.getValue();
+    await r.setValue("hi");
+    expect(mGetCell).toHaveBeenCalledWith(4, 1);
+    expect(mBatch).toHaveBeenCalledTimes(1);
+    expect(mWatch).not.toHaveBeenCalled();
+    expect(mOnSheets).not.toHaveBeenCalled();
+  });
+
+  it("a range bound to a NON-active sheet reads via getWatchCells", async () => {
+    mActive.mockResolvedValue(0);
+    mWatch.mockResolvedValue([{ display: "42" } as never]);
+    const r = CellRange.fromCell(3, 0, 1); // sheet 1, active is 0
+    const v = await r.getValue();
+    expect(v).toBe("42");
+    expect(mWatch).toHaveBeenCalledWith([[1, 3, 0]]);
+    expect(mGetCell).not.toHaveBeenCalled();
+  });
+
+  it("getValues on a non-active sheet batches one cross-sheet read", async () => {
+    mActive.mockResolvedValue(0);
+    mWatch.mockResolvedValue([
+      { display: "a" } as never,
+      { display: "b" } as never,
+      { display: "c" } as never,
+      { display: "d" } as never,
+    ]);
+    const r = CellRange.fromAddress("A1:B2", 1);
+    const map = await r.getValues();
+    expect(mWatch).toHaveBeenCalledTimes(1);
+    expect(mWatch).toHaveBeenCalledWith([
+      [1, 0, 0],
+      [1, 0, 1],
+      [1, 1, 0],
+      [1, 1, 1],
+    ]);
+    expect(map.size).toBe(4);
+  });
+
+  it("writes to a NON-active sheet route through updateCellOnSheets", async () => {
+    mActive.mockResolvedValue(0);
+    const r = CellRange.fromAddress("A1:B1", 2);
+    await r.setValues([["x", "y"]]);
+    expect(mOnSheets).toHaveBeenCalledWith([2], 0, 0, "x");
+    expect(mOnSheets).toHaveBeenCalledWith([2], 0, 1, "y");
+    expect(mBatch).not.toHaveBeenCalled();
   });
 });
