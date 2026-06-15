@@ -5,7 +5,13 @@
 //          aspects) with the right coordinates and clamping.
 
 import { describe, it, expect, vi } from "vitest";
-import { makeRange, rangeFromAddress, parseA1 } from "./canonicalModel";
+import {
+  makeRange,
+  rangeFromAddress,
+  parseA1,
+  makeWorkbook,
+  type WorkbookTransport,
+} from "./canonicalModel";
 
 const box = (sr: number, sc: number, er: number, ec: number) => ({
   startRow: sr,
@@ -104,5 +110,72 @@ describe("ScriptRange data ops fan out to read/write", () => {
     expect(write).toHaveBeenCalledWith(0, 1, "b");
     expect(write).toHaveBeenCalledWith(1, 0, "c");
     expect(write).toHaveBeenCalledWith(1, 1, "d");
+  });
+});
+
+describe("Workbook navigation (unlocked, cross-sheet)", () => {
+  const makeTransport = (): WorkbookTransport & {
+    reads: [number, number, number][];
+    writes: [number, number, number, string][];
+  } => {
+    const reads: [number, number, number][] = [];
+    const writes: [number, number, number, string][] = [];
+    return {
+      reads,
+      writes,
+      getSheetNames: vi.fn(async () => ["Intro", "Data", "Hidden"]),
+      getActiveSheet: vi.fn(async () => 1),
+      setActiveSheet: vi.fn(async () => {}),
+      readCell: vi.fn(async (s: number, r: number, c: number) => {
+        reads.push([s, r, c]);
+        return `${s}:${r}:${c}`;
+      }),
+      writeCell: vi.fn(async (s: number, r: number, c: number, v: string) => {
+        writes.push([s, r, c, v]);
+      }),
+    };
+  };
+
+  it("sheets() returns every sheet in tab order", async () => {
+    const wb = makeWorkbook(makeTransport());
+    const sheets = await wb.sheets();
+    expect(sheets.map((s) => s.name)).toEqual(["Intro", "Data", "Hidden"]);
+    expect(sheets.map((s) => s.index)).toEqual([0, 1, 2]);
+  });
+
+  it("activeSheet() resolves the active index", async () => {
+    const wb = makeWorkbook(makeTransport());
+    const s = await wb.activeSheet();
+    expect(s.index).toBe(1);
+    expect(s.name).toBe("Data");
+  });
+
+  it("sheet() resolves by name and index, null when absent", async () => {
+    const wb = makeWorkbook(makeTransport());
+    expect((await wb.sheet("Hidden"))?.index).toBe(2);
+    expect((await wb.sheet(0))?.name).toBe("Intro");
+    expect(await wb.sheet("Nope")).toBeNull();
+    expect(await wb.sheet(9)).toBeNull();
+  });
+
+  it("a navigated sheet's range reads/writes THAT sheet's index", async () => {
+    const t = makeTransport();
+    const wb = makeWorkbook(t);
+    const hidden = await wb.sheet("Hidden"); // index 2
+    await hidden!.range("A1:B1").setValues([["x", "y"]]);
+    await hidden!.cell(5, 0).getValue();
+    expect(t.writes).toEqual([
+      [2, 0, 0, "x"],
+      [2, 0, 1, "y"],
+    ]);
+    expect(t.reads).toEqual([[2, 5, 0]]);
+  });
+
+  it("activate() switches to that sheet", async () => {
+    const t = makeTransport();
+    const wb = makeWorkbook(t);
+    const s = await wb.sheet(2);
+    await s!.activate();
+    expect(t.setActiveSheet).toHaveBeenCalledWith(2);
   });
 });

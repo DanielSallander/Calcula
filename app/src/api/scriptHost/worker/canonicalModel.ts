@@ -187,3 +187,79 @@ export function rangeFromAddress(
 ): ScriptRange {
   return makeRange(read, write, parseA1(address));
 }
+
+// ---------------------------------------------------------------------------
+// Workbook / Sheet navigation (the cross-object canonical model — unlocked tier)
+// ---------------------------------------------------------------------------
+
+/** A worksheet facet: the navigation level above a ScriptRange. */
+export interface ScriptSheet {
+  readonly index: number;
+  readonly name: string;
+  /** A range on THIS sheet by A1 address. */
+  range(address: string): ScriptRange;
+  /** A single cell on this sheet (0-based). */
+  cell(row: number, col: number): ScriptRange;
+  /** Make this the active sheet. */
+  activate(): Promise<void>;
+}
+
+/** The workbook facet: navigate Workbook -> Sheet -> Range across sheets. */
+export interface ScriptWorkbook {
+  /** All sheets, in tab order. */
+  sheets(): Promise<ScriptSheet[]>;
+  /** The active sheet. */
+  activeSheet(): Promise<ScriptSheet>;
+  /** A sheet by exact name or 0-based index; null if not found. */
+  sheet(nameOrIndex: string | number): Promise<ScriptSheet | null>;
+}
+
+/**
+ * The injected transport behind Workbook navigation. The shim wires these to
+ * broker aspects: getSheetNames/getActiveSheet/setActiveSheet to the unlocked
+ * `api.*` aspects, and readCell/writeCell to `sheet.getCellValue`/`setCellValue`
+ * WITH a sheetIndex — cross-sheet access the host permits only for unlocked
+ * scripts (this transport is only ever wired for the unlocked tier).
+ */
+export interface WorkbookTransport {
+  getSheetNames(): Promise<string[]>;
+  getActiveSheet(): Promise<number>;
+  setActiveSheet(index: number): Promise<void>;
+  readCell(sheetIndex: number, row: number, col: number): Promise<string>;
+  writeCell(sheetIndex: number, row: number, col: number, value: string): Promise<void>;
+}
+
+function makeSheet(t: WorkbookTransport, index: number, name: string): ScriptSheet {
+  const read: CellReader = (row, col) => t.readCell(index, row, col);
+  const write: CellWriter = (row, col, value) => t.writeCell(index, row, col, value);
+  return {
+    index,
+    name,
+    range: (address) => rangeFromAddress(read, write, address),
+    cell: (row, col) =>
+      makeRange(read, write, { startRow: row, startCol: col, endRow: row, endCol: col }),
+    activate: () => t.setActiveSheet(index),
+  };
+}
+
+/** Build the Workbook navigation facet over an injected transport. */
+export function makeWorkbook(t: WorkbookTransport): ScriptWorkbook {
+  return {
+    async sheets() {
+      const names = await t.getSheetNames();
+      return names.map((name, i) => makeSheet(t, i, name));
+    },
+    async activeSheet() {
+      const [names, active] = await Promise.all([t.getSheetNames(), t.getActiveSheet()]);
+      const idx = active >= 0 && active < names.length ? active : 0;
+      return makeSheet(t, idx, names[idx] ?? "");
+    },
+    async sheet(nameOrIndex) {
+      const names = await t.getSheetNames();
+      const idx =
+        typeof nameOrIndex === "number" ? nameOrIndex : names.indexOf(nameOrIndex);
+      if (idx < 0 || idx >= names.length) return null;
+      return makeSheet(t, idx, names[idx]);
+    },
+  };
+}

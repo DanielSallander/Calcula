@@ -8,8 +8,36 @@
 // Base
 // ============================================================================
 
+/** A worksheet facet of the canonical model (C3). Reached via api.workbook. */
+declare interface ScriptSheet {
+  readonly index: number;
+  readonly name: string;
+  /** A range on THIS sheet by A1 address ("A1", "A1:B5"). */
+  range(address: string): ScriptRange;
+  /** A single cell on this sheet (0-based), as a single-cell range. */
+  cell(row: number, col: number): ScriptRange;
+  /** Make this the active sheet. */
+  activate(): Promise<void>;
+}
+
+/** The workbook facet of the canonical model (C3): Workbook -> Sheet -> Range. */
+declare interface ScriptWorkbook {
+  /** All sheets, in tab order. */
+  sheets(): Promise<ScriptSheet[]>;
+  /** The active sheet. */
+  activeSheet(): Promise<ScriptSheet>;
+  /** A sheet by exact name or 0-based index; null if not found. */
+  sheet(nameOrIndex: string | number): Promise<ScriptSheet | null>;
+}
+
 /** Extended API surface available only in "unlocked" access mode. */
 declare interface UnlockedAPI {
+  /**
+   * Canonical Workbook -> Sheet -> Range navigation (C3): the same model
+   * extensions use. e.g. `const s = await api.workbook.sheet("Data"); await
+   * s.range("A1:B5").setValues(...)`. Cross-sheet reach (unlocked tier only).
+   */
+  readonly workbook: ScriptWorkbook;
   /** Read a cell value by row/col (active sheet). */
   getCellValue(row: number, col: number): Promise<string>;
   /** Write a cell value by row/col (active sheet). */

@@ -10,7 +10,13 @@
 
 import type { MountSpec, W2H, RpcErrorShape } from "../protocol";
 import { CALL_TIMEOUT_MS, MAX_INFLIGHT_CALLS } from "../protocol";
-import { makeRange, rangeFromAddress, type ScriptRange } from "./canonicalModel";
+import {
+  makeRange,
+  rangeFromAddress,
+  makeWorkbook,
+  type ScriptRange,
+  type WorkbookTransport,
+} from "./canonicalModel";
 
 type Post = (msg: W2H, transfer?: Transferable[]) => void;
 type Handler = (payload: unknown) => void;
@@ -298,6 +304,19 @@ function buildCapsShim(rt: WorkerRuntime): {
 // ---- Unlocked API shim ----
 
 function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
+  // Cross-sheet transport for the canonical Workbook navigation. readCell/
+  // writeCell go through sheet.getCellValue/setCellValue WITH a sheetIndex — the
+  // host permits that cross-sheet reach only for the unlocked tier, which is
+  // exactly when this shim is built. No new aspect / no new privileged surface.
+  const workbookTransport: WorkbookTransport = {
+    getSheetNames: () => call(rt, "api.getSheetNames", []) as Promise<string[]>,
+    getActiveSheet: () => call(rt, "api.getActiveSheet", []) as Promise<number>,
+    setActiveSheet: (index) => call(rt, "api.setActiveSheet", [index]) as Promise<void>,
+    readCell: (sheetIndex, row, col) =>
+      call(rt, "sheet.getCellValue", [row, col, sheetIndex]) as Promise<string>,
+    writeCell: (sheetIndex, row, col, value) =>
+      call(rt, "sheet.setCellValue", [row, col, value, sheetIndex]) as Promise<void>,
+  };
   return {
     getCellValue: (row: number, col: number) => call(rt, "api.getCellValue", [row, col]),
     setCellValue: (row: number, col: number, value: string) => call(rt, "api.setCellValue", [row, col, value]),
@@ -305,6 +324,8 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     getSheetNames: () => call(rt, "api.getSheetNames", []),
     getActiveSheet: () => call(rt, "api.getActiveSheet", []),
     setActiveSheet: (index: number) => call(rt, "api.setActiveSheet", [index]),
+    // Canonical Workbook -> Sheet -> Range navigation (C3 step 3).
+    workbook: makeWorkbook(workbookTransport),
     emitEvent: (name: string, detail?: unknown) => callFire(rt, "api.emitEvent", [name, detail]),
     onEvent(name: string, handler: (detail: unknown) => void): CleanupFn {
       const cleanup = registerHook(rt, `event:${name}`, handler);
