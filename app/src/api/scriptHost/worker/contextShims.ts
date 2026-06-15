@@ -10,6 +10,7 @@
 
 import type { MountSpec, W2H, RpcErrorShape } from "../protocol";
 import { CALL_TIMEOUT_MS, MAX_INFLIGHT_CALLS } from "../protocol";
+import { makeRange, rangeFromAddress, type ScriptRange } from "./canonicalModel";
 
 type Post = (msg: W2H, transfer?: Transferable[]) => void;
 type Handler = (payload: unknown) => void;
@@ -356,7 +357,15 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         },
       };
 
-    case "sheet":
+    case "sheet": {
+      // Canonical-model facet (C3 step 3): a Range/Cell over THIS sheet, backed
+      // by the same restricted, own-sheet broker aspects the flat getCellValue/
+      // setCellValue use — pure sugar, no new privileged surface. Bound to the
+      // own sheet (no sheetIndex passed), so reads/writes stay clamped to it.
+      const readCell = (row: number, col: number): Promise<string> =>
+        call(rt, "sheet.getCellValue", [row, col]) as Promise<string>;
+      const writeCell = (row: number, col: number, value: string): Promise<void> =>
+        call(rt, "sheet.setCellValue", [row, col, value]) as Promise<void>;
       return {
         ...base,
         onActivate: (h: Handler) => registerHook(rt, "onActivate", h),
@@ -367,7 +376,17 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
           call(rt, "sheet.getCellValue", [row, col, sheetIndex]),
         setCellValue: (row: number, col: number, value: string, sheetIndex?: number) =>
           call(rt, "sheet.setCellValue", [row, col, value, sheetIndex]),
+        range: (address: string): ScriptRange =>
+          rangeFromAddress(readCell, writeCell, address),
+        cell: (row: number, col: number): ScriptRange =>
+          makeRange(readCell, writeCell, {
+            startRow: row,
+            startCol: col,
+            endRow: row,
+            endCol: col,
+          }),
       };
+    }
 
     case "cell":
       return {

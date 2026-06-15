@@ -283,6 +283,38 @@ export interface WorkbookContext extends BaseObjectContext {
   };
 }
 
+/**
+ * The object-script Range facet of the canonical shared object model (C3) — the
+ * same Workbook -> Sheet -> Range -> Cell shape extensions use (api/range.ts),
+ * bound to the script's own sheet and async over the broker. Values are display
+ * strings (the object-script convention). Built by Sheet.range() / Sheet.cell().
+ */
+export interface ScriptRange {
+  readonly startRow: number;
+  readonly startCol: number;
+  readonly endRow: number;
+  readonly endCol: number;
+  readonly rowCount: number;
+  readonly colCount: number;
+  readonly isSingleCell: boolean;
+  /** A1 address ("A1" or "A1:B5"). */
+  readonly address: string;
+  /** A new range shifted by (rowOffset, colOffset), same size. */
+  offset(rowOffset: number, colOffset: number): ScriptRange;
+  /** A new range, same top-left, resized to rows x cols. */
+  resize(rows: number, cols: number): ScriptRange;
+  /** A single-cell range at the given offset within this range. */
+  getCell(rowOffset: number, colOffset: number): ScriptRange;
+  /** The top-left cell's display value. */
+  getValue(): Promise<string>;
+  /** All values as a rows x cols grid of display strings. */
+  getValues(): Promise<string[][]>;
+  /** Set the top-left cell's value. */
+  setValue(value: string): Promise<void>;
+  /** Set values from a 2D array (clamped to the range's dimensions). */
+  setValues(values: string[][]): Promise<void>;
+}
+
 /** Context for Sheet-level scripts (applies to all sheets). */
 export interface SheetContext extends BaseObjectContext {
   readonly objectType: "sheet";
@@ -313,6 +345,16 @@ export interface SheetContext extends BaseObjectContext {
 
   /** Write a cell value. */
   setCellValue(row: number, col: number, value: string, sheetIndex?: number): Promise<void>;
+
+  /**
+   * A range on THIS sheet by A1 address ("A1", "A1:B5") — the canonical model
+   * facet (C3). Reads/writes are clamped to this sheet. Prefer this over the
+   * flat getCellValue/setCellValue: `sheet.range("A1:B5").setValues(...)`.
+   */
+  range(address: string): ScriptRange;
+
+  /** A single cell on this sheet (0-based), as a single-cell range. */
+  cell(row: number, col: number): ScriptRange;
 }
 
 /** Context for Cell-level scripts (applies to all cells). */
