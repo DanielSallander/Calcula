@@ -16,6 +16,7 @@ import {
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 
+import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects } from "./chartDispatch";
@@ -477,6 +478,9 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   }
 
   ctx.restore();
+
+  // T4: script-presence badge (design mode only) — see code on the object.
+  drawObjectScriptBadgeIfPresent(ctx, "chart", chartId, canvasX, canvasY, chartWidth);
 }
 
 // ============================================================================

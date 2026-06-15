@@ -10,6 +10,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./shell";
 import { exposeExtensionRuntimeGlobals } from "./api/extensionRuntime";
+import { initObjectScriptBadges } from "./api/objectScriptBadge";
 import "./index.css";
 
 // C2: publish the host's React singleton BEFORE any extension loads, so
@@ -17,6 +18,10 @@ import "./index.css";
 // second bundled React would break hooks/context). @api is NOT globalized —
 // extensions receive it via the per-extension ExtensionContext (scoped).
 exposeExtensionRuntimeGlobals();
+
+// T4: wire the shared object script-presence cache so grid-object overlays
+// (slicers, charts, ...) can show a "has script" badge in design mode.
+initObjectScriptBadges();
 
 // NOTE: Feature extensions (pivot, etc.) are loaded in useExtensionInitializer
 // AFTER bootstrapShell() so that services (DialogExtensions, etc.) are available.

@@ -10,6 +10,7 @@ import {
   type OverlayHitTestContext,
   type OverlayCursorFn,
 } from "@api/gridOverlays";
+import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { getSlicerById, getCachedItems } from "../lib/slicerStore";
 import { isSlicerSelected } from "../handlers/selectionHandler";
 import { SLICER_STYLES_BY_ID } from "../components/SlicerStylesGallery";
@@ -464,6 +465,9 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
   }
 
   c.restore(); // restore slicer clip
+
+  // T4: script-presence badge (design mode only) — see code on the object.
+  drawObjectScriptBadgeIfPresent(c, "slicer", slicerId, canvasX, canvasY, w);
 }
 
 // ============================================================================

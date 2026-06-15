@@ -1535,3 +1535,22 @@ export {
   codeUnitReachesBeyondGrid,
 } from "./codeInventory";
 export type { CodeUnit, CodeInventorySummary } from "./codeInventory";
+
+// ---- Design Mode (app-global flag) + object script-presence badges (T4) ----
+export {
+  getDesignMode,
+  setDesignMode,
+  toggleDesignMode,
+  onDesignModeChange,
+  DESIGN_MODE_CHANGED_EVENT,
+} from "./designMode";
+export {
+  hasObjectScript,
+  onObjectScriptPresenceChange,
+  refreshObjectScriptPresence,
+  markObjectScript,
+  unmarkObjectScript,
+  drawScriptBadge,
+  drawObjectScriptBadgeIfPresent,
+  initObjectScriptBadges,
+} from "./objectScriptBadge";
