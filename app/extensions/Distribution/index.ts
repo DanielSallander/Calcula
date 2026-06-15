@@ -6,10 +6,12 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { AppEvents } from "@api/events";
 import { OverridesPane } from "./components/OverridesPane";
+import { SubscriptionManagerPane } from "./components/SubscriptionManagerPane";
 import {
   DistributionManifest,
   OVERRIDES_PANE_ID,
   WRITEBACK_PANE_ID,
+  SUBSCRIPTIONS_PANE_ID,
   PUBLISH_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
@@ -80,6 +82,17 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(WRITEBACK_PANE_ID));
 
+  // Register the Subscriptions manager task pane (D6)
+  context.ui.taskPanes.register({
+    id: SUBSCRIPTIONS_PANE_ID,
+    title: "Subscriptions",
+    component: SubscriptionManagerPane,
+    contextKeys: ["always"],
+    priority: 34,
+    closable: true,
+  });
+  cleanupFns.push(() => context.ui.taskPanes.unregister(SUBSCRIPTIONS_PANE_ID));
+
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
@@ -115,13 +128,23 @@ function activate(context: ExtensionContext): void {
   });
 
   context.ui.menus.registerItem("data", {
+    id: "data:showSubscriptions",
+    label: "Manage Subscriptions...",
+    action: () => {
+      context.ui.taskPanes.open(SUBSCRIPTIONS_PANE_ID);
+      context.ui.taskPanes.showContainer();
+    },
+    order: 903,
+  });
+
+  context.ui.menus.registerItem("data", {
     id: "data:showOverrides",
     label: "Show Overrides Pane",
     action: () => {
       context.ui.taskPanes.open(OVERRIDES_PANE_ID);
       context.ui.taskPanes.showContainer();
     },
-    order: 903,
+    order: 904,
   });
 
   context.ui.menus.registerItem("data", {

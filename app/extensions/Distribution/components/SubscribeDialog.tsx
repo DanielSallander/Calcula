@@ -4,7 +4,7 @@
 import React, { useState } from "react";
 import type { DialogProps } from "@api";
 import { pullPackage, emitAppEvent, AppEvents } from "@api";
-import { inspectPackage, type PackageInspection } from "@api/distribution";
+import { inspectPackage, browseRegistry, type PackageInspection, type PackageInfo } from "@api/distribution";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getConnections, connect, updateConnection } from "../../BusinessIntelligence/lib/bi-api";
 import { pivot } from "@api/pivot";
@@ -29,6 +29,10 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [inspection, setInspection] = useState<PackageInspection | null>(null);
 
+  // The packages found in the chosen registry (D6 — no more blind text entry).
+  const [packages, setPackages] = useState<PackageInfo[] | null>(null);
+  const [browsing, setBrowsing] = useState(false);
+
   const handleBrowse = async () => {
     try {
       const selected = await open({
@@ -38,9 +42,31 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       });
       if (selected && typeof selected === "string") {
         setRegistryPath(selected);
+        setPackages(null);
       }
     } catch {
       // user cancelled
+    }
+  };
+
+  // List the packages in the registry so the user can pick one instead of
+  // typing its name + version blind.
+  const handleListPackages = async () => {
+    if (!registryPath.trim()) {
+      setError("Choose a registry folder first.");
+      return;
+    }
+    setError(null);
+    setStatus(null);
+    setBrowsing(true);
+    try {
+      const found = await browseRegistry(registryPath);
+      setPackages(found);
+      if (found.length === 0) setStatus("No packages found in this registry.");
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      setBrowsing(false);
     }
   };
 
@@ -237,11 +263,60 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       <div style={fieldStyle}>
         <label>Registry Path</label>
         <div style={{ display: "flex", gap: "4px" }}>
-          <input style={{ ...inputStyle, flex: 1 }} value={registryPath} onChange={(e) => setRegistryPath(e.target.value)}
+          <input style={{ ...inputStyle, flex: 1 }} value={registryPath} onChange={(e) => { setRegistryPath(e.target.value); setPackages(null); }}
             placeholder="C:\shared\registry" />
           <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>Browse...</button>
+          <button onClick={handleListPackages} disabled={browsing} style={{ whiteSpace: "nowrap" }}>
+            {browsing ? "..." : "List Packages"}
+          </button>
         </div>
       </div>
+
+      {packages && packages.length > 0 && (
+        <div style={{ marginBottom: 12, maxHeight: 168, overflowY: "auto", border: "1px solid #e0e0e0", borderRadius: 4 }}>
+          {packages.map((pkg) => {
+            const selected = packageName === pkg.name;
+            return (
+              <div
+                key={pkg.name}
+                onClick={() => { setPackageName(pkg.name); setVersionPin("latest"); }}
+                style={{ padding: "6px 8px", borderBottom: "1px solid #f0f0f0", cursor: "pointer", background: selected ? "#eef5ff" : "transparent" }}
+              >
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{pkg.name}</div>
+                <div style={{ fontSize: 11, color: "#888" }}>
+                  {pkg.description || pkg.kind}
+                  {` · ${pkg.versions.length} version${pkg.versions.length !== 1 ? "s" : ""}`}
+                  {pkg.author ? ` · ${pkg.author}` : ""}
+                </div>
+                {selected && pkg.versions.length > 0 && (
+                  <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }} onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => setVersionPin("latest")}
+                      style={{ fontSize: 11, padding: "1px 6px", border: "none", borderRadius: 3, cursor: "pointer", background: versionPin === "latest" ? "#1967d2" : "#f1f3f4", color: versionPin === "latest" ? "#fff" : "#333" }}
+                    >
+                      latest
+                    </button>
+                    {[...pkg.versions].reverse().map((v) => {
+                      const pin = `=${v.version}`;
+                      return (
+                        <button
+                          key={v.version}
+                          onClick={() => setVersionPin(pin)}
+                          title={`Published ${v.publishedAt}${v.publishedBy ? ` by ${v.publishedBy}` : ""}`}
+                          style={{ fontSize: 11, padding: "1px 6px", border: "none", borderRadius: 3, cursor: "pointer", background: versionPin === pin ? "#1967d2" : "#f1f3f4", color: versionPin === pin ? "#fff" : "#333" }}
+                        >
+                          {v.version}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div style={fieldStyle}>
         <label>Package Name</label>
         <input style={inputStyle} value={packageName} onChange={(e) => setPackageName(e.target.value)}
