@@ -1453,7 +1453,7 @@ export {
   hasSlicerItemBitmapRenderer,
 } from "./scriptHost/host";
 export { getCellRenderStats } from "./scriptHost/renderCache";
-export { resolveCapabilityRequest, getGrantedOrigins, getScriptGrants, revokeCapability, recordCapabilityGrant } from "./scriptHost/capabilities";
+export { resolveCapabilityRequest, getGrantedOrigins, getScriptGrants, revokeCapability, recordCapabilityGrant, describeCapability } from "./scriptHost/capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./scriptHost/capabilities";
 export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./scriptHost/capabilities";
 export type { DeclaredCapabilities } from "./scriptHost/capabilities";
@@ -1469,10 +1469,12 @@ export {
 
 export {
   registerSlicerStoreService,
+  registerTimelineStoreService,
   registerChartStoreService,
   registerPivotStoreService,
   registerBiConnectionService,
   getSlicerStoreService,
+  getTimelineStoreService,
   getChartStoreService,
   getPivotStoreService,
   getBiConnectionService,
@@ -1480,6 +1482,7 @@ export {
 
 export type {
   ISlicerStoreService,
+  ITimelineStoreService,
   IChartStoreService,
   IPivotStoreService,
   IBiConnectionService,

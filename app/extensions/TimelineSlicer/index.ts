@@ -7,6 +7,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
+  registerTimelineStoreService,
 } from "@api";
 import {
   requestOverlayRedraw,
@@ -90,6 +91,32 @@ function activate(context: ExtensionContext): void {
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(TimelineSlicerManifest);
+
+  // Register the timeline store service so scriptable timeline (date-range
+  // slicer) contexts can read/write the selected range without importing this
+  // extension. Runtime ids are EntityId strings (the TS cache type predates the
+  // EntityId migration and still annotates id as number).
+  registerTimelineStoreService({
+    getTimelineById(id: string) {
+      const t = getTimelineById(id as unknown as number);
+      if (!t) return undefined;
+      return {
+        name: t.name,
+        selectionStart: t.selectionStart ?? null,
+        selectionEnd: t.selectionEnd ?? null,
+        fieldName: t.fieldName,
+        level: String(t.level ?? ""),
+        sourceType: String(t.sourceType ?? ""),
+      };
+    },
+    getSelection(timelineId: string) {
+      const t = getTimelineById(timelineId as unknown as number);
+      return { start: t?.selectionStart ?? null, end: t?.selectionEnd ?? null };
+    },
+    async setSelection(timelineId: string, start: string | null, end: string | null) {
+      await updateTimelineSelectionAsync(timelineId as unknown as number, start, end);
+    },
+  });
 
   // Register dialogs
   context.ui.dialogs.register(InsertTimelineDialogDefinition);

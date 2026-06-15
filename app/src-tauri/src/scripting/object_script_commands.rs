@@ -290,6 +290,18 @@ pub fn delete_object_script(
     Ok(())
 }
 
+/// Prune every object script attached to a deleted component instance (C10 lifecycle
+/// hygiene). Called from the backend delete paths (chart/slicer/pivot/timeline/table/
+/// named range) so a deleted object never leaves a dangling, still-persisted script
+/// behind. instance_id is an EntityId UUID and therefore globally unique across object
+/// types, so matching by id alone is sufficient. Lock-poison is swallowed: cleanup must
+/// never turn a successful delete into an error.
+pub(crate) fn prune_scripts_for_instance(state: &AppState, instance_id: &str) {
+    if let Ok(mut scripts) = state.object_scripts.lock() {
+        scripts.retain(|s| s.instance_id.as_deref() != Some(instance_id));
+    }
+}
+
 /// Delete all object scripts for a specific component instance (when the component is deleted).
 #[tauri::command]
 pub fn delete_object_scripts_for_instance(
@@ -298,7 +310,6 @@ pub fn delete_object_scripts_for_instance(
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_OBJECT_SCRIPT_EDITOR)?;
-    let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
-    scripts.retain(|s| s.instance_id.as_deref() != Some(&instance_id));
+    prune_scripts_for_instance(&state, &instance_id);
     Ok(())
 }

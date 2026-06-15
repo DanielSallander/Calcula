@@ -20,11 +20,28 @@ import {
   revokeCapability,
   revokeScriptGrants,
   resetAllGrants,
+  describeCapability,
 } from "../capabilities";
 import { buildHandleFromDefinition, brokerCall } from "../broker";
+import { ALL_CAPABILITY_IDS } from "../capabilityIds";
 
 beforeEach(() => {
   resetAllGrants();
+});
+
+describe("describeCapability (C7 transparency UI label source)", () => {
+  it("gives every known capability a non-empty, non-id human description", () => {
+    for (const id of ALL_CAPABILITY_IDS) {
+      const desc = describeCapability(id);
+      expect(desc.length, id).toBeGreaterThan(0);
+      // The description should be prose, not just the raw id echoed back.
+      expect(desc, id).not.toBe(id);
+    }
+  });
+
+  it("falls back to the id for an unknown capability", () => {
+    expect(describeCapability("filesystem" as never)).toBe("filesystem");
+  });
 });
 
 describe("parseDeclaredCapabilities", () => {

@@ -64,5 +64,7 @@ pub fn delete_chart(state: State<AppState>, id: identity::EntityId) -> Result<()
         previous
     };
     crate::undo_commands::record_chart_undo(&state, id, previous, "Delete chart");
+    // C10: a deleted chart must not leave its object script mounted/persisted.
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &id.to_string());
     Ok(())
 }

@@ -189,6 +189,12 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "formula.udf": "evaluate worksheet formulas (user-defined functions)",
 };
 
+/** One-line description of a capability id, for transparency UI (extension
+ *  manager, audit panels). Single source of truth — reuses the JIT-dialog map. */
+export function describeCapability(id: CapabilityId): string {
+  return CAP_DESCRIPTION[id] ?? id;
+}
+
 /** requestId -> resolver. */
 const pendingRequests = new Map<string, (d: CapabilityDecision) => void>();
 let requestSeq = 0;

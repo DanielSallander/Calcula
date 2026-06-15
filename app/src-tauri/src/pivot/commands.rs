@@ -1072,6 +1072,10 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
     // Remove pivot region tracking (via generic protected region system)
     let mut regions = state.protected_regions.lock().unwrap();
     regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
+    drop(regions);
+
+    // C10: a deleted pivot must not leave its object script mounted/persisted.
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &pivot_id.to_string());
 
     Ok(())
 }

@@ -575,8 +575,28 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         },
       };
 
+    case "timeline":
+      return {
+        ...base,
+        instanceId,
+        name: spec.scriptName,
+        onChange: (h: Handler) => registerHook(rt, "onChange", h),
+        getRange: () => ({
+          start: mirror<string | null>(rt, "timeline.selectionStart", null),
+          end: mirror<string | null>(rt, "timeline.selectionEnd", null),
+        }),
+        setRange: (start: string | null, end: string | null) =>
+          setState(rt, "timeline.setSelection", [start ?? null, end ?? null]),
+        clearSelection: () => setState(rt, "timeline.setSelection", [null, null]),
+        properties: {
+          get fieldName() { return mirror(rt, "timeline.fieldName", ""); },
+          get level() { return mirror(rt, "timeline.level", ""); },
+          get sourceType() { return mirror(rt, "timeline.sourceType", ""); },
+        },
+      };
+
     default:
-      // textbox / timeline / future types: base surface only.
+      // textbox / future types: base surface only.
       return base;
   }
 }

@@ -314,13 +314,24 @@ function setup(textbox) {
 
     case "timeline":
       return `// Timeline: "${name}"
-// Access level: restricted
+// Access level: restricted (unlock full API via access level setting)
 
 function setup(timeline) {
   // == Events ==
-  // timeline.expose("onPeriodChange", (period) => {
-  //   timeline.log("Period changed:", period);
+  // Fires whenever the selected date range changes (start/end are ISO
+  // "YYYY-MM-DD" strings, or null for an open bound).
+  // timeline.onChange(({ start, end }) => {
+  //   timeline.log("Range changed:", start, "->", end);
   // });
+
+  // == Data Access ==
+  // const { start, end } = timeline.getRange();
+  // timeline.setRange("2026-01-01", "2026-03-31");
+  // timeline.clearSelection();
+
+  // == Properties ==
+  // timeline.log("Field:", timeline.properties.fieldName,
+  //              "Level:", timeline.properties.level);
 }
 `;
 

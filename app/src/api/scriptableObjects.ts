@@ -443,6 +443,41 @@ export interface SlicerContext extends BaseObjectContext {
   };
 }
 
+/** Context for Timeline (date-range slicer) instances. */
+export interface TimelineContext extends BaseObjectContext {
+  readonly objectType: "timeline";
+
+  /** The timeline instance ID. */
+  readonly instanceId: string;
+
+  /** The timeline name. */
+  readonly name: string;
+
+  /** Called when the selected date range changes. start/end are ISO "YYYY-MM-DD"
+   *  strings, or null for an open bound (no lower/upper limit). */
+  onChange(handler: EventHandler<{ start: string | null; end: string | null }>): CleanupFn;
+
+  /** Get the currently selected date range. A null bound means open-ended. */
+  getRange(): { start: string | null; end: string | null };
+
+  /** Set the selected date range programmatically (ISO "YYYY-MM-DD"; pass null
+   *  to leave a bound open). */
+  setRange(start: string | null, end: string | null): Promise<void>;
+
+  /** Clear the selection so every date is shown. */
+  clearSelection(): Promise<void>;
+
+  /** Timeline properties (read-only). */
+  readonly properties: {
+    /** The date field the timeline filters on. */
+    readonly fieldName: string;
+    /** Current granularity: "years" | "quarters" | "months" | "days". */
+    readonly level: string;
+    /** Source type (currently always "pivot"). */
+    readonly sourceType: string;
+  };
+}
+
 /** Context for Chart instances. */
 export interface ChartContext extends BaseObjectContext {
   readonly objectType: "chart";
@@ -702,7 +737,7 @@ export interface ObjectContextMap {
   pivot: PivotContext;
   button: ButtonContext;
   textbox: BaseObjectContext;
-  timeline: BaseObjectContext;
+  timeline: TimelineContext;
   shape: ShapeContext;
   table: TableContext;
   namedRange: NamedRangeContext;

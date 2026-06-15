@@ -124,6 +124,264 @@ declare namespace Calcula {
   function log(...args: string[]): void;
 
   // --------------------------------------------------------------------------
+  // Navigation & View
+  // --------------------------------------------------------------------------
+
+  /**
+   * Get the current view mode.
+   * @returns "normal" or "pageBreakPreview"
+   */
+  function getViewMode(): string;
+
+  /**
+   * Set the view mode (applied after the script completes).
+   * @param mode - "normal" or "pageBreakPreview"
+   */
+  function setViewMode(mode: string): void;
+
+  /**
+   * Get the current zoom level as a decimal (1.0 = 100%).
+   * @returns The zoom factor
+   */
+  function getZoom(): number;
+
+  /**
+   * Set the zoom level (applied after the script completes).
+   * @param percent - Zoom factor as a decimal (1.0 = 100%)
+   */
+  function setZoom(percent: number): void;
+
+  /**
+   * Get the cell reference style.
+   * @returns "A1" or "R1C1"
+   */
+  function getReferenceStyle(): string;
+
+  /**
+   * Set the cell reference style (applied after the script completes).
+   * @param style - "A1" or "R1C1"
+   */
+  function setReferenceStyle(style: string): void;
+
+  // --------------------------------------------------------------------------
+  // Sheet Operations (navigation & visibility)
+  // --------------------------------------------------------------------------
+
+  /** Switch to the next sheet (wraps around to the first). */
+  function nextSheet(): void;
+
+  /** Switch to the previous sheet (wraps around to the last). */
+  function previousSheet(): void;
+
+  /**
+   * Get a sheet's visibility.
+   * @param index - 0-based sheet index
+   * @returns "visible", "hidden", or "veryHidden"
+   */
+  function getSheetVisibility(index: number): string;
+
+  /**
+   * Hide a sheet (applied after the script completes).
+   * @param index - 0-based sheet index
+   * @param level - Optional: "hidden" (default) or "veryHidden"
+   */
+  function hideSheet(index: number, level?: string): void;
+
+  /**
+   * Make a hidden sheet visible again (applied after the script completes).
+   * @param index - 0-based sheet index
+   */
+  function unhideSheet(index: number): void;
+
+  // --------------------------------------------------------------------------
+  // Workbook Properties
+  // --------------------------------------------------------------------------
+
+  /**
+   * Get a custom workbook property.
+   * @param key - Property name
+   * @returns The property value, or empty string if not set.
+   */
+  function getWorkbookProperty(key: string): string;
+
+  /**
+   * Set a custom workbook property.
+   * @param key - Property name
+   * @param value - Property value
+   */
+  function setWorkbookProperty(key: string, value: string): void;
+
+  // --------------------------------------------------------------------------
+  // Formatting & Style
+  // --------------------------------------------------------------------------
+
+  /**
+   * Get the names of all defined named styles.
+   * @returns JSON string of `string[]`
+   */
+  function getNamedStyles(): string;
+
+  /**
+   * Apply a named style to a cell (applied after the script completes).
+   * @param styleName - The named style to apply
+   * @param row - 0-based row index
+   * @param col - 0-based column index
+   */
+  function applyNamedStyle(styleName: string, row: number, col: number): void;
+
+  // --------------------------------------------------------------------------
+  // Calculation
+  // --------------------------------------------------------------------------
+
+  /**
+   * Get the current calculation state.
+   * @returns "done" (calculation is synchronous in the current version)
+   */
+  function getCalculationState(): string;
+
+  /**
+   * Get iterative-calculation settings.
+   * @returns JSON string of `{ enabled: boolean, maxIterations: number, maxChange: number }`
+   */
+  function getIterationSettings(): string;
+
+  /**
+   * Set iterative-calculation settings (applied after the script completes).
+   * @param enabled - Whether iterative calculation is on
+   * @param maxIterations - Maximum iteration count
+   * @param maxChange - Maximum change threshold to stop iterating
+   */
+  function setIterationSettings(
+    enabled: boolean,
+    maxIterations: number,
+    maxChange: number,
+  ): void;
+
+  // --------------------------------------------------------------------------
+  // Data
+  // --------------------------------------------------------------------------
+
+  /**
+   * Fill the top row of a range downward into the rest of the range
+   * (applied after the script completes).
+   * @param startRow - 0-based start row
+   * @param startCol - 0-based start column
+   * @param endRow - 0-based end row (inclusive)
+   * @param endCol - 0-based end column (inclusive)
+   */
+  function fillDown(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+  ): void;
+
+  /**
+   * Fill the left column of a range rightward into the rest of the range
+   * (applied after the script completes).
+   * @param startRow - 0-based start row
+   * @param startCol - 0-based start column
+   * @param endRow - 0-based end row (inclusive)
+   * @param endCol - 0-based end column (inclusive)
+   */
+  function fillRight(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+  ): void;
+
+  /**
+   * Get the contiguous data region surrounding a cell (like Ctrl+Shift+*).
+   * @param row - 0-based row index
+   * @param col - 0-based column index
+   * @returns JSON string of `{ startRow, startCol, endRow, endCol }`
+   */
+  function getCurrentRegion(row: number, col: number): string;
+
+  /**
+   * Compute the product of a list of numbers.
+   * @param valuesJson - JSON string of a `number[]`
+   * @returns The product of all values
+   */
+  function product(valuesJson: string): number;
+
+  // --------------------------------------------------------------------------
+  // Worksheet Properties
+  // --------------------------------------------------------------------------
+
+  /**
+   * Get the used range of the active sheet (bounding box of non-empty cells).
+   * @returns JSON string of `{ startRow, startCol, endRow, endCol, empty: boolean }`
+   */
+  function getUsedRange(): string;
+
+  /** Whether zero values are displayed on the active sheet. */
+  function getDisplayZeros(): boolean;
+
+  /**
+   * Toggle display of zero values on the active sheet (applied after the
+   * script completes).
+   * @param value - true to show zeros, false to hide them
+   */
+  function setDisplayZeros(value: boolean): void;
+
+  /** Whether the workbook has unsaved changes. */
+  function isDirty(): boolean;
+
+  /**
+   * Scroll the grid to make a cell visible WITHOUT changing the selection
+   * (applied after the script completes).
+   * @param row - 0-based row index
+   * @param col - 0-based column index
+   */
+  function scrollToCell(row: number, col: number): void;
+
+  /**
+   * Get the scroll area (the range users are restricted to scrolling within).
+   * @returns An A1-style range string, or empty string if unrestricted.
+   */
+  function getScrollArea(): string;
+
+  /**
+   * Set the scroll area (applied after the script completes).
+   * @param area - An A1-style range string; pass an empty string to clear it.
+   */
+  function setScrollArea(area: string): void;
+
+  // --------------------------------------------------------------------------
+  // Display
+  // --------------------------------------------------------------------------
+
+  /**
+   * Set the status bar message (applied after the script completes).
+   * @param text - The message to display
+   */
+  function setStatusBarText(text: string): void;
+
+  /** Reset the status bar to its default (applied after the script completes). */
+  function clearStatusBarText(): void;
+
+  /**
+   * Toggle gridline display on the active sheet (applied after the script completes).
+   * @param value - true to show gridlines, false to hide them
+   */
+  function setDisplayGridlines(value: boolean): void;
+
+  /**
+   * Toggle row/column heading display on the active sheet (applied after the
+   * script completes).
+   * @param value - true to show headings, false to hide them
+   */
+  function setDisplayHeadings(value: boolean): void;
+
+  /** Whether gridlines are displayed on the active sheet. */
+  function getDisplayGridlines(): boolean;
+
+  /** Whether row/column headings are displayed on the active sheet. */
+  function getDisplayHeadings(): boolean;
+
+  // --------------------------------------------------------------------------
   // Application Object (modelled after Excel's Application object)
   // --------------------------------------------------------------------------
 

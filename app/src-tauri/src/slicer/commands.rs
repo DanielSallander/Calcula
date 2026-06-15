@@ -127,6 +127,9 @@ pub fn delete_slicer(
         }
     }
 
+    // C10: a deleted slicer must not leave its object script mounted/persisted.
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &slicer_id.to_string());
+
     Ok(())
 }
 

@@ -28,6 +28,27 @@ export interface ISlicerStoreService {
 }
 
 // ============================================================================
+// Timeline Store Interface
+// ============================================================================
+
+/** Access to timeline (date-range) slicers, registered by the TimelineSlicer
+ *  extension. Lets scriptable timeline contexts read/write the selected date
+ *  range without importing the extension directly. Dates are ISO "YYYY-MM-DD"
+ *  or null (no bound = open-ended / all dates). */
+export interface ITimelineStoreService {
+  getTimelineById(id: string): {
+    name: string;
+    selectionStart: string | null;
+    selectionEnd: string | null;
+    fieldName: string;
+    level: string;
+    sourceType: string;
+  } | undefined;
+  getSelection(timelineId: string): { start: string | null; end: string | null };
+  setSelection(timelineId: string, start: string | null, end: string | null): Promise<void>;
+}
+
+// ============================================================================
 // Chart Store Interface
 // ============================================================================
 
@@ -71,12 +92,21 @@ export interface IBiConnectionService {
 // ============================================================================
 
 let slicerStore: ISlicerStoreService | null = null;
+let timelineStore: ITimelineStoreService | null = null;
 let chartStore: IChartStoreService | null = null;
 let pivotStore: IPivotStoreService | null = null;
 let biConnectionService: IBiConnectionService | null = null;
 
 export function registerSlicerStoreService(service: ISlicerStoreService): void {
   slicerStore = service;
+}
+
+export function registerTimelineStoreService(service: ITimelineStoreService): void {
+  timelineStore = service;
+}
+
+export function getTimelineStoreService(): ITimelineStoreService | null {
+  return timelineStore;
 }
 
 export function registerChartStoreService(service: IChartStoreService): void {

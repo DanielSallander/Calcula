@@ -221,6 +221,32 @@ declare interface SlicerContext extends BaseObjectContext {
   };
 }
 
+/** Context for Timeline (date-range slicer) instances. */
+declare interface TimelineContext extends BaseObjectContext {
+  /** The timeline instance ID. */
+  readonly instanceId: string;
+  /** The timeline name. */
+  readonly name: string;
+  /** Called when the selected date range changes. start/end are ISO
+   *  "YYYY-MM-DD" strings, or null for an open bound. */
+  onChange(handler: (detail: { start: string | null; end: string | null }) => void): () => void;
+  /** Get the currently selected date range (null bound = open-ended). */
+  getRange(): { start: string | null; end: string | null };
+  /** Set the selected date range (ISO "YYYY-MM-DD"; null leaves a bound open). */
+  setRange(start: string | null, end: string | null): Promise<void>;
+  /** Clear the selection so every date is shown. */
+  clearSelection(): Promise<void>;
+  /** Timeline properties (read-only). */
+  readonly properties: {
+    /** The date field the timeline filters on. */
+    readonly fieldName: string;
+    /** Current granularity: "years" | "quarters" | "months" | "days". */
+    readonly level: string;
+    /** Source type (currently always "pivot"). */
+    readonly sourceType: string;
+  };
+}
+
 /** Context for Chart instances. */
 declare interface ChartContext extends BaseObjectContext {
   /** The chart instance ID. */

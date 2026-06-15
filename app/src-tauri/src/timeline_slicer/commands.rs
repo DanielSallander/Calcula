@@ -69,6 +69,7 @@ pub fn create_timeline_slicer(
 /// Delete a timeline slicer.
 #[tauri::command]
 pub fn delete_timeline_slicer(
+    state: State<crate::AppState>,
     timeline_state: State<TimelineSlicerState>,
     timeline_id: identity::EntityId,
 ) -> Result<(), String> {
@@ -78,6 +79,10 @@ pub fn delete_timeline_slicer(
     timelines
         .remove(&timeline_id)
         .ok_or_else(|| format!("Timeline slicer {} not found", timeline_id))?;
+    drop(timelines);
+
+    // C10: a deleted timeline must not leave its object script mounted/persisted.
+    crate::scripting::object_script_commands::prune_scripts_for_instance(&state, &timeline_id.to_string());
 
     Ok(())
 }

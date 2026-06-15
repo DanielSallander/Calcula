@@ -94,6 +94,7 @@ import {
   computeExtensionCeiling,
   type ExtensionTrust,
 } from "./extensionTrust";
+import { loadDisabledIds, persistDisabledIds } from "./extensionDisabledStore";
 // Phase B: sandboxed worker-realm execution for opted-in distributed extensions.
 import {
   mountWorkerExtension,
@@ -127,9 +128,25 @@ export interface LoadedExtension {
   /** True for a distributed extension running SANDBOXED in a worker realm
    *  (Phase B). Its lifecycle is owned by extensionWorkerHost, not `module`. */
   worker?: boolean;
+  /** Ed25519 sidecar-signature trust for distributed extensions:
+   *  "unsigned" | "invalid" | "publisherChanged" | "firstUse" | "verified".
+   *  Undefined for built-ins (trusted, never signed). Surfaced in the manager
+   *  UI so the user always sees whether a third-party bundle is signed. */
+  trustStatus?: string;
+  /** True when the user has disabled this extension (persisted). A disabled
+   *  distributed extension is skipped on next launch; the entry stays listed so
+   *  it can be re-enabled. Set by updateCachedArray from the persisted set. */
+  disabled?: boolean;
 }
 
 type ChangeListener = () => void;
+
+// The user can disable third-party extensions. The disabled set is persisted to
+// localStorage so a disabled extension stays disabled across restarts (it is
+// skipped during load but still listed, so it can be re-enabled). This mirrors
+// VS Code's model: disabling tears the extension down now; enabling takes effect
+// on the next reload. Persistence lives in a tiny standalone module so it is
+// unit-testable without the heavy ExtensionManager import graph.
 
 /** Entry returned by the Rust scan_extension_directory command */
 interface ExtensionFileEntry {
@@ -327,6 +344,10 @@ class ExtensionManagerImpl {
   // Cached array for useSyncExternalStore - MUST return same reference if data unchanged
   private cachedExtensionsArray: LoadedExtension[] = [];
 
+  /** Ids the user has disabled (persisted). Distributed extensions in this set
+   *  are skipped during load and torn down immediately when disabled at runtime. */
+  private disabledIds: Set<string> = loadDisabledIds();
+
   /**
    * The context passed to all extensions during activation.
    * This is our Dependency Injection container.
@@ -382,6 +403,7 @@ class ExtensionManagerImpl {
   private async activateExtension(
     module: ExtensionModule,
     trust: ExtensionTrust,
+    trustStatus?: string,
   ): Promise<void> {
     const { id, name, version } = module.manifest;
 
@@ -405,6 +427,7 @@ class ExtensionManagerImpl {
       module,
       trust,
       declaredCapabilities,
+      trustStatus,
     };
     this.extensions.set(id, entry);
 
@@ -552,6 +575,14 @@ class ExtensionManagerImpl {
       return;
     }
 
+    // Disabled (C7): the user turned this extension off. Don't mount/activate —
+    // just list it as inactive so it can be re-enabled. Persisted-disable works
+    // for sidecar-manifest extensions because the id is known before loading.
+    if (this.disabledIds.has(parsed.id)) {
+      this.recordDisabledExtension(parsed, entry.trustStatus);
+      return;
+    }
+
     // The declared ceiling is honored ONLY for a verified / first-use signature;
     // unsigned / invalid / changed -> deny-by-default (empty ceiling, still loads).
     const trustOk = entry.trustStatus === "verified" || entry.trustStatus === "firstUse";
@@ -574,7 +605,7 @@ class ExtensionManagerImpl {
         workerSupport: true,
       });
       if (result.ok && result.extId) {
-        this.recordWorkerExtension(result.extId, result.manifest, displayName);
+        this.recordWorkerExtension(result.extId, result.manifest, displayName, entry.trustStatus);
         return;
       }
       console.warn(
@@ -583,7 +614,35 @@ class ExtensionManagerImpl {
       );
     }
     // workerSupport:false (or the worker mount failed) -> main thread directly.
-    await this.activateMainThreadExtension(entry.content, displayName);
+    await this.activateMainThreadExtension(entry.content, displayName, entry.trustStatus);
+  }
+
+  /** List a disabled distributed extension WITHOUT loading its code, so the
+   *  manager UI can show it (with its declared ceiling + signature) and offer to
+   *  re-enable it. The ceiling shown is what it WOULD get if trusted + enabled. */
+  private recordDisabledExtension(parsed: SidecarManifest, trustStatus?: string): void {
+    if (this.extensions.has(parsed.id)) return;
+    const declaredCapabilities = computeExtensionCeiling(
+      (parsed.capabilities ?? []).filter((c): c is CapabilityId => CAPABILITY_ID_SET.has(c as CapabilityId)),
+      "distributed",
+    );
+    const displayName = parsed.name || parsed.id;
+    const entry: LoadedExtension = {
+      id: parsed.id,
+      name: displayName,
+      version: parsed.version ?? "0.0.0",
+      status: "inactive",
+      // Synthetic module: the real code was never imported (it's disabled).
+      module: { manifest: { id: parsed.id, name: displayName, version: parsed.version ?? "0.0.0" }, activate: () => {} },
+      trust: "distributed",
+      declaredCapabilities,
+      trustStatus,
+      worker: parsed.workerSupport === true,
+    };
+    this.extensions.set(parsed.id, entry);
+    this.updateCachedArray();
+    this.notifyChange();
+    console.log(`[ExtensionManager] Disabled extension '${parsed.id}' listed (not loaded).`);
   }
 
   /** Parse a sidecar manifest JSON string into the fields the host reads. */
@@ -619,7 +678,7 @@ class ExtensionManagerImpl {
   }
 
   /** Import + activate an extension on the MAIN thread (Phase A governance). */
-  private async activateMainThreadExtension(source: string, name: string): Promise<void> {
+  private async activateMainThreadExtension(source: string, name: string, trustStatus?: string): Promise<void> {
     const blob = new Blob([source], { type: "application/javascript" });
     const blobUrl = URL.createObjectURL(blob);
     try {
@@ -632,7 +691,7 @@ class ExtensionManagerImpl {
         throw new Error(`Extension '${name}' does not export an 'activate' function.`);
       }
       // Third-party bundles are DISTRIBUTED: ceiling-bounded + transparency-tracked.
-      await this.activateExtension(module, "distributed");
+      await this.activateExtension(module, "distributed", trustStatus);
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
@@ -645,6 +704,7 @@ class ExtensionManagerImpl {
     extId: string,
     manifest: WorkerExtensionManifest | undefined,
     fallbackName: string,
+    trustStatus?: string,
   ): void {
     if (this.extensions.has(extId)) return;
     const displayName = manifest?.name || fallbackName;
@@ -663,6 +723,7 @@ class ExtensionManagerImpl {
       module: { manifest: { id: extId, name: displayName, version }, activate: () => {} },
       trust: "distributed",
       declaredCapabilities,
+      trustStatus,
       worker: true,
     };
     this.extensions.set(extId, entry);
@@ -735,7 +796,59 @@ class ExtensionManagerImpl {
    * This ensures getExtensions() returns a stable reference for useSyncExternalStore.
    */
   private updateCachedArray(): void {
+    for (const entry of this.extensions.values()) {
+      entry.disabled = this.disabledIds.has(entry.id);
+    }
     this.cachedExtensionsArray = Array.from(this.extensions.values());
+  }
+
+  // --------------------------------------------------------------------------
+  // Enable / Disable (C7)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Enable or disable a third-party extension (built-ins cannot be disabled —
+   * they are kernel-adjacent). Disabling tears the extension down immediately
+   * AND persists, so it stays off across restarts. Enabling clears the persisted
+   * flag; like VS Code, the extension actually loads again on the next reload.
+   */
+  async setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
+    const entry = this.extensions.get(id);
+    if (!entry) {
+      console.warn(`[ExtensionManager] Cannot toggle unknown extension: ${id}`);
+      return;
+    }
+    if (entry.trust === "trusted") {
+      console.warn(`[ExtensionManager] Built-in extension '${id}' cannot be disabled.`);
+      return;
+    }
+
+    if (enabled) {
+      // Clear the persisted flag. The bundle reloads on next launch.
+      this.disabledIds.delete(id);
+      persistDisabledIds(this.disabledIds);
+      this.updateCachedArray();
+      this.notifyChange();
+      console.log(`[ExtensionManager] Extension '${id}' enabled (loads on next reload).`);
+      return;
+    }
+
+    // Disable: persist first so a teardown failure still records intent, then
+    // tear down now for immediate effect (safety — stop a misbehaving extension).
+    this.disabledIds.add(id);
+    persistDisabledIds(this.disabledIds);
+    if (entry.status === "active") {
+      await this.deactivateExtension(id);
+    } else {
+      this.updateCachedArray();
+      this.notifyChange();
+    }
+    console.log(`[ExtensionManager] Extension '${id}' disabled.`);
+  }
+
+  /** Whether an extension is currently disabled (persisted). */
+  isDisabled(id: string): boolean {
+    return this.disabledIds.has(id);
   }
 
   /**

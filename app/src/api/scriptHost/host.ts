@@ -63,7 +63,7 @@ import {
 } from "./objectCoords";
 import { showToast } from "../notifications";
 import { ExtensionRegistry } from "../extensionRegistry";
-import { getSlicerStoreService, getChartStoreService, getPivotStoreService } from "../componentStoreRegistry";
+import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService } from "../componentStoreRegistry";
 import type { IStyleOverride } from "../styleInterceptors";
 
 type CleanupFn = () => void;
@@ -805,6 +805,14 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       getSlicerStoreService()?.setStyleProperty(instanceId, name, value as string);
       return undefined;
     }
+    case "timeline.setSelection": {
+      const [start, end] = args as [string | null, string | null];
+      const store = getTimelineStoreService();
+      if (store) {
+        await store.setSelection(instanceId, start ?? null, end ?? null);
+      }
+      return undefined;
+    }
     case "chart.updateSpec": {
       const [patch] = args as [Record<string, unknown>];
       const store = getChartStoreService();
@@ -1192,6 +1200,17 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       }));
       break;
 
+    // ---- timeline (date-range slicer) ----
+    case "timeline.onChange":
+      addForwarder(mw, hook, onAppEvent("timelineSlicer:selectionChanged", (detail) => {
+        const d = detail as { timelineId: string; selectionStart: string | null; selectionEnd: string | null };
+        if (String(d.timelineId) !== instanceId) return;
+        post(mw, { t: "mirror", path: "timeline.selectionStart", value: d.selectionStart });
+        post(mw, { t: "mirror", path: "timeline.selectionEnd", value: d.selectionEnd });
+        forwardEvent(mw, hook, { start: d.selectionStart, end: d.selectionEnd });
+      }));
+      break;
+
     // ---- chart ----
     case "chart.onDataChange": {
       const getSourceRange = () => {
@@ -1465,6 +1484,18 @@ async function buildSnapshot(definition: HostMountDefinition, mw: MountedWorker)
             properties["slicer.sourceType"] = slicer.sourceType ?? "";
             properties["slicer.columns"] = slicer.columns ?? 1;
           }
+        }
+        break;
+      }
+      case "timeline": {
+        const store = getTimelineStoreService();
+        const tl = store?.getTimelineById(instanceId);
+        if (tl) {
+          properties["timeline.selectionStart"] = tl.selectionStart;
+          properties["timeline.selectionEnd"] = tl.selectionEnd;
+          properties["timeline.fieldName"] = tl.fieldName ?? "";
+          properties["timeline.level"] = tl.level ?? "";
+          properties["timeline.sourceType"] = tl.sourceType ?? "";
         }
         break;
       }
