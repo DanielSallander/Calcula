@@ -243,7 +243,7 @@ pub fn publish(
     // directory already exists without a manifest, it is debris from a
     // crashed earlier publish: clear it so stale files can't end up unlisted
     // in the checksum map.
-    let ver_dir = registry.version_dir(&request.package_name, &version_str);
+    let ver_dir = registry.version_dir(&request.package_name, &version_str)?;
     if ver_dir.exists() {
         fs::remove_dir_all(&ver_dir)?;
     }
@@ -252,7 +252,7 @@ pub fn publish(
     // Write sheet data (cells, styles, layout as JSON)
     for &idx in &request.sheet_indices {
         let sheet = &request.workbook.sheets[idx];
-        let sheet_dir = registry.sheet_dir(&request.package_name, &version_str, &sheet.id);
+        let sheet_dir = registry.sheet_dir(&request.package_name, &version_str, &sheet.id)?;
         fs::create_dir_all(&sheet_dir)?;
 
         // Filter out cells in excluded regions (e.g., pivot output areas).
@@ -293,7 +293,7 @@ pub fn publish(
 
     // Write tables
     for table in &published_tables {
-        let tables_dir = registry.tables_dir(&request.package_name, &version_str);
+        let tables_dir = registry.tables_dir(&request.package_name, &version_str)?;
         fs::create_dir_all(&tables_dir)?;
         fs::write(
             tables_dir.join(format!("{}.json", table.id)),
@@ -311,7 +311,7 @@ pub fn publish(
 
     // Write object scripts
     if !scripts_to_publish.is_empty() {
-        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str);
+        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str)?;
         fs::create_dir_all(&scripts_dir)?;
         for script in &scripts_to_publish {
             let mut def = calcula_format::features::object_scripts::ObjectScriptDef::from(*script);
@@ -333,7 +333,7 @@ pub fn publish(
     // capability stamping. Written BEFORE the manifest so the integrity walk
     // checksums them and the Ed25519 signature seals them.
     if !modules_to_publish.is_empty() {
-        let modules_dir = registry.modules_dir(&request.package_name, &version_str);
+        let modules_dir = registry.modules_dir(&request.package_name, &version_str)?;
         fs::create_dir_all(&modules_dir)?;
         for script in &modules_to_publish {
             let mut def = calcula_format::features::scripts::ScriptDef::from(*script);
@@ -355,7 +355,7 @@ pub fn publish(
     // cell id + source ship. Written BEFORE the manifest so they are covered
     // by the integrity checksums and the Ed25519 signature.
     if !notebooks_to_publish.is_empty() {
-        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str);
+        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str)?;
         fs::create_dir_all(&notebooks_dir)?;
         for notebook in &notebooks_to_publish {
             let mut def = calcula_format::features::notebooks::NotebookDef::from(*notebook);
@@ -428,19 +428,25 @@ pub fn publish(
         signature_hex,
     )?;
 
-    // Update package manifest
-    let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
-        .unwrap_or_else(|_| PackageManifest::new(
-            &request.package_name, &request.kind, &request.published_by, &request.now,
-        ));
+    // Update the package manifest under the registry lock (D7): the version-list
+    // read-modify-write must be serialized so a concurrent publish to the same
+    // registry can't drop the other's version. The lock releases when `_lock`
+    // drops at the end of this scope.
+    {
+        let _lock = registry.lock()?;
+        let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
+            .unwrap_or_else(|_| PackageManifest::new(
+                &request.package_name, &request.kind, &request.published_by, &request.now,
+            ));
 
-    pkg_manifest.versions.push(VersionEntry {
-        version: version_str.clone(),
-        published_at: request.now.clone(),
-        published_by: request.published_by.clone(),
-        extra: std::collections::HashMap::new(),
-    });
-    registry.write_package_manifest(&pkg_manifest)?;
+        pkg_manifest.versions.push(VersionEntry {
+            version: version_str.clone(),
+            published_at: request.now.clone(),
+            published_by: request.published_by.clone(),
+            extra: std::collections::HashMap::new(),
+        });
+        registry.write_package_manifest(&pkg_manifest)?;
+    }
 
     Ok(PublishResult {
         package_name: request.package_name.clone(),
@@ -521,7 +527,7 @@ mod tests {
         // detached signature file sits next to it.
         assert_eq!(ver.publisher_key.len(), 64, "publisher_key should be 32-byte hex");
         assert!(!ver.publisher_name.is_empty());
-        let ver_dir = reg.version_dir("test-pkg", "1.0.0");
+        let ver_dir = reg.version_dir("test-pkg", "1.0.0").unwrap();
         let sig_path = ver_dir.join(crate::integrity::VERSION_MANIFEST_SIG_FILE);
         assert!(sig_path.exists(), "version-manifest.sig must be written");
         // The signature verifies over the RAW on-disk manifest bytes.
@@ -532,7 +538,7 @@ mod tests {
         ).unwrap();
 
         // Verify sheet data files exist
-        let sheet_dir = reg.sheet_dir("test-pkg", "1.0.0", &wb.sheets[0].id);
+        let sheet_dir = reg.sheet_dir("test-pkg", "1.0.0", &wb.sheets[0].id).unwrap();
         assert!(sheet_dir.join("data.json").exists());
         assert!(sheet_dir.join("styles.json").exists());
         assert!(sheet_dir.join("layout.json").exists());
@@ -611,7 +617,7 @@ mod tests {
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 
         let on_disk = fs::read(
-            reg.sheet_dir("checked", "1.0.0", &wb.sheets[0].id).join("data.json"),
+            reg.sheet_dir("checked", "1.0.0", &wb.sheets[0].id).unwrap().join("data.json"),
         ).unwrap();
         assert_eq!(digest, &crate::integrity::sha256_hex(&on_disk));
     }

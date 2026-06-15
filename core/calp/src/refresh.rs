@@ -504,7 +504,7 @@ mod tests {
 
         // Tamper with an artifact of the NEW version (1.1.0) the refresh
         // would pull. The refresh path shares pull()'s integrity gate.
-        let sheets_dir = reg.version_dir("test-pkg", "1.1.0").join("sheets");
+        let sheets_dir = reg.version_dir("test-pkg", "1.1.0").unwrap().join("sheets");
         let sheet_subdir = std::fs::read_dir(&sheets_dir).unwrap()
             .next().unwrap().unwrap().path();
         std::fs::write(sheet_subdir.join("data.json"), "tampered").unwrap();

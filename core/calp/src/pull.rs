@@ -84,7 +84,7 @@ pub fn pull(
     let version_str = resolved.to_string();
     let ver_manifest = registry.get_version_manifest(&request.package_name, &version_str)?;
 
-    let ver_dir = registry.version_dir(&request.package_name, &version_str);
+    let ver_dir = registry.version_dir(&request.package_name, &version_str)?;
 
     // ORIGIN GATE (S5 phase 2): verify the manifest's Ed25519 signature and
     // apply TOFU publisher pinning BEFORE the integrity gate below. The
@@ -115,7 +115,7 @@ pub fn pull(
     for pub_sheet in &ver_manifest.sheets {
         let sheet_dir = registry.sheet_dir(
             &request.package_name, &version_str, &pub_sheet.sheet_id,
-        );
+        )?;
 
         // Read cell data
         let cells: HashMap<(u32, u32), SavedCell> = {
@@ -183,7 +183,7 @@ pub fn pull(
     // Read tables
     let mut pulled_tables = Vec::new();
     for table_id in &ver_manifest.tables {
-        let tables_dir = registry.tables_dir(&request.package_name, &version_str);
+        let tables_dir = registry.tables_dir(&request.package_name, &version_str)?;
         let path = tables_dir.join(format!("{}.json", table_id));
         if path.exists() {
             let table: SavedTable = serde_json::from_str(&fs::read_to_string(&path)?)?;
@@ -194,7 +194,7 @@ pub fn pull(
     // Read object scripts
     let mut pulled_scripts: Vec<SavedObjectScript> = Vec::new();
     for pub_script in &ver_manifest.object_scripts {
-        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str);
+        let scripts_dir = registry.scripts_dir(&request.package_name, &version_str)?;
         let path = scripts_dir.join(format!("{}.json", pub_script.id));
         if path.exists() {
             let content = fs::read_to_string(&path)?;
@@ -223,7 +223,7 @@ pub fn pull(
     // and never auto-executed — no provenance/access-level stamping.
     let mut pulled_modules: Vec<SavedScript> = Vec::new();
     for pub_module in &ver_manifest.module_scripts {
-        let modules_dir = registry.modules_dir(&request.package_name, &version_str);
+        let modules_dir = registry.modules_dir(&request.package_name, &version_str)?;
         let path = modules_dir.join(format!("{}.json", pub_module.id));
         if path.exists() {
             let content = fs::read_to_string(&path)?;
@@ -250,7 +250,7 @@ pub fn pull(
     // rule ("the user must not be misled about what they ran").
     let mut pulled_notebooks: Vec<SavedNotebook> = Vec::new();
     for pub_notebook in &ver_manifest.notebooks {
-        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str);
+        let notebooks_dir = registry.notebooks_dir(&request.package_name, &version_str)?;
         let path = notebooks_dir.join(format!("{}.json", pub_notebook.id));
         if path.exists() {
             let content = fs::read_to_string(&path)?;
@@ -294,9 +294,8 @@ pub fn pull(
     // Read pivot definitions
     let mut pulled_pivot_defs: Vec<persistence::SavedPivotDefinition> = Vec::new();
     {
-        let pivot_dir = registry.root()
-            .join(&request.package_name)
-            .join(subscription.resolved_version.as_str())
+        let pivot_dir = registry
+            .version_dir(&request.package_name, subscription.resolved_version.as_str())?
             .join("pivot_definitions");
         if pivot_dir.exists() {
             if let Ok(entries) = fs::read_dir(&pivot_dir) {
@@ -316,9 +315,8 @@ pub fn pull(
 
     // Read BI pivot metadata (if present)
     let bi_pivot_metadata: Vec<serde_json::Value> = {
-        let meta_path = registry.root()
-            .join(&request.package_name)
-            .join(subscription.resolved_version.as_str())
+        let meta_path = registry
+            .version_dir(&request.package_name, subscription.resolved_version.as_str())?
             .join("pivot_definitions")
             .join("bi_metadata.json");
         if meta_path.exists() {
@@ -332,11 +330,10 @@ pub fn pull(
     };
 
     // Resolve data source model paths
+    let ds_ver_dir = registry
+        .version_dir(&request.package_name, subscription.resolved_version.as_str())?;
     let pulled_data_sources: Vec<PulledDataSource> = ver_manifest.data_sources.iter().map(|ds| {
-        let ver_dir = registry.root()
-            .join(&request.package_name)
-            .join(subscription.resolved_version.as_str());
-        let model_path = ver_dir.join(&ds.model_path);
+        let model_path = ds_ver_dir.join(&ds.model_path);
         PulledDataSource {
             definition: ds.clone(),
             model_path,
@@ -542,7 +539,7 @@ mod tests {
     /// persisted publisher keypair so the signature is valid for the new bytes,
     /// letting the test reach the integrity gate it is actually exercising.
     fn resign_manifest(reg: &LocalRegistry, prof: &std::path::Path, package: &str, version: &str) {
-        let ver_dir = reg.version_dir(package, version);
+        let ver_dir = reg.version_dir(package, version).unwrap();
         let manifest_bytes = fs::read(ver_dir.join(crate::integrity::VERSION_MANIFEST_FILE)).unwrap();
         let kp = crate::signing::PublisherKeypair::load_or_create(prof).unwrap();
         let sig = kp.sign(&manifest_bytes);
@@ -575,6 +572,7 @@ mod tests {
         // Tamper with a published artifact after publish.
         let data_path = reg
             .sheet_dir("test-pkg", "1.0.0", &wb.sheets[0].id)
+            .unwrap()
             .join("data.json");
         fs::write(&data_path, "{\"cells\": \"tampered\"}").unwrap();
 
@@ -596,6 +594,7 @@ mod tests {
         // Inject a file the publisher never wrote (e.g. a smuggled script).
         let rogue = reg
             .version_dir("test-pkg", "1.0.0")
+            .unwrap()
             .join("object_scripts");
         fs::create_dir_all(&rogue).unwrap();
         fs::write(rogue.join("rogue.json"), "{\"source\": \"evil()\"}").unwrap();
@@ -615,6 +614,7 @@ mod tests {
         // Tamper-by-deletion: previously a silent skip, now a hard error.
         let styles_path = reg
             .sheet_dir("test-pkg", "1.0.0", &wb.sheets[1].id)
+            .unwrap()
             .join("styles.json");
         fs::remove_file(&styles_path).unwrap();
 
@@ -881,7 +881,7 @@ mod tests {
         // (which would make the cell render as a genuine "executed" cell), then
         // recompute the checksum and re-sign the manifest — a publisher with the
         // signing key can do all of this.
-        let ver_dir = reg.version_dir("evil-pkg", "1.0.0");
+        let ver_dir = reg.version_dir("evil-pkg", "1.0.0").unwrap();
         let forged = NotebookDef {
             id: "nb-evil".to_string(),
             name: "Report".to_string(),
@@ -946,6 +946,7 @@ mod tests {
         // Changing a value byte changes the signed bytes -> signature mismatch.
         let manifest_path = reg
             .version_dir("test-pkg", "1.0.0")
+            .unwrap()
             .join(crate::integrity::VERSION_MANIFEST_FILE);
         let text = fs::read_to_string(&manifest_path).unwrap();
         let tampered = text.replace("\"tester\"", "\"hacker\"");
@@ -967,6 +968,7 @@ mod tests {
 
         fs::remove_file(
             reg.version_dir("test-pkg", "1.0.0")
+                .unwrap()
                 .join(crate::integrity::VERSION_MANIFEST_SIG_FILE),
         )
         .unwrap();
@@ -1015,11 +1017,13 @@ mod tests {
         reg.write_version_manifest("test-pkg", "1.0.0", &ver).unwrap();
         let manifest_bytes = fs::read(
             reg.version_dir("test-pkg", "1.0.0")
+                .unwrap()
                 .join(crate::integrity::VERSION_MANIFEST_FILE),
         )
         .unwrap();
         fs::write(
             reg.version_dir("test-pkg", "1.0.0")
+                .unwrap()
                 .join(crate::integrity::VERSION_MANIFEST_SIG_FILE),
             kp_b.sign(&manifest_bytes),
         )

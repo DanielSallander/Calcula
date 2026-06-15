@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::time::Duration;
 
 use crate::error::CalpError;
 use crate::manifest::PackageManifest;
@@ -13,6 +14,123 @@ use crate::manifest::PackageManifest;
 use crate::manifest::VersionEntry;
 use crate::manifest::VersionManifest;
 use crate::version::{SemVer, VersionPin};
+
+// ---------------------------------------------------------------------------
+// D7 — registry robustness primitives
+// ---------------------------------------------------------------------------
+
+/// Validate a single path component (package name, version, submitter id) that
+/// originates from a third-party package manifest or a spoofable identity file
+/// before it is joined into a filesystem path. Rejects anything that could
+/// escape the registry root or otherwise be unsafe as a directory name:
+/// empty, `.`/`..`, path separators, drive/root markers, and control chars.
+pub fn validate_component(component: &str, kind: &str) -> Result<(), CalpError> {
+    let invalid = |reason: &str| {
+        Err(CalpError::Registry(format!(
+            "Invalid {kind} '{component}': {reason}"
+        )))
+    };
+    if component.is_empty() {
+        return invalid("must not be empty");
+    }
+    if component == "." || component == ".." {
+        return invalid("must not be '.' or '..'");
+    }
+    if component.contains('/') || component.contains('\\') {
+        return invalid("must not contain a path separator");
+    }
+    if component.contains('\0') {
+        return invalid("must not contain a null byte");
+    }
+    // A leading drive letter ("C:") or other colon, and any control char, are
+    // rejected — they enable absolute/alternate-stream paths on Windows.
+    if component.contains(':') {
+        return invalid("must not contain ':'");
+    }
+    if component.chars().any(|c| c.is_control()) {
+        return invalid("must not contain control characters");
+    }
+    Ok(())
+}
+
+/// Atomically write `content` to `path` by writing a sibling temp file and
+/// renaming it into place, so a crash or concurrent reader never observes a
+/// torn/partial file. The temp file lives in the SAME directory as the target
+/// so the rename stays on one filesystem (rename across filesystems fails).
+fn atomic_write(path: &Path, content: &[u8]) -> Result<(), CalpError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CalpError::Registry(format!("path has no parent: {}", path.display())))?;
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| CalpError::Registry(format!("path has no file name: {}", path.display())))?;
+    let tmp = parent.join(format!(".{file_name}.tmp"));
+    fs::write(&tmp, content)?;
+    // rename is atomic on the same filesystem; on Windows it also replaces an
+    // existing destination (fs::rename uses MoveFileEx with REPLACE_EXISTING).
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
+}
+
+/// A best-effort cross-process advisory lock over a registry, used to serialize
+/// the package-manifest read-modify-write so concurrent publishes don't lose a
+/// version-list update. Acquired by exclusively creating a lockfile; released on
+/// drop. A lockfile older than `STALE` is treated as abandoned (crashed holder)
+/// and stolen so a crash can never deadlock the registry forever.
+pub struct RegistryLock {
+    path: PathBuf,
+}
+
+impl RegistryLock {
+    const STALE: Duration = Duration::from_secs(30);
+
+    pub fn acquire(root: &Path) -> Result<Self, CalpError> {
+        let path = root.join(".calp-lock");
+        let start = std::time::Instant::now();
+        // Wait up to STALE + a margin: within this window a LIVE holder either
+        // releases (we then create the lock) or its lockfile ages past STALE and
+        // we steal it. Bounding the wait by STALE — not a fixed iteration count —
+        // means we never fail spuriously while another process legitimately holds
+        // the lock (the bug was a 5s iteration budget vs a 30s stale threshold).
+        let max_wait = Self::STALE + Duration::from_secs(5);
+        loop {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(RegistryLock { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Steal an abandoned lock (holder crashed) rather than wait forever.
+                    if let Ok(meta) = fs::metadata(&path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified.elapsed().map(|d| d > Self::STALE).unwrap_or(false) {
+                                let _ = fs::remove_file(&path);
+                                continue;
+                            }
+                        }
+                    }
+                    if start.elapsed() > max_wait {
+                        return Err(CalpError::Registry(
+                            "could not acquire registry lock (timed out)".to_string(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 /// Local filesystem registry adapter.
 ///
@@ -69,7 +187,7 @@ impl LocalRegistry {
 
     /// Get the package manifest for a named package.
     pub fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
-        let path = self.package_dir(package_name).join("calp-manifest.json");
+        let path = self.package_dir(package_name)?.join("calp-manifest.json");
         if !path.exists() {
             return Err(CalpError::PackageNotFound(package_name.to_string()));
         }
@@ -78,14 +196,19 @@ impl LocalRegistry {
         Ok(manifest)
     }
 
-    /// Write a package manifest.
+    /// Write a package manifest (atomically — D7).
     pub fn write_package_manifest(&self, manifest: &PackageManifest) -> Result<(), CalpError> {
-        let dir = self.package_dir(&manifest.name);
-        fs::create_dir_all(&dir)?;
-        let path = dir.join("calp-manifest.json");
+        let path = self.package_dir(&manifest.name)?.join("calp-manifest.json");
         let content = serde_json::to_string_pretty(manifest)?;
-        fs::write(&path, content)?;
-        Ok(())
+        atomic_write(&path, content.as_bytes())
+    }
+
+    /// Acquire the registry's cross-process advisory lock (D7). Hold it across a
+    /// package-manifest read-modify-write (get_package_manifest -> mutate ->
+    /// write_package_manifest) so concurrent publishes can't lose a version-list
+    /// update. Released when the returned guard is dropped.
+    pub fn lock(&self) -> Result<RegistryLock, CalpError> {
+        RegistryLock::acquire(&self.root)
     }
 
     // -----------------------------------------------------------------------
@@ -98,7 +221,7 @@ impl LocalRegistry {
         package_name: &str,
         version: &str,
     ) -> Result<VersionManifest, CalpError> {
-        let path = self.version_dir(package_name, version).join("version-manifest.json");
+        let path = self.version_dir(package_name, version)?.join("version-manifest.json");
         if !path.exists() {
             return Err(CalpError::VersionNotFound {
                 package: package_name.to_string(),
@@ -110,54 +233,53 @@ impl LocalRegistry {
         Ok(manifest)
     }
 
-    /// Write a version manifest and create the version directory.
+    /// Write a version manifest atomically and create the version directory (D7).
     pub fn write_version_manifest(
         &self,
         package_name: &str,
         version: &str,
         manifest: &VersionManifest,
     ) -> Result<(), CalpError> {
-        let dir = self.version_dir(package_name, version);
-        fs::create_dir_all(&dir)?;
-        let path = dir.join("version-manifest.json");
+        let path = self.version_dir(package_name, version)?.join("version-manifest.json");
         let content = serde_json::to_string_pretty(manifest)?;
-        fs::write(&path, content)?;
-        Ok(())
+        atomic_write(&path, content.as_bytes())
     }
 
-    /// Get the directory path for a version's sheet data.
+    /// Get the directory path for a version's sheet data. (sheet_id is a UUID v7,
+    /// already path-safe; package_name/version are validated by version_dir.)
     pub fn sheet_dir(
         &self,
         package_name: &str,
         version: &str,
         sheet_id: &identity::SheetId,
-    ) -> PathBuf {
-        self.version_dir(package_name, version)
+    ) -> Result<PathBuf, CalpError> {
+        Ok(self
+            .version_dir(package_name, version)?
             .join("sheets")
-            .join(sheet_id.to_string())
+            .join(sheet_id.to_string()))
     }
 
     /// Get the tables directory for a version.
-    pub fn tables_dir(&self, package_name: &str, version: &str) -> PathBuf {
-        self.version_dir(package_name, version).join("tables")
+    pub fn tables_dir(&self, package_name: &str, version: &str) -> Result<PathBuf, CalpError> {
+        Ok(self.version_dir(package_name, version)?.join("tables"))
     }
 
     /// Get the object scripts directory for a version.
-    pub fn scripts_dir(&self, package_name: &str, version: &str) -> PathBuf {
-        self.version_dir(package_name, version).join("object_scripts")
+    pub fn scripts_dir(&self, package_name: &str, version: &str) -> Result<PathBuf, CalpError> {
+        Ok(self.version_dir(package_name, version)?.join("object_scripts"))
     }
 
     /// Get the standalone module-scripts directory for a version (C8).
     /// Each module script is stored as `modules/{id}.json` (ScriptDef JSON).
-    pub fn modules_dir(&self, package_name: &str, version: &str) -> PathBuf {
-        self.version_dir(package_name, version).join("modules")
+    pub fn modules_dir(&self, package_name: &str, version: &str) -> Result<PathBuf, CalpError> {
+        Ok(self.version_dir(package_name, version)?.join("modules"))
     }
 
     /// Get the standalone notebooks directory for a version (C8).
     /// Each notebook is stored as `notebooks/{id}.json` (NotebookDef JSON,
     /// execution metadata stripped at publish time).
-    pub fn notebooks_dir(&self, package_name: &str, version: &str) -> PathBuf {
-        self.version_dir(package_name, version).join("notebooks")
+    pub fn notebooks_dir(&self, package_name: &str, version: &str) -> Result<PathBuf, CalpError> {
+        Ok(self.version_dir(package_name, version)?.join("notebooks"))
     }
 
     /// Resolve a version pin to the best matching version.
@@ -187,7 +309,9 @@ impl LocalRegistry {
 
     /// Check if a specific version exists.
     pub fn version_exists(&self, package_name: &str, version: &str) -> bool {
-        self.version_dir(package_name, version).join("version-manifest.json").exists()
+        self.version_dir(package_name, version)
+            .map(|d| d.join("version-manifest.json").exists())
+            .unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
@@ -222,16 +346,15 @@ impl LocalRegistry {
             )));
         }
 
-        let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id);
-        fs::create_dir_all(&sub_dir)?;
-
+        let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id)?;
         let path = sub_dir.join(format!(
             "{}_{}_{}.json",
             submission.region_id, submission.cell_row, submission.cell_col
         ));
         let content = serde_json::to_string_pretty(submission)?;
-        fs::write(&path, content)?;
-        Ok(())
+        // Atomic + slot-keyed: re-submitting a cell replaces its file without a
+        // torn-write window (D7).
+        atomic_write(&path, content.as_bytes())
     }
 
     /// Load EVERY submission for a package version across all submitters and
@@ -243,7 +366,7 @@ impl LocalRegistry {
         package_name: &str,
         version: &str,
     ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
-        let base = self.version_dir(package_name, version).join("submissions");
+        let base = self.version_dir(package_name, version)?.join("submissions");
         if !base.exists() {
             return Ok(Vec::new());
         }
@@ -253,6 +376,11 @@ impl LocalRegistry {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let submitter_id = entry.file_name().to_string_lossy().to_string();
+                // The submitter-id directory name is untrusted input read off
+                // disk — skip any that wouldn't pass the boundary validator.
+                if validate_component(&submitter_id, "submitter id").is_err() {
+                    continue;
+                }
                 all.extend(self.load_submissions(package_name, version, &submitter_id)?);
             }
         }
@@ -266,7 +394,7 @@ impl LocalRegistry {
         version: &str,
         submitter_id: &str,
     ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
-        let sub_dir = self.submissions_dir(package_name, version, submitter_id);
+        let sub_dir = self.submissions_dir(package_name, version, submitter_id)?;
         if !sub_dir.exists() {
             return Ok(Vec::new());
         }
@@ -290,7 +418,7 @@ impl LocalRegistry {
         version: &str,
         region_id: &str,
     ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
-        let base = self.version_dir(package_name, version).join("submissions");
+        let base = self.version_dir(package_name, version)?.join("submissions");
         if !base.exists() {
             return Ok(Vec::new());
         }
@@ -300,6 +428,9 @@ impl LocalRegistry {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let submitter_id = entry.file_name().to_string_lossy().to_string();
+                if validate_component(&submitter_id, "submitter id").is_err() {
+                    continue;
+                }
                 let subs = self.load_submissions(package_name, version, &submitter_id)?;
                 for sub in subs {
                     if sub.region_id == region_id {
@@ -315,20 +446,30 @@ impl LocalRegistry {
     // Helper paths
     // -----------------------------------------------------------------------
 
-    fn package_dir(&self, package_name: &str) -> PathBuf {
-        self.root.join(package_name)
+    fn package_dir(&self, package_name: &str) -> Result<PathBuf, CalpError> {
+        validate_component(package_name, "package name")?;
+        Ok(self.root.join(package_name))
     }
 
     /// Get the directory path for a specific package version.
     /// Public so publish/pull can write and verify artifacts in place.
-    pub fn version_dir(&self, package_name: &str, version: &str) -> PathBuf {
-        self.package_dir(package_name).join(version)
+    /// Validates `package_name` + `version` at the registry boundary (D7).
+    pub fn version_dir(&self, package_name: &str, version: &str) -> Result<PathBuf, CalpError> {
+        validate_component(version, "version")?;
+        Ok(self.package_dir(package_name)?.join(version))
     }
 
-    fn submissions_dir(&self, package_name: &str, version: &str, submitter_id: &str) -> PathBuf {
-        self.version_dir(package_name, version)
+    fn submissions_dir(
+        &self,
+        package_name: &str,
+        version: &str,
+        submitter_id: &str,
+    ) -> Result<PathBuf, CalpError> {
+        validate_component(submitter_id, "submitter id")?;
+        Ok(self
+            .version_dir(package_name, version)?
             .join("submissions")
-            .join(submitter_id)
+            .join(submitter_id))
     }
 }
 
@@ -661,5 +802,55 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(all.iter().filter(|s| s.region_id == "r1").count(), 2);
         assert_eq!(all.iter().filter(|s| s.region_id == "r2").count(), 1);
+    }
+
+    // --- D7: registry robustness ---
+
+    #[test]
+    fn validate_component_rejects_traversal_and_junk() {
+        for bad in ["", ".", "..", "a/b", "a\\b", "../escape", "C:\\Windows", "a:b", "a\u{0}b"] {
+            assert!(validate_component(bad, "x").is_err(), "should reject {bad:?}");
+        }
+        for ok in ["pkg", "my-package", "1.0.0", "id-alice", "a_b.c"] {
+            assert!(validate_component(ok, "x").is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn path_methods_reject_hostile_package_version_and_submitter() {
+        let (_dir, reg) = create_test_registry();
+        assert!(reg.get_package_manifest("../escape").is_err());
+        assert!(reg.version_dir("../escape", "1.0.0").is_err());
+        assert!(reg.version_dir("pkg", "../1.0.0").is_err());
+        assert!(reg.sheet_dir("pkg", "..", &identity::SheetId::ZERO).is_err());
+
+        // A hostile submitter id must not escape the submissions directory.
+        let mut evil = make_test_submission("region-1", "evil");
+        evil.submitter.id = "..\\..\\escape".to_string();
+        assert!(reg.save_submission("pkg", "1.0.0", &evil).is_err());
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sub").join("f.json");
+        atomic_write(&path, b"v1").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v1");
+        atomic_write(&path, b"v2-updated").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v2-updated");
+        assert!(!dir.path().join("sub").join(".f.json.tmp").exists());
+    }
+
+    #[test]
+    fn registry_lock_releases_on_drop() {
+        let dir = TempDir::new().unwrap();
+        let lockfile = dir.path().join(".calp-lock");
+        {
+            let _g = RegistryLock::acquire(dir.path()).unwrap();
+            assert!(lockfile.exists(), "lockfile present while held");
+        }
+        assert!(!lockfile.exists(), "lockfile removed on drop");
+        // Re-acquire after release works.
+        let _g2 = RegistryLock::acquire(dir.path()).unwrap();
     }
 }

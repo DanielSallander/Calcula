@@ -651,7 +651,7 @@ pub fn calp_inspect_package(
     // S5 phase 2: verify the manifest's Ed25519 signature + TOFU pin BEFORE
     // surfacing the contents — inspect is a pre-pull trust surface, so an
     // unsigned/tampered/hijacked package must fail to inspect, not just to pull.
-    let ver_dir = registry.version_dir(&package_name, &version);
+    let ver_dir = registry.version_dir(&package_name, &version).map_err(|e| e.to_string())?;
     let trust = calp::integrity::verify_manifest_signature(
         &ver_dir,
         &manifest,
