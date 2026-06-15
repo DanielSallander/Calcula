@@ -257,10 +257,11 @@ impl QueryExecutor {
             // Stage 2: Build and execute window function SQL.
             let mut select_parts: Vec<String> = Vec::new();
 
-            // Include outer GROUP BY columns in SELECT.
+            // Include outer GROUP BY columns in SELECT. Reference them with the
+            // ORIGINAL case stage 1 emitted (`dim."Col"` → field `Col`);
+            // lowercasing here would not resolve a mixed-case column.
             for dim in group_by {
-                let col_lower = dim.column.to_lowercase();
-                select_parts.push(quote_ident_double(&col_lower));
+                select_parts.push(quote_ident_double(&dim.column));
             }
 
             // Build the window function expression.
@@ -437,12 +438,24 @@ impl QueryExecutor {
             RankFunction::Rank => "RANK",
             RankFunction::DenseRank => "DENSE_RANK",
         };
+        // `DESC NULLS LAST`: a group whose aggregated order key is NULL (e.g. a
+        // member with fact rows but all-NULL/voided amounts) must rank LAST, not
+        // first. DataFusion's `DESC` defaults to NULLS FIRST, which would put a
+        // blank at rank 1 — a silently-wrong number, contrary to RANKX semantics.
         let order_terms: Vec<String> = (0..order_by.len())
-            .map(|i| format!("{} DESC", quote_ident_double(&format!("__rank_order_{i}"))))
+            .map(|i| {
+                format!(
+                    "{} DESC NULLS LAST",
+                    quote_ident_double(&format!("__rank_order_{i}"))
+                )
+            })
             .collect();
+        // Reference the stage-1 columns with their ORIGINAL case (stage 1 emits
+        // `dim."Col"`, which DataFusion names `Col`). Lowercasing here would not
+        // resolve a mixed-case column.
         let partition_terms: Vec<String> = partition_by
             .iter()
-            .map(|(_, c)| quote_ident_double(&c.to_lowercase()))
+            .map(|(_, c)| quote_ident_double(c))
             .collect();
         let over = if partition_terms.is_empty() {
             format!("OVER (ORDER BY {})", order_terms.join(", "))
@@ -455,7 +468,7 @@ impl QueryExecutor {
         };
         let mut select_parts: Vec<String> = group_by
             .iter()
-            .map(|d| quote_ident_double(&d.column.to_lowercase()))
+            .map(|d| quote_ident_double(&d.column))
             .collect();
         select_parts.push(format!("{fn_sql}() {over} AS {}", quote_ident_double(name)));
         let sql = format!("SELECT {} FROM {base}", select_parts.join(", "));
@@ -1027,7 +1040,7 @@ fn build_window_sql(
     let order_clause: Vec<String> = info
         .order_by
         .iter()
-        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .map(|(_, col)| quote_ident_double(col))
         .collect();
     let order_sql = order_clause.join(", ");
 
@@ -1101,7 +1114,7 @@ fn build_window_sql(
             let reverse_order: Vec<String> = info
                 .order_by
                 .iter()
-                .map(|(_, col)| format!("{} DESC", quote_ident_double(&col.to_lowercase())))
+                .map(|(_, col)| format!("{} DESC", quote_ident_double(col)))
                 .collect();
             let rev_order_sql = reverse_order.join(", ");
             let abs_pos = position.unsigned_abs();
@@ -1115,7 +1128,8 @@ fn build_window_sql(
     }
 }
 
-/// The PARTITION BY columns (lowercased, quoted) for a window's stage-2 SQL:
+/// The PARTITION BY columns (quoted, original case to match stage 1) for a
+/// window's stage-2 SQL:
 /// the explicit `partition_by` plus every outer group-by column that is not
 /// already an ORDER BY or PARTITION BY column. Shared by `build_window_sql`
 /// (to render the window) and the period-shift contiguity guard (to check
@@ -1124,15 +1138,15 @@ fn window_partition_cols(info: &WindowInfo, outer_group_by: &[ColumnRef]) -> Vec
     let order_clause: Vec<String> = info
         .order_by
         .iter()
-        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .map(|(_, col)| quote_ident_double(col))
         .collect();
     let mut partition_cols: Vec<String> = info
         .partition_by
         .iter()
-        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .map(|(_, col)| quote_ident_double(col))
         .collect();
     for dim in outer_group_by {
-        let col_quoted = quote_ident_double(&dim.column.to_lowercase());
+        let col_quoted = quote_ident_double(&dim.column);
         if !partition_cols.contains(&col_quoted) && !order_clause.contains(&col_quoted) {
             partition_cols.push(col_quoted);
         }
@@ -1169,7 +1183,7 @@ async fn check_period_shift_axis_contiguous(
 ) -> QueryResult<()> {
     let ord_cols: Vec<String> = order_by
         .iter()
-        .map(|(_, col)| quote_ident_double(&col.to_lowercase()))
+        .map(|(_, col)| quote_ident_double(col))
         .collect();
     let ordinal = match (granularity, ord_cols.as_slice()) {
         (DateGranularity::Year, [year]) => format!("CAST({year} AS BIGINT)"),

@@ -114,14 +114,29 @@ pub(super) async fn filter_cached_batch_or_groups(
 /// falls back to a safely-quoted string literal, which DataFusion coerces to
 /// the column type (and which keeps string equality working as before).
 fn literal_for_column(schema: &arrow::datatypes::Schema, column: &str, value: &str) -> String {
-    use arrow::datatypes::DataType;
-
     let Ok(field) = schema.field_with_name(column) else {
         // Unknown column: quote defensively. The subsequent SQL will error on
         // the missing column rather than silently mis-filtering.
         return sql_quote_literal(value);
     };
-    match field.data_type() {
+    render_filter_literal(field.data_type(), value)
+}
+
+/// Render a filter comparison value as a SQL literal appropriate to the column's
+/// Arrow type: an unquoted numeric/boolean literal where that parses (so
+/// DataFusion compares numerically / logically), otherwise a safely-quoted
+/// string (which DataFusion coerces to the column type, keeping string equality
+/// correct).
+///
+/// **Recurses through `Dictionary` encoding** — a dictionary-encoded integer key
+/// must still compare numerically, not lexically (`'100' > '50'` is false). And
+/// `Boolean` renders as an unquoted `true`/`false` (`"active" = 'true'` is a
+/// DataFusion type error). Shared by the cached-batch filter path
+/// ([`literal_for_column`]) and the in-memory / CSV connectors so the two cannot
+/// drift.
+pub(crate) fn render_filter_literal(data_type: &arrow::datatypes::DataType, value: &str) -> String {
+    use arrow::datatypes::DataType;
+    match data_type {
         DataType::Int8
         | DataType::Int16
         | DataType::Int32
@@ -156,9 +171,9 @@ fn literal_for_column(schema: &arrow::datatypes::Schema, column: &str, value: &s
             "true" | "false" => value.to_ascii_lowercase(),
             _ => sql_quote_literal(value),
         },
-        // Strings, dates, timestamps, dictionaries, etc.: a quoted literal,
-        // which DataFusion coerces to the column type (and string equality
-        // stays correct).
+        // A dictionary-encoded column compares as its decoded value type.
+        DataType::Dictionary(_, value_type) => render_filter_literal(value_type, value),
+        // Strings, dates, timestamps, etc.: a quoted literal.
         _ => sql_quote_literal(value),
     }
 }

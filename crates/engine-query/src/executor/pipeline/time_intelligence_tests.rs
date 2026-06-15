@@ -1675,6 +1675,115 @@ async fn rank_vs_dense_rank_tie_handling() {
 }
 
 #[tokio::test]
+async fn rank_measure_null_order_key_ranks_last() {
+    // A region with fact rows but an all-NULL amount aggregates to SUM = NULL.
+    // It must rank LAST (DESC NULLS LAST), not first — a blank at rank 1 would be
+    // a silently-wrong number contrary to RANKX semantics.
+    let model = model_with_measures(&[("rnk", "RANK(ORDERBY(fact_sales[amount]))")], true);
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202401, 202401, 202401])),
+            Arc::new(StringArray::from(vec!["east", "east", "nullreg"])),
+            Arc::new(Float64Array::from(vec![Some(100.0), Some(200.0), None])),
+        ],
+    )
+    .unwrap();
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_batch()).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["rnk".into()],
+        group_by: vec![ColumnRef::new("fact_sales", "region")],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let regions = string_column(&combined, "region");
+    let rnk = measure_column(&combined, "rnk");
+    let mut rk: HashMap<String, Option<f64>> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        rk.insert(regions[i].clone(), rnk[i]);
+    }
+    assert_eq!(rk["east"], Some(1.0), "east (SUM 300) ranks 1");
+    assert_eq!(rk["nullreg"], Some(2.0), "all-NULL amount ranks LAST, not first");
+}
+
+#[tokio::test]
+async fn rank_measure_mixed_case_group_by_column_resolves() {
+    // A MIXED-CASE group-by column must resolve: stage 2 now references the
+    // original case stage 1 emits. Previously this hard-errored FieldNotFound.
+    let fact = Table::new(
+        "fact_sales",
+        vec![
+            Column::new("Region", EngineDataType::String),
+            Column::new("amount", EngineDataType::Float64),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory);
+    let model = DataModel::builder()
+        .add_table(fact)
+        .add_measure(expression_measure(
+            "rnk",
+            parse_measure_expression("RANK(ORDERBY(fact_sales[amount]))").unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut cache = InMemoryCache::new();
+    cache
+        .store(
+            "fact_sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("Region", DataType::Utf8, true),
+                    Field::new("amount", DataType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec!["east", "east", "west"])),
+                    Arc::new(Float64Array::from(vec![100.0, 200.0, 1000.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["rnk".into()],
+        group_by: vec![ColumnRef::new("fact_sales", "Region")],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    assert!(
+        combined.schema().index_of("Region").is_ok(),
+        "the mixed-case dimension column is preserved in the result"
+    );
+    let regions = string_column(&combined, "Region");
+    let rnk = measure_column(&combined, "rnk");
+    let mut rk: HashMap<String, Option<f64>> = HashMap::new();
+    for i in 0..combined.num_rows() {
+        rk.insert(regions[i].clone(), rnk[i]);
+    }
+    assert_eq!(rk["west"], Some(1.0));
+    assert_eq!(rk["east"], Some(2.0));
+}
+
+#[tokio::test]
 async fn rank_measure_partitions_by_a_group_by_column() {
     // Rank regions WITHIN each year. Per (year, region): 2023 east=780/west=1560,
     // 2024 east=78/west=156 → within each year west=1, east=2.

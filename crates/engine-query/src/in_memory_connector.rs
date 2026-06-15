@@ -24,6 +24,8 @@ use engine_connectors::{ConnectorError, ConnectorResult};
 use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use engine_core::model::Table;
 
+use crate::executor::pipeline::render_filter_literal;
+
 /// A connector that serves canned [`RecordBatch`] data from memory.
 ///
 /// Tables are keyed by `(schema, table)`. [`fetch_data`](Self::fetch_data)
@@ -68,29 +70,27 @@ impl InMemoryConnector {
     }
 }
 
-/// Render a comparison value: unquoted (a numeric literal) when the target
-/// column is numeric and the value parses as a number — otherwise an escaped
-/// quoted string. Comparing a numeric column to a quoted string makes DataFusion
-/// compare **lexically** (`'100' > '50'` is false), so a numeric column must use
-/// an unquoted literal for correct ordering.
-fn render_value(value: &str, column: &str, numeric_cols: &std::collections::HashSet<String>) -> String {
-    if numeric_cols.contains(column) && value.parse::<f64>().is_ok() {
-        value.to_string()
-    } else {
-        sql_quote_literal(value)
+/// Render a comparison value as a SQL literal appropriate to the target
+/// column's Arrow type (numeric → unquoted, Boolean → unquoted `true`/`false`,
+/// dictionary-encoded → its decoded value type, else escaped quoted string).
+/// Delegates to the shared [`render_filter_literal`] so the connector path and
+/// the cached-batch path render identically — comparing a numeric column to a
+/// quoted string would make DataFusion compare **lexically** (`'100' > '50'` is
+/// false), and a quoted Boolean literal is a DataFusion type error.
+fn render_value(value: &str, column: &str, schema: &arrow::datatypes::Schema) -> String {
+    match schema.field_with_name(column) {
+        Ok(field) => render_filter_literal(field.data_type(), value),
+        Err(_) => sql_quote_literal(value),
     }
 }
 
 /// Render a single scalar [`FilterCondition`] as a safe SQL predicate.
-fn render_scalar(
-    f: &engine_connectors::FilterCondition,
-    numeric_cols: &std::collections::HashSet<String>,
-) -> String {
+fn render_scalar(f: &engine_connectors::FilterCondition, schema: &arrow::datatypes::Schema) -> String {
     format!(
         "{} {} {}",
         quote_ident_double(&f.column),
         f.operator.as_sql(),
-        render_value(&f.value, &f.column, numeric_cols)
+        render_value(&f.value, &f.column, schema)
     )
 }
 
@@ -109,21 +109,12 @@ pub(crate) async fn apply_filters(
     batch: &RecordBatch,
     request: &FetchRequest,
 ) -> ConnectorResult<Vec<RecordBatch>> {
-    // Columns whose Arrow type is numeric — their comparison values render as
-    // unquoted literals so DataFusion compares numerically, not lexically.
-    let numeric_cols: std::collections::HashSet<String> = batch
-        .schema()
-        .fields()
-        .iter()
-        .filter(|f| f.data_type().is_numeric())
-        .map(|f| f.name().clone())
-        .collect();
-
+    let schema = batch.schema();
     let mut conditions: Vec<String> = Vec::new();
 
     // Scalar filters.
     for f in &request.filters {
-        conditions.push(render_scalar(f, &numeric_cols));
+        conditions.push(render_scalar(f, &schema));
     }
 
     // IN-list filters: `col IN (v1, v2, …)`; empty → matches nothing.
@@ -135,7 +126,7 @@ pub(crate) async fn apply_filters(
         let values: Vec<String> = in_filter
             .values
             .iter()
-            .map(|v| render_value(v, &in_filter.column, &numeric_cols))
+            .map(|v| render_value(v, &in_filter.column, &schema))
             .collect();
         conditions.push(format!(
             "{} IN ({})",
@@ -151,7 +142,7 @@ pub(crate) async fn apply_filters(
             .or_groups
             .iter()
             .map(|group| {
-                let conds: Vec<String> = group.iter().map(|c| render_scalar(c, &numeric_cols)).collect();
+                let conds: Vec<String> = group.iter().map(|c| render_scalar(c, &schema)).collect();
                 format!("({})", conds.join(" AND "))
             })
             .collect();
@@ -272,6 +263,55 @@ mod tests {
         let total: usize = out.iter().map(|b| b.num_rows()).sum();
         // v >= 3 → rows 3, 4.
         assert_eq!(total, 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_with_boolean_filter_works() {
+        use arrow::array::BooleanArray;
+        let schema = Arc::new(Schema::new(vec![Field::new("active", DataType::Boolean, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(BooleanArray::from(vec![true, false, true]))],
+        )
+        .unwrap();
+        let conn = InMemoryConnector::new().with_table("public", "t", batch);
+        let req = FetchRequest {
+            schema: Some("public".into()),
+            table: "t".into(),
+            filters: vec![FilterCondition::new("active", FilterOperator::Equal, "true")],
+            ..Default::default()
+        };
+        // A Boolean column must render `"active" = true` (unquoted), not
+        // `= 'true'` which is a DataFusion type error.
+        let out = conn.fetch_data(&req).await.unwrap();
+        assert_eq!(out.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+    }
+
+    #[tokio::test]
+    async fn fetch_range_filter_on_dictionary_integer_compares_numerically() {
+        use arrow::array::{Array, DictionaryArray, Int8Array};
+        use arrow::datatypes::Int8Type;
+        // A Dictionary(Int8, Int64) key column with decoded values [5, 50, 100].
+        let keys = Int8Array::from(vec![0i8, 1, 2]);
+        let values = Int64Array::from(vec![5i64, 50, 100]);
+        let dict = DictionaryArray::<Int8Type>::new(keys, Arc::new(values));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "fk",
+            dict.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(dict)]).unwrap();
+        let conn = InMemoryConnector::new().with_table("public", "t", batch);
+        let req = FetchRequest {
+            schema: Some("public".into()),
+            table: "t".into(),
+            filters: vec![FilterCondition::new("fk", FilterOperator::GreaterThan, "50")],
+            ..Default::default()
+        };
+        // Numeric compare: only 100 > 50 → 1 row. A lexical (quoted) compare
+        // would give 0 ('100' < '50').
+        let out = conn.fetch_data(&req).await.unwrap();
+        assert_eq!(out.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 
     #[tokio::test]

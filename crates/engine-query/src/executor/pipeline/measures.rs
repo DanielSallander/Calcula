@@ -293,10 +293,35 @@ impl QueryExecutor {
             override_table_names[0].0.clone()
         };
 
-        // Select: all group columns from first table + all measure columns.
+        // The tables FULL OUTER JOINed after the first.
+        let tables_to_join: Vec<String> = if has_normal {
+            override_table_names.iter().map(|(t, _)| t.clone()).collect()
+        } else {
+            override_table_names[1..]
+                .iter()
+                .map(|(t, _)| t.clone())
+                .collect()
+        };
+
+        // Select: each group column COALESCEd across every combined table, then
+        // all measure columns. A non-equi USERELATIONSHIP override aggregates a
+        // different fact-row set, so a group can exist only on a later table; the
+        // FULL OUTER JOIN then leaves the first table's key NULL — COALESCE keeps
+        // the real key instead of blanking it.
+        let all_group_tables: Vec<&str> = std::iter::once(first_table.as_str())
+            .chain(tables_to_join.iter().map(|s| s.as_str()))
+            .collect();
         let mut combine_select: Vec<String> = group_cols
             .iter()
-            .map(|c| format!("{first_table}.{c}"))
+            .map(|c| {
+                if all_group_tables.len() == 1 {
+                    format!("{first_table}.{c}")
+                } else {
+                    let parts: Vec<String> =
+                        all_group_tables.iter().map(|t| format!("{t}.{c}")).collect();
+                    format!("COALESCE({}) AS {c}", parts.join(", "))
+                }
+            })
             .collect();
 
         if has_normal {
@@ -320,26 +345,22 @@ impl QueryExecutor {
         let combine_select_clause = combine_select.join(", ");
         let mut combine_sql = format!("SELECT {combine_select_clause} FROM {first_table}");
 
-        // FULL OUTER JOIN remaining tables.
-        let tables_to_join: Vec<&str> = if has_normal {
-            override_table_names
-                .iter()
-                .map(|(t, _)| t.as_str())
-                .collect()
-        } else {
-            override_table_names[1..]
-                .iter()
-                .map(|(t, _)| t.as_str())
-                .collect()
-        };
-
         for join_table in &tables_to_join {
             if group_cols.is_empty() {
                 combine_sql.push_str(&format!(" CROSS JOIN {join_table}"));
             } else {
+                // NULL-safe: a NULL group-by member must unify across the
+                // normal and override sides (plain `=` yields NULL for
+                // NULL = NULL, splitting the group into half-blank rows). OR
+                // form, not `IS NOT DISTINCT FROM` (uncompilable on DataFusion 44).
                 let join_conds: Vec<String> = group_cols
                     .iter()
-                    .map(|c| format!("{first_table}.{c} = {join_table}.{c}"))
+                    .map(|c| {
+                        format!(
+                            "({first_table}.{c} = {join_table}.{c} OR \
+                             ({first_table}.{c} IS NULL AND {join_table}.{c} IS NULL))"
+                        )
+                    })
                     .collect();
                 combine_sql.push_str(&format!(
                     " FULL OUTER JOIN {join_table} ON {}",

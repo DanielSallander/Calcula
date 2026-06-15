@@ -245,3 +245,102 @@ async fn three_facts_conformed_dim_unreachable_from_first_does_not_cartesian() {
         }
     }
 }
+
+#[tokio::test]
+async fn multi_fact_combine_unifies_a_null_conformed_dimension_member() {
+    use arrow::array::Array;
+
+    // dim_geo with a NULL-region member (id 3) referenced by BOTH facts. Grouped
+    // by region, the NULL group must be ONE unified row carrying both measures —
+    // a plain `=` join (NULL = NULL is NULL) would split it into two half-blank
+    // rows (a silently-wrong number).
+    let model = conformed_dim_model();
+    let mut cache = InMemoryCache::new();
+    cache
+        .store(
+            "dim_geo",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("id", DataType::Int64, true),
+                    Field::new("region", DataType::Utf8, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+                    Arc::new(StringArray::from(vec![Some("West"), Some("East"), None])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    cache
+        .store(
+            "fact_sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("geo_id", DataType::Int64, true),
+                    Field::new("amount_s", DataType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+                    Arc::new(Float64Array::from(vec![100.0, 200.0, 50.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    cache
+        .store(
+            "fact_returns",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("geo_id", DataType::Int64, true),
+                    Field::new("amount_r", DataType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+                    Arc::new(Float64Array::from(vec![10.0, 20.0, 5.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut registry = SourceRegistry::new();
+    for t in ["dim_geo", "fact_sales", "fact_returns"] {
+        registry.bind(t, 0, SourceBinding::new("public", t));
+    }
+    let req = QueryRequest {
+        measures: vec!["sales".into(), "returns".into()],
+        group_by: vec![ColumnRef::new("dim_geo", "region")],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+
+    assert_eq!(
+        combined.num_rows(),
+        3,
+        "West, East, and ONE unified NULL-region row — not a split"
+    );
+    let region = combined.column(combined.schema().index_of("region").unwrap());
+    let f64col = |name: &str| {
+        let idx = combined.schema().index_of(name).unwrap();
+        arrow::compute::cast(combined.column(idx), &DataType::Float64)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .clone()
+    };
+    let sales = f64col("sales");
+    let returns = f64col("returns");
+    let null_rows: Vec<usize> = (0..combined.num_rows())
+        .filter(|&i| region.is_null(i))
+        .collect();
+    assert_eq!(null_rows.len(), 1, "the NULL region is a single combined row");
+    let r = null_rows[0];
+    assert_eq!(sales.value(r), 50.0, "NULL-region sales present");
+    assert_eq!(returns.value(r), 5.0, "NULL-region returns present on same row");
+}

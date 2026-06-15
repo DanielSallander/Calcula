@@ -24,6 +24,7 @@ mod time_intelligence_tests;
 mod udf_tests;
 mod window;
 
+pub(crate) use fetch::render_filter_literal;
 pub(crate) use order_limit::apply_order_and_limit;
 
 use arrow::record_batch::RecordBatch;

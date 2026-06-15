@@ -424,7 +424,15 @@ impl QueryExecutor {
                             .collect();
                         format!("COALESCE({})", parts.join(", "))
                     };
-                    on_parts.push(format!("{lhs} = {gt}.{col}"));
+                    // NULL-safe: a NULL conformed-dimension member must unify
+                    // across facts. Plain `=` yields NULL for NULL = NULL,
+                    // splitting one NULL group into two half-blank rows. (The OR
+                    // form, not `IS NOT DISTINCT FROM`, which does not compile
+                    // under DataFusion 44.)
+                    let rhs = format!("{gt}.{col}");
+                    on_parts.push(format!(
+                        "({lhs} = {rhs} OR ({lhs} IS NULL AND {rhs} IS NULL))"
+                    ));
                 }
 
                 if on_parts.is_empty() {
