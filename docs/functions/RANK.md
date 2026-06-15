@@ -17,7 +17,7 @@ RANK(ORDERBY(table[column] [, table[column], ...]) [, PARTITIONBY(table[column] 
 
 ## Return value
 
-An integer representing the rank of each row. Tied rows receive the same rank, and the next rank is incremented by the number of tied rows (e.g., 1, 2, 2, 4).
+An integer representing the rank of each row. Tied rows receive the same rank, and the next rank is incremented by the number of tied rows (e.g., 1, 2, 2, 4). A group whose aggregated order key is `NULL` (e.g. all-blank/voided values) ranks **last**.
 
 ## Remarks
 

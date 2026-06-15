@@ -17,7 +17,7 @@ DENSE_RANK(ORDERBY(table[column] [, table[column], ...]) [, PARTITIONBY(table[co
 
 ## Return value
 
-An integer representing the dense rank of each row. Tied rows receive the same rank, and the next rank increments by exactly 1 regardless of the number of ties (e.g., 1, 2, 2, 3).
+An integer representing the dense rank of each row. Tied rows receive the same rank, and the next rank increments by exactly 1 regardless of the number of ties (e.g., 1, 2, 2, 3). A group whose aggregated order key is `NULL` (e.g. all-blank/voided values) ranks **last**.
 
 ## Remarks
 

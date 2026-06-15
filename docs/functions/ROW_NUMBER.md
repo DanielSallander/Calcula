@@ -17,7 +17,7 @@ ROW_NUMBER(ORDERBY(table[column] [, table[column], ...]) [, PARTITIONBY(table[co
 
 ## Return value
 
-An integer starting at 1, incrementing by 1 for each row in the partition according to the specified order. Every row receives a unique number within its partition.
+An integer starting at 1, incrementing by 1 for each row in the partition according to the specified order. Every row receives a unique number within its partition. A group whose aggregated order key is `NULL` (e.g. all-blank/voided values) is numbered **last**.
 
 ## Remarks
 
