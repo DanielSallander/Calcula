@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -45,6 +45,10 @@ pub struct PullResult {
     pub pivot_definitions: Vec<persistence::SavedPivotDefinition>,
     /// BI pivot metadata for reconnecting to BI models.
     pub bi_pivot_metadata: Vec<serde_json::Value>,
+    /// Charts carried by the package, each with its `sheet_id` already remapped
+    /// from the package's sheet id to the new LOCAL sheet id so it materializes
+    /// on the right sheet. Empty for packages published before charts were carried.
+    pub charts: Vec<SavedChart>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
@@ -199,6 +203,32 @@ pub fn pull(
             sheet,
         });
     }
+
+    // Read charts (carried for subscriber in-app fidelity). Each chart names the
+    // sheet it lives on by the PACKAGE sheet id; remap to the new LOCAL sheet id
+    // (pull assigns fresh ids) so it lands on the right sheet. A chart whose
+    // sheet wasn't pulled is dropped. Absent in packages published before charts.
+    let pulled_charts: Vec<SavedChart> = {
+        match registry.read_artifact(pkg, ver, "charts.json")? {
+            Some(bytes) => {
+                let package_charts: Vec<SavedChart> = serde_json::from_slice(&bytes)?;
+                let id_map: HashMap<SheetId, SheetId> = pulled_sheets
+                    .iter()
+                    .map(|p| (p.package_sheet_id, p.sheet.id))
+                    .collect();
+                package_charts
+                    .into_iter()
+                    .filter_map(|mut chart| {
+                        id_map.get(&chart.sheet_id).map(|&local| {
+                            chart.sheet_id = local;
+                            chart
+                        })
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        }
+    };
 
     // Read tables
     let mut pulled_tables = Vec::new();
@@ -370,6 +400,7 @@ pub fn pull(
         data_sources: pulled_data_sources,
         pivot_definitions: pulled_pivot_defs,
         bi_pivot_metadata,
+        charts: pulled_charts,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -496,6 +527,63 @@ mod tests {
         // data.json-serialized 0.
         let styled = &result.sheets[0].sheet;
         assert_eq!(styled.cells.get(&(1, 2)).map(|c| c.style_index), Some(3));
+    }
+
+    #[test]
+    fn pull_materializes_charts_with_remapped_sheet_id() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        // A workbook with a chart that lives on its sheet.
+        let mut sheet = Sheet::new("Charted".to_string());
+        sheet
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(1.0)));
+        let pkg_sheet_id = sheet.id;
+        let chart_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let mut wb = persistence::Workbook::default();
+        wb.charts.push(SavedChart {
+            id: chart_id,
+            sheet_id: pkg_sheet_id,
+            spec_json: "{\"kind\":\"bar\"}".to_string(),
+        });
+        wb.sheets = vec![sheet];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "charted-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish::publish(&reg, &publish_req, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "charted-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        // The chart round-trips, with its sheet_id remapped from the package id
+        // to the new LOCAL sheet id so it lands on the right sheet.
+        assert_eq!(result.charts.len(), 1);
+        let chart = &result.charts[0];
+        assert_eq!(chart.id, chart_id);
+        assert_eq!(chart.spec_json, "{\"kind\":\"bar\"}");
+        let local_sheet_id = result.sheets[0].sheet.id;
+        assert_eq!(chart.sheet_id, local_sheet_id);
+        assert_ne!(chart.sheet_id, pkg_sheet_id);
     }
 
     #[test]

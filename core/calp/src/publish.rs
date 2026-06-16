@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use identity::EntityId;
-use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, Workbook};
+use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, Workbook};
 
 use crate::error::CalpError;
 use crate::manifest::*;
@@ -342,6 +342,22 @@ pub fn publish(
             pkg, ver,
             "named_ranges.json",
             serde_json::to_string_pretty(&named_ranges)?.as_bytes(),
+        )?;
+    }
+
+    // Write charts on the published sheets, carried so subscribers see them
+    // in-app (pull remaps each chart's sheet id to the new local sheet).
+    let published_charts: Vec<&SavedChart> = request
+        .workbook
+        .charts
+        .iter()
+        .filter(|c| published_sheet_ids.contains(&c.sheet_id))
+        .collect();
+    if !published_charts.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "charts.json",
+            serde_json::to_string_pretty(&published_charts)?.as_bytes(),
         )?;
     }
 

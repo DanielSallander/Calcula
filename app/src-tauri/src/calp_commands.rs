@@ -421,7 +421,7 @@ pub fn calp_pull(
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
     // the shared registry and remap cell style_index values accordingly.
-    {
+    let chart_sheet_index = {
         let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
@@ -429,7 +429,13 @@ pub fn calp_pull(
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
 
-        for pulled in &result.sheets {
+        // Workbook index where pulled sheets land — a chart (keyed by its local
+        // sheet id) remaps to this for ChartEntry.sheet_index.
+        let base_index = grids.len();
+        let mut chart_index_map: std::collections::HashMap<_, usize> =
+            std::collections::HashMap::new();
+
+        for (i, pulled) in result.sheets.iter().enumerate() {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
             // Remap local style indices to the shared registry
@@ -449,8 +455,10 @@ pub fn calp_pull(
             sheet_ids.push(pulled.sheet.id);
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
+            chart_index_map.insert(pulled.sheet.id, base_index + i);
         }
-    }
+        chart_index_map
+    };
 
     // Store subscription
     {
@@ -466,6 +474,24 @@ pub fn calp_pull(
             // Don't overwrite existing scripts with the same ID (subscriber may have modified)
             if !scripts.iter().any(|s| s.id == script.id) {
                 scripts.push(script);
+            }
+        }
+    }
+
+    // Materialize pulled charts onto their (remapped) sheet index, so the
+    // subscriber sees the report's charts in-app. Don't overwrite a chart the
+    // subscriber already has by id.
+    if !result.charts.is_empty() {
+        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        for chart in result.charts {
+            if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
+                if !charts.iter().any(|c| c.id == chart.id) {
+                    charts.push(crate::api_types::ChartEntry {
+                        id: chart.id,
+                        sheet_index,
+                        spec_json: chart.spec_json,
+                    });
+                }
             }
         }
     }
