@@ -47,6 +47,14 @@ pub(super) fn comparison_to_filter_operator(op: ComparisonOp) -> FilterOperator 
 /// The [`FilterCondition`] is table-agnostic (column / op / value); callers
 /// place it on the fetch of the predicate's own [`FilterPredicate::table`].
 pub(super) fn predicate_to_condition(predicate: &FilterPredicate) -> FilterCondition {
+    // A dynamic RLS predicate (USERNAME()/CUSTOMDATA()) must be substituted to a
+    // concrete identity by the facade before planning, so the planner never sees
+    // one. Assert it in debug builds; the executor's entry guard is the hard
+    // fail-closed backstop in release.
+    debug_assert!(
+        predicate.dynamic.is_none(),
+        "unsubstituted dynamic RLS predicate reached the planner"
+    );
     FilterCondition::new(
         predicate.column.clone(),
         comparison_to_filter_operator(predicate.operator),

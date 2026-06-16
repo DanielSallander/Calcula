@@ -2118,12 +2118,12 @@ fn eq_filter(
     column: &str,
     value: &str,
 ) -> engine_core::compute::expression::FilterPredicate {
-    engine_core::compute::expression::FilterPredicate {
-        table: table.into(),
-        column: column.into(),
-        operator: engine_core::compute::expression::ComparisonOp::Equal,
-        value: value.into(),
-    }
+    engine_core::compute::expression::FilterPredicate::new(
+        table,
+        column,
+        engine_core::compute::expression::ComparisonOp::Equal,
+        value,
+    )
 }
 
 /// Build a model with both safe (equi ManyToOne) and unsafe (<= ManyToMany)

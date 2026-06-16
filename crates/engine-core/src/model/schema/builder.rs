@@ -8,6 +8,7 @@ use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
+use crate::model::kpi::{Kpi, KpiTarget};
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
 use crate::model::table::Table;
@@ -34,6 +35,7 @@ pub struct DataModelBuilder {
     pub(super) script_functions: Vec<ScriptFunction>,
     pub(super) security_roles: Vec<SecurityRole>,
     pub(super) calculation_groups: Vec<CalculationGroup>,
+    pub(super) kpis: Vec<Kpi>,
 }
 
 impl DataModelBuilder {
@@ -192,6 +194,16 @@ impl DataModelBuilder {
     /// ```
     pub fn add_calculation_group(mut self, group: CalculationGroup) -> Self {
         self.calculation_groups.push(group);
+        self
+    }
+
+    /// Add a [`Kpi`] definition (status markup over a base measure).
+    ///
+    /// Validated at [`build`](Self::build): the name must be unique, the base
+    /// measure and any `MeasureRef` target must exist, status-band thresholds
+    /// must be ascending, and the description (if any) must be within limits.
+    pub fn add_kpi(mut self, kpi: Kpi) -> Self {
+        self.kpis.push(kpi);
         self
     }
 
@@ -1252,6 +1264,62 @@ impl DataModelBuilder {
             }
         }
 
+        // 15. Validate KPI definitions (author-defined status markup). KPIs are
+        // presentation metadata, but they reference measures and travel inside
+        // shared model files, so they are checked at build time:
+        // - KPI names are unique;
+        // - the base measure exists;
+        // - a `MeasureRef` target measure exists;
+        // - status-band thresholds are strictly ascending (so a host can map a
+        //   ratio to exactly one band by the last threshold it meets or exceeds);
+        // - any description is within the metadata length limit.
+        {
+            let mut seen_kpis = std::collections::HashSet::new();
+            for kpi in &self.kpis {
+                if !seen_kpis.insert(kpi.name()) {
+                    return Err(EngineError::DuplicateName(format!(
+                        "Duplicate KPI '{}'",
+                        kpi.name()
+                    )));
+                }
+                if self.measures.iter().all(|m| m.name() != kpi.base_measure()) {
+                    return Err(EngineError::MeasureNotFound(format!(
+                        "KPI '{}' references unknown base measure '{}'",
+                        kpi.name(),
+                        kpi.base_measure()
+                    )));
+                }
+                if let KpiTarget::Measure(target) = kpi.target() {
+                    if self.measures.iter().all(|m| m.name() != target) {
+                        return Err(EngineError::MeasureNotFound(format!(
+                            "KPI '{}' target references unknown measure '{target}'",
+                            kpi.name()
+                        )));
+                    }
+                }
+                let mut prev: Option<f64> = None;
+                for band in kpi.status_bands() {
+                    if prev.is_some_and(|p| band.threshold <= p) {
+                        return Err(EngineError::InvalidMetadata {
+                            entity: format!("KPI '{}'", kpi.name()),
+                            field: "status_bands".to_string(),
+                            reason: "status-band thresholds must be strictly ascending".to_string(),
+                        });
+                    }
+                    prev = Some(band.threshold);
+                }
+                if let Some(description) = kpi.description() {
+                    validate_metadata_text(
+                        &format!("KPI '{}'", kpi.name()),
+                        "description",
+                        description,
+                        MAX_METADATA_DESCRIPTION_CHARS,
+                        false,
+                    )?;
+                }
+            }
+        }
+
         let model = DataModel {
             // Freshly built models always carry the current format version
             // (deserialized legacy models keep their stored value; note
@@ -1273,6 +1341,7 @@ impl DataModelBuilder {
             script_functions: self.script_functions,
             security_roles: self.security_roles,
             calculation_groups: self.calculation_groups,
+            kpis: self.kpis,
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

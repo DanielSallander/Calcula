@@ -98,6 +98,8 @@ mod meta_tests;
 #[cfg(test)]
 mod rank_tests;
 #[cfg(test)]
+mod topn_tests;
+#[cfg(test)]
 mod in_filter_tests;
 #[cfg(test)]
 mod security_tests;
@@ -153,8 +155,9 @@ pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
     ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole, FilterPropagation,
-    GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh, JoinCondition, JoinOperator,
-    RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, StorageMode, Table, TableVariable,
+    GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh, JoinCondition, JoinOperator, Kpi,
+    KpiStatus, KpiTarget, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, StatusBand,
+    StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -183,7 +186,7 @@ pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
     LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy, ResultColumn,
-    ResultColumnKind, TotalsMode, GROUPING_ID_COLUMN,
+    ResultColumnKind, TopN, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
@@ -251,6 +254,16 @@ pub struct Engine {
     /// if *any* active role permits it). Empty = unrestricted by RLS. This is
     /// host-controlled session state, never part of any model.
     active_roles: Vec<String>,
+    /// The current user identity, if set (DAX `USERNAME()`). Host-controlled
+    /// session state set after authentication. A dynamic role predicate
+    /// (`column = USERNAME()`) resolves to this; a query with such a predicate
+    /// and no identity set **fails closed**. Folded into the query-cache key so a
+    /// result computed for one user is never served to another.
+    user_identity: Option<String>,
+    /// Host-supplied custom data, if set (DAX `CUSTOMDATA()`). Like
+    /// [`user_identity`](Self::user_identity) but for an arbitrary host string
+    /// (e.g. a tenant id); also folded into the cache key.
+    custom_data: Option<String>,
     /// Error captured by the most recent effective-registry rebuild, if any
     /// (currently only a native-vs-script name collision —
     /// [`Engine::new`] is infallible, so the error is deferred and surfaced
@@ -538,6 +551,167 @@ fn apply_ranking(batches: &[RecordBatch], rank: &RankBy) -> QueryResult<Vec<Reco
     Ok(vec![out])
 }
 
+/// Keep only the top `limit` GROUPS by a measure, **tie-inclusive** (every group
+/// tied at the boundary value is kept — DAX `TOPN` semantics), per partition.
+/// Arrow-only (no DataFusion). Distinct from `order_by` + `limit`, which
+/// truncate to exactly `limit` rows. NULL measures sort last and are kept only
+/// when the boundary value is itself NULL (i.e. fewer than `limit` non-NULL
+/// groups exist). Optionally appends an `Int64` tie-count column.
+#[allow(clippy::float_cmp)] // tie detection is exact f64 equality, by design.
+fn apply_topn_with_ties(batches: &[RecordBatch], topn: &TopN) -> QueryResult<Vec<RecordBatch>> {
+    use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let schema = batches[0].schema();
+    let batch = arrow::compute::concat_batches(&schema, batches)?;
+    let rows = batch.num_rows();
+
+    if let Some(out) = &topn.output_column {
+        if schema
+            .fields()
+            .iter()
+            .any(|f| f.name().eq_ignore_ascii_case(out))
+        {
+            return Err(QueryError::InvalidQuery(format!(
+                "top_n output column '{out}' collides with an existing result column"
+            )));
+        }
+    }
+
+    let resolve = |name: &str, what: &str| -> QueryResult<usize> {
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|f| f.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                QueryError::InvalidQuery(format!("top_n {what} '{name}' is not a result column"))
+            })
+    };
+
+    let measure_idx = resolve(&topn.measure, "measure")?;
+    let measure_f64 =
+        arrow::compute::cast(batch.column(measure_idx), &ArrowType::Float64).map_err(|e| {
+            QueryError::InvalidQuery(format!(
+                "top_n measure '{}' must be numeric: {e}",
+                topn.measure
+            ))
+        })?;
+    let measure = measure_f64
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("cast to Float64 yields a Float64Array");
+
+    let partition_text: Vec<StringArray> = topn
+        .partition_by
+        .iter()
+        .map(|c| {
+            let idx = resolve(&c.column, "partition column")?;
+            let utf8 = arrow::compute::cast(batch.column(idx), &ArrowType::Utf8).map_err(|e| {
+                QueryError::InvalidQuery(format!(
+                    "top_n partition column '{}' could not be keyed: {e}",
+                    c.column
+                ))
+            })?;
+            Ok(utf8
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("cast to Utf8 yields a StringArray")
+                .clone())
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+    let key_of = |row: usize| -> Vec<Option<String>> {
+        partition_text
+            .iter()
+            .map(|a| {
+                if a.is_null(row) {
+                    None
+                } else {
+                    Some(a.value(row).to_string())
+                }
+            })
+            .collect()
+    };
+
+    let mut partitions: std::collections::HashMap<Vec<Option<String>>, Vec<usize>> =
+        std::collections::HashMap::new();
+    for row in 0..rows {
+        partitions.entry(key_of(row)).or_default().push(row);
+    }
+
+    let cell = |row: usize| -> (bool, f64) { (measure.is_null(row), measure.value(row)) };
+    // Order rows by RANK (best first): higher value first (or lower if
+    // `ascending`); a NULL measure is always worst (last).
+    let cmp_rank = |a: usize, b: usize| -> std::cmp::Ordering {
+        let (na, va) = cell(a);
+        let (nb, vb) = cell(b);
+        match (na, nb) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => {
+                let ord = va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal);
+                if topn.ascending {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            }
+        }
+    };
+
+    let mut keep = vec![false; rows];
+    let mut tie_count = vec![0i64; rows];
+    for indices in partitions.values() {
+        if topn.limit == 0 {
+            continue; // top-0 keeps nothing.
+        }
+        let mut sorted = indices.clone();
+        sorted.sort_by(|&a, &b| cmp_rank(a, b));
+        // Boundary = the limit-th best row (clamped to the partition size).
+        let boundary_row = sorted[(topn.limit - 1).min(sorted.len() - 1)];
+        let boundary = cell(boundary_row);
+        let mut at_boundary = 0i64;
+        for &row in indices {
+            // Keep rows that rank at least as high as the boundary (ties kept).
+            if cmp_rank(row, boundary_row) != std::cmp::Ordering::Greater {
+                keep[row] = true;
+            }
+            let c = cell(row);
+            if c.0 == boundary.0 && (c.0 || c.1 == boundary.1) {
+                at_boundary += 1;
+            }
+        }
+        for &row in indices {
+            if keep[row] {
+                tie_count[row] = at_boundary;
+            }
+        }
+    }
+
+    let mask = BooleanArray::from(keep.clone());
+    let filtered = arrow::compute::filter_record_batch(&batch, &mask)?;
+
+    if let Some(out_name) = &topn.output_column {
+        let kept_counts: Vec<i64> = (0..rows).filter(|&r| keep[r]).map(|r| tie_count[r]).collect();
+        let mut columns: Vec<arrow::array::ArrayRef> = filtered.columns().to_vec();
+        columns.push(std::sync::Arc::new(Int64Array::from(kept_counts)));
+        let mut fields: Vec<Field> = filtered
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| (**f).clone())
+            .collect();
+        fields.push(Field::new(out_name, ArrowType::Int64, false));
+        let out = RecordBatch::try_new(std::sync::Arc::new(Schema::new(fields)), columns)?;
+        return Ok(vec![out]);
+    }
+    Ok(vec![filtered])
+}
+
 /// Map an Arrow result type back to the engine [`DataType`] best-effort,
 /// unwrapping dictionary encoding (grouped string dimensions arrive
 /// dictionary-encoded). Returns `None` for a type with no clean engine mapping.
@@ -593,6 +767,10 @@ fn build_result_metadata(
     }
 
     let rank_output = request.rank_by.as_ref().map(|r| r.output_column.as_str());
+    let topn_output = request
+        .top_n
+        .as_ref()
+        .and_then(|t| t.output_column.as_deref());
 
     schema
         .fields()
@@ -610,6 +788,12 @@ fn build_result_metadata(
             // Rank column.
             if rank_output.is_some_and(|r| r.eq_ignore_ascii_case(name)) {
                 let mut c = ResultColumn::bare(name, ResultColumnKind::Rank);
+                c.data_type = data_type;
+                return c;
+            }
+            // Top-N tie-count column (an integer measure-like column).
+            if topn_output.is_some_and(|t| t.eq_ignore_ascii_case(name)) {
+                let mut c = ResultColumn::bare(name, ResultColumnKind::Measure);
                 c.data_type = data_type;
                 return c;
             }
@@ -646,6 +830,14 @@ fn build_result_metadata(
                     c.description = m.description().map(str::to_string);
                     c.is_hidden = m.is_hidden();
                 }
+                // A KPI whose base measure is this column lets the host render its
+                // status indicator. Exact name match (consistent with the measure
+                // attribution above).
+                c.kpi_name = model
+                    .kpis()
+                    .iter()
+                    .find(|k| k.base_measure() == measure_name.as_str())
+                    .map(|k| k.name().to_string());
                 return c;
             }
             // Otherwise a dimension: attribute it to a group-by column (the
@@ -807,6 +999,8 @@ impl Engine {
             script_sandbox_config: config,
             script_build_error,
             active_roles: Vec::new(),
+            user_identity: None,
+            custom_data: None,
         }
     }
 
@@ -1273,15 +1467,124 @@ impl Engine {
         &self.active_roles
     }
 
-    /// A stable cache-key fragment for the active role set (order-independent),
-    /// or `None` when no role is active.
+    /// Set (or clear) the current **user identity** (DAX `USERNAME()`) for
+    /// dynamic row-level security.
+    ///
+    /// A dynamic role predicate (`column = USERNAME()`, built with
+    /// [`FilterPredicate::username`](engine_core::compute::expression::FilterPredicate::username))
+    /// resolves to this value at query time. A query under such a role with **no**
+    /// identity set fails closed ([`EngineError::RowLevelSecurityNotEnforceable`])
+    /// — never an unrestricted result. The identity is part of the query-cache
+    /// key, so a result computed for one user is never served to another;
+    /// changing it invalidates the cache.
+    pub fn set_user_identity(&mut self, identity: Option<String>) {
+        if self.user_identity != identity {
+            self.user_identity = identity;
+            self.query_cache.lock().invalidate_all();
+        }
+    }
+
+    /// The current user identity, if set.
+    pub fn user_identity(&self) -> Option<&str> {
+        self.user_identity.as_deref()
+    }
+
+    /// Set (or clear) the host-supplied **custom data** (DAX `CUSTOMDATA()`) for
+    /// dynamic row-level security (e.g. a tenant id). Resolves a dynamic role
+    /// predicate built with
+    /// [`FilterPredicate::custom_data`](engine_core::compute::expression::FilterPredicate::custom_data).
+    /// Same fail-closed and cache-key semantics as
+    /// [`set_user_identity`](Self::set_user_identity).
+    pub fn set_custom_data(&mut self, data: Option<String>) {
+        if self.custom_data != data {
+            self.custom_data = data;
+            self.query_cache.lock().invalidate_all();
+        }
+    }
+
+    /// The host-supplied custom data, if set.
+    pub fn custom_data(&self) -> Option<&str> {
+        self.custom_data.as_deref()
+    }
+
+    /// Substitute each **dynamic** role predicate (`USERNAME()`/`CUSTOMDATA()`)
+    /// with the concrete runtime identity, returning OWNED static predicates.
+    ///
+    /// **Fails closed** ([`EngineError::RowLevelSecurityNotEnforceable`]) when a
+    /// predicate needs an identity that is not set — so a dynamic predicate is
+    /// never rendered as its placeholder and never silently dropped. Static
+    /// predicates are returned unchanged. This is the single substitution point
+    /// upstream of every role-filter consumer (the planner, the executor, and the
+    /// multi-role union).
+    fn substitute_identity_in_predicates(
+        &self,
+        predicates: &[FilterPredicate],
+    ) -> QueryResult<Vec<FilterPredicate>> {
+        use engine_core::compute::expression::DynamicValue;
+        predicates
+            .iter()
+            .map(|p| match p.dynamic {
+                None => Ok(p.clone()),
+                Some(kind) => {
+                    let (identity, label, setter) = match kind {
+                        DynamicValue::Username => {
+                            (self.user_identity.as_deref(), "USERNAME()", "set_user_identity")
+                        }
+                        DynamicValue::CustomData => {
+                            (self.custom_data.as_deref(), "CUSTOMDATA()", "set_custom_data")
+                        }
+                    };
+                    let value = identity.ok_or_else(|| {
+                        QueryError::Engine(EngineError::RowLevelSecurityNotEnforceable {
+                            table: p.table.clone(),
+                            reason: format!(
+                                "the active role has a dynamic {label} row filter on '{}', but no \
+                                 runtime identity is set; call Engine::{setter} before querying",
+                                p.table
+                            ),
+                        })
+                    })?;
+                    Ok(FilterPredicate::new(
+                        p.table.clone(),
+                        p.column.clone(),
+                        p.operator,
+                        value,
+                    ))
+                }
+            })
+            .collect()
+    }
+
+    /// A stable cache-key fragment for the security context — the active role set
+    /// (order-independent) **and** the runtime identity (`USERNAME()` /
+    /// `CUSTOMDATA()`) — or `None` when there is no role and no identity.
+    ///
+    /// A result computed under one (roles, identity) context must never be served
+    /// to another, so this fragment is part of the query-cache key. Components are
+    /// **length-prefixed** so the encoding is collision-free regardless of
+    /// contents: a role name or identity containing the field separator can no
+    /// longer alias a different context.
     fn role_cache_key(&self) -> Option<String> {
-        if self.active_roles.is_empty() {
+        if self.active_roles.is_empty()
+            && self.user_identity.is_none()
+            && self.custom_data.is_none()
+        {
             return None;
         }
+        use std::fmt::Write;
         let mut roles = self.active_roles.clone();
         roles.sort();
-        Some(roles.join("\u{1}"))
+        let mut key = String::new();
+        for r in &roles {
+            let _ = write!(key, "r{}:{};", r.len(), r);
+        }
+        if let Some(u) = &self.user_identity {
+            let _ = write!(key, "u{}:{};", u.len(), u);
+        }
+        if let Some(c) = &self.custom_data {
+            let _ = write!(key, "c{}:{};", c.len(), c);
+        }
+        Some(key)
     }
 
     /// Verify the active role (if any) names a role the model defines.
@@ -1292,7 +1595,11 @@ impl Engine {
     /// silent no-RLS run, so a typo can never leak data.
     pub(crate) fn validate_active_role(&self) -> QueryResult<()> {
         for name in &self.active_roles {
-            self.model.security_role(name).map_err(QueryError::Engine)?;
+            let role = self.model.security_role(name).map_err(QueryError::Engine)?;
+            // Dynamic predicates need a runtime identity; verify substitution
+            // succeeds (fail closed up front if an identity is unset) so every
+            // query path is guarded uniformly before any planning.
+            self.substitute_identity_in_predicates(role.table_filters())?;
         }
         Ok(())
     }
@@ -1339,7 +1646,9 @@ impl Engine {
         let mut union_table: Option<String> = None;
         for name in &self.active_roles {
             let role = self.model.security_role(name).map_err(QueryError::Engine)?;
-            let preds = role.table_filters();
+            // Resolve dynamic predicates to the runtime identity up front (fail
+            // closed if unset) so the union never carries a placeholder value.
+            let preds = self.substitute_identity_in_predicates(role.table_filters())?;
             if preds.is_empty() {
                 // A role with no filters permits every row → the union permits
                 // every row → no restriction at all.
@@ -1371,13 +1680,11 @@ impl Engine {
         // Reuse the single-role RLS gate by planning one role; if the planner
         // refuses (RowLevelSecurityNotEnforceable for a non-single-hop-equi
         // table), refuse too rather than risk leaving the fact unrestricted.
+        // The predicates are substituted (concrete identity) before planning.
         if let Some(name) = self.active_roles.first() {
-            let preds = self
-                .model
-                .security_role(name)
-                .map_err(QueryError::Engine)?
-                .table_filters();
-            PushdownPlanner::plan(&request, &self.model, &self.registry, preds)?;
+            let role = self.model.security_role(name).map_err(QueryError::Engine)?;
+            let preds = self.substitute_identity_in_predicates(role.table_filters())?;
+            PushdownPlanner::plan(&request, &self.model, &self.registry, &preds)?;
         }
 
         let mut rewritten = request;
@@ -1447,18 +1754,21 @@ impl Engine {
     /// [`validate_active_role`](Self::validate_active_role) first; an unknown
     /// role here degrades safely to an empty slice (no enforcement), but
     /// validation guarantees that case never reaches a query.
-    fn active_role_filters(&self) -> &[FilterPredicate] {
+    fn active_role_filters(&self) -> QueryResult<Vec<FilterPredicate>> {
         // Single-role enforcement. The multi-role union is handled separately
-        // (see `query_multi_role_union`) and never reaches a path that calls
-        // this, so returning a single role's predicates here is safe.
-        match self.active_roles.first() {
+        // (see `build_role_union_request`) and never reaches a path that calls
+        // this, so returning a single role's predicates here is safe. Dynamic
+        // predicates are substituted to the runtime identity (fail closed if
+        // unset) so every consumer sees concrete, owned static predicates.
+        let preds: &[FilterPredicate] = match self.active_roles.first() {
             Some(name) if self.active_roles.len() == 1 => self
                 .model
                 .security_role(name)
                 .map(|r| r.table_filters())
                 .unwrap_or(&[]),
             _ => &[],
-        }
+        };
+        self.substitute_identity_in_predicates(preds)
     }
 
     /// Rebuild the effective UDF registry from the current model, native
@@ -1728,6 +2038,14 @@ impl Engine {
             return self.query_with_ranking(request, token).await;
         }
 
+        // Top-N groups (tie-inclusive, DAX `TOPN`) is an outer post-aggregation
+        // step like RANKX: run the underlying query (which may apply a HAVING
+        // filter first), keep the top-N groups by measure, then re-apply the row
+        // limit. Handled before caching/planning so it composes with every path.
+        if request.top_n.is_some() {
+            return self.query_with_topn(request, token).await;
+        }
+
         // Measure-value filters (HAVING) are handled here — before caching and
         // planning — so they compose uniformly with every execution path. Run
         // the underlying query without them (and without the row limit), then
@@ -1782,8 +2100,8 @@ impl Engine {
             return Ok(cached);
         }
 
-        let role_filters = self.active_role_filters();
-        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, role_filters)?;
+        let role_filters = self.active_role_filters()?;
+        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, &role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute_with_cancellation(
                 &plan,
@@ -1792,7 +2110,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
-                role_filters,
+                &role_filters,
                 &token,
             )
             .await,
@@ -1928,6 +2246,72 @@ impl Engine {
         Ok(truncate_batches_to_limit(filtered, limit))
     }
 
+    /// Evaluate a query carrying a top-N filter (DAX `TOPN`, tie-inclusive).
+    ///
+    /// Runs the underlying query with the top-N removed and **no** row limit
+    /// (every group present and already ordered), keeps the top-N groups by
+    /// measure — every group tied at the boundary value included — then applies
+    /// the limit. The inner query (including any HAVING measure filter) is
+    /// evaluated by [`query_with_cancellation`](Self::query_with_cancellation), so
+    /// measure filters apply **before** the top-N. Unsupported combinations
+    /// (ROLLUP totals, calculation groups) fail closed rather than mislead.
+    async fn query_with_topn(
+        &self,
+        request: QueryRequest,
+        token: CancellationToken,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        // Safe: the caller (`query_with_cancellation`) only routes here when set.
+        let topn = request
+            .top_n
+            .clone()
+            .expect("query_with_topn is only called when top_n is set");
+
+        if request.totals == TotalsMode::Rollup {
+            return Err(QueryError::InvalidQuery(
+                "top_n is not supported with ROLLUP totals (it would rank subtotal/grand-total \
+                 rows among the details); request the top-N detail and the totals separately"
+                    .into(),
+            ));
+        }
+        if request.calculation_group.is_some() {
+            return Err(QueryError::InvalidQuery(
+                "top_n is not supported together with a calculation group; apply the top-N in a \
+                 separate request"
+                    .into(),
+            ));
+        }
+        if !request
+            .measures
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&topn.measure))
+        {
+            return Err(QueryError::InvalidQuery(format!(
+                "top_n references measure '{}', which is not in the request's measures",
+                topn.measure
+            )));
+        }
+        for pc in &topn.partition_by {
+            if !request
+                .group_by
+                .iter()
+                .any(|g| g.column.eq_ignore_ascii_case(&pc.column))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "top_n partition column '{}' must be one of the request's group_by columns",
+                    pc.column
+                )));
+            }
+        }
+
+        let mut inner = request.clone();
+        inner.top_n = None;
+        let limit = inner.limit.take();
+        let batches = Box::pin(self.query_with_cancellation(inner, token)).await?;
+
+        let topped = apply_topn_with_ties(&batches, &topn)?;
+        Ok(truncate_batches_to_limit(topped, limit))
+    }
+
     /// Return the **raw fact rows** behind a pivot cell (drillthrough /
     /// detail-rows).
     ///
@@ -2019,7 +2403,7 @@ impl Engine {
         // only wired through the aggregate `query` path. Fail closed rather
         // than emit unrestricted detail rows under multiple active roles.
         self.reject_multi_role()?;
-        let role_filters = self.active_role_filters();
+        let role_filters = self.active_role_filters()?;
 
         // Drillthrough results are intentionally NOT cached (see the doc
         // comment): interactive, one-off, per-cell. Go straight to execution.
@@ -2029,7 +2413,7 @@ impl Engine {
             &self.registry,
             Some(&self.cache),
             Some(self.max_inline_in_values),
-            role_filters,
+            &role_filters,
             &token,
         )
         .await
@@ -2093,8 +2477,8 @@ impl Engine {
             return Ok((cached, refreshed));
         }
 
-        let role_filters = self.active_role_filters();
-        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, role_filters)?;
+        let role_filters = self.active_role_filters()?;
+        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, &role_filters)?;
         let batches = map_script_error(
             QueryExecutor::execute(
                 &plan,
@@ -2103,7 +2487,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
-                role_filters,
+                &role_filters,
             )
             .await,
         )?;
@@ -2136,12 +2520,12 @@ impl Engine {
             None => (&self.model, &request),
         };
 
-        let role_filters = self.active_role_filters();
+        let role_filters = self.active_role_filters()?;
         let (query_plan, pushdown_node) = PushdownPlanner::plan_explained(
             effective_request,
             model,
             &self.registry,
-            role_filters,
+            &role_filters,
         )?;
         let (batches, exec_node) = map_script_error(
             QueryExecutor::execute_explained(
@@ -2151,7 +2535,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
-                role_filters,
+                &role_filters,
             )
             .await,
         )?;

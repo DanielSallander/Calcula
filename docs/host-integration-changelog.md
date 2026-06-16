@@ -43,6 +43,8 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `7` | Calculation groups — model gained `calculation_groups`; expression AST gained `SelectedMeasure`. |
 | `8` | `DATESINPERIOD` trailing-window time intelligence — expression AST gained `DatesInPeriod`. |
 | `9` | Semi-additive balances `CLOSINGBALANCE` / `OPENINGBALANCE` — expression AST gained `SemiAdditiveBalance`. |
+| `10` | KPIs — model gained `kpis` (author-defined status markup over a base measure: target + status bands). |
+| `11` | Dynamic row-level security — a role's `FilterPredicate` gained a `dynamic` field (`USERNAME()` / `CUSTOMDATA()` identity tokens). |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
 
@@ -146,6 +148,14 @@ QueryRequest {
 `RankBy { measure, output_column, partition_by: Vec<ColumnRef>, dense: bool, ascending: bool }` — builder `RankBy::new(measure, output_column)` then `.ascending()`, `.dense()`, `.within(cols)`. Defaults: descending (rank `1` = largest), standard competition ranking (`1,1,3` — ties share a rank, the next rank skips), ranked over all rows. `.dense()` gives gap-free ranks (`1,1,2`); `.within(group_by_cols)` restarts the rank inside each group. Computed **after** aggregation (like `measure_filters`), so it composes with `order_by` + `limit` for "top N by measure". The `measure` must be in `measures`; every `partition_by` column must be in `group_by`; `output_column` must not collide with an existing result column. A `NULL` measure value ranks **last**. Not supported with `TotalsMode::Rollup` or a calculation group (fails closed). No `MODEL_FORMAT_VERSION` change (request-time only).
 
 > **Two ranking surfaces.** `rank_by` above is the **request-level** option (post-aggregation, by a named measure). Separately, **measure-level** `RANK` / `ROW_NUMBER` / `DENSE_RANK` functions in a measure expression — `RANK(ORDERBY(fact[amount]) [, PARTITIONBY(dim[col])])` — now **execute** (they previously failed closed). They rank the query's group-by rows by `SUM(<fact order column>)` **descending** (largest = rank 1), partitioned by `PARTITIONBY` columns. v1 limits (fail closed): the query needs a `group_by`; every `ORDERBY` column must be a measure column of the query's genuine fact table (aggregated with `SUM`) — ranking by a **dimension** attribute fails closed (order by a dimension at the request level with `QueryRequest.order_by` instead); every `PARTITIONBY` column must be a `group_by` column. A group whose aggregated order key is `NULL` (e.g. all-blank/voided measure values) ranks **last**, never first. They two-stage like other window measures and combine with ordinary/window measures in one query. No `MODEL_FORMAT_VERSION` change (the AST node already existed).
+
+## Top-N groups (`TopN`, tie-inclusive)
+
+`QueryRequest` gained `top_n: Option<TopN>`. `TopN { measure, limit, partition_by: Vec<ColumnRef>, ascending: bool, output_column: Option<String> }` — builder `TopN::new(measure, limit)` then `.ascending()`, `.within(cols)`, `.with_tie_count(name)`. Keeps the top `limit` **groups** by `measure` with DAX `TOPN` **tie-inclusive** semantics: if several groups tie at the `limit`-th value, **all** are kept, so the result may contain more than `limit` rows — distinct from `order_by` + `limit`, which truncate exactly. Computed after aggregation and after `measure_filters`, before `order_by` + `limit` (so a host can order the tie-inclusive set and cap it exactly). `.with_tie_count("col")` appends an integer column giving, per kept row, how many groups tie at the boundary value (so the host sees how far the result exceeded `limit`). A `NULL` measure sorts last and is kept only when the boundary value is itself `NULL`. The `measure` must be in `measures`; every `partition_by` column must be in `group_by`; the output column must not collide. Not supported with `TotalsMode::Rollup` or a calculation group (fails closed). No `MODEL_FORMAT_VERSION` change (request-time only).
+
+## KPIs (format version 10)
+
+The model gained `kpis: Vec<Kpi>` — author-defined status markup over a base measure. `Kpi { name, base_measure, target: KpiTarget, status_bands: Vec<StatusBand>, description }`; `KpiTarget ∈ { Constant(f64), Measure(name) }`; `StatusBand { threshold: f64, status: KpiStatus }`; `KpiStatus ∈ { OffTrack, AtRisk, OnTrack }`. Builder `Kpi::new(name, base_measure, target).with_status_band(..).with_description(..)`, added via `DataModelBuilder::add_kpi`; accessors `DataModel::kpis()` / `kpi(name)`. Validated at `build()`: unique names, the base measure and any `Measure` target must exist, status-band thresholds must be **strictly ascending**, description within the metadata limit. KPIs are **presentation metadata** — the engine surfaces them in the result-column metadata: `ResultColumn` gained `kpi_name: Option<String>`, set on a base-measure column so the host can render the status indicator (the host computes the status from the base value, target, and bands). `bi_engine::{Kpi, KpiTarget, KpiStatus, StatusBand}`.
 
 ## Window/time-intelligence measure beside an ordinary measure
 
@@ -367,6 +377,29 @@ EngineError::RowLevelSecurityNotEnforceable { table, reason }
 **Enforcement model (v1):** a single active role, or a union of roles under the constraint above; static AND-combined predicates within a role; enforcement only through **single-hop, single-column, active, equi** relationships. If a role-filtered table is reachable from a queried fact but **not** via such a relationship, the query is refused (`RowLevelSecurityNotEnforceable`) rather than left unrestricted — the engine fails closed. The (canonicalized) active-role identity is folded into the query-cache key so results never leak across roles or role sets.
 
 > **Honesty note for hosts:** RLS in an embedded, client-side library is **advisory** against a cooperative host — it prevents a role from *seeing* rows through the engine, not from bypassing the engine and reading the source directly. Document it as such to end users.
+
+### Dynamic RLS — `USERNAME()` / `CUSTOMDATA()` (format version 11)
+
+A role predicate can now resolve to the **runtime identity** instead of a fixed value, so one role restricts each user to their own rows:
+
+```rust
+SecurityRole::new("PerUser").with_filters(vec![
+    FilterPredicate::username("dim_user", "email", ComparisonOp::Equal),     // = USERNAME()
+    // or FilterPredicate::custom_data("dim_tenant", "id", ComparisonOp::Equal) // = CUSTOMDATA()
+]);
+```
+
+The host sets the identity after authentication:
+
+| Method | Signature | Notes |
+|---|---|---|
+| `set_user_identity` | `(&mut self, identity: Option<String>)` | Resolves `USERNAME()` predicates (DAX `USERNAME()`). Part of the query-cache key (a result for one user is never served to another); changing it invalidates the cache. |
+| `set_custom_data` | `(&mut self, data: Option<String>)` | Resolves `CUSTOMDATA()` predicates (e.g. a tenant id). Same cache/invalidate semantics. |
+| `user_identity` / `custom_data` | `(&self) -> Option<&str>` | The current values. |
+
+- The model JSON gains a `dynamic` field on a role's `FilterPredicate` (`"Username"` / `"CustomData"`); absent for a static predicate (back-compat with pre-v11 role files).
+- **Fail closed:** a query under a role with a dynamic predicate and **no** matching identity set is refused with `EngineError::RowLevelSecurityNotEnforceable` — never an unrestricted (or placeholder-literal) result. The identity is substituted to a concrete value before any planning or rendering, on every query path.
+- The dynamic-ness is a **typed** field, not a magic string: a static predicate whose value is literally `"USERNAME()"` is a plain literal and is **not** substituted.
 
 ---
 

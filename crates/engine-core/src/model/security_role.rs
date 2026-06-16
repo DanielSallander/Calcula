@@ -32,8 +32,12 @@
 //!   multi-role shapes (cross-table or multi-predicate roles) are deferred and
 //!   **fail closed** rather than under-restrict (the union is applied by the
 //!   engine facade's `set_active_roles` / `query` path);
-//! - supports only static `column op value` predicates, AND-combined within a
-//!   role (no IN-list, and no dynamic `USERNAME()`-style identity filters);
+//! - supports static `column op value` predicates AND **dynamic** ones that
+//!   resolve to the runtime identity ([`FilterPredicate::username`] /
+//!   [`FilterPredicate::custom_data`], i.e. `USERNAME()` / `CUSTOMDATA()`),
+//!   AND-combined within a role (no IN-list yet). A dynamic predicate is
+//!   substituted to the identity set via `Engine::set_user_identity` /
+//!   `set_custom_data` and **fails closed** when that identity is unset;
 //! - enforces a dimension restriction on a fact only over a **single-hop,
 //!   active, single-column equi** relationship (the shape the executor can
 //!   turn into a fact restriction).

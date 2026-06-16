@@ -137,6 +137,24 @@ impl QueryExecutor {
         // tokens — no fetch is ever issued).
         check_cancelled(token)?;
 
+        // Defense in depth: a DYNAMIC row-level-security predicate
+        // (USERNAME()/CUSTOMDATA()) must have been substituted to a concrete
+        // identity by the facade (`Engine::active_role_filters`) before it
+        // reaches the executor. If one arrives unresolved, FAIL CLOSED rather than
+        // render its placeholder value as a SQL literal (which would mis-restrict
+        // or leak). In normal operation substitution makes this unreachable.
+        if let Some(p) = role_filters.iter().find(|p| p.dynamic.is_some()) {
+            return Err(crate::error::QueryError::Engine(
+                EngineError::RowLevelSecurityNotEnforceable {
+                    table: p.table.clone(),
+                    reason: "a dynamic row-level-security predicate (USERNAME()/CUSTOMDATA()) \
+                             reached the executor unresolved; it must be substituted to a concrete \
+                             identity before planning"
+                        .to_string(),
+                },
+            ));
+        }
+
         // Defense in depth: re-seal the active role's predicates into every
         // fetch that targets a role-filtered table. The planner already did
         // this, so for any table that already carries its role conditions this

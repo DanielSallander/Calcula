@@ -403,15 +403,19 @@ impl Engine {
             .await
             .map_err(QueryError::Engine)?;
 
-        // Check query cache. The guard is dropped before any await. The
-        // active role is part of the key (cross-role isolation).
+        // Check query cache. The guard is dropped before any await. The full
+        // security context — every active role AND the runtime identity
+        // (USERNAME()/CUSTOMDATA()) — is part of the key, so a result restricted
+        // for one user/role-set is never served to another. (Using
+        // `active_role()` here would key on only the first role name and omit the
+        // identity, cross-serving rows across users and multi-role unions.)
         let (cache_key, cached) = {
             let mut query_cache = self.query_cache.lock();
             let key = query_cache::query_cache_key(
                 &request,
                 query_cache.model_version(),
                 self.effective_udfs.identity_hash(),
-                self.active_role(),
+                self.role_cache_key().as_deref(),
             );
             let cached = query_cache.get(key);
             (key, cached)
@@ -435,13 +439,13 @@ impl Engine {
         // local, and thread the active role's predicates so a cached
         // (auto-tiered) dimension is restricted just like a connector-fetched
         // one.
-        let role_filters = self.active_role_filters();
+        let role_filters = self.active_role_filters()?;
         let plan = PushdownPlanner::plan_with_cached(
             effective_request,
             model,
             &self.registry,
             &self.auto_tier_state.cached,
-            role_filters,
+            &role_filters,
         )?;
         let batches = crate::map_script_error(
             QueryExecutor::execute(
@@ -451,7 +455,7 @@ impl Engine {
                 Some(&self.cache),
                 Some(self.max_inline_in_values),
                 Some(self.effective_udfs.as_ref()),
-                role_filters,
+                &role_filters,
             )
             .await,
         )?;

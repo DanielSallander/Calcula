@@ -31,6 +31,7 @@ use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
+use crate::model::kpi::Kpi;
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
 use crate::model::table::Table;
@@ -106,8 +107,22 @@ use crate::model::table_variable::TableVariable;
 ///   which an older engine would fail to deserialize, so the
 ///   [`ModelFormatTooNew`] gate refuses v8 files on a pre-v8 engine.
 ///
+/// - `10` — the model gained [`kpis`](DataModel::kpis), a list of author-defined
+///   KPI definitions (each a base measure, a target, and status bands). This is
+///   authored, behavior-bearing metadata that a pre-v10 engine would silently
+///   drop on a load→save round-trip, so the [`ModelFormatTooNew`] gate refuses
+///   v10 files on a pre-v10 engine.
+///
+/// - `11` — a [security role](crate::model::SecurityRole)'s
+///   [`FilterPredicate`](crate::compute::expression::FilterPredicate) gained a
+///   `dynamic` field for **dynamic** row-level security (`USERNAME()` /
+///   `CUSTOMDATA()`). A pre-v11 engine would ignore the unknown field and treat
+///   the predicate as a static comparison against its placeholder value — a
+///   silent RLS mis-restriction — so the [`ModelFormatTooNew`] gate must refuse
+///   v11 files on a pre-v11 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 9;
+pub const MODEL_FORMAT_VERSION: u32 = 11;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -156,6 +171,13 @@ pub struct DataModel {
     /// [`CalculationGroup`] for the full semantics.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     calculation_groups: Vec<CalculationGroup>,
+    /// Author-defined KPI definitions (a base measure, a target, and status
+    /// bands). Presentation metadata: surfaced in result-column metadata for the
+    /// base measure so a host can render its status indicator. Empty by default
+    /// and skipped on serialization when empty (back-compat with pre-v10 model
+    /// files). See [`Kpi`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    kpis: Vec<Kpi>,
 }
 
 impl DataModel {
@@ -176,6 +198,7 @@ impl DataModel {
             script_functions: Vec::new(),
             security_roles: Vec::new(),
             calculation_groups: Vec::new(),
+            kpis: Vec::new(),
         }
     }
 
@@ -414,6 +437,16 @@ impl DataModel {
             .iter()
             .find(|g| g.name() == name)
             .ok_or_else(|| EngineError::CalculationGroupNotFound(name.to_string()))
+    }
+
+    /// Returns all KPI definitions in the model.
+    pub fn kpis(&self) -> &[Kpi] {
+        &self.kpis
+    }
+
+    /// Look up a KPI by name (exact match), or `None` when absent.
+    pub fn kpi(&self, name: &str) -> Option<&Kpi> {
+        self.kpis.iter().find(|k| k.name() == name)
     }
 
     /// Returns a clone of this model with `extra` measures appended.

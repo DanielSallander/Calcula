@@ -37,6 +37,20 @@ impl super::QueryExecutor {
         udfs: Option<&engine_core::compute::udf::UdfRegistry>,
         role_filters: &[FilterPredicate],
     ) -> QueryResult<(Vec<RecordBatch>, PlanNode)> {
+        // Defense in depth (release-active): an unsubstituted dynamic RLS
+        // predicate (USERNAME()/CUSTOMDATA()) must never reach the executor; fail
+        // closed rather than render its placeholder as a literal.
+        if let Some(p) = role_filters.iter().find(|p| p.dynamic.is_some()) {
+            return Err(crate::error::QueryError::Engine(
+                engine_core::error::EngineError::RowLevelSecurityNotEnforceable {
+                    table: p.table.clone(),
+                    reason: "a dynamic row-level-security predicate (USERNAME()/CUSTOMDATA()) \
+                             reached the executor unresolved; it must be substituted to a \
+                             concrete identity before planning"
+                        .to_string(),
+                },
+            ));
+        }
         match plan {
             QueryPlan::PushedAggregation {
                 source_table,

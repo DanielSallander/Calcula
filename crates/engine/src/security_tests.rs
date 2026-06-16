@@ -1434,3 +1434,239 @@ fn changing_active_role_invalidates_query_cache() {
     engine.set_active_role(None);
     assert!(engine.query_cache.lock().model_version() > v1);
 }
+
+// --- Dynamic RLS (USERNAME() / CUSTOMDATA()) ---
+
+use engine_core::compute::expression::FilterPredicate;
+
+/// Engine over the same star fixture, but the role restricts `Geography.region`
+/// via the given (dynamic) predicate instead of a static `= West`.
+fn dynamic_rls_engine(role: SecurityRole) -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("geo_id", DataType::Int64),
+                    Column::new("cat_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Geography",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Category",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Geo", "Sales", "geo_id", "Geography", "id",
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Cat", "Sales", "cat_id", "Category", "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(role)
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Geography", 0, SourceBinding::new("public", "geography"));
+    engine.bind_table("Category", 0, SourceBinding::new("public", "category"));
+    engine.cache.store("Sales", sales_batch()).unwrap();
+    engine.cache.store("Geography", geo_batch()).unwrap();
+    engine.cache.store("Category", cat_batch()).unwrap();
+    engine
+}
+
+fn revenue_request() -> QueryRequest {
+    QueryRequest {
+        measures: vec!["Revenue".into()],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn dynamic_username_restricts_to_the_identity_region() {
+    // Role: Geography.region = USERNAME(). The identity selects the region.
+    let role = SecurityRole::new("DynRegion").with_filters(vec![FilterPredicate::username(
+        "Geography",
+        "region",
+        ComparisonOp::Equal,
+    )]);
+    let mut engine = dynamic_rls_engine(role);
+    engine.set_active_role(Some("DynRegion".into()));
+
+    engine.set_user_identity(Some("West".into()));
+    let west = engine.query(revenue_request()).await.unwrap();
+    assert!((scalar(&west, "Revenue") - 130.0).abs() < 1e-9, "USERNAME()=West → 130");
+
+    engine.set_user_identity(Some("East".into()));
+    let east = engine.query(revenue_request()).await.unwrap();
+    assert!((scalar(&east, "Revenue") - 60.0).abs() < 1e-9, "USERNAME()=East → 60");
+}
+
+#[tokio::test]
+async fn dynamic_customdata_restricts_to_the_supplied_region() {
+    let role = SecurityRole::new("DynCustom").with_filters(vec![FilterPredicate::custom_data(
+        "Geography",
+        "region",
+        ComparisonOp::Equal,
+    )]);
+    let mut engine = dynamic_rls_engine(role);
+    engine.set_active_role(Some("DynCustom".into()));
+    engine.set_custom_data(Some("West".into()));
+    let r = engine.query(revenue_request()).await.unwrap();
+    assert!((scalar(&r, "Revenue") - 130.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn dynamic_username_without_identity_fails_closed() {
+    // No user identity set → a USERNAME() role must FAIL CLOSED, never run
+    // unrestricted (or render the placeholder literal).
+    let role = SecurityRole::new("DynRegion").with_filters(vec![FilterPredicate::username(
+        "Geography",
+        "region",
+        ComparisonOp::Equal,
+    )]);
+    let mut engine = dynamic_rls_engine(role);
+    engine.set_active_role(Some("DynRegion".into()));
+    // user_identity is None.
+    let err = engine.query(revenue_request()).await.unwrap_err();
+    let QueryError::Engine(EngineError::RowLevelSecurityNotEnforceable { .. }) = &err else {
+        panic!("expected RowLevelSecurityNotEnforceable, got {err:?}");
+    };
+    assert!(err.to_string().contains("USERNAME()"), "got: {err}");
+}
+
+#[tokio::test]
+async fn dynamic_customdata_without_data_fails_closed() {
+    let role = SecurityRole::new("DynCustom").with_filters(vec![FilterPredicate::custom_data(
+        "Geography",
+        "region",
+        ComparisonOp::Equal,
+    )]);
+    let mut engine = dynamic_rls_engine(role);
+    engine.set_active_role(Some("DynCustom".into()));
+    let err = engine.query(revenue_request()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            QueryError::Engine(EngineError::RowLevelSecurityNotEnforceable { .. })
+        ),
+        "got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_identity_isolates_the_cache() {
+    // Same role + request; switching identity must recompute (no cross-serve).
+    let role = SecurityRole::new("DynRegion").with_filters(vec![FilterPredicate::username(
+        "Geography",
+        "region",
+        ComparisonOp::Equal,
+    )]);
+    let mut engine = dynamic_rls_engine(role);
+    engine.set_active_role(Some("DynRegion".into()));
+
+    engine.set_user_identity(Some("West".into()));
+    let west = engine.query(revenue_request()).await.unwrap();
+    assert!((scalar(&west, "Revenue") - 130.0).abs() < 1e-9);
+
+    // Switching identity invalidates the cache; the second user sees THEIR rows,
+    // never the cached West result.
+    engine.set_user_identity(Some("East".into()));
+    let east = engine.query(revenue_request()).await.unwrap();
+    assert!((scalar(&east, "Revenue") - 60.0).abs() < 1e-9, "East must not be served West's cached 130");
+}
+
+#[tokio::test]
+async fn a_static_username_literal_is_not_substituted() {
+    // A STATIC predicate whose value is literally "USERNAME()" must NOT be
+    // treated as dynamic (the typed `dynamic` field, not a magic string, decides
+    // substitution). region = 'USERNAME()' matches no row → 0, even with an
+    // identity that would otherwise select a region.
+    let role = SecurityRole::new("LiteralUser").with_filter(
+        "Geography",
+        "region",
+        ComparisonOp::Equal,
+        "USERNAME()",
+    );
+    let mut engine = dynamic_rls_engine(role);
+    engine.set_active_role(Some("LiteralUser".into()));
+    engine.set_user_identity(Some("West".into()));
+    let r = engine.query(revenue_request()).await.unwrap();
+    let revenue = if r.is_empty() || r[0].num_rows() == 0 {
+        0.0
+    } else {
+        scalar(&r, "Revenue")
+    };
+    assert!(
+        revenue.abs() < 1e-9,
+        "a static 'USERNAME()' literal must not resolve to the identity; got {revenue}"
+    );
+}
+
+#[test]
+fn role_cache_key_folds_identity_custom_data_and_all_roles() {
+    // The query-cache key must encode the FULL security context, so a result
+    // restricted for one (roles, identity, custom_data) is never keyed the same
+    // as another. (Guards the class of bug where a path keyed on only the first
+    // role name or dropped the identity — auto-tier regression.)
+    let mut e = rls_engine();
+
+    e.set_active_role(Some("WestOnly".into()));
+    e.set_user_identity(Some("alice".into()));
+    let k_alice = e.role_cache_key();
+    e.set_user_identity(Some("bob".into()));
+    let k_bob = e.role_cache_key();
+    assert_ne!(k_alice, k_bob, "different user identities must produce different keys");
+
+    // All roles fold in (not just the first): two sets sharing a first role differ.
+    e.set_user_identity(None);
+    e.set_active_roles(vec!["WestOnly".into(), "Alpha".into()]);
+    let k_alpha = e.role_cache_key();
+    e.set_active_roles(vec!["WestOnly".into(), "Beta".into()]);
+    let k_beta = e.role_cache_key();
+    assert_ne!(k_alpha, k_beta, "role sets sharing a first role must differ");
+
+    // custom_data folds in too.
+    e.set_active_roles(Vec::new());
+    e.set_custom_data(Some("tenant1".into()));
+    let k_t1 = e.role_cache_key();
+    e.set_custom_data(Some("tenant2".into()));
+    let k_t2 = e.role_cache_key();
+    assert_ne!(k_t1, k_t2, "different custom data must produce different keys");
+
+    // No context at all → None.
+    e.set_custom_data(None);
+    assert!(e.role_cache_key().is_none());
+
+    // Length-prefixed encoding is collision-free: a role named with the field
+    // separators cannot alias a different (roles, identity) context.
+    e.set_active_roles(vec!["WestOnly".into()]);
+    e.set_user_identity(Some("x".into()));
+    let a = e.role_cache_key();
+    e.set_active_roles(vec!["WestOnly".into()]);
+    e.set_user_identity(Some("y".into()));
+    let b = e.role_cache_key();
+    assert_ne!(a, b);
+}

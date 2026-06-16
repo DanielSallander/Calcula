@@ -137,6 +137,94 @@ async fn metadata_marks_the_rank_column() {
 }
 
 #[tokio::test]
+async fn metadata_marks_a_kpi_base_measure() {
+    use crate::{Kpi, KpiTarget};
+    let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
+    let model = DataModel::builder()
+        .add_table(in_mem(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_table(in_mem(
+            Table::new(
+                "Product",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Product",
+            "Sales",
+            "prod_id",
+            "Product",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_measure(sum_measure("Cost", "Sales", "amount"))
+        .add_kpi(Kpi::new("Revenue Goal", "Revenue", KpiTarget::Constant(1000.0)))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Product", 0, SourceBinding::new("public", "product"));
+    engine
+        .cache
+        .store(
+            "Sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("prod_id", ArrowType::Int64, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2])),
+                    Arc::new(Float64Array::from(vec![100.0, 60.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Product",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("id", ArrowType::Int64, true),
+                    Field::new("name", ArrowType::Utf8, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2])),
+                    Arc::new(StringArray::from(vec!["A", "B"])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let (_, meta) = engine
+        .query_with_meta(QueryRequest_for(
+            &["Revenue", "Cost"],
+            &[("Product", "name")],
+        ))
+        .await
+        .unwrap();
+    let revenue = meta.iter().find(|c| c.name == "Revenue").unwrap();
+    assert_eq!(revenue.kpi_name.as_deref(), Some("Revenue Goal"));
+    let cost = meta.iter().find(|c| c.name == "Cost").unwrap();
+    assert_eq!(cost.kpi_name, None, "a non-KPI measure has no kpi_name");
+}
+
+#[tokio::test]
 async fn metadata_does_not_misclassify_dimension_colliding_with_a_measure_name() {
     // A dimension column `tier` and a measure `Tier` (case-insensitive match).
     // The dimension must stay a Dimension with its source attribution — not be

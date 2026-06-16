@@ -43,7 +43,9 @@ pub(crate) use functions::{
 };
 pub use globals::expand_global_variables;
 pub use measure_refs::{expand_measure_refs, has_measure_ref, infer_fact_table};
-pub use predicates::{ComparisonOp, FilterPredicate, InPredicate, RelationshipPath};
+pub use predicates::{
+    ComparisonOp, DynamicValue, FilterPredicate, InPredicate, RelationshipPath,
+};
 pub use render::{
     BareQualifier, ColumnQualifier, LowercaseTableQualifier, SqlDialect, SqlRenderer,
     TableAliasQualifier,

@@ -57,6 +57,11 @@ pub struct ResultColumn {
     pub description: Option<String>,
     /// Whether the model marks the underlying measure/column hidden.
     pub is_hidden: bool,
+    /// For a [`Measure`](ResultColumnKind::Measure): the name of the model KPI
+    /// whose **base** measure this column is, when one is defined — so the host
+    /// can render the KPI's status indicator. `None` when the measure is not a
+    /// KPI base.
+    pub kpi_name: Option<String>,
 }
 
 impl ResultColumn {
@@ -76,6 +81,7 @@ impl ResultColumn {
             display_name: None,
             description: None,
             is_hidden: false,
+            kpi_name: None,
         }
     }
 }
@@ -173,6 +179,75 @@ impl RankBy {
     /// Restart the ranking within each distinct combination of `columns`.
     pub fn within(mut self, columns: Vec<ColumnRef>) -> Self {
         self.partition_by = columns;
+        self
+    }
+}
+
+/// A request-level **TOP N** filter: keep only the top `limit` groups by a
+/// measure value, with DAX `TOPN` **tie-inclusive** semantics — if several
+/// groups tie at the `limit`-th measure value, **all** of them are kept, so the
+/// result may contain more than `limit` rows. This is distinct from
+/// [`QueryRequest::order_by`] + [`QueryRequest::limit`], which truncate to
+/// exactly `limit` rows (breaking ties arbitrarily).
+///
+/// Computed after aggregation, like [`RankBy`] and measure-value filters.
+/// Composition order: any measure-value filters apply **first** ("top 10 of the
+/// groups that pass the threshold"), then TOP N, then `order_by` + `limit` (so a
+/// host can order the tie-inclusive result and optionally cap it exactly).
+///
+/// Validation (fails closed): `measure` must be in [`QueryRequest::measures`];
+/// each `partition_by` column must be in [`QueryRequest::group_by`] (the top-N
+/// restarts per distinct combination); `output_column`, when set, must not
+/// collide with an existing result column. Not supported with
+/// [`TotalsMode::Rollup`] or a calculation group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopN {
+    /// The measure whose value ranks the groups (must be in
+    /// [`QueryRequest::measures`]).
+    pub measure: String,
+    /// How many top groups to keep (tie-inclusive at the boundary value).
+    pub limit: usize,
+    /// Columns to take the top N *within* (the top-N restarts per distinct
+    /// combination). Each must be in [`QueryRequest::group_by`]. Empty = top N
+    /// over all groups.
+    pub partition_by: Vec<ColumnRef>,
+    /// Take the *bottom* N (`ascending` = smallest values). Default `false` =
+    /// top N (largest values), the usual "top" sense.
+    pub ascending: bool,
+    /// When set, append an integer column of this name giving, per kept row, how
+    /// many groups tie at the boundary value in its partition (so a host can see
+    /// how far the tie-inclusive result exceeded `limit`).
+    pub output_column: Option<String>,
+}
+
+impl TopN {
+    /// Keep the top `limit` groups by `measure` (descending; ties at the
+    /// boundary all kept), over all groups.
+    pub fn new(measure: impl Into<String>, limit: usize) -> Self {
+        Self {
+            measure: measure.into(),
+            limit,
+            partition_by: Vec::new(),
+            ascending: false,
+            output_column: None,
+        }
+    }
+
+    /// Take the *bottom* `limit` (smallest values).
+    pub fn ascending(mut self) -> Self {
+        self.ascending = true;
+        self
+    }
+
+    /// Restart the top-N within each distinct combination of `columns`.
+    pub fn within(mut self, columns: Vec<ColumnRef>) -> Self {
+        self.partition_by = columns;
+        self
+    }
+
+    /// Append an integer tie-count column named `name` to each kept row.
+    pub fn with_tie_count(mut self, name: impl Into<String>) -> Self {
+        self.output_column = Some(name.into());
         self
     }
 }
@@ -639,6 +714,12 @@ pub struct QueryRequest {
     /// so it composes with `order_by` + `limit` for "top N by measure". `None`
     /// (default) adds no ranking. See [`RankBy`].
     pub rank_by: Option<RankBy>,
+    /// Keep only the top N groups by a measure, with DAX `TOPN` tie-inclusive
+    /// semantics (all groups tied at the Nth value are kept — distinct from
+    /// `order_by` + `limit`, which truncate exactly). Computed after aggregation
+    /// and after [`measure_filters`](Self::measure_filters), before `order_by` +
+    /// `limit`. `None` (default) applies no top-N. See [`TopN`].
+    pub top_n: Option<TopN>,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /

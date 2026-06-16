@@ -106,6 +106,23 @@ impl QueryExecutor {
         // Cancellation checkpoint: before any work.
         check_cancelled(token)?;
 
+        // Defense in depth (release-active): drillthrough returns RAW rows, so RLS
+        // is most sensitive here. A dynamic RLS predicate (USERNAME()/CUSTOMDATA())
+        // must be substituted to a concrete identity by the facade before reaching
+        // here; if one arrives unresolved, FAIL CLOSED rather than render its
+        // placeholder as a literal.
+        if let Some(p) = role_filters.iter().find(|p| p.dynamic.is_some()) {
+            return Err(QueryError::Engine(
+                engine_core::error::EngineError::RowLevelSecurityNotEnforceable {
+                    table: p.table.clone(),
+                    reason: "a dynamic row-level-security predicate (USERNAME()/CUSTOMDATA()) \
+                             reached drillthrough unresolved; it must be substituted to a concrete \
+                             identity before planning"
+                        .to_string(),
+                },
+            ));
+        }
+
         let detail_table = request.table.as_str();
         // The detail table must exist in the model (so we can match columns and
         // resolve relationships). A non-existent table is a hard error.

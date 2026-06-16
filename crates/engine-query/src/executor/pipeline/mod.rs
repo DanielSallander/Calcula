@@ -109,6 +109,24 @@ impl QueryExecutor {
         role_filters: &[FilterPredicate],
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
+        // Defense in depth (release-active, ALL plan arms): a dynamic RLS
+        // predicate (USERNAME()/CUSTOMDATA()) must be substituted to a concrete
+        // identity by the facade before it reaches the executor. If one arrives
+        // unresolved — on a pushed OR a local plan — FAIL CLOSED rather than render
+        // its placeholder value as a SQL literal (which would mis-restrict or
+        // leak). The facade's substitution makes this unreachable in normal
+        // operation; this backstops any future path that forgets it.
+        if let Some(p) = role_filters.iter().find(|p| p.dynamic.is_some()) {
+            return Err(crate::error::QueryError::Engine(
+                engine_core::error::EngineError::RowLevelSecurityNotEnforceable {
+                    table: p.table.clone(),
+                    reason: "a dynamic row-level-security predicate (USERNAME()/CUSTOMDATA()) \
+                             reached the executor unresolved; it must be substituted to a \
+                             concrete identity before planning"
+                        .to_string(),
+                },
+            ));
+        }
         match plan {
             QueryPlan::PushedAggregation {
                 source_table,

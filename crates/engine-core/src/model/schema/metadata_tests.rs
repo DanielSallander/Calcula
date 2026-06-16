@@ -39,10 +39,11 @@ fn model_format_version_is_current() {
     // Version 8 introduced the DATESINPERIOD trailing-window time-intelligence
     // function (DatesInPeriod expression variant).
     // Version 9 introduced semi-additive balances CLOSINGBALANCE/OPENINGBALANCE
-    // (SemiAdditiveBalance expression variant).
+    // (SemiAdditiveBalance expression variant). v10 added KPIs; v11 added the
+    // dynamic-RLS predicate field.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 9);
+    assert_eq!(MODEL_FORMAT_VERSION, 11);
 }
 
 #[test]
