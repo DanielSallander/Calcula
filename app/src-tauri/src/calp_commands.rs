@@ -2609,6 +2609,62 @@ pub fn calp_load_region_submissions(
     Ok(out)
 }
 
+/// Apply a region's GATHER governance to its submissions: approval gating,
+/// drop cleared cells, then visibility (own_only hides others; own_plus_aggregate
+/// keeps values but anonymizes other submitters). Pure + unit-tested — this is the
+/// privacy boundary, so it must never silently change.
+fn apply_gather_governance(
+    mut submissions: Vec<calp::writeback::WritebackSubmission>,
+    region: &calp::WritebackRegionDeclaration,
+    own_identity: Option<&calp::SubmitterIdentity>,
+) -> Vec<calp::writeback::WritebackSubmission> {
+    // Approval gating: rejected submissions never count; under
+    // on_approval only Approved submissions join the aggregate.
+    let require_approval = matches!(
+        region.submission_policy,
+        Some(calp::writeback::SubmissionPolicy::OnApproval)
+    );
+    submissions.retain(|s| match s.state {
+        calp::writeback::SubmissionState::Rejected
+        | calp::writeback::SubmissionState::Draft => false,
+        calp::writeback::SubmissionState::Submitted => !require_approval,
+        calp::writeback::SubmissionState::Approved => true,
+    });
+
+    // A cleared cell is "no submission", not a zero — counting it
+    // would skew AVERAGE/COUNT/SUBMITTERS aggregates.
+    submissions.retain(|s| !matches!(s.value, calp::writeback::SubmissionValue::Empty));
+
+    // Visibility enforcement. NOTE: the policy docs say "publisher
+    // sees all", but without authenticated identities (roadmap D8)
+    // every gatherer is a subscriber, so the policy applies to all.
+    match region.visibility {
+        Some(calp::writeback::VisibilityPolicy::OwnOnly) => {
+            submissions.retain(|s| {
+                own_identity
+                    .map(|own| s.submitter.id == own.id)
+                    .unwrap_or(false)
+            });
+        }
+        Some(calp::writeback::VisibilityPolicy::OwnPlusAggregate) => {
+            // Values flow (aggregates need them) but other
+            // submitters' identities are anonymized.
+            for s in submissions.iter_mut() {
+                let is_own = own_identity
+                    .map(|own| s.submitter.id == own.id)
+                    .unwrap_or(false);
+                if !is_own {
+                    s.submitter.display_name = "(anonymous)".to_string();
+                    s.submitter.id = String::new();
+                }
+            }
+        }
+        _ => {}
+    }
+
+    submissions
+}
+
 /// Build a GatherRegionData map from the current subscriptions for formula evaluation.
 /// This is the pre-fetch step: load all submission data from the registry once,
 /// so GATHER functions can look it up synchronously during evaluation.
@@ -2767,51 +2823,7 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
                 }
             }
 
-            // Approval gating: rejected submissions never count; under
-            // on_approval only Approved submissions join the aggregate.
-            let require_approval = matches!(
-                region.submission_policy,
-                Some(calp::writeback::SubmissionPolicy::OnApproval)
-            );
-            submissions.retain(|s| match s.state {
-                calp::writeback::SubmissionState::Rejected
-                | calp::writeback::SubmissionState::Draft => false,
-                calp::writeback::SubmissionState::Submitted => !require_approval,
-                calp::writeback::SubmissionState::Approved => true,
-            });
-
-            // A cleared cell is "no submission", not a zero — counting it
-            // would skew AVERAGE/COUNT/SUBMITTERS aggregates.
-            submissions.retain(|s| !matches!(s.value, calp::writeback::SubmissionValue::Empty));
-
-            // Visibility enforcement. NOTE: the policy docs say "publisher
-            // sees all", but without authenticated identities (roadmap D8)
-            // every gatherer is a subscriber, so the policy applies to all.
-            match region.visibility {
-                Some(calp::writeback::VisibilityPolicy::OwnOnly) => {
-                    submissions.retain(|s| {
-                        own_identity
-                            .as_ref()
-                            .map(|own| s.submitter.id == own.id)
-                            .unwrap_or(false)
-                    });
-                }
-                Some(calp::writeback::VisibilityPolicy::OwnPlusAggregate) => {
-                    // Values flow (aggregates need them) but other
-                    // submitters' identities are anonymized.
-                    for s in submissions.iter_mut() {
-                        let is_own = own_identity
-                            .as_ref()
-                            .map(|own| s.submitter.id == own.id)
-                            .unwrap_or(false);
-                        if !is_own {
-                            s.submitter.display_name = "(anonymous)".to_string();
-                            s.submitter.id = String::new();
-                        }
-                    }
-                }
-                _ => {}
-            }
+            let submissions = apply_gather_governance(submissions, region, own_identity.as_ref());
 
             let gather_subs: Vec<engine::GatherSubmission> = submissions.iter().map(|s| {
                 engine::GatherSubmission {
@@ -2840,6 +2852,233 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
     }
 
     result
+}
+
+#[cfg(test)]
+mod gather_governance_tests {
+    //! Unit tests for `apply_gather_governance` — the writeback privacy/approval
+    //! boundary extracted (behavior-preserving) out of `build_gather_data`. This
+    //! is the GATHER governance safety net (roadmap D4 / D10): it must never
+    //! silently change which submissions are visible or whether other
+    //! submitters' identities leak.
+    use super::apply_gather_governance;
+    use std::collections::HashMap;
+
+    use calp::writeback::{
+        RegionSelector, SubmissionPolicy, SubmissionState, SubmissionValue, VisibilityPolicy,
+        WritebackRegionDeclaration, WritebackSubmission,
+    };
+    use calp::SubmitterIdentity;
+
+    fn make_identity(id: &str, name: &str) -> SubmitterIdentity {
+        SubmitterIdentity {
+            display_name: name.to_string(),
+            id: id.to_string(),
+            extra: HashMap::new(),
+        }
+    }
+
+    /// Build a submission for the "r" region at cell (0,0) from one submitter
+    /// with a given state and value. Only the fields the governance step reads
+    /// (submitter, value, state) vary; the rest are stable filler.
+    fn make_submission(
+        submitter_id: &str,
+        name: &str,
+        state: SubmissionState,
+        value: SubmissionValue,
+    ) -> WritebackSubmission {
+        WritebackSubmission {
+            id: format!("sub-{submitter_id}"),
+            region_id: "r".to_string(),
+            cell_row: 0,
+            cell_col: 0,
+            cell_id: None,
+            submitter: make_identity(submitter_id, name),
+            value,
+            state,
+            created_at: "2026-06-15T00:00:00Z".to_string(),
+            updated_at: "2026-06-15T00:00:00Z".to_string(),
+            submitted_at: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    /// Build a region declaration carrying only the two governance-relevant
+    /// policies; the selector is a 1x1 placeholder (governance ignores it).
+    fn make_region(
+        visibility: Option<VisibilityPolicy>,
+        policy: Option<SubmissionPolicy>,
+    ) -> WritebackRegionDeclaration {
+        let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        WritebackRegionDeclaration {
+            id: "r".to_string(),
+            selector: RegionSelector {
+                sheet_id,
+                row_start: 0,
+                row_end: 0,
+                col_start: 0,
+                col_end: 0,
+            },
+            mode: None,
+            schema: None,
+            visibility,
+            submission_policy: policy,
+            version_binding: None,
+            lifecycle: None,
+            aggregation_hint: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn num(v: f64) -> SubmissionValue {
+        SubmissionValue::Number { value: v }
+    }
+
+    // 1. OnApproval: a Submitted submission is EXCLUDED, an Approved one INCLUDED.
+    #[test]
+    fn on_approval_excludes_submitted_includes_approved() {
+        let region = make_region(None, Some(SubmissionPolicy::OnApproval));
+        let subs = vec![
+            make_submission("alice", "Alice", SubmissionState::Submitted, num(10.0)),
+            make_submission("bob", "Bob", SubmissionState::Approved, num(20.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, None);
+        assert_eq!(out.len(), 1, "only the Approved submission survives on_approval");
+        assert_eq!(out[0].submitter.id, "bob");
+        assert!(matches!(out[0].value, SubmissionValue::Number { value } if value == 20.0));
+    }
+
+    // 2. Immediate / OnSubmit / None: a Submitted submission is INCLUDED.
+    #[test]
+    fn non_approval_policies_include_submitted() {
+        for policy in [
+            None,
+            Some(SubmissionPolicy::Immediate),
+            Some(SubmissionPolicy::OnSubmit),
+        ] {
+            let region = make_region(None, policy.clone());
+            let subs = vec![make_submission(
+                "alice",
+                "Alice",
+                SubmissionState::Submitted,
+                num(10.0),
+            )];
+            let out = apply_gather_governance(subs, &region, None);
+            assert_eq!(
+                out.len(),
+                1,
+                "Submitted must be included under policy {policy:?}"
+            );
+        }
+    }
+
+    // 3. Rejected and Draft: always EXCLUDED regardless of policy.
+    #[test]
+    fn rejected_and_draft_always_excluded() {
+        for policy in [
+            None,
+            Some(SubmissionPolicy::Immediate),
+            Some(SubmissionPolicy::OnSubmit),
+            Some(SubmissionPolicy::OnApproval),
+        ] {
+            let region = make_region(None, policy.clone());
+            let subs = vec![
+                make_submission("a", "A", SubmissionState::Rejected, num(1.0)),
+                make_submission("b", "B", SubmissionState::Draft, num(2.0)),
+            ];
+            let out = apply_gather_governance(subs, &region, None);
+            assert!(
+                out.is_empty(),
+                "Rejected + Draft must both be dropped under policy {policy:?}"
+            );
+        }
+    }
+
+    // 4. Empty value: EXCLUDED (a cleared cell is "no submission", not a zero).
+    #[test]
+    fn empty_value_excluded() {
+        let region = make_region(None, None);
+        let subs = vec![
+            make_submission("a", "A", SubmissionState::Submitted, SubmissionValue::Empty),
+            make_submission("b", "B", SubmissionState::Submitted, num(5.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, None);
+        assert_eq!(out.len(), 1, "the Empty submission is dropped");
+        assert_eq!(out[0].submitter.id, "b");
+    }
+
+    // 5. OwnOnly: with own_identity = Alice, only Alice's submissions remain.
+    #[test]
+    fn own_only_keeps_only_own() {
+        let region = make_region(Some(VisibilityPolicy::OwnOnly), None);
+        let alice = make_identity("id-alice", "Alice");
+        let subs = vec![
+            make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
+            make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, Some(&alice));
+        assert_eq!(out.len(), 1, "only Alice's own submission remains");
+        assert_eq!(out[0].submitter.id, "id-alice");
+        assert_eq!(out[0].submitter.display_name, "Alice");
+    }
+
+    // 6. OwnPlusAggregate: Bob's value REMAINS but his identity is anonymized;
+    //    Alice's own row is untouched (real id + name).
+    #[test]
+    fn own_plus_aggregate_anonymizes_others_keeps_values() {
+        let region = make_region(Some(VisibilityPolicy::OwnPlusAggregate), None);
+        let alice = make_identity("id-alice", "Alice");
+        let subs = vec![
+            make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
+            make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, Some(&alice));
+        assert_eq!(out.len(), 2, "both values flow into the aggregate");
+
+        let own = out.iter().find(|s| s.submitter.id == "id-alice").expect("own row present");
+        assert_eq!(own.submitter.display_name, "Alice", "own identity untouched");
+        assert!(matches!(own.value, SubmissionValue::Number { value } if value == 10.0));
+
+        let other = out
+            .iter()
+            .find(|s| matches!(s.value, SubmissionValue::Number { value } if value == 20.0))
+            .expect("Bob's value preserved");
+        assert_eq!(other.submitter.display_name, "(anonymous)", "Bob's name anonymized");
+        assert_eq!(other.submitter.id, "", "Bob's id cleared");
+    }
+
+    // 7. Transparent / None visibility: all submissions remain with real identities.
+    #[test]
+    fn transparent_and_none_keep_real_identities() {
+        for visibility in [None, Some(VisibilityPolicy::Transparent)] {
+            let region = make_region(visibility.clone(), None);
+            let alice = make_identity("id-alice", "Alice");
+            let subs = vec![
+                make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
+                make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
+            ];
+            let out = apply_gather_governance(subs, &region, Some(&alice));
+            assert_eq!(out.len(), 2, "all submissions remain under {visibility:?}");
+            let bob = out.iter().find(|s| s.submitter.id == "id-bob").expect("Bob present");
+            assert_eq!(bob.submitter.display_name, "Bob", "Bob's real name kept under {visibility:?}");
+        }
+    }
+
+    // 8. own_identity = None + OwnOnly: everything is dropped (no own to match) —
+    //    documents the fail-closed behavior.
+    #[test]
+    fn own_only_with_no_identity_drops_everything() {
+        let region = make_region(Some(VisibilityPolicy::OwnOnly), None);
+        let subs = vec![
+            make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
+            make_submission("id-bob", "Bob", SubmissionState::Submitted, num(20.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, None);
+        assert!(
+            out.is_empty(),
+            "without an own identity, own_only fails closed and reveals nothing"
+        );
+    }
 }
 
 /// Look up the CellId at a position without minting. Returns null if none exists.
