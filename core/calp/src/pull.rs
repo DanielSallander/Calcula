@@ -117,7 +117,7 @@ pub fn pull(
         let sheet_prefix = format!("sheets/{}", pub_sheet.sheet_id);
 
         // Read cell data
-        let cells: HashMap<(u32, u32), SavedCell> = {
+        let mut cells: HashMap<(u32, u32), SavedCell> = {
             match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/data.json"))? {
                 Some(bytes) => {
                     let sd: calcula_format::sheet_data::SheetData = serde_json::from_slice(&bytes)?;
@@ -126,6 +126,19 @@ pub fn pull(
                 None => HashMap::new(),
             }
         };
+
+        // Apply per-cell style indices. data.json serializes every cell's
+        // style_index as 0, so the cell->style association rides in a companion
+        // cell_styles.json (A1 -> style index). Without this a subscriber's
+        // sheet would lose ALL per-cell styling (colors/fonts/borders). Absent
+        // in pre-cell_styles packages -> cells keep their default style.
+        if let Some(bytes) =
+            registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/cell_styles.json"))?
+        {
+            let sheet_styles: calcula_format::sheet_styles::SheetStyles =
+                serde_json::from_slice(&bytes)?;
+            calcula_format::sheet_styles::apply_sheet_styles(&mut cells, &sheet_styles);
+        }
 
         // Read styles
         let styles: Vec<engine::style::CellStyle> = {
@@ -436,6 +449,53 @@ mod tests {
         let dashboard = &result.sheets[0].sheet;
         let cell = dashboard.cells.get(&(0, 0)).unwrap();
         assert!(matches!(cell.value, persistence::SavedCellValue::Number(n) if n == 42.0));
+    }
+
+    #[test]
+    fn pull_restores_per_cell_style_indices() {
+        // A cell carrying a non-default style index. data.json serializes
+        // style_index 0, so the cell->style association must survive
+        // publish->pull via the companion cell_styles.json.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut sheet = Sheet::new("Styled".to_string());
+        let mut sc = SavedCell::from_cell(&engine::cell::Cell::new_text("x".to_string()));
+        sc.style_index = 3;
+        sheet.cells.insert((1, 2), sc);
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![sheet];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "styled-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish::publish(&reg, &publish_req, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "styled-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        // The pulled cell carries the published style index, not the
+        // data.json-serialized 0.
+        let styled = &result.sheets[0].sheet;
+        assert_eq!(styled.cells.get(&(1, 2)).map(|c| c.style_index), Some(3));
     }
 
     #[test]
