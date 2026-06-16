@@ -1122,17 +1122,43 @@ fn fiscal_dim_date_batch() -> RecordBatch {
 }
 
 #[tokio::test]
-async fn filter_context_fiscal_calendar_fails_closed() {
+async fn filter_context_fiscal_ytd_uses_role_columns() {
+    // Fiscal calendar (FY rolls over in July). YTD reads the period start from the
+    // YEAR role column, not the Gregorian date key: as-of = Dec 2024 (fiscal year
+    // 2025), so fiscal YTD spans Jul..Dec 2024 = 3*(7+8+9+10+11+12) = 171 — NOT
+    // the calendar-year 234.
     let model = model_with_measure("YTD(SUM(fact_sales[amount]))", true);
     // request(&[]) → no date column on the axis → filter-context path.
+    let batches = run_model(&model, fiscal_dim_date_batch(), &[], request(&[]))
+        .await
+        .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(171.0));
+}
+
+#[tokio::test]
+async fn filter_context_fiscal_closingbalance_works() {
+    // CLOSINGBALANCE pins to the last context day (Dec 2024) — a boundary day, so
+    // it is calendar-agnostic and works on a fiscal calendar. east 12 + west 24 = 36.
+    let model = model_with_measure("CLOSINGBALANCE(SUM(fact_sales[amount]))", true);
+    let batches = run_model(&model, fiscal_dim_date_batch(), &[], request(&[]))
+        .await
+        .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(36.0));
+}
+
+#[tokio::test]
+async fn filter_context_fiscal_prioryear_fails_closed() {
+    // A period shift over a fiscal calendar needs fiscal-period arithmetic and is
+    // not supported — fail closed rather than apply Gregorian-month math.
+    let model = model_with_measure("PRIORYEAR(SUM(fact_sales[amount]))", true);
     let err = run_model(&model, fiscal_dim_date_batch(), &[], request(&[]))
         .await
         .unwrap_err();
     let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
-        panic!("expected a typed TimeIntelligence error for a fiscal calendar, got {err:?}");
+        panic!("expected a typed TimeIntelligence error for a fiscal period shift, got {err:?}");
     };
     assert!(
-        reason.contains("Gregorian") && reason.contains("calendar"),
+        reason.contains("fiscal") && reason.contains("period shift"),
         "got: {reason}"
     );
 }
@@ -2762,6 +2788,91 @@ async fn hierarchy_hide_members_with_ytd_drops_blank_branch() {
     assert_eq!(map[&("France".into(), "IDF".into())], 40.0);
     assert_eq!(map[&("USA".into(), "WA".into())], 10.0);
     assert!(!map.contains_key(&("USA".into(), "*".into())));
+}
+
+#[tokio::test]
+async fn hierarchy_compound_yoy_repeat_parent() {
+    // Compound YoY (YTD − PRIORYEAR) × ragged hierarchy: each leaf applies the
+    // RepeatParent transform (blank state → country), so the USA blank-state row
+    // groups under state="USA". 2024 = 40/10/30, 2023 = 20/5/15 → YoY = 20/5/15.
+    let model = geo_ti_model(
+        RaggedBehavior::RepeatParent,
+        "YTD(SUM(fact_sales[amount])) - PRIORYEAR(SUM(fact_sales[amount]))",
+    );
+    let dim = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("datekey", DataType::Date32, true),
+            Field::new("year", DataType::Int64, true),
+            Field::new("quarter", DataType::Int64, true),
+            Field::new("month", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![202301i64, 202401])),
+            Arc::new(Date32Array::from(vec![
+                first_of_month_days(2023, 1),
+                first_of_month_days(2024, 1),
+            ])),
+            Arc::new(Int64Array::from(vec![2023i64, 2024])),
+            Arc::new(Int64Array::from(vec![1i64, 1])),
+            Arc::new(Int64Array::from(vec![1i64, 1])),
+        ],
+    )
+    .unwrap();
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("country", DataType::Utf8, true),
+            Field::new("state", DataType::Utf8, true),
+            Field::new("city", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![
+                202401i64, 202401, 202401, 202301, 202301, 202301,
+            ])),
+            Arc::new(StringArray::from(vec![
+                "France", "USA", "USA", "France", "USA", "USA",
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("IDF"),
+                Some("WA"),
+                None,
+                Some("IDF"),
+                Some("WA"),
+                None,
+            ])),
+            Arc::new(StringArray::from(vec![
+                "Paris", "Seattle", "DC", "Paris", "Seattle", "DC",
+            ])),
+            Arc::new(Float64Array::from(vec![40.0, 10.0, 30.0, 20.0, 5.0, 15.0])),
+        ],
+    )
+    .unwrap();
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+    let req = QueryRequest {
+        measures: vec!["m".into()],
+        hierarchy_group_by: Some(HierarchyGroupBy::new("Geo", 2)),
+        filters: vec![FilterCondition::new("year", FilterOperator::Equal, "2024")],
+        ..Default::default()
+    };
+    let plan = PushdownPlanner::plan(&req, &model, &registry, &[]).unwrap();
+    let batches = QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[])
+        .await
+        .unwrap();
+    let map = geo_map(&batches);
+    assert_eq!(map[&("France".into(), "IDF".into())], 20.0);
+    assert_eq!(map[&("USA".into(), "WA".into())], 5.0);
+    assert_eq!(
+        map[&("USA".into(), "USA".into())],
+        15.0,
+        "blank state filled with country; YoY computed per level"
+    );
 }
 
 #[tokio::test]

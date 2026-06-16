@@ -10,6 +10,7 @@ pub mod csv_connector;
 pub mod error;
 pub mod executor;
 pub mod in_memory_connector;
+pub mod parquet_connector;
 pub mod planner;
 pub mod registry;
 pub mod request;

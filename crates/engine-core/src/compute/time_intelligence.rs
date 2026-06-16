@@ -91,10 +91,14 @@
 //! The AXIS route (a date column on the group-by axis), `Window`/`Offset`/`Index`
 //! frames, and ranking still reject ROLLUP / hierarchies.
 //!
-//! Deferred to a future version (full-DAX behavior): value-based period
-//! matching across gaps, `DATEADD` over date keys, fiscal calendars, and
-//! axis-mode windows/period-shifts × totals (the window execution path rejects
-//! those today).
+//! Fiscal (non-Gregorian) calendars are supported for filter-context `ToDate`
+//! (YTD/QTD/MTD) — the period start is read from the date table's role columns
+//! (see the executor's `probe_fiscal_period_start`) rather than the Gregorian
+//! parts of the key — and for `SemiAdditiveBalance` (boundary-day, so calendar-
+//! agnostic). Deferred to a future version (full-DAX behavior): value-based
+//! period matching across gaps, `DATEADD` over date keys, **fiscal** period shifts
+//! / `DATESINPERIOD`, and axis-mode windows/period-shifts × totals (the window
+//! execution path rejects those today).
 
 use chrono::{Datelike, NaiveDate};
 
@@ -976,6 +980,39 @@ fn build_filtered_range_keep(
         ),
     ];
     Ok((expr::keep(cleared, filters), description))
+}
+
+/// Build a filter-context `ToDate` (YTD/QTD/MTD) lowering with an **explicit**
+/// period start, rather than the Gregorian-algebraic `start_of_period`.
+///
+/// The host probes the period start from the date table's role columns — e.g.
+/// the first `DateKey` of the **fiscal** year/quarter/month containing the as-of
+/// date — so this works for a non-Gregorian calendar (where the role columns,
+/// not the Gregorian parts of the key, define the periods). `start_days` and
+/// `as_of_days` are `Date32` day counts; the produced range is the same half-open
+/// `[start, as_of + 1 day)` `Keep(Clear(inner),…)` the Gregorian path emits.
+pub fn lower_to_date_explicit_range(
+    inner: &Expression,
+    model: &DataModel,
+    date_table: &str,
+    date_key_column: &str,
+    start_days: i32,
+    as_of_days: i32,
+    description: String,
+) -> EngineResult<(Expression, String)> {
+    let start = date32_to_naive(start_days).ok_or_else(|| {
+        time_intelligence_error(
+            "time intelligence",
+            format!("the period-start probe returned an out-of-range value ({start_days} days)"),
+        )
+    })?;
+    let end = date32_to_naive(as_of_days).ok_or_else(|| {
+        time_intelligence_error(
+            "time intelligence",
+            format!("the as-of date probe returned an out-of-range value ({as_of_days} days)"),
+        )
+    })?;
+    build_filtered_range_keep(inner, model, date_table, date_key_column, start, end, description)
 }
 
 /// Convert a `Date32` value (days since 1970-01-01) to a [`NaiveDate`].

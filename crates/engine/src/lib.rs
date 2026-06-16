@@ -178,6 +178,7 @@ pub use engine_connectors::{ConnectorError, ConnectorResult};
 pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::csv_connector::CsvConnector;
 pub use engine_query::in_memory_connector::InMemoryConnector;
+pub use engine_query::parquet_connector::ParquetConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
@@ -931,6 +932,26 @@ impl Engine {
     ) -> ConnectorResult<usize> {
         let connector = CsvConnector::from_target(target, auth)?;
         let idx = self.registry.add_connector(AnyConnector::Csv(connector));
+        Ok(idx)
+    }
+
+    /// Register an Apache Parquet file source (a directory of `<table>.parquet`
+    /// files) and return its connector index.
+    ///
+    /// The `target.database` field is the **directory** holding the Parquet
+    /// files; `target.default_schema` (default `"public"`) is the cosmetic
+    /// source schema. Parquet is local, so the only applicable [`AuthMethod`] is
+    /// [`AuthMethod::Integrated`] (the process's own file-system access);
+    /// credential methods are rejected. Unlike CSV, Parquet embeds its schema,
+    /// so introspection is exact. Synchronous (the directory is validated; files
+    /// are read lazily per query). See [`ParquetConnector`].
+    pub fn add_parquet_source(
+        &mut self,
+        target: ConnectionTarget,
+        auth: AuthMethod,
+    ) -> ConnectorResult<usize> {
+        let connector = ParquetConnector::from_target(target, auth)?;
+        let idx = self.registry.add_connector(AnyConnector::Parquet(connector));
         Ok(idx)
     }
 

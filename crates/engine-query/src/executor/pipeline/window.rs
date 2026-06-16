@@ -15,8 +15,8 @@ use engine_core::compute::measure::{expression_measure, Measure};
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::compute::time_intelligence::{
-    lower_time_intelligence, lower_time_intelligence_filtered, time_intelligence_route,
-    FilterContextPlan, TimeIntelligenceRoute,
+    lower_time_intelligence, lower_time_intelligence_filtered, lower_to_date_explicit_range,
+    time_intelligence_route, FilterContextPlan, TimeIntelligenceRoute,
 };
 use engine_core::error::EngineError;
 use engine_core::model::{DataModel, DateRole, RaggedBehavior};
@@ -76,14 +76,11 @@ impl QueryExecutor {
             // the joined per-leaf columns. A bare window/TI node skips this and
             // takes the simple path below.
             if !is_simple_window_leaf(&stripped_expr) {
-                // A compound TI measure composes with ROLLUP when every leaf is a
-                // composable filter-context family (the gate enforces this): each
-                // leaf rolls up, the leaves are joined carrying `__grouping_id`, and
-                // the arithmetic is applied per level. Compound × hierarchy is
-                // deferred (each leaf would need the level transform) — fail closed.
-                if hier.is_some() {
-                    return Err(hierarchy_unsupported("compound time-intelligence measures"));
-                }
+                // A compound TI measure composes with ROLLUP and a ragged hierarchy
+                // when every leaf is a composable filter-context family (the gate
+                // enforces this): each leaf rolls up / applies the level transform,
+                // the leaves are joined carrying `__grouping_id`, HideMembers is
+                // applied, and the arithmetic is evaluated per level.
                 reject_compound_outer_context(name, &eval_ctx)?;
                 // Decompose the ORIGINAL (un-resolved) expression so each leaf
                 // keeps its column qualifiers (so the leaf measure's fact table
@@ -106,7 +103,7 @@ impl QueryExecutor {
                     model,
                     date_filters,
                     rollup,
-                    None,
+                    hier,
                     plan.as_deref_mut(),
                 ))
                 .await?;
@@ -595,16 +592,30 @@ impl QueryExecutor {
         // `reject_unapplyable_axis_window_context`.)
         Self::reject_unsupported_filter_context_ops(&plan_info.function, eval_ctx, model)?;
 
-        // FAIL CLOSED (Fix: fiscal calendars): the filter-context path computes
-        // the window boundary (e.g. start-of-year for YTD) from the Gregorian
-        // calendar of the DateKey, whereas the axis path resets on the model's
-        // Year/Quarter/Month *role columns*. For a standard calendar these agree;
-        // for a NON-Gregorian calendar (a host that puts fiscal period numbers in
-        // the role columns), they would disagree — the same YTD measure would
-        // return a fiscal window on the axis and a calendar window in a slicer.
-        // Refuse rather than return a silently-different number. (A fiscal-aware
-        // filter-context window is a planned enhancement.)
-        Self::reject_non_gregorian_calendar(ctx, plan_info, model).await?;
+        // Classify the calendar. The Gregorian path derives window boundaries
+        // (e.g. start-of-year for YTD) algebraically from the DateKey; a fiscal
+        // (non-Gregorian) calendar reads them from the Year/Quarter/Month *role
+        // columns* instead (see `probe_fiscal_period_start`). On a fiscal calendar
+        // only ToDate (YTD/QTD/MTD) and SemiAdditiveBalance (a boundary-day
+        // balance, calendar-agnostic) are supported; period shifts and
+        // DATESINPERIOD need fiscal-period arithmetic and fail closed.
+        let is_gregorian = Self::calendar_is_gregorian(ctx, plan_info, model).await?;
+        if !is_gregorian
+            && !matches!(
+                stripped_expr,
+                Expression::ToDate { .. } | Expression::SemiAdditiveBalance { .. }
+            )
+        {
+            return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason: "on a non-Gregorian (fiscal) date table, filter-context time intelligence \
+                         supports only YTD/QTD/MTD and CLOSINGBALANCE/OPENINGBALANCE; period \
+                         shifts (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD) and DATESINPERIOD over a \
+                         fiscal calendar are not yet supported — put a date column on the group-by \
+                         axis (the axis path honours the role columns)"
+                    .to_string(),
+            }));
+        }
 
         // The as-of date = MAX(date key) under the current date context (the
         // request's date-table filters plus the measure's KEEP filters on the
@@ -630,7 +641,7 @@ impl QueryExecutor {
         // analogous guard (`check_period_shift_axis_contiguous`); restore it here.
         // ToDate/DATESINPERIOD build their range purely from the as-of date (a hole
         // simply contributes nothing) and single-day balances are a single day, so
-        // only `PeriodShift` is checked.
+        // only `PeriodShift` is checked. (Fiscal PeriodShift was already rejected.)
         if matches!(stripped_expr, Expression::PeriodShift { .. }) {
             Self::check_filter_context_window_contiguous(
                 ctx,
@@ -642,8 +653,39 @@ impl QueryExecutor {
         }
 
         // Lower to Keep(Clear(inner, date cols), [DateKey >= start, < end]).
-        let (lowered_expr, description) =
-            lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?;
+        // Gregorian: algebraic boundaries. Fiscal: a ToDate's period start is
+        // probed from the role columns; a SemiAdditiveBalance is boundary-day only
+        // (the standard lowering uses as-of/min days, not period math, so it is
+        // calendar-agnostic).
+        let (lowered_expr, description) = if is_gregorian {
+            lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?
+        } else if let Expression::ToDate {
+            expr: inner,
+            granularity,
+        } = stripped_expr
+        {
+            let Some(start_days) =
+                Self::probe_fiscal_period_start(ctx, plan_info, model, *granularity, &where_sql)
+                    .await?
+            else {
+                return Ok(Vec::new());
+            };
+            let desc = format!(
+                "{} (fiscal filter context; period start read from the role columns) on {}.{}",
+                plan_info.function, plan_info.date_table, plan_info.date_key_column
+            );
+            lower_to_date_explicit_range(
+                inner,
+                model,
+                &plan_info.date_table,
+                &plan_info.date_key_column,
+                start_days,
+                as_of_days,
+                desc,
+            )?
+        } else {
+            lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?
+        };
 
         // Evaluate the context-wrapped aggregate grouped by the non-date
         // dimensions (the date columns are not on the axis here). The KEEP
@@ -791,26 +833,24 @@ impl QueryExecutor {
         Ok(())
     }
 
-    /// Fail closed when the marked date table is not a standard Gregorian
-    /// calendar, because the filter-context window math is calendar-based.
+    /// Whether the marked date table is a standard **Gregorian** calendar — its
+    /// `Year`/`Quarter`/`Month` role columns equal the calendar parts extracted
+    /// from the `DateKey`.
     ///
-    /// The filter-context path derives the window bounds (start-of-year for YTD,
-    /// the prior-year shift, etc.) from the Gregorian calendar of the `DateKey`
-    /// via `start_of_period`. The axis path instead resets/partitions on the
-    /// model's `Year`/`Quarter`/`Month` *role columns*. These agree only when
-    /// those columns hold the Gregorian calendar parts of the DateKey. If a host
-    /// models a fiscal (non-January) year by populating the role columns with
-    /// fiscal period numbers, the two paths would return *different* windows for
-    /// the same measure (fiscal on the axis, calendar in a slicer) — a silent
-    /// inconsistency. This check verifies each present role column equals the
-    /// calendar part extracted from the DateKey, and refuses otherwise.
-    async fn reject_non_gregorian_calendar(
+    /// The Gregorian filter-context path derives window bounds (start-of-year for
+    /// YTD, the period shift, …) algebraically from the `DateKey` via
+    /// `start_of_period`. For a **fiscal** calendar the role columns hold fiscal
+    /// period numbers, so the period boundaries must instead be read from those
+    /// columns (see `probe_fiscal_period_start`). Returns `false` when any present
+    /// role column diverges from the Gregorian part of the key; `true` when they
+    /// all agree (or there are no role columns to compare).
+    async fn calendar_is_gregorian(
         ctx: &SessionContext,
         plan_info: &FilterContextPlan,
         model: &DataModel,
-    ) -> QueryResult<()> {
+    ) -> QueryResult<bool> {
         let Ok(date_table) = model.table(&plan_info.date_table) else {
-            return Ok(());
+            return Ok(true);
         };
         let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
 
@@ -830,7 +870,7 @@ impl QueryExecutor {
             ));
         }
         if divergence.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
 
         let table = quote_ident_double(&plan_info.date_table.to_lowercase());
@@ -838,25 +878,16 @@ impl QueryExecutor {
             "SELECT COUNT(*) FROM {table} WHERE {}",
             divergence.join(" OR ")
         );
-
-        let fiscal_error = |detail: String| -> QueryError {
+        let df = ctx.sql(&sql).await.map_err(|e| -> QueryError {
             EngineError::TimeIntelligence {
                 function: plan_info.function.clone(),
                 reason: format!(
-                    "the date table '{}' is not a standard Gregorian calendar ({detail}), and \
-                     filter-context time intelligence (date not on the query axis) only supports \
-                     a Gregorian calendar; put a date column on the group-by axis (the axis path \
-                     honours the role columns), or use a calendar date table",
+                    "the date table '{}' Year/Quarter/Month role columns could not be compared to \
+                     the date key to classify the calendar: {e}",
                     plan_info.date_table
                 ),
             }
             .into()
-        };
-
-        let df = ctx.sql(&sql).await.map_err(|e| {
-            fiscal_error(format!(
-                "its Year/Quarter/Month role columns could not be compared to the date key: {e}"
-            ))
         })?;
         let batches = df.collect().await?;
         let diverging = batches
@@ -864,14 +895,82 @@ impl QueryExecutor {
             .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
             .map(|a| if a.is_empty() { 0 } else { a.value(0) })
             .unwrap_or(0);
-        if diverging > 0 {
-            return Err(fiscal_error(
-                "its Year/Quarter/Month role columns do not match the calendar parts of the \
-                 date key"
-                    .to_string(),
-            ));
+        Ok(diverging == 0)
+    }
+
+    /// Probe the first `DateKey` of the **fiscal** period (year / quarter / month)
+    /// containing the as-of date, read from the date table's role columns.
+    ///
+    /// For a non-Gregorian calendar the role columns define the periods, so the
+    /// fiscal-`ToDate` start is `MIN(DateKey)` over the rows whose period role
+    /// column(s) match the as-of date's. The as-of date is `MAX(DateKey)` under
+    /// the current date context (`where_sql`); the start is taken over the **full**
+    /// (un-pre-filtered) calendar so it can reach before the context. Returns
+    /// `None` when no matching rows exist (blank result).
+    async fn probe_fiscal_period_start(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        model: &DataModel,
+        granularity: DateGranularity,
+        where_sql: &str,
+    ) -> QueryResult<Option<i32>> {
+        let date_table = model.table(&plan_info.date_table).map_err(QueryError::Engine)?;
+        let role_col = |role: DateRole| -> Option<String> {
+            date_table
+                .columns()
+                .iter()
+                .find(|c| c.date_role() == Some(role))
+                .map(|c| c.name().to_lowercase())
+        };
+        // The role column(s) that define one period at this granularity.
+        let period_cols: Option<Vec<String>> = match granularity {
+            DateGranularity::Year => vec![role_col(DateRole::Year)],
+            DateGranularity::Quarter => vec![role_col(DateRole::Year), role_col(DateRole::Quarter)],
+            DateGranularity::Month => vec![role_col(DateRole::Year), role_col(DateRole::Month)],
         }
-        Ok(())
+        .into_iter()
+        .collect();
+        let period_cols = period_cols.ok_or_else(|| -> QueryError {
+            EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason: format!(
+                    "fiscal {granularity:?}-to-date needs the date table '{}' to carry the role \
+                     column(s) that define the period (Year, and Quarter/Month); assign them with \
+                     Column::with_date_role",
+                    plan_info.date_table
+                ),
+            }
+            .into()
+        })?;
+
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = quote_ident_double(&plan_info.date_table.to_lowercase());
+        let ctx_where = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {where_sql}")
+        };
+        // The as-of date = MAX(DateKey) under the context (a scalar subquery, so
+        // no date literal is rendered).
+        let as_of_sub = format!("(SELECT MAX({dk}) FROM {table}{ctx_where})");
+        // MIN(DateKey) over the FULL calendar whose period role column(s) equal
+        // the as-of date's — i.e. the first day of its fiscal period.
+        let conds: Vec<String> = period_cols
+            .iter()
+            .map(|c| {
+                let cq = quote_ident_double(c);
+                format!("{cq} = (SELECT {cq} FROM {table} WHERE {dk} = {as_of_sub})")
+            })
+            .collect();
+        let sql = format!(
+            "SELECT MIN({dk}) AS __start FROM {table} WHERE {}",
+            conds.join(" AND ")
+        );
+        let batches = ctx.sql(&sql).await?.collect().await?;
+        match batches.first() {
+            Some(b) if b.num_rows() > 0 => read_date_as_days(b, "__start"),
+            _ => Ok(None),
+        }
     }
 
     /// Fail closed when the date context of a filter-context PERIOD SHIFT is not
