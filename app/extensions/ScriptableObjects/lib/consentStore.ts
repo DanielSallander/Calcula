@@ -14,6 +14,10 @@ const CONSENT_FILE = ".calcula/script-consent.json";
 export interface ConsentedScript {
   id: string;
   sourceHash: string;
+  /** The source the user actually approved, retained so a later re-consent can
+   *  DIFF old→new (review the change, not a blind re-approval). Optional for
+   *  records written before this was added. */
+  source?: string;
 }
 
 /** A consented capability for a package (Phase 4.2a). Origins only apply to
@@ -101,7 +105,11 @@ export async function recordConsent(
 ): Promise<void> {
   const hashed: ConsentedScript[] = [];
   for (const script of scripts) {
-    hashed.push({ id: script.id, sourceHash: await sha256Hex(script.source) });
+    hashed.push({
+      id: script.id,
+      sourceHash: await sha256Hex(script.source),
+      source: script.source,
+    });
   }
 
   const consents = await loadConsents();
@@ -149,4 +157,37 @@ export async function isConsentCurrent(
   }
 
   return true;
+}
+
+/** A script whose source changed since it was last consented (T3). */
+export interface ChangedScript {
+  id: string;
+  oldSource: string;
+  newSource: string;
+}
+
+/**
+ * For a re-consent prompt: the scripts whose source CHANGED since the user last
+ * approved this package — each with the previously-approved source and the new
+ * one — so the consent UI can show a diff instead of a blind re-approval. Only
+ * scripts that (a) have a prior consent record, (b) whose source actually
+ * differs, and (c) whose old source was retained are returned.
+ */
+export async function getChangedScripts(
+  consents: ConsentRecord[],
+  packageName: string,
+  scripts: Array<{ id: string; source: string }>,
+): Promise<ChangedScript[]> {
+  const record = consents.find((c) => c.packageName === packageName);
+  if (!record) return [];
+  const changed: ChangedScript[] = [];
+  for (const script of scripts) {
+    const prior = record.scripts.find((s) => s.id === script.id);
+    if (!prior || prior.source === undefined) continue;
+    const hash = await sha256Hex(script.source);
+    if (hash !== prior.sourceHash) {
+      changed.push({ id: script.id, oldSource: prior.source, newSource: script.source });
+    }
+  }
+  return changed;
 }

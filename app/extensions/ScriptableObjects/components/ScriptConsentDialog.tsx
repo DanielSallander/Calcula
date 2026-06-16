@@ -3,15 +3,79 @@
 // CONTEXT: When a workbook contains scripts from a .calp package, the user
 //          is asked to review and approve them before they can run.
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { emitAppEvent } from "@api/events";
 import type { CapabilityId } from "@api";
+import { lineDiff, changedLineCount, type DiffRowType } from "../lib/lineDiff";
 
 /** One entry in the consent prompt's requested-capabilities list. */
 interface RequestedCapability {
   capability: CapabilityId;
   description: string;
   origins: string[];
+}
+
+/** A script whose source changed since the last consent (T3 re-consent diff). */
+interface ChangedScriptData {
+  id: string;
+  name: string;
+  oldSource: string;
+  newSource: string;
+}
+
+const diffRowBg: Record<DiffRowType, string> = {
+  same: "transparent",
+  add: "#e6ffed",
+  del: "#ffeef0",
+};
+
+/** Collapsible old->new line diff for one changed script. */
+function ScriptChangeDiff({ name, oldSource, newSource }: ChangedScriptData): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const rows = useMemo(() => lineDiff(oldSource, newSource), [oldSource, newSource]);
+  const changed = changedLineCount(rows);
+  return (
+    <div style={{ marginBottom: 6, border: "1px solid #f0c36d", borderRadius: 4 }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          background: "#fffdf5",
+          border: "none",
+          padding: "4px 6px",
+          cursor: "pointer",
+          fontSize: 11,
+          fontWeight: 600,
+          color: "#7a4a00",
+        }}
+      >
+        {open ? "[hide]" : "[show]"} {name} &mdash; {changed} line{changed === 1 ? "" : "s"} changed
+      </button>
+      {open && (
+        <pre
+          style={{
+            margin: 0,
+            maxHeight: 200,
+            overflow: "auto",
+            fontFamily: "Consolas, monospace",
+            fontSize: 10.5,
+            lineHeight: 1.4,
+            background: "#fff",
+          }}
+        >
+          {rows.map((r, i) => (
+            <div key={i} style={{ background: diffRowBg[r.type], padding: "0 4px", whiteSpace: "pre" }}>
+              <span style={{ opacity: 0.5, userSelect: "none" }}>
+                {r.type === "add" ? "+" : r.type === "del" ? "-" : " "}
+              </span>{" "}
+              {r.text || " "}
+            </div>
+          ))}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 // ============================================================================
@@ -183,6 +247,7 @@ export default function ScriptConsentDialog({
   const scriptIds = (data?.scriptIds as string[]) ?? [];
   const requestedCapabilities =
     (data?.requestedCapabilities as RequestedCapability[]) ?? [];
+  const changedScripts = (data?.changedScripts as ChangedScriptData[]) ?? [];
   const [inspecting, setInspecting] = useState(false);
 
   // The dialog instance is reused when the consent queue advances to the
@@ -235,6 +300,18 @@ export default function ScriptConsentDialog({
               <div key={i} style={scriptItemStyle}>{name}</div>
             ))}
           </div>
+
+          {changedScripts.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <p style={{ color: "#9a5b00", fontWeight: 600, margin: "0 0 4px" }}>
+                {changedScripts.length} script{changedScripts.length === 1 ? "" : "s"} changed
+                since you last approved this package &mdash; review what changed before allowing:
+              </p>
+              {changedScripts.map((cs) => (
+                <ScriptChangeDiff key={cs.id} {...cs} />
+              ))}
+            </div>
+          )}
 
           {requestedCapabilities.length > 0 ? (
             <>

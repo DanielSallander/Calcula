@@ -129,7 +129,8 @@ function handleForUdf(def: CustomFunctionDef): ScriptHandle {
 }
 
 /** Run one UDF call through the broker, returning the result as a UdfValue.
- *  Any denial/timeout/throw maps to the appropriate cell error (#VALUE!/#NAME?). */
+ *  Refused code maps to #BLOCKED! (the user must see the code was refused, not a
+ *  stale number); other denial/timeout/throw maps to #VALUE!/#NAME?. */
 async function resolveUdfCall(call: UdfCall): Promise<UdfValue> {
   const def = getCustomFunction(call.name);
   if (!def) return { kind: "error", value: "#NAME?" };

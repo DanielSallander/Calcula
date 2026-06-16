@@ -2447,6 +2447,88 @@ pub fn calp_submit_region(
     submit_region_internal(&state, &region_id)
 }
 
+/// One value that would leave the machine on submit.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundValue {
+    pub cell_row: u32,
+    pub cell_col: u32,
+    pub value_display: String,
+    pub value_kind: String,
+}
+
+/// A read-only preview of EXACTLY what `calp_submit_region` would send: the
+/// destination package + registry, the submitter identity it would be sent as,
+/// and each draft value — so the user reviews what leaves the machine, to whom,
+/// and as whom, BEFORE it leaves (transparency blind spot: outbound-data preview).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundSubmissionPreview {
+    pub region_id: String,
+    pub package_name: String,
+    pub resolved_version: String,
+    pub registry_path: String,
+    pub submitter_id: String,
+    pub submitter_name: String,
+    pub values: Vec<OutboundValue>,
+}
+
+/// Mirror `submit_region_internal`'s resolution + draft snapshot WITHOUT writing,
+/// so the UI can show an outbound-data preview + confirm step before submitting.
+#[tauri::command]
+pub fn calp_preview_region_submission(
+    state: State<AppState>,
+    region_id: String,
+    window: tauri::Window,
+) -> Result<OutboundSubmissionPreview, String> {
+    use calp::writeback::{SubmissionState, SubmissionValue};
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // Same owning-subscription resolution the real submit uses (not subscriptions[0]).
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(&state, &region_id)?;
+    // The identity the submission would be sent as.
+    let identity = get_subscriber_identity(&state)?;
+
+    // Exactly the drafts submit_region_internal would send: Draft state, this region.
+    let values: Vec<OutboundValue> = {
+        let wb_layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        wb_layer
+            .drafts
+            .iter()
+            .filter(|d| {
+                d.region_id == region_id && matches!(d.state, SubmissionState::Draft)
+            })
+            .map(|d| {
+                let (value_display, value_kind) = match &d.value {
+                    SubmissionValue::Number { value } => (value.to_string(), "number"),
+                    SubmissionValue::Text { value } => (value.clone(), "text"),
+                    SubmissionValue::Boolean { value } => {
+                        ((if *value { "TRUE" } else { "FALSE" }).to_string(), "boolean")
+                    }
+                    SubmissionValue::Empty => (String::new(), "empty"),
+                };
+                OutboundValue {
+                    cell_row: d.cell_row,
+                    cell_col: d.cell_col,
+                    value_display,
+                    value_kind: value_kind.to_string(),
+                }
+            })
+            .collect()
+    };
+
+    Ok(OutboundSubmissionPreview {
+        region_id,
+        package_name,
+        resolved_version,
+        registry_path,
+        submitter_id: identity.id,
+        submitter_name: identity.display_name,
+        values,
+    })
+}
+
 /// Approve or reject a submitted writeback value (publisher action).
 /// Rewrites the submission's registry file with the new state; `on_approval`
 /// regions only aggregate Approved submissions in GATHER.

@@ -31,6 +31,9 @@ pub enum CellError {
     Parse,      // Formula parsing error
     Circular,   // Circular dependency detected
     Conflict,   // Conflicting UI effects (e.g., two formulas setting same row height)
+    Blocked,    // Code the user refused to run (denied/declined capability) — a
+                // refused value, not a computation error. Transparency: the user
+                // must see #BLOCKED! rather than a stale number or a generic error.
 }
 
 /// Represents the calculated result or raw data within a cell.
@@ -276,6 +279,7 @@ impl Cell {
             CellValue::Error(e) => match e {
                 CellError::NA => "#N/A".to_string(),
                 CellError::Conflict => "#CONFLICT".to_string(),
+                CellError::Blocked => "#BLOCKED!".to_string(),
                 other => format!("#{:?}", other).to_uppercase(),
             },
             CellValue::List(items) => format!("[List({})]", items.len()),

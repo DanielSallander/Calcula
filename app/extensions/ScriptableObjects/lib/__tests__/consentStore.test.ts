@@ -16,6 +16,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isConsentCurrent,
+  getChangedScripts,
   sha256Hex,
 } from "../consentStore";
 import type { ConsentRecord } from "../consentStore";
@@ -177,5 +178,64 @@ describe("consentStore.isConsentCurrent — pragma-tamper / cap-expansion guard"
     const current = await isConsentCurrent([record], PKG, scripts);
 
     expect(current).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getChangedScripts — the re-consent diff source (T3)
+// ---------------------------------------------------------------------------
+
+/** Like makeRecord, but RETAINS each script's source (so a diff is possible). */
+async function recordWithSource(
+  packageName: string,
+  scripts: Array<{ id: string; source: string }>,
+  grantedCaps: ConsentRecord["grantedCapabilities"],
+): Promise<ConsentRecord> {
+  const hashed = [];
+  for (const s of scripts) {
+    hashed.push({ id: s.id, sourceHash: await sha256Hex(s.source), source: s.source });
+  }
+  return {
+    packageName,
+    scripts: hashed,
+    grantedCapabilities: grantedCaps,
+    grantedAt: new Date("2026-06-14T00:00:00.000Z").toISOString(),
+  };
+}
+
+describe("consentStore.getChangedScripts", () => {
+  it("returns the changed script with old + new source", async () => {
+    const rec = await recordWithSource(PKG, [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC }], []);
+    const changed = await getChangedScripts([rec], PKG, [
+      { id: SCRIPT_A_ID, source: SCRIPT_A_SRC_TAMPERED },
+    ]);
+    expect(changed).toEqual([
+      { id: SCRIPT_A_ID, oldSource: SCRIPT_A_SRC, newSource: SCRIPT_A_SRC_TAMPERED },
+    ]);
+  });
+
+  it("returns [] when the source is unchanged", async () => {
+    const rec = await recordWithSource(PKG, [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC }], []);
+    expect(
+      await getChangedScripts([rec], PKG, [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC }]),
+    ).toEqual([]);
+  });
+
+  it("skips scripts whose old source was NOT retained (pre-T3 records can't diff)", async () => {
+    // makeRecord stores {id, sourceHash} with NO source.
+    const rec = await makeRecord(PKG, [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC }], []);
+    expect(
+      await getChangedScripts([rec], PKG, [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC_TAMPERED }]),
+    ).toEqual([]);
+  });
+
+  it("returns [] for an unknown package or a brand-new script id", async () => {
+    const rec = await recordWithSource(PKG, [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC }], []);
+    expect(
+      await getChangedScripts([rec], "other-pkg", [{ id: SCRIPT_A_ID, source: SCRIPT_A_SRC_TAMPERED }]),
+    ).toEqual([]);
+    expect(
+      await getChangedScripts([rec], PKG, [{ id: "brand-new", source: "x" }]),
+    ).toEqual([]);
   });
 });

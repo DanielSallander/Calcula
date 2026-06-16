@@ -21,7 +21,7 @@ import {
 } from "@api";
 import type { CapabilityRequestPayload, CapabilityDecision, CapabilityId } from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
-import { loadConsents, recordConsent, isConsentCurrent } from "./lib/consentStore";
+import { loadConsents, recordConsent, isConsentCurrent, getChangedScripts } from "./lib/consentStore";
 import type { CapabilityGrant } from "./lib/consentStore";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
@@ -239,14 +239,24 @@ async function loadAndMountScripts(): Promise<void> {
         }
       } else {
         // Emit consent request event — the UI will show a prompt. Include the
-        // union of capabilities the package's scripts declare.
+        // union of capabilities the package's scripts declare, plus any scripts
+        // whose source CHANGED since last consent (T3) so the prompt can diff
+        // old→new instead of asking for a blind re-approval.
         const { requested } = computePackageCapabilities(pkgScripts);
+        const changed = await getChangedScripts(persistedConsents, pkg, pkgScripts);
+        const changedScripts = changed.map((c) => ({
+          id: c.id,
+          name: pkgScripts.find((s) => s.id === c.id)?.name ?? c.id,
+          oldSource: c.oldSource,
+          newSource: c.newSource,
+        }));
         emitAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, {
           packageName: pkg,
           scriptCount: pkgScripts.length,
           scriptNames: pkgScripts.map((s) => s.name),
           scriptIds: pkgScripts.map((s) => s.id),
           requestedCapabilities: requested,
+          changedScripts,
         });
       }
     }

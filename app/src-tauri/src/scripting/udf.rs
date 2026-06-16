@@ -55,6 +55,7 @@ fn cell_error_to_str(e: &CellError) -> &'static str {
         CellError::Parse => "#VALUE!", // no distinct Excel literal; surface as #VALUE!
         CellError::Circular => "#CIRCULAR!",
         CellError::Conflict => "#CONFLICT",
+        CellError::Blocked => "#BLOCKED!",
     }
 }
 
@@ -69,6 +70,7 @@ fn parse_cell_error(s: &str) -> CellError {
         "#N/A" => CellError::NA,
         "#CIRCULAR!" => CellError::Circular,
         "#CONFLICT" => CellError::Conflict,
+        "#BLOCKED!" => CellError::Blocked,
         _ => CellError::Value,
     }
 }
@@ -423,6 +425,18 @@ pub fn collect_udf_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_cell_error_round_trips() {
+        // Refused code surfaces as #BLOCKED! (distinct from #VALUE!/#NAME?) and
+        // round-trips through the UDF wire format without collapsing to #VALUE!.
+        assert_eq!(cell_error_to_str(&CellError::Blocked), "#BLOCKED!");
+        assert_eq!(parse_cell_error("#BLOCKED!"), CellError::Blocked);
+        assert_eq!(parse_cell_error("#blocked!"), CellError::Blocked); // case-insensitive
+        // A blocked UDF error value maps to the Blocked cell error, not Value.
+        let u = UdfValue::Error { value: "#BLOCKED!".to_string() };
+        assert_eq!(udf_to_eval(&u), EvalResult::Error(CellError::Blocked));
+    }
 
     #[test]
     fn roundtrip_number() {

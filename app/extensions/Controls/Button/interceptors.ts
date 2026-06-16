@@ -173,10 +173,18 @@ async function executeButtonAction(row: number, col: number): Promise<void> {
       // Refresh grid if cells were modified and screenUpdating is on
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     } else if (result.type === "error") {
+      // Degraded-mode transparency: a button whose script is blocked / refused /
+      // errored must SHOW it, not silently do nothing (a click that quietly
+      // produces nothing is itself a transparency failure).
       console.error(`[Controls] Button OnSelect error: ${result.message}`);
+      const { showToast } = await import("../../../src/api/notifications");
+      showToast(`Button script couldn't run: ${result.message}`, { variant: "error" });
     }
   } catch (err) {
     console.error("[Controls] Failed to execute button OnSelect:", err);
+    const { showToast } = await import("../../../src/api/notifications");
+    const msg = err instanceof Error ? err.message : String(err);
+    showToast(`Button script couldn't run: ${msg}`, { variant: "error" });
   }
 }
 

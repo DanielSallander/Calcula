@@ -71,6 +71,7 @@ pub fn get_error_indicators(
                         let error_display = match err {
                             engine::CellError::NA => "#N/A".to_string(),
                             engine::CellError::Conflict => "#CONFLICT".to_string(),
+                            engine::CellError::Blocked => "#BLOCKED!".to_string(),
                             other => format!("#{:?}", other).to_uppercase(),
                         };
                         indicators.push(CellErrorIndicator {

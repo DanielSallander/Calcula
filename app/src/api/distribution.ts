@@ -515,6 +515,34 @@ export function submitRegion(regionId: string): Promise<number> {
   return invokeBackend("calp_submit_region", { regionId });
 }
 
+/** One value that would leave the machine on submit. */
+export interface OutboundValue {
+  cellRow: number;
+  cellCol: number;
+  valueDisplay: string;
+  valueKind: "number" | "text" | "boolean" | "empty";
+}
+
+/** A read-only preview of exactly what submitRegion would send — destination
+ * package + registry, the submitter identity, and each draft value — so the
+ * user can review what leaves the machine before it leaves. */
+export interface OutboundSubmissionPreview {
+  regionId: string;
+  packageName: string;
+  resolvedVersion: string;
+  registryPath: string;
+  submitterId: string;
+  submitterName: string;
+  values: OutboundValue[];
+}
+
+/** Preview an outbound writeback submission without sending it. */
+export function previewRegionSubmission(
+  regionId: string,
+): Promise<OutboundSubmissionPreview> {
+  return invokeBackend("calp_preview_region_submission", { regionId });
+}
+
 /** Approve, reject, or reset a submitted writeback value (publisher action). */
 export function setSubmissionState(
   regionId: string,

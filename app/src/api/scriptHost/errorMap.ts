@@ -9,7 +9,7 @@
 import { BrokerError, type RpcErrorCode } from "./broker";
 
 /** Canonical spreadsheet error strings (must match the engine's CellError text). */
-export type CellErrorText = "#NAME?" | "#VALUE!" | "#REF!";
+export type CellErrorText = "#NAME?" | "#VALUE!" | "#REF!" | "#BLOCKED!";
 
 /** The broker error code for any thrown value (non-BrokerError -> "HostError"). */
 export function brokerErrorCode(e: unknown): RpcErrorCode {
@@ -20,12 +20,23 @@ export function brokerErrorCode(e: unknown): RpcErrorCode {
  * Map a broker failure to a spreadsheet cell error for formula-callable code
  * (UDFs). An unregistered name never reaches the broker (the engine emits
  * #NAME? directly when the udf closure returns None), so a broker failure here
- * means the function exists but was DENIED / timed out / threw / had bad args:
- * all of those are #VALUE!. UnknownMethod is mapped to #NAME? for completeness
- * (a stale/removed broker method name behaves like an unknown function).
+ * means the function exists but failed in one of these ways:
+ *   - REFUSED to run (PermissionDenied = capability not declared / tier too low;
+ *     CapabilityRequired = capability declared but not granted/consented) -> the
+ *     user must SEE that code was refused, not get a stale number: #BLOCKED!
+ *   - UnknownMethod (a stale/removed broker method) -> #NAME?
+ *   - genuine failure (bad args / timeout / threw) -> #VALUE!
  */
 export function brokerErrorToCellError(e: unknown): CellErrorText {
-  return brokerErrorCode(e) === "UnknownMethod" ? "#NAME?" : "#VALUE!";
+  switch (brokerErrorCode(e)) {
+    case "PermissionDenied":
+    case "CapabilityRequired":
+      return "#BLOCKED!";
+    case "UnknownMethod":
+      return "#NAME?";
+    default:
+      return "#VALUE!";
+  }
 }
 
 /**
