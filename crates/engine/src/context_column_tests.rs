@@ -28,9 +28,9 @@ use chrono::NaiveDate;
 
 use crate::{
     expression as expr, sum_measure, AggregateOp, Column, ColumnRef, ComparisonOp, ContextColumn,
-    DataModel, DataType, Engine, Expression, FilterCondition, FilterOperator, InFilter, Measure,
-    QueryError, QueryRequest, Relationship, SecurityRole, SourceBinding, StorageMode, Table,
-    TotalsMode,
+    DataModel, DataType, DetailRequest, Engine, Expression, FilterCondition, FilterOperator,
+    InFilter, Measure, QueryError, QueryRequest, Relationship, SecurityRole, SourceBinding,
+    StorageMode, Table, TotalsMode,
 };
 
 /// Days since the Unix epoch for a calendar date (a `Date32` value).
@@ -298,6 +298,327 @@ async fn metadata_tags_context_column_as_dimension() {
         status.description.as_deref(),
         Some("Paid or Open relative to the as-of date")
     );
+}
+
+// ---- interdependent (DAG) context columns ----
+
+/// `PaymentStatus` (Paid/Open as of 2024-03-31) plus `PaidTier`, which
+/// **references** PaymentStatus: BigPaid when Paid and amount >= 50, else Other.
+fn dag_model() -> DataModel {
+    let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
+    let paid_tier = expr::if_expr(
+        expr::and(
+            expr::compare(
+                expr::qualified_col("Invoice", "PaymentStatus"),
+                ComparisonOp::Equal,
+                expr::lit_str("Paid"),
+            ),
+            expr::compare(
+                expr::qualified_col("Invoice", "amount"),
+                ComparisonOp::GreaterThanOrEqual,
+                expr::lit(50.0),
+            ),
+        ),
+        expr::lit_str("BigPaid"),
+        expr::lit_str("Other"),
+    );
+    DataModel::builder()
+        .add_table(in_mem(
+            Table::new(
+                "Invoice",
+                vec![
+                    Column::new("paid_date", DataType::Date),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_table(in_mem(
+            Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap(),
+        ))
+        .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+        .add_measure(Measure::new(
+            "AsOfDate",
+            expr::agg(AggregateOp::Max, expr::qualified_col("Calendar", "date")),
+        ))
+        .add_context_column(ContextColumn::new(
+            "PaymentStatus",
+            "Invoice",
+            payment_status_expr(),
+            DataType::String,
+        ))
+        .add_context_column(ContextColumn::new(
+            "PaidTier",
+            "Invoice",
+            paid_tier,
+            DataType::String,
+        ))
+        .build()
+        .unwrap()
+}
+
+fn dag_engine(model: DataModel) -> Engine {
+    let mut engine = Engine::new(model);
+    for t in ["Invoice", "Calendar"] {
+        engine.bind_table(t, 0, SourceBinding::new("public", &t.to_lowercase()));
+    }
+    engine
+        .cache
+        .store(
+            "Invoice",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("paid_date", ArrowType::Date32, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Date32Array::from(vec![
+                        days(2024, 1, 15),
+                        days(2024, 3, 15),
+                        days(2024, 6, 15),
+                        days(2024, 12, 15),
+                    ])),
+                    Arc::new(Float64Array::from(vec![100.0, 50.0, 30.0, 20.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Calendar",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                vec![Arc::new(Date32Array::from(vec![days(2024, 3, 31)]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn context_column_references_another_context_column() {
+    // PaidTier inlines PaymentStatus. Paid (as of 2024-03-31): 100, 50; of
+    // those amount >= 50 -> BigPaid (150). The rest -> Other (30 + 20).
+    let engine = dag_engine(dag_model());
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Invoice", "PaidTier")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Reuse by_status by reading the PaidTier column.
+    let mut out = HashMap::new();
+    for b in &batches {
+        let g = b.column(col_idx(b, "PaidTier"));
+        let m = b.column(col_idx(b, "Revenue"));
+        let amt = m.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..b.num_rows() {
+            out.insert(str_key(g.as_ref(), row), amt.value(row));
+        }
+    }
+    assert_eq!(out["BigPaid"], 150.0);
+    assert_eq!(out["Other"], 50.0);
+}
+
+#[tokio::test]
+async fn circular_context_column_references_fail_closed() {
+    // A references B, B references A. The model builds (cycles are caught at
+    // query time), but querying either fails closed rather than recursing.
+    let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
+    let a = expr::if_expr(
+        expr::compare(
+            expr::qualified_col("Invoice", "B"),
+            ComparisonOp::Equal,
+            expr::lit_str("x"),
+        ),
+        expr::lit_str("a1"),
+        expr::lit_str("a2"),
+    );
+    let b = expr::if_expr(
+        expr::compare(
+            expr::qualified_col("Invoice", "A"),
+            ComparisonOp::Equal,
+            expr::lit_str("y"),
+        ),
+        expr::lit_str("b1"),
+        expr::lit_str("b2"),
+    );
+    let model = DataModel::builder()
+        .add_table(in_mem(
+            Table::new("Invoice", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+        ))
+        .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+        .add_context_column(ContextColumn::new("A", "Invoice", a, DataType::String))
+        .add_context_column(ContextColumn::new("B", "Invoice", b, DataType::String))
+        .build()
+        .unwrap();
+    let engine = {
+        let mut e = Engine::new(model);
+        e.bind_table("Invoice", 0, SourceBinding::new("public", "invoice"));
+        e.cache
+            .store(
+                "Invoice",
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![Field::new("amount", ArrowType::Float64, true)])),
+                    vec![Arc::new(Float64Array::from(vec![1.0]))],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        e
+    };
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Invoice", "A")],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::Engine(_) | QueryError::InvalidQuery(_)),
+        "got: {err:?}"
+    );
+}
+
+// ---- drillthrough: context columns as detail outputs ----
+
+/// `amount -> PaymentStatus` across raw detail rows.
+fn detail_amount_status(batches: &[RecordBatch]) -> HashMap<i64, String> {
+    let mut out = HashMap::new();
+    for b in batches {
+        let a = b.column(col_idx(b, "amount"));
+        let s = b.column(col_idx(b, "PaymentStatus"));
+        let amounts = a.as_any().downcast_ref::<Float64Array>().expect("amount f64");
+        for row in 0..b.num_rows() {
+            out.insert(amounts.value(row) as i64, str_key(s.as_ref(), row));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn drillthrough_computes_context_column_per_row() {
+    // Drill into the Paid/Open segmentation: each raw invoice row gets its
+    // PaymentStatus as of 2024-03-31. 100 + 50 paid; 30 + 20 open.
+    let engine = ctx_engine();
+    let req = DetailRequest::new("Invoice", 10)
+        .with_context_columns(vec![ColumnRef::new("Invoice", "PaymentStatus")]);
+    let batches = engine.query_rows(req).await.unwrap();
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(row_count, 4, "limit not exceeded, no rows dropped or added");
+    let m = detail_amount_status(&batches);
+    assert_eq!(m[&100], "Paid");
+    assert_eq!(m[&50], "Paid");
+    assert_eq!(m[&30], "Open");
+    assert_eq!(m[&20], "Open");
+}
+
+#[tokio::test]
+async fn drillthrough_context_column_under_role_no_leak() {
+    // A role restricts Invoice to amount >= 30 (excludes the 20 row). A
+    // drillthrough with the PaymentStatus context column must return only the
+    // permitted rows, each correctly labeled, and never leak the excluded row.
+    let mut engine = Engine::new(
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Invoice",
+                    vec![
+                        Column::new("paid_date", DataType::Date),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_table(
+                Table::new("Calendar", vec![Column::new("date", DataType::Date)])
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+            .add_measure(Measure::new(
+                "AsOfDate",
+                expr::agg(AggregateOp::Max, expr::qualified_col("Calendar", "date")),
+            ))
+            .add_context_column(ContextColumn::new(
+                "PaymentStatus",
+                "Invoice",
+                payment_status_expr(),
+                DataType::String,
+            ))
+            .add_security_role(SecurityRole::new("Big").with_filter(
+                "Invoice",
+                "amount",
+                ComparisonOp::GreaterThanOrEqual,
+                "30",
+            ))
+            .build()
+            .unwrap(),
+    );
+    for t in ["Invoice", "Calendar"] {
+        engine.bind_table(t, 0, SourceBinding::new("public", &t.to_lowercase()));
+    }
+    engine
+        .cache
+        .store(
+            "Invoice",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("paid_date", ArrowType::Date32, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Date32Array::from(vec![
+                        days(2024, 1, 15),
+                        days(2024, 3, 15),
+                        days(2024, 6, 15),
+                        days(2024, 12, 15),
+                    ])),
+                    Arc::new(Float64Array::from(vec![100.0, 50.0, 30.0, 20.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Calendar",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                vec![Arc::new(Date32Array::from(vec![days(2024, 3, 31)]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine.set_active_role(Some("Big".into()));
+
+    let req = DetailRequest::new("Invoice", 10)
+        .with_context_columns(vec![ColumnRef::new("Invoice", "PaymentStatus")]);
+    let batches = engine.query_rows(req).await.unwrap();
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(row_count, 3, "role excludes the amount=20 row");
+    let m = detail_amount_status(&batches);
+    assert_eq!(m[&100], "Paid");
+    assert_eq!(m[&50], "Paid");
+    assert_eq!(m[&30], "Open");
+    assert!(!m.contains_key(&20), "excluded row must not leak: {m:?}");
+}
+
+#[tokio::test]
+async fn drillthrough_rejects_unknown_context_column() {
+    let engine = ctx_engine();
+    let req = DetailRequest::new("Invoice", 10)
+        .with_context_columns(vec![ColumnRef::new("Invoice", "amount")]); // physical, not a ctx col
+    let err = engine.query_rows(req).await.unwrap_err();
+    assert!(matches!(err, QueryError::InvalidQuery(_)), "got: {err:?}");
 }
 
 // ---- v2: cross-table references ----

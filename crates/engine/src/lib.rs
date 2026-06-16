@@ -2415,6 +2415,14 @@ impl Engine {
         self.reject_multi_role()?;
         let role_filters = self.active_role_filters()?;
 
+        // Resolve any context-driven calculated columns requested as detail
+        // outputs: their scalar measures are evaluated from this request's
+        // filter context (via the normal RLS-aware query path), so the per-row
+        // segment label matches the segmented cell the user drilled from.
+        let context_column_exprs = self
+            .resolve_detail_context_columns(&request, &token)
+            .await?;
+
         // Drillthrough results are intentionally NOT cached (see the doc
         // comment): interactive, one-off, per-cell. Go straight to execution.
         QueryExecutor::execute_detail(
@@ -2424,9 +2432,99 @@ impl Engine {
             Some(&self.cache),
             Some(self.max_inline_in_values),
             &role_filters,
+            &context_column_exprs,
             &token,
         )
         .await
+    }
+
+    /// Resolve the context-driven calculated columns requested in a
+    /// [`DetailRequest`] into row-level expressions with their scalar measures
+    /// substituted to literals.
+    ///
+    /// Each scalar is computed by an inner ungrouped query over this request's
+    /// filter context — the same value the aggregation path would resolve — so
+    /// the drillthrough segment labels match the cell. Fails closed on a
+    /// non-context column, a cross-table reference (deferred for drillthrough),
+    /// a non-simple-aggregate or context-op scalar measure, or a `NULL` scalar.
+    async fn resolve_detail_context_columns(
+        &self,
+        request: &DetailRequest,
+        token: &CancellationToken,
+    ) -> QueryResult<Vec<(ColumnRef, Expression)>> {
+        use engine_core::compute::expression::{expand_measure_refs, expr_literal_from_arrow};
+
+        let mut resolved: Vec<(ColumnRef, Expression)> = Vec::new();
+        for col_ref in &request.context_columns {
+            let cc = self
+                .model
+                .context_column(&col_ref.column)
+                .filter(|cc| cc.table().eq_ignore_ascii_case(&col_ref.table))
+                .ok_or_else(|| {
+                    QueryError::InvalidQuery(format!(
+                        "'{}[{}]' is not a context-driven calculated column on the detail table",
+                        col_ref.table, col_ref.column
+                    ))
+                })?;
+            // Inline references to other context columns on the host (a cycle
+            // fails closed), then enforce the drillthrough constraints on the
+            // self-contained expression.
+            let inlined = self
+                .model
+                .inline_context_column_refs(
+                    cc.table(),
+                    cc.expression(),
+                    &mut vec![cc.name().to_lowercase()],
+                )
+                .map_err(QueryError::Engine)?;
+            // v1: drillthrough supports only host-table-only context columns.
+            for (t, _) in inlined.qualified_column_references() {
+                if !t.eq_ignore_ascii_case(cc.table()) {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "drillthrough does not yet support the cross-table context column '{}'; \
+                         request it in an aggregation query instead",
+                        cc.name()
+                    )));
+                }
+            }
+
+            let mut env: std::collections::HashMap<String, Expression> =
+                std::collections::HashMap::new();
+            for m_name in inlined.measure_references() {
+                let measure = self.model.measure(m_name).map_err(QueryError::Engine)?;
+                let expanded = expand_measure_refs(measure.expression(), &self.model)
+                    .map_err(QueryError::Engine)?;
+                if expanded.has_context_ops() || expanded.as_simple_aggregate().is_none() {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "context-driven calculated column '{}' references measure '[{m_name}]', \
+                         which must be a single aggregate over one table with no context operations",
+                        cc.name()
+                    )));
+                }
+                // Resolve the scalar under the cell's filter context.
+                let inner = QueryRequest {
+                    measures: vec![m_name.to_string()],
+                    filters: request.filters.clone(),
+                    ..Default::default()
+                };
+                let batches = Box::pin(self.query_with_cancellation(inner, token.clone())).await?;
+                let lit = match batches.iter().find(|b| b.num_rows() > 0) {
+                    Some(b) => expr_literal_from_arrow(b.column(0).as_ref(), 0)
+                        .map_err(QueryError::Engine)?,
+                    None => Expression::Blank,
+                };
+                if matches!(lit, Expression::Blank) {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "context-driven calculated column '{}': its scalar measure '[{m_name}]' \
+                         resolved to NULL under the filters, so the segmentation is undefined",
+                        cc.name()
+                    )));
+                }
+                env.insert(m_name.to_string(), lit);
+            }
+            resolved.push((col_ref.clone(), inlined.substitute_measure_refs(&env)));
+        }
+        Ok(resolved)
     }
 
     /// Execute a query, automatically refreshing any stale in-memory tables first.

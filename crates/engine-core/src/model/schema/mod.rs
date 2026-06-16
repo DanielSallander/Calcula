@@ -586,6 +586,77 @@ impl DataModel {
             .collect()
     }
 
+    /// Inline references to other context-driven calculated columns on `host`
+    /// into `expr`, returning a self-contained row-level expression in which
+    /// only measure references and physical columns remain.
+    ///
+    /// A reference (a bare column, or a `host`-qualified column, whose name is
+    /// another context column on `host`) is resolved by recursively inlining
+    /// the referenced column's own expression first, so a chain `C → B → A`
+    /// flattens in one pass. `visiting` carries the resolution stack (seed it
+    /// with the starting column's lowercased name) so a cycle — direct or
+    /// indirect — is detected and returns an error rather than recursing
+    /// forever. When `expr` references no context column it is returned
+    /// unchanged (a no-op for the common, independent case).
+    ///
+    /// The candidate references are taken from `column_references()`, which is a
+    /// slight over-approximation: a *cross-table* qualified column that happens
+    /// to share a name with a host context column is treated as a candidate for
+    /// recursion (though [`substitute_context_column_refs`](crate::compute::expression::Expression::substitute_context_column_refs)
+    /// will not actually replace it). This is harmless except in the contrived
+    /// case where that shared name also closes a dependency cycle, which would
+    /// be reported as a (fail-closed) circular reference. Avoid naming a context
+    /// column identically to a cross-table column you reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::InvalidData`](crate::error::EngineError::InvalidData)
+    /// on a circular reference.
+    pub fn inline_context_column_refs(
+        &self,
+        host: &str,
+        expr: &crate::compute::expression::Expression,
+        visiting: &mut Vec<String>,
+    ) -> EngineResult<crate::compute::expression::Expression> {
+        use crate::compute::expression::Expression;
+        let host_ctx: std::collections::HashSet<String> = self
+            .context_columns_for_table(host)
+            .iter()
+            .map(|c| c.name().to_lowercase())
+            .collect();
+        if host_ctx.is_empty() {
+            return Ok(expr.clone());
+        }
+        let mut env: std::collections::HashMap<String, Expression> =
+            std::collections::HashMap::new();
+        for name in expr.column_references() {
+            let name_lc = name.to_lowercase();
+            if !host_ctx.contains(&name_lc) || env.contains_key(&name_lc) {
+                continue;
+            }
+            if visiting.iter().any(|v| v == &name_lc) {
+                return Err(EngineError::InvalidData(format!(
+                    "circular reference among context-driven calculated columns (via '{name}'); \
+                     a context column must not reference itself directly or indirectly"
+                )));
+            }
+            let referenced = self.context_column(name).ok_or_else(|| {
+                EngineError::InvalidData(format!(
+                    "context-column reference '{name}' could not be resolved"
+                ))
+            })?;
+            visiting.push(name_lc.clone());
+            let inlined =
+                self.inline_context_column_refs(host, referenced.expression(), visiting)?;
+            visiting.pop();
+            env.insert(name_lc, inlined);
+        }
+        if env.is_empty() {
+            return Ok(expr.clone());
+        }
+        Ok(expr.substitute_context_column_refs(host, &env))
+    }
+
     /// Returns all relationships where the given table appears on either side.
     pub fn relationships_for_table(&self, table_name: &str) -> Vec<&Relationship> {
         self.relationships

@@ -597,3 +597,22 @@ pub fn expr_literal_from_scalar(
         }
     })
 }
+
+/// Convert a single cell of an Arrow array into a literal [`Expression`].
+///
+/// A thin wrapper over [`expr_literal_from_scalar`] for callers that hold an
+/// Arrow array (e.g. a host without a DataFusion dependency reading the result
+/// of an inner scalar query) rather than a `ScalarValue`. Same type support and
+/// errors as [`expr_literal_from_scalar`].
+///
+/// # Errors
+///
+/// Propagates the Arrow→scalar extraction error, and errors on an unsupported
+/// scalar type (see [`expr_literal_from_scalar`]).
+pub fn expr_literal_from_arrow(
+    array: &dyn arrow::array::Array,
+    row: usize,
+) -> crate::error::EngineResult<Expression> {
+    let scalar = datafusion::common::ScalarValue::try_from_array(array, row)?;
+    expr_literal_from_scalar(&scalar)
+}

@@ -447,6 +447,117 @@ impl Expression {
         }
     }
 
+    /// Replace references to other context-driven calculated columns with their
+    /// (already-resolved) expressions, returning the rewritten clone.
+    ///
+    /// A reference is a bare [`ColumnRef`](Expression::ColumnRef) whose name is
+    /// a key in `env`, or a [`QualifiedColumnRef`](Expression::QualifiedColumnRef)
+    /// **on `host`** whose column is a key in `env` (a qualified reference to a
+    /// *different* table — a cross-table physical column that happens to share a
+    /// name — is left alone). Keys in `env` are lowercased context-column names;
+    /// they never collide with physical columns (validated at build), so a
+    /// matching bare reference is unambiguously a context-column reference.
+    ///
+    /// This powers interdependent context columns: one column may reference
+    /// another on the same table, and the dependency is inlined (in dependency
+    /// order — the model build rejects cycles) before the scalar measures are
+    /// resolved. Recursion mirrors [`substitute_measure_refs`](Self::substitute_measure_refs)
+    /// over the row-level node set.
+    pub fn substitute_context_column_refs(
+        &self,
+        host: &str,
+        env: &std::collections::HashMap<String, Expression>,
+    ) -> Expression {
+        let sub = |e: &Expression| e.substitute_context_column_refs(host, env);
+        match self {
+            Expression::ColumnRef(name) => env
+                .get(&name.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
+            Expression::QualifiedColumnRef {
+                table_or_var,
+                column,
+            } if table_or_var.eq_ignore_ascii_case(host) => env
+                .get(&column.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
+            Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+                left: Box::new(sub(left)),
+                op: *op,
+                right: Box::new(sub(right)),
+            },
+            Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
+                function: *function,
+                args: args.iter().map(sub).collect(),
+            },
+            Expression::TextFunc { function, args } => Expression::TextFunc {
+                function: *function,
+                args: args.iter().map(sub).collect(),
+            },
+            Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+                function: *function,
+                args: args.iter().map(sub).collect(),
+            },
+            Expression::Comparison { left, op, right } => Expression::Comparison {
+                left: Box::new(sub(left)),
+                op: *op,
+                right: Box::new(sub(right)),
+            },
+            Expression::And(left, right) => Expression::And(Box::new(sub(left)), Box::new(sub(right))),
+            Expression::Or(left, right) => Expression::Or(Box::new(sub(left)), Box::new(sub(right))),
+            Expression::Xor(left, right) => Expression::Xor(Box::new(sub(left)), Box::new(sub(right))),
+            Expression::Not(inner) => Expression::Not(Box::new(sub(inner))),
+            Expression::IsBlank(inner) => Expression::IsBlank(Box::new(sub(inner))),
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => Expression::If {
+                condition: Box::new(sub(condition)),
+                then_expr: Box::new(sub(then_expr)),
+                else_expr: Box::new(sub(else_expr)),
+            },
+            Expression::Switch {
+                expr,
+                cases,
+                default,
+            } => Expression::Switch {
+                expr: Box::new(sub(expr)),
+                cases: cases.iter().map(|(v, r)| (sub(v), sub(r))).collect(),
+                default: default.as_ref().map(|d| Box::new(sub(d))),
+            },
+            Expression::Coalesce(exprs) => Expression::Coalesce(exprs.iter().map(sub).collect()),
+            Expression::NullIf { expr, value } => Expression::NullIf {
+                expr: Box::new(sub(expr)),
+                value: Box::new(sub(value)),
+            },
+            Expression::Greatest(args) => Expression::Greatest(args.iter().map(sub).collect()),
+            Expression::Least(args) => Expression::Least(args.iter().map(sub).collect()),
+            Expression::IfError { expr, alternate } => Expression::IfError {
+                expr: Box::new(sub(expr)),
+                alternate: Box::new(sub(alternate)),
+            },
+            Expression::InList { expr, values } => Expression::InList {
+                expr: Box::new(sub(expr)),
+                values: values.iter().map(sub).collect(),
+            },
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => Expression::SafeDivide {
+                numerator: Box::new(sub(numerator)),
+                denominator: Box::new(sub(denominator)),
+                alternate: alternate.as_ref().map(|a| Box::new(sub(a))),
+            },
+            Expression::Call { name, args } => Expression::Call {
+                name: name.clone(),
+                args: args.iter().map(sub).collect(),
+            },
+            _ => self.clone(),
+        }
+    }
+
     /// Replace every [`Expression::SelectedMeasure`] node in this tree with
     /// `replacement`, returning the rewritten clone.
     ///

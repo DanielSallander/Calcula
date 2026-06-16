@@ -394,7 +394,18 @@ impl PushdownPlanner {
         // LEFT JOINed into the main statement, so they stay in the RLS set.
         let mut context_ref_tables: Vec<String> = Vec::new();
         for cc in &context_columns_on_axis {
-            for m_name in cc.expression().measure_references() {
+            // Inline references to other context columns on the host so the
+            // TRANSITIVE scalar measures and cross-table references are fetched
+            // (a column may depend on another's scalar). This also detects a
+            // dependency cycle at plan time and fails closed.
+            let inlined = model
+                .inline_context_column_refs(
+                    cc.table(),
+                    cc.expression(),
+                    &mut vec![cc.name().to_lowercase()],
+                )
+                .map_err(QueryError::Engine)?;
+            for m_name in inlined.measure_references() {
                 let measure = model.measure(m_name).map_err(QueryError::Engine)?;
                 let source_table = if measure.table().is_empty() {
                     let expanded =
@@ -415,7 +426,7 @@ impl PushdownPlanner {
                     context_scalar_measures.push(measure.clone());
                 }
             }
-            for (ref_table, _) in cc.expression().qualified_column_references() {
+            for (ref_table, _) in inlined.qualified_column_references() {
                 if !ref_table.eq_ignore_ascii_case(cc.table())
                     && !context_ref_tables
                         .iter()

@@ -851,6 +851,20 @@ pub struct DetailRequest {
     /// permitted dimension rows, and never re-introduces a row the role
     /// excluded or changes the detail row set.
     pub dimension_columns: Vec<ColumnRef>,
+    /// Context-driven calculated columns to compute per detail row.
+    ///
+    /// Each [`ColumnRef`] must name a [`ContextColumn`](engine_core::model::ContextColumn)
+    /// defined on the **detail table**. Its scalar measure is resolved once from
+    /// this request's filter context (exactly as in the aggregation path, so the
+    /// per-row segment label matches the segmented cell the user drilled from),
+    /// and the resulting row-level CASE is computed for each returned detail row
+    /// and appended as an output column named by the context column.
+    ///
+    /// v1 supports only context columns whose row-level expression references
+    /// the **host (detail) table's** own columns; a cross-table reference is
+    /// rejected with [`InvalidQuery`](crate::error::QueryError::InvalidQuery).
+    /// A scalar that resolves to `NULL` under the filters fails closed.
+    pub context_columns: Vec<ColumnRef>,
     /// Cell-coordinate and slicer filters.
     ///
     /// Each [`FilterCondition`] is matched to the table that owns its named
@@ -884,6 +898,7 @@ impl DetailRequest {
             table: table.into(),
             columns: Vec::new(),
             dimension_columns: Vec::new(),
+            context_columns: Vec::new(),
             filters: Vec::new(),
             order_by: Vec::new(),
             limit,
@@ -907,6 +922,13 @@ impl DetailRequest {
     /// requirements, ordering, and naming convention.
     pub fn with_dimension_columns(mut self, columns: Vec<ColumnRef>) -> Self {
         self.dimension_columns = columns;
+        self
+    }
+
+    /// Append context-driven calculated columns to compute per detail row
+    /// (replacing any previously set). See [`context_columns`](Self::context_columns).
+    pub fn with_context_columns(mut self, columns: Vec<ColumnRef>) -> Self {
+        self.context_columns = columns;
         self
     }
 

@@ -412,6 +412,67 @@ mod tests {
     }
 
     #[test]
+    fn context_column_may_reference_another_on_same_table() {
+        // PaidFlag references the PaymentStatus context column — build accepts
+        // it (a dependency, inlined at query time), not rejected as unknown.
+        let a =
+            ContextColumn::new("PaymentStatus", "Invoice", payment_status_expr(), DataType::String);
+        let b = ContextColumn::new(
+            "PaidFlag",
+            "Invoice",
+            if_expr(
+                compare(
+                    qualified_col("Invoice", "PaymentStatus"),
+                    ComparisonOp::Equal,
+                    lit_str("Paid"),
+                ),
+                lit_str("Y"),
+                lit_str("N"),
+            ),
+            DataType::String,
+        );
+        let model = model_with_context_columns(vec![a, b]);
+        assert!(model.is_ok(), "got: {:?}", model.err());
+    }
+
+    #[test]
+    fn inline_context_column_refs_flattens_dependency() {
+        let a =
+            ContextColumn::new("PaymentStatus", "Invoice", payment_status_expr(), DataType::String);
+        let b = ContextColumn::new(
+            "PaidFlag",
+            "Invoice",
+            if_expr(
+                compare(
+                    qualified_col("Invoice", "PaymentStatus"),
+                    ComparisonOp::Equal,
+                    lit_str("Paid"),
+                ),
+                lit_str("Y"),
+                lit_str("N"),
+            ),
+            DataType::String,
+        );
+        let model = model_with_context_columns(vec![a, b]).unwrap();
+        let inlined = model
+            .inline_context_column_refs(
+                "Invoice",
+                model.context_column("PaidFlag").unwrap().expression(),
+                &mut vec!["paidflag".into()],
+            )
+            .unwrap();
+        let cols = inlined.column_references();
+        // The reference to PaymentStatus is gone; its physical input remains.
+        assert!(cols.iter().any(|c| c.eq_ignore_ascii_case("paid_date")));
+        assert!(!cols.iter().any(|c| c.eq_ignore_ascii_case("PaymentStatus")));
+        // The referenced measure surfaces transitively.
+        assert!(inlined
+            .measure_references()
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case("AsOfDate")));
+    }
+
+    #[test]
     fn case_insensitive_context_column_lookup() {
         let cc = ContextColumn::new(
             "PaymentStatus",

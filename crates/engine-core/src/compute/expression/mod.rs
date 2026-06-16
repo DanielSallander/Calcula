@@ -30,8 +30,8 @@ mod walkers;
 
 pub use builders::{
     agg, and, blank, block, call, clear, clear_except, clear_inner, clear_outer, closing_balance,
-    coalesce, col, compare, count_rows, dates_in_period, datetime_fn, expr_literal_from_scalar,
-    first_value, has_one_value,
+    coalesce, col, compare, count_rows, dates_in_period, datetime_fn, expr_literal_from_arrow,
+    expr_literal_from_scalar, first_value, has_one_value,
     if_error, if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in,
     keep_vars, lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
     period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,

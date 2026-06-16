@@ -80,6 +80,7 @@ fn ctx_col_unsupported(feature: &str) -> crate::error::QueryError {
     ))
 }
 
+
 impl QueryExecutor {
     /// Execute a local aggregation: fetch data, join, and aggregate via DataFusion.
     ///
@@ -1828,9 +1829,20 @@ impl QueryExecutor {
         model: &DataModel,
         cc: &ContextColumn,
     ) -> QueryResult<String> {
+        // Inline references to other context columns on the same table (in
+        // dependency order; a cycle fails closed) so the scalar resolution and
+        // rendering below see a single self-contained row-level expression.
+        let resolved_expr = model
+            .inline_context_column_refs(
+                cc.table(),
+                cc.expression(),
+                &mut vec![cc.name().to_lowercase()],
+            )
+            .map_err(crate::error::QueryError::Engine)?;
+
         let mut env: std::collections::HashMap<String, Expression> =
             std::collections::HashMap::new();
-        for m_name in cc.expression().measure_references() {
+        for m_name in resolved_expr.measure_references() {
             let measure = model
                 .measure(m_name)
                 .map_err(crate::error::QueryError::Engine)?;
@@ -1886,7 +1898,7 @@ impl QueryExecutor {
                 expr_literal_from_scalar(&scalar).map_err(crate::error::QueryError::Engine)?;
             env.insert(m_name.to_string(), lit);
         }
-        cc.expression()
+        resolved_expr
             .substitute_measure_refs(&env)
             .to_qualified_sql(&cc.table().to_lowercase())
             .map_err(crate::error::QueryError::Engine)

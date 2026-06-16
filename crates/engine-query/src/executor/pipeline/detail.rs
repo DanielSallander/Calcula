@@ -94,6 +94,7 @@ impl QueryExecutor {
     ///   single-equi related to the detail table (snowflake / multi-hop /
     ///   non-equi / composite-key).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_detail(
         request: &DetailRequest,
         model: &DataModel,
@@ -101,6 +102,7 @@ impl QueryExecutor {
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         role_filters: &[FilterPredicate],
+        context_column_exprs: &[(crate::request::ColumnRef, engine_core::compute::expression::Expression)],
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Cancellation checkpoint: before any work.
@@ -338,6 +340,31 @@ impl QueryExecutor {
         // yields no plans and the historical code path is preserved exactly.
         let dim_plans = resolve_dim_plans(request, model, detail_table)?;
 
+        // v1: a context column needs its physical input columns present in the
+        // detail batch to compute its CASE, and combining it with the
+        // dimension-attribute join (which re-projects the batch) is not yet
+        // wired. Fail closed rather than silently drop the inputs.
+        if !context_column_exprs.is_empty() && !dim_plans.is_empty() {
+            return Err(QueryError::InvalidQuery(
+                "a drillthrough cannot yet combine context-driven calculated columns with \
+                 dimension attributes in one request; request them separately"
+                    .into(),
+            ));
+        }
+        // The physical input columns of each requested context column must be
+        // fetched so its CASE can reference them (added to the projection below).
+        let context_input_columns: Vec<String> = {
+            let mut cols: Vec<String> = Vec::new();
+            for (_, expr) in context_column_exprs {
+                for c in expr.column_references() {
+                    if !cols.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+                        cols.push(c.to_string());
+                    }
+                }
+            }
+            cols
+        };
+
         // The detail-side join keys that must survive a column projection so the
         // attribute LEFT JOIN can match on them. Only relevant when the request
         // projects an explicit column subset (an empty `columns` keeps every
@@ -361,6 +388,12 @@ impl QueryExecutor {
             for key in &required_detail_keys {
                 if !cols.contains(key) {
                     cols.push(key.clone());
+                }
+            }
+            // Fetch the context columns' inputs (they appear in the output too).
+            for input in &context_input_columns {
+                if !cols.iter().any(|c| c.eq_ignore_ascii_case(input)) {
+                    cols.push(input.clone());
                 }
             }
             cols
@@ -418,24 +451,72 @@ impl QueryExecutor {
 
         // --- Step 7: dimension-attribute join (optional) ---
         //
-        // With no requested dimension attributes, return the detail rows
-        // unchanged — exactly the historical behavior and code path.
-        if dim_plans.is_empty() {
-            return Ok(detail_batches);
+        // With no requested dimension attributes, the detail rows are unchanged
+        // — exactly the historical behavior and code path.
+        let final_batches = if dim_plans.is_empty() {
+            detail_batches
+        } else {
+            join_dimension_attributes(
+                detail_batches,
+                dim_plans,
+                request,
+                model,
+                registry,
+                cache,
+                max_inline_in_values,
+                role_filters,
+                token,
+            )
+            .await?
+        };
+
+        // --- Step 8: context-driven calculated columns (optional) ---
+        //
+        // Each carries a row-level CASE whose scalar measure the facade already
+        // resolved to a literal from this request's filter context. Compute it
+        // per detail row and append it as an output column. Runs after the
+        // limit + dimension join, so it never changes which rows are returned.
+        if context_column_exprs.is_empty() {
+            return Ok(final_batches);
         }
-        join_dimension_attributes(
-            detail_batches,
-            dim_plans,
-            request,
-            model,
-            registry,
-            cache,
-            max_inline_in_values,
-            role_filters,
-            token,
-        )
-        .await
+        check_cancelled(token)?;
+        append_context_columns(final_batches, context_column_exprs, detail_table).await
     }
+}
+
+/// Append context-driven calculated columns to the already RLS-restricted,
+/// limited, dimension-joined detail rows.
+///
+/// Each expression is the context column's row-level CASE with its scalar
+/// measure already substituted to a literal (by the facade, from the request's
+/// filter context — so the per-row label matches the segmented cell the user
+/// drilled from). It is rendered qualified to the detail table and projected as
+/// a new output column named by the context column. The detail batches are
+/// registered once and a single `SELECT *, <case> AS <col> ...` runs over them,
+/// so no row is added or dropped.
+async fn append_context_columns(
+    batches: Vec<RecordBatch>,
+    exprs: &[(crate::request::ColumnRef, engine_core::compute::expression::Expression)],
+    detail_table: &str,
+) -> QueryResult<Vec<RecordBatch>> {
+    if batches.is_empty() {
+        return Ok(batches);
+    }
+    let ctx = SessionContext::new();
+    let table = detail_table.to_lowercase();
+    register_partitioned_table(&ctx, &table, batches)?;
+
+    let mut select_parts: Vec<String> = vec!["*".to_string()];
+    for (col_ref, expr) in exprs {
+        let case_sql = expr.to_qualified_sql(&table).map_err(QueryError::Engine)?;
+        select_parts.push(format!(
+            "{case_sql} AS {}",
+            quote_ident_double(&col_ref.column)
+        ));
+    }
+    let sql = format!("SELECT {} FROM {table}", select_parts.join(", "));
+    let df = ctx.sql(&sql).await?;
+    Ok(df.collect().await?)
 }
 
 /// Resolve and validate the requested dimension attributes into per-dimension

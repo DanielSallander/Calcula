@@ -78,10 +78,21 @@ pub(super) fn compute_table_projections(
             .context_column(&col_ref.column)
             .filter(|cc| cc.table().eq_ignore_ascii_case(&col_ref.table))
         {
-            for c in cc.expression().column_references() {
+            // Inline any references to other context columns first so the
+            // transitive physical inputs are fetched (and the non-physical
+            // referenced-column names are not). A cycle is caught at plan time
+            // before projection; fall back to the raw expression defensively.
+            let expr = model
+                .inline_context_column_refs(
+                    cc.table(),
+                    cc.expression(),
+                    &mut vec![cc.name().to_lowercase()],
+                )
+                .unwrap_or_else(|_| cc.expression().clone());
+            for c in expr.column_references() {
                 collector.add(cc.table(), c);
             }
-            for (t, c) in cc.expression().qualified_column_references() {
+            for (t, c) in expr.qualified_column_references() {
                 collector.add(t, c);
             }
             continue;

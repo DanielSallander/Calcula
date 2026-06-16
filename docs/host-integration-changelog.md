@@ -241,6 +241,12 @@ with `AsOfDate = MAX(Calendar[date])`. Grouping by `PaymentStatus` splits revenu
 
 In results and `query_with_meta`, a context column appears as an ordinary **dimension** column (`ResultColumnKind::Dimension`) attributed to its host table, carrying its `description`.
 
+**Interdependent columns.** A context column's row-level expression may reference **another context column on the same table** (by name); the reference is inlined in dependency order before the scalars are resolved, so e.g. `PaidTier = IF(Invoice[PaymentStatus] = "Paid" AND Invoice[amount] >= 50, "BigPaid", "Other")` builds on an existing `PaymentStatus` segment. (Multiple *independent* context columns in one query already worked.) A circular reference — direct or indirect — is caught when the column is resolved and fails closed with `QueryError`. No `MODEL_FORMAT_VERSION` change (uses the existing column-reference representation).
+
+**Drillthrough output.** `DetailRequest` gained `context_columns: Vec<ColumnRef>` (builder `with_context_columns`). Each names a context column on the **detail table**; the engine resolves its scalar from the request's filter context (via the same RLS-aware path, so the per-row label matches the segmented cell the user drilled from) and appends the computed value to every returned detail row. The column's physical inputs are fetched automatically. The scalar resolution is RLS-restricted and fails closed on a `NULL` or non-simple-aggregate scalar. v1 drillthrough supports **host-table-only** context columns; a cross-table context column, or combining context columns with `dimension_columns` in one drillthrough, is rejected with `QueryError::InvalidQuery` (request them separately). No `MODEL_FORMAT_VERSION` change (request-time only).
+
+**Fiscal calendars.** A context column's scalar over a fiscal (non-Gregorian) date table is already correct for the supported scalar shape — a plain aggregate such as `MAX(Calendar[date])` is calendar-agnostic (the max date is the max date regardless of the fiscal layout). A period-boundary as-of (e.g. "the end of the current fiscal quarter") would require a richer, period-filtered scalar measure, which the v1 simple-aggregate rule rejects (fail closed); that "richer scalars" capability is deferred.
+
 ## Pivot-shaped queries: ordering, limit, totals
 
 `QueryRequest` (`engine-query::request`) gained the fields hosts need to render sorted, capped, and subtotaled pivots:

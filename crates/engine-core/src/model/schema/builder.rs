@@ -729,8 +729,30 @@ impl DataModelBuilder {
         // enter the `Aggregate` node). All referenced measures and columns must
         // exist, and the name must not collide with a physical, calculated, or
         // other context column.
+        // Context-column names per host table (lowercased), so a reference from
+        // one context column to another on the same table is recognized as a
+        // dependency (inlined at query time) rather than rejected as an unknown
+        // column. A cyclic reference is caught at query time, where the
+        // resolver fails closed.
+        let context_cols_by_host: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = {
+            let mut m: std::collections::HashMap<String, std::collections::HashSet<String>> =
+                std::collections::HashMap::new();
+            for c in &self.context_columns {
+                m.entry(c.table().to_lowercase())
+                    .or_default()
+                    .insert(c.name().to_lowercase());
+            }
+            m
+        };
         let mut seen_context_cols = std::collections::HashSet::new();
         for cc in &self.context_columns {
+            let host_ctx_cols = context_cols_by_host.get(&cc.table().to_lowercase());
+            let is_host_ctx_col = |name: &str| {
+                host_ctx_cols.is_some_and(|s| s.contains(&name.to_lowercase()))
+            };
             // Name uniqueness among context columns.
             if !seen_context_cols.insert(cc.name()) {
                 return Err(EngineError::DuplicateName(format!(
@@ -828,6 +850,12 @@ impl DataModelBuilder {
                 std::collections::HashSet::new();
             for (ref_table, col) in cc.expression().qualified_column_references() {
                 if ref_table.eq_ignore_ascii_case(cc.table()) {
+                    // A reference to another context column on the host is a
+                    // dependency, inlined at query time — not a physical column.
+                    if is_host_ctx_col(col) {
+                        cross_table_cols.insert(col);
+                        continue;
+                    }
                     if table.column(col).is_err() {
                         return Err(EngineError::ExpressionColumnNotFound {
                             table: cc.table().to_string(),
@@ -883,7 +911,10 @@ impl DataModelBuilder {
             // so a name belonging to a validated cross-table reference is
             // tolerated here.
             for col_ref in cc.expression().column_references() {
-                if table.column(col_ref).is_err() && !cross_table_cols.contains(col_ref) {
+                if table.column(col_ref).is_err()
+                    && !cross_table_cols.contains(col_ref)
+                    && !is_host_ctx_col(col_ref)
+                {
                     return Err(EngineError::ExpressionColumnNotFound {
                         table: cc.table().to_string(),
                         column: col_ref.to_string(),
