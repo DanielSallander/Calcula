@@ -466,6 +466,36 @@ impl Relationship {
         ) && self.is_equi_only()
     }
 
+    /// Returns `true` if the OTHER table can be joined onto `host` without
+    /// risk of multiplying `host`'s rows — i.e. each `host` row matches at most
+    /// one row of the other table.
+    ///
+    /// Unlike [`is_safe_for_direct_join`](Self::is_safe_for_direct_join), this
+    /// is **direction-aware**: it checks that `host` is on the *many* (or 1:1)
+    /// side of an active, equality-only relationship, so a value looked up from
+    /// the other table is a function of the `host` row (a safe `LEFT JOIN`).
+    /// `host` must be one of this relationship's two tables.
+    ///
+    /// Used to validate a context-driven calculated column's cross-table
+    /// reference: the referenced table is the "one" side, so joining it onto
+    /// the fact never inflates the aggregate.
+    pub fn lookup_safe_from(&self, host: &str) -> bool {
+        if !self.is_equi_only() || !self.active {
+            return false;
+        }
+        match self.cardinality {
+            Cardinality::OneToOne => {
+                self.from_table.eq_ignore_ascii_case(host)
+                    || self.to_table.eq_ignore_ascii_case(host)
+            }
+            // many → one: `host` is the many side when it is the `from` table.
+            Cardinality::ManyToOne => self.from_table.eq_ignore_ascii_case(host),
+            // one → many: `host` is the many side when it is the `to` table.
+            Cardinality::OneToMany => self.to_table.eq_ignore_ascii_case(host),
+            Cardinality::ManyToMany => false,
+        }
+    }
+
     /// Try to build a scalar boundary clause instead of a correlated `EXISTS`.
     ///
     /// For relationships with a **single** non-equi condition, the correlated

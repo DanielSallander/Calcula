@@ -817,40 +817,73 @@ impl DataModelBuilder {
                 });
             }
 
-            // All qualified column references must be on the HOST table and
-            // resolve to a physical column there. v1 renders the column's
-            // expression qualified to its host table, so a reference to a
-            // different table (even a related one) cannot be resolved correctly
-            // — reject it rather than silently mis-qualify or fetch the wrong
-            // data. Cross-table row-level references are deferred to a later
-            // version. Checked before the bare-name loop below so a cross-table
-            // reference reports the precise reason (rather than "column not
-            // found on the host" when the names happen to differ).
+            // Qualified column references resolve to either the host table or a
+            // related table. A cross-table reference is allowed only across a
+            // fan-out-safe single-hop relationship (the host is the many / 1:1
+            // side), so the LEFT JOIN that renders it at query time can never
+            // multiply the fact's rows and inflate the aggregate. Their column
+            // names are remembered so the bare-name loop below tolerates them
+            // (column_references() includes the column part of qualified refs).
+            let mut cross_table_cols: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
             for (ref_table, col) in cc.expression().qualified_column_references() {
-                if !ref_table.eq_ignore_ascii_case(cc.table()) {
+                if ref_table.eq_ignore_ascii_case(cc.table()) {
+                    if table.column(col).is_err() {
+                        return Err(EngineError::ExpressionColumnNotFound {
+                            table: cc.table().to_string(),
+                            column: col.to_string(),
+                        });
+                    }
+                    continue;
+                }
+                // Cross-table reference. The named table and column must exist.
+                let other = self
+                    .tables
+                    .iter()
+                    .find(|t| t.name().eq_ignore_ascii_case(ref_table))
+                    .ok_or_else(|| EngineError::InvalidContextColumn {
+                        name: cc.name().to_string(),
+                        reason: format!("references unknown table '{ref_table}'"),
+                    })?;
+                if other.column(col).is_err() {
+                    return Err(EngineError::ExpressionColumnNotFound {
+                        table: ref_table.to_string(),
+                        column: col.to_string(),
+                    });
+                }
+                // There must be an active, equality-only relationship between
+                // the host and the referenced table on which the host is the
+                // many / one-to-one side (so the referenced value is a function
+                // of the host row). `find_relationship` at query time returns
+                // this same active relationship.
+                let safe = self.relationships.iter().any(|r| {
+                    let pair = (r.from_table().eq_ignore_ascii_case(cc.table())
+                        && r.to_table().eq_ignore_ascii_case(ref_table))
+                        || (r.from_table().eq_ignore_ascii_case(ref_table)
+                            && r.to_table().eq_ignore_ascii_case(cc.table()));
+                    pair && r.lookup_safe_from(cc.table())
+                });
+                if !safe {
                     return Err(EngineError::InvalidContextColumn {
                         name: cc.name().to_string(),
                         reason: format!(
-                            "references column '{ref_table}[{col}]' on a table other than its \
-                             host table '{}'; a context column's row-level expression may \
-                             reference only its host table's columns (and scalar measures)",
+                            "references column '{ref_table}[{col}]' across a relationship that is \
+                             not a fan-out-safe single hop from its host table '{}'. A context \
+                             column may reference a related table only over an active, \
+                             equality-only relationship on which the host is the many (or \
+                             one-to-one) side, so the join cannot multiply the fact's rows",
                             cc.table()
                         ),
                     });
                 }
-                if table.column(col).is_err() {
-                    return Err(EngineError::ExpressionColumnNotFound {
-                        table: cc.table().to_string(),
-                        column: col.to_string(),
-                    });
-                }
+                cross_table_cols.insert(col);
             }
-            // Every (bare or qualified) referenced column name must exist as a
-            // physical column of the host table. A reference to another context
-            // or calculated column is rejected here, since those are not
-            // physical columns.
+            // Every bare (unqualified) referenced column must exist on the host
+            // table. column_references() also yields qualified columns' names,
+            // so a name belonging to a validated cross-table reference is
+            // tolerated here.
             for col_ref in cc.expression().column_references() {
-                if table.column(col_ref).is_err() {
+                if table.column(col_ref).is_err() && !cross_table_cols.contains(col_ref) {
                     return Err(EngineError::ExpressionColumnNotFound {
                         table: cc.table().to_string(),
                         column: col_ref.to_string(),

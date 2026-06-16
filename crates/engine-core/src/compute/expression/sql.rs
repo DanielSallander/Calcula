@@ -30,24 +30,29 @@ impl Expression {
         SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier).render(self)
     }
 
-    /// Render this expression as a DataFusion SQL fragment with every column
-    /// reference qualified by `table_alias` (`alias."col"`).
+    /// Render this expression as a DataFusion SQL fragment, qualifying each
+    /// column reference to the table it belongs to.
     ///
-    /// Both bare (`ColumnRef`) and table-qualified (`QualifiedColumnRef`)
-    /// references are prefixed with the same alias — the caller guarantees all
-    /// references belong to one table. This is the rendering used to inject a
-    /// context-driven calculated column's (literal-substituted) CASE expression
-    /// into a `GROUP BY` over a joined query, where bare column names would be
-    /// ambiguous.
+    /// A **bare** reference (`ColumnRef`) is qualified with `host_table` (the
+    /// column's host table, supplied already lowercased); a **table-qualified**
+    /// reference (`QualifiedColumnRef`) is qualified with its own lowercased
+    /// table name. This is the rendering used to inject a context-driven
+    /// calculated column's (literal-substituted) CASE expression into a
+    /// `GROUP BY` over a joined query: the host table's columns and any
+    /// fan-out-safe related table's columns are each qualified correctly, so the
+    /// SQL is unambiguous. For a host-table-only column every reference resolves
+    /// to `host_table`, identical to a single fixed-alias rendering.
     ///
     /// # Errors
     ///
     /// Same conditions as [`Expression::to_sql_string`]; in particular an
     /// unexpanded [`Expression::MeasureRef`] fails closed.
-    pub fn to_qualified_sql(&self, table_alias: &str) -> EngineResult<String> {
+    pub fn to_qualified_sql(&self, host_table: &str) -> EngineResult<String> {
         SqlRenderer::new(
             SqlDialect::DataFusion,
-            &TableAliasQualifier { alias: table_alias },
+            &MultiTableQualifier {
+                default_table: host_table,
+            },
         )
         .render(self)
     }

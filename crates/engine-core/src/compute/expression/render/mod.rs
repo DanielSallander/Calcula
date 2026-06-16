@@ -163,6 +163,31 @@ impl ColumnQualifier for LowercaseTableQualifier {
     }
 }
 
+/// Qualifies a table-qualified reference with its own lowercased model table
+/// name (`table."col"`) and a **bare** reference with a fixed default table
+/// (`default."col"`).
+///
+/// Used to render a context-driven calculated column's row-level expression
+/// into a multi-table `GROUP BY`: the column may reference its host table's
+/// columns (written bare or qualified) and, across a fan-out-safe relationship,
+/// a related table's columns (always qualified). Each reference is qualified to
+/// the table it belongs to, so the SQL is unambiguous over the joined query.
+#[derive(Debug, Clone, Copy)]
+pub struct MultiTableQualifier<'a> {
+    /// The default table for **bare** references (the host table), already
+    /// lowercased by the caller.
+    pub default_table: &'a str,
+}
+
+impl ColumnQualifier for MultiTableQualifier<'_> {
+    fn column(&self, table_or_var: Option<&str>, column: &str) -> EngineResult<String> {
+        Ok(match table_or_var {
+            Some(table) => format!("{}.{}", table.to_lowercase(), quote_ident_double(column)),
+            None => format!("{}.{}", self.default_table, quote_ident_double(column)),
+        })
+    }
+}
+
 /// Unified recursive Expression → SQL renderer.
 ///
 /// Construct with [`SqlRenderer::new`], optionally enable KEEP-to-CASE-WHEN

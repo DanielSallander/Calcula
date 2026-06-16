@@ -205,6 +205,54 @@ fn table_alias_qualifier_overrides_existing_qualification() {
 }
 
 #[test]
+fn multi_table_qualifier_qualifies_each_ref_to_its_own_table() {
+    // Qualified references go to their own lowercased table; bare references go
+    // to the host (default) table. This is the context-driven calculated column
+    // rendering used for cross-table references.
+    let qualifier = MultiTableQualifier {
+        default_table: "invoice",
+    };
+    let renderer = SqlRenderer::new(SqlDialect::DataFusion, &qualifier);
+    // Host column (qualified with the host table) → host.
+    assert_eq!(
+        renderer.render(&qualified_col("Invoice", "paid_date")).unwrap(),
+        "invoice.\"paid_date\""
+    );
+    // Related table column → its own table.
+    assert_eq!(
+        renderer.render(&qualified_col("Customer", "tier")).unwrap(),
+        "customer.\"tier\""
+    );
+    // Bare column → the default (host) table.
+    assert_eq!(renderer.render(&col("paid_date")).unwrap(), "invoice.\"paid_date\"");
+}
+
+#[test]
+fn multi_table_qualifier_renders_mixed_case_expression() {
+    // A CASE referencing two tables renders each side to its own table.
+    let qualifier = MultiTableQualifier {
+        default_table: "invoice",
+    };
+    let expr = if_expr(
+        compare(
+            qualified_col("Invoice", "paid_date"),
+            ComparisonOp::LessThanOrEqual,
+            Expression::LiteralDate(19_813),
+        ),
+        qualified_col("Customer", "tier"),
+        lit_str("Unpaid"),
+    );
+    let sql = SqlRenderer::new(SqlDialect::DataFusion, &qualifier)
+        .render(&expr)
+        .unwrap();
+    assert_eq!(
+        sql,
+        "CASE WHEN (invoice.\"paid_date\" <= CAST(19813 AS DATE)) \
+         THEN customer.\"tier\" ELSE 'Unpaid' END"
+    );
+}
+
+#[test]
 fn countrows_keep_pushdown_preserves_legacy_count_star() {
     // Legacy PostgreSQL pushdown rendered COUNTROWS with a KEEP operand as a
     // plain COUNT(*) (the filter does not travel) — preserved byte-for-byte.

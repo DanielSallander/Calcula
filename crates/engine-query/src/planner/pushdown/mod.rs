@@ -383,9 +383,16 @@ impl PushdownPlanner {
             .collect();
         let has_context_columns = !context_columns_on_axis.is_empty();
         // The scalar measures referenced by those columns, plus the tables they
-        // aggregate over (added to `all_tables` below).
+        // aggregate over (added to `all_tables` below). Scalar source tables are
+        // probed, NOT joined, so they are later excluded from the RLS
+        // query-table set (a role on one must restrict via two-phase propagation
+        // or fail closed, never via a join that does not exist).
         let mut context_scalar_measures: Vec<Measure> = Vec::new();
         let mut context_scalar_tables: Vec<String> = Vec::new();
+        // Tables a context column references across a (fan-out-safe) relationship
+        // in its row-level expression (v2 cross-table references). These ARE
+        // LEFT JOINed into the main statement, so they stay in the RLS set.
+        let mut context_ref_tables: Vec<String> = Vec::new();
         for cc in &context_columns_on_axis {
             for m_name in cc.expression().measure_references() {
                 let measure = model.measure(m_name).map_err(QueryError::Engine)?;
@@ -406,6 +413,15 @@ impl PushdownPlanner {
                     .any(|m| m.name().eq_ignore_ascii_case(measure.name()))
                 {
                     context_scalar_measures.push(measure.clone());
+                }
+            }
+            for (ref_table, _) in cc.expression().qualified_column_references() {
+                if !ref_table.eq_ignore_ascii_case(cc.table())
+                    && !context_ref_tables
+                        .iter()
+                        .any(|x| x.eq_ignore_ascii_case(ref_table))
+                {
+                    context_ref_tables.push(ref_table.to_string());
                 }
             }
         }
@@ -575,6 +591,7 @@ impl PushdownPlanner {
             .chain(userelationship_tables.iter().map(|s| s.as_str()))
             .chain(time_intelligence_tables.iter().map(|s| s.as_str()))
             .chain(context_scalar_tables.iter().map(|s| s.as_str()))
+            .chain(context_ref_tables.iter().map(|s| s.as_str()))
             .chain(in_filter_tables.iter().copied())
             .chain(or_filter_table.iter().copied())
             .collect();

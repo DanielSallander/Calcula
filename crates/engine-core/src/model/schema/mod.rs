@@ -686,12 +686,18 @@ impl DataModel {
     /// side and the other is on the "to" side. Inactive relationships (used via
     /// `USERELATIONSHIP`) are skipped.
     pub fn find_relationship(&self, table_a: &str, table_b: &str) -> EngineResult<&Relationship> {
+        // Table names are matched case-insensitively, consistent with the rest
+        // of the engine's identifier resolution (and with build-time validation
+        // of cross-table references). Existing callers pass canonical model
+        // names, so this only widens matching for differently-cased inputs.
         self.relationships
             .iter()
             .find(|r| {
                 r.is_active()
-                    && ((r.from_table() == table_a && r.to_table() == table_b)
-                        || (r.from_table() == table_b && r.to_table() == table_a))
+                    && ((r.from_table().eq_ignore_ascii_case(table_a)
+                        && r.to_table().eq_ignore_ascii_case(table_b))
+                        || (r.from_table().eq_ignore_ascii_case(table_b)
+                            && r.to_table().eq_ignore_ascii_case(table_a)))
             })
             .ok_or_else(|| {
                 EngineError::RelationshipNotFound(format!(
@@ -712,8 +718,10 @@ impl DataModel {
         self.relationships
             .iter()
             .find(|r| {
-                (r.from_table() == table_a && r.to_table() == table_b)
-                    || (r.from_table() == table_b && r.to_table() == table_a)
+                (r.from_table().eq_ignore_ascii_case(table_a)
+                    && r.to_table().eq_ignore_ascii_case(table_b))
+                    || (r.from_table().eq_ignore_ascii_case(table_b)
+                        && r.to_table().eq_ignore_ascii_case(table_a))
             })
             .ok_or_else(|| {
                 EngineError::RelationshipNotFound(format!(
@@ -744,6 +752,23 @@ mod tests {
         assert_eq!(deserialized.relationships().len(), 1);
         assert_eq!(deserialized.table("Sales").unwrap().columns().len(), 4);
         assert!(deserialized.validate().is_ok());
+    }
+
+    #[test]
+    fn find_relationship_matches_table_names_case_insensitively() {
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products_table())
+            .add_relationship(sales_products_relationship())
+            .build()
+            .unwrap();
+        // Canonical case, lowercase, and uppercase all resolve the same
+        // relationship — consistent with build-time cross-table validation.
+        assert!(model.find_relationship("Sales", "Products").is_ok());
+        assert!(model.find_relationship("sales", "products").is_ok());
+        assert!(model.find_relationship("SALES", "PRODUCTS").is_ok());
+        assert!(model.find_relationship("products", "sales").is_ok());
+        assert!(model.find_any_relationship("sales", "PRODUCTS").is_ok());
     }
 
     #[test]

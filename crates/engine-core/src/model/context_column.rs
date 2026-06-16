@@ -120,7 +120,7 @@ mod tests {
     };
     use crate::compute::measure::{sum_measure, Measure};
     use crate::error::EngineError;
-    use crate::model::{Column, DataModel, Table};
+    use crate::model::{Column, DataModel, Relationship, Table};
     use crate::types::DataType;
 
     /// A model with `Invoice(paid_date, amount)` + `Calendar(date)`, a
@@ -311,6 +311,100 @@ mod tests {
             DataType::String,
         );
         let err = model_with_context_columns(vec![cc]).unwrap_err();
+        assert!(
+            matches!(err, EngineError::InvalidContextColumn { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Invoice (paid_date, amount, customer_id) -> Customer (id, tier)
+    /// ManyToOne, plus a disconnected Calendar (date), a Revenue + AsOfDate
+    /// measure, and the given context columns.
+    fn model_with_customer(cols: Vec<ContextColumn>) -> crate::error::EngineResult<DataModel> {
+        let mut b = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Invoice",
+                    vec![
+                        Column::new("paid_date", DataType::Date),
+                        Column::new("amount", DataType::Float64),
+                        Column::new("customer_id", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Customer",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("tier", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Invoice_Customer",
+                "Invoice",
+                "customer_id",
+                "Customer",
+                "id",
+            ))
+            .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+            .add_measure(Measure::new(
+                "AsOfDate",
+                agg(AggregateOp::Max, qualified_col("Calendar", "date")),
+            ));
+        for c in cols {
+            b = b.add_context_column(c);
+        }
+        b.build()
+    }
+
+    /// `IF(Invoice[paid_date] <= [AsOfDate], Customer[tier], "Unpaid")`.
+    fn paid_tier_expr() -> Expression {
+        if_expr(
+            compare(
+                qualified_col("Invoice", "paid_date"),
+                ComparisonOp::LessThanOrEqual,
+                Expression::MeasureRef("AsOfDate".into()),
+            ),
+            qualified_col("Customer", "tier"),
+            lit_str("Unpaid"),
+        )
+    }
+
+    #[test]
+    fn safe_cross_table_reference_is_accepted() {
+        // Invoice (many) -> Customer (one): a context column on Invoice may
+        // reference Customer[tier]; the join cannot inflate the fact.
+        let cc = ContextColumn::new("PaidTier", "Invoice", paid_tier_expr(), DataType::String);
+        let model = model_with_customer(vec![cc]);
+        assert!(model.is_ok(), "got: {:?}", model.err());
+    }
+
+    #[test]
+    fn unsafe_cross_table_reference_is_rejected() {
+        // A context column on Customer (the ONE side) referencing Invoice (the
+        // MANY side) would fan out — rejected.
+        let cc = ContextColumn::new(
+            "Bad",
+            "Customer",
+            if_expr(
+                compare(
+                    qualified_col("Invoice", "amount"),
+                    ComparisonOp::GreaterThan,
+                    Expression::LiteralFloat(0.0),
+                ),
+                lit_str("Has"),
+                lit_str("None"),
+            ),
+            DataType::String,
+        );
+        let err = model_with_customer(vec![cc]).unwrap_err();
         assert!(
             matches!(err, EngineError::InvalidContextColumn { .. }),
             "got: {err:?}"

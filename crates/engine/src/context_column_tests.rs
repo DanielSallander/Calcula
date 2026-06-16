@@ -29,7 +29,8 @@ use chrono::NaiveDate;
 use crate::{
     expression as expr, sum_measure, AggregateOp, Column, ColumnRef, ComparisonOp, ContextColumn,
     DataModel, DataType, Engine, Expression, FilterCondition, FilterOperator, InFilter, Measure,
-    QueryError, QueryRequest, SourceBinding, StorageMode, Table, TotalsMode,
+    QueryError, QueryRequest, Relationship, SecurityRole, SourceBinding, StorageMode, Table,
+    TotalsMode,
 };
 
 /// Days since the Unix epoch for a calendar date (a `Date32` value).
@@ -297,4 +298,362 @@ async fn metadata_tags_context_column_as_dimension() {
         status.description.as_deref(),
         Some("Paid or Open relative to the as-of date")
     );
+}
+
+// ---- v2: cross-table references ----
+//
+// Invoice (paid_date, amount, customer_id) -> Customer (id, tier) ManyToOne,
+// plus the disconnected Calendar. Context column:
+//   PaidTier = IF(Invoice[paid_date] <= [AsOfDate], Customer[tier], "Unpaid")
+// Paid invoices are segmented by their customer's tier; unpaid ones lumped.
+
+/// `Revenue` summed across all rows (any group), to test row integrity.
+fn total_revenue(batches: &[RecordBatch]) -> f64 {
+    let mut sum = 0.0;
+    for b in batches {
+        let m = b.column(col_idx(b, "Revenue"));
+        for row in 0..b.num_rows() {
+            if let Some(a) = m.as_any().downcast_ref::<Float64Array>() {
+                if !a.is_null(row) {
+                    sum += a.value(row);
+                }
+            }
+        }
+    }
+    sum
+}
+
+/// `PaidTier -> Revenue` (NULL group key folded to "(null)").
+fn by_paid_tier(batches: &[RecordBatch]) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    for b in batches {
+        let g = b.column(col_idx(b, "PaidTier"));
+        let m = b.column(col_idx(b, "Revenue"));
+        for row in 0..b.num_rows() {
+            let key = if g.is_null(row) {
+                "(null)".to_string()
+            } else {
+                str_key(g.as_ref(), row)
+            };
+            let v = m
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|a| a.value(row))
+                .expect("float measure");
+            *out.entry(key).or_insert(0.0) += v;
+        }
+    }
+    out
+}
+
+fn cross_table_model() -> DataModel {
+    let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
+    let paid_tier = expr::if_expr(
+        expr::compare(
+            expr::qualified_col("Invoice", "paid_date"),
+            ComparisonOp::LessThanOrEqual,
+            Expression::MeasureRef("AsOfDate".into()),
+        ),
+        expr::qualified_col("Customer", "tier"),
+        expr::lit_str("Unpaid"),
+    );
+    DataModel::builder()
+        .add_table(in_mem(
+            Table::new(
+                "Invoice",
+                vec![
+                    Column::new("paid_date", DataType::Date),
+                    Column::new("amount", DataType::Float64),
+                    Column::new("customer_id", DataType::Int64),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_table(in_mem(
+            Table::new(
+                "Customer",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("tier", DataType::String),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_table(in_mem(
+            Table::new(
+                "Calendar",
+                vec![Column::new("date", DataType::Date)],
+            )
+            .unwrap(),
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Invoice_Customer",
+            "Invoice",
+            "customer_id",
+            "Customer",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+        .add_measure(Measure::new(
+            "AsOfDate",
+            expr::agg(AggregateOp::Max, expr::qualified_col("Calendar", "date")),
+        ))
+        .add_context_column(ContextColumn::new(
+            "PaidTier",
+            "Invoice",
+            paid_tier,
+            DataType::String,
+        ))
+        .build()
+        .unwrap()
+}
+
+/// `with_orphan` adds a 5th invoice whose customer_id (99) has no Customer row.
+fn cross_table_engine(with_orphan: bool) -> Engine {
+    let mut engine = Engine::new(cross_table_model());
+    for t in ["Invoice", "Customer", "Calendar"] {
+        engine.bind_table(t, 0, SourceBinding::new("public", &t.to_lowercase()));
+    }
+    let (mut dates, mut amounts, mut custs) = (
+        vec![days(2024, 1, 15), days(2024, 3, 15), days(2024, 6, 15), days(2024, 12, 15)],
+        vec![100.0, 50.0, 30.0, 20.0],
+        vec![1i64, 2, 1, 2],
+    );
+    if with_orphan {
+        dates.push(days(2024, 2, 15));
+        amounts.push(70.0);
+        custs.push(99);
+    }
+    engine
+        .cache
+        .store(
+            "Invoice",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("paid_date", ArrowType::Date32, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                    Field::new("customer_id", ArrowType::Int64, true),
+                ])),
+                vec![
+                    Arc::new(Date32Array::from(dates)),
+                    Arc::new(Float64Array::from(amounts)),
+                    Arc::new(Int64Array::from(custs)),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Customer",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("id", ArrowType::Int64, true),
+                    Field::new("tier", ArrowType::Utf8, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1i64, 2])),
+                    Arc::new(StringArray::from(vec!["Gold", "Silver"])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Calendar",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                vec![Arc::new(Date32Array::from(vec![
+                    days(2024, 1, 31),
+                    days(2024, 2, 29),
+                    days(2024, 3, 31),
+                ]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+}
+
+fn group_by_paid_tier() -> QueryRequest {
+    QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Invoice", "PaidTier")],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn cross_table_segmentation_by_customer_tier() {
+    // AsOfDate = 2024-03-31. Paid invoices: 100 (Gold), 50 (Silver). Unpaid:
+    // 30 + 20.
+    let engine = cross_table_engine(false);
+    let r = by_paid_tier(&engine.query(group_by_paid_tier()).await.unwrap());
+    assert_eq!(r["Gold"], 100.0);
+    assert_eq!(r["Silver"], 50.0);
+    assert_eq!(r["Unpaid"], 50.0);
+}
+
+/// Like `cross_table_model` but with a security role restricting Customer to
+/// the `Gold` tier (so only customer 1 is visible).
+fn rls_cross_table_model() -> DataModel {
+    let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
+    let paid_tier = expr::if_expr(
+        expr::compare(
+            expr::qualified_col("Invoice", "paid_date"),
+            ComparisonOp::LessThanOrEqual,
+            Expression::MeasureRef("AsOfDate".into()),
+        ),
+        expr::qualified_col("Customer", "tier"),
+        expr::lit_str("Unpaid"),
+    );
+    DataModel::builder()
+        .add_table(in_mem(
+            Table::new(
+                "Invoice",
+                vec![
+                    Column::new("paid_date", DataType::Date),
+                    Column::new("amount", DataType::Float64),
+                    Column::new("customer_id", DataType::Int64),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_table(in_mem(
+            Table::new(
+                "Customer",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("tier", DataType::String),
+                ],
+            )
+            .unwrap(),
+        ))
+        .add_table(in_mem(
+            Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap(),
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Invoice_Customer",
+            "Invoice",
+            "customer_id",
+            "Customer",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+        .add_measure(Measure::new(
+            "AsOfDate",
+            expr::agg(AggregateOp::Max, expr::qualified_col("Calendar", "date")),
+        ))
+        .add_context_column(ContextColumn::new(
+            "PaidTier",
+            "Invoice",
+            paid_tier,
+            DataType::String,
+        ))
+        .add_security_role(SecurityRole::new("GoldOnly").with_filter(
+            "Customer",
+            "tier",
+            ComparisonOp::Equal,
+            "Gold",
+        ))
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rls_on_referenced_table_restricts_the_fact_no_leak() {
+    // Role GoldOnly restricts Customer to tier='Gold' (customer 1). A context
+    // column references Customer[tier]. The role MUST restrict the fact to
+    // customer 1's invoices — inv1 (100, Paid→Gold) and inv3 (30, Unpaid) —
+    // NOT leak customer 2's invoices (Silver 50, Unpaid 20). Total = 130.
+    let mut engine = Engine::new(rls_cross_table_model());
+    for t in ["Invoice", "Customer", "Calendar"] {
+        engine.bind_table(t, 0, SourceBinding::new("public", &t.to_lowercase()));
+    }
+    engine
+        .cache
+        .store(
+            "Invoice",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("paid_date", ArrowType::Date32, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                    Field::new("customer_id", ArrowType::Int64, true),
+                ])),
+                vec![
+                    Arc::new(Date32Array::from(vec![
+                        days(2024, 1, 15),
+                        days(2024, 3, 15),
+                        days(2024, 6, 15),
+                        days(2024, 12, 15),
+                    ])),
+                    Arc::new(Float64Array::from(vec![100.0, 50.0, 30.0, 20.0])),
+                    Arc::new(Int64Array::from(vec![1i64, 2, 1, 2])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Customer",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("id", ArrowType::Int64, true),
+                    Field::new("tier", ArrowType::Utf8, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1i64, 2])),
+                    Arc::new(StringArray::from(vec!["Gold", "Silver"])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Calendar",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                vec![Arc::new(Date32Array::from(vec![
+                    days(2024, 1, 31),
+                    days(2024, 3, 31),
+                ]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine.set_active_role(Some("GoldOnly".into()));
+
+    let batches = engine.query(group_by_paid_tier()).await.unwrap();
+    let total = total_revenue(&batches);
+    assert_eq!(
+        total, 130.0,
+        "role must restrict the fact to Gold-customer invoices (100+30), got {total}"
+    );
+    let r = by_paid_tier(&batches);
+    assert_eq!(r.get("Gold"), Some(&100.0));
+    assert_eq!(r.get("Unpaid"), Some(&30.0));
+    assert!(r.get("Silver").is_none(), "Silver-customer rows must not leak: {r:?}");
+}
+
+#[tokio::test]
+async fn left_join_keeps_unmatched_fact_rows_without_inflation() {
+    // The Customer LEFT JOIN must keep an invoice whose customer is missing
+    // (orphan FK) — an INNER JOIN would drop its $70 — and must not multiply
+    // any fact row. Total revenue = 100+50+30+20+70 = 270 either way it must
+    // hold; the orphan lands in the NULL-tier group.
+    let engine = cross_table_engine(true);
+    let batches = engine.query(group_by_paid_tier()).await.unwrap();
+    assert_eq!(total_revenue(&batches), 270.0, "no rows dropped or duplicated");
+    let r = by_paid_tier(&batches);
+    assert_eq!(r["Gold"], 100.0);
+    assert_eq!(r["Silver"], 50.0);
+    assert_eq!(r["Unpaid"], 50.0);
+    assert_eq!(r["(null)"], 70.0, "orphan-FK paid invoice kept with NULL tier");
 }

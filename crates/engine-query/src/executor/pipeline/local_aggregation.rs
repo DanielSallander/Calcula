@@ -1487,6 +1487,57 @@ impl QueryExecutor {
             )?;
         }
 
+        // Add LEFT JOINs for tables a context-driven calculated column
+        // references across a relationship in its row-level expression
+        // (cross-table references). LEFT JOIN keeps every fact row — an
+        // unmatched row yields NULL columns, which the CASE evaluates
+        // accordingly — whereas an INNER JOIN would silently drop rows and
+        // undercount the aggregate. The reference is validated at model-build
+        // time to be a fan-out-safe single hop (the fact is the many side), so
+        // the join cannot multiply fact rows; the safety is re-checked here as
+        // defense in depth. Supported only when the column's host is the fact
+        // table being aggregated; a cross-table reference from a context column
+        // on a dimension fails closed (its multi-level join is not built).
+        if has_context_columns {
+            for dim in group_by {
+                let Some(cc) = model
+                    .context_column(&dim.column)
+                    .filter(|cc| cc.table().eq_ignore_ascii_case(&dim.table))
+                else {
+                    continue;
+                };
+                for (ref_table, _) in cc.expression().qualified_column_references() {
+                    if ref_table.eq_ignore_ascii_case(cc.table()) {
+                        continue; // a host-table column
+                    }
+                    if !cc.table().eq_ignore_ascii_case(fact_model_name) {
+                        return Err(ctx_col_unsupported(
+                            "a cross-table reference from a context column whose host table is \
+                             not the fact table being aggregated",
+                        ));
+                    }
+                    let ref_lower = ref_table.to_lowercase();
+                    if joined_tables.contains(&ref_lower) {
+                        continue;
+                    }
+                    let rel = model
+                        .find_relationship(fact_model_name, ref_table)
+                        .map_err(crate::error::QueryError::Engine)?;
+                    if !rel.lookup_safe_from(fact_model_name) {
+                        return Err(ctx_col_unsupported(
+                            "a cross-table reference across a relationship that could multiply \
+                             fact rows (not a fan-out-safe single hop)",
+                        ));
+                    }
+                    let left_is_from = rel.from_table() == fact_model_name;
+                    let on_clause = rel.build_on_clause(fact_table, &ref_lower, left_is_from);
+                    sql.push_str(&format!(" LEFT JOIN {ref_lower} ON {on_clause}"));
+                    join_descriptions.push(on_clause);
+                    joined_tables.insert(ref_lower);
+                }
+            }
+        }
+
         // Add JOINs for tables referenced by context filters (KEEP, etc.).
         // For unsafe relationships (ManyToMany, non-equi), use EXISTS subquery
         // instead of JOIN to avoid row explosion.
