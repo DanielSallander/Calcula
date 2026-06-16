@@ -45,6 +45,7 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `9` | Semi-additive balances `CLOSINGBALANCE` / `OPENINGBALANCE` — expression AST gained `SemiAdditiveBalance`. |
 | `10` | KPIs — model gained `kpis` (author-defined status markup over a base measure: target + status bands). |
 | `11` | Dynamic row-level security — a role's `FilterPredicate` gained a `dynamic` field (`USERNAME()` / `CUSTOMDATA()` identity tokens). |
+| `12` | Context-driven calculated columns — model gained `context_columns` (a groupable column whose row-level expression resolves a scalar measure from the query's filter context). |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
 
@@ -209,6 +210,35 @@ New `Engine::add_csv_source(ConnectionTarget, AuthMethod) -> ConnectorResult<usi
 ## Parquet file connector
 
 New `Engine::add_parquet_source(ConnectionTarget, AuthMethod) -> ConnectorResult<usize>` registers a directory of Apache Parquet files (`<dir>/<table>.parquet`) as a source — the standard columnar interchange format, for data-lake / exported analytical data with zero database setup. Same contract as the [CSV connector](#csv-file-connector): `target.database` is the directory, `target.default_schema` (default `"public"`) is the cosmetic schema, only `AuthMethod::Integrated` is accepted, scalar `filters` / `in_filters` / `or_groups` are applied locally, and table names are validated against path traversal. Unlike CSV, Parquet embeds its Arrow schema, so introspection is **exact** (no header inference). One file per table; types the engine cannot model (nested list/struct) fall back to `String`. `bi_engine::ParquetConnector` / `AnyConnector::Parquet`.
+
+## Context-driven calculated columns (format version 12)
+
+The model gained `context_columns: Vec<ContextColumn>` — a **groupable column whose row-level value is computed per query from a scalar measure resolved against the query's filter context**. It is "dynamic segmentation as a first-class axis": the buckets re-derive from the slicers and can be grouped, ordered, and drilled like an ordinary dimension.
+
+`ContextColumn { name, table, expression, data_type, description }` — builder `ContextColumn::new(name, table, expression, data_type).with_description(...)`, added via `DataModelBuilder::add_context_column`; accessors `DataModel::context_columns()` / `context_column(name)` / `context_columns_for_table(table)`. `bi_engine::ContextColumn`.
+
+**What it is.** Like a `CalculatedColumn`, but the row-level `expression` may reference a scalar **measure** (`Expression::MeasureRef`). At query time, each referenced measure is evaluated **ungrouped** under the query's filters, substituted as a literal, and the resulting CASE is rendered as a GROUP BY key. Example:
+
+```text
+PaymentStatus = IF(Invoice[paid_date] <= [AsOfDate], "Paid", "Open")
+```
+
+with `AsOfDate = MAX(Calendar[date])`. Grouping by `PaymentStatus` splits revenue into Paid/Open **as of the slicer's date**; changing the date slice moves the as-of date and re-derives the split.
+
+**Build-time validation** (`add_context_column` → `build()`): unique name; the table must exist; the name must not collide with a physical or calculated column; every referenced measure and column must exist; and the expression must be **row-level apart from its measure references** — substituting every reference with a placeholder must leave no aggregates, no context operations, and no window functions (a bare `SUM(...)` directly in the column is rejected; `[Measure]` is allowed). Errors surface as `EngineError::InvalidContextColumn { name, reason }`.
+
+**Why it's safe (no silently-wrong numbers).** The scalar is resolved **only from the filters**, never from the grouping the column defines — it is evaluated ungrouped over the filter-restricted source, which makes a circular definition structurally impossible. The result cache keys on the request's filters and the model version, and the scalar is a deterministic function of those, so two queries with different slices get different cache entries — a slice change never serves a stale segmentation.
+
+**v1 limits (fail closed with `QueryError::InvalidQuery` / `EngineError`):**
+- Each referenced scalar measure must be a **single aggregate over one table** (e.g. `MAX`, `MIN`, `SUM`) with **no context operations**. A bare `TODAY()` / `NOW()` is therefore rejected at query time (it is not an aggregate).
+- The row-level expression may reference only the **host table's** physical columns (and scalar measures). A reference to another table — even a related one — is rejected at build time (`InvalidContextColumn`); cross-table row-level references are deferred.
+- A scalar that resolves to **NULL** under the current filters (e.g. an empty filtered source) is an error, not a guess; an unsupported scalar type (timestamp, interval, …) is also an error.
+- Executes **locally only** (never pushed to a source).
+- Not combined in one query with: `TotalsMode::Rollup`, a ragged hierarchy, lookup columns, a calculation group, QUERY-in-VAR / window / time-intelligence measures, measures from multiple fact tables, or a many-to-many / non-equi group-by dimension. Request those separately.
+
+**Scalar determinism.** The segmentation is correct and cache-safe as long as the scalar measure is a deterministic function of the data and filters. The cache keys on `filters`, `in_filters`, `or_filters`, and the model version, so a slice change always re-derives the split. The one exception is the engine-wide `TODAY()` / `NOW()` cache-staleness limitation: if a scalar's aggregate reads a calculated column that itself uses `TODAY()`/`NOW()`, its value changes over wall-clock time without changing the cache key (the same caveat applies to any measure using those functions). For a stable as-of axis, drive it from a real date column / slicer rather than a clock function.
+
+In results and `query_with_meta`, a context column appears as an ordinary **dimension** column (`ResultColumnKind::Dimension`) attributed to its host table, carrying its `description`.
 
 ## Pivot-shaped queries: ordering, limit, totals
 

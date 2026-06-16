@@ -309,6 +309,144 @@ impl Expression {
         }
     }
 
+    /// Replace every [`Expression::MeasureRef`] node whose name is a key in
+    /// `env` with the bound replacement expression, returning the rewritten
+    /// clone. Measure references not present in `env` are left unchanged.
+    ///
+    /// This powers context-driven calculated columns: a measure reference such
+    /// as `[AsOfDate]` is resolved to a single scalar per query and substituted
+    /// here as a literal, after which the column is an ordinary row-level
+    /// expression that can be rendered into a `GROUP BY` key.
+    ///
+    /// Recursion deliberately covers only the **row-level** node set (the
+    /// nodes a valid context column may contain). It does **not** descend into
+    /// aggregate, window, or context-operation nodes — a context column is
+    /// validated to contain none of those outside a `MeasureRef`, and this same
+    /// property makes the function a validation primitive: substituting every
+    /// measure reference with a placeholder and then checking
+    /// [`Expression::has_aggregate`]/[`Expression::has_context_ops`] rejects a
+    /// bare aggregate (e.g. `SUM([m])`) because the surviving `Aggregate` node
+    /// is never entered. If a `MeasureRef` ever survives substitution (an
+    /// unexpected node held one), SQL rendering fails closed rather than
+    /// producing a wrong value.
+    pub fn substitute_measure_refs(
+        &self,
+        env: &std::collections::HashMap<String, Expression>,
+    ) -> Expression {
+        match self {
+            Expression::MeasureRef(name) => {
+                env.get(name).cloned().unwrap_or_else(|| self.clone())
+            }
+            Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+                left: Box::new(left.substitute_measure_refs(env)),
+                op: *op,
+                right: Box::new(right.substitute_measure_refs(env)),
+            },
+            Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
+                function: *function,
+                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+            },
+            Expression::TextFunc { function, args } => Expression::TextFunc {
+                function: *function,
+                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+            },
+            Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+                function: *function,
+                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+            },
+            Expression::Comparison { left, op, right } => Expression::Comparison {
+                left: Box::new(left.substitute_measure_refs(env)),
+                op: *op,
+                right: Box::new(right.substitute_measure_refs(env)),
+            },
+            Expression::And(left, right) => Expression::And(
+                Box::new(left.substitute_measure_refs(env)),
+                Box::new(right.substitute_measure_refs(env)),
+            ),
+            Expression::Or(left, right) => Expression::Or(
+                Box::new(left.substitute_measure_refs(env)),
+                Box::new(right.substitute_measure_refs(env)),
+            ),
+            Expression::Xor(left, right) => Expression::Xor(
+                Box::new(left.substitute_measure_refs(env)),
+                Box::new(right.substitute_measure_refs(env)),
+            ),
+            Expression::Not(inner) => {
+                Expression::Not(Box::new(inner.substitute_measure_refs(env)))
+            }
+            Expression::IsBlank(inner) => {
+                Expression::IsBlank(Box::new(inner.substitute_measure_refs(env)))
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => Expression::If {
+                condition: Box::new(condition.substitute_measure_refs(env)),
+                then_expr: Box::new(then_expr.substitute_measure_refs(env)),
+                else_expr: Box::new(else_expr.substitute_measure_refs(env)),
+            },
+            Expression::Switch {
+                expr,
+                cases,
+                default,
+            } => Expression::Switch {
+                expr: Box::new(expr.substitute_measure_refs(env)),
+                cases: cases
+                    .iter()
+                    .map(|(v, r)| {
+                        (v.substitute_measure_refs(env), r.substitute_measure_refs(env))
+                    })
+                    .collect(),
+                default: default
+                    .as_ref()
+                    .map(|d| Box::new(d.substitute_measure_refs(env))),
+            },
+            Expression::Coalesce(exprs) => Expression::Coalesce(
+                exprs.iter().map(|e| e.substitute_measure_refs(env)).collect(),
+            ),
+            Expression::NullIf { expr, value } => Expression::NullIf {
+                expr: Box::new(expr.substitute_measure_refs(env)),
+                value: Box::new(value.substitute_measure_refs(env)),
+            },
+            Expression::Greatest(args) => Expression::Greatest(
+                args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+            ),
+            Expression::Least(args) => Expression::Least(
+                args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+            ),
+            Expression::IfError { expr, alternate } => Expression::IfError {
+                expr: Box::new(expr.substitute_measure_refs(env)),
+                alternate: Box::new(alternate.substitute_measure_refs(env)),
+            },
+            Expression::InList { expr, values } => Expression::InList {
+                expr: Box::new(expr.substitute_measure_refs(env)),
+                values: values.iter().map(|v| v.substitute_measure_refs(env)).collect(),
+            },
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => Expression::SafeDivide {
+                numerator: Box::new(numerator.substitute_measure_refs(env)),
+                denominator: Box::new(denominator.substitute_measure_refs(env)),
+                alternate: alternate
+                    .as_ref()
+                    .map(|a| Box::new(a.substitute_measure_refs(env))),
+            },
+            Expression::Call { name, args } => Expression::Call {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+            },
+            // Leaf nodes and any non-row-level node (aggregate / window /
+            // context op): clone unchanged. A measure reference buried inside a
+            // non-row-level node is intentionally NOT substituted — context
+            // columns are validated to contain none of those, and a survivor
+            // fails closed at SQL rendering.
+            _ => self.clone(),
+        }
+    }
+
     /// Replace every [`Expression::SelectedMeasure`] node in this tree with
     /// `replacement`, returning the rewritten clone.
     ///
@@ -646,6 +784,7 @@ impl Expression {
             | Expression::MeasureRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank
@@ -756,6 +895,30 @@ pub fn resolve_is_in_scope(expr: &Expression, group_by: &[(String, String)]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- substitute_measure_refs (context-driven calculated columns) ---
+
+    #[test]
+    fn substitute_measure_refs_recurses_into_safe_divide_and_call() {
+        // A MeasureRef buried in a SafeDivide and in a Call must be substituted,
+        // not left to survive (which would fail closed at rendering).
+        let mut env = std::collections::HashMap::new();
+        env.insert("Threshold".to_string(), lit(0.5));
+        let expr = if_expr(
+            compare(
+                safe_divide(col("paid"), col("total"), None),
+                ComparisonOp::GreaterThanOrEqual,
+                Expression::MeasureRef("Threshold".into()),
+            ),
+            call("classify", vec![Expression::MeasureRef("Threshold".into())]),
+            lit_str("Low"),
+        );
+        // Before: the SafeDivide-side and Call-side references are present.
+        assert_eq!(expr.measure_references(), vec!["Threshold"]);
+        // After substitution: no MeasureRef survives anywhere in the tree.
+        let out = expr.substitute_measure_refs(&env);
+        assert!(out.measure_references().is_empty());
+    }
 
     // --- Block / VAR inline substitution tests ---
 

@@ -30,7 +30,8 @@ mod walkers;
 
 pub use builders::{
     agg, and, blank, block, call, clear, clear_except, clear_inner, clear_outer, closing_balance,
-    coalesce, col, compare, count_rows, dates_in_period, datetime_fn, first_value, has_one_value,
+    coalesce, col, compare, count_rows, dates_in_period, datetime_fn, expr_literal_from_scalar,
+    first_value, has_one_value,
     if_error, if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in,
     keep_vars, lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
     period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,
@@ -184,6 +185,17 @@ pub enum Expression {
     LiteralFloat(f64),
     /// A literal integer value.
     LiteralInt(i64),
+    /// A literal date value, stored as a Date32 day count (days since the Unix
+    /// epoch) and rendered as `CAST(<days> AS DATE)`.
+    ///
+    /// There is no date-typed literal in authored expressions (dates appear as
+    /// columns, not constants); this variant exists so a date-typed scalar
+    /// resolved at query time — e.g. the as-of date of a context-driven
+    /// calculated column — can be substituted as a literal that compares
+    /// correctly against a `Date32` column without relying on string→date
+    /// coercion. It is produced transiently during evaluation and never
+    /// persisted in a model file.
+    LiteralDate(i32),
     /// Binary arithmetic: `left op right`.
     BinaryOp {
         /// Left operand.

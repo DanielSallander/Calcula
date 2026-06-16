@@ -305,6 +305,7 @@ impl<'a> ContextResolver<'a> {
             Expression::ColumnRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralBool(_)
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)

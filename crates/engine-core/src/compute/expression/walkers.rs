@@ -21,6 +21,7 @@ impl Expression {
             | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank => {}
@@ -247,6 +248,7 @@ impl Expression {
             | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank => {}
@@ -505,6 +507,7 @@ impl Expression {
             | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank
@@ -689,6 +692,7 @@ impl Expression {
             | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank
@@ -868,6 +872,7 @@ impl Expression {
             | Expression::SelectedMeasure
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank

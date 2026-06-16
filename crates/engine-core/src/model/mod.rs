@@ -4,6 +4,7 @@ pub mod calculated_column;
 pub mod calculation_group;
 pub mod column;
 pub mod context;
+pub mod context_column;
 pub mod global_variable;
 pub mod hierarchy;
 pub mod kpi;
@@ -19,6 +20,7 @@ pub use calculation_group::{
 };
 pub use column::{Column, DateRole};
 pub use context::{ClearTarget, ContextDefinition, ContextOp};
+pub use context_column::ContextColumn;
 pub use global_variable::GlobalVariable;
 pub use hierarchy::{Hierarchy, HierarchyLevel, RaggedBehavior};
 pub use kpi::{Kpi, KpiStatus, KpiTarget, StatusBand};

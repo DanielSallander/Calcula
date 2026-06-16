@@ -29,6 +29,7 @@ use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
 use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
+use crate::model::context_column::ContextColumn;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::Kpi;
@@ -121,8 +122,17 @@ use crate::model::table_variable::TableVariable;
 ///   silent RLS mis-restriction — so the [`ModelFormatTooNew`] gate must refuse
 ///   v11 files on a pre-v11 engine.
 ///
+/// - `12` — the model gained [`context_columns`](DataModel::context_columns),
+///   a list of author-defined context-driven calculated columns. Each is a
+///   groupable column whose row-level expression may reference a scalar measure
+///   that is resolved per query from the filter context (e.g. an as-of payment
+///   flag). This is authored, behavior-bearing content a pre-v12 engine would
+///   silently drop on a load→save round-trip — and a query grouping by such a
+///   column would fail outright — so the [`ModelFormatTooNew`] gate refuses v12
+///   files on a pre-v12 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 11;
+pub const MODEL_FORMAT_VERSION: u32 = 12;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -178,6 +188,13 @@ pub struct DataModel {
     /// files). See [`Kpi`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     kpis: Vec<Kpi>,
+    /// Author-defined context-driven calculated columns: groupable columns
+    /// whose row-level value is computed per query from a scalar measure
+    /// resolved against the query's filter context. Empty by default and
+    /// skipped on serialization when empty (back-compat with pre-v12 model
+    /// files). See [`ContextColumn`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    context_columns: Vec<ContextColumn>,
 }
 
 impl DataModel {
@@ -199,6 +216,7 @@ impl DataModel {
             security_roles: Vec::new(),
             calculation_groups: Vec::new(),
             kpis: Vec::new(),
+            context_columns: Vec::new(),
         }
     }
 
@@ -539,6 +557,35 @@ impl DataModel {
             .collect()
     }
 
+    /// Returns all context-driven calculated columns in the model.
+    pub fn context_columns(&self) -> &[ContextColumn] {
+        &self.context_columns
+    }
+
+    /// Returns the context-driven calculated column with the given name, if any.
+    ///
+    /// Matched case-insensitively (exact match preferred), consistent with the
+    /// engine's table/column identifier resolution.
+    pub fn context_column(&self, name: &str) -> Option<&ContextColumn> {
+        self.context_columns
+            .iter()
+            .find(|c| c.name() == name)
+            .or_else(|| {
+                self.context_columns
+                    .iter()
+                    .find(|c| c.name().eq_ignore_ascii_case(name))
+            })
+    }
+
+    /// Returns context-driven calculated columns defined on a specific table
+    /// (matched case-insensitively).
+    pub fn context_columns_for_table(&self, table_name: &str) -> Vec<&ContextColumn> {
+        self.context_columns
+            .iter()
+            .filter(|cc| cc.table().eq_ignore_ascii_case(table_name))
+            .collect()
+    }
+
     /// Returns all relationships where the given table appears on either side.
     pub fn relationships_for_table(&self, table_name: &str) -> Vec<&Relationship> {
         self.relationships
@@ -589,6 +636,9 @@ impl DataModel {
         }
         for cg in &self.calculation_groups {
             builder = builder.add_calculation_group(cg.clone());
+        }
+        for cc in &self.context_columns {
+            builder = builder.add_context_column(cc.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

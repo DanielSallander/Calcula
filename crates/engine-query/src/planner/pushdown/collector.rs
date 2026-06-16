@@ -454,6 +454,7 @@ impl<'a> ProjectionCollector<'a> {
             } => self.add_qualified(table_or_var, column),
             Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
+            | Expression::LiteralDate(_)
             | Expression::LiteralString(_)
             | Expression::LiteralBool(_)
             | Expression::Blank

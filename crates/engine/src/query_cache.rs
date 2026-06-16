@@ -303,6 +303,24 @@ pub(crate) fn query_cache_key(
         hash_filter_condition(f, &mut hasher);
     }
 
+    // IN-list slicers and cross-column OR slicers. These restrict the result
+    // (and, for a context-driven calculated column, the per-query scalar
+    // resolved from the filter context), so two queries that differ only in
+    // their `in_filters` / `or_filters` must get different keys — otherwise the
+    // cache would serve one slice's answer for another.
+    request.in_filters.len().hash(&mut hasher);
+    for f in &request.in_filters {
+        f.column.hash(&mut hasher);
+        f.values.len().hash(&mut hasher);
+        for v in &f.values {
+            v.hash(&mut hasher);
+        }
+    }
+    request.or_filters.len().hash(&mut hasher);
+    for f in &request.or_filters {
+        hash_filter_condition(f, &mut hasher);
+    }
+
     // Lookups (order matters).
     request.lookups.len().hash(&mut hasher);
     for l in &request.lookups {

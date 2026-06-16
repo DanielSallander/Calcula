@@ -80,6 +80,15 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// A context-driven calculated column definition is invalid.
+    #[error("Invalid context column '{name}': {reason}")]
+    InvalidContextColumn {
+        /// The context column name.
+        name: String,
+        /// Description of the validation failure.
+        reason: String,
+    },
+
     /// An expression references a column that does not exist.
     #[error("Expression references unknown column '{column}' in table '{table}'")]
     ExpressionColumnNotFound {

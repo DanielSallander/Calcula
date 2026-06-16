@@ -1,11 +1,13 @@
 //! Builder for constructing a validated [`DataModel`].
 
+use crate::compute::expression::Expression;
 use crate::compute::measure::{Measure, MeasureGroup};
 use crate::compute::script::{ScriptFunction, ScriptSandboxConfig};
 use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
 use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
+use crate::model::context_column::ContextColumn;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::{Kpi, KpiTarget};
@@ -36,6 +38,7 @@ pub struct DataModelBuilder {
     pub(super) security_roles: Vec<SecurityRole>,
     pub(super) calculation_groups: Vec<CalculationGroup>,
     pub(super) kpis: Vec<Kpi>,
+    pub(super) context_columns: Vec<ContextColumn>,
 }
 
 impl DataModelBuilder {
@@ -60,6 +63,18 @@ impl DataModelBuilder {
     /// Add a calculated column to the model.
     pub fn add_calculated_column(mut self, calculated_column: CalculatedColumn) -> Self {
         self.calculated_columns.push(calculated_column);
+        self
+    }
+
+    /// Add a context-driven calculated column to the model.
+    ///
+    /// See [`ContextColumn`]. Validated at [`build`](Self::build): the
+    /// expression must be row-level apart from its measure references (no
+    /// aggregates or context operations outside a `MeasureRef`), all referenced
+    /// measures and columns must exist, and the name must not collide with a
+    /// physical, calculated, or other context column.
+    pub fn add_context_column(mut self, context_column: ContextColumn) -> Self {
+        self.context_columns.push(context_column);
         self
     }
 
@@ -704,6 +719,146 @@ impl DataModelBuilder {
             }
         }
 
+        // 6a. Validate context-driven calculated columns. Like calculated
+        // columns, but the expression may reference a scalar measure (a
+        // `MeasureRef`) that is resolved per query and substituted as a literal.
+        // The column must therefore be row-level *apart from* its measure
+        // references: substituting every reference with a placeholder must leave
+        // an expression with no aggregates and no context operations (a bare
+        // aggregate like `SUM([m])` is rejected because substitution does not
+        // enter the `Aggregate` node). All referenced measures and columns must
+        // exist, and the name must not collide with a physical, calculated, or
+        // other context column.
+        let mut seen_context_cols = std::collections::HashSet::new();
+        for cc in &self.context_columns {
+            // Name uniqueness among context columns.
+            if !seen_context_cols.insert(cc.name()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate context column '{}'",
+                    cc.name()
+                )));
+            }
+            // No collision with a calculated column.
+            if seen_calc_cols.contains(cc.name()) {
+                return Err(EngineError::InvalidContextColumn {
+                    name: cc.name().to_string(),
+                    reason: format!(
+                        "name conflicts with calculated column '{}'",
+                        cc.name()
+                    ),
+                });
+            }
+
+            // Table must exist.
+            let table = self
+                .tables
+                .iter()
+                .find(|t| t.name() == cc.table())
+                .ok_or_else(|| EngineError::InvalidContextColumn {
+                    name: cc.name().to_string(),
+                    reason: format!("table '{}' not found", cc.table()),
+                })?;
+
+            // Name must not collide with a physical column.
+            if table.column(cc.name()).is_ok() {
+                return Err(EngineError::InvalidContextColumn {
+                    name: cc.name().to_string(),
+                    reason: format!(
+                        "name conflicts with physical column '{}' in table '{}'",
+                        cc.name(),
+                        cc.table()
+                    ),
+                });
+            }
+
+            // Every referenced measure must exist.
+            for measure_name in cc.expression().measure_references() {
+                if !self.measures.iter().any(|m| m.name() == measure_name) {
+                    return Err(EngineError::InvalidContextColumn {
+                        name: cc.name().to_string(),
+                        reason: format!("references unknown measure '[{measure_name}]'"),
+                    });
+                }
+            }
+
+            // Row-level check: replace every measure reference with a
+            // placeholder, then require no aggregates and no context ops in the
+            // remainder. This permits `[m]` inside the column while rejecting a
+            // bare aggregate or a context operation.
+            let placeholders: std::collections::HashMap<String, Expression> = cc
+                .expression()
+                .measure_references()
+                .into_iter()
+                .map(|n| (n.to_string(), Expression::Blank))
+                .collect();
+            let row_level = cc.expression().substitute_measure_refs(&placeholders);
+            if row_level.has_aggregate() {
+                return Err(EngineError::InvalidContextColumn {
+                    name: cc.name().to_string(),
+                    reason: "the expression must be row-level — an aggregate is only allowed \
+                             inside a referenced measure, not directly in the column"
+                        .into(),
+                });
+            }
+            if row_level.has_context_ops() {
+                return Err(EngineError::InvalidContextColumn {
+                    name: cc.name().to_string(),
+                    reason: "the expression must not contain context operations \
+                             (keep/clear/reset/traverse/using/block)"
+                        .into(),
+                });
+            }
+            if row_level.has_window() {
+                return Err(EngineError::InvalidContextColumn {
+                    name: cc.name().to_string(),
+                    reason: "the expression must not contain window or running-total \
+                             functions"
+                        .into(),
+                });
+            }
+
+            // All qualified column references must be on the HOST table and
+            // resolve to a physical column there. v1 renders the column's
+            // expression qualified to its host table, so a reference to a
+            // different table (even a related one) cannot be resolved correctly
+            // — reject it rather than silently mis-qualify or fetch the wrong
+            // data. Cross-table row-level references are deferred to a later
+            // version. Checked before the bare-name loop below so a cross-table
+            // reference reports the precise reason (rather than "column not
+            // found on the host" when the names happen to differ).
+            for (ref_table, col) in cc.expression().qualified_column_references() {
+                if !ref_table.eq_ignore_ascii_case(cc.table()) {
+                    return Err(EngineError::InvalidContextColumn {
+                        name: cc.name().to_string(),
+                        reason: format!(
+                            "references column '{ref_table}[{col}]' on a table other than its \
+                             host table '{}'; a context column's row-level expression may \
+                             reference only its host table's columns (and scalar measures)",
+                            cc.table()
+                        ),
+                    });
+                }
+                if table.column(col).is_err() {
+                    return Err(EngineError::ExpressionColumnNotFound {
+                        table: cc.table().to_string(),
+                        column: col.to_string(),
+                    });
+                }
+            }
+            // Every (bare or qualified) referenced column name must exist as a
+            // physical column of the host table. A reference to another context
+            // or calculated column is rejected here, since those are not
+            // physical columns.
+            for col_ref in cc.expression().column_references() {
+                if table.column(col_ref).is_err() {
+                    return Err(EngineError::ExpressionColumnNotFound {
+                        table: cc.table().to_string(),
+                        column: col_ref.to_string(),
+                    });
+                }
+            }
+        }
+
         // 7. Validate context definitions.
         let mut seen_contexts = std::collections::HashSet::new();
         for ctx in &self.contexts {
@@ -1342,6 +1497,7 @@ impl DataModelBuilder {
             security_roles: self.security_roles,
             calculation_groups: self.calculation_groups,
             kpis: self.kpis,
+            context_columns: self.context_columns,
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

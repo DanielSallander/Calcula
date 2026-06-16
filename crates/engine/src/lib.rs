@@ -104,6 +104,8 @@ mod in_filter_tests;
 #[cfg(test)]
 mod security_tests;
 #[cfg(test)]
+mod context_column_tests;
+#[cfg(test)]
 mod test_fixtures;
 
 use std::sync::Arc;
@@ -154,10 +156,10 @@ pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
-    ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole, FilterPropagation,
-    GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh, JoinCondition, JoinOperator, Kpi,
-    KpiStatus, KpiTarget, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, StatusBand,
-    StorageMode, Table, TableVariable,
+    ContextColumn, ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole,
+    FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh, JoinCondition,
+    JoinOperator, Kpi, KpiStatus, KpiTarget, RaggedBehavior, RefreshStrategy, Relationship,
+    SecurityRole, StatusBand, StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -858,6 +860,14 @@ fn build_result_metadata(
                     c.display_name = column.display_name().map(str::to_string);
                     c.description = column.description().map(str::to_string);
                     c.is_hidden = column.is_hidden();
+                } else if let Some(cc) = model
+                    .context_column(&col_ref.column)
+                    .filter(|cc| cc.table().eq_ignore_ascii_case(&col_ref.table))
+                {
+                    // A context-driven calculated column is not a physical
+                    // column; surface its description so the host can label the
+                    // dynamic-segmentation axis.
+                    c.description = cc.description().map(str::to_string);
                 }
             }
             c

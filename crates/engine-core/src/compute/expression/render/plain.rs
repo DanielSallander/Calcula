@@ -39,6 +39,10 @@ impl SqlRenderer<'_> {
             }
             Expression::LiteralFloat(v) => format!("{v}"),
             Expression::LiteralInt(v) => format!("{v}"),
+            // Date32 day count → a date-typed literal. Casting an integer to
+            // DATE reinterprets it as days since the epoch (Arrow's Int→Date32
+            // cast), so the comparison stays Date32-vs-Date32.
+            Expression::LiteralDate(days) => format!("CAST({days} AS DATE)"),
             Expression::LiteralBool(b) => {
                 if *b {
                     "TRUE".to_string()

@@ -29,6 +29,28 @@ impl Expression {
     pub fn to_sql_string(&self) -> EngineResult<String> {
         SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier).render(self)
     }
+
+    /// Render this expression as a DataFusion SQL fragment with every column
+    /// reference qualified by `table_alias` (`alias."col"`).
+    ///
+    /// Both bare (`ColumnRef`) and table-qualified (`QualifiedColumnRef`)
+    /// references are prefixed with the same alias — the caller guarantees all
+    /// references belong to one table. This is the rendering used to inject a
+    /// context-driven calculated column's (literal-substituted) CASE expression
+    /// into a `GROUP BY` over a joined query, where bare column names would be
+    /// ambiguous.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Expression::to_sql_string`]; in particular an
+    /// unexpanded [`Expression::MeasureRef`] fails closed.
+    pub fn to_qualified_sql(&self, table_alias: &str) -> EngineResult<String> {
+        SqlRenderer::new(
+            SqlDialect::DataFusion,
+            &TableAliasQualifier { alias: table_alias },
+        )
+        .render(self)
+    }
 }
 
 #[cfg(test)]

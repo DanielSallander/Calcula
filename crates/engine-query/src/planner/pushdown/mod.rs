@@ -21,7 +21,7 @@ pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
 pub(crate) use security::{rls_relevance, role_conditions_for_table};
 
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
-use engine_core::compute::expression::FilterPredicate;
+use engine_core::compute::expression::{expand_measure_refs, infer_fact_table, FilterPredicate};
 use engine_core::compute::measure::Measure;
 use engine_core::model::DataModel;
 
@@ -363,6 +363,53 @@ impl PushdownPlanner {
         // local DataFusion SQL — they force LocalAggregation below.
         let hierarchy_needs_local = hierarchy_spec.as_ref().is_some_and(|s| s.needs_local());
 
+        // Context-driven calculated columns referenced on the group-by axis.
+        // Each is rendered, per query, as a CASE expression in the local
+        // DataFusion SQL (its scalar measure resolved from the filter context
+        // and substituted as a literal), so a context column on the axis forces
+        // LocalAggregation. The scalar measures they reference — and the model
+        // tables those measures aggregate over — are pulled into the fetch set
+        // so the executor can resolve the scalar against the (filtered) source
+        // data. The executor re-derives the column definitions from the model;
+        // the planner only needs the force-local signal and the extra fetches.
+        let context_columns_on_axis: Vec<&engine_core::model::ContextColumn> = request
+            .group_by
+            .iter()
+            .filter_map(|c| {
+                model
+                    .context_column(&c.column)
+                    .filter(|cc| cc.table().eq_ignore_ascii_case(&c.table))
+            })
+            .collect();
+        let has_context_columns = !context_columns_on_axis.is_empty();
+        // The scalar measures referenced by those columns, plus the tables they
+        // aggregate over (added to `all_tables` below).
+        let mut context_scalar_measures: Vec<Measure> = Vec::new();
+        let mut context_scalar_tables: Vec<String> = Vec::new();
+        for cc in &context_columns_on_axis {
+            for m_name in cc.expression().measure_references() {
+                let measure = model.measure(m_name).map_err(QueryError::Engine)?;
+                let source_table = if measure.table().is_empty() {
+                    let expanded =
+                        expand_measure_refs(measure.expression(), model).map_err(QueryError::Engine)?;
+                    infer_fact_table(&expanded)
+                } else {
+                    Some(measure.table().to_string())
+                };
+                if let Some(t) = source_table {
+                    if !context_scalar_tables.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                        context_scalar_tables.push(t);
+                    }
+                }
+                if !context_scalar_measures
+                    .iter()
+                    .any(|m| m.name().eq_ignore_ascii_case(measure.name()))
+                {
+                    context_scalar_measures.push(measure.clone());
+                }
+            }
+        }
+
         // Validate ORDER BY targets against group_by and measures.
         validate_order_by(request)?;
 
@@ -527,6 +574,7 @@ impl PushdownPlanner {
             .chain(named_context_tables.iter().map(|s| s.as_str()))
             .chain(userelationship_tables.iter().map(|s| s.as_str()))
             .chain(time_intelligence_tables.iter().map(|s| s.as_str()))
+            .chain(context_scalar_tables.iter().map(|s| s.as_str()))
             .chain(in_filter_tables.iter().copied())
             .chain(or_filter_table.iter().copied())
             .collect();
@@ -558,8 +606,25 @@ impl PushdownPlanner {
         // restriction when the dimension is not otherwise in the query, so we
         // forgo them (documented performance trade-off — one extra fetch buys
         // a correct, un-bypassable restriction).
-        let query_table_set: std::collections::HashSet<String> =
+        let mut query_table_set: std::collections::HashSet<String> =
             unique_tables.iter().map(|t| t.to_string()).collect();
+        // A table pulled in ONLY to probe a context-column scalar is NOT joined
+        // into the main aggregation statement, so its role predicate cannot
+        // restrict a fact via an in-statement join. Remove such tables from the
+        // RLS query-table set: `rls_relevance` treats a role-filtered table that
+        // is "in the query" as already enforceable (the join restricts the
+        // fact). For a scalar-only table that join does not exist, so a role on
+        // it must instead be routed through the enforceable two-phase
+        // propagation path (`rls_extra_tables`) or fail closed — never silently
+        // leave the fact unrestricted. A scalar table that is ALSO a measure or
+        // group-by table is genuinely joined, so it stays.
+        for st in &context_scalar_tables {
+            let joined = measure_tables.iter().any(|m| m.eq_ignore_ascii_case(st))
+                || group_by_tables.iter().any(|g| g.eq_ignore_ascii_case(st));
+            if !joined {
+                query_table_set.retain(|t| !t.eq_ignore_ascii_case(st));
+            }
+        }
         let (rls_relevant, rls_extra_tables) =
             rls_relevance(role_filters, &query_table_set, &measure_tables, model)?;
 
@@ -612,6 +677,7 @@ impl PushdownPlanner {
             && !hierarchy_needs_local
             && !rls_force_local
             && !has_in_filters
+            && !has_context_columns
         {
             // ORDER BY / LIMIT are rendered into the pushed SQL. Sort-by
             // substitution uses `MIN(sort_col)` on the same (single) table.
@@ -717,6 +783,7 @@ impl PushdownPlanner {
             && !hierarchy_needs_local
             && !rls_force_local
             && !has_in_filters
+            && !has_context_columns
         {
             let table_name = all_tables[0];
             if let Ok(req) = build_join_aggregation_request(
@@ -766,6 +833,7 @@ impl PushdownPlanner {
             && !hierarchy_needs_local
             && !rls_force_local
             && !has_in_filters
+            && !has_context_columns
         {
             // Check if all tables share the same connector.
             let first_table = all_tables[0];
@@ -834,11 +902,18 @@ impl PushdownPlanner {
 
         // Compute the exact source columns each fetch needs. Tables whose
         // requirements cannot be statically determined fall back to a full
-        // fetch (empty column list = SELECT *).
+        // fetch (empty column list = SELECT *). The context-column scalar
+        // measures are walked alongside the request measures so their source
+        // columns (e.g. the date column behind an as-of scalar) are fetched.
+        let projection_measures: Vec<Measure> = measures
+            .iter()
+            .cloned()
+            .chain(context_scalar_measures.iter().cloned())
+            .collect();
         let projections = compute_table_projections(
             request,
             model,
-            &measures,
+            &projection_measures,
             &projection_tables,
             &lookup_specs,
             cached_tables,

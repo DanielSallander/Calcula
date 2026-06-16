@@ -517,3 +517,83 @@ pub fn percentile(operand: Expression, percentile_value: Expression) -> Expressi
         percentile: Box::new(percentile_value),
     }
 }
+
+/// Convert a resolved [`ScalarValue`](datafusion::common::ScalarValue) into a
+/// literal [`Expression`] for substitution into a row-level expression.
+///
+/// Used by context-driven calculated columns: the column's scalar measure
+/// (e.g. `[AsOfDate] = MAX(dim_date[date])`) is evaluated once per query, then
+/// the resolved value is converted here and substituted in place of the
+/// `MeasureRef` (see [`Expression::substitute_measure_refs`]).
+///
+/// A `NULL` scalar maps to [`Expression::Blank`]; the caller decides whether a
+/// blank context scalar is acceptable. A date maps to [`Expression::LiteralDate`]
+/// so the comparison stays `Date32`-typed.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InvalidExpression`](crate::error::EngineError::InvalidExpression)
+/// for scalar types not supported as a context scalar in this version
+/// (timestamps, intervals, lists, structs, …) — fail closed rather than coerce
+/// a value that could compare wrongly.
+pub fn expr_literal_from_scalar(
+    scalar: &datafusion::common::ScalarValue,
+) -> crate::error::EngineResult<Expression> {
+    use datafusion::common::ScalarValue as SV;
+    Ok(match scalar {
+        SV::Null => Expression::Blank,
+        SV::Boolean(None)
+        | SV::Float64(None)
+        | SV::Float32(None)
+        | SV::Int64(None)
+        | SV::Int32(None)
+        | SV::Int16(None)
+        | SV::Int8(None)
+        | SV::UInt64(None)
+        | SV::UInt32(None)
+        | SV::UInt16(None)
+        | SV::UInt8(None)
+        | SV::Utf8(None)
+        | SV::LargeUtf8(None)
+        | SV::Date32(None)
+        | SV::Date64(None)
+        | SV::Decimal128(None, _, _) => Expression::Blank,
+        SV::Boolean(Some(b)) => Expression::LiteralBool(*b),
+        SV::Float64(Some(v)) => Expression::LiteralFloat(*v),
+        SV::Float32(Some(v)) => Expression::LiteralFloat(f64::from(*v)),
+        SV::Int64(Some(v)) => Expression::LiteralInt(*v),
+        SV::Int32(Some(v)) => Expression::LiteralInt(i64::from(*v)),
+        SV::Int16(Some(v)) => Expression::LiteralInt(i64::from(*v)),
+        SV::Int8(Some(v)) => Expression::LiteralInt(i64::from(*v)),
+        SV::UInt64(Some(v)) => Expression::LiteralInt(i64::try_from(*v).map_err(|_| {
+            crate::error::EngineError::InvalidExpression(format!(
+                "context scalar {v} exceeds the i64 range"
+            ))
+        })?),
+        SV::UInt32(Some(v)) => Expression::LiteralInt(i64::from(*v)),
+        SV::UInt16(Some(v)) => Expression::LiteralInt(i64::from(*v)),
+        SV::UInt8(Some(v)) => Expression::LiteralInt(i64::from(*v)),
+        SV::Utf8(Some(s)) | SV::LargeUtf8(Some(s)) => Expression::LiteralString(s.clone()),
+        SV::Date32(Some(d)) => Expression::LiteralDate(*d),
+        // Date64 is milliseconds since the epoch; reduce to whole days.
+        SV::Date64(Some(ms)) => Expression::LiteralDate(
+            i32::try_from(ms.div_euclid(86_400_000)).map_err(|_| {
+                crate::error::EngineError::InvalidExpression(format!(
+                    "context scalar date {ms} is out of the Date32 range"
+                ))
+            })?,
+        ),
+        SV::Decimal128(Some(v), _precision, scale) => {
+            // Render as a float for comparison. Precision beyond f64 is lost;
+            // acceptable for a threshold comparison, documented for the host.
+            Expression::LiteralFloat(*v as f64 / 10f64.powi(i32::from(*scale)))
+        }
+        other => {
+            return Err(crate::error::EngineError::InvalidExpression(format!(
+                "a context-driven calculated column scalar resolved to an unsupported type \
+                 ({other:?}); supported types are boolean, integer, float, decimal, string, and \
+                 date"
+            )));
+        }
+    })
+}

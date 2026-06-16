@@ -12,13 +12,14 @@ use tokio_util::sync::CancellationToken;
 use engine_connectors::{FilterCondition, FilterOperator, InFilterCondition};
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{
-    expand_global_variables, expand_measure_refs, ComparisonOp, Expression, FilterPredicate,
+    expand_global_variables, expand_measure_refs, expr_literal_from_scalar, infer_fact_table,
+    ComparisonOp, Expression, FilterPredicate,
 };
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::error::EngineError;
-use engine_core::model::DataModel;
+use engine_core::model::{ContextColumn, DataModel};
 use engine_core::store::InMemoryCache;
 
 use crate::error::QueryResult;
@@ -68,6 +69,15 @@ fn role_filter_condition(predicate: &FilterPredicate) -> FilterCondition {
 /// Used to make the defense-in-depth role re-sealing idempotent.
 fn filter_conditions_equal(a: &FilterCondition, b: &FilterCondition) -> bool {
     a.column == b.column && a.operator == b.operator && a.value == b.value
+}
+
+/// A typed error for a context-driven calculated column on the group-by axis
+/// combined with a feature this version does not support together with it.
+fn ctx_col_unsupported(feature: &str) -> crate::error::QueryError {
+    crate::error::QueryError::InvalidQuery(format!(
+        "a context-driven calculated column on the group-by axis cannot be combined with \
+         {feature} in this version; request them in separate queries"
+    ))
 }
 
 impl QueryExecutor {
@@ -221,6 +231,41 @@ impl QueryExecutor {
         } else {
             &expanded_measures
         };
+
+        // Context-driven calculated columns referenced on the group-by axis are
+        // rendered as a per-query CASE in the main single-fact path's GROUP BY
+        // (resolved against the registered data below). v1 supports them only on
+        // that path: fail closed when combined with totals, a ragged hierarchy,
+        // lookups, QUERY-in-VAR / window / time-intelligence measures, or
+        // measures spanning multiple fact tables — each of those routes through a
+        // specialized two-stage path that does not render the column.
+        let has_context_columns = group_by.iter().any(|c| {
+            model
+                .context_column(&c.column)
+                .is_some_and(|cc| cc.table().eq_ignore_ascii_case(&c.table))
+        });
+        if has_context_columns {
+            if rollup {
+                return Err(totals_unsupported("context-driven calculated columns"));
+            }
+            if hier.is_some() {
+                return Err(hierarchy_unsupported("context-driven calculated columns"));
+            }
+            if !lookup_specs.is_empty() {
+                return Err(ctx_col_unsupported("lookup columns"));
+            }
+            if measures.iter().any(|m| m.expression().has_query_bindings()) {
+                return Err(ctx_col_unsupported("QUERY-in-VAR measures"));
+            }
+            if measures.iter().any(|m| m.expression().has_window()) {
+                return Err(ctx_col_unsupported(
+                    "window, running-total, or time-intelligence measures",
+                ));
+            }
+            if partition_measures_by_table(measures).len() > 1 {
+                return Err(ctx_col_unsupported("measures from multiple fact tables"));
+            }
+        }
 
         // The session that runs the measure SQL (and that the two-stage
         // QUERY/window/multi-group/lookup paths reuse). Host-registered UDFs
@@ -1058,6 +1103,11 @@ impl QueryExecutor {
                     "GROUP BY dimensions reached through many-to-many or non-equi relationships",
                 ));
             }
+            if has_context_columns {
+                return Err(ctx_col_unsupported(
+                    "GROUP BY dimensions reached through many-to-many or non-equi relationships",
+                ));
+            }
             // Cancellation checkpoint: before pre-aggregate evaluation.
             check_cancelled(token)?;
             // Two-stage pre-aggregation — ordered at the Arrow level.
@@ -1076,11 +1126,45 @@ impl QueryExecutor {
             return apply_order_and_limit(batches, order_by, limit);
         }
 
+        // Resolve context-driven calculated columns on the axis to per-query
+        // CASE SQL. Each scalar measure is evaluated ungrouped against the
+        // already-registered (filter-restricted) tables, so the value reflects
+        // the query's filter context — never the grouping axis (resolving
+        // ungrouped makes a circular definition impossible). Keyed by
+        // (table_lc, column_lc) for the group-by rendering below.
+        let mut context_column_sql: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        if has_context_columns {
+            for dim in group_by {
+                if let Some(cc) = model
+                    .context_column(&dim.column)
+                    .filter(|cc| cc.table().eq_ignore_ascii_case(&dim.table))
+                {
+                    let key = (dim.table.to_lowercase(), dim.column.to_lowercase());
+                    if context_column_sql.contains_key(&key) {
+                        continue;
+                    }
+                    let sql = Self::resolve_context_column_sql(&ctx, model, cc).await?;
+                    context_column_sql.insert(key, sql);
+                }
+            }
+        }
+
         let mut select_parts: Vec<String> = Vec::new();
         let mut group_parts: Vec<String> = Vec::new();
 
         for dim in group_by {
             let dim_table = dim.table.to_lowercase();
+            // A context-driven calculated column groups ON its resolved CASE
+            // expression (the scalar measure already substituted as a literal),
+            // aliased to the column name — mirrors a hierarchy transform.
+            if let Some(case_sql) =
+                context_column_sql.get(&(dim_table.clone(), dim.column.to_lowercase()))
+            {
+                select_parts.push(format!("{case_sql} AS {}", quote_ident_double(&dim.column)));
+                group_parts.push(case_sql.clone());
+                continue;
+            }
             // Hierarchy levels with active ragged transforms group ON the
             // transformed expression (stopper NULLIF / parent COALESCE /
             // leaf CASE), aliased to the plain column name so the result
@@ -1151,6 +1235,12 @@ impl QueryExecutor {
             }
             if hier.is_some() {
                 return Err(hierarchy_unsupported(
+                    "USERELATIONSHIP overrides targeting a group-by dimension \
+                     through a many-to-many or non-equi relationship",
+                ));
+            }
+            if has_context_columns {
+                return Err(ctx_col_unsupported(
                     "USERELATIONSHIP overrides targeting a group-by dimension \
                      through a many-to-many or non-equi relationship",
                 ));
@@ -1292,6 +1382,19 @@ impl QueryExecutor {
                 let term = match &clause.target {
                     OrderTarget::Column(col) => {
                         let dim_lower = col.table.to_lowercase();
+                        // A context-driven calculated column is not a physical
+                        // column: order by its resolved CASE expression (the
+                        // group-by key), like a hierarchy transform.
+                        if let Some(case_sql) =
+                            context_column_sql.get(&(dim_lower.clone(), col.column.to_lowercase()))
+                        {
+                            order_terms.push(if clause.descending {
+                                format!("{case_sql} DESC")
+                            } else {
+                                case_sql.clone()
+                            });
+                            continue;
+                        }
                         let sort_col = model
                             .table(&col.table)
                             .ok()
@@ -1649,5 +1752,92 @@ impl QueryExecutor {
                 Ok(batches)
             }
         }
+    }
+}
+
+impl QueryExecutor {
+    /// Resolve a context-driven calculated column to a row-level CASE SQL
+    /// fragment for the current query.
+    ///
+    /// Every scalar measure the column references is evaluated **ungrouped**
+    /// against the already-registered (and filter-restricted) source tables in
+    /// `ctx`, so the scalar reflects the query's filter context — and never the
+    /// grouping axis the column defines (ungrouped resolution makes a circular
+    /// definition structurally impossible). The resolved value is substituted as
+    /// a literal and the remaining row-level expression is rendered qualified to
+    /// the column's host table, ready to be injected into the GROUP BY.
+    ///
+    /// v1 limits (fail closed, never a silently-wrong segmentation):
+    /// - each referenced measure must be a single aggregate over one table with
+    ///   no context operations;
+    /// - a NULL scalar (e.g. an empty filtered source) is an error, not a guess;
+    /// - an unsupported scalar type (timestamp, interval, …) is an error.
+    async fn resolve_context_column_sql(
+        ctx: &SessionContext,
+        model: &DataModel,
+        cc: &ContextColumn,
+    ) -> QueryResult<String> {
+        let mut env: std::collections::HashMap<String, Expression> =
+            std::collections::HashMap::new();
+        for m_name in cc.expression().measure_references() {
+            let measure = model
+                .measure(m_name)
+                .map_err(crate::error::QueryError::Engine)?;
+            let expanded = expand_measure_refs(measure.expression(), model)
+                .map_err(crate::error::QueryError::Engine)?;
+            if expanded.has_context_ops() {
+                return Err(ctx_col_unsupported(&format!(
+                    "the scalar measure '[{m_name}]', which uses context operations (v1 \
+                     supports only a plain aggregate scalar such as MAX(date))"
+                )));
+            }
+            let Some((op, col)) = expanded.as_simple_aggregate() else {
+                return Err(ctx_col_unsupported(&format!(
+                    "the scalar measure '[{m_name}]', which is not a single aggregate over one \
+                     table"
+                )));
+            };
+            let source_table = if measure.table().is_empty() {
+                infer_fact_table(&expanded).ok_or_else(|| {
+                    ctx_col_unsupported(&format!(
+                        "the scalar measure '[{m_name}]', whose source table could not be \
+                         inferred"
+                    ))
+                })?
+            } else {
+                measure.table().to_string()
+            };
+            let table_lc = source_table.to_lowercase();
+            // CountRows ignores its operand; any other aggregate qualifies the
+            // column to the (single) source table so the reference is exact.
+            let operand = if col == "*" {
+                String::new()
+            } else {
+                format!("{table_lc}.{}", quote_ident_double(col))
+            };
+            let agg_sql = op.render_sql(&operand);
+            let probe_sql = format!("SELECT {agg_sql} AS __ctx_scalar FROM {table_lc}");
+            let batches = ctx.sql(&probe_sql).await?.collect().await?;
+            let scalar = if batches.is_empty() || batches[0].num_rows() == 0 {
+                datafusion::common::ScalarValue::Null
+            } else {
+                datafusion::common::ScalarValue::try_from_array(batches[0].column(0), 0)?
+            };
+            if scalar.is_null() {
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "context-driven calculated column '{}': its scalar measure '[{m_name}]' \
+                     resolved to NULL under the current filters, so the segmentation is \
+                     undefined",
+                    cc.name()
+                )));
+            }
+            let lit =
+                expr_literal_from_scalar(&scalar).map_err(crate::error::QueryError::Engine)?;
+            env.insert(m_name.to_string(), lit);
+        }
+        cc.expression()
+            .substitute_measure_refs(&env)
+            .to_qualified_sql(&cc.table().to_lowercase())
+            .map_err(crate::error::QueryError::Engine)
     }
 }

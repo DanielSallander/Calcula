@@ -72,6 +72,7 @@ fn collect_query_global_refs(
         Expression::ColumnRef(_)
         | Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
+        | Expression::LiteralDate(_)
         | Expression::LiteralString(_)
         | Expression::LiteralBool(_)
         | Expression::Blank
@@ -583,6 +584,7 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
         // Leaves that don't contain sub-expressions or ColumnRef.
         Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
+        | Expression::LiteralDate(_)
         | Expression::LiteralString(_)
         | Expression::LiteralBool(_)
         | Expression::Blank

@@ -68,8 +68,24 @@ pub(super) fn compute_table_projections(
         }
     }
 
-    // 2. Group-by columns plus their declared sort-by columns.
+    // 2. Group-by columns plus their declared sort-by columns. A context-driven
+    //    calculated column is NOT a physical source column: skip its name and
+    //    instead fetch the physical inputs of its row-level expression (its
+    //    scalar measure's columns are already covered by the measure walk in
+    //    step 1, since the planner passes those measures here).
     for col_ref in &request.group_by {
+        if let Some(cc) = model
+            .context_column(&col_ref.column)
+            .filter(|cc| cc.table().eq_ignore_ascii_case(&col_ref.table))
+        {
+            for c in cc.expression().column_references() {
+                collector.add(cc.table(), c);
+            }
+            for (t, c) in cc.expression().qualified_column_references() {
+                collector.add(t, c);
+            }
+            continue;
+        }
         collector.add(&col_ref.table, &col_ref.column);
         if let Ok(table) = model.table(&col_ref.table) {
             if let Ok(sort_col) = table.sort_column_for(&col_ref.column) {
@@ -618,6 +634,95 @@ mod tests {
             diagnostics.fallbacks[0].1.contains("mystery_col"),
             "got: {}",
             diagnostics.fallbacks[0].1
+        );
+    }
+
+    #[test]
+    fn context_column_forces_local_and_projects_physical_inputs() {
+        use engine_core::compute::measure::expression_measure;
+        use engine_core::model::ContextColumn;
+
+        let invoice = Table::new(
+            "Invoice",
+            vec![
+                Column::new("paid_date", DataType::Date),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        // Disconnected as-of reference table (no relationship to Invoice).
+        let calendar = Table::new(
+            "Calendar",
+            vec![
+                Column::new("date", DataType::Date),
+                Column::new("period", DataType::Int32),
+            ],
+        )
+        .unwrap();
+
+        let payment_status = expr::if_expr(
+            expr::compare(
+                expr::qualified_col("Invoice", "paid_date"),
+                ComparisonOp::LessThanOrEqual,
+                Expression::MeasureRef("AsOfDate".into()),
+            ),
+            expr::lit_str("Paid"),
+            expr::lit_str("Open"),
+        );
+
+        let model = DataModel::builder()
+            .add_table(invoice)
+            .add_table(calendar)
+            .add_measure(sum_measure("Revenue", "Invoice", "amount"))
+            .add_measure(expression_measure(
+                "AsOfDate",
+                expr::agg(AggregateOp::Max, expr::qualified_col("Calendar", "date")),
+            ))
+            .add_context_column(ContextColumn::new(
+                "PaymentStatus",
+                "Invoice",
+                payment_status,
+                DataType::String,
+            ))
+            .build()
+            .unwrap();
+
+        let mut registry = SourceRegistry::new();
+        registry.bind("Invoice", 0, SourceBinding::new("dbo", "invoice"));
+        registry.bind("Calendar", 0, SourceBinding::new("dbo", "calendar"));
+
+        let request = QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Invoice", "PaymentStatus")],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+
+        // A context column on the axis forces LocalAggregation.
+        let fetches = match &plan {
+            crate::planner::QueryPlan::LocalAggregation { fetches, .. } => fetches,
+            other => panic!("expected LocalAggregation, got {other:?}"),
+        };
+
+        // Invoice fetches the context column's physical input + the measure
+        // column — NOT the non-physical "PaymentStatus".
+        assert_eq!(
+            fetch_for(&plan, "Invoice").columns,
+            vec!["amount".to_string(), "paid_date".to_string()]
+        );
+        assert!(!fetch_for(&plan, "Invoice")
+            .columns
+            .contains(&"PaymentStatus".to_string()));
+
+        // The scalar measure's source table is fetched with its scalar column.
+        assert!(
+            fetches.iter().any(|(t, _)| t == "Calendar"),
+            "Calendar (scalar source) must be fetched"
+        );
+        assert_eq!(
+            fetch_for(&plan, "Calendar").columns,
+            vec!["date".to_string()]
         );
     }
 

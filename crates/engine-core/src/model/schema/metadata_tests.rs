@@ -40,10 +40,10 @@ fn model_format_version_is_current() {
     // function (DatesInPeriod expression variant).
     // Version 9 introduced semi-additive balances CLOSINGBALANCE/OPENINGBALANCE
     // (SemiAdditiveBalance expression variant). v10 added KPIs; v11 added the
-    // dynamic-RLS predicate field.
+    // dynamic-RLS predicate field; v12 added context-driven calculated columns.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 11);
+    assert_eq!(MODEL_FORMAT_VERSION, 12);
 }
 
 #[test]
