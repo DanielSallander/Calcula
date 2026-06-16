@@ -9,6 +9,7 @@ pub mod channels;
 pub mod cross_package;
 pub mod dev_mode;
 pub mod error;
+pub mod html_export;
 pub mod identity_provider;
 pub mod integrity;
 pub mod manifest;
@@ -24,6 +25,7 @@ pub mod pull;
 pub mod writeback;
 
 pub use error::CalpError;
+pub use html_export::{render_package_html, HtmlExportMode, HtmlExportOptions};
 pub use identity_provider::SubmitterIdentity;
 pub mod data_refresh;
 

@@ -282,12 +282,27 @@ pub fn publish(
             serde_json::to_string_pretty(&cell_data)?.as_bytes(),
         )?;
 
-        // Styles
+        // Styles registry (the sheet's Vec<CellStyle>, indexed by style_index).
         registry.write_artifact(
             pkg, ver,
             &format!("{sheet_prefix}/styles.json"),
             serde_json::to_string_pretty(&sheet.styles)?.as_bytes(),
         )?;
+
+        // Per-cell style assignments (A1 -> style index). data.json does NOT
+        // carry style_index (it is always 0 there), so without this companion
+        // map the registry above could never be re-associated with cells and
+        // all per-cell formatting would be lost on the consuming side (subscriber
+        // refresh, HTML export). Only written when there are non-default styles,
+        // mirroring named_ranges.json. Uses the (possibly region-filtered) cells.
+        let cell_styles = calcula_format::sheet_styles::cells_to_sheet_styles(&cells);
+        if !cell_styles.cells.is_empty() {
+            registry.write_artifact(
+                pkg, ver,
+                &format!("{sheet_prefix}/cell_styles.json"),
+                serde_json::to_string_pretty(&cell_styles)?.as_bytes(),
+            )?;
+        }
 
         // Layout (column widths + row heights as simple JSON)
         let layout = calcula_format::sheet_layout::SheetLayout::from_dimensions(

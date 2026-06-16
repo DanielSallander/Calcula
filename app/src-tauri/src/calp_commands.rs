@@ -2529,6 +2529,32 @@ pub fn calp_preview_region_submission(
     })
 }
 
+/// Render a published package version to a self-contained HTML string the
+/// recipient can open WITHOUT Calcula (recipient reach). `mode` is "static" (a
+/// stacked, print-ready report) or "viewer" (a multi-sheet tabbed viewer). The
+/// frontend then saves the string as .html or opens it for print-to-PDF.
+#[tauri::command]
+pub fn calp_export_package_html(
+    registry_path: String,
+    package_name: String,
+    version: String,
+    mode: String,
+    window: tauri::Window,
+) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let path = registry_path
+        .strip_prefix("file://")
+        .unwrap_or(&registry_path);
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(path))
+        .map_err(|e| e.to_string())?;
+    let export_mode = match mode.as_str() {
+        "viewer" => calp::HtmlExportMode::Viewer,
+        _ => calp::HtmlExportMode::Static,
+    };
+    let opts = calp::HtmlExportOptions { mode: export_mode };
+    calp::render_package_html(&registry, &package_name, &version, &opts).map_err(|e| e.to_string())
+}
+
 /// Approve or reject a submitted writeback value (publisher action).
 /// Rewrites the submission's registry file with the new state; `on_approval`
 /// regions only aggregate Approved submissions in GATHER.

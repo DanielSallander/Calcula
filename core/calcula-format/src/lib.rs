@@ -22,7 +22,7 @@ mod error;
 mod manifest;
 mod cell_ref;
 pub mod sheet_data;
-mod sheet_styles;
+pub mod sheet_styles;
 pub mod sheet_layout;
 pub mod sheet_metadata;
 mod zip_io;

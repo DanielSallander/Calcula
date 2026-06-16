@@ -543,6 +543,27 @@ export function previewRegionSubmission(
   return invokeBackend("calp_preview_region_submission", { regionId });
 }
 
+/** How to render a package version to self-contained HTML (recipient reach):
+ *  `static` = a stacked, print-ready report; `viewer` = a multi-sheet tabbed
+ *  viewer with embedded navigation. Both are single offline-openable .html. */
+export type HtmlExportMode = "static" | "viewer";
+
+/** Render a published package version to a self-contained HTML string that any
+ *  browser/phone/Mac can open WITHOUT Calcula. */
+export function exportPackageHtml(
+  registryPath: string,
+  packageName: string,
+  version: string,
+  mode: HtmlExportMode,
+): Promise<string> {
+  return invokeBackend("calp_export_package_html", {
+    registryPath,
+    packageName,
+    version,
+    mode,
+  });
+}
+
 /** Approve, reject, or reset a submitted writeback value (publisher action). */
 export function setSubmissionState(
   regionId: string,

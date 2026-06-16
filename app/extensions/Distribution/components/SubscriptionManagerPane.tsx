@@ -7,13 +7,46 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { getSubscriptions, detach, emitAppEvent, onAppEvent, AppEvents } from "@api";
-import type { Subscription } from "@api/distribution";
+import { exportPackageHtml, type Subscription } from "@api/distribution";
+import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
 
 export function SubscriptionManagerPane(): React.ReactElement {
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDetach, setConfirmingDetach] = useState(false);
+  const [exporting, setExporting] = useState<string | null>(null);
+
+  // Recipient reach: render this received report to a self-contained HTML the
+  // recipient can open without Calcula — save as .html (static report or
+  // multi-sheet viewer) or open the print dialog to Save as PDF.
+  const handleExport = useCallback(
+    async (s: Subscription, mode: "static" | "viewer", asPdf: boolean) => {
+      const key = `${s.packageName}:${asPdf ? "pdf" : mode}`;
+      setExporting(key);
+      setError(null);
+      try {
+        // The backend strips a file:// prefix from registryUrl.
+        const html = await exportPackageHtml(
+          s.registryUrl,
+          s.packageName,
+          s.resolvedVersion,
+          mode,
+        );
+        if (asPdf) {
+          printHtmlReport(html);
+        } else {
+          const suffix = mode === "viewer" ? "-viewer" : "";
+          await saveHtmlReport(html, `${s.packageName}-${s.resolvedVersion}${suffix}.html`);
+        }
+      } catch (e: unknown) {
+        setError(`Export failed: ${String(e)}`);
+      } finally {
+        setExporting(null);
+      }
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -81,6 +114,35 @@ export function SubscriptionManagerPane(): React.ReactElement {
                 <div style={styles.meta}>
                   {s.sheets.length} sheet{s.sheets.length !== 1 ? "s" : ""} · resolved {s.resolvedAt}
                 </div>
+                <div style={styles.exportRow}>
+                  <span style={styles.exportLabel} title="Open this report without Calcula">
+                    Share as:
+                  </span>
+                  <button
+                    onClick={() => handleExport(s, "static", false)}
+                    disabled={exporting !== null}
+                    style={styles.smallBtn}
+                    title="Self-contained HTML report"
+                  >
+                    {exporting === `${s.packageName}:static` ? "..." : "HTML"}
+                  </button>
+                  <button
+                    onClick={() => handleExport(s, "viewer", false)}
+                    disabled={exporting !== null}
+                    style={styles.smallBtn}
+                    title="Multi-sheet HTML viewer (tabs)"
+                  >
+                    {exporting === `${s.packageName}:viewer` ? "..." : "Viewer"}
+                  </button>
+                  <button
+                    onClick={() => handleExport(s, "static", true)}
+                    disabled={exporting !== null}
+                    style={styles.smallBtn}
+                    title="Open the print dialog to Save as PDF"
+                  >
+                    {exporting === `${s.packageName}:pdf` ? "..." : "PDF"}
+                  </button>
+                </div>
               </div>
             );
           })
@@ -117,6 +179,8 @@ const styles: Record<string, React.CSSProperties> = {
   version: { fontSize: 12, color: "#1967d2", flexShrink: 0 },
   pinHint: { color: "#b06000", fontStyle: "italic" as const },
   meta: { fontSize: 11, color: "#888", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
+  exportRow: { display: "flex", alignItems: "center", gap: 4, marginTop: 6 },
+  exportLabel: { fontSize: 11, color: "#666", marginRight: 2 },
   footer: { padding: "8px 12px", borderTop: "1px solid #e0e0e0", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexShrink: 0 },
   confirmHint: { fontSize: 12, color: "#c5221f", marginRight: "auto" },
   smallBtn: { fontSize: 12, padding: "3px 10px", borderRadius: 4, border: "1px solid #d0d0d0", background: "#fff", cursor: "pointer" },
