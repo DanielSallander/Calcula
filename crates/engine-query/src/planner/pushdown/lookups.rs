@@ -1,6 +1,8 @@
 //! Lookup-column resolution: key inference and resolution-expression SQL.
 
-use engine_core::compute::expression::{Expression, SqlDialect, SqlRenderer, TableAliasQualifier};
+use engine_core::compute::expression::{
+    DataFusionDialect, Expression, SqlRenderer, TableAliasQualifier,
+};
 use engine_core::compute::parser::parse_measure_expression;
 use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::model::schema::apply_lookup_placeholder;
@@ -203,7 +205,7 @@ fn built_in_resolution_sql(table_alias: &str, column_name: &str, data_type: &Dat
 /// as scalar SQL (see [`Expression::to_sql_string`]).
 fn qualified_sql(expr: &Expression, table_alias: &str) -> QueryResult<String> {
     let qualifier = TableAliasQualifier { alias: table_alias };
-    Ok(SqlRenderer::new(SqlDialect::DataFusion, &qualifier).render(expr)?)
+    Ok(SqlRenderer::new(DataFusionDialect, &qualifier).render(expr)?)
 }
 
 #[cfg(test)]

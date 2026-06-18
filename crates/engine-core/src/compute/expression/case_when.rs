@@ -22,7 +22,7 @@ impl Expression {
     /// `TableRef`). `COUNTROWS` is exempt: its table-reference operand is
     /// consumed before rendering.
     pub fn to_case_when_sql(&self, condition: &str, fact_table: &str) -> EngineResult<String> {
-        SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
             .render_case_when(self, condition, fact_table)
     }
 }

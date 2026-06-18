@@ -51,6 +51,19 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 
 ---
 
+## Connector pluggability & fail-soft pushdown (no format bump)
+
+Internal restructuring to make adding a database vendor close to plug-in. Mostly invisible to hosts; the host-facing pieces:
+
+- **Behavior fix (correctness).** A compound-measure or star-schema query whose tables bind to a **non-PostgreSQL** source (SQL Server, CSV, Parquet) previously **hard-errored** with `UnsupportedOperation`; it now computes locally and returns the correct result. The query planner gates expression pushdown on a connector capability instead of assuming PostgreSQL. No host code change — queries that used to fail now succeed.
+- **New public type `bi_engine::ConnectorCapabilities`** and a `Connector::capabilities(&self) -> ConnectorCapabilities` trait method (defaulted to fetch-only). Hosts that implement their own `Connector` are unaffected (the default applies); a host connector opts into expression pushdown by overriding it.
+- **New facade method `Engine::add_source<C: Into<AnyConnector>>(&mut self, connector: C) -> usize`** — register a pre-built connector generically. The typed `add_postgres` / `add_sqlserver` / `add_csv_source` / `add_parquet_source` / `add_in_memory_source` are unchanged and now funnel through it.
+- **No model-file or `QueryRequest` change; no `MODEL_FORMAT_VERSION` bump.** Generated source SQL is byte-for-byte unchanged (the pinned-SQL tests across all crates are the oracle); type fidelity and auth handling are unchanged.
+
+See [adding-a-connector.md](adding-a-connector.md) for the connector-author surface. PostgreSQL remains the only source with expression pushdown; everything else is fetch-only and computes compound/JOIN queries locally.
+
+---
+
 ## Presentation metadata (format version 2)
 
 Pure serde additions for host display. The engine does not interpret them (except `default_aggregation`, which is advisory); they exist so both hosts agree on field-list presentation.

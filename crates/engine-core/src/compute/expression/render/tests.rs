@@ -40,7 +40,7 @@ fn datafusion_bare_matches_to_sql_string_on_complex_expression() {
     // Old-vs-new equivalence: the unified renderer configured like
     // to_sql_string must produce byte-identical SQL.
     let expr = complex_expression();
-    let unified = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let unified = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
     assert_eq!(unified, expr.to_sql_string().unwrap());
@@ -56,7 +56,7 @@ fn case_when_mode_matches_to_case_when_sql_on_complex_expression() {
     // Old-vs-new equivalence for the conditional-aggregation mode.
     let expr = complex_expression();
     let condition = "products.\"category\" = 'O''Brien'";
-    let unified = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let unified = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render_case_when(&expr, condition, "fact_sales")
         .unwrap();
     assert_eq!(
@@ -75,13 +75,13 @@ fn dialect_divergence_safe_divide_pinned() {
         Some(lit_int(0)),
     );
     assert_eq!(
-        SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
             .render(&expr)
             .unwrap(),
         "CASE WHEN COUNT(\"b\") = 0 THEN 0 ELSE (CAST(SUM(\"a\") AS DOUBLE) / COUNT(\"b\")) END"
     );
     assert_eq!(
-        SqlRenderer::new(SqlDialect::Postgres, &BareQualifier)
+        SqlRenderer::new(PostgresDialect, &BareQualifier)
             .render(&expr)
             .unwrap(),
         "CASE WHEN COUNT(\"b\") = 0 THEN 0 \
@@ -93,13 +93,13 @@ fn dialect_divergence_safe_divide_pinned() {
 fn dialect_divergence_round_pinned() {
     let expr = scalar_fn(ScalarFunction::Round, vec![col("x"), lit_int(2)]);
     assert_eq!(
-        SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
             .render(&expr)
             .unwrap(),
         "ROUND(\"x\", 2)"
     );
     assert_eq!(
-        SqlRenderer::new(SqlDialect::Postgres, &BareQualifier)
+        SqlRenderer::new(PostgresDialect, &BareQualifier)
             .render(&expr)
             .unwrap(),
         "ROUND((\"x\")::NUMERIC, 2)"
@@ -120,13 +120,13 @@ fn dialect_percentile_render_forms_pinned() {
     // keep the forced-local gate and this comment in lockstep.
     let expr = percentile(col("x"), lit(0.95));
     assert_eq!(
-        SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+        SqlRenderer::new(DataFusionDialect, &BareQualifier)
             .render(&expr)
             .unwrap(),
         "approx_percentile_cont(\"x\", 0.95)"
     );
     assert_eq!(
-        SqlRenderer::new(SqlDialect::Postgres, &BareQualifier)
+        SqlRenderer::new(PostgresDialect, &BareQualifier)
             .render(&expr)
             .unwrap(),
         "PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY \"x\")"
@@ -150,7 +150,7 @@ fn keep_case_when_mode_renders_condition_with_qualifier() {
         ),
     );
     let qualifier = TableAliasQualifier { alias: "t" };
-    let sql = SqlRenderer::new(SqlDialect::Postgres, &qualifier)
+    let sql = SqlRenderer::new(PostgresDialect, &qualifier)
         .with_keep_case_when()
         .render(&expr)
         .unwrap();
@@ -174,7 +174,7 @@ fn keep_pass_through_mode_ignores_filters() {
             )],
         ),
     );
-    let sql = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let sql = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
     assert_eq!(sql, "SUM(\"amount\")");
@@ -185,7 +185,7 @@ fn lowercase_table_qualifier_qualifies_only_qualified_refs() {
     let qualifier = LowercaseTableQualifier;
     let qualified = qualified_col("Products", "category");
     let bare = col("category");
-    let renderer = SqlRenderer::new(SqlDialect::DataFusion, &qualifier);
+    let renderer = SqlRenderer::new(DataFusionDialect, &qualifier);
     assert_eq!(
         renderer.render(&qualified).unwrap(),
         "products.\"category\""
@@ -196,7 +196,7 @@ fn lowercase_table_qualifier_qualifies_only_qualified_refs() {
 #[test]
 fn table_alias_qualifier_overrides_existing_qualification() {
     let qualifier = TableAliasQualifier { alias: "dim" };
-    let renderer = SqlRenderer::new(SqlDialect::DataFusion, &qualifier);
+    let renderer = SqlRenderer::new(DataFusionDialect, &qualifier);
     assert_eq!(
         renderer.render(&qualified_col("Whatever", "name")).unwrap(),
         "dim.\"name\""
@@ -212,7 +212,7 @@ fn multi_table_qualifier_qualifies_each_ref_to_its_own_table() {
     let qualifier = MultiTableQualifier {
         default_table: "invoice",
     };
-    let renderer = SqlRenderer::new(SqlDialect::DataFusion, &qualifier);
+    let renderer = SqlRenderer::new(DataFusionDialect, &qualifier);
     // Host column (qualified with the host table) → host.
     assert_eq!(
         renderer.render(&qualified_col("Invoice", "paid_date")).unwrap(),
@@ -242,7 +242,7 @@ fn multi_table_qualifier_renders_mixed_case_expression() {
         qualified_col("Customer", "tier"),
         lit_str("Unpaid"),
     );
-    let sql = SqlRenderer::new(SqlDialect::DataFusion, &qualifier)
+    let sql = SqlRenderer::new(DataFusionDialect, &qualifier)
         .render(&expr)
         .unwrap();
     assert_eq!(
@@ -268,7 +268,7 @@ fn countrows_keep_pushdown_preserves_legacy_count_star() {
             )],
         )),
     };
-    let sql = SqlRenderer::new(SqlDialect::Postgres, &BareQualifier)
+    let sql = SqlRenderer::new(PostgresDialect, &BareQualifier)
         .with_keep_case_when()
         .render(&expr)
         .unwrap();
@@ -282,7 +282,7 @@ fn call_renders_lowercased_in_datafusion_dialect() {
     // The name is lowercased to match DataFusion's normalization of
     // unquoted SQL function identifiers.
     let expr = agg(AggregateOp::Sum, call("Double", vec![col("amount")]));
-    let sql = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let sql = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
     assert_eq!(sql, "SUM(double(\"amount\"))");
@@ -291,7 +291,7 @@ fn call_renders_lowercased_in_datafusion_dialect() {
 #[test]
 fn call_renders_multiple_args_in_datafusion_dialect() {
     let expr = call("pct_of", vec![col("part"), col("whole"), lit_int(2)]);
-    let sql = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let sql = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
     assert_eq!(sql, "pct_of(\"part\", \"whole\", 2)");
@@ -300,7 +300,7 @@ fn call_renders_multiple_args_in_datafusion_dialect() {
 #[test]
 fn call_zero_args_renders_empty_parens() {
     let expr = call("my_constant", vec![]);
-    let sql = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let sql = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap();
     assert_eq!(sql, "my_constant()");
@@ -310,7 +310,7 @@ fn call_zero_args_renders_empty_parens() {
 fn call_errors_in_postgres_dialect() {
     // UDFs never push down — the Postgres dialect fails closed.
     let expr = agg(AggregateOp::Sum, call("double", vec![col("amount")]));
-    let err = SqlRenderer::new(SqlDialect::Postgres, &BareQualifier)
+    let err = SqlRenderer::new(PostgresDialect, &BareQualifier)
         .with_keep_case_when()
         .render(&expr)
         .unwrap_err();
@@ -323,7 +323,7 @@ fn call_with_hostile_name_fails_closed_at_render_time() {
     // Even if Expression::validate was bypassed (hand-built tree), the
     // renderer must reject an injection-shaped name.
     let expr = call("f(); DROP TABLE x; --", vec![col("amount")]);
-    let err = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let err = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render(&expr)
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidIdentifier { .. }));
@@ -334,7 +334,7 @@ fn call_case_when_mode_wraps_aggregates_inside_args() {
     // SUM with KEEP over a call operand: the CASE WHEN wraps the aggregate
     // operand, and the call's column args are fact-table qualified.
     let expr = agg(AggregateOp::Sum, call("double", vec![col("amount")]));
-    let sql = SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier)
+    let sql = SqlRenderer::new(DataFusionDialect, &BareQualifier)
         .render_case_when(&expr, "products.\"category\" = 'Bikes'", "fact_sales")
         .unwrap();
     assert_eq!(

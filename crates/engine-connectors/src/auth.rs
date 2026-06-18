@@ -246,6 +246,64 @@ pub(crate) fn validate_no_nul(parameter: &str, value: &str) -> ConnectorResult<(
     Ok(())
 }
 
+/// Validate the non-credential parts of a [`ConnectionTarget`] (rejects
+/// embedded NUL bytes in the host and database). Every connector calls this
+/// before handing the target to its driver's typed configuration builder.
+pub(crate) fn validate_target(target: &ConnectionTarget) -> ConnectorResult<()> {
+    validate_no_nul("host", &target.host)?;
+    validate_no_nul("database", &target.database)?;
+    Ok(())
+}
+
+/// Credentials resolved from an [`AuthMethod`].
+///
+/// Environment-variable lookups have been performed and any embedded NUL bytes
+/// in the resulting username/password rejected. A connector maps this to its
+/// own driver auth — in particular it decides whether it accepts
+/// [`Integrated`](Self::Integrated) (e.g. PostgreSQL rejects it; SQL Server
+/// maps it to Windows/SSPI auth).
+pub(crate) enum ResolvedCredentials {
+    /// Explicit username and password (given directly, or read from the named
+    /// environment variables).
+    UsernamePassword {
+        /// Resolved database username.
+        username: String,
+        /// Resolved database password.
+        password: String,
+    },
+    /// OS-level integrated authentication — no embedded credentials.
+    Integrated,
+}
+
+/// Resolve an [`AuthMethod`] into concrete [`ResolvedCredentials`].
+///
+/// This is the **single** place that handles every `AuthMethod` variant: it
+/// looks up environment variables and validates the resolved credentials for
+/// NUL bytes, so each connector's `from_target` only has to decide how to map
+/// the result onto its driver (and whether it supports `Integrated`). Because
+/// `AuthMethod` is `#[non_exhaustive]`, centralizing the match here means a new
+/// auth variant is wired in one location rather than in every connector.
+pub(crate) fn resolve_credentials(auth: AuthMethod) -> ConnectorResult<ResolvedCredentials> {
+    let (username, password) = match auth {
+        AuthMethod::Integrated => return Ok(ResolvedCredentials::Integrated),
+        AuthMethod::UsernamePassword { username, password } => (username, password),
+        AuthMethod::EnvironmentVariable {
+            username_var,
+            password_var,
+        } => (resolve_env_var(&username_var)?, resolve_env_var(&password_var)?),
+    };
+    validate_no_nul("username", &username)?;
+    validate_no_nul("password", &password)?;
+    Ok(ResolvedCredentials::UsernamePassword { username, password })
+}
+
+/// Read a required environment variable, mapping an unset variable to a
+/// connection error that names it (the value itself is never logged).
+fn resolve_env_var(var: &str) -> ConnectorResult<String> {
+    std::env::var(var)
+        .map_err(|_| ConnectorError::ConnectionFailed(format!("environment variable '{var}' not set")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

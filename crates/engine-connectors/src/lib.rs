@@ -11,6 +11,7 @@
 //! Arrow [`RecordBatch`](arrow::record_batch::RecordBatch) values, consistent
 //! with the rest of the engine.
 
+pub(crate) mod arrow_build;
 pub mod arrow_convert;
 pub mod auth;
 pub(crate) mod decimal;

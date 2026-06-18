@@ -11,10 +11,10 @@ use crate::error::{ConnectorError, ConnectorResult};
 /// Defaulting to 0 would silently drop every fractional digit, so we default
 /// to a fraction-preserving scale matching the inferred-schema paths, which
 /// hardcode `Decimal128(38, 10)`.
-const DEFAULT_DECIMAL_SCALE: i32 = 10;
+const DEFAULT_DECIMAL_SCALE: i32 = crate::decimal::DEFAULT_DECIMAL_SCALE as i32;
 
 /// Maximum precision supported by Arrow `Decimal128`.
-const MAX_DECIMAL_PRECISION: i32 = 38;
+const MAX_DECIMAL_PRECISION: i32 = crate::decimal::DEFAULT_DECIMAL_PRECISION as i32;
 
 /// Build a [`DataType::Decimal`] from database-reported precision/scale
 /// metadata, applying safe defaults for unconstrained decimals.

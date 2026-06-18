@@ -2,7 +2,7 @@
 //! multi-table join aggregation requests.
 
 use engine_connectors::{AggregateFunction, FilterCondition};
-use engine_core::compute::expression::{ColumnQualifier, Expression, SqlDialect, SqlRenderer};
+use engine_core::compute::expression::{ColumnQualifier, Expression, PostgresDialect, SqlRenderer};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::error::{EngineError, EngineResult};
@@ -224,7 +224,7 @@ impl ColumnQualifier for RegistryQualifier<'_> {
 #[allow(dead_code)]
 fn expression_to_source_sql(expr: &Expression, registry: &SourceRegistry) -> QueryResult<String> {
     let qualifier = RegistryQualifier { registry };
-    Ok(SqlRenderer::new(SqlDialect::Postgres, &qualifier)
+    Ok(SqlRenderer::new(PostgresDialect, &qualifier)
         .with_keep_case_when()
         .render(expr)?)
 }

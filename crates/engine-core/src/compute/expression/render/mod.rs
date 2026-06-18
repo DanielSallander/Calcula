@@ -3,10 +3,11 @@
 //! All Expression-to-SQL string generation in the workspace flows through
 //! [`SqlRenderer`], parameterized by two small abstractions:
 //!
-//! - [`SqlDialect`] — function spellings that differ between the local
-//!   DataFusion execution engine and PostgreSQL source pushdown SQL
+//! - [`Dialect`] — function spellings that differ between execution targets
 //!   (aggregate names, `CAST` target for safe division, scalar-function
-//!   rewrites, percentile syntax, ...).
+//!   rewrites, percentile syntax, ...). A trait, so a new database vendor adds
+//!   one impl ([`DataFusionDialect`], [`PostgresDialect`], ...) to teach the
+//!   renderer its pushdown SQL — without changing this module.
 //! - [`ColumnQualifier`] — how column references are qualified for a
 //!   particular execution environment (bare `"col"`, a fixed table alias,
 //!   lowercased model-table prefixes, source-registry bindings, connector
@@ -29,59 +30,17 @@
 //! renderers; the pinned-SQL tests in each crate are the oracle.
 
 mod conditional;
+mod dialect;
 mod plain;
 #[cfg(test)]
 mod tests;
 
-use crate::compute::aggregate::AggregateOp;
+pub use dialect::{DataFusionDialect, Dialect, PostgresDialect};
+
 use crate::compute::sql_util::quote_ident_double;
 use crate::error::EngineResult;
 
 use super::Expression;
-
-/// SQL dialect targeted by the renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqlDialect {
-    /// DataFusion-compatible SQL for local execution (the engine's internal
-    /// query engine). Uses `CAST(x AS DOUBLE)`, `approx_percentile_cont`,
-    /// `FIRST_VALUE(x ORDER BY y)`, and DataFusion aggregate spellings.
-    DataFusion,
-    /// PostgreSQL SQL for source pushdown. Uses `CAST(x AS DOUBLE PRECISION)`,
-    /// `PERCENTILE_CONT(k) WITHIN GROUP (ORDER BY x)`, `::NUMERIC` casts for
-    /// `ROUND`/`TRUNC`/`LOG`, and PostgreSQL aggregate spellings.
-    Postgres,
-}
-
-impl SqlDialect {
-    /// Render an aggregate over an already-rendered operand fragment.
-    fn render_aggregate(&self, op: &AggregateOp, operand_sql: &str) -> String {
-        match self {
-            SqlDialect::DataFusion => op.render_sql(operand_sql),
-            SqlDialect::Postgres => op.render_postgres_sql(operand_sql),
-        }
-    }
-
-    /// Render an aggregate with a `CASE WHEN` condition applied to its operand.
-    fn render_aggregate_case_when(
-        &self,
-        op: &AggregateOp,
-        condition: &str,
-        operand_sql: &str,
-    ) -> String {
-        match self {
-            SqlDialect::DataFusion => op.render_case_when_sql(condition, operand_sql),
-            SqlDialect::Postgres => op.render_postgres_case_when_sql(condition, operand_sql),
-        }
-    }
-
-    /// The cast target used for safe division (`DIVIDE`).
-    fn divide_cast(&self) -> &'static str {
-        match self {
-            SqlDialect::DataFusion => "DOUBLE",
-            SqlDialect::Postgres => "DOUBLE PRECISION",
-        }
-    }
-}
 
 /// How `KEEP` context operations are rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,18 +154,20 @@ impl ColumnQualifier for MultiTableQualifier<'_> {
 /// [`SqlRenderer::render`] (plain scalar SQL) or
 /// [`SqlRenderer::render_case_when`] (conditional aggregation over a fact
 /// table).
-pub struct SqlRenderer<'a> {
-    dialect: SqlDialect,
+pub struct SqlRenderer<'a, D: Dialect> {
+    dialect: D,
     qualifier: &'a dyn ColumnQualifier,
     keep: KeepRendering,
 }
 
-impl<'a> SqlRenderer<'a> {
+impl<'a, D: Dialect> SqlRenderer<'a, D> {
     /// Create a renderer for the given dialect and column qualifier.
     ///
     /// KEEP context operations pass through to their inner expression (the
-    /// local-execution behavior, where context is resolved separately).
-    pub fn new(dialect: SqlDialect, qualifier: &'a dyn ColumnQualifier) -> Self {
+    /// local-execution behavior, where context is resolved separately). The
+    /// dialect is taken by value (the built-in dialects are zero-size unit
+    /// structs); a new vendor passes its own [`Dialect`] impl.
+    pub fn new(dialect: D, qualifier: &'a dyn ColumnQualifier) -> Self {
         Self {
             dialect,
             qualifier,

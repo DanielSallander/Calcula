@@ -10,7 +10,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
 
 use crate::arrow_convert::rows_to_record_batches;
-use crate::auth::{validate_no_nul, AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
+use crate::auth::{
+    resolve_credentials, validate_target, AuthMethod, AuthMethodKind, ConnectionTarget,
+    ConnectorAuth, ResolvedCredentials,
+};
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::sql_builder::{self, PostgresDialect, SqlDialect};
 use crate::traits::{
@@ -113,38 +116,18 @@ impl PostgresConnector {
         auth: AuthMethod,
     ) -> ConnectorResult<PgConnectOptions> {
         let port = target.port.unwrap_or(5432);
+        validate_target(target)?;
 
-        let (username, password) = match auth {
-            AuthMethod::UsernamePassword { username, password } => (username, password),
-            AuthMethod::EnvironmentVariable {
-                username_var,
-                password_var,
-            } => {
-                let username = std::env::var(&username_var).map_err(|_| {
-                    ConnectorError::ConnectionFailed(format!(
-                        "environment variable '{}' not set",
-                        username_var
-                    ))
-                })?;
-                let password = std::env::var(&password_var).map_err(|_| {
-                    ConnectorError::ConnectionFailed(format!(
-                        "environment variable '{}' not set",
-                        password_var
-                    ))
-                })?;
-                (username, password)
-            }
-            AuthMethod::Integrated => {
+        // Shared resolver handles env-var lookup + credential NUL validation;
+        // PostgreSQL does not support OS-integrated auth in this connector.
+        let (username, password) = match resolve_credentials(auth)? {
+            ResolvedCredentials::UsernamePassword { username, password } => (username, password),
+            ResolvedCredentials::Integrated => {
                 return Err(ConnectorError::AuthMethodNotSupported(
                     "Integrated (SSPI/Kerberos) authentication is not supported by the PostgreSQL connector".to_string(),
                 ));
             }
         };
-
-        validate_no_nul("host", &target.host)?;
-        validate_no_nul("database", &target.database)?;
-        validate_no_nul("username", &username)?;
-        validate_no_nul("password", &password)?;
 
         let mut options = PgConnectOptions::new()
             .host(&target.host)
@@ -643,106 +626,10 @@ impl Connector for PostgresConnector {
         &self,
         request: &JoinAggregationRequest,
     ) -> ConnectorResult<Vec<RecordBatch>> {
-        // Resolve ISINSCOPE in expressions before SQL generation.
-        let group_by_pairs: Vec<(String, String)> = request
-            .table_map
-            .iter()
-            .flat_map(|(model, _)| {
-                request
-                    .group_by
-                    .iter()
-                    .filter(move |col| {
-                        request
-                            .table_map
-                            .iter()
-                            .any(|(m, s)| m.eq_ignore_ascii_case(model) && s == &col.table)
-                    })
-                    .map(move |col| (model.clone(), col.column.clone()))
-            })
-            .collect();
-
-        // Build SELECT parts.
-        let mut select_parts: Vec<String> = Vec::new();
-        let mut group_by_parts: Vec<String> = Vec::new();
-
-        for col in &request.group_by {
-            let qualified = format!(
-                "{}.{}",
-                quote_ident_double(&col.table),
-                quote_ident_double(&col.column)
-            );
-            select_parts.push(qualified.clone());
-            group_by_parts.push(qualified);
-        }
-
-        // Computed GROUP BY expressions (context-driven calculated columns):
-        // the SAME dialect renderer as measures, but each goes into BOTH the
-        // SELECT (aliased) and the GROUP BY (raw). The expression carries only
-        // the fact's columns and engine-substituted literals.
-        for cg in &request.computed_group_by {
-            let resolved = engine_core::compute::expression::resolve_is_in_scope(
-                &cg.expression,
-                &group_by_pairs,
-            );
-            let expr_sql = pg_dialect::expr_to_sql_with_clear(
-                &resolved,
-                &request.table_map,
-                &request.group_by,
-            )?;
-            select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(&cg.alias)));
-            group_by_parts.push(expr_sql);
-        }
-
-        for m in &request.measures {
-            let resolved = engine_core::compute::expression::resolve_is_in_scope(
-                &m.expression,
-                &group_by_pairs,
-            );
-            let expr_sql = pg_dialect::expr_to_sql_with_clear(
-                &resolved,
-                &request.table_map,
-                &request.group_by,
-            )?;
-            select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(&m.alias)));
-        }
-
-        // Build FROM + JOINs.
-        let mut sql = format!(
-            "SELECT {} FROM {}.{}",
-            select_parts.join(", "),
-            quote_ident_double(&request.fact_schema),
-            quote_ident_double(&request.fact_table)
-        );
-
-        for join in &request.joins {
-            sql.push_str(&format!(
-                " JOIN {}.{} ON {}.{} = {}.{}",
-                quote_ident_double(&join.dim_schema),
-                quote_ident_double(&join.dim_table),
-                quote_ident_double(&request.fact_table),
-                quote_ident_double(&join.fact_column),
-                quote_ident_double(&join.dim_table),
-                quote_ident_double(&join.dim_column),
-            ));
-        }
-
-        // WHERE clause. Filter values are bound as parameters (like
-        // `build_aggregate_sql`) so a value can never terminate the SQL string.
-        let mut params: Vec<String> = Vec::new();
-        if !request.filters.is_empty() {
-            let where_parts = sql_builder::build_filter_conditions(
-                &PostgresDialect,
-                &request.filters,
-                &mut params,
-            );
-            sql.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
-        }
-
-        // GROUP BY.
-        if !group_by_parts.is_empty() {
-            sql.push_str(&format!(" GROUP BY {}", group_by_parts.join(", ")));
-        }
-
+        // The structural SQL assembly is shared across dialects; PostgreSQL's
+        // identifier quoting and Expression rendering (`pg_dialect`) come from
+        // its `SqlDialect` / `ExpressionDialect` impls.
+        let (sql, params) = sql_builder::build_join_aggregation_sql(&PostgresDialect, request)?;
         self.execute_query_with_params(&sql, &params).await
     }
 
@@ -809,7 +696,10 @@ fn pg_type_name_to_arrow(
         "INT8" | "BIGINT" | "SERIAL" | "BIGSERIAL" => Ok(AT::Int64),
         "FLOAT4" | "REAL" => Ok(AT::Float64),
         "FLOAT8" | "DOUBLE PRECISION" => Ok(AT::Float64),
-        "NUMERIC" | "DECIMAL" => Ok(AT::Decimal128(38, 10)),
+        "NUMERIC" | "DECIMAL" => Ok(AT::Decimal128(
+            crate::decimal::DEFAULT_DECIMAL_PRECISION,
+            crate::decimal::DEFAULT_DECIMAL_SCALE,
+        )),
         "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER" | "CHARACTER VARYING" | "BPCHAR" | "NAME"
         | "UUID" | "JSON" | "JSONB" | "XML" => Ok(AT::Utf8),
         "BOOL" | "BOOLEAN" => Ok(AT::Boolean),
@@ -827,7 +717,9 @@ fn pg_type_name_to_arrow(
 // ---------------------------------------------------------------------------
 
 mod pg_dialect {
-    use engine_core::compute::expression::{ColumnQualifier, Expression, SqlDialect, SqlRenderer};
+    use engine_core::compute::expression::{
+        ColumnQualifier, Expression, PostgresDialect, SqlRenderer,
+    };
     use engine_core::compute::sql_util::quote_ident_double;
     use engine_core::error::EngineResult;
 
@@ -875,7 +767,7 @@ mod pg_dialect {
         table_map: &[(String, String)],
     ) -> ConnectorResult<String> {
         let qualifier = TableMapQualifier { table_map };
-        SqlRenderer::new(SqlDialect::Postgres, &qualifier)
+        SqlRenderer::new(PostgresDialect, &qualifier)
             .with_keep_case_when()
             .render(expr)
             .map_err(|e| ConnectorError::UnsupportedOperation(format!("PostgreSQL pushdown: {e}")))
@@ -1005,6 +897,20 @@ mod pg_dialect {
             }
             _ => expr_to_sql(expr, table_map),
         }
+    }
+}
+
+/// PostgreSQL can render Expression trees, so it implements
+/// [`ExpressionDialect`](sql_builder::ExpressionDialect) — unlocking the shared
+/// [`build_join_aggregation_sql`](sql_builder::build_join_aggregation_sql).
+impl sql_builder::ExpressionDialect for PostgresDialect {
+    fn render_join_expression(
+        &self,
+        expr: &engine_core::compute::expression::Expression,
+        table_map: &[(String, String)],
+        group_by: &[crate::traits::QualifiedColumn],
+    ) -> ConnectorResult<String> {
+        pg_dialect::expr_to_sql_with_clear(expr, table_map, group_by)
     }
 }
 

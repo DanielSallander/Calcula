@@ -12,9 +12,9 @@ use crate::compute::expression::Expression;
 use crate::compute::sql_util::quote_ident_double;
 use crate::error::{EngineError, EngineResult};
 
-use super::{SqlDialect, SqlRenderer};
+use super::{Dialect, SqlRenderer};
 
-impl SqlRenderer<'_> {
+impl<D: Dialect> SqlRenderer<'_, D> {
     pub(super) fn render_conditional(
         &self,
         expr: &Expression,
@@ -28,12 +28,12 @@ impl SqlRenderer<'_> {
                     // Handled before rendering the operand: COUNTROWS carries a
                     // bare table reference, which is not renderable as scalar SQL.
                     self.dialect
-                        .render_aggregate_case_when(operation, condition, "")
+                        .render_aggregate_case_when(operation, condition, "")?
                 }
                 _ => {
                     let qualified = self.render_operand(operand, fact_table)?;
                     self.dialect
-                        .render_aggregate_case_when(operation, condition, &qualified)
+                        .render_aggregate_case_when(operation, condition, &qualified)?
                 }
             },
             // Compound expressions: recurse into sub-expressions so CASE WHEN
@@ -62,7 +62,7 @@ impl SqlRenderer<'_> {
                     .iter()
                     .map(|a| self.render_conditional(a, condition, fact_table))
                     .collect::<EngineResult<Vec<String>>>()?;
-                self.render_scalar_func(function, &mapped)
+                self.render_scalar_func(function, &mapped)?
             }
             Expression::TextFunc { function, args } => {
                 let mapped = args
@@ -96,12 +96,7 @@ impl SqlRenderer<'_> {
                 let qualified = self.render_operand(operand, fact_table)?;
                 let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
                 let p = self.render_plain(percentile)?;
-                match self.dialect {
-                    SqlDialect::DataFusion => format!("approx_percentile_cont({case_expr}, {p})"),
-                    SqlDialect::Postgres => {
-                        format!("PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {case_expr})")
-                    }
-                }
+                self.dialect.percentile(&p, &case_expr)?
             }
             Expression::Coalesce(exprs) => {
                 let mapped = exprs
@@ -263,7 +258,7 @@ impl SqlRenderer<'_> {
                     .iter()
                     .map(|a| self.render_operand(a, fact_table))
                     .collect::<EngineResult<Vec<String>>>()?;
-                self.render_scalar_func(function, &mapped)
+                self.render_scalar_func(function, &mapped)?
             }
             // UDF call inside an aggregate operand: qualify each argument's
             // column references with the fact table (mirrors ScalarFunc).

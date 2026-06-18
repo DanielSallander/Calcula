@@ -10,7 +10,10 @@ use engine_core::compute::sql_util::quote_ident_bracket;
 use engine_core::model::{Column, Table};
 use tiberius::{Config, EncryptionLevel};
 
-use crate::auth::{validate_no_nul, AuthMethod, AuthMethodKind, ConnectionTarget, ConnectorAuth};
+use crate::auth::{
+    resolve_credentials, validate_target, AuthMethod, AuthMethodKind, ConnectionTarget,
+    ConnectorAuth, ResolvedCredentials,
+};
 use crate::error::{ConnectorError, ConnectorResult};
 use crate::sql_builder::{self, SqlDialect, SqlServerDialect};
 use crate::sqlserver_convert::tiberius_rows_to_record_batches;
@@ -128,38 +131,16 @@ impl SqlServerConnector {
         auth: AuthMethod,
     ) -> ConnectorResult<SqlServerConnectionSettings> {
         let port = target.port.unwrap_or(1433);
+        validate_target(target)?;
 
-        let resolved_auth = match auth {
-            AuthMethod::Integrated => ResolvedSqlServerAuth::Integrated,
-            AuthMethod::UsernamePassword { username, password } => {
-                ResolvedSqlServerAuth::SqlServer { username, password }
-            }
-            AuthMethod::EnvironmentVariable {
-                username_var,
-                password_var,
-            } => {
-                let username = std::env::var(&username_var).map_err(|_| {
-                    ConnectorError::ConnectionFailed(format!(
-                        "environment variable '{}' not set",
-                        username_var
-                    ))
-                })?;
-                let password = std::env::var(&password_var).map_err(|_| {
-                    ConnectorError::ConnectionFailed(format!(
-                        "environment variable '{}' not set",
-                        password_var
-                    ))
-                })?;
+        // Shared resolver handles env-var lookup + credential NUL validation;
+        // SQL Server additionally accepts integrated (Windows/SSPI) auth.
+        let resolved_auth = match resolve_credentials(auth)? {
+            ResolvedCredentials::Integrated => ResolvedSqlServerAuth::Integrated,
+            ResolvedCredentials::UsernamePassword { username, password } => {
                 ResolvedSqlServerAuth::SqlServer { username, password }
             }
         };
-
-        validate_no_nul("host", &target.host)?;
-        validate_no_nul("database", &target.database)?;
-        if let ResolvedSqlServerAuth::SqlServer { username, password } = &resolved_auth {
-            validate_no_nul("username", username)?;
-            validate_no_nul("password", password)?;
-        }
 
         Ok(SqlServerConnectionSettings {
             host: target.host.clone(),
@@ -663,9 +644,10 @@ fn infer_schema_from_row(row: &tiberius::Row) -> ConnectorResult<Schema> {
             tiberius::ColumnType::Int8 => AT::Int64,
             tiberius::ColumnType::Float4 => AT::Float64,
             tiberius::ColumnType::Float8 => AT::Float64,
-            tiberius::ColumnType::Decimaln | tiberius::ColumnType::Numericn => {
-                AT::Decimal128(38, 10)
-            }
+            tiberius::ColumnType::Decimaln | tiberius::ColumnType::Numericn => AT::Decimal128(
+                crate::decimal::DEFAULT_DECIMAL_PRECISION,
+                crate::decimal::DEFAULT_DECIMAL_SCALE,
+            ),
             tiberius::ColumnType::Money | tiberius::ColumnType::Money4 => AT::Decimal128(19, 4),
             tiberius::ColumnType::Bit | tiberius::ColumnType::Bitn => AT::Boolean,
             tiberius::ColumnType::Daten => AT::Date32,

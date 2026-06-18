@@ -6,7 +6,7 @@ use engine_core::compute::context::{
     format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter,
 };
 use engine_core::compute::expression::{
-    Expression, LowercaseTableQualifier, SqlDialect, SqlRenderer,
+    DataFusionDialect, Expression, LowercaseTableQualifier, SqlRenderer,
 };
 use engine_core::compute::sql_util::quote_ident_double;
 use engine_core::model::DataModel;
@@ -206,7 +206,7 @@ pub(super) fn collect_qualified_tables(
 /// name); bare column references stay unqualified. Delegates to the unified
 /// [`SqlRenderer`] (DataFusion dialect, [`LowercaseTableQualifier`]).
 fn qualify_condition_sql(expr: &Expression) -> QueryResult<String> {
-    Ok(SqlRenderer::new(SqlDialect::DataFusion, &LowercaseTableQualifier).render(expr)?)
+    Ok(SqlRenderer::new(DataFusionDialect, &LowercaseTableQualifier).render(expr)?)
 }
 
 /// Recursively resolve and generate SQL for compound measure expressions

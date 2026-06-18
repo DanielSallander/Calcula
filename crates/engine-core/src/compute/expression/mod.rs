@@ -48,8 +48,8 @@ pub use predicates::{
     ComparisonOp, DynamicValue, FilterPredicate, InPredicate, RelationshipPath,
 };
 pub use render::{
-    BareQualifier, ColumnQualifier, LowercaseTableQualifier, MultiTableQualifier, SqlDialect,
-    SqlRenderer, TableAliasQualifier,
+    BareQualifier, ColumnQualifier, DataFusionDialect, Dialect, LowercaseTableQualifier,
+    MultiTableQualifier, PostgresDialect, SqlRenderer, TableAliasQualifier,
 };
 pub use text::TextFunction;
 pub use transform::resolve_is_in_scope;

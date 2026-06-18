@@ -12,6 +12,16 @@ use rust_decimal::Decimal;
 
 use crate::error::{ConnectorError, ConnectorResult};
 
+/// Default Arrow precision for a source `NUMERIC`/`DECIMAL` whose own precision
+/// is unconstrained or unreported. 38 is the maximum an Arrow `Decimal128`
+/// (an `i128` mantissa) can represent.
+pub(crate) const DEFAULT_DECIMAL_PRECISION: u8 = 38;
+
+/// Default Arrow scale for an unconstrained `NUMERIC`/`DECIMAL`. Scale 10
+/// preserves fractional digits — defaulting to 0 would silently drop them,
+/// the worst failure mode for an analytical engine.
+pub(crate) const DEFAULT_DECIMAL_SCALE: i8 = 10;
+
 /// Convert a `rust_decimal::Decimal` to an `i128` mantissa at the given
 /// Arrow scale.
 ///

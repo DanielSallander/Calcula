@@ -1083,10 +1083,7 @@ impl Engine {
         auth: AuthMethod,
     ) -> ConnectorResult<usize> {
         let connector = PostgresConnector::connect(target, auth).await?;
-        let idx = self
-            .registry
-            .add_connector(AnyConnector::Postgres(connector));
-        Ok(idx)
+        Ok(self.add_source(connector))
     }
 
     /// Register a SQL Server data source and return its connector index.
@@ -1099,10 +1096,7 @@ impl Engine {
         auth: AuthMethod,
     ) -> ConnectorResult<usize> {
         let connector = SqlServerConnector::connect(target, auth).await?;
-        let idx = self
-            .registry
-            .add_connector(AnyConnector::SqlServer(connector));
-        Ok(idx)
+        Ok(self.add_source(connector))
     }
 
     /// Register an in-process [`InMemoryConnector`] (canned Arrow batches) and
@@ -1116,8 +1110,7 @@ impl Engine {
     /// incremental refresh can push the volatile-row `WHERE` to the same
     /// fetch path a real database would use). Synchronous (no I/O).
     pub fn add_in_memory_source(&mut self, connector: InMemoryConnector) -> usize {
-        self.registry
-            .add_connector(AnyConnector::InMemory(connector))
+        self.add_source(connector)
     }
 
     /// Register a CSV file source (a directory of `<table>.csv` files) and
@@ -1135,8 +1128,7 @@ impl Engine {
         auth: AuthMethod,
     ) -> ConnectorResult<usize> {
         let connector = CsvConnector::from_target(target, auth)?;
-        let idx = self.registry.add_connector(AnyConnector::Csv(connector));
-        Ok(idx)
+        Ok(self.add_source(connector))
     }
 
     /// Register an Apache Parquet file source (a directory of `<table>.parquet`
@@ -1155,8 +1147,19 @@ impl Engine {
         auth: AuthMethod,
     ) -> ConnectorResult<usize> {
         let connector = ParquetConnector::from_target(target, auth)?;
-        let idx = self.registry.add_connector(AnyConnector::Parquet(connector));
-        Ok(idx)
+        Ok(self.add_source(connector))
+    }
+
+    /// Register an already-built connector and return its index — the generic
+    /// entry point the typed `add_*` constructors above funnel through.
+    ///
+    /// `C: Into<AnyConnector>` holds only for the built-in connector types, each
+    /// of which the compiler-enforced [`ConnectorAuth`] checklist covers (see
+    /// [`AnyConnector`]); there is no way to register a connector that skipped
+    /// it. Use this when you have constructed a connector yourself; prefer the
+    /// typed `add_postgres` / `add_csv_source` / … wrappers otherwise.
+    pub fn add_source<C: Into<AnyConnector>>(&mut self, connector: C) -> usize {
+        self.registry.add_connector(connector.into())
     }
 
     /// Register a host-provided scalar UDF, replacing any UDF with the same

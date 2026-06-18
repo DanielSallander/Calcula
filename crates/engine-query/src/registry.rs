@@ -35,41 +35,109 @@ impl SourceBinding {
     }
 }
 
-/// Enum dispatch for connectors, avoiding async trait object issues.
+/// Generate the closed [`AnyConnector`] enum and all of its dispatch.
 ///
-/// Each variant wraps a concrete connector type. New connectors are added
-/// as variants here.
-pub enum AnyConnector {
+/// One invocation lists every built-in connector as `Variant => Type`. The
+/// macro expands that single list into the enum variants, every dispatch method
+/// (the data operations, `capabilities`, the `execute_join_aggregation` join
+/// pushdown, and the `supported_auth_methods` static call that makes a missing
+/// `ConnectorAuth` impl a **compile error**), and the `From<Type>` conversions.
+///
+/// Adding a connector is therefore one line in the [`define_any_connector!`]
+/// invocation — there are no hand-maintained per-method match arms that can
+/// drift out of sync or silently omit a variant.
+macro_rules! define_any_connector {
+    ($($(#[$vmeta:meta])* $variant:ident => $ty:ty),+ $(,)?) => {
+        /// Enum dispatch for connectors, avoiding async-trait object-safety
+        /// issues. The set is **closed** so the `supported_auth_methods`
+        /// dispatch can statically require every variant's type to implement
+        /// [`ConnectorAuth`] — the compile-enforced half of the connector
+        /// checklist (see [`define_any_connector!`]).
+        pub enum AnyConnector {
+            $(
+                $(#[$vmeta])*
+                $variant($ty),
+            )+
+        }
+
+        impl AnyConnector {
+            /// The source-side computation capabilities of the wrapped
+            /// connector (dispatch). The planner consults this — never a
+            /// hardcoded connector name — to decide what to push.
+            pub fn capabilities(&self) -> ConnectorCapabilities {
+                match self { $( AnyConnector::$variant(c) => c.capabilities(), )+ }
+            }
+
+            /// Fetch data from this connector.
+            pub async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
+                match self { $( AnyConnector::$variant(c) => c.fetch_data(request).await, )+ }
+            }
+
+            /// Execute a raw SQL query.
+            pub async fn execute_query(&self, sql: &str) -> ConnectorResult<Vec<RecordBatch>> {
+                match self { $( AnyConnector::$variant(c) => c.execute_query(sql).await, )+ }
+            }
+
+            /// List tables in the data source.
+            pub async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
+                match self { $( AnyConnector::$variant(c) => c.list_tables().await, )+ }
+            }
+
+            /// Introspect a table's schema.
+            pub async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
+                match self { $( AnyConnector::$variant(c) => c.introspect_table(schema, table_name).await, )+ }
+            }
+
+            /// Get the row count for a table.
+            pub async fn row_count(&self, schema: &str, table_name: &str) -> ConnectorResult<usize> {
+                match self { $( AnyConnector::$variant(c) => c.row_count(schema, table_name).await, )+ }
+            }
+
+            /// Returns the auth methods supported by this connector type.
+            ///
+            /// This is the ONE site that statically calls each variant type's
+            /// [`ConnectorAuth::supported_auth_methods`] — a connector listed in
+            /// [`define_any_connector!`] that does not implement [`ConnectorAuth`]
+            /// fails to compile. (The in-memory connector implements it trivially:
+            /// it is built from in-process data and supports no auth methods.)
+            pub fn supported_auth_methods(&self) -> Vec<AuthMethodKind> {
+                match self { $( AnyConnector::$variant(_) => <$ty as ConnectorAuth>::supported_auth_methods(), )+ }
+            }
+
+            /// Execute a multi-table aggregation query with JOINs.
+            pub async fn execute_join_aggregation(
+                &self,
+                request: &engine_connectors::JoinAggregationRequest,
+            ) -> ConnectorResult<Vec<RecordBatch>> {
+                match self { $( AnyConnector::$variant(c) => c.execute_join_aggregation(request).await, )+ }
+            }
+        }
+
+        $(
+            impl From<$ty> for AnyConnector {
+                fn from(connector: $ty) -> Self {
+                    AnyConnector::$variant(connector)
+                }
+            }
+        )+
+    };
+}
+
+define_any_connector! {
     /// PostgreSQL connector.
-    Postgres(PostgresConnector),
+    Postgres => PostgresConnector,
     /// SQL Server connector.
-    SqlServer(SqlServerConnector),
+    SqlServer => SqlServerConnector,
     /// In-process connector serving canned Arrow batches (testing and simple
     /// file-less in-memory sources). See [`InMemoryConnector`].
-    InMemory(InMemoryConnector),
-    /// File-backed connector serving CSV files from a directory. See
-    /// [`CsvConnector`].
-    Csv(CsvConnector),
-    /// File-backed connector serving Apache Parquet files from a directory. See
-    /// [`ParquetConnector`].
-    Parquet(ParquetConnector),
+    InMemory => InMemoryConnector,
+    /// File-backed connector serving CSV files from a directory. See [`CsvConnector`].
+    Csv => CsvConnector,
+    /// File-backed connector serving Apache Parquet files from a directory. See [`ParquetConnector`].
+    Parquet => ParquetConnector,
 }
 
 impl AnyConnector {
-    /// The source-side computation capabilities of the wrapped connector.
-    ///
-    /// Dispatches to each connector's [`Connector::capabilities`]. The planner
-    /// consults this (never a hardcoded connector name) to decide what to push.
-    pub fn capabilities(&self) -> ConnectorCapabilities {
-        match self {
-            AnyConnector::Postgres(c) => c.capabilities(),
-            AnyConnector::SqlServer(c) => c.capabilities(),
-            AnyConnector::InMemory(c) => c.capabilities(),
-            AnyConnector::Csv(c) => c.capabilities(),
-            AnyConnector::Parquet(c) => c.capabilities(),
-        }
-    }
-
     /// Whether this connector can execute a pushed join-aggregation whose
     /// GROUP BY / measures are arbitrary expressions (e.g. a context-driven
     /// calculated column's resolved `CASE`). Connectors that cannot render
@@ -77,94 +145,6 @@ impl AnyConnector {
     /// locally instead — see [`ConnectorCapabilities::expression_pushdown`].
     pub fn supports_expression_pushdown(&self) -> bool {
         self.capabilities().expression_pushdown
-    }
-
-    /// Fetch data from this connector.
-    pub async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
-        match self {
-            AnyConnector::Postgres(c) => c.fetch_data(request).await,
-            AnyConnector::SqlServer(c) => c.fetch_data(request).await,
-            AnyConnector::InMemory(c) => c.fetch_data(request).await,
-            AnyConnector::Csv(c) => c.fetch_data(request).await,
-            AnyConnector::Parquet(c) => c.fetch_data(request).await,
-        }
-    }
-
-    /// Execute a raw SQL query.
-    pub async fn execute_query(&self, sql: &str) -> ConnectorResult<Vec<RecordBatch>> {
-        match self {
-            AnyConnector::Postgres(c) => c.execute_query(sql).await,
-            AnyConnector::SqlServer(c) => c.execute_query(sql).await,
-            AnyConnector::InMemory(c) => c.execute_query(sql).await,
-            AnyConnector::Csv(c) => c.execute_query(sql).await,
-            AnyConnector::Parquet(c) => c.execute_query(sql).await,
-        }
-    }
-
-    /// List tables in the data source.
-    pub async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
-        match self {
-            AnyConnector::Postgres(c) => c.list_tables().await,
-            AnyConnector::SqlServer(c) => c.list_tables().await,
-            AnyConnector::InMemory(c) => c.list_tables().await,
-            AnyConnector::Csv(c) => c.list_tables().await,
-            AnyConnector::Parquet(c) => c.list_tables().await,
-        }
-    }
-
-    /// Introspect a table's schema.
-    pub async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
-        match self {
-            AnyConnector::Postgres(c) => c.introspect_table(schema, table_name).await,
-            AnyConnector::SqlServer(c) => c.introspect_table(schema, table_name).await,
-            AnyConnector::InMemory(c) => c.introspect_table(schema, table_name).await,
-            AnyConnector::Csv(c) => c.introspect_table(schema, table_name).await,
-            AnyConnector::Parquet(c) => c.introspect_table(schema, table_name).await,
-        }
-    }
-
-    /// Get the row count for a table.
-    pub async fn row_count(&self, schema: &str, table_name: &str) -> ConnectorResult<usize> {
-        match self {
-            AnyConnector::Postgres(c) => c.row_count(schema, table_name).await,
-            AnyConnector::SqlServer(c) => c.row_count(schema, table_name).await,
-            AnyConnector::InMemory(c) => c.row_count(schema, table_name).await,
-            AnyConnector::Csv(c) => c.row_count(schema, table_name).await,
-            AnyConnector::Parquet(c) => c.row_count(schema, table_name).await,
-        }
-    }
-
-    /// Returns the auth methods supported by this connector type.
-    ///
-    /// When adding a new `AnyConnector` variant, you MUST add a match arm
-    /// here. If the new connector does not implement [`ConnectorAuth`], the
-    /// code will not compile — this is intentional.
-    ///
-    /// The in-memory connector is constructed directly from in-process data
-    /// (no [`ConnectionTarget`](engine_connectors::auth::ConnectionTarget) /
-    /// secrets), so it supports no auth methods.
-    pub fn supported_auth_methods(&self) -> Vec<AuthMethodKind> {
-        match self {
-            AnyConnector::Postgres(_) => PostgresConnector::supported_auth_methods(),
-            AnyConnector::SqlServer(_) => SqlServerConnector::supported_auth_methods(),
-            AnyConnector::InMemory(_) => Vec::new(),
-            AnyConnector::Csv(_) => CsvConnector::supported_auth_methods(),
-            AnyConnector::Parquet(_) => ParquetConnector::supported_auth_methods(),
-        }
-    }
-
-    /// Execute a multi-table aggregation query with JOINs.
-    pub async fn execute_join_aggregation(
-        &self,
-        request: &engine_connectors::JoinAggregationRequest,
-    ) -> ConnectorResult<Vec<RecordBatch>> {
-        match self {
-            AnyConnector::Postgres(c) => c.execute_join_aggregation(request).await,
-            AnyConnector::SqlServer(c) => c.execute_join_aggregation(request).await,
-            AnyConnector::InMemory(c) => c.execute_join_aggregation(request).await,
-            AnyConnector::Csv(c) => c.execute_join_aggregation(request).await,
-            AnyConnector::Parquet(c) => c.execute_join_aggregation(request).await,
-        }
     }
 }
 
@@ -288,6 +268,14 @@ mod capability_tests {
         let c = AnyConnector::InMemory(InMemoryConnector::new());
         assert_eq!(c.capabilities(), ConnectorCapabilities::fetch_only());
         assert!(!c.supports_expression_pushdown());
+    }
+
+    #[test]
+    fn from_connector_builds_matching_variant() {
+        // The macro-generated `From<Type>` conversions back `Engine::add_source`.
+        let c: AnyConnector = InMemoryConnector::new().into();
+        assert!(matches!(c, AnyConnector::InMemory(_)));
+        assert!(c.supported_auth_methods().is_empty());
     }
 }
 

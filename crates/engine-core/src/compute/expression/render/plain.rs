@@ -6,9 +6,10 @@ use crate::compute::expression::{Expression, FilterPredicate, ScalarFunction};
 use crate::compute::sql_util::sql_quote_literal;
 use crate::error::{EngineError, EngineResult};
 
-use super::{KeepRendering, SqlDialect, SqlRenderer};
+use super::dialect::udf_call_unsupported;
+use super::{Dialect, KeepRendering, SqlRenderer};
 
-impl SqlRenderer<'_> {
+impl<D: Dialect> SqlRenderer<'_, D> {
     pub(super) fn render_plain(&self, expr: &Expression) -> EngineResult<String> {
         Ok(match expr {
             Expression::ColumnRef(name) => self.qualifier.column(None, name)?,
@@ -155,15 +156,7 @@ impl SqlRenderer<'_> {
                     Some(a) => self.render_plain(a)?,
                     None => "NULL".to_string(),
                 };
-                match self.dialect {
-                    // DataFusion plain SQL parenthesizes the division.
-                    SqlDialect::DataFusion => {
-                        format!("CASE WHEN {d} = 0 THEN {alt} ELSE (CAST({n} AS DOUBLE) / {d}) END")
-                    }
-                    SqlDialect::Postgres => format!(
-                        "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
-                    ),
-                }
+                self.dialect.safe_divide(&n, &d, &alt)?
             }
             Expression::Coalesce(exprs) => {
                 let args = exprs
@@ -177,7 +170,7 @@ impl SqlRenderer<'_> {
                     .iter()
                     .map(|a| self.render_plain(a))
                     .collect::<EngineResult<Vec<String>>>()?;
-                self.render_scalar_func(function, &mapped)
+                self.render_scalar_func(function, &mapped)?
             }
             Expression::TextFunc { function, args } => {
                 let mapped = args
@@ -208,21 +201,14 @@ impl SqlRenderer<'_> {
             } => {
                 let op_sql = self.render_plain(operand)?;
                 let k_sql = self.render_plain(percentile)?;
-                match self.dialect {
-                    SqlDialect::DataFusion => {
-                        format!("approx_percentile_cont({op_sql}, {k_sql})")
-                    }
-                    SqlDialect::Postgres => {
-                        format!("PERCENTILE_CONT({k_sql}) WITHIN GROUP (ORDER BY {op_sql})")
-                    }
-                }
+                self.dialect.percentile(&k_sql, &op_sql)?
             }
-            Expression::Query { .. } => match self.dialect {
+            Expression::Query { .. } => {
                 // Query expressions produce tables and must be materialized,
                 // not rendered inline. This should not be reached in normal flow.
-                SqlDialect::DataFusion => "/* QUERY: must be materialized */".to_string(),
-                SqlDialect::Postgres => return Err(unsupported(expr)),
-            },
+                self.dialect
+                    .materialized_placeholder("/* QUERY: must be materialized */", expr)?
+            }
             Expression::HasOneValue { column } => {
                 format!("(COUNT(DISTINCT {}) = 1)", self.render_plain(column)?)
             }
@@ -236,23 +222,16 @@ impl SqlRenderer<'_> {
                     "CASE WHEN COUNT(DISTINCT {col_sql}) = 1 THEN MIN({col_sql}) ELSE {alt} END"
                 )
             }
-            Expression::FirstValue { column, order_by } => match self.dialect {
-                SqlDialect::DataFusion => format!(
-                    "FIRST_VALUE({} ORDER BY {})",
-                    self.render_plain(column)?,
-                    self.render_plain(order_by)?
-                ),
-                // PostgreSQL pushdown simplifies FIRST to MIN (no inline
-                // ordered-set FIRST_VALUE aggregate).
-                SqlDialect::Postgres => format!("MIN({})", self.render_plain(column)?),
-            },
+            Expression::FirstValue { column, order_by } => {
+                let column_sql = self.render_plain(column)?;
+                let order_sql = self.render_plain(order_by)?;
+                self.dialect.first_value(&column_sql, &order_sql)?
+            }
             Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
-                match self.dialect {
-                    // Window expressions produce tables and must be materialized,
-                    // not rendered inline. This should not be reached in normal flow.
-                    SqlDialect::DataFusion => "/* WINDOW: must be materialized */".to_string(),
-                    SqlDialect::Postgres => return Err(unsupported(expr)),
-                }
+                // Window expressions produce tables and must be materialized,
+                // not rendered inline. This should not be reached in normal flow.
+                self.dialect
+                    .materialized_placeholder("/* WINDOW: must be materialized */", expr)?
             }
             // Time-intelligence sugar is lowered onto Window/Offset before
             // any SQL is generated (see compute::time_intelligence). A node
@@ -270,10 +249,9 @@ impl SqlRenderer<'_> {
                         .to_string(),
                 ));
             }
-            Expression::RankWindow { .. } => match self.dialect {
-                SqlDialect::DataFusion => "/* RANK_WINDOW: must be materialized */".to_string(),
-                SqlDialect::Postgres => return Err(unsupported(expr)),
-            },
+            Expression::RankWindow { .. } => self
+                .dialect
+                .materialized_placeholder("/* RANK_WINDOW: must be materialized */", expr)?,
             Expression::InList { expr, values } => {
                 let expr_sql = self.render_plain(expr)?;
                 let vals = values
@@ -319,54 +297,32 @@ impl SqlRenderer<'_> {
             Expression::MaxBy { value, sort_by } => {
                 let v = self.render_plain(value)?;
                 let s = self.render_plain(sort_by)?;
-                match self.dialect {
-                    // First value ordered by sort_by descending.
-                    SqlDialect::DataFusion => format!("FIRST_VALUE({v} ORDER BY {s} DESC)"),
-                    SqlDialect::Postgres => {
-                        format!("(ARRAY_AGG({v} ORDER BY {s} DESC NULLS LAST))[1]")
-                    }
-                }
+                self.dialect.max_by(&v, &s)?
             }
             Expression::MinBy { value, sort_by } => {
                 let v = self.render_plain(value)?;
                 let s = self.render_plain(sort_by)?;
-                match self.dialect {
-                    // First value ordered by sort_by ascending.
-                    SqlDialect::DataFusion => format!("FIRST_VALUE({v} ORDER BY {s} ASC)"),
-                    SqlDialect::Postgres => {
-                        format!("(ARRAY_AGG({v} ORDER BY {s} ASC NULLS LAST))[1]")
-                    }
-                }
+                self.dialect.min_by(&v, &s)?
             }
-            Expression::Call { name, args } => match self.dialect {
+            Expression::Call { name, args } => {
                 // Host-registered UDFs exist only in the local DataFusion
-                // session. The name is rendered lowercased because DataFusion
-                // normalizes unquoted SQL function identifiers to lowercase
-                // before registry lookup (UdfRegistry enforces lowercase
-                // registration, so the lookup always matches).
-                //
-                // The name is spliced unquoted — re-check the call-name rule
-                // here so a hostile model file that bypassed
-                // `Expression::validate` still cannot inject SQL.
-                SqlDialect::DataFusion => {
-                    crate::compute::expression::validate_call_name(name)?;
-                    let mapped = args
-                        .iter()
-                        .map(|a| self.render_plain(a))
-                        .collect::<EngineResult<Vec<String>>>()?;
-                    format!("{}({})", name.to_lowercase(), mapped.join(", "))
+                // session. A source dialect has no source-SQL equivalent and the
+                // pushdown planner never pushes expressions containing Call (see
+                // has_unpushable_ops), so this is unreachable in pushdown — fail
+                // closed regardless, before rendering the arguments.
+                if !self.dialect.supports_udf_call() {
+                    return Err(udf_call_unsupported(name));
                 }
-                // UDFs have no source-SQL equivalent. The pushdown planner
-                // never pushes expressions containing Call (see
-                // has_unpushable_ops), so this is unreachable in normal flow —
-                // fail closed regardless.
-                SqlDialect::Postgres => {
-                    return Err(EngineError::InvalidExpression(format!(
-                        "UDF call '{name}' cannot be rendered as source SQL; \
-                         user-defined functions execute locally only"
-                    )));
-                }
-            },
+                // The name is rendered lowercased (DataFusion normalizes unquoted
+                // function identifiers before registry lookup) and re-validated
+                // so a hostile model file that bypassed `Expression::validate`
+                // still cannot inject SQL.
+                let mapped = args
+                    .iter()
+                    .map(|a| self.render_plain(a))
+                    .collect::<EngineResult<Vec<String>>>()?;
+                super::dialect::render_udf_call(name, &mapped)?
+            }
         })
     }
 
@@ -394,21 +350,21 @@ impl SqlRenderer<'_> {
                     // COUNT(*) (the CASE WHEN condition does not apply);
                     // preserved byte-for-byte for pushdown compatibility.
                     if matches!(operation, AggregateOp::CountRows) {
-                        return Ok(self.dialect.render_aggregate(operation, ""));
+                        return self.dialect.render_aggregate(operation, "");
                     }
                     let inner_sql = self.render_plain(inner)?;
                     let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                    return Ok(self.dialect.render_aggregate(operation, &case_expr));
+                    return self.dialect.render_aggregate(operation, &case_expr);
                 }
             }
         }
         match operation {
             // COUNT(*) — handled before rendering the operand: COUNTROWS
             // carries a bare table reference, which is not renderable.
-            AggregateOp::CountRows => Ok(self.dialect.render_aggregate(operation, "")),
-            _ => Ok(self
+            AggregateOp::CountRows => self.dialect.render_aggregate(operation, ""),
+            _ => self
                 .dialect
-                .render_aggregate(operation, &self.render_plain(operand)?)),
+                .render_aggregate(operation, &self.render_plain(operand)?),
         }
     }
 
@@ -469,11 +425,11 @@ impl SqlRenderer<'_> {
             Expression::Aggregate { operation, operand } => {
                 // See render_aggregate_node for the COUNTROWS rationale.
                 if matches!(operation, AggregateOp::CountRows) {
-                    self.dialect.render_aggregate(operation, "")
+                    self.dialect.render_aggregate(operation, "")?
                 } else {
                     let inner_sql = self.render_plain(operand)?;
                     let case_expr = format!("CASE WHEN {condition} THEN {inner_sql} END");
-                    self.dialect.render_aggregate(operation, &case_expr)
+                    self.dialect.render_aggregate(operation, &case_expr)?
                 }
             }
             Expression::BinaryOp { left, op, right } => {
@@ -499,43 +455,14 @@ impl SqlRenderer<'_> {
         })
     }
 
-    /// Render a scalar function call with pre-rendered arguments, applying
-    /// PostgreSQL-specific rewrites in the `Postgres` dialect.
+    /// Render a scalar function call with pre-rendered arguments, delegating the
+    /// per-dialect spelling (e.g. PostgreSQL's `::NUMERIC` rewrites) to the
+    /// configured [`Dialect`].
     pub(super) fn render_scalar_func(
         &self,
         function: &ScalarFunction,
         mapped: &[String],
-    ) -> String {
-        match self.dialect {
-            SqlDialect::DataFusion => function.to_sql_strs(mapped),
-            SqlDialect::Postgres => match function {
-                // PostgreSQL ROUND/TRUNC require numeric, not double precision.
-                ScalarFunction::Round | ScalarFunction::RoundUp | ScalarFunction::RoundDown => {
-                    let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
-                    let func = if matches!(function, ScalarFunction::RoundDown) {
-                        "TRUNC"
-                    } else {
-                        "ROUND"
-                    };
-                    format!("{func}(({})::NUMERIC, {digits})", mapped[0])
-                }
-                ScalarFunction::Trunc => {
-                    let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
-                    format!("TRUNC(({})::NUMERIC, {digits})", mapped[0])
-                }
-                // PostgreSQL uses LOG(base, value), not LOG10(value).
-                ScalarFunction::Log10 => format!("LOG(10, ({})::NUMERIC)", mapped[0]),
-                ScalarFunction::Sign => format!("SIGN({})", mapped[0]),
-                ScalarFunction::Mod => format!("MOD({}, {})", mapped[0], mapped[1]),
-                _ => function.to_sql_strs(mapped),
-            },
-        }
+    ) -> EngineResult<String> {
+        self.dialect.scalar_func(function, mapped)
     }
-}
-
-/// Error for expression nodes that cannot be rendered in the target dialect.
-fn unsupported(expr: &Expression) -> EngineError {
-    EngineError::InvalidExpression(format!(
-        "Expression not supported for source SQL rendering: {expr:?}"
-    ))
 }

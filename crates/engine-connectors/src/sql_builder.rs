@@ -18,11 +18,13 @@
 //! previously generated inline — the connectors' pinned SQL-string tests
 //! enforce this.
 
+use engine_core::compute::expression::{resolve_is_in_scope, Expression};
 use engine_core::compute::sql_util::{quote_ident_bracket, quote_ident_double, sql_quote_literal};
 
+use crate::error::ConnectorResult;
 use crate::traits::{
     AggregateFunction, FetchRequest, FilterCondition, InFilterCondition, InValueKind,
-    OrderByTarget, GROUPING_ID_COLUMN,
+    JoinAggregationRequest, OrderByTarget, QualifiedColumn, GROUPING_ID_COLUMN,
 };
 
 /// Dialect-specific SQL fragments.
@@ -639,6 +641,127 @@ pub(crate) fn build_select_sql_with_conditions(
     sql.push_str(&dialect.limit_suffix(request.limit));
 
     sql
+}
+
+/// A [`SqlDialect`] that can additionally render engine `Expression` trees —
+/// the capability required to push a JOIN + aggregation / compound-measure /
+/// context-column query to a source.
+///
+/// Only connectors that have an `engine_core` [`Dialect`] implement this
+/// (PostgreSQL today). Because the shared [`build_join_aggregation_sql`] is
+/// generic over `ExpressionDialect`, a connector that does *not* implement it
+/// is structurally incapable of being handed a pushed join-aggregation, and the
+/// planner's capability gate routes such queries to local aggregation.
+///
+/// [`Dialect`]: engine_core::compute::expression::Dialect
+pub(crate) trait ExpressionDialect: SqlDialect {
+    /// Render an (already ISINSCOPE-resolved) `Expression` to this dialect's
+    /// SQL, qualifying column references through the connector `table_map` and
+    /// using `group_by` for any CLEAR-to-window translation.
+    fn render_join_expression(
+        &self,
+        expr: &Expression,
+        table_map: &[(String, String)],
+        group_by: &[QualifiedColumn],
+    ) -> ConnectorResult<String>;
+}
+
+/// Build a pushed JOIN + aggregation query from a [`JoinAggregationRequest`].
+///
+/// Assembles `SELECT <group-by cols, computed group-by CASEs, measures> FROM
+/// fact JOIN dims… WHERE filters GROUP BY <cols, computed CASEs>`. Identifier
+/// quoting and filter binding come from the [`SqlDialect`]; the measure and
+/// computed-group-by `Expression`s are rendered through
+/// [`ExpressionDialect::render_join_expression`]. Returns `(sql, bound_params)`.
+///
+/// `JoinAggregationRequest` carries only `filters` (no `in_filters`/`or_groups`
+/// — those force local aggregation upstream), so this renders the full request
+/// restriction contract; a future change adding disjunctive restriction to the
+/// join path must thread it here or keep forcing local.
+pub(crate) fn build_join_aggregation_sql(
+    dialect: &impl ExpressionDialect,
+    request: &JoinAggregationRequest,
+) -> ConnectorResult<(String, Vec<String>)> {
+    // (model, column) pairs for the group-by columns, used to resolve ISINSCOPE
+    // in expressions before SQL generation.
+    let group_by_pairs: Vec<(String, String)> = request
+        .table_map
+        .iter()
+        .flat_map(|(model, _)| {
+            request
+                .group_by
+                .iter()
+                .filter(move |col| {
+                    request
+                        .table_map
+                        .iter()
+                        .any(|(m, s)| m.eq_ignore_ascii_case(model) && s == &col.table)
+                })
+                .map(move |col| (model.clone(), col.column.clone()))
+        })
+        .collect();
+
+    let mut select_parts: Vec<String> = Vec::new();
+    let mut group_by_parts: Vec<String> = Vec::new();
+
+    for col in &request.group_by {
+        let qualified = format!(
+            "{}.{}",
+            dialect.quote_ident(&col.table),
+            dialect.quote_ident(&col.column)
+        );
+        select_parts.push(qualified.clone());
+        group_by_parts.push(qualified);
+    }
+
+    // Computed GROUP BY expressions (context-driven calculated columns): the
+    // SAME renderer as measures, but each goes into BOTH the SELECT (aliased)
+    // and the GROUP BY (raw).
+    for cg in &request.computed_group_by {
+        let resolved = resolve_is_in_scope(&cg.expression, &group_by_pairs);
+        let expr_sql = dialect.render_join_expression(&resolved, &request.table_map, &request.group_by)?;
+        select_parts.push(format!("{expr_sql} AS {}", dialect.quote_ident(&cg.alias)));
+        group_by_parts.push(expr_sql);
+    }
+
+    for m in &request.measures {
+        let resolved = resolve_is_in_scope(&m.expression, &group_by_pairs);
+        let expr_sql = dialect.render_join_expression(&resolved, &request.table_map, &request.group_by)?;
+        select_parts.push(format!("{expr_sql} AS {}", dialect.quote_ident(&m.alias)));
+    }
+
+    let mut sql = format!(
+        "SELECT {} FROM {}.{}",
+        select_parts.join(", "),
+        dialect.quote_ident(&request.fact_schema),
+        dialect.quote_ident(&request.fact_table)
+    );
+
+    for join in &request.joins {
+        sql.push_str(&format!(
+            " JOIN {}.{} ON {}.{} = {}.{}",
+            dialect.quote_ident(&join.dim_schema),
+            dialect.quote_ident(&join.dim_table),
+            dialect.quote_ident(&request.fact_table),
+            dialect.quote_ident(&join.fact_column),
+            dialect.quote_ident(&join.dim_table),
+            dialect.quote_ident(&join.dim_column),
+        ));
+    }
+
+    // WHERE clause. Filter values are bound as parameters (like
+    // `build_aggregate_sql`) so a value can never terminate the SQL string.
+    let mut params: Vec<String> = Vec::new();
+    if !request.filters.is_empty() {
+        let where_parts = build_filter_conditions(dialect, &request.filters, &mut params);
+        sql.push_str(&format!(" WHERE {}", where_parts.join(" AND ")));
+    }
+
+    if !group_by_parts.is_empty() {
+        sql.push_str(&format!(" GROUP BY {}", group_by_parts.join(", ")));
+    }
+
+    Ok((sql, params))
 }
 
 #[cfg(test)]
@@ -1340,5 +1463,51 @@ mod tests {
             "SELECT [region], SUM([amount]) AS [total] FROM [dbo].[sales] \
              WHERE [fk] IN (SELECT val FROM [#_ef_0]) GROUP BY [region]"
         );
+    }
+
+    /// Pin the shared join-aggregation SQL: group-by + JOIN + a measure
+    /// Expression (rendered via PostgreSQL's `ExpressionDialect`) + a bound
+    /// WHERE filter. The connector's `execute_join_aggregation` is now a thin
+    /// wrapper over this builder, so this is its byte-for-byte oracle.
+    #[test]
+    fn build_join_aggregation_sql_pinned_for_postgres() {
+        use crate::traits::{JoinAggregationRequest, JoinClause, MeasureExpr, QualifiedColumn};
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression as ec_expr;
+
+        let request = JoinAggregationRequest {
+            fact_schema: "sales".into(),
+            fact_table: "orders".into(),
+            joins: vec![JoinClause {
+                dim_schema: "sales".into(),
+                dim_table: "products".into(),
+                fact_column: "product_id".into(),
+                dim_column: "id".into(),
+            }],
+            measures: vec![MeasureExpr {
+                expression: ec_expr::agg(
+                    AggregateOp::Sum,
+                    ec_expr::qualified_col("Sales", "amount"),
+                ),
+                alias: "total".into(),
+            }],
+            group_by: vec![QualifiedColumn {
+                table: "products".into(),
+                column: "category".into(),
+            }],
+            computed_group_by: vec![],
+            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
+            table_map: vec![("Sales".into(), "orders".into())],
+        };
+
+        let (sql, params) = build_join_aggregation_sql(&PostgresDialect, &request).unwrap();
+        assert_eq!(
+            sql,
+            "SELECT \"products\".\"category\", SUM(\"orders\".\"amount\") AS \"total\" \
+             FROM \"sales\".\"orders\" JOIN \"sales\".\"products\" \
+             ON \"orders\".\"product_id\" = \"products\".\"id\" \
+             WHERE \"status\"::text = $1 GROUP BY \"products\".\"category\""
+        );
+        assert_eq!(params, vec!["active".to_string()]);
     }
 }

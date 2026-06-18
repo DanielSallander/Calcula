@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
+use engine_connectors::auth::{AuthMethodKind, ConnectorAuth};
 use engine_connectors::traits::{Connector, FetchRequest, SourceTable};
 use engine_connectors::{ConnectorError, ConnectorResult};
 use engine_core::compute::sql_util::{quote_ident_double, sql_quote_literal};
@@ -35,6 +36,15 @@ use crate::executor::pipeline::render_filter_literal;
 #[derive(Debug, Default)]
 pub struct InMemoryConnector {
     tables: HashMap<(String, String), RecordBatch>,
+}
+
+impl ConnectorAuth for InMemoryConnector {
+    /// The in-memory connector is constructed directly from in-process data
+    /// (no [`ConnectionTarget`](engine_connectors::auth::ConnectionTarget) /
+    /// secrets), so it supports no authentication methods.
+    fn supported_auth_methods() -> Vec<AuthMethodKind> {
+        Vec::new()
+    }
 }
 
 impl InMemoryConnector {

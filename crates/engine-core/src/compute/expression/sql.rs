@@ -12,7 +12,7 @@ impl Expression {
     /// Column names are double-quoted. Aggregate functions are rendered
     /// as `FUNC(operand)`. `DistinctCount` renders as `COUNT(DISTINCT operand)`.
     ///
-    /// Delegates to [`SqlRenderer`] configured with [`SqlDialect::DataFusion`]
+    /// Delegates to [`SqlRenderer`] configured with [`DataFusionDialect`]
     /// and [`BareQualifier`].
     ///
     /// # Errors
@@ -27,7 +27,7 @@ impl Expression {
     ///   construct consumes them before rendering (e.g. `COUNTROWS(table)`,
     ///   context operations, fact-table inference).
     pub fn to_sql_string(&self) -> EngineResult<String> {
-        SqlRenderer::new(SqlDialect::DataFusion, &BareQualifier).render(self)
+        SqlRenderer::new(DataFusionDialect, &BareQualifier).render(self)
     }
 
     /// Render this expression as a DataFusion SQL fragment, qualifying each
@@ -49,7 +49,7 @@ impl Expression {
     /// unexpanded [`Expression::MeasureRef`] fails closed.
     pub fn to_qualified_sql(&self, host_table: &str) -> EngineResult<String> {
         SqlRenderer::new(
-            SqlDialect::DataFusion,
+            DataFusionDialect,
             &MultiTableQualifier {
                 default_table: host_table,
             },
