@@ -82,6 +82,24 @@ impl PostgresConnector {
         })
     }
 
+    /// Construct a connector backed by a **lazy** connection pool that never
+    /// actually connects (sqlx opens a connection only on first use).
+    ///
+    /// Intended for planner/plan-shape tests and tooling that need a
+    /// pushdown-capable connector instance without a live database — the
+    /// capability probes ([`supports_expression_pushdown`](crate::registry) via
+    /// the registry) only inspect the connector *kind*, never the pool. Any
+    /// method that issues a query will fail at connection time.
+    #[doc(hidden)]
+    pub fn lazy_unconnected() -> Self {
+        let pool = PgPoolOptions::new().connect_lazy_with(PgConnectOptions::new());
+        Self {
+            pool,
+            temp_table_counter: AtomicU64::new(0),
+            schema_cache: SchemaCache::new(),
+        }
+    }
+
     /// Build typed PostgreSQL connection options from a target and auth
     /// method.
     ///
@@ -504,6 +522,12 @@ impl PostgresConnector {
 }
 
 impl Connector for PostgresConnector {
+    fn capabilities(&self) -> crate::traits::ConnectorCapabilities {
+        // PostgreSQL renders Expression trees through the unified SQL renderer
+        // (`pg_dialect`) and executes pushed JOIN-aggregations.
+        crate::traits::ConnectorCapabilities::with_expression_pushdown()
+    }
+
     async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
         let rows = sqlx::query(
             "SELECT table_schema, table_name

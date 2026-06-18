@@ -870,6 +870,24 @@ impl PushdownPlanner {
         // DataFusion session). Any of these force LocalAggregation.
         let has_unpushable_context = measures.iter().any(|m| has_unpushable_ops(m.expression()));
 
+        // Whether every real source table involved can execute a pushed
+        // join-aggregation (the connector renders Expression trees as SQL).
+        // Only such connectors may receive a `PushedJoinAggregation`; for any
+        // other source (e.g. SQL Server, which has no expression renderer) the
+        // pushed-join branches below must fall through to `LocalAggregation`
+        // rather than emit a plan the connector answers with
+        // `UnsupportedOperation` (a hard error where local would succeed).
+        // QUERY-in-VAR binding names are not source tables and are skipped.
+        let all_push_capable = all_tables
+            .iter()
+            .filter(|t| !query_binding_names.contains(&t.to_lowercase()))
+            .all(|t| {
+                registry
+                    .connector_for(t)
+                    .map(|c| c.supports_expression_pushdown())
+                    .unwrap_or(false)
+            });
+
         // Single-table with compound expressions (not simple aggregates):
         // use PushedJoinAggregation (no JOINs needed, just compound SQL).
         // Skipped when a measure contains unpushable operations (UDF calls,
@@ -892,6 +910,7 @@ impl PushdownPlanner {
             && !rls_force_local
             && !has_in_filters
             && !has_context_columns
+            && all_push_capable
         {
             let table_name = all_tables[0];
             if let Ok(req) = build_join_aggregation_request(
@@ -943,6 +962,7 @@ impl PushdownPlanner {
             && !rls_force_local
             && !has_in_filters
             && !has_context_columns
+            && all_push_capable
         {
             // Check if all tables share the same connector.
             let first_table = all_tables[0];
@@ -1392,6 +1412,69 @@ mod tests {
                 assert!(!req.measures.is_empty(), "Expected measures");
             }
             other => panic!("Expected PushedJoinAggregation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn star_schema_on_non_pushdown_source_falls_back_to_local() {
+        // A same-source star schema whose connector cannot render expression
+        // GROUP BY/JOIN aggregation (e.g. SQL Server, or here the in-memory
+        // connector) must NOT be planned as a PushedJoinAggregation — the
+        // connector would answer with UnsupportedOperation, a hard error where
+        // local aggregation succeeds. The capability gate falls it back.
+        use crate::in_memory_connector::InMemoryConnector;
+        use crate::registry::{AnyConnector, SourceBinding};
+
+        let model = test_model_star_schema();
+        let mut registry = SourceRegistry::new();
+        let idx = registry.add_connector(AnyConnector::InMemory(InMemoryConnector::new()));
+        registry.bind("Sales", idx, SourceBinding::new("sales", "salesorderheader"));
+        registry.bind("Products", idx, SourceBinding::new("production", "product"));
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            ..Default::default()
+        };
+
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &[]).unwrap();
+        assert!(
+            matches!(plan, QueryPlan::LocalAggregation { .. }),
+            "a non-pushdown source must aggregate locally, got {plan:?}"
+        );
+    }
+
+    #[test]
+    fn non_pushdown_fallback_still_seals_role_conditions() {
+        // The fail-soft is done at the PLANNER, so a compound-measure query on a
+        // non-pushdown source falls back to LocalAggregation with the active
+        // role's predicate STILL sealed into the fact fetch — no RLS leak. (A
+        // naive executor-side catch that re-fetched without the role would leak.)
+        use crate::in_memory_connector::InMemoryConnector;
+        use crate::registry::{AnyConnector, SourceBinding};
+
+        let model = test_model_single_compound();
+        let mut registry = SourceRegistry::new();
+        let idx = registry.add_connector(AnyConnector::InMemory(InMemoryConnector::new()));
+        registry.bind("Sales", idx, SourceBinding::new("dbo", "sales"));
+
+        let request = QueryRequest {
+            measures: vec!["Doubled".into()],
+            ..Default::default()
+        };
+        let plan = PushdownPlanner::plan(&request, &model, &registry, &west_role()).unwrap();
+        match plan {
+            QueryPlan::LocalAggregation { fetches, .. } => {
+                let sales = &fetches.iter().find(|(n, _)| n == "Sales").unwrap().1;
+                assert!(
+                    sales
+                        .filters
+                        .iter()
+                        .any(|f| f.column == "region" && f.value == "West"),
+                    "active-role predicate must survive the fallback into the fetch: {sales:?}"
+                );
+            }
+            other => panic!("expected LocalAggregation, got {other:?}"),
         }
     }
 

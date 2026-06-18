@@ -237,7 +237,7 @@ impl PushdownPlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::SourceBinding;
+    use crate::registry::{test_capable_connector, SourceBinding};
     use crate::request::ColumnRef;
     use engine_core::compute::aggregate::AggregateOp;
     use engine_core::compute::expression::{self as expr, ComparisonOp, FilterPredicate};
@@ -300,6 +300,9 @@ mod tests {
 
     fn mock_registry(tables: &[&str]) -> SourceRegistry {
         let mut registry = SourceRegistry::new();
+        // A pushdown-capable connector so the planner's expression-pushdown
+        // gate sees a capable source; plan-shape tests never execute.
+        registry.add_connector(test_capable_connector());
         for table in tables {
             registry.bind(
                 *table,

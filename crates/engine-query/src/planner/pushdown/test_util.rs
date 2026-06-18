@@ -1,13 +1,26 @@
 //! Shared test fixtures for the pushdown planner test modules.
 
 use engine_connectors::FetchRequest;
-use engine_core::compute::measure::{count_measure, sum_measure};
+use engine_core::compute::aggregate::AggregateOp;
+use engine_core::compute::expression::{self as expr, ComparisonOp, FilterPredicate};
+use engine_core::compute::measure::{count_measure, expression_measure, sum_measure};
 use engine_core::model::{Column, DataModel, Relationship, Table};
 use engine_core::types::DataType;
 
-use crate::registry::{SourceBinding, SourceRegistry};
+use crate::registry::{test_capable_connector, SourceBinding, SourceRegistry};
 
 use super::QueryPlan;
+
+/// A registry pre-loaded with `n` pushdown-capable connectors. Plan-shape tests
+/// bind their tables to these indices so the planner's expression-pushdown
+/// capability gate sees a capable source (see [`test_capable_connector`]).
+fn registry_with_capable_connectors(n: usize) -> SourceRegistry {
+    let mut registry = SourceRegistry::new();
+    for _ in 0..n {
+        registry.add_connector(test_capable_connector());
+    }
+    registry
+}
 
 pub(super) fn test_model_single_table() -> DataModel {
     let sales = Table::new(
@@ -64,7 +77,7 @@ pub(super) fn test_model_star_schema() -> DataModel {
 }
 
 pub(super) fn mock_registry_single(connector_idx: usize) -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
+    let mut registry = registry_with_capable_connectors(connector_idx + 1);
     registry.bind(
         "Sales",
         connector_idx,
@@ -74,7 +87,7 @@ pub(super) fn mock_registry_single(connector_idx: usize) -> SourceRegistry {
 }
 
 pub(super) fn mock_registry_star(connector_idx: usize) -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
+    let mut registry = registry_with_capable_connectors(connector_idx + 1);
     registry.bind(
         "Sales",
         connector_idx,
@@ -90,14 +103,14 @@ pub(super) fn mock_registry_star(connector_idx: usize) -> SourceRegistry {
 
 /// Two tables on different connectors — forces local aggregation.
 pub(super) fn make_cross_source_registry() -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
+    let mut registry = registry_with_capable_connectors(2);
     registry.bind("Sales", 0, SourceBinding::new("sales", "salesorderheader"));
     registry.bind("Products", 1, SourceBinding::new("production", "product"));
     registry
 }
 
 pub(super) fn mock_registry_cross_source() -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
+    let mut registry = registry_with_capable_connectors(2);
     // Sales on connector 0, Products on connector 1 (different sources).
     registry.bind("Sales", 0, SourceBinding::new("sales", "salesorderheader"));
     registry.bind("Products", 1, SourceBinding::new("production", "product"));
@@ -159,7 +172,7 @@ pub(super) fn test_model_three_table() -> DataModel {
 }
 
 pub(super) fn mock_registry_three(connector_idx: usize) -> SourceRegistry {
-    let mut registry = SourceRegistry::new();
+    let mut registry = registry_with_capable_connectors(connector_idx + 1);
     registry.bind("Sales", connector_idx, SourceBinding::new("dbo", "sales"));
     registry.bind(
         "Products",
@@ -168,6 +181,40 @@ pub(super) fn mock_registry_three(connector_idx: usize) -> SourceRegistry {
     );
     registry.bind("Dates", connector_idx, SourceBinding::new("dbo", "dates"));
     registry
+}
+
+/// Single fact `Sales(id, amount, region)` with one **compound** measure
+/// (`Doubled = SUM(amount) * 2`, not a simple aggregate) — exercises the
+/// single-table expression-pushdown branch.
+pub(super) fn test_model_single_compound() -> DataModel {
+    let sales = Table::new(
+        "Sales",
+        vec![
+            Column::new("id", DataType::Int64),
+            Column::new("amount", DataType::Float64),
+            Column::new("region", DataType::String),
+        ],
+    )
+    .unwrap();
+    DataModel::builder()
+        .add_table(sales)
+        .add_measure(expression_measure(
+            "Doubled",
+            expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount"))
+                .multiply(expr::lit_int(2)),
+        ))
+        .build()
+        .unwrap()
+}
+
+/// Active-role predicate restricting `Sales` to `region = 'West'`.
+pub(super) fn west_role() -> Vec<FilterPredicate> {
+    vec![FilterPredicate::new(
+        "Sales",
+        "region",
+        ComparisonOp::Equal,
+        "West",
+    )]
 }
 
 /// Extract the fetch for a table from a LocalAggregation plan.

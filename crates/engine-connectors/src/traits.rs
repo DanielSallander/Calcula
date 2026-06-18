@@ -389,6 +389,50 @@ pub struct JoinAggregationRequest {
     pub table_map: Vec<(String, String)>,
 }
 
+/// What a connector can compute **at the source**, beyond the universal floor
+/// that every connector honors: a plain `SELECT` with the full [`FetchRequest`]
+/// restriction contract (`filters` + `in_filters` + `or_groups`) applied.
+///
+/// The query planner consults this descriptor to decide what to push down and
+/// what to compute locally. It is **declarative and defaults to nothing**
+/// ([`fetch_only`](Self::fetch_only)): a connector must explicitly opt into a
+/// capability *and* implement the corresponding source SQL. A capability a
+/// connector does not advertise is never pushed — so a partially-capable (or
+/// brand-new) connector is structurally incapable of being handed a query it
+/// cannot answer, and the planner falls back to local aggregation instead.
+///
+/// New capability flags are added here as the planner learns to gate on them;
+/// each defaults to `false` so existing connectors keep their current (minimal)
+/// surface until they opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct ConnectorCapabilities {
+    /// The connector can execute a pushed JOIN + aggregation whose GROUP BY and
+    /// measures are arbitrary Expression trees rendered to the connector's SQL
+    /// dialect — i.e. it meaningfully implements
+    /// [`Connector::execute_join_aggregation`]. When `false`, the planner emits
+    /// `LocalAggregation` for any compound-measure / multi-table-same-source /
+    /// context-column query instead of a `PushedJoinAggregation`.
+    pub expression_pushdown: bool,
+}
+
+impl ConnectorCapabilities {
+    /// The universal floor: a plain filtered fetch only, nothing pushed.
+    pub const fn fetch_only() -> Self {
+        Self {
+            expression_pushdown: false,
+        }
+    }
+
+    /// A source that can additionally execute pushed expression
+    /// JOIN-aggregations (today: PostgreSQL).
+    pub const fn with_expression_pushdown() -> Self {
+        Self {
+            expression_pushdown: true,
+        }
+    }
+}
+
 /// Trait for data source connectors.
 ///
 /// Implementations provide access to external databases, translating
@@ -399,6 +443,14 @@ pub struct JoinAggregationRequest {
 /// own constructor (e.g., `PostgresConnector::connect`).
 #[allow(async_fn_in_trait)]
 pub trait Connector {
+    /// The source-side computations this connector supports beyond a plain
+    /// filtered fetch. Defaults to [`ConnectorCapabilities::fetch_only`] —
+    /// a connector overrides this to opt into pushdown (and must implement the
+    /// matching source SQL). See [`ConnectorCapabilities`].
+    fn capabilities(&self) -> ConnectorCapabilities {
+        ConnectorCapabilities::fetch_only()
+    }
+
     /// List all user tables available in the data source.
     ///
     /// Excludes system tables and internal schemas.

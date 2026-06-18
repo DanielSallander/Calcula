@@ -27,7 +27,7 @@ pub use error::{ConnectorError, ConnectorResult};
 pub use postgres::PostgresConnector;
 pub use sqlserver::SqlServerConnector;
 pub use traits::{
-    AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
-    InFilterCondition, JoinAggregationRequest, JoinClause, MeasureExpr, OrderByExpr, OrderByTarget,
-    QualifiedColumn, SourceTable, GROUPING_ID_COLUMN,
+    AggregateExpr, AggregateFunction, Connector, ConnectorCapabilities, FetchRequest,
+    FilterCondition, FilterOperator, InFilterCondition, JoinAggregationRequest, JoinClause,
+    MeasureExpr, OrderByExpr, OrderByTarget, QualifiedColumn, SourceTable, GROUPING_ID_COLUMN,
 };

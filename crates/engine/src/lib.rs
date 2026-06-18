@@ -173,8 +173,8 @@ pub use engine_connectors::auth::{
 pub use engine_connectors::postgres::PostgresConnector;
 pub use engine_connectors::sqlserver::SqlServerConnector;
 pub use engine_connectors::traits::{
-    AggregateExpr, AggregateFunction, Connector, FetchRequest, FilterCondition, FilterOperator,
-    OrderByExpr, OrderByTarget, SourceTable,
+    AggregateExpr, AggregateFunction, Connector, ConnectorCapabilities, FetchRequest,
+    FilterCondition, FilterOperator, OrderByExpr, OrderByTarget, SourceTable,
 };
 pub use engine_connectors::{ConnectorError, ConnectorResult};
 
