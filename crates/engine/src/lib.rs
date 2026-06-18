@@ -2111,7 +2111,25 @@ impl Engine {
         }
 
         let role_filters = self.active_role_filters()?;
-        let plan = PushdownPlanner::plan(effective_request, model, &self.registry, &role_filters)?;
+        // Resolve host-only context-driven calculated columns' scalars so the
+        // planner can push their CASE into the source GROUP BY (single-fact,
+        // pushable shape, supporting connector). Empty for any other query —
+        // the planner then aggregates locally and the executor resolves the
+        // scalar itself.
+        let context_column_cases = self
+            .resolve_pushable_context_columns(&request, &token)
+            .await?;
+        let plan = if context_column_cases.is_empty() {
+            PushdownPlanner::plan(effective_request, model, &self.registry, &role_filters)?
+        } else {
+            PushdownPlanner::plan_with_context_columns(
+                effective_request,
+                model,
+                &self.registry,
+                &role_filters,
+                &context_column_cases,
+            )?
+        };
         let batches = map_script_error(
             QueryExecutor::execute_with_cancellation(
                 &plan,
@@ -2527,6 +2545,215 @@ impl Engine {
         Ok(resolved)
     }
 
+    /// Names (lowercased) of every table in `fact`'s relationship-connected
+    /// component, `fact` included — an undirected BFS over the model's
+    /// relationships. A scalar measure aggregating over a table in this set can
+    /// be cross-filtered by the fact's filter context in the local path, so
+    /// [`resolve_pushable_context_columns`](Self::resolve_pushable_context_columns)
+    /// declines to push such a context column (see its body).
+    fn fact_connected_tables(&self, fact: &str) -> std::collections::HashSet<String> {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(fact.to_lowercase());
+        let mut frontier = vec![fact.to_string()];
+        while let Some(t) = frontier.pop() {
+            for r in self.model.relationships() {
+                let other = if r.from_table().eq_ignore_ascii_case(&t) {
+                    Some(r.to_table())
+                } else if r.to_table().eq_ignore_ascii_case(&t) {
+                    Some(r.from_table())
+                } else {
+                    None
+                };
+                if let Some(o) = other {
+                    if seen.insert(o.to_lowercase()) {
+                        frontier.push(o.to_string());
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    /// Resolve a query's host-only context-driven calculated columns into
+    /// row-level expressions (scalar measures substituted to literals) **only
+    /// when the whole query is shaped so the planner can push their `CASE`
+    /// into the source `GROUP BY`** — single fact, simple pushable measures,
+    /// all grouping on that fact, a connector that renders expressions.
+    ///
+    /// This is purely an optimization: a non-empty result lets the planner
+    /// build a `PushedJoinAggregation`; an empty result (the default for any
+    /// query that is not unambiguously pushable, or any context column that is
+    /// cross-table / resolves to `NULL` / references a non-aggregate scalar)
+    /// makes the planner aggregate locally — the long-standing path that
+    /// resolves the same scalar itself. Because deferral reproduces the local
+    /// result exactly, pushdown never changes an answer; it only moves the work.
+    async fn resolve_pushable_context_columns(
+        &self,
+        request: &QueryRequest,
+        token: &CancellationToken,
+    ) -> QueryResult<Vec<(ColumnRef, Expression)>> {
+        use engine_core::compute::expression::{expand_measure_refs, expr_literal_from_arrow};
+
+        // Cheap, conservative shape gate. Any feature that forces (or merely
+        // complicates) local aggregation defers to it — the planner and
+        // executor own those paths. Pushdown handles only the plain
+        // group-by/aggregate query.
+        if !request.in_filters.is_empty()
+            || !request.or_filters.is_empty()
+            || !request.measure_filters.is_empty()
+            || !request.lookups.is_empty()
+            || request.rank_by.is_some()
+            || request.top_n.is_some()
+            || request.hierarchy_group_by.is_some()
+            || request.calculation_group.is_some()
+            || request.totals != TotalsMode::None
+            || request.measures.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+
+        // Context columns referenced on the group-by axis.
+        let ctx_cols: Vec<&ColumnRef> = request
+            .group_by
+            .iter()
+            .filter(|c| {
+                self.model
+                    .context_column(&c.column)
+                    .is_some_and(|cc| cc.table().eq_ignore_ascii_case(&c.table))
+            })
+            .collect();
+        if ctx_cols.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Single fact: every measure's home table is the same, non-empty table.
+        let mut fact: Option<String> = None;
+        for m in &request.measures {
+            let mt = self.model.measure(m).map_err(QueryError::Engine)?.table();
+            if mt.is_empty() {
+                return Ok(Vec::new());
+            }
+            match &fact {
+                None => fact = Some(mt.to_string()),
+                Some(f) if f.eq_ignore_ascii_case(mt) => {}
+                Some(_) => return Ok(Vec::new()),
+            }
+        }
+        let Some(fact) = fact else {
+            return Ok(Vec::new());
+        };
+
+        // All grouping (context columns included) lives on the fact, and the
+        // fact's connector can render expression GROUP BY entries.
+        if !request
+            .group_by
+            .iter()
+            .all(|c| c.table.eq_ignore_ascii_case(&fact))
+        {
+            return Ok(Vec::new());
+        }
+        // In-memory facts are served locally (DataFusion), never pushed; and
+        // their cache binding may carry a placeholder connector index. Defer.
+        if self.model.table(&fact).is_ok_and(Table::is_in_memory) {
+            return Ok(Vec::new());
+        }
+        let pushable = self
+            .registry
+            .connector_for(&fact)
+            .map(AnyConnector::supports_expression_pushdown)
+            .unwrap_or(false);
+        if !pushable {
+            return Ok(Vec::new());
+        }
+
+        // Tables in the fact's relationship-connected component. A scalar
+        // measure aggregating over such a table can be cross-filtered by the
+        // fact's filter context in the trusted local path (bidirectional
+        // `FilterPropagation::Both` reverse-propagation, multi-hop), which the
+        // inner scalar query below does NOT replicate (it fetches only the
+        // scalar's own table). Pushing it would bake a different scalar into the
+        // CASE than local computes — a silently-wrong segmentation. So any
+        // scalar over a fact-connected table (other than the fact itself) defers
+        // the whole query to local. A *disconnected* as-of reference (the
+        // canonical pattern) is unaffected — its scalar is filtered only by its
+        // own columns, identically on both paths.
+        let fact_connected = self.fact_connected_tables(&fact);
+
+        // Resolve each context column's row-level CASE. Any column that is not
+        // self-contained-on-the-host, or whose scalar measure is not a single
+        // aggregate / resolves to NULL, aborts pushdown for the whole query
+        // (the local path supports those cases and produces the same result).
+        let mut resolved: Vec<(ColumnRef, Expression)> = Vec::new();
+        for col_ref in &ctx_cols {
+            let cc = self
+                .model
+                .context_column(&col_ref.column)
+                .filter(|cc| cc.table().eq_ignore_ascii_case(&col_ref.table))
+                .ok_or_else(|| {
+                    QueryError::InvalidQuery(format!(
+                        "'{}[{}]' is not a context-driven calculated column",
+                        col_ref.table, col_ref.column
+                    ))
+                })?;
+            let inlined = self
+                .model
+                .inline_context_column_refs(
+                    cc.table(),
+                    cc.expression(),
+                    &mut vec![cc.name().to_lowercase()],
+                )
+                .map_err(QueryError::Engine)?;
+            // Pushdown v1: host-table-only context columns. A cross-table
+            // reference defers the whole query to the local path.
+            if inlined
+                .qualified_column_references()
+                .iter()
+                .any(|(t, _)| !t.eq_ignore_ascii_case(cc.table()))
+            {
+                return Ok(Vec::new());
+            }
+
+            let mut env: std::collections::HashMap<String, Expression> =
+                std::collections::HashMap::new();
+            for m_name in inlined.measure_references() {
+                let measure = self.model.measure(m_name).map_err(QueryError::Engine)?;
+                let expanded = expand_measure_refs(measure.expression(), &self.model)
+                    .map_err(QueryError::Engine)?;
+                if expanded.has_context_ops() || expanded.as_simple_aggregate().is_none() {
+                    return Ok(Vec::new());
+                }
+                // The scalar's source table must be the fact or fully
+                // disconnected from it; a fact-connected scalar table can be
+                // cross-filtered by the local path but not by the inner query
+                // below, so pushing it would diverge — defer to local.
+                let scalar_table = measure.table();
+                if !scalar_table.eq_ignore_ascii_case(&fact)
+                    && fact_connected.contains(&scalar_table.to_lowercase())
+                {
+                    return Ok(Vec::new());
+                }
+                let inner = QueryRequest {
+                    measures: vec![m_name.to_string()],
+                    filters: request.filters.clone(),
+                    ..Default::default()
+                };
+                let batches = Box::pin(self.query_with_cancellation(inner, token.clone())).await?;
+                let lit = match batches.iter().find(|b| b.num_rows() > 0) {
+                    Some(b) => {
+                        expr_literal_from_arrow(b.column(0).as_ref(), 0).map_err(QueryError::Engine)?
+                    }
+                    None => Expression::Blank,
+                };
+                if matches!(lit, Expression::Blank) {
+                    return Ok(Vec::new());
+                }
+                env.insert(m_name.to_string(), lit);
+            }
+            resolved.push(((*col_ref).clone(), inlined.substitute_measure_refs(&env)));
+        }
+        Ok(resolved)
+    }
+
     /// Execute a query, automatically refreshing any stale in-memory tables first.
     ///
     /// This is equivalent to calling [`Engine::refresh_stale`] followed by
@@ -2629,11 +2856,18 @@ impl Engine {
         };
 
         let role_filters = self.active_role_filters()?;
+        // Mirror the `query` path: resolve pushable context-column CASEs so the
+        // explain output reports the same plan the query would actually run.
+        let token = CancellationToken::new();
+        let context_column_cases = self
+            .resolve_pushable_context_columns(&request, &token)
+            .await?;
         let (query_plan, pushdown_node) = PushdownPlanner::plan_explained(
             effective_request,
             model,
             &self.registry,
             &role_filters,
+            &context_column_cases,
         )?;
         let (batches, exec_node) = map_script_error(
             QueryExecutor::execute_explained(

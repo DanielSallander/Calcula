@@ -808,7 +808,7 @@ mod tests {
         };
 
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
         let projected = node
             .properties
             .iter()
@@ -861,7 +861,7 @@ mod tests {
         };
 
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &fallback_model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &fallback_model, &registry, &[], &[]).unwrap();
         let fallbacks = node
             .properties
             .iter()

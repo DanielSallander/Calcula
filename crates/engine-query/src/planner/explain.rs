@@ -31,10 +31,20 @@ impl PushdownPlanner {
         model: &DataModel,
         registry: &SourceRegistry,
         role_filters: &[FilterPredicate],
+        context_column_cases: &[(
+            crate::request::ColumnRef,
+            engine_core::compute::expression::Expression,
+        )],
     ) -> QueryResult<(QueryPlan, PlanNode)> {
         let start = Instant::now();
-        let (plan, projection) =
-            Self::plan_with_diagnostics(request, model, registry, role_filters)?;
+        let (plan, projection) = Self::plan_with_cached_diagnostics(
+            request,
+            model,
+            registry,
+            &std::collections::HashSet::new(),
+            role_filters,
+            context_column_cases,
+        )?;
         let elapsed = start.elapsed();
 
         // Reconstruct decision reasoning from the plan and request.
@@ -313,7 +323,7 @@ mod tests {
         };
 
         let (plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
 
         assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
         assert_eq!(node.operation, PlanOperation::PushdownDecision);
@@ -348,7 +358,7 @@ mod tests {
         };
 
         let (plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
 
         assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
 
@@ -376,7 +386,7 @@ mod tests {
         };
 
         let (plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
 
         assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
 
@@ -402,7 +412,7 @@ mod tests {
         };
 
         let (plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
         assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
         let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
         assert_eq!(totals.value, PlanValue::Text("rollup".into()));
@@ -429,7 +439,7 @@ mod tests {
         };
 
         let (plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
         assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
         let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
         assert_eq!(totals.value, PlanValue::Text("rollup".into()));
@@ -450,7 +460,7 @@ mod tests {
             ..Default::default()
         };
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
         assert!(node.properties.iter().all(|p| p.key != "totals"));
     }
 
@@ -493,7 +503,7 @@ mod tests {
             ..Default::default()
         };
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
 
         let prop = |key: &str| {
             node.properties
@@ -520,7 +530,7 @@ mod tests {
             ..Default::default()
         };
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
         assert!(node.properties.iter().all(|p| p.key != "hierarchy"));
     }
 
@@ -566,7 +576,7 @@ mod tests {
         };
 
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &model, &registry, &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
 
         let reason = node.properties.iter().find(|p| p.key == "reason").unwrap();
         match &reason.value {

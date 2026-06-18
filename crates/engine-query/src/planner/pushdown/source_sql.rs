@@ -385,6 +385,7 @@ pub(super) fn build_join_aggregation_request(
     all_tables: &[&str],
     model: &DataModel,
     registry: &SourceRegistry,
+    computed_group_by: &[(ColumnRef, Expression)],
 ) -> QueryResult<engine_connectors::JoinAggregationRequest> {
     use engine_connectors::{JoinAggregationRequest, JoinClause, MeasureExpr, QualifiedColumn};
 
@@ -449,12 +450,24 @@ pub(super) fn build_join_aggregation_request(
         joined.insert(t.to_string());
     }
 
+    // Computed GROUP BY: a context-driven calculated column's resolved CASE
+    // (aliased to the column name). Rendered by the connector into both SELECT
+    // and GROUP BY.
+    let computed_exprs: Vec<MeasureExpr> = computed_group_by
+        .iter()
+        .map(|(col_ref, expr)| MeasureExpr {
+            expression: expr.clone(),
+            alias: col_ref.column.clone(),
+        })
+        .collect();
+
     Ok(JoinAggregationRequest {
         fact_schema: fact_binding.schema.clone(),
         fact_table: fact_binding.table.clone(),
         joins,
         measures: measure_exprs,
         group_by: qualified_group_by,
+        computed_group_by: computed_exprs,
         filters: filters.to_vec(),
         table_map,
     })

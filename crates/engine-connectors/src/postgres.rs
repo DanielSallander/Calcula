@@ -651,6 +651,24 @@ impl Connector for PostgresConnector {
             group_by_parts.push(qualified);
         }
 
+        // Computed GROUP BY expressions (context-driven calculated columns):
+        // the SAME dialect renderer as measures, but each goes into BOTH the
+        // SELECT (aliased) and the GROUP BY (raw). The expression carries only
+        // the fact's columns and engine-substituted literals.
+        for cg in &request.computed_group_by {
+            let resolved = engine_core::compute::expression::resolve_is_in_scope(
+                &cg.expression,
+                &group_by_pairs,
+            );
+            let expr_sql = pg_dialect::expr_to_sql_with_clear(
+                &resolved,
+                &request.table_map,
+                &request.group_by,
+            )?;
+            select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(&cg.alias)));
+            group_by_parts.push(expr_sql);
+        }
+
         for m in &request.measures {
             let resolved = engine_core::compute::expression::resolve_is_in_scope(
                 &m.expression,
@@ -1125,6 +1143,37 @@ mod tests {
         let sql = pg_dialect::expr_to_sql(&expr, &table_map).unwrap();
         assert!(sql.contains("'x''); DROP TABLE t; --'"), "{sql}");
         assert!(!sql.contains("= 'x');"), "{sql}");
+    }
+
+    #[test]
+    fn pg_dialect_context_column_case_renders_escaped_for_group_by() {
+        // The expression a context-driven calculated column pushes into GROUP BY:
+        // `IF(fact[paid_date] <= <resolved date>, "Pa'id", "Open")`. It comes from
+        // the (untrusted) model file, so its string branches must be escaped and
+        // the substituted scalar renders as a typed DATE literal — never raw SQL.
+        // This is the SAME renderer the connector uses for `computed_group_by`.
+        use engine_core::compute::expression::{compare, if_expr, lit_str, qualified_col};
+        use engine_core::compute::expression::{ComparisonOp, Expression};
+
+        let expr = if_expr(
+            compare(
+                qualified_col("Invoice", "paid_date"),
+                ComparisonOp::LessThanOrEqual,
+                Expression::LiteralDate(19_813),
+            ),
+            lit_str("Pa'id"),
+            lit_str("Open"),
+        );
+        let table_map = vec![("Invoice".to_string(), "invoice".to_string())];
+        let sql = pg_dialect::expr_to_sql_with_clear(&expr, &table_map, &[]).unwrap();
+        assert_eq!(
+            sql,
+            "CASE WHEN (\"invoice\".\"paid_date\" <= CAST(19813 AS DATE)) \
+             THEN 'Pa''id' ELSE 'Open' END"
+        );
+        // The apostrophe is doubled (escaped), not left to terminate the literal.
+        assert!(sql.contains("'Pa''id'"), "{sql}");
+        assert!(!sql.contains("'Pa'id'"), "{sql}");
     }
 
     #[test]

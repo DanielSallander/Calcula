@@ -224,6 +224,57 @@ fn apply_sargable_filter_kinds(plan: &mut QueryPlan, model: &DataModel) {
     }
 }
 
+/// Partition a query's filters for the context-column pushdown path, which
+/// queries only the fact table.
+///
+/// Returns `Some(fact_filters)` when every filter can be handled by a fact-only
+/// pushed query, and `None` (defer to local) otherwise:
+///
+/// - A filter on a column the **fact owns** is pushed onto the fact (it
+///   restricts fact rows, exactly as local aggregation would).
+/// - Any other filter must be owned **solely by table(s) disconnected from the
+///   fact** (no relationship). Such a filter cannot restrict fact rows; it only
+///   shaped a context column's scalar, which the facade has already resolved to
+///   a literal — so it is correctly dropped here.
+/// - A filter owned by a fact-**related** dimension (local aggregation would
+///   propagate it to the fact) or by **no** table at all forces the local path,
+///   which performs that relationship-aware propagation.
+///
+/// This keeps the pushed result identical to the local result for every filter
+/// shape — the pushed path activates only when it provably matches.
+fn context_pushdown_fact_filters(
+    model: &DataModel,
+    fact: &str,
+    filters: &[FilterCondition],
+) -> Option<Vec<FilterCondition>> {
+    let fact_table = model.table(fact).ok()?;
+    let mut fact_filters = Vec::new();
+    for f in filters {
+        if collector::resolve_physical_column(fact_table, &f.column).is_some() {
+            fact_filters.push(f.clone());
+            continue;
+        }
+        // Not a fact column: every owner must be disconnected from the fact.
+        let mut any_owner = false;
+        for owner in model.tables() {
+            if collector::resolve_physical_column(owner, &f.column).is_none() {
+                continue;
+            }
+            any_owner = true;
+            if owner.name().eq_ignore_ascii_case(fact) {
+                continue;
+            }
+            if model.find_any_relationship(fact, owner.name()).is_ok() {
+                return None; // related-dimension filter — needs local propagation
+            }
+        }
+        if !any_owner {
+            return None; // unattributable filter — defer to local
+        }
+    }
+    Some(fact_filters)
+}
+
 /// The pushdown planner analyzes a query request and produces an execution plan.
 pub struct PushdownPlanner;
 
@@ -269,7 +320,32 @@ impl PushdownPlanner {
             registry,
             &std::collections::HashSet::new(),
             role_filters,
+            &[],
         )
+    }
+
+    /// Like [`plan`](Self::plan), but with facade-resolved context-driven
+    /// calculated column expressions (each a row-level `CASE` whose scalar
+    /// measure is already substituted to a literal). When a context column is
+    /// on the group-by axis and the query is otherwise pushable on a connector
+    /// that supports expression pushdown, the planner pushes the `CASE` into the
+    /// source GROUP BY instead of forcing local aggregation.
+    pub fn plan_with_context_columns(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+        role_filters: &[FilterPredicate],
+        context_column_cases: &[(ColumnRef, engine_core::compute::expression::Expression)],
+    ) -> QueryResult<QueryPlan> {
+        Ok(Self::plan_with_cached_diagnostics(
+            request,
+            model,
+            registry,
+            &std::collections::HashSet::new(),
+            role_filters,
+            context_column_cases,
+        )?
+        .0)
     }
 
     /// Analyze a query request and produce a plan, treating tables in
@@ -288,6 +364,7 @@ impl PushdownPlanner {
             registry,
             cached_tables,
             role_filters,
+            &[],
         )?
         .0)
     }
@@ -307,6 +384,7 @@ impl PushdownPlanner {
         registry: &SourceRegistry,
         cached_tables: &std::collections::HashSet<String>,
         role_filters: &[FilterPredicate],
+        context_column_cases: &[(ColumnRef, engine_core::compute::expression::Expression)],
     ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
         let (mut plan, diagnostics) = Self::plan_with_cached_diagnostics_inner(
             request,
@@ -314,6 +392,7 @@ impl PushdownPlanner {
             registry,
             cached_tables,
             role_filters,
+            context_column_cases,
         )?;
         // Post-pass: now that every fetch in the plan carries a known model
         // table, upgrade integer-typed scalar/OR filters to a sargable
@@ -330,6 +409,7 @@ impl PushdownPlanner {
         registry: &SourceRegistry,
         cached_tables: &std::collections::HashSet<String>,
         role_filters: &[FilterPredicate],
+        context_column_cases: &[(ColumnRef, engine_core::compute::expression::Expression)],
     ) -> QueryResult<(QueryPlan, ProjectionDiagnostics)> {
         if request.measures.is_empty() {
             return Err(QueryError::InvalidQuery(
@@ -821,6 +901,7 @@ impl PushdownPlanner {
                 &all_tables,
                 model,
                 registry,
+                &[],
             ) {
                 return Ok((
                     QueryPlan::PushedJoinAggregation {
@@ -879,6 +960,7 @@ impl PushdownPlanner {
                         &all_tables,
                         model,
                         registry,
+                        &[],
                     ) {
                         return Ok((
                             QueryPlan::PushedJoinAggregation {
@@ -890,6 +972,112 @@ impl PushdownPlanner {
                             ProjectionDiagnostics::default(),
                         ));
                     }
+                }
+            }
+        }
+
+        // Context-driven calculated column pushdown. When a host-only context
+        // column is on the group-by axis and the facade has resolved its scalar
+        // to a literal (`context_column_cases`), push the resolved CASE into the
+        // source GROUP BY instead of aggregating locally — provided this is a
+        // single-fact query, every group-by column is on the fact (no dimension
+        // joins), the measures are simple pushable aggregates, there is no other
+        // force-local reason, and the fact's connector supports expression
+        // pushdown (PostgreSQL today). Otherwise fall through to local. The
+        // scalar source table is NOT included (its value is already a literal),
+        // so only the fact is queried.
+        // Filters safe to push onto the fact-only query: fact-owned filters are
+        // pushed; disconnected scalar-shaping filters are dropped (baked into the
+        // resolved literal). `None` means a filter requires local propagation.
+        let context_push_fact_filters = if has_context_columns
+            && !context_column_cases.is_empty()
+            && measure_tables.len() == 1
+        {
+            context_pushdown_fact_filters(model, measure_tables[0], &request.filters)
+        } else {
+            None
+        };
+        // Only the FACT is queried here, so only the fact must be a live source —
+        // an in-memory/cached as-of *reference* table (a common slicer) is fine,
+        // since its scalar is already resolved to a literal. (`any_in_memory`
+        // would over-block by counting that reference table.)
+        let fact_is_live_source = measure_tables.len() == 1 && {
+            let f = measure_tables[0];
+            !(model.table(f).is_ok_and(|t| t.is_in_memory()) || cached_tables.contains(f))
+        };
+        if has_context_columns
+            && !context_column_cases.is_empty()
+            && context_ref_tables.is_empty()
+            && measure_tables.len() == 1
+            && context_push_fact_filters.is_some()
+            && fact_is_live_source
+            && request
+                .group_by
+                .iter()
+                .all(|c| c.table.eq_ignore_ascii_case(measure_tables[0]))
+            && all_simple
+            && all_pushable
+            && !any_context_ops
+            && !any_table_var_refs
+            && lookup_specs.is_empty()
+            && !needs_sort_substitution
+            && request.totals == TotalsMode::None
+            && !hierarchy_needs_local
+            && !rls_force_local
+            && !has_in_filters
+            && registry
+                .connector_for(measure_tables[0])
+                .map(|c| c.supports_expression_pushdown())
+                .unwrap_or(false)
+        {
+            let fact = measure_tables[0];
+            // Fact-owned request filters + the fact's active-role conditions.
+            let mut pushed_filters = context_push_fact_filters.unwrap_or_default();
+            pushed_filters.extend(role_conditions_for_table(role_filters, fact));
+            // Physical fact group-by columns (the context columns become
+            // computed_group_by below).
+            let physical_group_by: Vec<ColumnRef> = request
+                .group_by
+                .iter()
+                .filter(|c| {
+                    model
+                        .context_column(&c.column)
+                        .filter(|cc| cc.table().eq_ignore_ascii_case(&c.table))
+                        .is_none()
+                })
+                .cloned()
+                .collect();
+            // The resolved CASE for each context column actually on this axis.
+            let computed: Vec<(ColumnRef, engine_core::compute::expression::Expression)> =
+                context_column_cases
+                    .iter()
+                    .filter(|(cr, _)| {
+                        request.group_by.iter().any(|g| {
+                            g.table.eq_ignore_ascii_case(&cr.table)
+                                && g.column.eq_ignore_ascii_case(&cr.column)
+                        })
+                    })
+                    .cloned()
+                    .collect();
+            if !computed.is_empty() {
+                if let Ok(req) = build_join_aggregation_request(
+                    &measures,
+                    &physical_group_by,
+                    &pushed_filters,
+                    &[fact],
+                    model,
+                    registry,
+                    &computed,
+                ) {
+                    return Ok((
+                        QueryPlan::PushedJoinAggregation {
+                            source_table: fact.to_string(),
+                            request: req,
+                            order_by: effective_order.clone(),
+                            limit: request.limit,
+                        },
+                        ProjectionDiagnostics::default(),
+                    ));
                 }
             }
         }

@@ -29,8 +29,8 @@ use chrono::NaiveDate;
 use crate::{
     expression as expr, sum_measure, AggregateOp, Column, ColumnRef, ComparisonOp, ContextColumn,
     DataModel, DataType, DetailRequest, Engine, Expression, FilterCondition, FilterOperator,
-    InFilter, Measure, QueryError, QueryRequest, Relationship, SecurityRole, SourceBinding,
-    StorageMode, Table, TotalsMode,
+    FilterPropagation, InFilter, Measure, QueryError, QueryRequest, Relationship, SecurityRole,
+    SourceBinding, StorageMode, Table, TotalsMode,
 };
 
 /// Days since the Unix epoch for a calendar date (a `Date32` value).
@@ -977,4 +977,367 @@ async fn left_join_keeps_unmatched_fact_rows_without_inflation() {
     assert_eq!(r["Silver"], 50.0);
     assert_eq!(r["Unpaid"], 50.0);
     assert_eq!(r["(null)"], 70.0, "orphan-FK paid invoice kept with NULL tier");
+}
+
+#[tokio::test]
+async fn in_memory_context_column_is_not_pushed() {
+    // The capability gate: an in-memory fact has no expression-pushdown
+    // connector, so the context column must aggregate locally — never emit a
+    // pushed join-aggregation (which only PostgreSQL can execute).
+    let engine = ctx_engine();
+    let (_batches, plan) = engine.query_explained(group_by_status(vec![])).await.unwrap();
+    let json = serde_json::to_string(&plan).unwrap();
+    assert!(
+        !json.contains("PushedJoinAggregation"),
+        "in-memory context column must not be pushed: {json}"
+    );
+    assert!(
+        json.contains("LocalAggregation"),
+        "expected local aggregation for an in-memory fact: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Live PostgreSQL: context-column CASE pushed into the source GROUP BY.
+//
+// `fact_sales` is a DirectQuery PostgreSQL table (AdventureWorks `BI` schema);
+// `asof_calendar` is a *disconnected* in-memory as-of reference. The scalar
+// `AsOfDate = MAX(asof_calendar[date])` is resolved from the (possibly sliced)
+// filter context, then the context column
+//   `OrderTiming = IF(fact_sales[orderdate] <= [AsOfDate], "OnOrBefore", "After")`
+// is pushed into PostgreSQL's GROUP BY. Each test asserts (a) the plan is a
+// pushed join-aggregation and (b) the grouped result matches a direct CASE
+// query — proving the pushed CASE equals ground truth.
+//
+//   cargo test -p bi-engine --lib context_pushdown -- --ignored --nocapture
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod context_pushdown {
+    use super::*;
+    use crate::{AuthMethod, ConnectionTarget, ExecutionPlan};
+    use rust_decimal::Decimal;
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::Row;
+
+    fn cal_batch(rows: &[(i32, i32)]) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("date", ArrowType::Date32, true),
+                Field::new("period", ArrowType::Int32, true),
+            ])),
+            vec![
+                Arc::new(Date32Array::from(
+                    rows.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(
+                    rows.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// PostgreSQL fact + in-memory as-of calendar. Calendar `MAX = 2013-06-01`
+    /// (period 2); slicing `period = 1` moves the as-of to `2012-06-01`.
+    async fn pg_engine() -> Engine {
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "fact_sales",
+                    vec![
+                        Column::new("salesorderdetailid", DataType::Int32),
+                        Column::new("orderdate", DataType::Date),
+                        Column::new("linetotal", DataType::Decimal(38, 6)),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "asof_calendar",
+                    vec![
+                        Column::new("date", DataType::Date),
+                        Column::new("period", DataType::Int32),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_measure(sum_measure("Revenue", "fact_sales", "linetotal"))
+            .add_measure(Measure::new(
+                "AsOfDate",
+                expr::agg(
+                    AggregateOp::Max,
+                    expr::qualified_col("asof_calendar", "date"),
+                ),
+            ))
+            .add_context_column(ContextColumn::new(
+                "OrderTiming",
+                "fact_sales",
+                expr::if_expr(
+                    expr::compare(
+                        expr::qualified_col("fact_sales", "orderdate"),
+                        ComparisonOp::LessThanOrEqual,
+                        Expression::MeasureRef("AsOfDate".into()),
+                    ),
+                    expr::lit_str("OnOrBefore"),
+                    expr::lit_str("After"),
+                ),
+                DataType::String,
+            ))
+            .build()
+            .unwrap();
+
+        let mut engine = Engine::new(model);
+        let pg_idx = engine
+            .add_postgres(
+                ConnectionTarget::new("localhost", "Adventureworks").with_port(5432),
+                AuthMethod::UsernamePassword {
+                    username: "postgres".into(),
+                    password: "postgres".into(),
+                },
+            )
+            .await
+            .expect("connect to local AdventureWorks PostgreSQL");
+        engine.bind_table("fact_sales", pg_idx, SourceBinding::new("BI", "fact_sales"));
+        // Bound only so the planner accepts the table; the in-memory cache
+        // serves it, so PostgreSQL is never queried for `asof_calendar`.
+        engine.bind_table(
+            "asof_calendar",
+            pg_idx,
+            SourceBinding::new("mem", "asof_calendar"),
+        );
+        engine
+            .cache
+            .store(
+                "asof_calendar",
+                cal_batch(&[(days(2012, 6, 1), 1), (days(2013, 6, 1), 2)]),
+            )
+            .unwrap();
+        engine
+    }
+
+    async fn pool() -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect("postgresql://postgres:postgres@localhost:5432/Adventureworks")
+            .await
+            .unwrap()
+    }
+
+    /// Ground truth: group `fact_sales` by the identical CASE, in SQL.
+    async fn oracle(pool: &sqlx::PgPool, asof: &str) -> HashMap<String, f64> {
+        let sql = format!(
+            "SELECT CASE WHEN orderdate <= DATE '{asof}' THEN 'OnOrBefore' ELSE 'After' END \
+             AS timing, SUM(linetotal) AS rev FROM \"BI\".fact_sales GROUP BY 1"
+        );
+        let mut out = HashMap::new();
+        for row in sqlx::query(&sql).fetch_all(pool).await.unwrap() {
+            let timing: String = row.get("timing");
+            let rev: Decimal = row.get("rev");
+            out.insert(timing, rev.to_string().parse::<f64>().unwrap());
+        }
+        out
+    }
+
+    fn engine_by_timing(batches: &[RecordBatch]) -> HashMap<String, f64> {
+        let mut out = HashMap::new();
+        for b in batches {
+            let g = b.column(col_idx(b, "OrderTiming"));
+            let m = b.column(col_idx(b, "Revenue"));
+            for row in 0..b.num_rows() {
+                let v = if let Some(a) = m.as_any().downcast_ref::<Float64Array>() {
+                    a.value(row)
+                } else if let Some(a) =
+                    m.as_any().downcast_ref::<arrow::array::Decimal128Array>()
+                {
+                    let scale = match m.data_type() {
+                        ArrowType::Decimal128(_, s) => *s,
+                        _ => 0,
+                    };
+                    a.value(row) as f64 / 10f64.powi(scale as i32)
+                } else if let Some(a) = m.as_any().downcast_ref::<Int64Array>() {
+                    a.value(row) as f64
+                } else {
+                    panic!("unexpected measure type {:?}", m.data_type());
+                };
+                out.insert(str_key(g.as_ref(), row), v);
+            }
+        }
+        out
+    }
+
+    fn assert_pushed(plan: &ExecutionPlan) {
+        let json = serde_json::to_string(plan).unwrap();
+        assert!(
+            json.contains("PushedJoinAggregation"),
+            "expected the context column to be pushed into the source GROUP BY; plan: {json}"
+        );
+    }
+
+    fn assert_matches(got: &HashMap<String, f64>, want: &HashMap<String, f64>) {
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "group sets differ: got {got:?}, want {want:?}"
+        );
+        for (k, wv) in want {
+            let gv = got
+                .get(k)
+                .unwrap_or_else(|| panic!("group '{k}' missing from {got:?}"));
+            assert!(
+                (gv - wv).abs() < wv.abs() * 1e-6 + 0.01,
+                "group '{k}': pushed {gv}, oracle {wv}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local AdventureWorks PostgreSQL"]
+    async fn context_column_pushed_matches_oracle_no_slice() {
+        let engine = pg_engine().await;
+        let pool = pool().await;
+        let request = QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("fact_sales", "OrderTiming")],
+            ..Default::default()
+        };
+        let (batches, plan) = engine.query_explained(request).await.unwrap();
+        assert_pushed(&plan);
+        assert_matches(&engine_by_timing(&batches), &oracle(&pool, "2013-06-01").await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local AdventureWorks PostgreSQL"]
+    async fn context_column_pushed_follows_the_as_of_slice() {
+        let engine = pg_engine().await;
+        let pool = pool().await;
+        // Slice period = 1 → as-of moves to 2012-06-01; the disconnected
+        // calendar filter shapes the scalar only, never the fact rows.
+        let request = QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("fact_sales", "OrderTiming")],
+            filters: vec![FilterCondition::new("period", FilterOperator::Equal, "1")],
+            ..Default::default()
+        };
+        let (batches, plan) = engine.query_explained(request).await.unwrap();
+        assert_pushed(&plan);
+        assert_matches(&engine_by_timing(&batches), &oracle(&pool, "2012-06-01").await);
+    }
+
+    /// Like `pg_engine`, but the as-of reference is **related** to the fact
+    /// (`Both`), so its scalar can be cross-filtered by the fact's filter
+    /// context in the local path. The inner scalar query cannot replicate that
+    /// reverse-propagation, so this context column must NOT be pushed — it
+    /// defers to the (correct) local path.
+    async fn pg_engine_connected_scalar() -> Engine {
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "fact_sales",
+                    vec![
+                        Column::new("salesorderdetailid", DataType::Int32),
+                        Column::new("orderdate", DataType::Date),
+                        Column::new("linetotal", DataType::Decimal(38, 6)),
+                        Column::new("territoryid", DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "asof_terr",
+                    vec![
+                        Column::new("territoryid", DataType::Int32),
+                        Column::new("date", DataType::Date),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            // fact (many) → as-of dimension (one), bidirectional: a filter on
+            // the fact reverse-propagates to restrict `asof_terr`.
+            .add_relationship(
+                Relationship::many_to_one(
+                    "Sales_AsOfTerr",
+                    "fact_sales",
+                    "territoryid",
+                    "asof_terr",
+                    "territoryid",
+                )
+                .with_propagation(FilterPropagation::Both),
+            )
+            .add_measure(sum_measure("Revenue", "fact_sales", "linetotal"))
+            .add_measure(Measure::new(
+                "AsOfDate",
+                expr::agg(AggregateOp::Max, expr::qualified_col("asof_terr", "date")),
+            ))
+            .add_context_column(ContextColumn::new(
+                "OrderTiming",
+                "fact_sales",
+                expr::if_expr(
+                    expr::compare(
+                        expr::qualified_col("fact_sales", "orderdate"),
+                        ComparisonOp::LessThanOrEqual,
+                        Expression::MeasureRef("AsOfDate".into()),
+                    ),
+                    expr::lit_str("OnOrBefore"),
+                    expr::lit_str("After"),
+                ),
+                DataType::String,
+            ))
+            .build()
+            .unwrap();
+
+        let mut engine = Engine::new(model);
+        let pg_idx = engine
+            .add_postgres(
+                ConnectionTarget::new("localhost", "Adventureworks").with_port(5432),
+                AuthMethod::UsernamePassword {
+                    username: "postgres".into(),
+                    password: "postgres".into(),
+                },
+            )
+            .await
+            .expect("connect to local AdventureWorks PostgreSQL");
+        engine.bind_table("fact_sales", pg_idx, SourceBinding::new("BI", "fact_sales"));
+        engine.bind_table("asof_terr", pg_idx, SourceBinding::new("mem", "asof_terr"));
+        engine
+            .cache
+            .store(
+                "asof_terr",
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![
+                        Field::new("territoryid", ArrowType::Int32, true),
+                        Field::new("date", ArrowType::Date32, true),
+                    ])),
+                    vec![
+                        Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])),
+                        Arc::new(Date32Array::from(vec![days(2013, 6, 1); 10])),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        engine
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local AdventureWorks PostgreSQL"]
+    async fn fact_connected_scalar_table_is_not_pushed() {
+        let engine = pg_engine_connected_scalar().await;
+        let request = QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("fact_sales", "OrderTiming")],
+            ..Default::default()
+        };
+        let (_batches, plan) = engine.query_explained(request).await.unwrap();
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !json.contains("PushedJoinAggregation"),
+            "a fact-connected scalar table must defer to local (the inner scalar \
+             query cannot replicate bidirectional cross-filtering): {json}"
+        );
+        assert!(json.contains("LocalAggregation"), "{json}");
+    }
 }

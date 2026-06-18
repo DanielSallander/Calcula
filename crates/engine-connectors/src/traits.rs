@@ -374,6 +374,14 @@ pub struct JoinAggregationRequest {
     pub measures: Vec<MeasureExpr>,
     /// Columns to GROUP BY.
     pub group_by: Vec<QualifiedColumn>,
+    /// Computed (expression-based) GROUP BY entries — a context-driven
+    /// calculated column's row-level `CASE`, with its scalar measure already
+    /// resolved to a literal by the engine. Each is rendered through the same
+    /// dialect expression renderer as [`measures`](Self::measures) and appears
+    /// in **both** the SELECT (aliased) and the GROUP BY. Empty for an ordinary
+    /// query.
+    #[allow(clippy::struct_field_names)]
+    pub computed_group_by: Vec<MeasureExpr>,
     /// Optional WHERE filter conditions.
     pub filters: Vec<FilterCondition>,
     /// Mapping from model table names to source table names.

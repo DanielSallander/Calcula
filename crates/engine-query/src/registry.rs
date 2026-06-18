@@ -56,6 +56,15 @@ pub enum AnyConnector {
 }
 
 impl AnyConnector {
+    /// Whether this connector can execute a pushed join-aggregation whose
+    /// GROUP BY includes an expression (a context-driven calculated column's
+    /// resolved `CASE`). Only PostgreSQL implements `execute_join_aggregation`
+    /// with the dialect expression renderer today; for every other connector
+    /// such a query is computed locally instead.
+    pub fn supports_expression_pushdown(&self) -> bool {
+        matches!(self, AnyConnector::Postgres(_))
+    }
+
     /// Fetch data from this connector.
     pub async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
         match self {
@@ -185,12 +194,21 @@ impl SourceRegistry {
     }
 
     /// Look up the connector for a model table.
+    ///
+    /// Returns [`QueryError::SourceNotRegistered`] when the table has no
+    /// binding, or when its binding points at a connector index that was never
+    /// registered (a host that called `bind` with a stale index) — the latter
+    /// must not panic (library code never panics; see CLAUDE.md), so callers
+    /// can treat an unregistered source uniformly (e.g. the context-column
+    /// pushdown capability probe falls back to local aggregation).
     pub fn connector_for(&self, model_table: &str) -> QueryResult<&AnyConnector> {
         let (idx, _) = self
             .bindings
             .get(model_table)
             .ok_or_else(|| QueryError::SourceNotRegistered(model_table.to_string()))?;
-        Ok(&self.connectors[*idx])
+        self.connectors
+            .get(*idx)
+            .ok_or_else(|| QueryError::SourceNotRegistered(model_table.to_string()))
     }
 
     /// Look up a connector by its registration index. Used by host commands that
