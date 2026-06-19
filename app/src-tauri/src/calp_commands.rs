@@ -3592,6 +3592,7 @@ fn restore_pulled_pivots(
                         hierarchies: saved.hierarchies,
                         last_query: None,
                         lookup_columns: saved.lookup_columns.into_iter().collect(),
+                        drill_through: saved.drill_through,
                     });
                 }
             }

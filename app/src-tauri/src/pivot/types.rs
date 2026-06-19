@@ -1497,6 +1497,78 @@ pub struct BiValueFieldRef {
     pub custom_name: Option<String>,
 }
 
+/// How a pivot's double-click drill-through behaves. `Builtin` = the default
+/// secured drillthrough; `Query` = a declarative override of the detail query
+/// (columns / dimension attributes / order / limit / extra filters). A future
+/// `Script` mode (an `onDrillThrough` hook) is planned — see
+/// docs/design/pivot-drillthrough-customization.md.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DrillThroughKind {
+    #[default]
+    Builtin,
+    Query,
+}
+
+/// A model column reference (table + column) used by a drill-through override.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillColumnRef {
+    pub table: String,
+    pub column: String,
+}
+
+/// An ORDER BY clause over a detail-table column for a drill-through override.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillOrderBy {
+    pub table: String,
+    pub column: String,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+/// An extra filter ANDed onto the cell-derived filters of a drill-through.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillFilter {
+    pub column: String,
+    pub operator: String,
+    pub value: String,
+}
+
+/// A declarative override of the drill-through detail query (no code, no
+/// consent — it executes through the same `bi.query` the pivot already runs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillQueryOverride {
+    /// Detail-table columns to return; empty = all columns.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// Dimension attributes to attach beside each detail row.
+    #[serde(default)]
+    pub dimension_columns: Vec<DrillColumnRef>,
+    /// ORDER BY clauses (detail-table columns only).
+    #[serde(default)]
+    pub order_by: Vec<DrillOrderBy>,
+    /// Row-cap override (falls back to the host default when None).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Extra filters ANDed with the cell-derived ones.
+    #[serde(default)]
+    pub filters: Vec<DrillFilter>,
+}
+
+/// Per-pivot configuration of double-click drill-through behavior. Persists in
+/// the workbook and travels in `.calp` so subscribers get the publisher's drill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillThroughBehavior {
+    pub kind: DrillThroughKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<DrillQueryOverride>,
+}
+
 /// Serializable BI pivot metadata for persistence in .cala/.calp files.
 /// Does NOT include a runtime connection_id, but records which package data
 /// source the pivot belongs to (the publisher's connection UUID string —
@@ -1515,6 +1587,9 @@ pub struct SavedBiPivotMetadata {
     /// Package data source id this pivot queries (publisher connection UUID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
+    /// Drill-through behavior config (None = default builtin). Travels in .calp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drill_through: Option<DrillThroughBehavior>,
 }
 
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
@@ -1538,6 +1613,8 @@ pub struct BiPivotMetadata {
     /// All columns the user has toggled to LOOKUP mode ("Table.Column" keys).
     /// Persists across navigations even for fields not currently in a zone.
     pub lookup_columns: std::collections::HashSet<String>,
+    /// Drill-through behavior config (None = default builtin).
+    pub drill_through: Option<DrillThroughBehavior>,
 }
 
 /// Table metadata from a BI model.
@@ -1617,6 +1694,66 @@ pub enum BiRaggedBehavior {
 impl Default for BiRaggedBehavior {
     fn default() -> Self {
         BiRaggedBehavior::ShowBlanks
+    }
+}
+
+#[cfg(test)]
+mod drill_through_tests {
+    use super::*;
+
+    #[test]
+    fn drill_through_behavior_json_round_trips_camel_case() {
+        let behavior = DrillThroughBehavior {
+            kind: DrillThroughKind::Query,
+            query: Some(DrillQueryOverride {
+                columns: vec!["amount".to_string(), "qty".to_string()],
+                dimension_columns: vec![DrillColumnRef {
+                    table: "Customer".to_string(),
+                    column: "name".to_string(),
+                }],
+                order_by: vec![DrillOrderBy {
+                    table: "Sales".to_string(),
+                    column: "amount".to_string(),
+                    descending: true,
+                }],
+                limit: Some(50),
+                filters: vec![DrillFilter {
+                    column: "status".to_string(),
+                    operator: ">=".to_string(),
+                    value: "1".to_string(),
+                }],
+            }),
+        };
+
+        let json = serde_json::to_string(&behavior).expect("serialize");
+        // Golden rule: camelCase over the wire, never snake_case.
+        assert!(json.contains("dimensionColumns"), "json={json}");
+        assert!(!json.contains("dimension_columns"), "json={json}");
+        assert!(json.contains("orderBy"), "json={json}");
+
+        let back: DrillThroughBehavior = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(behavior, back);
+    }
+
+    #[test]
+    fn drill_through_kind_defaults_to_builtin() {
+        assert_eq!(DrillThroughKind::default(), DrillThroughKind::Builtin);
+    }
+
+    #[test]
+    fn missing_drill_through_field_deserializes_to_none() {
+        // Pivot metadata authored before this feature (no drillThrough key) must
+        // still load — the field is serde(default) -> None.
+        let json = r#"{
+            "pivotId": "00000000-0000-0000-0000-000000000000",
+            "modelTables": [],
+            "measures": [],
+            "lookupColumns": [],
+            "hierarchies": []
+        }"#;
+        let saved: SavedBiPivotMetadata =
+            serde_json::from_str(json).expect("deserialize legacy metadata");
+        assert!(saved.drill_through.is_none());
     }
 }
 

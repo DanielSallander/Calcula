@@ -3676,19 +3676,43 @@ pub fn ungroup_pivot_field(
     Ok(response)
 }
 
+/// Map a drill-override filter operator string to a `bi_engine::FilterOperator`
+/// (mirrors the BI query builder; unknown operators default to Equal).
+fn drill_filter_op(op: &str) -> bi_engine::FilterOperator {
+    match op {
+        "!=" | "ne" => bi_engine::FilterOperator::NotEqual,
+        ">" | "gt" => bi_engine::FilterOperator::GreaterThan,
+        "<" | "lt" => bi_engine::FilterOperator::LessThan,
+        ">=" | "gte" => bi_engine::FilterOperator::GreaterThanOrEqual,
+        "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
+        _ => bi_engine::FilterOperator::Equal,
+    }
+}
+
 /// Build an engine drillthrough request (`DetailRequest`) for a BI-backed pivot
 /// cell, identified by its `group_path` of (cache field index, value id) pairs.
 /// Each pair becomes an equality filter on that dimension column, so the engine
 /// returns only the RLS-enforced raw fact rows behind the drilled cell. A
 /// grand-total cell (empty `group_path`) yields no filters and drills the whole
 /// fact table (capped by `limit`).
+///
+/// When `include_dimension_attrs` is set, the pivot's related-dimension fields
+/// (group-by + lookup columns whose table is *not* the fact table, and which the
+/// drilled cell does not already pin to a constant) are appended as
+/// `dimension_columns` — readable labels (`Customer.name`, `Product.category`)
+/// looked up beside each raw fact row. Returns the request plus the number of
+/// attached attributes, so the caller can build a bare fallback: the engine
+/// fails the whole request closed if any attribute's relationship is not
+/// single-hop active equi, and degrading to raw fact rows beats erroring.
 fn build_bi_detail_request(
     meta: &super::types::BiPivotMetadata,
     definition: &PivotDefinition,
     cache: &PivotCache,
     group_path: &[(usize, u32)],
-    limit: usize,
-) -> Result<bi_engine::DetailRequest, String> {
+    default_limit: usize,
+    override_: Option<&super::types::DrillQueryOverride>,
+    include_dimension_attrs: bool,
+) -> Result<(bi_engine::DetailRequest, usize), String> {
     // The detail (fact) table is the home table of the pivot's measures. v1
     // drills the first measure's table; a pivot mixing measures from multiple
     // fact tables drills the first (documented limitation).
@@ -3702,6 +3726,7 @@ fn build_bi_detail_request(
 
     // Each group_path entry pins one dimension to the drilled cell's value.
     let mut filters: Vec<bi_engine::FilterCondition> = Vec::with_capacity(group_path.len());
+    let mut pinned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for &(field_index, value_id) in group_path {
         // Pivot field names are "Table.Column"; the engine resolves a filter by
         // the bare column name against the owning table (then propagates it to
@@ -3720,10 +3745,11 @@ fn build_bi_detail_request(
             })
             .or_else(|| cache.field_name(field_index))
             .unwrap_or_default();
-        let column = field_name
-            .rsplit_once('.')
-            .map(|(_, c)| c.to_string())
-            .unwrap_or(field_name);
+        let (dim_table, column) = match field_name.rsplit_once('.') {
+            Some((t, c)) => (t.to_string(), c.to_string()),
+            None => (String::new(), field_name.clone()),
+        };
+        pinned.insert((dim_table, column.clone()));
         let value = cache.get_value_label(field_index, value_id).unwrap_or_default();
         filters.push(bi_engine::FilterCondition::new(
             column,
@@ -3732,7 +3758,75 @@ fn build_bi_detail_request(
         ));
     }
 
-    Ok(bi_engine::DetailRequest::new(fact_table, limit).with_filters(filters))
+    // Extra filters from a declarative override, ANDed with the cell filters.
+    if let Some(ov) = override_ {
+        for f in &ov.filters {
+            filters.push(bi_engine::FilterCondition::new(
+                f.column.clone(),
+                drill_filter_op(&f.operator),
+                f.value.clone(),
+            ));
+        }
+    }
+
+    // Append readable dimension attributes the pivot already uses, skipping the
+    // fact's own columns (returned anyway via SELECT *) and any dimension the
+    // drilled cell already pins to a single value (a constant column adds noise).
+    let mut dimension_columns: Vec<bi_engine::ColumnRef> = Vec::new();
+    if include_dimension_attrs {
+        match override_ {
+            // Declarative override: attach exactly the publisher-chosen attrs.
+            Some(ov) => {
+                for c in &ov.dimension_columns {
+                    dimension_columns.push(bi_engine::ColumnRef::new(&c.table, &c.column));
+                }
+            }
+            // Builtin: auto-derive from the pivot's own related-dimension fields.
+            None => {
+                if let Some(last) = &meta.last_query {
+                    let mut seen: std::collections::HashSet<(String, String)> =
+                        std::collections::HashSet::new();
+                    for f in last.group_by.iter().chain(last.lookups.iter()) {
+                        if f.table == fact_table {
+                            continue;
+                        }
+                        let key = (f.table.clone(), f.column.clone());
+                        if pinned.contains(&key) || !seen.insert(key) {
+                            continue;
+                        }
+                        dimension_columns.push(bi_engine::ColumnRef::new(&f.table, &f.column));
+                    }
+                }
+            }
+        }
+    }
+    let n_dims = dimension_columns.len();
+
+    let limit = override_.and_then(|o| o.limit).unwrap_or(default_limit);
+    let mut request = bi_engine::DetailRequest::new(fact_table, limit)
+        .with_filters(filters)
+        .with_dimension_columns(dimension_columns);
+    // Declarative override: detail columns + ordering.
+    if let Some(ov) = override_ {
+        if !ov.columns.is_empty() {
+            request = request.with_columns(ov.columns.clone());
+        }
+        if !ov.order_by.is_empty() {
+            let order: Vec<bi_engine::OrderByClause> = ov
+                .order_by
+                .iter()
+                .map(|o| {
+                    if o.descending {
+                        bi_engine::OrderByClause::column_desc(&o.table, &o.column)
+                    } else {
+                        bi_engine::OrderByClause::column(&o.table, &o.column)
+                    }
+                })
+                .collect();
+            request = request.with_order_by(order);
+        }
+    }
+    Ok((request, n_dims))
 }
 
 /// Convert one drillthrough cell (an `Option<String>` from `batches_to_result`)
@@ -3773,7 +3867,11 @@ pub async fn drill_through_to_sheet(
     // grid-backed pivot reads its source rows from the grid now.
     let mut headers: Vec<String> = Vec::new();
     let mut row_data: Vec<Vec<engine::CellValue>> = Vec::new();
-    let bi_drill: Option<(crate::bi::types::ConnectionId, bi_engine::DetailRequest)> = {
+    let bi_drill: Option<(
+        crate::bi::types::ConnectionId,
+        bi_engine::DetailRequest,
+        Option<bi_engine::DetailRequest>,
+    )> = {
         let bi_meta = pivot_state
             .bi_metadata
             .lock()
@@ -3787,9 +3885,41 @@ pub async fn drill_through_to_sheet(
             .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
         if let Some(meta) = bi_meta.get(&request.pivot_id) {
-            let detail =
-                build_bi_detail_request(meta, definition, cache, &request.group_path, max)?;
-            Some((meta.connection_id, detail))
+            // A `Query`-mode behavior overrides the detail query declaratively;
+            // builtin / None uses the default (auto dimension attributes).
+            let override_ref = match &meta.drill_through {
+                Some(b) if b.kind == super::types::DrillThroughKind::Query => b.query.as_ref(),
+                _ => None,
+            };
+            let (detail, n_dims) = build_bi_detail_request(
+                meta,
+                definition,
+                cache,
+                &request.group_path,
+                max,
+                override_ref,
+                true,
+            )?;
+            // Bare fallback (no dimension attributes) for the case where an
+            // attribute's relationship is not single-hop and the engine rejects
+            // the enriched request — the drill still returns raw fact rows.
+            let fallback = if n_dims > 0 {
+                Some(
+                    build_bi_detail_request(
+                        meta,
+                        definition,
+                        cache,
+                        &request.group_path,
+                        max,
+                        override_ref,
+                        false,
+                    )?
+                    .0,
+                )
+            } else {
+                None
+            };
+            Some((meta.connection_id, detail, fallback))
         } else {
             // Grid-backed pivot — read the matching source rows from the grid.
             let result = drill_down(definition, cache, &request.group_path, max);
@@ -3829,7 +3959,7 @@ pub async fn drill_through_to_sheet(
     };
 
     // BI-backed pivot: run the secured drillthrough now the pivot locks are free.
-    if let Some((connection_id, detail)) = bi_drill {
+    if let Some((connection_id, detail, fallback)) = bi_drill {
         let engine_arc = {
             let connections = bi_state
                 .connections
@@ -3842,10 +3972,25 @@ pub async fn drill_through_to_sheet(
         };
         let batches = {
             let engine = engine_arc.lock().await;
-            engine
-                .query_rows(detail)
-                .await
-                .map_err(|e| format!("BI drillthrough failed: {}", e))?
+            match engine.query_rows(detail).await {
+                Ok(b) => b,
+                Err(e) => match fallback {
+                    // Retry without dimension attributes — the enriched request
+                    // hit a non-single-hop relationship the engine rejects.
+                    Some(bare) => {
+                        log_info!(
+                            "PIVOT",
+                            "drillthrough with dimension attributes failed ({}); retrying without",
+                            e
+                        );
+                        engine
+                            .query_rows(bare)
+                            .await
+                            .map_err(|err| format!("BI drillthrough failed: {}", err))?
+                    }
+                    None => return Err(format!("BI drillthrough failed: {}", e)),
+                },
+            }
         };
         let result = crate::bi::commands::batches_to_result(&batches);
         headers = result.columns;
@@ -3918,6 +4063,38 @@ pub async fn drill_through_to_sheet(
         row_count: data_row_count,
         col_count,
     })
+}
+
+/// Set (or clear, with `None`) a BI pivot's drill-through behavior. Persists in
+/// the pivot's BI metadata; saved with the workbook and carried into `.calp`.
+#[tauri::command]
+pub fn set_pivot_drill_behavior(
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    behavior: Option<super::types::DrillThroughBehavior>,
+) -> Result<(), String> {
+    let mut bi_meta = pivot_state
+        .bi_metadata
+        .lock()
+        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+    let meta = bi_meta
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot {} is not a BI-backed pivot", pivot_id))?;
+    meta.drill_through = behavior;
+    Ok(())
+}
+
+/// Get a BI pivot's current drill-through behavior (`None` = default builtin).
+#[tauri::command]
+pub fn get_pivot_drill_behavior(
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<Option<super::types::DrillThroughBehavior>, String> {
+    let bi_meta = pivot_state
+        .bi_metadata
+        .lock()
+        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+    Ok(bi_meta.get(&pivot_id).and_then(|m| m.drill_through.clone()))
 }
 
 // ============================================================================
@@ -4158,6 +4335,7 @@ pub async fn create_pivot_from_bi_model(
         hierarchies,
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
+        drill_through: None,
     };
     pivot_state
         .bi_metadata
