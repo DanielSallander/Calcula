@@ -3676,11 +3676,87 @@ pub fn ungroup_pivot_field(
     Ok(response)
 }
 
-/// Performs a drill-through: creates a new sheet with the matching source data rows.
+/// Build an engine drillthrough request (`DetailRequest`) for a BI-backed pivot
+/// cell, identified by its `group_path` of (cache field index, value id) pairs.
+/// Each pair becomes an equality filter on that dimension column, so the engine
+/// returns only the RLS-enforced raw fact rows behind the drilled cell. A
+/// grand-total cell (empty `group_path`) yields no filters and drills the whole
+/// fact table (capped by `limit`).
+fn build_bi_detail_request(
+    meta: &super::types::BiPivotMetadata,
+    definition: &PivotDefinition,
+    cache: &PivotCache,
+    group_path: &[(usize, u32)],
+    limit: usize,
+) -> Result<bi_engine::DetailRequest, String> {
+    // The detail (fact) table is the home table of the pivot's measures. v1
+    // drills the first measure's table; a pivot mixing measures from multiple
+    // fact tables drills the first (documented limitation).
+    let fact_table = meta
+        .measures
+        .first()
+        .map(|m| m.table.clone())
+        .ok_or_else(|| {
+            "BI pivot has no measures; cannot determine a detail table to drill".to_string()
+        })?;
+
+    // Each group_path entry pins one dimension to the drilled cell's value.
+    let mut filters: Vec<bi_engine::FilterCondition> = Vec::with_capacity(group_path.len());
+    for &(field_index, value_id) in group_path {
+        // Pivot field names are "Table.Column"; the engine resolves a filter by
+        // the bare column name against the owning table (then propagates it to
+        // the fact over a single hop), so pass the column part.
+        let field_name = definition
+            .row_fields
+            .iter()
+            .find(|f| f.source_index == field_index)
+            .map(|f| f.name.clone())
+            .or_else(|| {
+                definition
+                    .column_fields
+                    .iter()
+                    .find(|f| f.source_index == field_index)
+                    .map(|f| f.name.clone())
+            })
+            .or_else(|| cache.field_name(field_index))
+            .unwrap_or_default();
+        let column = field_name
+            .rsplit_once('.')
+            .map(|(_, c)| c.to_string())
+            .unwrap_or(field_name);
+        let value = cache.get_value_label(field_index, value_id).unwrap_or_default();
+        filters.push(bi_engine::FilterCondition::new(
+            column,
+            bi_engine::FilterOperator::Equal,
+            value,
+        ));
+    }
+
+    Ok(bi_engine::DetailRequest::new(fact_table, limit).with_filters(filters))
+}
+
+/// Convert one drillthrough cell (an `Option<String>` from `batches_to_result`)
+/// into a grid `CellValue`: nulls become empty, numeric text becomes a number,
+/// everything else stays text.
+fn detail_value_to_cell(value: Option<String>) -> engine::CellValue {
+    match value {
+        None => engine::CellValue::Empty,
+        Some(s) => match s.parse::<f64>() {
+            Ok(n) => engine::CellValue::Number(n),
+            Err(_) => engine::CellValue::Text(s),
+        },
+    }
+}
+
+/// Performs a drill-through: creates a new sheet with the detail rows behind a
+/// pivot cell. A BI-backed pivot uses the engine's RLS-enforced `query_rows`
+/// (secured server-side fact rows); a grid-backed pivot uses its original
+/// source range.
 #[tauri::command]
-pub fn drill_through_to_sheet(
-    state: State<AppState>,
+pub async fn drill_through_to_sheet(
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     request: DrillThroughRequest,
 ) -> Result<DrillThroughResponse, String> {
     log_info!(
@@ -3690,52 +3766,98 @@ pub fn drill_through_to_sheet(
         request.group_path.len()
     );
 
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, cache) = pivot_tables
-        .get(&request.pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
-
     let max = request.max_records.unwrap_or(10000);
-    let result = drill_down(definition, cache, &request.group_path, max);
 
-    // Gather header names and source data
-    let headers: Vec<String> = cache.fields.iter().map(|f| f.name.clone()).collect();
-    let col_count = headers.len();
+    // Gather the detail rows. A BI-backed pivot builds an engine DetailRequest
+    // here (while the pivot locks are held) and runs it after they drop; a
+    // grid-backed pivot reads its source rows from the grid now.
+    let mut headers: Vec<String> = Vec::new();
+    let mut row_data: Vec<Vec<engine::CellValue>> = Vec::new();
+    let bi_drill: Option<(crate::bi::types::ConnectionId, bi_engine::DetailRequest)> = {
+        let bi_meta = pivot_state
+            .bi_metadata
+            .lock()
+            .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+        let pivot_tables = pivot_state
+            .pivot_tables
+            .lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        let (definition, cache) = pivot_tables
+            .get(&request.pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
-    // Read source row data from the grid
-    let grids = state.grids.lock().unwrap();
-    let source_sheet_idx = 0;
-    let grid = grids
-        .get(source_sheet_idx)
-        .ok_or_else(|| "Source sheet not found".to_string())?;
+        if let Some(meta) = bi_meta.get(&request.pivot_id) {
+            let detail =
+                build_bi_detail_request(meta, definition, cache, &request.group_path, max)?;
+            Some((meta.connection_id, detail))
+        } else {
+            // Grid-backed pivot — read the matching source rows from the grid.
+            let result = drill_down(definition, cache, &request.group_path, max);
+            headers = cache.fields.iter().map(|f| f.name.clone()).collect();
+            let col_count = headers.len();
 
-    let (start_row, start_col) = definition.source_start;
-    let data_start = if definition.source_has_headers {
-        start_row + 1
-    } else {
-        start_row
+            let grids = state
+                .grids
+                .lock()
+                .map_err(|e| format!("grids lock poisoned: {}", e))?;
+            let grid = grids
+                .get(0)
+                .ok_or_else(|| "Source sheet not found".to_string())?;
+
+            let (start_row, start_col) = definition.source_start;
+            let data_start = if definition.source_has_headers {
+                start_row + 1
+            } else {
+                start_row
+            };
+
+            for &src_row in &result.source_rows {
+                let grid_row = data_start + src_row;
+                let mut row = Vec::with_capacity(col_count);
+                for c in 0..col_count {
+                    let col = start_col + c as u32;
+                    let cv = grid
+                        .get_cell(grid_row, col)
+                        .map(|cell| cell.value.clone())
+                        .unwrap_or(engine::CellValue::Empty);
+                    row.push(cv);
+                }
+                row_data.push(row);
+            }
+            None
+        }
     };
 
-    // Build row data as CellValues
-    let mut row_data: Vec<Vec<engine::CellValue>> = Vec::with_capacity(result.source_rows.len());
-    for &src_row in &result.source_rows {
-        let grid_row = data_start + src_row;
-        let mut row = Vec::with_capacity(col_count);
-        for c in 0..col_count {
-            let col = start_col + c as u32;
-            let cv = grid
-                .get_cell(grid_row, col)
-                .map(|cell| cell.value.clone())
-                .unwrap_or(engine::CellValue::Empty);
-            row.push(cv);
-        }
-        row_data.push(row);
+    // BI-backed pivot: run the secured drillthrough now the pivot locks are free.
+    if let Some((connection_id, detail)) = bi_drill {
+        let engine_arc = {
+            let connections = bi_state
+                .connections
+                .lock()
+                .map_err(|e| format!("connections lock poisoned: {}", e))?;
+            let conn = connections
+                .get(&connection_id)
+                .ok_or_else(|| format!("BI connection {} not found", connection_id))?;
+            conn.engine.clone().ok_or("No BI model loaded.")?
+        };
+        let batches = {
+            let engine = engine_arc.lock().await;
+            engine
+                .query_rows(detail)
+                .await
+                .map_err(|e| format!("BI drillthrough failed: {}", e))?
+        };
+        let result = crate::bi::commands::batches_to_result(&batches);
+        headers = result.columns;
+        row_data = result
+            .rows
+            .into_iter()
+            .map(|r| r.into_iter().map(detail_value_to_cell).collect())
+            .collect();
     }
 
     let data_row_count = row_data.len();
-
-    drop(grids);
-    drop(pivot_tables);
+    let col_count = headers.len();
 
     // Create new sheet
     let mut sheet_names = state.sheet_names.lock().unwrap();

@@ -20,6 +20,7 @@ import {
   addTaskPaneContextKey,
 } from "@api";
 import { emitAppEvent } from "@api/events";
+import { setActiveSheet } from "@api/lib";
 
 import { PivotEvents } from "./lib/pivotEvents";
 import type { PivotProgressEvent } from "./lib/pivotEvents";
@@ -78,7 +79,7 @@ import {
   setJustCreatedPivot,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, drillThroughToSheet, isTotalCell } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -1511,6 +1512,23 @@ function activate(context: ExtensionContext): void {
             } catch (error) {
               console.error("[Pivot Extension] Failed to toggle hierarchy on double-click:", error);
             }
+          } else if (cell.cellType === "Data" || isTotalCell(cell.cellType)) {
+            // Data / total cell: drill through to a new sheet with the detail
+            // rows behind this cell. For a BI-backed pivot these are the
+            // engine's RLS-enforced fact rows; for a grid pivot, the source rows.
+            const groupPath = (cell.groupPath ?? []) as Array<[number, number]>;
+            drillThroughToSheet({ pivotId, groupPath })
+              .then(async (resp) => {
+                try {
+                  await setActiveSheet(resp.sheetIndex);
+                } catch {
+                  /* the SHEET_CHANGED emit below still re-syncs the tab bar */
+                }
+                emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: resp.sheetIndex });
+              })
+              .catch((error) => {
+                console.error("[Pivot Extension] Drill-through failed:", error);
+              });
           }
 
           // Any cell in a pivot region: consume double-click (no edit mode)
