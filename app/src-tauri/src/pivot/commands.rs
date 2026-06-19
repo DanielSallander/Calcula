@@ -3196,7 +3196,11 @@ pub fn get_pivot_bi_metadata(
 
         Some(serde_json::json!({
             "connectionId": meta.connection_id,
-            "sheetIndex": sheet_index
+            "sheetIndex": sheet_index,
+            // Model tables/columns + measures so callers (e.g. the drill-through
+            // behavior dialog) can offer a column/attribute picker.
+            "tables": meta.model_tables,
+            "measures": meta.measures,
         }))
     } else {
         None

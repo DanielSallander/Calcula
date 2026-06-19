@@ -51,6 +51,7 @@ import {
   PIVOT_GROUP_DIALOG_ID,
   PIVOT_FIELD_SETTINGS_DIALOG_ID,
   PIVOT_OPTIONS_DIALOG_ID,
+  PIVOT_DRILL_BEHAVIOR_DIALOG_ID,
   PIVOT_PANE_ID,
 } from "../manifest";
 
@@ -150,6 +151,23 @@ export function registerPivotContextMenuItems(): () => void {
         if (pivotId === null) return;
 
         showDialog(CHART_DIALOG_ID, { pivotId });
+      },
+    },
+
+    // ------------------------------------------------------------------
+    // Drill-through behavior (customize what a double-click drill returns)
+    // ------------------------------------------------------------------
+    {
+      id: "pivot:drillBehavior",
+      label: "Drill-through behavior...",
+      group: "pivot",
+      order: 36,
+      visible: isInPivotRegion,
+      onClick: async (ctx) => {
+        const pivotId = getPivotIdFromContext(ctx);
+        if (pivotId === null) return;
+
+        showDialog(PIVOT_DRILL_BEHAVIOR_DIALOG_ID, { pivotId });
       },
     },
 

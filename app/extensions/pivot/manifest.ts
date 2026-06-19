@@ -16,6 +16,7 @@ import { CreatePivotDialog } from "./components/CreatePivotDialog";
 import { GroupDialog } from "./components/GroupDialog";
 import { FieldSettingsDialog } from "./components/FieldSettingsDialog";
 import { PivotOptionsDialog } from "./components/PivotOptionsDialog";
+import DrillThroughBehaviorDialog from "./components/DrillThroughBehaviorDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
 import { PivotHeaderFilterDropdown } from "./components/PivotHeaderFilterDropdown";
 import type { HeaderFieldSummary } from "./lib/pivot-api";
@@ -164,6 +165,22 @@ function PivotOptionsDialogWrapper(props: DialogProps): React.ReactElement {
 export const PivotOptionsDialogDefinition: DialogDefinition = {
   id: PIVOT_OPTIONS_DIALOG_ID,
   component: PivotOptionsDialogWrapper,
+  priority: 100,
+};
+
+export const PIVOT_DRILL_BEHAVIOR_DIALOG_ID = "pivot:drillBehaviorDialog";
+
+function DrillThroughBehaviorDialogWrapper(props: DialogProps): React.ReactElement {
+  return React.createElement(DrillThroughBehaviorDialog, {
+    isOpen: props.isOpen,
+    onClose: props.onClose,
+    data: props.data,
+  });
+}
+
+export const DrillThroughBehaviorDialogDefinition: DialogDefinition = {
+  id: PIVOT_DRILL_BEHAVIOR_DIALOG_ID,
+  component: DrillThroughBehaviorDialogWrapper,
   priority: 100,
 };
 

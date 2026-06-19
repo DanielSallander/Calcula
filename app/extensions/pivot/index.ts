@@ -51,6 +51,7 @@ import {
   PivotGroupDialogDefinition,
   PivotFieldSettingsDialogDefinition,
   PivotOptionsDialogDefinition,
+  DrillThroughBehaviorDialogDefinition,
   PivotFilterOverlayDefinition,
   PivotHeaderFilterOverlayDefinition,
   PIVOT_PANE_ID,
@@ -1121,6 +1122,7 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(PivotGroupDialogDefinition);
   context.ui.dialogs.register(PivotFieldSettingsDialogDefinition);
   context.ui.dialogs.register(PivotOptionsDialogDefinition);
+  context.ui.dialogs.register(DrillThroughBehaviorDialogDefinition);
 
   // Register context menu items for right-click in pivot regions
   cleanupFunctions.push(registerPivotContextMenuItems());

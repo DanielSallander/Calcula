@@ -139,6 +139,7 @@ import {
   addCalculatedItem as apiAddCalculatedItem,
   removeCalculatedItem as apiRemoveCalculatedItem,
   showReportFilterPages as apiShowReportFilterPages,
+  invokeBackend,
 } from "@api/backend";
 
 // ============================================================================
@@ -1784,6 +1785,78 @@ export async function drillThroughToSheet(
   request: DrillThroughRequest
 ): Promise<DrillThroughResponse> {
   return apiDrillThroughToSheet<DrillThroughRequest, DrillThroughResponse>(request);
+}
+
+// ---------------------------------------------------------------------------
+// Drill-through behavior (Layer 1: declarative query override). Mirrors the
+// Rust DrillThroughBehavior; persists in the pivot's BI metadata and travels
+// in .calp. See docs/design/pivot-drillthrough-customization.md.
+// ---------------------------------------------------------------------------
+
+/** How a pivot's double-click drill-through behaves. */
+export type DrillThroughKind = "builtin" | "query";
+
+/** A model column reference for a drill-through override. */
+export interface DrillColumnRef {
+  table: string;
+  column: string;
+}
+
+/** ORDER BY clause over a detail-table column. */
+export interface DrillOrderBy {
+  table: string;
+  column: string;
+  descending?: boolean;
+}
+
+/** Extra filter ANDed onto the cell-derived drill filters. */
+export interface DrillFilter {
+  column: string;
+  operator: string;
+  value: string;
+}
+
+/** Declarative override of the drill-through detail query (no code). */
+export interface DrillQueryOverride {
+  columns?: string[];
+  dimensionColumns?: DrillColumnRef[];
+  orderBy?: DrillOrderBy[];
+  limit?: number;
+  filters?: DrillFilter[];
+}
+
+/** Per-pivot drill-through behavior config. */
+export interface DrillThroughBehavior {
+  kind: DrillThroughKind;
+  query?: DrillQueryOverride;
+}
+
+/**
+ * Set (or clear, with `null`) a BI pivot's drill-through behavior. Persists in
+ * the pivot's BI metadata; saved with the workbook and carried into `.calp`.
+ */
+export async function setPivotDrillBehavior(
+  pivotId: PivotId,
+  behavior: DrillThroughBehavior | null,
+): Promise<void> {
+  return invokeBackend<void>("set_pivot_drill_behavior", { pivotId, behavior });
+}
+
+/** Get a BI pivot's current drill-through behavior (`null` = default builtin). */
+export async function getPivotDrillBehavior(
+  pivotId: PivotId,
+): Promise<DrillThroughBehavior | null> {
+  return invokeBackend<DrillThroughBehavior | null>("get_pivot_drill_behavior", { pivotId });
+}
+
+/**
+ * Fetch a BI pivot's model metadata (tables/columns + measures), used to offer
+ * column/attribute pickers. Returns `null` for a non-BI pivot.
+ */
+export async function getPivotBiMetadata(
+  pivotId: PivotId,
+): Promise<BiPivotModelInfo | null> {
+  return invokeBackend<BiPivotModelInfo | null>("get_pivot_bi_metadata", { pivotId });
 }
 
 // ============================================================================
