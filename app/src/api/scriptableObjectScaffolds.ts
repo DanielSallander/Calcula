@@ -211,6 +211,15 @@ function setup(pivot) {
   //   pivot.log("Pivot refreshed");
   // });
 
+  // Custom drill-through: runs when the user double-clicks a cell and this
+  // pivot's drill-through behavior is set to "Script". ctx.cell is the drilled
+  // cell as { table, column, value } pairs; build your own detail however you
+  // like. To query the model, declare the capability at the top of this script:
+  //   // @capability bi.query
+  // pivot.onDrillThrough((ctx) => {
+  //   pivot.log("Drill: " + ctx.cell.map((c) => c.column + "=" + c.value).join(", "));
+  // });
+
   // == Data Access ==
   // const fields = pivot.getFields();
   // pivot.refresh();

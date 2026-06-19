@@ -21,6 +21,7 @@ import {
 } from "@api";
 import { emitAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
+import { hasObjectScript, drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 
 import { PivotEvents } from "./lib/pivotEvents";
 import type { PivotProgressEvent } from "./lib/pivotEvents";
@@ -1523,7 +1524,10 @@ function activate(context: ExtensionContext): void {
             void (async () => {
               try {
                 const behavior = await getPivotDrillBehavior(pivotId);
-                if (behavior?.kind === "script") {
+                // Dispatch to the pivot's script ONLY if one is attached; a
+                // "script" mode with no script attached falls through to the
+                // built-in drill so a double-click is never a silent no-op.
+                if (behavior?.kind === "script" && hasObjectScript("pivot", pivotId)) {
                   // Resolve the drilled cell to (table, column, value) pairs and
                   // dispatch the hook; the pivot's script handles the rest.
                   const resolved = await getPivotDataFormula(row, col);
@@ -1588,6 +1592,17 @@ function activate(context: ExtensionContext): void {
             if (isLoading(pivotId)) {
               drawLoadingOverlay(ctx, pivotId);
             }
+            // Transparency: badge a pivot that has a script attached (design
+            // mode) -- e.g. a "script" drill-through. Same affordance charts and
+            // slicers use.
+            drawObjectScriptBadgeIfPresent(
+              ctx.ctx,
+              "pivot",
+              pivotId,
+              overlayGetColumnX(ctx, ctx.region.startCol),
+              overlayGetRowY(ctx, ctx.region.startRow),
+              overlayGetColumnsWidth(ctx, ctx.region.startCol, ctx.region.endCol),
+            );
             // Connection status badge is shown in the task pane only
           }
         }
