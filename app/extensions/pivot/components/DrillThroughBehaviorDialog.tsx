@@ -196,12 +196,16 @@ function DrillThroughBehaviorDialog({
           }
         }
         setAttrOptions(opts);
-        if (behavior && behavior.kind === "query") {
+        if (behavior?.kind === "query") {
           setMode("query");
           setSelected(
             new Set((behavior.query?.dimensionColumns ?? []).map((d) => `${d.table}.${d.column}`)),
           );
           setLimit(behavior.query?.limit != null ? String(behavior.query.limit) : "");
+        } else if (behavior?.kind === "script") {
+          setMode("script");
+          setSelected(new Set());
+          setLimit("");
         } else {
           setMode("builtin");
           setSelected(new Set());
@@ -235,6 +239,8 @@ function DrillThroughBehaviorDialog({
     try {
       if (mode === "builtin") {
         await setPivotDrillBehavior(pivotId, null);
+      } else if (mode === "script") {
+        await setPivotDrillBehavior(pivotId, { kind: "script" });
       } else {
         const dimensionColumns: DrillColumnRef[] = attrOptions
           .filter((o) => selected.has(o.key))
@@ -302,6 +308,17 @@ function DrillThroughBehaviorDialog({
                   <strong>Custom</strong> - choose the dimension attributes and row cap
                 </span>
               </label>
+              <label className={styles.radioRow}>
+                <input
+                  type="radio"
+                  name="drillMode"
+                  checked={mode === "script"}
+                  onChange={() => setMode("script")}
+                />
+                <span>
+                  <strong>Script</strong> - run this pivot's onDrillThrough script (advanced)
+                </span>
+              </label>
 
               {mode === "query" && (
                 <div className={styles.customSection}>
@@ -334,6 +351,17 @@ function DrillThroughBehaviorDialog({
                       placeholder="default"
                       onChange={(e) => setLimit(e.target.value)}
                     />
+                  </div>
+                </div>
+              )}
+
+              {mode === "script" && (
+                <div className={styles.customSection}>
+                  <div className={styles.muted}>
+                    On double-click, this pivot's sandboxed onDrillThrough(ctx) script runs with the
+                    clicked cell. Author it as the pivot's object script (it needs the bi.query
+                    capability and writes its own result). It is consented + audited and travels in
+                    .calp.
                   </div>
                 </div>
               )}

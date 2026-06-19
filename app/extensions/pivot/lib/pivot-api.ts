@@ -1794,7 +1794,7 @@ export async function drillThroughToSheet(
 // ---------------------------------------------------------------------------
 
 /** How a pivot's double-click drill-through behaves. */
-export type DrillThroughKind = "builtin" | "query";
+export type DrillThroughKind = "builtin" | "query" | "script";
 
 /** A model column reference for a drill-through override. */
 export interface DrillColumnRef {

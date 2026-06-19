@@ -331,12 +331,27 @@ declare interface ChartContext extends BaseObjectContext {
   };
 }
 
+/** The drilled cell delivered to a pivot `onDrillThrough` handler. */
+declare interface PivotDrillContext {
+  /** The pivot instance ID. */
+  readonly pivotId: string;
+  /** The drilled cell as resolved dimension coordinates (empty for a grand total). */
+  readonly cell: ReadonlyArray<{ table: string; column: string; value: string }>;
+}
+
 /** Context for Pivot Table instances. */
 declare interface PivotContext extends BaseObjectContext {
   /** The pivot instance ID. */
   readonly instanceId: string;
   /** Called when the pivot is refreshed (recalculated). */
   onRefresh(handler: () => void): () => void;
+  /**
+   * Called when the user double-clicks a data/total cell and the pivot's
+   * drill-through behavior is set to "script". The handler receives the drilled
+   * cell as resolved (table, column, value) pairs; produce the drill via your
+   * granted capabilities (e.g. bi.query, then write a sheet).
+   */
+  onDrillThrough(handler: (ctx: PivotDrillContext) => void): () => void;
   /** Get current pivot field configuration. */
   getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
   /** Refresh the pivot table data. */

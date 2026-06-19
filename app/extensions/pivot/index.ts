@@ -80,7 +80,7 @@ import {
   setJustCreatedPivot,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, drillThroughToSheet, isTotalCell } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, drillThroughToSheet, isTotalCell, getPivotDrillBehavior } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -1515,22 +1515,38 @@ function activate(context: ExtensionContext): void {
               console.error("[Pivot Extension] Failed to toggle hierarchy on double-click:", error);
             }
           } else if (cell.cellType === "Data" || isTotalCell(cell.cellType)) {
-            // Data / total cell: drill through to a new sheet with the detail
-            // rows behind this cell. For a BI-backed pivot these are the
-            // engine's RLS-enforced fact rows; for a grid pivot, the source rows.
+            // Data / total cell: drill through. A "script"-mode pivot dispatches
+            // the onDrillThrough hook to its sandboxed script (which produces the
+            // drill via its consented capabilities); otherwise the host runs the
+            // built-in / query secured drill into a new sheet.
             const groupPath = (cell.groupPath ?? []) as Array<[number, number]>;
-            drillThroughToSheet({ pivotId, groupPath })
-              .then(async (resp) => {
+            void (async () => {
+              try {
+                const behavior = await getPivotDrillBehavior(pivotId);
+                if (behavior?.kind === "script") {
+                  // Resolve the drilled cell to (table, column, value) pairs and
+                  // dispatch the hook; the pivot's script handles the rest.
+                  const resolved = await getPivotDataFormula(row, col);
+                  const drillCell = (resolved?.fieldItemPairs ?? []).map(([fn, value]) => {
+                    const dot = fn.lastIndexOf(".");
+                    return dot >= 0
+                      ? { table: fn.slice(0, dot), column: fn.slice(dot + 1), value }
+                      : { table: "", column: fn, value };
+                  });
+                  emitAppEvent("pivot:drillThrough", { pivotId, cell: drillCell });
+                  return;
+                }
+                const resp = await drillThroughToSheet({ pivotId, groupPath });
                 try {
                   await setActiveSheet(resp.sheetIndex);
                 } catch {
                   /* the SHEET_CHANGED emit below still re-syncs the tab bar */
                 }
                 emitAppEvent(AppEvents.SHEET_CHANGED, { sheetIndex: resp.sheetIndex });
-              })
-              .catch((error) => {
+              } catch (error) {
                 console.error("[Pivot Extension] Drill-through failed:", error);
-              });
+              }
+            })();
           }
 
           // Any cell in a pivot region: consume double-click (no edit mode)

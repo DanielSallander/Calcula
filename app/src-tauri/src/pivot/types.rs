@@ -1508,6 +1508,10 @@ pub enum DrillThroughKind {
     #[default]
     Builtin,
     Query,
+    /// Dispatch the pivot script's `onDrillThrough` hook (Layer 2): the
+    /// frontend routes the double-click to the pivot's sandboxed script
+    /// instead of running the host-side drill.
+    Script,
 }
 
 /// A model column reference (table + column) used by a drill-through override.

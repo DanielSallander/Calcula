@@ -572,6 +572,12 @@ export interface ChartContext extends BaseObjectContext {
   };
 }
 
+/** The drilled cell delivered to a pivot `onDrillThrough` handler. */
+export interface PivotDrillContext {
+  readonly pivotId: string;
+  readonly cell: ReadonlyArray<{ table: string; column: string; value: string }>;
+}
+
 /** Context for Pivot Table instances. */
 export interface PivotContext extends BaseObjectContext {
   readonly objectType: "pivot";
@@ -581,6 +587,13 @@ export interface PivotContext extends BaseObjectContext {
 
   /** Called when the pivot is refreshed (recalculated). */
   onRefresh(handler: EventHandler): CleanupFn;
+
+  /**
+   * Called when the user double-clicks a data/total cell and the pivot's
+   * drill-through behavior is "script". Receives the drilled cell as resolved
+   * (table, column, value) pairs.
+   */
+  onDrillThrough(handler: EventHandler<PivotDrillContext>): CleanupFn;
 
   /** Get current pivot field configuration. */
   getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };

@@ -499,6 +499,7 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         ...base,
         instanceId,
         onRefresh: (h: Handler) => registerHook(rt, "onRefresh", h),
+        onDrillThrough: (h: Handler) => registerHook(rt, "onDrillThrough", h),
         getFields: () =>
           mirror(rt, "pivot.fields", { rows: [], columns: [], values: [], filters: [] }),
         refresh: () => setState(rt, "pivot.refresh", []),

@@ -1269,6 +1269,14 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       }));
       break;
 
+    case "pivot.onDrillThrough":
+      addForwarder(mw, hook, onAppEvent("pivot:drillThrough", (detail) => {
+        const d = detail as { pivotId?: string; cell?: unknown } | undefined;
+        if (d?.pivotId !== undefined && String(d.pivotId) !== instanceId) return;
+        forwardEvent(mw, hook, { pivotId: instanceId, cell: d?.cell ?? [] });
+      }));
+      break;
+
     // ---- button ----
     case "button.onClick":
       addForwarder(mw, hook, onAppEvent("button:clicked", (detail) => {
