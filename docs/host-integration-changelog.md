@@ -207,6 +207,8 @@ pub struct ResultColumn {
 
 The engine owns the `format_string`/`display_name`/`is_hidden` (from the `Measure`/`Column`), the `"M [I]"` calculation-group → (base measure, item) mapping, and which column is the `__grouping_id` or rank column — so Calcula and Calcula Studio cannot drift on that mapping. Derived from the executed request + result schema, so it reflects calculation-group expansion and the appended rank column. No `MODEL_FORMAT_VERSION` change.
 
+`Engine::query_with_meta_and_cancellation(request, CancellationToken) -> QueryResult<(Vec<RecordBatch>, Vec<ResultColumn>)>` is the cancellable twin of `query_with_meta` — same metadata sidecar, but stops with `QueryError::Cancelled` when the token fires (the [cancellation](#concurrency--cancellation) contract). Lets a host get column metadata **and** a cancellable long-running query in one call, instead of choosing between them. No `MODEL_FORMAT_VERSION` change.
+
 ## Measure-authoring APIs (Studio)
 
 Two **request-free** helpers for the measure editor — neither rebuilds the model:

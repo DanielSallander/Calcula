@@ -1993,6 +1993,26 @@ impl Engine {
         Ok((batches, meta))
     }
 
+    /// [`query_with_meta`](Self::query_with_meta) that can be cancelled from
+    /// another task. Returns the same results plus the per-column
+    /// [`ResultColumn`] metadata, but stops with [`QueryError::Cancelled`] when
+    /// `token` is cancelled (see
+    /// [`query_with_cancellation`](Self::query_with_cancellation) for the
+    /// cancellation contract). Lets a host get the metadata sidecar **and** a
+    /// cancellable long-running query in one call.
+    pub async fn query_with_meta_and_cancellation(
+        &self,
+        request: QueryRequest,
+        token: CancellationToken,
+    ) -> QueryResult<(Vec<RecordBatch>, Vec<ResultColumn>)> {
+        let batches = self.query_with_cancellation(request.clone(), token).await?;
+        let meta = match batches.first() {
+            Some(batch) => build_result_metadata(&self.model, &request, batch.schema().as_ref()),
+            None => Vec::new(),
+        };
+        Ok((batches, meta))
+    }
+
     /// Execute a query that can be cancelled from another task.
     ///
     /// Like [`query`](Self::query), but stops with [`QueryError::Cancelled`]
