@@ -4115,27 +4115,45 @@ fn extract_bi_model_metadata(
         .tables()
         .iter()
         .map(|t| {
-            let columns = t
+            let is_numeric_dt = |dt: &bi_engine::DataType| {
+                matches!(
+                    dt,
+                    bi_engine::DataType::Int32
+                        | bi_engine::DataType::Int64
+                        | bi_engine::DataType::Float64
+                        | bi_engine::DataType::Decimal(_, _)
+                )
+            };
+            let mut columns: Vec<BiModelColumnMeta> = t
                 .columns()
                 .iter()
                 .map(|c| {
                     let dt = c.data_type();
-                    let is_numeric = matches!(
-                        dt,
-                        bi_engine::DataType::Int32
-                            | bi_engine::DataType::Int64
-                            | bi_engine::DataType::Float64
-                            | bi_engine::DataType::Decimal(_, _)
-                    );
                     BiModelColumnMeta {
                         name: c.name().to_string(),
                         data_type: format!("{:?}", dt),
-                        is_numeric,
+                        is_numeric: is_numeric_dt(dt),
                         lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
                         sort_by_column: c.sort_by_column().map(|s| s.to_string()),
+                        is_context_column: false,
                     }
                 })
                 .collect();
+            // Context columns: Studio-authored dynamic-segmentation columns. They
+            // are not physical columns but ARE groupable like ordinary dimensions
+            // (the engine computes them when they appear in group_by), so surface
+            // them in the field list alongside the table's columns.
+            for cc in model.context_columns_for_table(t.name()) {
+                let dt = cc.data_type();
+                columns.push(BiModelColumnMeta {
+                    name: cc.name().to_string(),
+                    data_type: format!("{:?}", dt),
+                    is_numeric: is_numeric_dt(dt),
+                    lookup_resolution: None,
+                    sort_by_column: None,
+                    is_context_column: true,
+                });
+            }
             BiModelTableMeta {
                 name: t.name().to_string(),
                 columns,

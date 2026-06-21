@@ -3310,6 +3310,9 @@ export interface BiTableInfo {
 export interface BiColumnInfo {
   name: string;
   dataType: string;
+  /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
+   *  physical column, but groupable like an ordinary dimension. */
+  isContextColumn?: boolean;
 }
 
 export interface BiMeasureInfo {

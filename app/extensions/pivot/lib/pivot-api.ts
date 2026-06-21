@@ -537,6 +537,9 @@ export interface BiModelColumn {
   name: string;
   dataType: string;
   isNumeric: boolean;
+  /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
+   *  physical column, but groupable like an ordinary dimension. */
+  isContextColumn?: boolean;
 }
 
 export interface BiMeasureFieldInfo {

@@ -343,6 +343,10 @@ pub struct BiTableInfo {
 pub struct BiColumnInfo {
     pub name: String,
     pub data_type: String,
+    /// True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
+    /// physical column, but groupable like an ordinary dimension.
+    #[serde(default)]
+    pub is_context_column: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

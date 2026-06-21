@@ -597,6 +597,22 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
                 <span style={{ color: "#999", fontSize: "10px" }}>
                   ({c.dataType})
                 </span>
+                {c.isContextColumn && (
+                  <span
+                    title="Context column - dynamic segmentation computed by the model"
+                    style={{
+                      color: "#6639ba",
+                      background: "#e7defc",
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      borderRadius: "3px",
+                      padding: "0 4px",
+                      marginLeft: "4px",
+                    }}
+                  >
+                    CTX
+                  </span>
+                )}
               </label>
             )),
           )}

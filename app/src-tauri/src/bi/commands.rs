@@ -161,16 +161,29 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
     let tables = model
         .tables()
         .iter()
-        .map(|t| BiTableInfo {
-            name: t.name().to_string(),
-            columns: t
+        .map(|t| {
+            let mut columns: Vec<BiColumnInfo> = t
                 .columns()
                 .iter()
                 .map(|c| BiColumnInfo {
                     name: c.name().to_string(),
                     data_type: format!("{:?}", c.data_type()),
+                    is_context_column: false,
                 })
-                .collect(),
+                .collect();
+            // Context columns: Studio-authored dynamic-segmentation columns,
+            // groupable like ordinary dimensions (the engine computes them).
+            for cc in model.context_columns_for_table(t.name()) {
+                columns.push(BiColumnInfo {
+                    name: cc.name().to_string(),
+                    data_type: format!("{:?}", cc.data_type()),
+                    is_context_column: true,
+                });
+            }
+            BiTableInfo {
+                name: t.name().to_string(),
+                columns,
+            }
         })
         .collect();
 

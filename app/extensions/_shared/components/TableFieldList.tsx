@@ -19,6 +19,9 @@ export interface BiModelColumn {
   lookupResolution?: string;
   /** Sort-by column name: sort this column's pivot items by another column's values. */
   sortByColumn?: string;
+  /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
+   *  physical column, but groupable like an ordinary dimension. */
+  isContextColumn?: boolean;
 }
 
 export interface BiModelTable {
@@ -191,6 +194,21 @@ const treeStyles = {
     color: #9a6700;
     &:hover { background: #fae17d; }
   `,
+  contextBadge: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    background: #e7defc;
+    color: #6639ba;
+    user-select: none;
+    flex-shrink: 0;
+  `,
   hierarchyItem: css`
     display: flex;
     align-items: center;
@@ -273,6 +291,7 @@ function TreeFieldItem({
   isMeasure,
   isLookup,
   lookupResolution,
+  isContextColumn,
   onToggle,
   onLookupToggle,
 }: {
@@ -283,6 +302,7 @@ function TreeFieldItem({
   isMeasure: boolean;
   isLookup?: boolean;
   lookupResolution?: string;
+  isContextColumn?: boolean;
   onToggle: (checked: boolean) => void;
   onLookupToggle?: () => void;
 }) {
@@ -327,6 +347,15 @@ function TreeFieldItem({
         onChange={handleChange}
       />
       <span className={treeStyles.fieldName}>{name}</span>
+      {/* Context-column badge — Studio-authored dynamic segmentation */}
+      {isContextColumn && (
+        <span
+          className={treeStyles.contextBadge}
+          title="Context column — dynamic segmentation computed by the model"
+        >
+          CTX
+        </span>
+      )}
       {/* G/L toggle badge — only for dimension columns, not measures */}
       {!isMeasure && onLookupToggle && (
         <span
@@ -706,6 +735,7 @@ export function TableFieldList({
                         isMeasure={false}
                         isLookup={lookupColumns?.has(colKey)}
                         lookupResolution={col.lookupResolution}
+                        isContextColumn={col.isContextColumn}
                         onToggle={(checked) =>
                           onColumnToggle(table.name, col.name, col.isNumeric, checked)
                         }

@@ -1645,6 +1645,11 @@ pub struct BiModelColumnMeta {
     /// Example: month_name sorted by month_number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_by_column: Option<String>,
+    /// True for a Studio-authored CONTEXT column (dynamic segmentation computed
+    /// per query from a scalar measure, not a physical column). Groupable like an
+    /// ordinary dimension; the engine resolves it when it appears in group_by.
+    #[serde(default)]
+    pub is_context_column: bool,
 }
 
 /// Measure metadata from a BI model.
