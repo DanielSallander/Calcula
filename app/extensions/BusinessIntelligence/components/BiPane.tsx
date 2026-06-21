@@ -2,7 +2,7 @@
 // PURPOSE: Task pane for the BI extension — connection-aware query workflow.
 // CONTEXT: Multi-step wizard: select connection, bind, query, insert.
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { useGridState, restoreFocusToGrid } from "@api";
 import {
@@ -20,6 +20,30 @@ import type {
   BiModelInfo,
 } from "../types";
 import { biGetModelInfo } from "@api/backend";
+import type { BiKpiInfo } from "@api/backend";
+import { computeKpiStatus, kpiStatusColor, type KpiStatusLevel } from "../lib/kpiStatus";
+
+/** Resolve a KPI cell's status: parse the base value, resolve the target
+ *  (a constant goal, or the row's value of the target measure), and classify. */
+function statusForCell(
+  kpi: BiKpiInfo,
+  val: string | null,
+  row: (string | null)[],
+  colIndexByName: Map<string, number>,
+): KpiStatusLevel | null {
+  const base = val == null ? NaN : parseFloat(val);
+  let target: number | null = null;
+  if (kpi.targetKind === "constant") {
+    target = kpi.targetValue ?? null;
+  } else if (kpi.targetKind === "measure" && kpi.targetMeasure) {
+    const ti = colIndexByName.get(kpi.targetMeasure);
+    if (ti !== undefined) {
+      const tv = row[ti];
+      target = tv == null ? null : parseFloat(tv);
+    }
+  }
+  return computeKpiStatus(base, target, kpi.statusBands);
+}
 
 // ============================================================================
 // Styles
@@ -196,6 +220,24 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
   );
   const [selectedGroupBy, setSelectedGroupBy] = useState<BiColumnRef[]>([]);
   const [queryResult, setQueryResult] = useState<BiQueryResult | null>(null);
+
+  // Map result column name -> index, and column index -> the KPI whose base
+  // measure it is (so KPI cells get a status indicator).
+  const colIndexByName = useMemo(() => {
+    const m = new Map<string, number>();
+    queryResult?.columns.forEach((c, i) => m.set(c, i));
+    return m;
+  }, [queryResult]);
+  const kpiByColumn = useMemo(() => {
+    const m = new Map<number, BiKpiInfo>();
+    if (queryResult && modelInfo?.kpis) {
+      for (const kpi of modelInfo.kpis) {
+        const idx = colIndexByName.get(kpi.baseMeasure);
+        if (idx !== undefined) m.set(idx, kpi);
+      }
+    }
+    return m;
+  }, [queryResult, modelInfo, colIndexByName]);
 
   // ----- Status -----
   const [loading, setLoading] = useState(false);
@@ -593,11 +635,31 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
                   <tbody>
                     {queryResult.rows.slice(0, 20).map((row, rowIdx) => (
                       <tr key={rowIdx}>
-                        {row.map((val, colIdx) => (
-                          <td key={colIdx} style={styles.td}>
-                            {val ?? ""}
-                          </td>
-                        ))}
+                        {row.map((val, colIdx) => {
+                          const kpi = kpiByColumn.get(colIdx);
+                          const status = kpi
+                            ? statusForCell(kpi, val, row, colIndexByName)
+                            : null;
+                          return (
+                            <td key={colIdx} style={styles.td}>
+                              {status && (
+                                <span
+                                  title={`KPI ${kpi!.name}: ${status}`}
+                                  style={{
+                                    display: "inline-block",
+                                    width: 8,
+                                    height: 8,
+                                    borderRadius: "50%",
+                                    marginRight: 6,
+                                    backgroundColor: kpiStatusColor(status),
+                                    verticalAlign: "middle",
+                                  }}
+                                />
+                              )}
+                              {val ?? ""}
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))}
                     {queryResult.rowCount > 20 && (

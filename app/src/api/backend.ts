@@ -3265,6 +3265,28 @@ export interface BiModelInfo {
   measures: BiMeasureInfo[];
   relationships: BiRelationshipInfo[];
   hierarchies?: BiHierarchyMeta[];
+  /** KPIs the model defines (Studio-authored). Status is computed host-side. */
+  kpis?: BiKpiInfo[];
+}
+
+/** A KPI defined in the model. Presentation metadata: the host renders the
+ *  status indicator from a base-measure value, the target, and the bands. */
+export interface BiKpiInfo {
+  name: string;
+  baseMeasure: string;
+  /** "constant" (fixed goal) or "measure" (goal supplied per row by a measure). */
+  targetKind: string;
+  targetValue?: number;
+  targetMeasure?: string;
+  statusBands: BiStatusBand[];
+  description?: string;
+}
+
+/** One KPI status band: a base/target ratio >= `threshold` (and below the next)
+ *  maps to `status` ("OffTrack" | "AtRisk" | "OnTrack"). */
+export interface BiStatusBand {
+  threshold: number;
+  status: string;
 }
 
 export interface BiHierarchyMeta {

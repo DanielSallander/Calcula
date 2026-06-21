@@ -146,6 +146,16 @@ fn build_target_from_connection_info(server: &str, database: &str) -> bi_engine:
     target
 }
 
+/// Map an engine KPI status to its wire string.
+fn kpi_status_str(s: bi_engine::KpiStatus) -> String {
+    match s {
+        bi_engine::KpiStatus::OffTrack => "OffTrack",
+        bi_engine::KpiStatus::AtRisk => "AtRisk",
+        bi_engine::KpiStatus::OnTrack => "OnTrack",
+    }
+    .to_string()
+}
+
 /// Build a `BiModelInfo` from an Engine's DataModel.
 fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
     let tables = model
@@ -210,11 +220,41 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
         })
         .collect();
 
+    let kpis = model
+        .kpis()
+        .iter()
+        .map(|k| {
+            let (target_kind, target_value, target_measure) = match k.target() {
+                bi_engine::KpiTarget::Constant(v) => ("constant".to_string(), Some(*v), None),
+                bi_engine::KpiTarget::Measure(m) => {
+                    ("measure".to_string(), None, Some(m.clone()))
+                }
+            };
+            crate::bi::types::BiKpiInfo {
+                name: k.name().to_string(),
+                base_measure: k.base_measure().to_string(),
+                target_kind,
+                target_value,
+                target_measure,
+                status_bands: k
+                    .status_bands()
+                    .iter()
+                    .map(|b| crate::bi::types::BiStatusBand {
+                        threshold: b.threshold,
+                        status: kpi_status_str(b.status),
+                    })
+                    .collect(),
+                description: k.description().map(|s| s.to_string()),
+            }
+        })
+        .collect();
+
     BiModelInfo {
         tables,
         measures,
         relationships,
         hierarchies,
+        kpis,
     }
 }
 

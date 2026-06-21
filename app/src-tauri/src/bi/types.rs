@@ -293,6 +293,42 @@ pub struct BiModelInfo {
     pub relationships: Vec<BiRelationshipInfo>,
     #[serde(default)]
     pub hierarchies: Vec<crate::pivot::types::BiHierarchyMeta>,
+    /// KPIs the model defines (Studio-authored). Presentation metadata: the host
+    /// renders the status indicator from a base-measure value, the target, and
+    /// the bands; the engine does not compute the status.
+    #[serde(default)]
+    pub kpis: Vec<BiKpiInfo>,
+}
+
+/// A KPI surfaced to the frontend (mirrors the engine `Kpi`). Status is computed
+/// host-side from a base-measure value vs the target across the status bands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiKpiInfo {
+    pub name: String,
+    /// The measure whose value drives this KPI.
+    pub base_measure: String,
+    /// "constant" (fixed goal) or "measure" (goal supplied per row by a measure).
+    pub target_kind: String,
+    /// The fixed goal, when `target_kind == "constant"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_value: Option<f64>,
+    /// The goal measure name, when `target_kind == "measure"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_measure: Option<String>,
+    /// Status bands, ascending by `threshold` over the base/target ratio.
+    pub status_bands: Vec<BiStatusBand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One KPI status band: a base/target ratio at or above `threshold` (and below
+/// the next band) maps to `status` ("OffTrack" | "AtRisk" | "OnTrack").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiStatusBand {
+    pub threshold: f64,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
