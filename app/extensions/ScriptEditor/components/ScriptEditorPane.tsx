@@ -10,6 +10,12 @@ import {
   setScriptSecurityLevel,
 } from "../lib/scriptApi";
 import { openAdvancedEditor } from "../lib/openEditorWindow";
+import {
+  isRecording as recorderIsRecording,
+  startRecording,
+  stopRecording,
+} from "../lib/actionRecorder";
+import { generateMacroSource } from "../lib/actionCodegen";
 import type { RunScriptResponse } from "../types";
 
 // ============================================================================
@@ -176,8 +182,15 @@ export function ScriptEditorPane(
   const [isRunning, setIsRunning] = useState(false);
   const [consoleLines, setConsoleLines] = useState<ConsoleEntry[]>([]);
   const [securityLevel, setSecurityLevel] = useState<string>("prompt");
+  const [recording, setRecording] = useState(false);
   const consoleEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Resync the button to the recorder's actual state (it's a process-wide
+  // singleton, so it may already be recording when this pane remounts).
+  useEffect(() => {
+    setRecording(recorderIsRecording());
+  }, []);
 
   // Auto-scroll console to bottom on new output
   useEffect(() => {
@@ -279,6 +292,28 @@ export function ScriptEditorPane(
     }
   }, [source, isRunning]);
 
+  const handleToggleRecord = useCallback(async () => {
+    if (recording) {
+      const actions = stopRecording();
+      setRecording(false);
+      setSource(generateMacroSource(actions));
+      setConsoleLines((prev) => [
+        ...prev,
+        {
+          text: `--- Recorded ${actions.length} action(s); generated script loaded into the editor ---`,
+          type: "info",
+        },
+      ]);
+    } else {
+      await startRecording();
+      setRecording(true);
+      setConsoleLines((prev) => [
+        ...prev,
+        { text: "--- Recording... edit cells, then click Stop ---", type: "info" },
+      ]);
+    }
+  }, [recording]);
+
   const handleClearConsole = useCallback(() => {
     setConsoleLines([]);
   }, []);
@@ -332,6 +367,24 @@ export function ScriptEditorPane(
       React.createElement(
         "div",
         { style: { display: "flex", gap: 6, alignItems: "center" } },
+        React.createElement(
+          "button",
+          {
+            style: recording
+              ? { ...buttonStyle, backgroundColor: "#C42B1C", borderColor: "#C42B1C" }
+              : {
+                  ...buttonStyle,
+                  backgroundColor: "transparent",
+                  color: "#C42B1C",
+                  borderColor: "#C42B1C",
+                },
+            onClick: handleToggleRecord,
+            title: recording
+              ? "Stop recording and load the generated script"
+              : "Record your cell edits as a script",
+          },
+          recording ? "Stop Recording" : "Record",
+        ),
         React.createElement(
           "select",
           {

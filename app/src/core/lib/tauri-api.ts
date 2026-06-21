@@ -51,6 +51,34 @@ export function setUdfResolveHook(hook: UdfResolveHook | null): void {
   udfResolveHook = hook;
 }
 
+/** A cell write observed at the bridge, surfaced to the macro recorder. */
+export interface RecordedCellWrite {
+  row: number;
+  col: number;
+  value: string;
+}
+
+/** Best-effort observer of cell writes for the macro recorder. At most one is
+ *  installed (by the recorder while recording); pass null to uninstall. A
+ *  failing hook never blocks the edit. */
+export type CellRecorderHook = (writes: RecordedCellWrite[]) => void;
+
+let cellRecorderHook: CellRecorderHook | null = null;
+
+/** Installed by the macro recorder while recording; pass null to uninstall. */
+export function setCellRecorderHook(hook: CellRecorderHook | null): void {
+  cellRecorderHook = hook;
+}
+
+function recordCellWrites(writes: RecordedCellWrite[]): void {
+  if (!cellRecorderHook) return;
+  try {
+    cellRecorderHook(writes);
+  } catch (e) {
+    console.warn("[recorder] cell-write hook failed; ignoring", e);
+  }
+}
+
 // ============================================================================
 // Cell Operations
 // ============================================================================
@@ -165,6 +193,7 @@ export async function updateCell(
   );
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.cells.length} cells | ipc=${dt.toFixed(1)}ms`);
+  recordCellWrites([{ row, col, value: input }]);
   return result;
 }
 
@@ -195,6 +224,7 @@ export async function updateCellsBatch(
   const result = await invoke<CellData[]>("update_cells_batch", { updates });
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCellsBatch(${updates.length}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
+  recordCellWrites(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
   return result;
 }
 

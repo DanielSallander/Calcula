@@ -23,6 +23,7 @@ export {
   getCollectionTexts,
   updateCell,
   updateCellsBatch,
+  setCellRecorderHook,
   clearCell,
   clearRange,
   clearRangeWithOptions,
