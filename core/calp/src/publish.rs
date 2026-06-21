@@ -462,6 +462,11 @@ pub fn publish(
     // covers all OTHER artifacts and is itself the commit point of the publish.
     version_manifest.artifact_checksums =
         crate::integrity::compute_artifact_checksums_via(registry, pkg, ver)?;
+    // Org-scale dedup: move the just-written artifacts into the content-addressed
+    // blob store (identical bytes across versions are stored once). The checksum
+    // map computed above is unchanged, so the signed manifest — and integrity —
+    // are unaffected; only WHERE the bytes live changes.
+    registry.commit_artifacts_as_blobs(pkg, ver, &version_manifest.artifact_checksums)?;
     registry.write_version_manifest(pkg, ver, &version_manifest)?;
 
     // S5 phase 2: seal the integrity root. Sign the RAW bytes of
@@ -592,11 +597,19 @@ mod tests {
             &ver.publisher_key, &manifest_bytes, sig_hex.trim(), "test-pkg", "1.0.0",
         ).unwrap();
 
-        // Verify sheet data files exist
-        let sheet_dir = reg.sheet_dir("test-pkg", "1.0.0", &wb.sheets[0].id).unwrap();
-        assert!(sheet_dir.join("data.json").exists());
-        assert!(sheet_dir.join("styles.json").exists());
-        assert!(sheet_dir.join("layout.json").exists());
+        // Sheet artifacts are deduplicated into the content-addressed blob store
+        // (not stored per-version), and remain retrievable via read_artifact.
+        let sid = &wb.sheets[0].id;
+        for name in ["data.json", "styles.json", "layout.json"] {
+            let key = format!("sheets/{sid}/{name}");
+            assert!(
+                reg.read_artifact("test-pkg", "1.0.0", &key).unwrap().is_some(),
+                "artifact {key} must be retrievable"
+            );
+        }
+        // The per-version copy was moved out by dedup.
+        let sheet_dir = reg.sheet_dir("test-pkg", "1.0.0", sid).unwrap();
+        assert!(!sheet_dir.join("data.json").exists());
     }
 
     #[test]
@@ -671,10 +684,89 @@ mod tests {
         assert_eq!(digest.len(), 64);
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 
-        let on_disk = fs::read(
-            reg.sheet_dir("checked", "1.0.0", &wb.sheets[0].id).unwrap().join("data.json"),
-        ).unwrap();
-        assert_eq!(digest, &crate::integrity::sha256_hex(&on_disk));
+        let bytes = reg
+            .read_artifact("checked", "1.0.0", &data_key)
+            .unwrap()
+            .expect("data.json must be retrievable from the blob store");
+        assert_eq!(digest, &crate::integrity::sha256_hex(&bytes));
+    }
+
+    /// Count blob files in the registry's content-addressed store.
+    fn count_blobs(root: &std::path::Path) -> usize {
+        let blobs = root.join(".blobs");
+        let mut n = 0;
+        if let Ok(shards) = fs::read_dir(&blobs) {
+            for shard in shards.flatten() {
+                if let Ok(files) = fs::read_dir(shard.path()) {
+                    n += files
+                        .flatten()
+                        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                        .count();
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn publish_dedups_identical_artifacts_across_versions() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let wb = make_test_workbook();
+
+        // Publish two versions of the SAME workbook — the artifact bytes are
+        // identical across versions (only the manifest differs).
+        for v in [SemVer::new(1, 0, 0), SemVer::new(1, 0, 1)] {
+            let request = PublishRequest {
+                workbook: &wb,
+                package_name: "dedup".to_string(),
+                version: v,
+                kind: "report".to_string(),
+                sheet_indices: vec![0, 1],
+                now: "2026-05-18T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+            };
+            publish(&reg, &request, prof.path()).unwrap();
+        }
+
+        let v1 = reg.get_version_manifest("dedup", "1.0.0").unwrap();
+        let v2 = reg.get_version_manifest("dedup", "1.0.1").unwrap();
+        let total_refs = v1.artifact_checksums.len() + v2.artifact_checksums.len();
+        assert!(total_refs > 0);
+
+        let mut unique: std::collections::HashSet<&String> = std::collections::HashSet::new();
+        unique.extend(v1.artifact_checksums.values());
+        unique.extend(v2.artifact_checksums.values());
+
+        let blob_count = count_blobs(dir.path());
+        // Dedup: identical bytes across versions are stored once, so fewer blobs
+        // than total artifact references, exactly one blob per unique content.
+        assert!(
+            blob_count < total_refs,
+            "expected dedup: {blob_count} blobs < {total_refs} refs"
+        );
+        assert_eq!(blob_count, unique.len(), "one blob per unique content hash");
+
+        // Both versions still pull intact from the shared blob store.
+        for ver in ["1.0.0", "1.0.1"] {
+            let req = crate::pull::PullRequest {
+                package_name: "dedup".to_string(),
+                registry_url: format!("file://{}", dir.path().display()),
+                version_pin: crate::version::VersionPin::Exact(
+                    if ver == "1.0.0" { SemVer::new(1, 0, 0) } else { SemVer::new(1, 0, 1) },
+                ),
+                now: "2026-05-18T01:00:00Z".to_string(),
+            };
+            let result = crate::pull::pull(&reg, &req, prof.path()).unwrap();
+            assert_eq!(result.sheets.len(), 2);
+        }
     }
 
     #[test]

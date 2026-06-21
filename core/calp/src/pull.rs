@@ -752,23 +752,25 @@ mod tests {
     }
 
     #[test]
-    fn pull_fails_on_file_added_after_publish() {
+    fn pull_fails_on_corrupted_blob() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
-        publish_test_package(&reg, prof.path());
+        let wb = publish_test_package(&reg, prof.path());
 
-        // Inject a file the publisher never wrote (e.g. a smuggled script).
-        let rogue = reg
-            .version_dir("test-pkg", "1.0.0")
-            .unwrap()
-            .join("object_scripts");
-        fs::create_dir_all(&rogue).unwrap();
-        fs::write(rogue.join("rogue.json"), "{\"source\": \"evil()\"}").unwrap();
+        // Corrupt a deduped artifact's blob: its content no longer hashes to the
+        // (signed) checksum, so pull rejects it. With content-addressed storage,
+        // smuggling an UNLISTED extra file is moot — it is never referenced by the
+        // signed manifest, hence never read or pulled.
+        let ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
+        let key = format!("sheets/{}/data.json", wb.sheets[0].id);
+        let hash = ver.artifact_checksums.get(&key).expect("data.json checksum");
+        let blob = dir.path().join(".blobs").join(&hash[0..2]).join(hash);
+        fs::write(&blob, "{\"cells\": \"corrupted\"}").unwrap();
 
         let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
-        assert!(matches!(err, CalpError::UnlistedArtifact { .. }));
-        assert!(err.to_string().contains("object_scripts/rogue.json"));
+        assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
+        assert!(err.to_string().contains("data.json"));
     }
 
     #[test]
@@ -778,12 +780,12 @@ mod tests {
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = publish_test_package(&reg, prof.path());
 
-        // Tamper-by-deletion: previously a silent skip, now a hard error.
-        let styles_path = reg
-            .sheet_dir("test-pkg", "1.0.0", &wb.sheets[1].id)
-            .unwrap()
-            .join("styles.json");
-        fs::remove_file(&styles_path).unwrap();
+        // Tamper-by-deletion: remove a deduped artifact's blob -> a hard error.
+        let ver = reg.get_version_manifest("test-pkg", "1.0.0").unwrap();
+        let key = format!("sheets/{}/styles.json", wb.sheets[1].id);
+        let hash = ver.artifact_checksums.get(&key).expect("styles.json checksum");
+        let blob = dir.path().join(".blobs").join(&hash[0..2]).join(hash);
+        fs::remove_file(&blob).unwrap();
 
         let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
         assert!(matches!(err, CalpError::MissingArtifact { .. }));

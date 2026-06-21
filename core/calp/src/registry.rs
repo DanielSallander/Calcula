@@ -494,6 +494,12 @@ impl LocalRegistry {
     }
 
     /// Read an artifact at a version-relative path; `Ok(None)` when absent.
+    ///
+    /// Dir-first, blob-fallback: at publish time (before dedup) artifacts live in
+    /// the version directory; after publish they are moved to the shared
+    /// content-addressed blob store, so on a dir miss we resolve `rel_path` ->
+    /// hash via the (signed) version manifest and read the blob. Callers
+    /// (pull/integrity) are unchanged — the dedup is transparent.
     pub fn read_artifact(
         &self,
         package_name: &str,
@@ -502,10 +508,74 @@ impl LocalRegistry {
     ) -> Result<Option<Vec<u8>>, CalpError> {
         let path = self.artifact_path(package_name, version, rel_path)?;
         match fs::read(&path) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        // Deduped artifact: resolve via the manifest's checksum map (rel -> hash)
+        // and read the blob. A missing manifest means the artifact is absent.
+        let manifest = match self.get_version_manifest(package_name, version) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        match manifest.artifact_checksums.get(rel_path) {
+            Some(hash) => self.read_blob(hash),
+            None => Ok(None),
+        }
+    }
+
+    /// Path of a content-addressed blob. Blobs are shared across ALL packages and
+    /// versions, so identical artifact bytes are stored once. Sharded by the
+    /// first two hex chars to keep directories small. The hash is validated as
+    /// hex so it can never escape the blob root.
+    fn blob_path(&self, hash: &str) -> Result<PathBuf, CalpError> {
+        if hash.len() < 4 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CalpError::Registry(format!("invalid blob hash '{hash}'")));
+        }
+        Ok(self.root.join(".blobs").join(&hash[0..2]).join(hash))
+    }
+
+    /// Write a blob, keyed by its content hash. Idempotent: a blob that already
+    /// exists is left as-is (the dedup that makes org-scale storage bounded).
+    pub fn write_blob(&self, hash: &str, bytes: &[u8]) -> Result<(), CalpError> {
+        let path = self.blob_path(hash)?;
+        if path.exists() {
+            return Ok(());
+        }
+        atomic_write(&path, bytes)
+    }
+
+    /// Read a blob by content hash; `Ok(None)` when absent.
+    pub fn read_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, CalpError> {
+        let path = self.blob_path(hash)?;
+        match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Move a version's per-version artifacts into the content-addressed blob
+    /// store (dedup) and remove the per-version copies, leaving only the manifest
+    /// and its signature in the version directory. Idempotent: an artifact whose
+    /// per-version copy is already gone (re-run) is skipped.
+    pub fn commit_artifacts_as_blobs(
+        &self,
+        package_name: &str,
+        version: &str,
+        checksums: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), CalpError> {
+        for (rel, hash) in checksums {
+            let path = self.artifact_path(package_name, version, rel)?;
+            let bytes = match fs::read(&path) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            self.write_blob(hash, &bytes)?;
+            let _ = fs::remove_file(&path);
+        }
+        Ok(())
     }
 
     /// List ALL checksummable artifact rel-paths under a version (forward
@@ -699,15 +769,37 @@ impl RegistryTransport for LocalRegistry {
         LocalRegistry::clear_version(self, package_name, version)
     }
 
+    fn commit_artifacts_as_blobs(
+        &self,
+        package_name: &str,
+        version: &str,
+        checksums: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), CalpError> {
+        LocalRegistry::commit_artifacts_as_blobs(self, package_name, version, checksums)
+    }
+
     fn local_artifact_path(
         &self,
         package_name: &str,
         version: &str,
         rel_path: &str,
     ) -> Result<Option<PathBuf>, CalpError> {
-        // Validated like any artifact path (D7 boundary). For the local
-        // transport this is the absolute on-disk location.
-        Ok(Some(self.artifact_path(package_name, version, rel_path)?))
+        // Validated like any artifact path (D7 boundary). Dir-first (pre-dedup),
+        // blob-fallback: after dedup the bytes live in the content-addressed blob
+        // store, so resolve rel-path -> hash via the manifest and hand out the
+        // blob path. Keeps the lazy model.json read working post-dedup.
+        let dir_path = self.artifact_path(package_name, version, rel_path)?;
+        if dir_path.exists() {
+            return Ok(Some(dir_path));
+        }
+        let manifest = match self.get_version_manifest(package_name, version) {
+            Ok(m) => m,
+            Err(_) => return Ok(Some(dir_path)),
+        };
+        match manifest.artifact_checksums.get(rel_path) {
+            Some(hash) => Ok(Some(self.blob_path(hash)?)),
+            None => Ok(Some(dir_path)),
+        }
     }
 
     fn save_submission(

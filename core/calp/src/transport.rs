@@ -111,6 +111,23 @@ pub trait RegistryTransport {
     /// Replaces the `fs::remove_dir_all(ver_dir)` publish used to do directly.
     fn clear_version(&self, package_name: &str, version: &str) -> Result<(), CalpError>;
 
+    /// Move a version's just-written artifacts into a content-addressed blob
+    /// store, deduplicating bytes that repeat across versions (org-scale: a
+    /// daily-published workbook only re-stores the artifacts that actually
+    /// changed). Called by publish AFTER the signed `artifact_checksums` are
+    /// computed; `checksums` maps each version-relative artifact path to its
+    /// SHA-256, which is exactly the blob name. The manifest is unchanged, so
+    /// signing/integrity are unaffected. Default: a no-op (the transport keeps
+    /// per-version artifact files); the local transport overrides it to dedup.
+    fn commit_artifacts_as_blobs(
+        &self,
+        _package_name: &str,
+        _version: &str,
+        _checksums: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), CalpError> {
+        Ok(())
+    }
+
     /// Resolve a version-relative artifact path to an ABSOLUTE LOCAL FILESYSTEM
     /// path, when this transport is backed by the local filesystem. `None` for a
     /// non-local transport (e.g. a future HTTP registry, where there is no local

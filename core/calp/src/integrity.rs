@@ -247,8 +247,28 @@ pub fn verify_version_artifacts_via(
             version: version.to_string(),
         });
     }
-    let actual = compute_artifact_checksums_via(t, package, version)?;
-    compare_checksums(&actual, manifest, package, version)
+    // Content-addressed verification: every artifact named in the (signed)
+    // manifest must be readable and hash to its published digest. With blob
+    // storage the artifact set IS the manifest's checksum keys, so there is no
+    // separate dir-walk + unlisted-file check — an unreferenced blob is never
+    // pulled. `read_artifact` resolves rel-path -> blob transparently.
+    for (rel, expected) in &manifest.artifact_checksums {
+        let bytes = t
+            .read_artifact(package, version, rel)?
+            .ok_or_else(|| CalpError::MissingArtifact {
+                package: package.to_string(),
+                version: version.to_string(),
+                file: rel.clone(),
+            })?;
+        if sha256_hex(&bytes) != *expected {
+            return Err(CalpError::ChecksumMismatch {
+                package: package.to_string(),
+                version: version.to_string(),
+                file: rel.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
