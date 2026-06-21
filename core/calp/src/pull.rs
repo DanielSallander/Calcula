@@ -102,6 +102,18 @@ pub fn pull(
         profile_dir,
     )?;
 
+    // COMPATIBILITY GATE: refuse a package that needs a newer Calcula than this
+    // one (an honest "update the app" rather than a silent/partial failure).
+    // min_app_version lives in the now-signature-verified manifest; the host app
+    // version was recorded at startup via calp::set_host_app_version. Skipped
+    // when the package declares no minimum or the host version is unknown.
+    crate::compat::check_min_app_version(
+        pkg,
+        ver,
+        &ver_manifest.min_app_version,
+        crate::compat::host_app_version(),
+    )?;
+
     // INTEGRITY GATE: verify every artifact the transport exposes for this
     // version against the manifest's published SHA-256 checksums BEFORE
     // materializing anything. This single chokepoint covers both subscribe and

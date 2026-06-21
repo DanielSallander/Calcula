@@ -3687,6 +3687,10 @@ pub fn run() {
         }
     }
 
+    // Record this app's version so the .calp compatibility gate can refuse a
+    // package that requires a newer Calcula (honest "update the app").
+    calp::set_host_app_version(env!("CARGO_PKG_VERSION"));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

@@ -3367,6 +3367,10 @@ fn load_embedded_data_sources(
         } else {
             json_value
         };
+        if let Err(e) = crate::bi::commands::check_model_format_version(&model_json) {
+            crate::log_warn!("CALP", "Skipping data source {}: {}", ds.definition.id, e);
+            continue;
+        }
         let model: bi_engine::DataModel = match serde_json::from_value(model_json) {
             Ok(m) => m,
             Err(e) => {
@@ -3818,6 +3822,10 @@ pub async fn calp_refresh_data(
             model_json
         };
 
+        if let Err(e) = crate::bi::commands::check_model_format_version(&actual_model_json) {
+            crate::log_warn!("CALP", "Skipping data source {}: {}", ds.id, e);
+            continue;
+        }
         let model: bi_engine::DataModel = match serde_json::from_value(actual_model_json) {
             Ok(m) => m,
             Err(e) => {

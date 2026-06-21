@@ -421,6 +421,50 @@ fn get_engine_arc(
 // Tauri Commands — Connection Management
 // ---------------------------------------------------------------------------
 
+/// Reject a data model whose schema `format_version` exceeds what this app's
+/// bundled engine supports, with an "update the app" message -- instead of
+/// silently deserializing (serde drops unknown fields) and quietly losing the
+/// newer features. `model_json` is the unwrapped DataModel JSON (NOT the
+/// ModelBundle wrapper). Matters across `.calp` distribution: a subscriber on an
+/// older Calcula opening a publisher's newer-format model.
+pub fn check_model_format_version(model_json: &serde_json::Value) -> Result<(), String> {
+    let found = model_json
+        .get("format_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    if found > bi_engine::MODEL_FORMAT_VERSION {
+        return Err(format!(
+            "This report needs a newer version of Calcula. Its data model uses format v{} but this app supports up to v{}. Please update Calcula.",
+            found, bi_engine::MODEL_FORMAT_VERSION
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod format_gate_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_current_missing_and_older_formats() {
+        // Missing format_version defaults to 0 (legacy), current is accepted.
+        assert!(check_model_format_version(&serde_json::json!({})).is_ok());
+        assert!(check_model_format_version(&serde_json::json!({ "format_version": 0 })).is_ok());
+        assert!(check_model_format_version(
+            &serde_json::json!({ "format_version": bi_engine::MODEL_FORMAT_VERSION })
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_newer_format_with_update_message() {
+        let too_new =
+            serde_json::json!({ "format_version": bi_engine::MODEL_FORMAT_VERSION as u64 + 1 });
+        let err = check_model_format_version(&too_new).unwrap_err();
+        assert!(err.contains("newer version of Calcula"), "unexpected: {err}");
+    }
+}
+
 /// Create a new connection: loads the model, registers in the shared engine registry,
 /// loads disk cache, and refreshes stale tables.
 /// Does NOT connect to the database yet — call `bi_connect` for that.
@@ -453,6 +497,7 @@ pub async fn bi_create_connection(
         json_value
     };
 
+    check_model_format_version(&model_json)?;
     let model: bi_engine::DataModel = serde_json::from_value(model_json)
         .map_err(|e| format!("Failed to parse model: {}", e))?;
     model.validate().map_err(|e| format!("Model validation failed: {}", e))?;
@@ -892,11 +937,33 @@ pub async fn bi_query(
     let query_request = build_engine_query(&request);
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
 
-    let (batches, refreshed_tables) = {
+    let (batches, refreshed_tables, refresh_failures) = {
         let mut engine = engine_arc.lock().await;
-        engine.query_auto_refresh(query_request).await
-            .map_err(|e| format!("Query failed: {}", e))?
+        let (b, rt) = engine.query_auto_refresh(query_request).await
+            .map_err(|e| format!("Query failed: {}", e))?;
+        // Capture partial refresh failures so they aren't silently swallowed
+        // (query_auto_refresh proceeds despite per-table failures and serves
+        // possibly-stale data for the failed tables).
+        let failures: Vec<String> = engine
+            .last_refresh_report()
+            .map(|r| {
+                r.failures
+                    .iter()
+                    .map(|f| format!("{}: {}", f.table, f.detail))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (b, rt, failures)
     };
+
+    if !refresh_failures.is_empty() {
+        crate::log_warn!(
+            "BI",
+            "bi_query: {} table(s) failed to refresh (serving possibly-stale data): {}",
+            refresh_failures.len(),
+            refresh_failures.join("; ")
+        );
+    }
 
     // DEV: Log data source (cache vs database)
     if refreshed_tables.is_empty() {

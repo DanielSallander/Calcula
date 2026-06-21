@@ -213,6 +213,9 @@ pub fn publish(
         // subscriber verifies against; publisher_name is display-only.
         publisher_key: keypair.public_key_hex(),
         publisher_name: keypair.display_name(),
+        // Opt-in publisher minimum-app-version (publisher UX to set it is a
+        // later slice); empty = no minimum.
+        min_app_version: String::new(),
         sheets,
         named_ranges: named_ranges.clone(),
         tables: table_ids,

@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod channels;
+pub mod compat;
 pub mod cross_package;
 pub mod dev_mode;
 pub mod error;
@@ -24,6 +25,7 @@ pub mod publish;
 pub mod pull;
 pub mod writeback;
 
+pub use compat::{check_min_app_version, host_app_version, set_host_app_version};
 pub use error::CalpError;
 pub use html_export::{render_package_html, HtmlExportMode, HtmlExportOptions};
 pub use identity_provider::SubmitterIdentity;

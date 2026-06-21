@@ -67,4 +67,9 @@ pub enum CalpError {
 
     #[error("Publisher key for package {package}@{version} changed since first use: pinned {pinned} but this version is signed by {got} — refusing to trust (possible package hijack)")]
     PublisherKeyChanged { package: String, version: String, pinned: String, got: String },
+
+    // -- Compatibility contract --------------------------------------------
+
+    #[error("This package needs a newer version of Calcula: {package}@{version} requires app v{required} but this app is v{current}. Please update Calcula.")]
+    AppTooOld { package: String, version: String, required: String, current: String },
 }

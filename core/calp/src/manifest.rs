@@ -94,6 +94,13 @@ pub struct VersionManifest {
     /// never used for verification (only `publisher_key` is).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub publisher_name: String,
+    /// Minimum host app version (semver) required to open this version. Empty =
+    /// no minimum (older packages / publishers who don't opt in). Checked at
+    /// pull (compat.rs): an older Calcula is refused with an "update the app"
+    /// error instead of a silent/partial failure. Covered by the manifest's
+    /// Ed25519 signature.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub min_app_version: String,
     pub sheets: Vec<PublishedSheet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_ranges: Vec<PublishedNamedRange>,
