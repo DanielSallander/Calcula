@@ -3975,7 +3975,10 @@ pub async fn drill_through_to_sheet(
             conn.engine.clone().ok_or("No BI model loaded.")?
         };
         let batches = {
-            let engine = engine_arc.lock().await;
+            let mut engine = engine_arc.lock().await;
+            // Apply this connection's RLS role (or clear a sibling's) so drilled
+            // detail rows are restricted to what the active role permits.
+            crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
             match engine.query_rows(detail).await {
                 Ok(b) => b,
                 Err(e) => match fallback {
@@ -4871,6 +4874,8 @@ pub async fn update_bi_pivot_fields(
 
     let query_result = {
         let mut engine = engine_arc.lock().await;
+        // Apply this connection's RLS role (or clear a sibling's) before querying.
+        crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
         engine.query(query_request).await
     };
     let batches = match query_result {

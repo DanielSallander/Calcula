@@ -262,12 +262,39 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
         })
         .collect();
 
+    let security_roles = model
+        .security_roles()
+        .iter()
+        .map(|r| {
+            let table_filters: Vec<crate::bi::types::BiFilterPredicateInfo> = r
+                .table_filters()
+                .iter()
+                .map(|p| crate::bi::types::BiFilterPredicateInfo {
+                    table: p.table.clone(),
+                    column: p.column.clone(),
+                    operator: format!("{:?}", p.operator),
+                    value: p.value.clone(),
+                    // None for static; Debug of DynamicValue ("Username"/"CustomData")
+                    // for a dynamic (identity-resolved) predicate.
+                    dynamic: p.dynamic.as_ref().map(|d| format!("{:?}", d)),
+                })
+                .collect();
+            let is_dynamic = table_filters.iter().any(|f| f.dynamic.is_some());
+            crate::bi::types::BiSecurityRoleInfo {
+                name: r.name().to_string(),
+                table_filters,
+                is_dynamic,
+            }
+        })
+        .collect();
+
     BiModelInfo {
         tables,
         measures,
         relationships,
         hierarchies,
         kpis,
+        security_roles,
     }
 }
 
@@ -470,6 +497,86 @@ fn get_engine_arc(
         .ok_or_else(|| "No model loaded.".to_string())
 }
 
+/// Read this connection's chosen "view as" RLS role and apply it on the locked
+/// engine, immediately before a query. MUST be called inside the engine lock.
+///
+/// Connections that share a model also share ONE engine (the registry dedups by
+/// model_path) and `set_active_role` is sticky engine state, so this is called
+/// on EVERY query path: it sets the chosen role, OR clears (`None`) any role a
+/// sibling connection left on the shared engine — without it, connection A's
+/// role would leak into connection B's results. Re-setting the same role is
+/// cheap (the engine no-ops and keeps its role-keyed cache when unchanged).
+/// v1 applies at most one role.
+pub(crate) fn apply_connection_role(
+    engine: &mut bi_engine::Engine,
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+) {
+    let role = {
+        let connections = bi_state.connections.lock().unwrap();
+        connections
+            .get(&connection_id)
+            .and_then(|c| c.active_role.clone())
+    };
+    engine.set_active_role(role);
+}
+
+/// Set the active "view as" RLS role for a connection (`None` = unrestricted).
+/// The role is validated against the model up front for an immediate friendly
+/// error; the engine re-validates and fails closed at query time. v1 refuses
+/// dynamic (USERNAME/CUSTOMDATA) roles until runtime-identity wiring lands.
+#[tauri::command]
+pub async fn bi_set_active_role(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    role: Option<String>,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN,
+    )?;
+
+    if let Some(name) = &role {
+        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+        let engine = engine_arc.lock().await;
+        let security_role = engine
+            .model()
+            .security_role(name)
+            .map_err(|_| format!("Security role '{}' not found in this model.", name))?;
+        if security_role
+            .table_filters()
+            .iter()
+            .any(|p| p.dynamic.is_some())
+        {
+            return Err(format!(
+                "Role '{}' uses a dynamic identity (USERNAME/CUSTOMDATA), which is not \
+                 supported yet.",
+                name
+            ));
+        }
+    }
+
+    let mut connections = bi_state.connections.lock().unwrap();
+    let conn = connections
+        .get_mut(&connection_id)
+        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    conn.active_role = role;
+    Ok(())
+}
+
+/// Get the active "view as" RLS role for a connection (`None` = unrestricted).
+#[tauri::command]
+pub async fn bi_get_active_role(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+) -> Result<Option<String>, String> {
+    let connections = bi_state.connections.lock().unwrap();
+    Ok(connections
+        .get(&connection_id)
+        .and_then(|c| c.active_role.clone()))
+}
+
 // ---------------------------------------------------------------------------
 // Tauri Commands — Connection Management
 // ---------------------------------------------------------------------------
@@ -515,6 +622,93 @@ mod format_gate_tests {
             serde_json::json!({ "format_version": bi_engine::MODEL_FORMAT_VERSION as u64 + 1 });
         let err = check_model_format_version(&too_new).unwrap_err();
         assert!(err.contains("newer version of Calcula"), "unexpected: {err}");
+    }
+}
+
+#[cfg(test)]
+mod rls_mapping_tests {
+    use super::*;
+
+    /// A model with one static role and one dynamic (USERNAME) role.
+    fn model_with_roles() -> bi_engine::DataModel {
+        bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Geography",
+                    vec![
+                        bi_engine::Column::new("id", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("region", bi_engine::DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_security_role(bi_engine::SecurityRole::new("WestOnly").with_filter(
+                "Geography",
+                "region",
+                bi_engine::ComparisonOp::Equal,
+                "West",
+            ))
+            .add_security_role(
+                bi_engine::SecurityRole::new("MyRows").with_filters(vec![
+                    bi_engine::FilterPredicate::username(
+                        "Geography",
+                        "region",
+                        bi_engine::ComparisonOp::Equal,
+                    ),
+                ]),
+            )
+            .build()
+            .expect("model with roles should build")
+    }
+
+    #[test]
+    fn maps_static_role_predicates() {
+        let info = model_to_info(&model_with_roles());
+        assert_eq!(info.security_roles.len(), 2);
+
+        let west = info
+            .security_roles
+            .iter()
+            .find(|r| r.name == "WestOnly")
+            .expect("WestOnly role present");
+        assert!(!west.is_dynamic, "static role must not be flagged dynamic");
+        assert_eq!(west.table_filters.len(), 1);
+        let f = &west.table_filters[0];
+        assert_eq!(f.table, "Geography");
+        assert_eq!(f.column, "region");
+        assert_eq!(f.operator, "Equal");
+        assert_eq!(f.value, "West");
+        assert!(f.dynamic.is_none());
+    }
+
+    #[test]
+    fn flags_and_labels_dynamic_role() {
+        let info = model_to_info(&model_with_roles());
+        let dyn_role = info
+            .security_roles
+            .iter()
+            .find(|r| r.name == "MyRows")
+            .expect("MyRows role present");
+        assert!(dyn_role.is_dynamic, "USERNAME() role must be flagged dynamic");
+        assert_eq!(
+            dyn_role.table_filters[0].dynamic.as_deref(),
+            Some("Username")
+        );
+    }
+
+    #[test]
+    fn empty_when_model_has_no_roles() {
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "T",
+                    vec![bi_engine::Column::new("c", bi_engine::DataType::Int64)],
+                )
+                .unwrap(),
+            )
+            .build()
+            .unwrap();
+        assert!(model_to_info(&model).security_roles.is_empty());
     }
 }
 
@@ -630,6 +824,7 @@ pub async fn bi_create_connection(
         is_connected: false,
         active_queries: std::collections::HashMap::new(),
         package_data_source_id: None,
+        active_role: None,
     };
 
     let info = connection.to_info();
@@ -992,6 +1187,8 @@ pub async fn bi_query(
 
     let (batches, refreshed_tables, refresh_failures) = {
         let mut engine = engine_arc.lock().await;
+        // Apply this connection's RLS role (or clear a sibling's) before querying.
+        apply_connection_role(&mut engine, &bi_state, connection_id);
         let (b, rt) = engine.query_auto_refresh(query_request).await
             .map_err(|e| format!("Query failed: {}", e))?;
         // Capture partial refresh failures so they aren't silently swallowed
@@ -1175,6 +1372,7 @@ pub async fn bi_get_column_values(
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
     let (batches, refreshed_tables) = {
         let mut engine = engine_arc.lock().await;
+        apply_connection_role(&mut engine, &bi_state, connection_id);
         engine.query_auto_refresh(query_request).await
             .map_err(|e| format!("Query failed: {}", e))?
     };
@@ -1265,6 +1463,7 @@ pub async fn bi_get_column_available_values(
     let engine_arc = get_engine_arc(&bi_state, connection_id)?;
     let (batches, refreshed_tables) = {
         let mut engine = engine_arc.lock().await;
+        apply_connection_role(&mut engine, &bi_state, connection_id);
         engine.query_auto_refresh(query_request).await
             .map_err(|e| format!("Query failed: {}", e))?
     };
@@ -1540,6 +1739,7 @@ pub async fn bi_refresh_connection(
 
         let (batches, refreshed_tables) = {
             let mut engine = engine_arc.lock().await;
+            apply_connection_role(&mut engine, &bi_state, connection_id);
             engine.query_auto_refresh(query_request).await
                 .map_err(|e| format!("Refresh query failed: {}", e))?
         };

@@ -10,6 +10,8 @@ export type {
   BiColumnInfo,
   BiMeasureInfo,
   BiRelationshipInfo,
+  BiSecurityRoleInfo,
+  BiFilterPredicateInfo,
   BiQueryRequest,
   BiColumnRef,
   BiFilter,

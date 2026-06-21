@@ -17,6 +17,8 @@ import {
   biRefreshConnection as apiRefreshConnection,
   biRefreshAllInMemory as apiRefreshAllInMemory,
   biGetModelInfo as apiGetModelInfo,
+  biSetActiveRole as apiSetActiveRole,
+  biGetActiveRole as apiGetActiveRole,
   biGetRegionAtCell as apiGetRegionAtCell,
 } from "@api/backend";
 
@@ -176,6 +178,21 @@ export async function getModelInfo(
   connectionId: string,
 ): Promise<BiModelInfo | null> {
   return apiGetModelInfo(connectionId);
+}
+
+/** Set the active "view as" RLS role for a connection (null = unrestricted). */
+export async function setActiveRole(
+  connectionId: string,
+  role: string | null,
+): Promise<void> {
+  return apiSetActiveRole(connectionId, role);
+}
+
+/** Get the active "view as" RLS role for a connection (null = unrestricted). */
+export async function getActiveRole(
+  connectionId: string,
+): Promise<string | null> {
+  return apiGetActiveRole(connectionId);
 }
 
 export async function getRegionAtCell(

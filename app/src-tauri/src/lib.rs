@@ -3935,6 +3935,8 @@ pub fn run() {
             bi::bi_refresh_connection,
             bi::bi_refresh_all_in_memory,
             bi::bi_get_model_info,
+            bi::bi_set_active_role,
+            bi::bi_get_active_role,
             bi::bi_get_column_values,
             bi::bi_get_column_available_values,
             bi::bi_get_region_at_cell,

@@ -87,6 +87,15 @@ pub struct Connection {
     /// machinery (verify/save credentials) find and configure the SAME
     /// connection that pivots query. None for locally created connections.
     pub package_data_source_id: Option<String>,
+    /// The active "view as" row-level-security role for this connection, or
+    /// None for unrestricted. v1: at most ONE role — every Calcula query path
+    /// (bi_query / column-values / refresh go through query_auto_refresh, and
+    /// drill-through uses query_rows) fails closed under multiple roles, so a
+    /// single-role model keeps all paths uniformly enforceable. Re-applied on
+    /// the (possibly shared) engine inside the query lock before every query so
+    /// a sibling connection's role can never leak into this one's results.
+    /// In-memory for now; not yet persisted across app restarts.
+    pub active_role: Option<String>,
 }
 
 /// Supported connection types.
@@ -298,6 +307,41 @@ pub struct BiModelInfo {
     /// the bands; the engine does not compute the status.
     #[serde(default)]
     pub kpis: Vec<BiKpiInfo>,
+    /// Row-level-security roles the model defines (Studio-authored). The host
+    /// surfaces them in a "View as role" selector; the engine enforces the row
+    /// filters when a role is activated on the connection.
+    #[serde(default)]
+    pub security_roles: Vec<BiSecurityRoleInfo>,
+}
+
+/// A row-level-security role surfaced to the frontend (mirrors the engine
+/// `SecurityRole`). The host renders the role name + a filter summary; the
+/// engine enforces the filters as sealed pre-aggregation restrictions when the
+/// role is activated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiSecurityRoleInfo {
+    /// The role's unique name (the key the host activates).
+    pub name: String,
+    /// Per-table row filters this role applies (presentation/diagnostic).
+    pub table_filters: Vec<BiFilterPredicateInfo>,
+    /// True if ANY predicate is dynamic (USERNAME()/CUSTOMDATA()). v1 disables
+    /// selecting a dynamic role until runtime-identity wiring lands.
+    pub is_dynamic: bool,
+}
+
+/// A single row filter predicate within a security role (`Table.Column op value`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiFilterPredicateInfo {
+    pub table: String,
+    pub column: String,
+    /// Debug form of the engine `ComparisonOp` (e.g. "Equal", "GreaterThan").
+    pub operator: String,
+    pub value: String,
+    /// `None` for a static predicate; "Username" | "CustomData" for a dynamic one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<String>,
 }
 
 /// A KPI surfaced to the frontend (mirrors the engine `Kpi`). Status is computed

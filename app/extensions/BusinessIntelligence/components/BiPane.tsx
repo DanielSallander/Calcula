@@ -12,6 +12,8 @@ import {
   query,
   insertResult,
   refreshConnection,
+  setActiveRole,
+  getActiveRole,
 } from "../lib/bi-api";
 import type {
   ConnectionInfo,
@@ -240,6 +242,8 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
   }, [queryResult, modelInfo, colIndexByName]);
 
   // ----- Status -----
+  // Active "view as" RLS role for the selected connection (null = unrestricted).
+  const [activeRole, setActiveRoleState] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [statusType, setStatusType] = useState<"info" | "error" | "success">(
@@ -280,6 +284,13 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
 
         const info = await biGetModelInfo(connId);
         setModelInfo(info);
+
+        // Restore the connection's current "view as" role into the selector.
+        try {
+          setActiveRoleState(await getActiveRole(connId));
+        } catch {
+          setActiveRoleState(null);
+        }
 
         if (info) {
           const initialBindings: TableBinding[] = info.tables.map((t) => ({
@@ -357,6 +368,31 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
       setLoading(false);
     }
   }, [selectedConnectionId, selectedMeasures, selectedGroupBy, setStatus]);
+
+  // Change the connection's "view as" RLS role, then re-run the current query so
+  // filtered results show immediately. null = unrestricted.
+  const handleRoleChange = useCallback(
+    async (role: string | null) => {
+      if (selectedConnectionId === null) return;
+      try {
+        setLoading(true);
+        await setActiveRole(selectedConnectionId, role);
+        setActiveRoleState(role);
+        setStatus(
+          role ? `Viewing as role "${role}"` : "Viewing unrestricted (no role)",
+          "success",
+        );
+        if (queryResult) {
+          await handleQuery();
+        }
+      } catch (error) {
+        setStatus(`Failed to set role: ${error}`, "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [selectedConnectionId, queryResult, handleQuery, setStatus],
+  );
 
   const handleInsert = useCallback(async () => {
     if (!queryResult || selectedConnectionId === null) return;
@@ -500,6 +536,56 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
               <strong>Measures:</strong>{" "}
               {modelInfo.measures.map((m) => m.name).join(", ")}
             </div>
+            {modelInfo.securityRoles && modelInfo.securityRoles.length > 0 && (
+              <div
+                style={{
+                  marginTop: "6px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                <strong>View as:</strong>
+                <select
+                  value={activeRole ?? ""}
+                  onChange={(e) =>
+                    handleRoleChange(
+                      e.target.value === "" ? null : e.target.value,
+                    )
+                  }
+                  disabled={loading}
+                  title={
+                    "Row-level security: preview the data as a given role sees it. " +
+                    "This is an advisory preview enforced by the query engine, not a " +
+                    "guarantee against a user with direct source access."
+                  }
+                  style={{ fontSize: "11px" }}
+                >
+                  <option value="">Unrestricted</option>
+                  {modelInfo.securityRoles.map((r) => (
+                    <option key={r.name} value={r.name} disabled={r.isDynamic}>
+                      {r.name}
+                      {r.isDynamic ? " (dynamic - not yet supported)" : ""}
+                    </option>
+                  ))}
+                </select>
+                {activeRole && (
+                  <span
+                    title="Results are filtered to this role's permitted rows (advisory preview)."
+                    style={{
+                      color: "#6639ba",
+                      background: "#e7defc",
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      borderRadius: "3px",
+                      padding: "0 4px",
+                    }}
+                  >
+                    RLS
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

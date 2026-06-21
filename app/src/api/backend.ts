@@ -3267,6 +3267,30 @@ export interface BiModelInfo {
   hierarchies?: BiHierarchyMeta[];
   /** KPIs the model defines (Studio-authored). Status is computed host-side. */
   kpis?: BiKpiInfo[];
+  /** Row-level-security roles the model defines (Studio-authored). Surfaced in a
+   *  "View as role" selector; the engine enforces the filters when one is active. */
+  securityRoles?: BiSecurityRoleInfo[];
+}
+
+/** A row-level-security role defined in the model. The host renders the name +
+ *  filter summary; the engine enforces the row filters when the role is active. */
+export interface BiSecurityRoleInfo {
+  name: string;
+  tableFilters: BiFilterPredicateInfo[];
+  /** True if ANY predicate is dynamic (USERNAME()/CUSTOMDATA()). v1 disables
+   *  selecting a dynamic role until runtime-identity wiring lands. */
+  isDynamic: boolean;
+}
+
+/** One row filter predicate within a security role (`Table.Column op value`). */
+export interface BiFilterPredicateInfo {
+  table: string;
+  column: string;
+  /** Debug form of the engine comparison op (e.g. "Equal", "GreaterThan"). */
+  operator: string;
+  value: string;
+  /** undefined for static; "Username" | "CustomData" for a dynamic predicate. */
+  dynamic?: string;
 }
 
 /** A KPI defined in the model. Presentation metadata: the host renders the
@@ -3505,6 +3529,21 @@ export async function biGetModelInfo(
   connectionId: string,
 ): Promise<BiModelInfo | null> {
   return invoke<BiModelInfo | null>("bi_get_model_info", { connectionId });
+}
+
+/** Set the active "view as" RLS role for a connection (null = unrestricted). */
+export async function biSetActiveRole(
+  connectionId: string,
+  role: string | null,
+): Promise<void> {
+  return invoke<void>("bi_set_active_role", { connectionId, role });
+}
+
+/** Get the active "view as" RLS role for a connection (null = unrestricted). */
+export async function biGetActiveRole(
+  connectionId: string,
+): Promise<string | null> {
+  return invoke<string | null>("bi_get_active_role", { connectionId });
 }
 
 /** Check if a cell is within a BI protected region. */
