@@ -749,19 +749,28 @@ export function PivotEditor({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
-        {isBiPivot && biModel?.calculationGroups && biModel.calculationGroups.length > 0 && (
+        {isBiPivot && biModel?.calculationGroups && biModel.calculationGroups.length > 0 && (() => {
+          // Calc groups can't combine with lookup columns (the backend rejects
+          // it). Disable the control while any lookup column is active, unless a
+          // group is already applied (so the user can still switch it off).
+          const hasLookups = lookupColumns.size > 0;
+          const disabled = hasLookups && !appliedCalcGroup;
+          return (
           <div style={{ padding: '8px', borderTop: '1px solid #eaeef2', fontSize: '12px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: disabled ? 0.5 : 1 }}>
               <span style={{ fontWeight: 600 }}>Calculation group:</span>
               <select
                 value={appliedCalcGroup?.group ?? ''}
                 onChange={(e) =>
                   handleCalcGroupChange(e.target.value === '' ? null : e.target.value)
                 }
+                disabled={disabled}
                 style={{ fontSize: '12px', flex: 1 }}
                 title={
-                  'Apply a calculation group: each value field is shown once per ' +
-                  'calculation item (e.g. Current, YTD, PY). Not combinable with lookup columns.'
+                  disabled
+                    ? 'Remove lookup columns to apply a calculation group.'
+                    : 'Apply a calculation group: each value field is shown once per ' +
+                      'calculation item (e.g. Current, YTD, PY).'
                 }
               >
                 <option value="">None</option>
@@ -774,11 +783,13 @@ export function PivotEditor({
             </label>
             {appliedCalcGroup && (
               <div style={{ marginTop: '4px', color: '#6639ba', fontSize: '11px' }}>
-                Applied to {values.length} measure{values.length === 1 ? '' : 's'} (all items)
+                Applied to {values.length} measure{values.length === 1 ? '' : 's'} (all items) -
+                totals off while applied
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Design tab content */}

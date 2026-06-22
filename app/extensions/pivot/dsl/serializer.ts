@@ -14,6 +14,8 @@ export interface SerializeOptions {
   saveAs?: string;
   /** Calculated fields to serialize as CALC clauses. */
   calculatedFields?: CalculatedFieldDef[];
+  /** Applied calculation group to serialize as a CALCGROUP clause. */
+  appliedCalcGroup?: { group: string; items: string[] };
   /**
    * Map from filter field name/sourceIndex to all unique values for that field.
    * When available, the serializer uses whichever of = (inclusion) or NOT IN
@@ -74,6 +76,17 @@ export function serialize(
   const layoutStr = serializeLayout(layout);
   if (layoutStr) {
     lines.push(`LAYOUT:  ${layoutStr}`);
+  }
+
+  if (options.appliedCalcGroup) {
+    const { group, items } = options.appliedCalcGroup;
+    const groupStr = quoteIfNeeded(group);
+    if (items.length > 0) {
+      const itemsStr = items.map(quoteIfNeeded).join(', ');
+      lines.push(`CALCGROUP: ${groupStr} (${itemsStr})`);
+    } else {
+      lines.push(`CALCGROUP: ${groupStr}`);
+    }
   }
 
   if (options.saveAs) {

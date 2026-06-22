@@ -99,7 +99,7 @@ export function DesignEditor({
       return;
     }
 
-    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
+    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields, appliedCalcGroup: biModel?.appliedCalculationGroup });
     if (text === lastSerializedText.current) return;
     lastSerializedText.current = text;
 
@@ -155,7 +155,7 @@ export function DesignEditor({
     monacoRef.current = monacoInstance;
 
     // Set initial content by serializing current zone state
-    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
+    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields, appliedCalcGroup: biModel?.appliedCalculationGroup });
     lastSerializedText.current = text;
     // setValue during mount doesn't trigger onChange (listener not attached yet)
     editor.setValue(text);

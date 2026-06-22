@@ -5430,6 +5430,19 @@ pub async fn update_bi_pivot_fields(
         apply_layout_config(&mut definition.layout, layout_config);
     }
 
+    // Grand/sub-totals are computed by summing the value columns over the axis,
+    // which is not meaningful per calculation item (e.g. a YTD or ratio item
+    // summed across rows is wrong). While a calculation group is applied, force
+    // totals off so we never render a misleading total. Authoritative here so it
+    // holds across the editor, the DSL, refresh, and .calp.
+    if !calc_item_names.is_empty() {
+        definition.layout.show_row_grand_totals = false;
+        definition.layout.show_column_grand_totals = false;
+        for f in definition.row_fields.iter_mut().chain(definition.column_fields.iter_mut()) {
+            f.show_subtotals = false;
+        }
+    }
+
     // Update calculated fields
     if let Some(ref calc_fields) = request.calculated_fields {
         definition.calculated_fields = calc_fields

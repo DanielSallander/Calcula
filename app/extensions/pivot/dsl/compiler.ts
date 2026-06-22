@@ -17,7 +17,7 @@ import type {
   SourceField, ZoneField, AggregationType,
 } from '../../_shared/components/types';
 import { getDefaultAggregation, getValueFieldDisplayName } from '../../_shared/components/types';
-import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from '../../Pivot/components/types';
+import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef, AppliedCalcGroup } from '../../Pivot/components/types';
 
 /** The compiled output of a DSL definition. */
 export interface CompileResult {
@@ -34,6 +34,8 @@ export interface CompileResult {
   valueColumnOrder: ValueColumnRefDef[];
   /** Save-as name if SAVE AS clause was present. */
   saveAs?: string;
+  /** Applied calculation group from a CALCGROUP clause (validated against the model). */
+  appliedCalcGroup?: AppliedCalcGroup;
   errors: DslError[];
 }
 
@@ -147,6 +149,8 @@ class Compiler {
       }
     }
 
+    const appliedCalcGroup = this.compileCalcGroup();
+
     return {
       rows,
       columns,
@@ -157,8 +161,39 @@ class Compiler {
       calculatedFields,
       valueColumnOrder,
       saveAs: this.ast.saveAs,
+      appliedCalcGroup,
       errors: this.errors,
     };
+  }
+
+  /** Validate and compile the CALCGROUP clause against the BI model. */
+  private compileCalcGroup(): AppliedCalcGroup | undefined {
+    const node = this.ast.calcGroup;
+    if (!node) return undefined;
+    if (!this.ctx.biModel) {
+      this.errors.push(dslError('CALCGROUP is only supported for BI model pivots', node.location));
+      return undefined;
+    }
+    const group = this.ctx.biModel.calculationGroups?.find(
+      g => g.name.toLowerCase() === node.name.toLowerCase(),
+    );
+    if (!group) {
+      this.errors.push(dslError(`Unknown calculation group: "${node.name}"`, node.location));
+      return undefined;
+    }
+    // Validate + canonicalize selected items against the group's declared items.
+    const items: string[] = [];
+    for (const item of node.items) {
+      const match = group.items.find(i => i.name.toLowerCase() === item.toLowerCase());
+      if (!match) {
+        this.errors.push(dslError(
+          `Unknown calculation item "${item}" in group "${group.name}"`, node.location,
+        ));
+        continue;
+      }
+      items.push(match.name);
+    }
+    return { group: group.name, items };
   }
 
   // --- Field nodes (ROWS / COLUMNS) ---

@@ -90,6 +90,7 @@ describe("DSL keyword string stability", () => {
         "BOTTOM",
         "BY",
         "CALC",
+        "CALCGROUP",
         "COLUMNS",
         "DESC",
         "FILTERS",

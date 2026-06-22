@@ -2345,6 +2345,7 @@ export async function applyPivotDsl(
       lookupColumns: result.lookupColumns,
       calculatedFields: calcFields.length > 0 ? calcFields : undefined,
       valueColumnOrder: columnOrder.length > 0 ? columnOrder : undefined,
+      calculationGroup: result.appliedCalcGroup,
     };
     view = await updateBiFields(biRequest);
   } else {

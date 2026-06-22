@@ -132,6 +132,29 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
     }
   }
 
+  // --- Validate CALCGROUP ---
+  if (ast.calcGroup) {
+    if (!isBi) {
+      errors.push(dslError('CALCGROUP is only supported for BI model pivots', ast.calcGroup.location));
+    } else if (ctx.biModel) {
+      const group = ctx.biModel.calculationGroups?.find(
+        g => g.name.toLowerCase() === ast.calcGroup!.name.toLowerCase(),
+      );
+      if (!group) {
+        errors.push(dslError(`Unknown calculation group: "${ast.calcGroup.name}"`, ast.calcGroup.location));
+      } else {
+        const itemNames = new Set(group.items.map(i => i.name.toLowerCase()));
+        for (const item of ast.calcGroup.items) {
+          if (!itemNames.has(item.toLowerCase())) {
+            errors.push(dslError(
+              `Unknown calculation item "${item}" in group "${group.name}"`, ast.calcGroup.location,
+            ));
+          }
+        }
+      }
+    }
+  }
+
   // --- Informational hints ---
   if (ast.rows.length === 0 && ast.columns.length === 0 && ast.values.length === 0) {
     // No fields at all — not an error, but hint

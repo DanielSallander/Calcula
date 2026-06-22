@@ -7,6 +7,7 @@ import {
   type PivotLayoutAST, type FieldNode, type ValueFieldNode,
   type FilterFieldNode, type SortNode, type LayoutDirective,
   type CalcFieldNode, type TopNNode, type GroupingNode, type ViaNode,
+  type CalcGroupNode,
   emptyAST,
 } from './ast';
 import { type DslError, type SourceLocation, dslError } from './errors';
@@ -94,6 +95,11 @@ class Parser {
         this.expect(TokenType.Colon, 'Expected ":" after CALC');
         this.ast.calculatedFields.push(this.parseCalcField());
         break;
+      case TokenType.CalcGroup:
+        this.advance();
+        this.expect(TokenType.Colon, 'Expected ":" after CALCGROUP');
+        this.ast.calcGroup = this.parseCalcGroup();
+        break;
       case TokenType.Top:
       case TokenType.Bottom:
         this.ast.topN = this.parseTopN();
@@ -106,7 +112,7 @@ class Parser {
         break;
       default:
         this.errors.push(dslError(
-          `Unexpected token "${tok.value}". Expected a clause keyword (ROWS, COLUMNS, VALUES, FILTERS, SORT, LAYOUT, CALC, TOP, SAVE).`,
+          `Unexpected token "${tok.value}". Expected a clause keyword (ROWS, COLUMNS, VALUES, FILTERS, SORT, LAYOUT, CALC, CALCGROUP, TOP, SAVE).`,
           tok.location,
         ));
         this.skipToNextClause();
@@ -560,6 +566,29 @@ class Parser {
     return '';
   }
 
+  // --- CALCGROUP: GroupName (Item1, Item2) ---
+
+  private parseCalcGroup(): CalcGroupNode {
+    const startTok = this.peek();
+    const nameResult = this.parseFieldName();
+    if (!nameResult) {
+      this.errors.push(dslError('Expected calculation group name after CALCGROUP', startTok.location));
+      return { name: '', items: [], location: startTok.location };
+    }
+    const items: string[] = [];
+    // Optional parenthesized item list: (Item1, Item2, ...). No list = all items.
+    if (this.match(TokenType.LeftParen)) {
+      while (!this.isAtEnd() && !this.check(TokenType.RightParen)) {
+        const itemResult = this.parseFieldName();
+        if (!itemResult) break;
+        items.push(itemResult.name);
+        this.match(TokenType.Comma); // optional comma between items
+      }
+      this.expect(TokenType.RightParen, 'Expected ")" after calculation group items');
+    }
+    return { name: nameResult.name, items, location: startTok.location };
+  }
+
   // --- Field name parsing (shared) ---
 
   /** Parse a field name: Identifier, DottedIdentifier, or StringLiteral. */
@@ -767,7 +796,8 @@ function isClauseStart(type: TokenType): boolean {
   return type === TokenType.Rows || type === TokenType.Columns ||
     type === TokenType.Values || type === TokenType.Filters ||
     type === TokenType.Sort || type === TokenType.Layout ||
-    type === TokenType.Calc || type === TokenType.Top ||
+    type === TokenType.Calc || type === TokenType.CalcGroup ||
+    type === TokenType.Top ||
     type === TokenType.Bottom || type === TokenType.Save;
 }
 
