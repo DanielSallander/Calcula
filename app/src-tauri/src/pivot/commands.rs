@@ -4333,6 +4333,7 @@ fn extract_bi_model_metadata(
                         lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
                         sort_by_column: c.sort_by_column().map(|s| s.to_string()),
                         is_context_column: false,
+                        description: c.description().map(|s| s.to_string()),
                     }
                 })
                 .collect();
@@ -4349,6 +4350,7 @@ fn extract_bi_model_metadata(
                     lookup_resolution: None,
                     sort_by_column: None,
                     is_context_column: true,
+                    description: cc.description().map(|s| s.to_string()),
                 });
             }
             BiModelTableMeta {

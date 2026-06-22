@@ -692,6 +692,7 @@ pub(crate) fn capture_local_bi_connections(
             server: conn.server.clone(),
             database: conn.database.clone(),
             preferred_auth: conn.preferred_auth.clone(),
+            model_path: conn.model_path.clone(),
             model_json,
             bindings: conn
                 .bindings
@@ -741,12 +742,31 @@ pub(crate) fn restore_local_bi_connections(
         };
         let conn_id = ConnectionId::parse(&sc.id)
             .unwrap_or_else(|| identity::EntityId::from_bytes(identity::generate_uuid_v7()));
-        // Own engine per local connection, keyed by a synthetic id-based key (the
-        // original model file may be gone; the model travels embedded).
-        let model_key = ModelKey::from_model_path(&format!("local:{}", sc.id));
+        // Re-key the engine to the ORIGINAL model path so it finds the on-disk
+        // cache from the prior session (offline data, same machine). The path
+        // string keys the cache; the file itself need not exist (model is
+        // embedded). Fall back to a synthetic per-connection key when unknown.
+        let model_key = match sc.model_path.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => ModelKey::from_model_path(p),
+            None => ModelKey::from_model_path(&format!("local:{}", sc.id)),
+        };
         let engine = build_configured_engine(model);
-        let (engine_arc, _was_existing, _cache_dir) =
+        let (engine_arc, was_existing, cache_dir) =
             bi_state.engine_registry.get_or_create(&model_key, engine);
+        // Load the prior session's disk cache so queries can serve offline until
+        // a refresh. A freshly-created engine is uncontended, so try_lock succeeds.
+        if !was_existing {
+            if let Ok(mut guard) = engine_arc.try_lock() {
+                let loaded = EngineRegistry::load_cache(&mut guard, &cache_dir);
+                if !loaded.is_empty() {
+                    crate::log_info!(
+                        "BI",
+                        "restore connection {}: loaded {} cached tables from disk",
+                        sc.id, loaded.len()
+                    );
+                }
+            }
+        }
         let bindings: Vec<BiBindRequest> = sc
             .bindings
             .iter()
@@ -765,7 +785,7 @@ pub(crate) fn restore_local_bi_connections(
             server: sc.server.clone(),
             database: sc.database.clone(),
             preferred_auth: sc.preferred_auth.clone(),
-            model_path: None,
+            model_path: sc.model_path.clone(),
             engine: Some(engine_arc),
             model_key: Some(model_key),
             connector_index: None,

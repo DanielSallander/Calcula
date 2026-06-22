@@ -1014,6 +1014,7 @@ mod tests {
             server: "localhost".to_string(),
             database: "sales".to_string(),
             preferred_auth: "Integrated".to_string(),
+            model_path: Some("C:/models/sales.model".to_string()),
             model_json: serde_json::json!({ "tables": [], "measures": [], "formatVersion": 1 }),
             bindings: vec![persistence::SavedBiBinding {
                 model_table: "Sales".to_string(),

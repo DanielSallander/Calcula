@@ -557,6 +557,8 @@ export interface BiModelColumn {
   /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
    *  physical column, but groupable like an ordinary dimension. */
   isContextColumn?: boolean;
+  /** Model-authored description (shown as a field-list tooltip). */
+  description?: string;
 }
 
 export interface BiMeasureFieldInfo {

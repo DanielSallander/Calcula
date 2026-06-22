@@ -22,6 +22,8 @@ export interface BiModelColumn {
   /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
    *  physical column, but groupable like an ordinary dimension. */
   isContextColumn?: boolean;
+  /** Model-authored description (shown as a field-list tooltip). */
+  description?: string;
 }
 
 export interface BiModelTable {
@@ -306,6 +308,7 @@ function TreeFieldItem({
   isLookup,
   lookupResolution,
   isContextColumn,
+  description,
   onToggle,
   onLookupToggle,
 }: {
@@ -317,6 +320,7 @@ function TreeFieldItem({
   isLookup?: boolean;
   lookupResolution?: string;
   isContextColumn?: boolean;
+  description?: string;
   onToggle: (checked: boolean) => void;
   onLookupToggle?: () => void;
 }) {
@@ -360,7 +364,7 @@ function TreeFieldItem({
         checked={isChecked}
         onChange={handleChange}
       />
-      <span className={treeStyles.fieldName}>{name}</span>
+      <span className={treeStyles.fieldName} title={description || undefined}>{name}</span>
       {/* Context-column badge — Studio-authored dynamic segmentation */}
       {isContextColumn && (
         <span
@@ -801,6 +805,7 @@ export function TableFieldList({
                         isLookup={lookupColumns?.has(colKey)}
                         lookupResolution={col.lookupResolution}
                         isContextColumn={col.isContextColumn}
+                        description={col.description}
                         onToggle={(checked) =>
                           onColumnToggle(table.name, col.name, col.isNumeric, checked)
                         }

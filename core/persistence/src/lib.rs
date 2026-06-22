@@ -106,6 +106,11 @@ pub struct SavedBiConnection {
     pub database: String,
     #[serde(default)]
     pub preferred_auth: String,
+    /// Original model file path. Not required to reconstruct (the model is
+    /// embedded), but used to re-key the engine to its on-disk cache so the
+    /// prior session's cached data is reused offline (same machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_path: Option<String>,
     /// The embedded BI model: a raw DataModel JSON object, or a ModelBundle
     /// wrapper (`{ formatVersion, model }`). Reconstruction handles both.
     pub model_json: serde_json::Value,

@@ -1666,6 +1666,9 @@ pub struct BiModelColumnMeta {
     /// ordinary dimension; the engine resolves it when it appears in group_by.
     #[serde(default)]
     pub is_context_column: bool,
+    /// Model-authored description (shown as a tooltip in the field list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Measure metadata from a BI model.
