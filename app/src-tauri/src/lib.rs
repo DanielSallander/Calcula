@@ -84,6 +84,7 @@ pub mod calp_commands;
 pub mod state_digest;
 pub mod security;
 pub mod net_commands;
+pub mod file_keychain;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -3805,6 +3806,13 @@ pub fn run() {
             persistence::get_current_file_path,
             persistence::is_file_modified,
             persistence::mark_file_modified,
+            persistence::is_document_encrypted,
+            persistence::set_session_password,
+            persistence::clear_session_password,
+            file_keychain::keychain_set_password,
+            file_keychain::keychain_get_password,
+            file_keychain::keychain_delete_password,
+            file_keychain::keychain_has_password,
             persistence::list_virtual_files,
             persistence::read_virtual_file,
             persistence::create_virtual_file,

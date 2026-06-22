@@ -11,7 +11,8 @@ use persistence::{
     SavedMergedRegion, SavedNamedRange, SavedNote, SavedHyperlink, SavedPageSetup,
     Workbook,
 };
-use calcula_format::{save_calcula, load_calcula};
+use calcula_format::{save_calcula_opt, load_calcula_opt};
+use zeroize::Zeroizing;
 use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,6 +23,14 @@ use tauri::{Emitter, State};
 pub struct FileState {
     pub current_path: Mutex<Option<PathBuf>>,
     pub is_modified: Mutex<bool>,
+    /// Session passphrase for the currently-open encrypted workbook.
+    /// `None` = the document is plain (unencrypted). Held only in memory,
+    /// zeroized when replaced/cleared; never persisted to disk, logged, or
+    /// surfaced over IPC.
+    pub session_password: Mutex<Option<Zeroizing<String>>>,
+    /// Whether the currently-open document is encrypted. Drives the File-menu
+    /// label ("Encrypt with Password…" vs "Remove Password").
+    pub is_encrypted: Mutex<bool>,
 }
 
 /// Virtual filesystem for user files stored inside the .cala archive.
@@ -1192,6 +1201,10 @@ pub fn save_file(
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     path: String,
+    // Optional passphrase. `Some` encrypts (and becomes the session password);
+    // `None` falls back to the session password so a plain Ctrl+S keeps an
+    // already-encrypted document encrypted. Ignored for non-`.cala` formats.
+    password: Option<String>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -1311,9 +1324,39 @@ pub fn save_file(
         .unwrap_or("")
         .to_lowercase();
 
+    // Resolve the effective passphrase: an explicit arg wins; otherwise fall
+    // back to the session passphrase so a plain re-save keeps an encrypted
+    // document encrypted without re-prompting.
+    let effective_pw: Option<Zeroizing<String>> = match password {
+        Some(pw) => Some(Zeroizing::new(pw)),
+        None => file_state
+            .session_password
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone(),
+    };
+
     match ext.as_str() {
-        "cala" => save_calcula(&workbook, &path_buf).map_err(|e| e.to_string())?,
+        "cala" => {
+            let pw_bytes = effective_pw.as_ref().map(|z| z.as_bytes());
+            save_calcula_opt(&workbook, &path_buf, pw_bytes).map_err(|e| e.to_string())?;
+        }
+        // xlsx (and any other format) is never encrypted; the passphrase is ignored.
         _ => save_xlsx(&workbook, &path_buf).map_err(|e| e.to_string())?,
+    }
+
+    // Persist the session encryption state for subsequent saves. A `.cala` save
+    // adopts the effective passphrase; saving to any other format drops it.
+    {
+        let mut sess = file_state.session_password.lock().map_err(|e| e.to_string())?;
+        let mut enc = file_state.is_encrypted.lock().map_err(|e| e.to_string())?;
+        if ext == "cala" {
+            *enc = effective_pw.is_some();
+            *sess = effective_pw;
+        } else {
+            *sess = None;
+            *enc = false;
+        }
     }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
@@ -1333,6 +1376,11 @@ pub fn open_file(
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     path: String,
+    // Optional passphrase for an encrypted `.cala`. When the file is encrypted
+    // and this is `None` (or wrong), the command returns a sentinel error string
+    // (ENC_NEEDS_PASSWORD / ENC_WRONG_PASSWORD / ENC_CORRUPT) the frontend
+    // branches on to prompt and retry.
+    password: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<CellData>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -1346,7 +1394,22 @@ pub fn open_file(
         .to_lowercase();
 
     let mut workbook = match ext.as_str() {
-        "cala" => load_calcula(&path_buf).map_err(|e| e.to_string())?,
+        "cala" => {
+            let pw_bytes = password.as_ref().map(|s| s.as_bytes());
+            match load_calcula_opt(&path_buf, pw_bytes) {
+                Ok(wb) => wb,
+                Err(calcula_format::FormatError::NeedsPassword) => {
+                    return Err("ENC_NEEDS_PASSWORD".to_string())
+                }
+                Err(calcula_format::FormatError::WrongPassword) => {
+                    return Err("ENC_WRONG_PASSWORD".to_string())
+                }
+                Err(calcula_format::FormatError::EncryptedCorrupt(_)) => {
+                    return Err("ENC_CORRUPT".to_string())
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
         _ => load_xlsx(&path_buf).map_err(|e| e.to_string())?,
     };
 
@@ -1767,6 +1830,23 @@ pub fn open_file(
         };
     }
 
+    // Adopt the session encryption state from the file we just opened: an
+    // encrypted `.cala` keeps its passphrase for in-place saves; anything else
+    // clears it so a previously-open encrypted doc doesn't leak state.
+    {
+        let opened_encrypted = ext == "cala"
+            && calcula_format::is_calcula_encrypted(&path_buf).unwrap_or(false);
+        let mut sess = file_state.session_password.lock().map_err(|e| e.to_string())?;
+        let mut enc = file_state.is_encrypted.lock().map_err(|e| e.to_string())?;
+        if opened_encrypted {
+            *sess = password.map(Zeroizing::new);
+            *enc = true;
+        } else {
+            *sess = None;
+            *enc = false;
+        }
+    }
+
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
 
@@ -2031,6 +2111,9 @@ pub fn new_file(
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
+    // A new (blank) document is never encrypted; drop any session passphrase.
+    *file_state.session_password.lock().map_err(|e| e.to_string())? = None;
+    *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = false;
 
     Ok(())
 }
@@ -2047,6 +2130,33 @@ pub fn get_current_file_path(file_state: State<FileState>) -> Option<String> {
 #[tauri::command]
 pub fn is_file_modified(file_state: State<FileState>) -> bool {
     file_state.is_modified.lock().map(|m| *m).unwrap_or(false)
+}
+
+/// Whether the currently-open document is encrypted. Used by the frontend to
+/// toggle the File-menu label between "Encrypt with Password…" and "Remove
+/// Password". Never exposes the passphrase itself.
+#[tauri::command]
+pub fn is_document_encrypted(file_state: State<FileState>) -> bool {
+    file_state.is_encrypted.lock().map(|e| *e).unwrap_or(false)
+}
+
+/// Stage a session passphrase without writing the file. The next `save_file`
+/// with no explicit password will encrypt using this. (The encrypt dialog can
+/// alternatively pass the password straight to `save_file`.)
+#[tauri::command]
+pub fn set_session_password(file_state: State<FileState>, password: String) -> Result<(), String> {
+    *file_state.session_password.lock().map_err(|e| e.to_string())? = Some(Zeroizing::new(password));
+    *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = true;
+    Ok(())
+}
+
+/// Drop the session passphrase so the next `save_file` writes a plain ZIP.
+/// This is the host half of the "Remove Password" action (clear, then save).
+#[tauri::command]
+pub fn clear_session_password(file_state: State<FileState>) -> Result<(), String> {
+    *file_state.session_password.lock().map_err(|e| e.to_string())? = None;
+    *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = false;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2596,8 +2706,17 @@ pub fn auto_recover_save(
     // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
     enrich_workbook_metadata(&mut workbook, &state, &sheet_ids_ar);
 
-    // Save as .cala format to the recovery path
-    calcula_format::save_calcula(&workbook, &recovery_path).map_err(|e| e.to_string())?;
+    // Save as .cala to the recovery path. CRITICAL: if the live document is
+    // encrypted, the recovery snapshot MUST be encrypted too — otherwise an
+    // auto-recover write would drop a plaintext copy next to the protected file.
+    let session_pw = file_state
+        .session_password
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let pw_bytes = session_pw.as_ref().map(|z| z.as_bytes());
+    calcula_format::save_calcula_opt(&workbook, &recovery_path, pw_bytes)
+        .map_err(|e| e.to_string())?;
 
     // Do NOT reset the dirty flag -- this is a background save
     Ok(recovery_path.to_string_lossy().to_string())

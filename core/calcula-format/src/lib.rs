@@ -94,3 +94,18 @@ pub fn save_calcula(workbook: &Workbook, path: &std::path::Path) -> Result<(), F
 pub fn load_calcula(path: &std::path::Path) -> Result<Workbook, FormatError> {
     load_calcula_opt(path, None)
 }
+
+/// Cheaply test whether a `.cala` file on disk is an encrypted container.
+/// Reads only the 8-byte magic header (no decryption, no full read), so the
+/// host can decide whether to prompt for a password and how to label the UI.
+/// A file shorter than the magic (or absent body) is treated as not encrypted.
+pub fn is_calcula_encrypted(path: &std::path::Path) -> Result<bool, FormatError> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut magic = [0u8; 8];
+    match f.read_exact(&mut magic) {
+        Ok(()) => Ok(calcula_crypto::is_encrypted(&magic)),
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(FormatError::Io(e)),
+    }
+}

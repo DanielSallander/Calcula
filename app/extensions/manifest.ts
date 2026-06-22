@@ -87,6 +87,7 @@ import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
 import DataFormExtension from "./DataForm";
 import DistributionExtension from "./Distribution";
+import EncryptionExtension from "./BuiltIn/Encryption";
 
 // Dev-only extensions
 import TestRunnerExtension from "./TestRunner";
@@ -189,6 +190,8 @@ export const builtInExtensions: ExtensionModule[] = [
   AIChatExtension,
   JsonViewExtension,
   DistributionExtension,
+  // Workbook Encryption (File-menu "Encrypt with Password…" + unlock dialog)
+  EncryptionExtension,
   // Quick Access (loads last — needs all menu items registered for command palette)
   QuickAccessExtension,
   // Test Runner (dev-only, macro-based integration tests)
