@@ -228,6 +228,14 @@ pub struct ValueField {
     /// Can be a specific item name, "(previous)", or "(next)".
     #[serde(default)]
     pub base_item: Option<String>,
+
+    /// For a BI pivot with an applied calculation group: the calculation item
+    /// this value field renders (e.g. "YTD"). The field's `name` stays the clean
+    /// base measure key (`[Measure]`) so it round-trips to the base measure; this
+    /// carries the item so the editor/refresh can collapse the M*K expanded value
+    /// fields back to the K base measures. `None` for ordinary value fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calc_item: Option<String>,
 }
 
 impl ValueField {
@@ -241,6 +249,7 @@ impl ValueField {
             custom_name: None,
             base_field_index: None,
             base_item: None,
+            calc_item: None,
         }
     }
 }

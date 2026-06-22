@@ -1039,6 +1039,7 @@ pub(crate) fn collect_pivot_definitions(
             lookup_columns: meta.lookup_columns.iter().cloned().collect(),
             hierarchies: meta.hierarchies.clone(),
             calculation_groups: meta.calculation_groups.clone(),
+            applied_calc_group: meta.applied_calc_group.clone(),
             drill_through: meta.drill_through.clone(),
             // Prefer the carried package data source id; fall back to the
             // live connection UUID (which IS the package ds id at publish
@@ -1166,6 +1167,7 @@ fn restore_pivot_definitions(
             measures: saved.measures,
             hierarchies: saved.hierarchies,
             calculation_groups: saved.calculation_groups,
+            applied_calc_group: saved.applied_calc_group,
             last_query: None,
             lookup_columns: saved.lookup_columns.into_iter().collect(),
             drill_through: saved.drill_through,

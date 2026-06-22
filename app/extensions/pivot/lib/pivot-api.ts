@@ -529,6 +529,8 @@ export interface BiPivotModelInfo {
   /** Calculation groups defined in the BI model. Items are measure templates
    *  applied on the Values axis, not groupable dimensions. */
   calculationGroups?: BiCalcGroup[];
+  /** The calculation group currently applied to this pivot (None = none). */
+  appliedCalculationGroup?: AppliedCalcGroup;
 }
 
 export interface BiModelTable {
@@ -603,6 +605,15 @@ export interface UpdateBiPivotFieldsRequest {
   calculatedFields?: CalculatedFieldDef[];
   /** Unified column ordering for interleaving values and calculated fields */
   valueColumnOrder?: ValueColumnRefDef[];
+  /** Applied calculation group (multiplies value fields on the Values axis). */
+  calculationGroup?: AppliedCalcGroup;
+}
+
+/** A calculation group applied to a pivot: group name + selected items
+ *  (empty = all items, declaration order). */
+export interface AppliedCalcGroup {
+  group: string;
+  items: string[];
 }
 
 /** Pivot region info returned when checking if a cell is in a pivot */

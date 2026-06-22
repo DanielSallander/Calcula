@@ -1470,6 +1470,11 @@ pub struct UpdateBiPivotFieldsRequest {
     /// Unified column ordering for interleaving values and calculated fields.
     #[serde(default)]
     pub value_column_order: Option<Vec<ValueColumnRefDef>>,
+    /// Applied calculation group (None = none). When set, the value fields
+    /// (base measures) are multiplied by the group's selected items on the
+    /// Values axis. Not supported together with lookup columns in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculation_group: Option<AppliedCalcGroup>,
 }
 
 /// Reference to a table column (for BI pivot row/column/filter fields).
@@ -1591,6 +1596,10 @@ pub struct SavedBiPivotMetadata {
     /// Calculation groups defined in the BI model (read-only field-list metadata).
     #[serde(default)]
     pub calculation_groups: Vec<BiCalcGroupMeta>,
+    /// The calculation group currently APPLIED to this pivot (None = none).
+    /// Travels in .calp so a subscriber's pivot renders the same expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_calc_group: Option<AppliedCalcGroup>,
     /// Package data source id this pivot queries (publisher connection UUID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
@@ -1617,6 +1626,8 @@ pub struct BiPivotMetadata {
     pub hierarchies: Vec<BiHierarchyMeta>,
     /// Calculation groups defined in the BI model (read-only field-list metadata).
     pub calculation_groups: Vec<BiCalcGroupMeta>,
+    /// The calculation group currently APPLIED to this pivot (None = none).
+    pub applied_calc_group: Option<AppliedCalcGroup>,
     /// Last executed query (for refresh)
     pub last_query: Option<BiPivotQuery>,
     /// All columns the user has toggled to LOOKUP mode ("Table.Column" keys).
@@ -1690,6 +1701,19 @@ pub struct BiCalcGroupItemMeta {
     pub source: Option<String>,
 }
 
+/// A calculation group applied to a BI pivot: the group name + the selected
+/// item names (empty = ALL items, in declaration order). When applied, the
+/// pivot's selected measures are multiplied on the Values axis (each measure x
+/// each selected item), expanded by the engine into synthetic measures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedCalcGroup {
+    pub group: String,
+    /// Selected item names. Empty means all items in the group.
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
 /// Stored query for BI pivot refresh.
 #[derive(Debug, Clone)]
 pub struct BiPivotQuery {
@@ -1717,6 +1741,10 @@ pub struct BiPivotModelInfo {
     /// measure templates applied on the Values axis, not groupable dimensions.
     #[serde(default)]
     pub calculation_groups: Vec<BiCalcGroupMeta>,
+    /// The calculation group currently APPLIED to this pivot (None = none), so
+    /// the editor control reflects the active selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_calculation_group: Option<AppliedCalcGroup>,
 }
 
 // ---------------------------------------------------------------------------

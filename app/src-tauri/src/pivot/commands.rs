@@ -1243,9 +1243,28 @@ pub async fn refresh_pivot_cache(
             let column_fields: Vec<super::types::BiFieldRef> = definition.column_fields.iter()
                 .map(|f| parse_field(&f.name, f.is_attribute))
                 .collect();
-            let value_fields: Vec<super::types::BiValueFieldRef> = definition.value_fields.iter()
-                .map(|v| super::types::BiValueFieldRef { measure_name: v.name.clone(), custom_name: v.custom_name.clone() })
-                .collect();
+            // Collapse any calculation-group expansion back to the base measures
+            // (one BiValueFieldRef per base measure) and strip the "[...]" display
+            // wrapper to recover the clean measure name; update_bi_pivot_fields
+            // re-applies the calculation group from meta.applied_calc_group.
+            let value_fields: Vec<super::types::BiValueFieldRef> = {
+                let mut seen_calc: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                definition.value_fields.iter()
+                    .filter(|v| v.calc_item.is_none() || seen_calc.insert(v.name.clone()))
+                    .map(|v| super::types::BiValueFieldRef {
+                        measure_name: v.name
+                            .trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .to_string(),
+                        custom_name: if v.calc_item.is_some() {
+                            None
+                        } else {
+                            v.custom_name.clone()
+                        },
+                    })
+                    .collect()
+            };
             let filter_fields: Vec<super::types::BiFieldRef> = definition.filter_fields.iter()
                 .map(|f| {
                     let mut field = parse_field(&f.field.name, f.field.is_attribute);
@@ -1318,6 +1337,7 @@ pub async fn refresh_pivot_cache(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 calculated_fields: calc_fields,
                 value_column_order,
+                calculation_group: meta.applied_calc_group.clone(),
             }
         };
 
@@ -1583,18 +1603,29 @@ pub fn get_pivot_at_cell(
         }
     }).collect();
 
-    let value_fields: Vec<ZoneFieldInfo> = definition.value_fields.iter().map(|f| {
-        let is_numeric = cache.is_numeric_field(f.source_index);
-        ZoneFieldInfo {
-            source_index: f.source_index,
-            name: f.name.clone(),
-            is_numeric,
-            aggregation: Some(aggregation_to_string(f.aggregation)),
-            is_lookup: false,
-            hidden_items: None,
-            custom_name: f.custom_name.clone(),
-        }
-    }).collect();
+    // Collapse calculation-group expansion: a calc group renders M base measures
+    // as M*K value fields (one per item), all sharing the base measure's `name`.
+    // The editor's Values zone shows the K base measures (the applied group is a
+    // separate control), so emit one zone entry per base measure and drop the
+    // item-specific custom_name.
+    let value_fields: Vec<ZoneFieldInfo> = {
+        let mut seen_calc: std::collections::HashSet<String> = std::collections::HashSet::new();
+        definition.value_fields.iter().filter_map(|f| {
+            if f.calc_item.is_some() && !seen_calc.insert(f.name.clone()) {
+                return None;
+            }
+            let is_numeric = cache.is_numeric_field(f.source_index);
+            Some(ZoneFieldInfo {
+                source_index: f.source_index,
+                name: f.name.clone(),
+                is_numeric,
+                aggregation: Some(aggregation_to_string(f.aggregation)),
+                is_lookup: false,
+                hidden_items: None,
+                custom_name: if f.calc_item.is_some() { None } else { f.custom_name.clone() },
+            })
+        }).collect()
+    };
 
     let filter_fields: Vec<ZoneFieldInfo> = definition.filter_fields.iter().map(|f| {
         let is_numeric = cache.is_numeric_field(f.field.source_index);
@@ -1699,6 +1730,7 @@ pub fn get_pivot_at_cell(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 hierarchies: meta.hierarchies.clone(),
                 calculation_groups: meta.calculation_groups.clone(),
+                applied_calculation_group: meta.applied_calc_group.clone(),
             }
         })
     };
@@ -2339,6 +2371,7 @@ pub fn get_pivot_hierarchies(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 hierarchies: meta.hierarchies.clone(),
                 calculation_groups: meta.calculation_groups.clone(),
+                applied_calculation_group: meta.applied_calc_group.clone(),
             }
         })
     };
@@ -4111,6 +4144,111 @@ pub fn get_pivot_drill_behavior(
 // ============================================================================
 
 /// Extracts model metadata (tables + measures) from a BI engine.
+/// Expand a BI pivot's value fields by an applied calculation group's items.
+///
+/// With no items (`item_names` empty), this is one value field per base measure
+/// (the ordinary case). With K items, it produces M base measures x K items in
+/// **measures-outer / items-inner** order to match the engine's synthetic
+/// column order (`M1[I1], M1[I2], M2[I1], ...`). Each field keeps the clean
+/// `[Measure]` key as its `name` so it round-trips to the base measure, carries
+/// the item in `calc_item` (so the editor/refresh can collapse it back), and
+/// shows `Measure [Item]` as its `custom_name`. Indices are contiguous from
+/// `measure_start`, matching the cache value block.
+fn expand_bi_value_fields(
+    value_fields: &[BiValueFieldRef],
+    item_names: &[String],
+    measure_start: usize,
+) -> Vec<pivot_engine::ValueField> {
+    if item_names.is_empty() {
+        return value_fields
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let mut vf = ValueField::new(
+                    measure_start + i,
+                    format!("[{}]", v.measure_name),
+                    AggregationType::Sum, // SUM of pre-aggregated = identity
+                );
+                vf.custom_name = v.custom_name.clone();
+                vf
+            })
+            .collect();
+    }
+    let k = item_names.len();
+    let mut vfs = Vec::with_capacity(value_fields.len() * k);
+    for (m_idx, v) in value_fields.iter().enumerate() {
+        for (i_idx, item) in item_names.iter().enumerate() {
+            let mut vf = ValueField::new(
+                measure_start + m_idx * k + i_idx,
+                format!("[{}]", v.measure_name),
+                AggregationType::Sum,
+            );
+            vf.calc_item = Some(item.clone());
+            vf.custom_name = Some(match &v.custom_name {
+                Some(c) => format!("{} [{}]", c, item),
+                None => format!("{} [{}]", v.measure_name, item),
+            });
+            vfs.push(vf);
+        }
+    }
+    vfs
+}
+
+#[cfg(test)]
+mod calc_group_expand_tests {
+    use super::*;
+
+    fn vf(name: &str) -> crate::pivot::types::BiValueFieldRef {
+        crate::pivot::types::BiValueFieldRef {
+            measure_name: name.to_string(),
+            custom_name: None,
+        }
+    }
+
+    #[test]
+    fn no_calc_group_one_field_per_measure() {
+        let fields = vec![vf("Revenue"), vf("Cost")];
+        let out = expand_bi_value_fields(&fields, &[], 3);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].source_index, 3);
+        assert_eq!(out[0].name, "[Revenue]");
+        assert!(out[0].calc_item.is_none());
+        assert_eq!(out[1].source_index, 4);
+        assert_eq!(out[1].name, "[Cost]");
+        assert!(out[1].calc_item.is_none());
+    }
+
+    #[test]
+    fn calc_group_expands_measures_outer_items_inner() {
+        let fields = vec![vf("Revenue"), vf("Cost")];
+        let items = vec!["Current".to_string(), "YTD".to_string(), "PY".to_string()];
+        let out = expand_bi_value_fields(&fields, &items, 2);
+        // 2 measures x 3 items = 6 fields, contiguous from measure_start = 2.
+        assert_eq!(out.len(), 6);
+        let cols: Vec<usize> = out.iter().map(|f| f.source_index).collect();
+        assert_eq!(cols, vec![2, 3, 4, 5, 6, 7]);
+        // measures-outer / items-inner ordering.
+        assert_eq!(out[0].name, "[Revenue]");
+        assert_eq!(out[0].calc_item.as_deref(), Some("Current"));
+        assert_eq!(out[0].custom_name.as_deref(), Some("Revenue [Current]"));
+        assert_eq!(out[2].calc_item.as_deref(), Some("PY"));
+        assert_eq!(out[3].name, "[Cost]");
+        assert_eq!(out[3].calc_item.as_deref(), Some("Current"));
+        assert_eq!(out[3].custom_name.as_deref(), Some("Cost [Current]"));
+    }
+
+    #[test]
+    fn custom_base_name_combines_with_item_and_keeps_clean_key() {
+        let mut f = vf("Revenue");
+        f.custom_name = Some("Sales".to_string());
+        let out = expand_bi_value_fields(&[f], &["YTD".to_string()], 0);
+        assert_eq!(out[0].custom_name.as_deref(), Some("Sales [YTD]"));
+        // name stays the clean base measure key so it round-trips to the measure.
+        assert_eq!(out[0].name, "[Revenue]");
+        assert_eq!(out[0].calc_item.as_deref(), Some("YTD"));
+    }
+}
+
 fn extract_bi_model_metadata(
     engine: &bi_engine::Engine,
 ) -> (
@@ -4385,6 +4523,7 @@ pub async fn create_pivot_from_bi_model(
         measures,
         hierarchies,
         calculation_groups: calc_groups,
+        applied_calc_group: None,
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
         drill_through: None,
@@ -4838,11 +4977,73 @@ pub async fn update_bi_pivot_fields(
         })
         .collect();
 
+    // ---- Calculation group resolution (Slice 2) ----
+    // Resolve request.calculation_group into an engine application + the ordered
+    // list of item names actually applied (empty selection = all items, in
+    // declaration order). The item list drives the M*K value-field expansion and
+    // the cache index math below. Skipped when there are no real value fields
+    // (a synthetic dimensions-only pivot has no measure to multiply).
+    let (calc_group_app, calc_item_names): (
+        Option<bi_engine::CalculationGroupApplication>,
+        Vec<String>,
+    ) = match request.calculation_group.as_ref().filter(|_| synthetic_measure.is_none()) {
+        Some(cg) => {
+            // v1: calculation groups cannot combine with lookup columns (the
+            // engine allows it but the combination is unvalidated; fail closed).
+            if !query_lookups.is_empty() {
+                return Err(
+                    "Calculation groups can't be combined with lookup columns yet. \
+                     Remove the lookup column(s) or the calculation group."
+                        .to_string(),
+                );
+            }
+            // Resolve the group's declared item list to validate the selection
+            // and expand an empty selection to all items in declaration order.
+            let all_items: Vec<String> = {
+                let bi_meta = pivot_state.bi_metadata.lock()
+                    .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+                let meta = bi_meta.get(&pivot_id)
+                    .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
+                let group = meta.calculation_groups.iter()
+                    .find(|g| g.name == cg.group)
+                    .ok_or_else(|| format!(
+                        "Calculation group '{}' not found in this model.", cg.group
+                    ))?;
+                group.items.iter().map(|i| i.name.clone()).collect()
+            };
+            let resolved: Vec<String> = if cg.items.is_empty() {
+                all_items
+            } else {
+                for it in &cg.items {
+                    if !all_items.iter().any(|a| a == it) {
+                        return Err(format!(
+                            "Calculation item '{}' not found in group '{}'.", it, cg.group
+                        ));
+                    }
+                }
+                // Preserve declaration order, restricted to the selected items.
+                all_items.into_iter().filter(|a| cg.items.contains(a)).collect()
+            };
+            if resolved.is_empty() {
+                return Err(format!("Calculation group '{}' has no items.", cg.group));
+            }
+            (
+                Some(bi_engine::CalculationGroupApplication::new(
+                    cg.group.clone(),
+                    resolved.clone(),
+                )),
+                resolved,
+            )
+        }
+        None => (None, Vec::new()),
+    };
+
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
         group_by: query_group_by,
         filters: vec![],
         lookups: query_lookups,
+        calculation_group: calc_group_app,
         ..Default::default()
     };
 
@@ -4994,6 +5195,10 @@ pub async fn update_bi_pivot_fields(
     // BI engine result column order: [GROUP BY cols] [Measure cols] [Lookup cols]
     // num_measures reflects actual query columns (includes synthetic if present)
     let num_measures = if synthetic_measure.is_some() { 1 } else { request.value_fields.len() };
+    // With a calculation group, the engine multiplies the measure block: each
+    // base measure expands into one synthetic column per applied item, so the
+    // value block is num_measures * num_items wide (measures-outer/items-inner).
+    let num_items = if calc_item_names.is_empty() { 1 } else { calc_item_names.len() };
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
@@ -5013,8 +5218,8 @@ pub async fn update_bi_pivot_fields(
     }
     // Measures come next (after group_by, before lookups)
     let measure_start = num_group_by + dim_offset;
-    // Lookup cols come last (after measures)
-    let lookup_start = num_group_by + num_measures + dim_offset;
+    // Lookup cols come last (after the expanded measure block)
+    let lookup_start = num_group_by + num_measures * num_items + dim_offset;
     cache_idx = lookup_start;
     for f in row_lookup_fields.iter().chain(col_lookup_fields.iter()) {
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
@@ -5145,20 +5350,8 @@ pub async fn update_bi_pivot_fields(
     if synthetic_measure.is_some() {
         definition.value_fields = Vec::new();
     } else {
-        definition.value_fields = request
-            .value_fields
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                let mut vf = ValueField::new(
-                    measure_start + i,
-                    format!("[{}]", v.measure_name),
-                    AggregationType::Sum, // SUM of pre-aggregated = identity
-                );
-                vf.custom_name = v.custom_name.clone();
-                vf
-            })
-            .collect();
+        definition.value_fields =
+            expand_bi_value_fields(&request.value_fields, &calc_item_names, measure_start);
     }
 
     // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter.
@@ -5346,6 +5539,11 @@ pub async fn update_bi_pivot_fields(
                 group_by: group_fields,
                 lookups: lookup_fields,
             });
+            // Remember the applied calculation group (the user's selection) so
+            // refresh re-applies it and the editor reflects it. None when no
+            // group was effectively applied.
+            meta.applied_calc_group =
+                request.calculation_group.clone().filter(|_| !calc_item_names.is_empty());
             // Persist full lookup column set (including fields not in zones)
             meta.lookup_columns = request.lookup_columns.into_iter().collect();
         }

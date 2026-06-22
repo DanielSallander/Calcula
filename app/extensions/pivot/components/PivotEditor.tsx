@@ -27,6 +27,7 @@ import type {
   MeasureField,
   PivotId,
   CalculatedFieldDef,
+  AppliedCalcGroup,
 } from './types';
 import { useJsonToggle } from '../../JsonView/lib/useJsonToggle';
 import { JsonToggleButton } from '../../JsonView/components/JsonToggleButton';
@@ -220,6 +221,12 @@ export function PivotEditor({
     return set;
   });
 
+  // Applied calculation group: the group whose items multiply the value fields
+  // on the Values axis. v1 applies all items of the selected group (null = none).
+  const [appliedCalcGroup, setAppliedCalcGroup] = useState<AppliedCalcGroup | null>(
+    () => biModel?.appliedCalculationGroup ?? null,
+  );
+
   // Ref to resetZones (set after usePivotEditorState, used in handleUpdate catch)
   const resetZonesRef = useRef<(() => void) | null>(null);
 
@@ -254,6 +261,7 @@ export function PivotEditor({
         lookupColumns: [...lookupColumns],
         calculatedFields: request.calculatedFields,
         valueColumnOrder: request.valueColumnOrder,
+        calculationGroup: appliedCalcGroup ?? undefined,
       };
     }
 
@@ -309,7 +317,7 @@ export function PivotEditor({
       }
       }
     }
-  }, [isBiPivot, lookupColumns, onViewUpdate]);
+  }, [isBiPivot, lookupColumns, appliedCalcGroup, onViewUpdate]);
 
   const {
     usedFields,
@@ -597,13 +605,42 @@ export function PivotEditor({
       rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
       columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
       lookupColumns: [...lookupColumns],
+      calculationGroup: appliedCalcGroup ?? undefined,
     };
     pivot.updateBiFields(biRequest).then(() => {
       if (onViewUpdate) onViewUpdate();
     }).catch((err) => {
       console.error('Failed to update pivot after lookup toggle:', err);
     });
-  }, [lookupColumns, isBiPivot, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
+  }, [lookupColumns, appliedCalcGroup, isBiPivot, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
+
+  // Apply (or clear) a calculation group, then re-run the BI query so the value
+  // axis re-expands. v1 applies ALL items of the chosen group (items: []).
+  const handleCalcGroupChange = useCallback((groupName: string | null) => {
+    const next: AppliedCalcGroup | null = groupName ? { group: groupName, items: [] } : null;
+    setAppliedCalcGroup(next);
+    if (!isBiPivot) return;
+    const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
+    const toBiRef = (f: { name: string }) => toBiFieldRef(f.name, lookupColumns.has(f.name));
+    const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
+    const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
+    const biRequest: UpdateBiPivotFieldsRequest = {
+      pivotId,
+      rowFields: rows.filter(isRealBiField).map(toBiRef),
+      columnFields: columns.filter(isRealBiField).map(toBiRef),
+      valueFields: values.map((f) => toBiValueFieldRef(f.name, f.customName)),
+      filterFields: filters.filter(isRealBiField).map(toBiRef),
+      rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
+      columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
+      lookupColumns: [...lookupColumns],
+      calculationGroup: next ?? undefined,
+    };
+    pivot.updateBiFields(biRequest).then(() => {
+      if (onViewUpdate) onViewUpdate();
+    }).catch((err) => {
+      console.error('Failed to apply calculation group:', err);
+    });
+  }, [isBiPivot, pivotId, rows, columns, values, filters, lookupColumns, onViewUpdate]);
 
   // Notify Layout when filter fields change so it can show the FilterBar
   useEffect(() => {
@@ -712,6 +749,36 @@ export function PivotEditor({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
+        {isBiPivot && biModel?.calculationGroups && biModel.calculationGroups.length > 0 && (
+          <div style={{ padding: '8px', borderTop: '1px solid #eaeef2', fontSize: '12px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontWeight: 600 }}>Calculation group:</span>
+              <select
+                value={appliedCalcGroup?.group ?? ''}
+                onChange={(e) =>
+                  handleCalcGroupChange(e.target.value === '' ? null : e.target.value)
+                }
+                style={{ fontSize: '12px', flex: 1 }}
+                title={
+                  'Apply a calculation group: each value field is shown once per ' +
+                  'calculation item (e.g. Current, YTD, PY). Not combinable with lookup columns.'
+                }
+              >
+                <option value="">None</option>
+                {biModel.calculationGroups.map((g) => (
+                  <option key={g.name} value={g.name}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {appliedCalcGroup && (
+              <div style={{ marginTop: '4px', color: '#6639ba', fontSize: '11px' }}>
+                Applied to {values.length} measure{values.length === 1 ? '' : 's'} (all items)
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Design tab content */}

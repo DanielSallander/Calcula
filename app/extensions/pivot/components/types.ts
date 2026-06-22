@@ -136,6 +136,28 @@ export interface BiPivotModelInfo {
   connectionId?: string;
   /** Hierarchies defined in the BI model (drill-down paths). */
   hierarchies?: BiHierarchyMeta[];
+  /** Calculation groups defined in the BI model. */
+  calculationGroups?: BiCalcGroup[];
+  /** The calculation group currently applied to this pivot (None = none). */
+  appliedCalculationGroup?: AppliedCalcGroup;
+}
+
+/** A calculation group + its items (read-only metadata). */
+export interface BiCalcGroup {
+  name: string;
+  items: BiCalcGroupItem[];
+}
+
+export interface BiCalcGroupItem {
+  name: string;
+  source?: string;
+}
+
+/** A calculation group applied to a pivot: group name + selected items
+ *  (empty = all items, declaration order). */
+export interface AppliedCalcGroup {
+  group: string;
+  items: string[];
 }
 
 /** Table metadata from a BI model */
@@ -228,4 +250,6 @@ export interface UpdateBiPivotFieldsRequest {
   calculatedFields?: CalculatedFieldDef[];
   /** Unified column ordering for interleaving values and calculated fields. */
   valueColumnOrder?: ValueColumnRefDef[];
+  /** Applied calculation group (multiplies value fields on the Values axis). */
+  calculationGroup?: AppliedCalcGroup;
 }
