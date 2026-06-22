@@ -805,7 +805,10 @@ export function TableFieldList({
                           onColumnToggle(table.name, col.name, col.isNumeric, checked)
                         }
                         onLookupToggle={
-                          onLookupToggle
+                          // Context columns are computed per query, not physical
+                          // columns, so they can't be resolved as a LOOKUP — hide
+                          // the G/L toggle for them.
+                          onLookupToggle && !col.isContextColumn
                             ? () => onLookupToggle(table.name, col.name)
                             : undefined
                         }

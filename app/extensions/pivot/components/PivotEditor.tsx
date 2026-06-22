@@ -614,10 +614,9 @@ export function PivotEditor({
     });
   }, [lookupColumns, appliedCalcGroup, isBiPivot, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
 
-  // Apply (or clear) a calculation group, then re-run the BI query so the value
-  // axis re-expands. v1 applies ALL items of the chosen group (items: []).
-  const handleCalcGroupChange = useCallback((groupName: string | null) => {
-    const next: AppliedCalcGroup | null = groupName ? { group: groupName, items: [] } : null;
+  // Apply (or clear) a calculation group + its selected items, then re-run the
+  // BI query so the value axis re-expands. items: [] means ALL items of the group.
+  const applyCalcGroup = useCallback((next: AppliedCalcGroup | null) => {
     setAppliedCalcGroup(next);
     if (!isBiPivot) return;
     const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
@@ -641,6 +640,28 @@ export function PivotEditor({
       console.error('Failed to apply calculation group:', err);
     });
   }, [isBiPivot, pivotId, rows, columns, values, filters, lookupColumns, onViewUpdate]);
+
+  // Select/clear the calculation group (defaults to all items).
+  const handleCalcGroupChange = useCallback((groupName: string | null) => {
+    applyCalcGroup(groupName ? { group: groupName, items: [] } : null);
+  }, [applyCalcGroup]);
+
+  // Toggle one calculation item. Empty items === all, so unchecking from "all"
+  // materializes the full list minus that item; re-selecting every item collapses
+  // back to the canonical [] (all). Never allows zero items.
+  const handleCalcItemToggle = useCallback(
+    (itemName: string, allItemNames: string[], checked: boolean) => {
+      if (!appliedCalcGroup) return;
+      const current = appliedCalcGroup.items.length > 0 ? appliedCalcGroup.items : allItemNames;
+      const draft = checked ? [...current, itemName] : current.filter((i) => i !== itemName);
+      // Restrict to known items, dedup, and preserve model declaration order.
+      const nextItems = allItemNames.filter((i) => draft.includes(i));
+      if (nextItems.length === 0) return; // keep at least one item
+      const items = nextItems.length === allItemNames.length ? [] : nextItems;
+      applyCalcGroup({ group: appliedCalcGroup.group, items });
+    },
+    [appliedCalcGroup, applyCalcGroup],
+  );
 
   // Notify Layout when filter fields change so it can show the FilterBar
   useEffect(() => {
@@ -781,12 +802,34 @@ export function PivotEditor({
                 ))}
               </select>
             </label>
-            {appliedCalcGroup && (
-              <div style={{ marginTop: '4px', color: '#6639ba', fontSize: '11px' }}>
-                Applied to {values.length} measure{values.length === 1 ? '' : 's'} (all items) -
-                totals off while applied
-              </div>
-            )}
+            {appliedCalcGroup && (() => {
+              const group = biModel.calculationGroups?.find(g => g.name === appliedCalcGroup.group);
+              const allItems = group?.items.map(i => i.name) ?? [];
+              const isItemOn = (name: string) =>
+                appliedCalcGroup.items.length === 0 || appliedCalcGroup.items.includes(name);
+              return (
+                <div style={{ marginTop: '6px' }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
+                    {allItems.map((name) => (
+                      <label
+                        key={name}
+                        style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '11px' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isItemOn(name)}
+                          onChange={(e) => handleCalcItemToggle(name, allItems, e.target.checked)}
+                        />
+                        {name}
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: '3px', color: '#6639ba', fontSize: '11px' }}>
+                    Applied to {values.length} measure{values.length === 1 ? '' : 's'} - totals off while applied
+                  </div>
+                </div>
+              );
+            })()}
           </div>
           );
         })()}

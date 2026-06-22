@@ -4028,9 +4028,9 @@ pub async fn drill_through_to_sheet(
                         engine
                             .query_rows(bare)
                             .await
-                            .map_err(|err| format!("BI drillthrough failed: {}", err))?
+                            .map_err(|err| crate::bi::commands::friendly_bi_query_error("BI drillthrough failed", &err))?
                     }
-                    None => return Err(format!("BI drillthrough failed: {}", e)),
+                    None => return Err(crate::bi::commands::friendly_bi_query_error("BI drillthrough failed", &e)),
                 },
             }
         };
@@ -5207,7 +5207,7 @@ pub async fn update_bi_pivot_fields(
                 finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
                 return Ok(response);
             }
-            return Err(format!("BI query failed: {}", e));
+            return Err(crate::bi::commands::friendly_bi_query_error("BI query failed", &e));
         }
     };
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
@@ -5419,6 +5419,29 @@ pub async fn update_bi_pivot_fields(
             measure_start,
             &value_col_idx,
         );
+
+        // Adopt each measure's model number format (from query_with_meta) so BI
+        // value cells render with the model-defined format (currency, %, etc.)
+        // rather than raw numbers. Keyed by (base measure, calculation item);
+        // for a calc-group column the format is carried from the base measure.
+        let format_by_key: std::collections::HashMap<(String, Option<String>), String> =
+            result_columns
+                .iter()
+                .filter(|rc| matches!(rc.kind, bi_engine::ResultColumnKind::Measure))
+                .filter_map(|rc| {
+                    let m = rc.measure.clone()?;
+                    let f = rc.format_string.clone()?;
+                    Some(((m, rc.calculation_item.clone()), f))
+                })
+                .collect();
+        if !format_by_key.is_empty() {
+            for vf in definition.value_fields.iter_mut() {
+                let measure = vf.name.trim_start_matches('[').trim_end_matches(']').to_string();
+                if let Some(fmt) = format_by_key.get(&(measure, vf.calc_item.clone())) {
+                    vf.number_format = Some(fmt.clone());
+                }
+            }
+        }
     }
 
     // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter.

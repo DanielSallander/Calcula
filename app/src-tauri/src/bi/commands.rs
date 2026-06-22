@@ -538,6 +538,26 @@ pub(crate) fn apply_connection_role(
     engine.set_active_role(role);
 }
 
+/// Map a BI query error to a user-facing message. Row-level-security failures
+/// get a friendly, actionable hint (the engine's raw variant is otherwise
+/// opaque to an end user); everything else keeps the caller's `context` prefix
+/// plus the engine detail.
+pub(crate) fn friendly_bi_query_error(context: &str, e: &impl std::fmt::Display) -> String {
+    let s = e.to_string();
+    if s.contains("SecurityRoleNotFound") {
+        "The selected security role no longer exists in this model. Pick a different \
+         role in \"View as\"."
+            .to_string()
+    } else if s.contains("RowLevelSecurityNotEnforceable") {
+        "This security role can't be applied to this view — its row filters can't be \
+         enforced through the model's relationships. Try a different role, or clear the \
+         role in \"View as\"."
+            .to_string()
+    } else {
+        format!("{}: {}", context, s)
+    }
+}
+
 /// Set the active "view as" RLS role for a connection (`None` = unrestricted).
 /// The role is validated against the model up front for an immediate friendly
 /// error; the engine re-validates and fails closed at query time. v1 refuses
@@ -1263,7 +1283,7 @@ pub async fn bi_query(
         // Apply this connection's RLS role (or clear a sibling's) before querying.
         apply_connection_role(&mut engine, &bi_state, connection_id);
         let (b, rt) = engine.query_auto_refresh(query_request).await
-            .map_err(|e| format!("Query failed: {}", e))?;
+            .map_err(|e| friendly_bi_query_error("Query failed", &e))?;
         // Capture partial refresh failures so they aren't silently swallowed
         // (query_auto_refresh proceeds despite per-table failures and serves
         // possibly-stale data for the failed tables).
@@ -1447,7 +1467,7 @@ pub async fn bi_get_column_values(
         let mut engine = engine_arc.lock().await;
         apply_connection_role(&mut engine, &bi_state, connection_id);
         engine.query_auto_refresh(query_request).await
-            .map_err(|e| format!("Query failed: {}", e))?
+            .map_err(|e| friendly_bi_query_error("Query failed", &e))?
     };
 
     // DEV: Log data source (cache vs database)
@@ -1538,7 +1558,7 @@ pub async fn bi_get_column_available_values(
         let mut engine = engine_arc.lock().await;
         apply_connection_role(&mut engine, &bi_state, connection_id);
         engine.query_auto_refresh(query_request).await
-            .map_err(|e| format!("Query failed: {}", e))?
+            .map_err(|e| friendly_bi_query_error("Query failed", &e))?
     };
 
     // DEV: Log data source (cache vs database)
@@ -1814,7 +1834,7 @@ pub async fn bi_refresh_connection(
             let mut engine = engine_arc.lock().await;
             apply_connection_role(&mut engine, &bi_state, connection_id);
             engine.query_auto_refresh(query_request).await
-                .map_err(|e| format!("Refresh query failed: {}", e))?
+                .map_err(|e| friendly_bi_query_error("Refresh query failed", &e))?
         };
 
         // DEV: Log data source (cache vs database)
