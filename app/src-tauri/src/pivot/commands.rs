@@ -1731,6 +1731,7 @@ pub fn get_pivot_at_cell(
                 hierarchies: meta.hierarchies.clone(),
                 calculation_groups: meta.calculation_groups.clone(),
                 applied_calculation_group: meta.applied_calc_group.clone(),
+                data_as_of: meta.data_as_of.clone(),
             }
         })
     };
@@ -2372,6 +2373,7 @@ pub fn get_pivot_hierarchies(
                 hierarchies: meta.hierarchies.clone(),
                 calculation_groups: meta.calculation_groups.clone(),
                 applied_calculation_group: meta.applied_calc_group.clone(),
+                data_as_of: meta.data_as_of.clone(),
             }
         })
     };
@@ -4578,6 +4580,7 @@ pub async fn create_pivot_from_bi_model(
         hierarchies,
         calculation_groups: calc_groups,
         applied_calc_group: None,
+        data_as_of: None,
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
         drill_through: None,
@@ -5661,6 +5664,13 @@ pub async fn update_bi_pivot_fields(
             // group was effectively applied.
             meta.applied_calc_group =
                 request.calculation_group.clone().filter(|_| !calc_item_names.is_empty());
+            // Record the data snapshot time only when we actually went to the
+            // database (online). When served purely from cache (all_warm, e.g.
+            // offline), keep the existing timestamp so "Data as of …" reflects
+            // when the data was truly fetched, not when the layout last changed.
+            if !all_warm {
+                meta.data_as_of = Some(chrono::Utc::now().to_rfc3339());
+            }
             // Persist full lookup column set (including fields not in zones)
             meta.lookup_columns = request.lookup_columns.into_iter().collect();
         }

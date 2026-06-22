@@ -1600,6 +1600,11 @@ pub struct SavedBiPivotMetadata {
     /// Travels in .calp so a subscriber's pivot renders the same expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_calc_group: Option<AppliedCalcGroup>,
+    /// ISO-8601 timestamp of when this pivot's data was last fetched from the
+    /// database. Surfaced as "Data as of …" so a reader (esp. offline, after a
+    /// cross-machine open) knows the snapshot's age. None until first fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_as_of: Option<String>,
     /// Package data source id this pivot queries (publisher connection UUID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
@@ -1628,6 +1633,10 @@ pub struct BiPivotMetadata {
     pub calculation_groups: Vec<BiCalcGroupMeta>,
     /// The calculation group currently APPLIED to this pivot (None = none).
     pub applied_calc_group: Option<AppliedCalcGroup>,
+    /// ISO-8601 timestamp of when this pivot's data was last fetched from the
+    /// database (surfaced as "Data as of …"; preserved across save/reload so an
+    /// offline reader sees the snapshot age). None until first fetched.
+    pub data_as_of: Option<String>,
     /// Last executed query (for refresh)
     pub last_query: Option<BiPivotQuery>,
     /// All columns the user has toggled to LOOKUP mode ("Table.Column" keys).
@@ -1748,6 +1757,10 @@ pub struct BiPivotModelInfo {
     /// the editor control reflects the active selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_calculation_group: Option<AppliedCalcGroup>,
+    /// ISO-8601 timestamp of when this pivot's data was last fetched ("Data as
+    /// of …"). Lets a reader gauge offline-snapshot freshness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_as_of: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

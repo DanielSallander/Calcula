@@ -731,6 +731,18 @@ export function PivotEditor({
         />
       )}
 
+      {/* Data snapshot freshness — when this pivot's data was last fetched.
+          Especially relevant offline / after a cross-machine open, where the
+          data is a snapshot embedded at save time. */}
+      {isBiPivot && biModel?.dataAsOf && (
+        <div
+          style={{ padding: '4px 8px', fontSize: '11px', color: '#57606a' }}
+          title={`Data last fetched from the database on ${new Date(biModel.dataAsOf).toLocaleString()}. Refresh to update.`}
+        >
+          Data as of {new Date(biModel.dataAsOf).toLocaleString()}
+        </div>
+      )}
+
       {/* Fields tab content */}
       <div className={styles.content} style={{ display: activeTab === 'fields' ? 'flex' : 'none' }}>
         {isBiPivot && biModel ? (

@@ -531,6 +531,8 @@ export interface BiPivotModelInfo {
   calculationGroups?: BiCalcGroup[];
   /** The calculation group currently applied to this pivot (None = none). */
   appliedCalculationGroup?: AppliedCalcGroup;
+  /** ISO-8601 time this pivot's data was last fetched ("Data as of …"). */
+  dataAsOf?: string;
 }
 
 export interface BiModelTable {
