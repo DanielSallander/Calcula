@@ -41,6 +41,13 @@ pub trait Dialect {
     /// `DOUBLE PRECISION`.
     fn divide_cast(&self) -> &'static str;
 
+    /// Render a `Date32` literal (days since the Unix epoch) as a date-typed
+    /// SQL constant. DataFusion reinterprets an integer cast (`CAST(n AS DATE)`)
+    /// as days-since-epoch, but PostgreSQL rejects integer→date casts, so each
+    /// dialect spells this differently. Returns `Err` for an out-of-range day
+    /// count (fail-soft to local execution).
+    fn date_literal(&self, days: i32) -> EngineResult<String>;
+
     /// Render a plain (non-conditional) `SafeDivide`.
     fn safe_divide(
         &self,
@@ -101,6 +108,13 @@ impl Dialect for DataFusionDialect {
 
     fn divide_cast(&self) -> &'static str {
         "DOUBLE"
+    }
+
+    fn date_literal(&self, days: i32) -> EngineResult<String> {
+        // DataFusion's Int→Date32 cast reinterprets the integer as days since
+        // the epoch, so the comparison stays Date32-vs-Date32. (Pinned across
+        // the renderer tests.)
+        Ok(format!("CAST({days} AS DATE)"))
     }
 
     fn safe_divide(
@@ -170,6 +184,22 @@ impl Dialect for PostgresDialect {
 
     fn divide_cast(&self) -> &'static str {
         "DOUBLE PRECISION"
+    }
+
+    fn date_literal(&self, days: i32) -> EngineResult<String> {
+        // PostgreSQL rejects integer→date casts (`CAST(15857 AS DATE)` →
+        // "cannot cast type integer to date"), so spell the actual calendar
+        // date as a `DATE 'YYYY-MM-DD'` literal. `NaiveDate::default()` is the
+        // Unix epoch (1970-01-01).
+        let date = chrono::NaiveDate::default()
+            .checked_add_signed(chrono::Duration::days(days as i64))
+            .ok_or_else(|| {
+                EngineError::InvalidExpression(format!(
+                    "Date literal {days} (days since the Unix epoch) is out of range \
+                     for PostgreSQL date rendering"
+                ))
+            })?;
+        Ok(format!("DATE '{}'", date.format("%Y-%m-%d")))
     }
 
     fn safe_divide(

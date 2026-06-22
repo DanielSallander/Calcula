@@ -253,6 +253,27 @@ fn multi_table_qualifier_renders_mixed_case_expression() {
 }
 
 #[test]
+fn dialect_divergence_date_literal_pinned() {
+    // A Date32 day count renders differently per dialect: DataFusion
+    // reinterprets an integer cast as days-since-epoch, but PostgreSQL rejects
+    // integer→date casts and needs an explicit `DATE '…'` literal. 19_813 days
+    // since the Unix epoch is 2024-03-31.
+    let expr = compare(
+        qualified_col("Invoice", "paid_date"),
+        ComparisonOp::LessThanOrEqual,
+        Expression::LiteralDate(19_813),
+    );
+    let df = SqlRenderer::new(DataFusionDialect, &BareQualifier)
+        .render(&expr)
+        .unwrap();
+    assert_eq!(df, "(\"paid_date\" <= CAST(19813 AS DATE))");
+    let pg = SqlRenderer::new(PostgresDialect, &BareQualifier)
+        .render(&expr)
+        .unwrap();
+    assert_eq!(pg, "(\"paid_date\" <= DATE '2024-03-31')");
+}
+
+#[test]
 fn countrows_keep_pushdown_preserves_legacy_count_star() {
     // Legacy PostgreSQL pushdown rendered COUNTROWS with a KEEP operand as a
     // plain COUNT(*) (the filter does not travel) — preserved byte-for-byte.

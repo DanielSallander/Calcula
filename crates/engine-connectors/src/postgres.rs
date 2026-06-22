@@ -1096,9 +1096,11 @@ mod tests {
         );
         let table_map = vec![("Invoice".to_string(), "invoice".to_string())];
         let sql = pg_dialect::expr_to_sql_with_clear(&expr, &table_map, &[]).unwrap();
+        // 19_813 days since the Unix epoch is 2024-03-31. PostgreSQL rejects
+        // integer→date casts, so the scalar renders as a `DATE '…'` literal.
         assert_eq!(
             sql,
-            "CASE WHEN (\"invoice\".\"paid_date\" <= CAST(19813 AS DATE)) \
+            "CASE WHEN (\"invoice\".\"paid_date\" <= DATE '2024-03-31') \
              THEN 'Pa''id' ELSE 'Open' END"
         );
         // The apostrophe is doubled (escaped), not left to terminate the literal.
