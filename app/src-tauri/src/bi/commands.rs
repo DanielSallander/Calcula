@@ -288,6 +288,22 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
         })
         .collect();
 
+    let calculation_groups = model
+        .calculation_groups()
+        .iter()
+        .map(|g| crate::pivot::types::BiCalcGroupMeta {
+            name: g.name().to_string(),
+            items: g
+                .items()
+                .iter()
+                .map(|i| crate::pivot::types::BiCalcGroupItemMeta {
+                    name: i.name().to_string(),
+                    source: i.source().map(|s| s.to_string()),
+                })
+                .collect(),
+        })
+        .collect();
+
     BiModelInfo {
         tables,
         measures,
@@ -295,6 +311,7 @@ fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
         hierarchies,
         kpis,
         security_roles,
+        calculation_groups,
     }
 }
 
@@ -709,6 +726,62 @@ mod rls_mapping_tests {
             .build()
             .unwrap();
         assert!(model_to_info(&model).security_roles.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod calc_group_mapping_tests {
+    use super::*;
+
+    fn model_with_calc_group() -> bi_engine::DataModel {
+        bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![bi_engine::Column::new("amount", bi_engine::DataType::Float64)],
+                )
+                .unwrap(),
+            )
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "amount"))
+            .add_calculation_group(bi_engine::CalculationGroup::new(
+                "Time",
+                vec![
+                    bi_engine::CalculationItem::from_text("Current", "SELECTEDMEASURE()")
+                        .unwrap(),
+                    bi_engine::CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2")
+                        .unwrap(),
+                ],
+            ))
+            .build()
+            .expect("model with a calc group should build")
+    }
+
+    #[test]
+    fn maps_calculation_groups_and_items() {
+        let info = model_to_info(&model_with_calc_group());
+        assert_eq!(info.calculation_groups.len(), 1);
+        let g = &info.calculation_groups[0];
+        assert_eq!(g.name, "Time");
+        assert_eq!(g.items.len(), 2);
+        assert_eq!(g.items[0].name, "Current");
+        assert_eq!(g.items[1].name, "Doubled");
+        // Source text is retained from `from_text` and surfaced for display.
+        assert_eq!(g.items[0].source.as_deref(), Some("SELECTEDMEASURE()"));
+    }
+
+    #[test]
+    fn empty_when_model_has_no_calc_groups() {
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "T",
+                    vec![bi_engine::Column::new("c", bi_engine::DataType::Int64)],
+                )
+                .unwrap(),
+            )
+            .build()
+            .unwrap();
+        assert!(model_to_info(&model).calculation_groups.is_empty());
     }
 }
 

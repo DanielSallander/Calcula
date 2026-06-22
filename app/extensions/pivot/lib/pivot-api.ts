@@ -526,11 +526,26 @@ export interface BiPivotModelInfo {
   lookupColumns?: string[];
   /** Hierarchies defined in the BI model (drill-down paths). */
   hierarchies?: BiHierarchyMeta[];
+  /** Calculation groups defined in the BI model. Items are measure templates
+   *  applied on the Values axis, not groupable dimensions. */
+  calculationGroups?: BiCalcGroup[];
 }
 
 export interface BiModelTable {
   name: string;
   columns: BiModelColumn[];
+}
+
+/** A calculation group surfaced in the field list (read-only in v1). */
+export interface BiCalcGroup {
+  name: string;
+  items: BiCalcGroupItem[];
+}
+
+export interface BiCalcGroupItem {
+  name: string;
+  /** Source text of the item's template expression (display/diagnostic). */
+  source?: string;
 }
 
 export interface BiModelColumn {

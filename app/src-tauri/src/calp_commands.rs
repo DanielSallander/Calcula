@@ -3595,6 +3595,7 @@ fn restore_pulled_pivots(
                         model_tables: saved.model_tables,
                         measures: saved.measures,
                         hierarchies: saved.hierarchies,
+                        calculation_groups: saved.calculation_groups,
                         last_query: None,
                         lookup_columns: saved.lookup_columns.into_iter().collect(),
                         drill_through: saved.drill_through,

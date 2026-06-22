@@ -1588,6 +1588,9 @@ pub struct SavedBiPivotMetadata {
     pub lookup_columns: Vec<String>,
     #[serde(default)]
     pub hierarchies: Vec<BiHierarchyMeta>,
+    /// Calculation groups defined in the BI model (read-only field-list metadata).
+    #[serde(default)]
+    pub calculation_groups: Vec<BiCalcGroupMeta>,
     /// Package data source id this pivot queries (publisher connection UUID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source_id: Option<String>,
@@ -1612,6 +1615,8 @@ pub struct BiPivotMetadata {
     pub measures: Vec<MeasureFieldInfo>,
     /// Hierarchies defined in the BI model
     pub hierarchies: Vec<BiHierarchyMeta>,
+    /// Calculation groups defined in the BI model (read-only field-list metadata).
+    pub calculation_groups: Vec<BiCalcGroupMeta>,
     /// Last executed query (for refresh)
     pub last_query: Option<BiPivotQuery>,
     /// All columns the user has toggled to LOOKUP mode ("Table.Column" keys).
@@ -1662,6 +1667,29 @@ pub struct MeasureFieldInfo {
     pub aggregation: String,
 }
 
+/// A calculation group surfaced to the field list (mirrors engine
+/// `CalculationGroup`). Its items are measure templates (SELECTEDMEASURE()
+/// transforms), NOT groupable dimensions: applying one multiplies the pivot's
+/// selected measures on the Values axis (each measure x each item). Read-only
+/// metadata for the field list; applying a group is a later slice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiCalcGroupMeta {
+    pub name: String,
+    pub items: Vec<BiCalcGroupItemMeta>,
+}
+
+/// A single calculation item within a calculation group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiCalcGroupItemMeta {
+    pub name: String,
+    /// Source text of the item's template expression (display/diagnostic).
+    /// None when the model was built from an AST without retained source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 /// Stored query for BI pivot refresh.
 #[derive(Debug, Clone)]
 pub struct BiPivotQuery {
@@ -1685,6 +1713,10 @@ pub struct BiPivotModelInfo {
     /// Hierarchies defined in the BI model (drill-down paths).
     #[serde(default)]
     pub hierarchies: Vec<BiHierarchyMeta>,
+    /// Calculation groups defined in the BI model (Studio-authored). Items are
+    /// measure templates applied on the Values axis, not groupable dimensions.
+    #[serde(default)]
+    pub calculation_groups: Vec<BiCalcGroupMeta>,
 }
 
 // ---------------------------------------------------------------------------

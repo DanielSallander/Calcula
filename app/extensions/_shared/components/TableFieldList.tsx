@@ -42,10 +42,24 @@ export interface BiHierarchyMeta {
   raggedBehavior?: 'ShowBlanks' | 'HideMembers' | 'RepeatParent' | 'ShowAsLeaf';
 }
 
+export interface BiCalcGroupItem {
+  name: string;
+  /** Source text of the item's template expression (display/diagnostic). */
+  source?: string;
+}
+
+export interface BiCalcGroup {
+  name: string;
+  items: BiCalcGroupItem[];
+}
+
 export interface BiPivotModelInfo {
   tables: BiModelTable[];
   measures: MeasureField[];
   hierarchies?: BiHierarchyMeta[];
+  /** Calculation groups defined in the BI model. Items are measure templates
+   *  applied on the Values axis, not groupable dimensions. Read-only in v1. */
+  calculationGroups?: BiCalcGroup[];
 }
 
 interface TableFieldListProps {
@@ -580,6 +594,9 @@ export function TableFieldList({
     for (const t of biModel.tables) {
       set.add(t.name);
     }
+    for (const g of biModel.calculationGroups ?? []) {
+      set.add(`__calcgroup__:${g.name}`);
+    }
     return set;
   });
 
@@ -601,8 +618,11 @@ export function TableFieldList({
     for (const t of biModel.tables) {
       set.add(t.name);
     }
+    for (const g of biModel.calculationGroups ?? []) {
+      set.add(`__calcgroup__:${g.name}`);
+    }
     setExpandedFolders(set);
-  }, [biModel.tables]);
+  }, [biModel.tables, biModel.calculationGroups]);
 
   const collapseAll = useCallback(() => {
     setExpandedFolders(new Set<string>());
@@ -646,7 +666,23 @@ export function TableFieldList({
     return map;
   }, [biModel.hierarchies, query]);
 
-  const hasResults = filteredMeasures.length > 0 || filteredTables.some((t) => t.columns.length > 0) || hierarchiesByTable.size > 0;
+  // Filter calculation groups + items by search
+  const filteredCalcGroups = useMemo(() => {
+    const groups = biModel.calculationGroups ?? [];
+    if (!query) return groups;
+    return groups
+      .map((g) => ({
+        ...g,
+        items: g.items.filter(
+          (it) =>
+            it.name.toLowerCase().includes(query) ||
+            g.name.toLowerCase().includes(query)
+        ),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [biModel.calculationGroups, query]);
+
+  const hasResults = filteredMeasures.length > 0 || filteredTables.some((t) => t.columns.length > 0) || hierarchiesByTable.size > 0 || filteredCalcGroups.length > 0;
 
   return (
     <div className={styles.section} style={{ flex: 1, overflow: 'hidden' }}>
@@ -693,6 +729,35 @@ export function TableFieldList({
                 ))}
               </FolderNode>
             )}
+
+            {/* Calculation group folders (read-only in v1). Items are measure
+                templates applied on the Values axis, not draggable dimensions. */}
+            {filteredCalcGroups.map((g) => (
+              <FolderNode
+                key={`calcgroup:${g.name}`}
+                name={g.name}
+                icon={'ƒ'}
+                childCount={g.items.length}
+                isExpanded={!!query || expandedFolders.has(`__calcgroup__:${g.name}`)}
+                onToggleExpand={() => toggleFolder(`__calcgroup__:${g.name}`)}
+                onExpandAll={expandAll}
+                onCollapseAll={collapseAll}
+              >
+                {g.items.map((it) => (
+                  <div
+                    key={`calcitem:${g.name}.${it.name}`}
+                    className={treeStyles.fieldItem}
+                    style={{ cursor: 'default', paddingLeft: '26px' }}
+                    title={
+                      it.source ? `${it.name} = ${it.source}` : it.name
+                    }
+                  >
+                    <span className={treeStyles.fieldName}>{it.name}</span>
+                    <span className={treeStyles.fieldTypeIcon}>{'ƒ'}</span>
+                  </div>
+                ))}
+              </FolderNode>
+            ))}
 
             {/* Table folders */}
             {filteredTables.map((table) => {

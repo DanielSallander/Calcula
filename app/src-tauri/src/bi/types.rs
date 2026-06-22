@@ -312,6 +312,11 @@ pub struct BiModelInfo {
     /// filters when a role is activated on the connection.
     #[serde(default)]
     pub security_roles: Vec<BiSecurityRoleInfo>,
+    /// Calculation groups the model defines (Studio-authored). Read-only here;
+    /// items are measure templates applied on the Values axis in a pivot, not
+    /// groupable dimensions.
+    #[serde(default)]
+    pub calculation_groups: Vec<crate::pivot::types::BiCalcGroupMeta>,
 }
 
 /// A row-level-security role surfaced to the frontend (mirrors the engine

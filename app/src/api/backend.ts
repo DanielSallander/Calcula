@@ -3270,6 +3270,21 @@ export interface BiModelInfo {
   /** Row-level-security roles the model defines (Studio-authored). Surfaced in a
    *  "View as role" selector; the engine enforces the filters when one is active. */
   securityRoles?: BiSecurityRoleInfo[];
+  /** Calculation groups the model defines (Studio-authored). Items are measure
+   *  templates applied on the Values axis, not groupable dimensions. */
+  calculationGroups?: BiCalcGroupInfo[];
+}
+
+/** A calculation group defined in the model (read-only metadata). */
+export interface BiCalcGroupInfo {
+  name: string;
+  items: BiCalcGroupItemInfo[];
+}
+
+export interface BiCalcGroupItemInfo {
+  name: string;
+  /** Source text of the item's template expression (display/diagnostic). */
+  source?: string;
 }
 
 /** A row-level-security role defined in the model. The host renders the name +

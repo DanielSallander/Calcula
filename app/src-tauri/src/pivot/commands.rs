@@ -1698,6 +1698,7 @@ pub fn get_pivot_at_cell(
                 measures: meta.measures.clone(),
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 hierarchies: meta.hierarchies.clone(),
+                calculation_groups: meta.calculation_groups.clone(),
             }
         })
     };
@@ -2337,6 +2338,7 @@ pub fn get_pivot_hierarchies(
                 measures: meta.measures.clone(),
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 hierarchies: meta.hierarchies.clone(),
+                calculation_groups: meta.calculation_groups.clone(),
             }
         })
     };
@@ -4111,7 +4113,12 @@ pub fn get_pivot_drill_behavior(
 /// Extracts model metadata (tables + measures) from a BI engine.
 fn extract_bi_model_metadata(
     engine: &bi_engine::Engine,
-) -> (Vec<BiModelTableMeta>, Vec<MeasureFieldInfo>, Vec<BiHierarchyMeta>) {
+) -> (
+    Vec<BiModelTableMeta>,
+    Vec<MeasureFieldInfo>,
+    Vec<BiHierarchyMeta>,
+    Vec<BiCalcGroupMeta>,
+) {
     let model = engine.model();
 
     let tables: Vec<BiModelTableMeta> = model
@@ -4210,7 +4217,26 @@ fn extract_bi_model_metadata(
         })
         .collect();
 
-    (tables, measures, hierarchies)
+    // Calculation groups: Studio-authored measure templates. Surfaced read-only
+    // in the field list; applying one (multiplying the Values axis) is a later
+    // slice. They are model-global (no per-table binding in the engine model).
+    let calculation_groups: Vec<BiCalcGroupMeta> = model
+        .calculation_groups()
+        .iter()
+        .map(|g| BiCalcGroupMeta {
+            name: g.name().to_string(),
+            items: g
+                .items()
+                .iter()
+                .map(|i| BiCalcGroupItemMeta {
+                    name: i.name().to_string(),
+                    source: i.source().map(|s| s.to_string()),
+                })
+                .collect(),
+        })
+        .collect();
+
+    (tables, measures, hierarchies, calculation_groups)
 }
 
 /// Creates an empty BI pivot from the full model (all tables + measures).
@@ -4235,7 +4261,7 @@ pub async fn create_pivot_from_bi_model(
     auto_connect_bi_connection(&bi_state, connection_id).await?;
 
     // Extract model metadata from the connection's engine
-    let (model_tables, measures, hierarchies) = {
+    let (model_tables, measures, hierarchies, calc_groups) = {
         let engine_arc = {
             let connections = bi_state.connections.lock().unwrap();
             let conn = connections.get(&connection_id)
@@ -4358,6 +4384,7 @@ pub async fn create_pivot_from_bi_model(
         model_tables,
         measures,
         hierarchies,
+        calculation_groups: calc_groups,
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
         drill_through: None,
