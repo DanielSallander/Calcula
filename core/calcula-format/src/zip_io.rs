@@ -72,6 +72,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     if !workbook.bi_connection_roles.is_empty() {
         manifest.features.push("bi_connection_roles".to_string());
     }
+    if !workbook.bi_connections.is_empty() {
+        manifest.features.push("bi_connections".to_string());
+    }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
     }
@@ -216,6 +219,14 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
         let roles_json = serde_json::to_string_pretty(&workbook.bi_connection_roles)?;
         zip.start_file("bi_connection_roles.json", options.clone())?;
         zip.write_all(roles_json.as_bytes())?;
+    }
+
+    // Write locally-authored BI connections (embedded model + spec + bindings).
+    // One file each — embedded models can be large.
+    for (i, conn) in workbook.bi_connections.iter().enumerate() {
+        let conn_json = serde_json::to_string_pretty(conn)?;
+        zip.start_file(format!("bi_connections/conn_{}.json", i), options.clone())?;
+        zip.write_all(conn_json.as_bytes())?;
     }
 
     // Write scripts
@@ -513,6 +524,29 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read locally-authored BI connections (embedded models)
+    let mut bi_connections: Vec<persistence::SavedBiConnection> = Vec::new();
+    if manifest.features.contains(&"bi_connections".to_string()) {
+        let conn_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("bi_connections/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for conn_name in conn_names {
+            if let Some(conn) =
+                read_optional_json::<persistence::SavedBiConnection>(&mut archive, &conn_name)?
+            {
+                bi_connections.push(conn);
+            }
+        }
+    }
+
     // Read ribbon filters
     let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
     if manifest.features.contains(&"ribbon_filters".to_string()) {
@@ -643,6 +677,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         bi_pivot_metadata,
         object_scripts,
         bi_connection_roles,
+        bi_connections,
     })
 }
 
@@ -776,6 +811,7 @@ mod tests {
             bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
             bi_connection_roles: Vec::new(),
+            bi_connections: Vec::new(),
         }
     }
 
@@ -965,6 +1001,43 @@ mod tests {
         write_calcula(&workbook, &path).unwrap();
         let loaded = read_calcula(&path).unwrap();
         assert!(loaded.bi_connection_roles.is_empty());
+    }
+
+    #[test]
+    fn test_roundtrip_with_bi_connections() {
+        let mut workbook = make_test_workbook();
+        workbook.bi_connections.push(persistence::SavedBiConnection {
+            id: "11111111-1111-1111-1111-111111111111".to_string(),
+            name: "Sales DB".to_string(),
+            description: "Local sales model".to_string(),
+            connection_type: "PostgreSQL".to_string(),
+            server: "localhost".to_string(),
+            database: "sales".to_string(),
+            preferred_auth: "Integrated".to_string(),
+            model_json: serde_json::json!({ "tables": [], "measures": [], "formatVersion": 1 }),
+            bindings: vec![persistence::SavedBiBinding {
+                model_table: "Sales".to_string(),
+                schema: "public".to_string(),
+                source_table: "sales".to_string(),
+            }],
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_bi_connections.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.bi_connections.len(), 1);
+        let c = &loaded.bi_connections[0];
+        assert_eq!(c.id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(c.name, "Sales DB");
+        assert_eq!(c.server, "localhost");
+        assert_eq!(c.database, "sales");
+        assert_eq!(c.bindings.len(), 1);
+        assert_eq!(c.bindings[0].model_table, "Sales");
+        assert_eq!(c.model_json["formatVersion"], 1);
+        // Credentials are never persisted.
+        assert_eq!(loaded.bi_connections[0].model_json.get("connectionString"), None);
     }
 
     #[test]

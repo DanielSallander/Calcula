@@ -1226,6 +1226,10 @@ pub fn save_file(
     // save/reload (re-applied when the connection is re-created on re-pull).
     workbook.bi_connection_roles = crate::bi::commands::collect_bi_connection_roles(&bi_state);
 
+    // Embed locally-authored BI connections (model + spec + bindings, no creds)
+    // so they reconstruct on open without the original model file.
+    workbook.bi_connections = crate::bi::commands::capture_local_bi_connections(&bi_state);
+
     // Serialize subscription metadata into user_files so it persists in the .cala archive
     {
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
@@ -1592,9 +1596,32 @@ pub fn open_file(
     // Restore full pivot definitions into PivotState
     restore_pivot_definitions(&workbook, &pivot_state, &state);
 
+    // Reconstruct locally-authored BI connections (embedded model + spec +
+    // bindings) and remap each pivot's connection_id by its stable data_source_id
+    // so local BI pivots reconnect on open without a manual reconnect.
+    {
+        let id_map = crate::bi::commands::restore_local_bi_connections(
+            &bi_state,
+            &workbook.bi_connections,
+        );
+        if !id_map.is_empty() {
+            if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {
+                for meta in bi_meta.values_mut() {
+                    if let Some(conn_id) = meta
+                        .data_source_id
+                        .as_deref()
+                        .and_then(|ds| id_map.get(ds))
+                    {
+                        meta.connection_id = *conn_id;
+                    }
+                }
+            }
+        }
+    }
+
     // Stage saved "view as" RLS roles so they re-attach when the BI connection
     // is (re)created (e.g. on the next package re-pull) and apply to any that
-    // already exist in this session.
+    // already exist in this session (incl. the locals just reconstructed).
     crate::bi::commands::load_pending_roles(&bi_state, &workbook.bi_connection_roles);
 
     // Restore object scripts (scriptable objects) from workbook

@@ -80,6 +80,46 @@ pub struct Workbook {
     /// connection identifier (package data source id, or model path for a local
     /// connection). Re-applied when the connection is (re)created on load.
     pub bi_connection_roles: Vec<SavedBiConnectionRole>,
+    /// Locally-authored BI connections embedded in the workbook (model + spec +
+    /// bindings, NOT credentials) so they reconstruct on open without depending
+    /// on the original model file. Package-subscribed connections are NOT stored
+    /// here — they reconstruct from the .calp on re-pull.
+    pub bi_connections: Vec<SavedBiConnection>,
+}
+
+/// A locally-authored BI connection persisted in the workbook. Carries the
+/// embedded model + connection spec + bindings, but never credentials (those
+/// resolve via the credential cache / Connect, keyed by server+database).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedBiConnection {
+    /// The connection's stable id (UUID string). Pivots reference it via their
+    /// `data_source_id`, so reconstruction must reuse this id.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub connection_type: String,
+    #[serde(default)]
+    pub server: String,
+    #[serde(default)]
+    pub database: String,
+    #[serde(default)]
+    pub preferred_auth: String,
+    /// The embedded BI model: a raw DataModel JSON object, or a ModelBundle
+    /// wrapper (`{ formatVersion, model }`). Reconstruction handles both.
+    pub model_json: serde_json::Value,
+    #[serde(default)]
+    pub bindings: Vec<SavedBiBinding>,
+}
+
+/// A model-table -> source-table binding for a persisted BI connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedBiBinding {
+    pub model_table: String,
+    pub schema: String,
+    pub source_table: String,
 }
 
 /// A persisted RLS "view as" role selection for one BI connection.
@@ -265,6 +305,7 @@ impl Workbook {
             bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
             bi_connection_roles: Vec::new(),
+            bi_connections: Vec::new(),
         }
     }
 
@@ -290,6 +331,7 @@ impl Workbook {
             bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
             bi_connection_roles: Vec::new(),
+            bi_connections: Vec::new(),
         }
     }
 }

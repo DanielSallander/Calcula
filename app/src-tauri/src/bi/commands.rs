@@ -617,6 +617,172 @@ pub(crate) fn load_pending_roles(
     }
 }
 
+/// Build an Engine from a model with Calcula's standard auto-tier + query-cache
+/// configuration. Shared by connection-create and workbook reconstruct so both
+/// behave identically.
+pub(crate) fn build_configured_engine(model: bi_engine::DataModel) -> bi_engine::Engine {
+    let mut engine = bi_engine::Engine::new(model);
+    engine.set_auto_tier_config(bi_engine::AutoTierConfig {
+        enabled: true,
+        max_rows: 100_000,
+        default_ttl_secs: 3600,
+    });
+    engine.set_query_cache_config(bi_engine::QueryCacheConfig {
+        enabled: true,
+        max_entries: 256,
+        max_memory_bytes: 64 * 1024 * 1024, // 64 MB
+        ttl_secs: 300,
+    });
+    engine
+}
+
+/// Capture locally-authored BI connections for embedding in the workbook
+/// (model + spec + bindings; NEVER credentials). Package-subscribed connections
+/// are skipped — those reconstruct from the .calp on re-pull.
+pub(crate) fn capture_local_bi_connections(
+    bi_state: &BiState,
+) -> Vec<persistence::SavedBiConnection> {
+    let connections = bi_state.connections.lock().unwrap();
+    let mut saved = Vec::new();
+    for conn in connections.values() {
+        if conn.package_data_source_id.is_some() {
+            continue; // package connection — reconstructs from the .calp, not here
+        }
+        let engine_arc = match &conn.engine {
+            Some(arc) => arc,
+            None => continue,
+        };
+        // Serialize the live model. try_lock keeps the sync save path non-blocking;
+        // engines are idle at save time so this normally succeeds. If busy, fall
+        // back to the on-disk model file when one is still present.
+        let model_json = match engine_arc.try_lock() {
+            Ok(engine) => match serde_json::to_value(engine.model()) {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::log_warn!(
+                        "BI",
+                        "skip persisting connection {}: model serialize failed: {}",
+                        conn.id, e
+                    );
+                    continue;
+                }
+            },
+            Err(_) => match conn
+                .model_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            {
+                Some(v) => v,
+                None => {
+                    crate::log_warn!(
+                        "BI",
+                        "skip persisting connection {}: engine busy and no model file",
+                        conn.id
+                    );
+                    continue;
+                }
+            },
+        };
+        saved.push(persistence::SavedBiConnection {
+            id: conn.id.to_string(),
+            name: conn.name.clone(),
+            description: conn.description.clone(),
+            connection_type: conn.connection_type.as_str().to_string(),
+            server: conn.server.clone(),
+            database: conn.database.clone(),
+            preferred_auth: conn.preferred_auth.clone(),
+            model_json,
+            bindings: conn
+                .bindings
+                .iter()
+                .map(|b| persistence::SavedBiBinding {
+                    model_table: b.model_table.clone(),
+                    schema: b.schema.clone(),
+                    source_table: b.source_table.clone(),
+                })
+                .collect(),
+        });
+    }
+    saved
+}
+
+/// Reconstruct locally-authored BI connections from the workbook on open.
+/// Each is rebuilt with its ORIGINAL id (so pivots' `data_source_id` keeps
+/// matching across save/open cycles), the embedded model goes into a fresh
+/// engine, bindings are restored, and credentials are left empty (resolved via
+/// the credential cache / Connect). Returns a map of saved id -> live
+/// ConnectionId for pivot remapping. RLS roles are applied separately by
+/// `load_pending_roles`.
+pub(crate) fn restore_local_bi_connections(
+    bi_state: &BiState,
+    saved: &[persistence::SavedBiConnection],
+) -> std::collections::HashMap<String, ConnectionId> {
+    let mut id_map = std::collections::HashMap::new();
+    for sc in saved {
+        // Unwrap a ModelBundle wrapper (`{ formatVersion, model }`) if present.
+        let model_value = if sc.model_json.get("formatVersion").is_some() {
+            match sc.model_json.get("model") {
+                Some(m) => m.clone(),
+                None => {
+                    crate::log_warn!("BI", "restore connection {}: bundle missing 'model'", sc.id);
+                    continue;
+                }
+            }
+        } else {
+            sc.model_json.clone()
+        };
+        let model: bi_engine::DataModel = match serde_json::from_value(model_value) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::log_warn!("BI", "restore connection {}: model parse failed: {}", sc.id, e);
+                continue;
+            }
+        };
+        let conn_id = ConnectionId::parse(&sc.id)
+            .unwrap_or_else(|| identity::EntityId::from_bytes(identity::generate_uuid_v7()));
+        // Own engine per local connection, keyed by a synthetic id-based key (the
+        // original model file may be gone; the model travels embedded).
+        let model_key = ModelKey::from_model_path(&format!("local:{}", sc.id));
+        let engine = build_configured_engine(model);
+        let (engine_arc, _was_existing, _cache_dir) =
+            bi_state.engine_registry.get_or_create(&model_key, engine);
+        let bindings: Vec<BiBindRequest> = sc
+            .bindings
+            .iter()
+            .map(|b| BiBindRequest {
+                model_table: b.model_table.clone(),
+                schema: b.schema.clone(),
+                source_table: b.source_table.clone(),
+            })
+            .collect();
+        let connection = Connection {
+            id: conn_id,
+            name: sc.name.clone(),
+            description: sc.description.clone(),
+            connection_type: ConnectionType::parse_or_default(&sc.connection_type),
+            connection_string: String::new(), // creds via credential cache / Connect
+            server: sc.server.clone(),
+            database: sc.database.clone(),
+            preferred_auth: sc.preferred_auth.clone(),
+            model_path: None,
+            engine: Some(engine_arc),
+            model_key: Some(model_key),
+            connector_index: None,
+            bindings,
+            last_refreshed: None,
+            created_at: now_iso(),
+            is_connected: false,
+            active_queries: std::collections::HashMap::new(),
+            package_data_source_id: None,
+            active_role: None, // applied by load_pending_roles
+        };
+        bi_state.connections.lock().unwrap().insert(conn_id, connection);
+        id_map.insert(sc.id.clone(), conn_id);
+    }
+    id_map
+}
+
 /// Set the active "view as" RLS role for a connection (`None` = unrestricted).
 /// The role is validated against the model up front for an immediate friendly
 /// error; the engine re-validates and fails closed at query time. v1 refuses
@@ -903,25 +1069,9 @@ pub async fn bi_create_connection(
 
     let model_key = ModelKey::from_model_path(&request.model_path);
 
-    // Get or create shared engine via the registry
-    let mut engine = bi_engine::Engine::new(model);
-
-    // Enable auto-tier dimension caching — dimension tables are automatically cached
-    // on first use so repeated queries don't re-fetch the same data.
-    engine.set_auto_tier_config(bi_engine::AutoTierConfig {
-        enabled: true,
-        max_rows: 100_000,
-        default_ttl_secs: 3600,
-    });
-
-    // Enable query-result caching — navigating away and back, or switching tabs
-    // with shared queries, returns results instantly from cache.
-    engine.set_query_cache_config(bi_engine::QueryCacheConfig {
-        enabled: true,
-        max_entries: 256,
-        max_memory_bytes: 64 * 1024 * 1024, // 64 MB
-        ttl_secs: 300,
-    });
+    // Get or create shared engine via the registry (standard auto-tier +
+    // query-cache config; shared with workbook reconstruct).
+    let engine = build_configured_engine(model);
 
     let (engine_arc, was_existing, cache_dir) =
         bi_state.engine_registry.get_or_create(&model_key, engine);
