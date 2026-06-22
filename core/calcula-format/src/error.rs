@@ -19,4 +19,18 @@ pub enum FormatError {
 
     #[error("Missing entry: {0}")]
     MissingEntry(String),
+
+    /// The file is an encrypted `.cala` but no password was supplied — the host
+    /// should prompt for one and retry.
+    #[error("file is encrypted; a password is required")]
+    NeedsPassword,
+
+    /// Decryption authentication failed: wrong password OR the file was
+    /// modified (indistinguishable by design).
+    #[error("incorrect password or the file has been modified")]
+    WrongPassword,
+
+    /// The encrypted container is structurally malformed (not a password issue).
+    #[error("encrypted file is corrupt: {0}")]
+    EncryptedCorrupt(String),
 }

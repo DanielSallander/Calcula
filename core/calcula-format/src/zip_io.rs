@@ -23,14 +23,14 @@ use identity::SheetId;
 use crate::features::object_scripts::ObjectScriptDef;
 use persistence::{SavedChart, SavedNotebook, SavedObjectScript, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
-use std::path::Path;
 use zip::write::FileOptions;
 use zip::CompressionMethod;
 
-/// Write a Workbook to a .cala ZIP file.
-pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError> {
-    let file = std::fs::File::create(path)?;
-    let mut zip = zip::ZipWriter::new(file);
+/// Build the complete `.cala` ZIP into a byte buffer (no file I/O). The host
+/// wraps this — optionally encrypting it — and writes it atomically.
+pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> {
+    let mut buf = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
     let options = FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
 
     // Build manifest with sheet IDs
@@ -289,14 +289,14 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
         zip.write_all(content)?;
     }
 
-    zip.finish()?;
-    Ok(())
+    zip.finish()?; // consumes `zip`, releasing the &mut borrow of `buf`
+    Ok(buf)
 }
 
-/// Read a Workbook from a .cala ZIP file.
-pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
-    let file = std::fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+/// Parse a Workbook from `.cala` ZIP bytes (no file I/O). The host reads the
+/// file, decrypts if needed, then calls this on the plain ZIP bytes.
+pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
 
     // Read manifest.json
     let manifest: Manifest = {
@@ -727,7 +727,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
 
 /// Read an optional JSON file from the archive. Returns None if the file doesn't exist.
 fn read_optional_json<T: serde::de::DeserializeOwned>(
-    archive: &mut zip::ZipArchive<std::fs::File>,
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
     name: &str,
 ) -> Result<Option<T>, FormatError> {
     match archive.by_name(name) {
@@ -747,6 +747,17 @@ mod tests {
     use super::*;
     use persistence::{SavedCell, SavedCellValue};
     use std::collections::HashMap;
+
+    // Test shims: the public file API moved to the crate root (save_calcula /
+    // load_calcula), and zip_io is now bytes-first. These keep the existing
+    // round-trip tests writing/reading a real temp file via the bytes API.
+    fn write_calcula(workbook: &Workbook, path: &std::path::Path) -> Result<(), FormatError> {
+        std::fs::write(path, write_calcula_bytes(workbook)?)?;
+        Ok(())
+    }
+    fn read_calcula(path: &std::path::Path) -> Result<Workbook, FormatError> {
+        read_calcula_bytes(&std::fs::read(path)?)
+    }
 
     fn make_test_workbook() -> Workbook {
         let mut cells = HashMap::new();
@@ -1132,5 +1143,54 @@ mod tests {
         assert_eq!(loaded.sheets.len(), 1);
         assert_eq!(loaded.sheets[0].name, "Sheet1");
         assert!(loaded.sheets[0].cells.is_empty());
+    }
+
+    #[test]
+    fn encrypted_roundtrip() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enc.cala");
+        crate::save_calcula_opt(&workbook, &path, Some(b"hunter2")).unwrap();
+
+        // On disk it's an encrypted container, not a plain ZIP.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(calcula_crypto::is_encrypted(&raw));
+        assert_ne!(&raw[..2], b"PK");
+
+        let loaded = crate::load_calcula_opt(&path, Some(b"hunter2")).unwrap();
+        assert_eq!(loaded.sheets.len(), workbook.sheets.len());
+    }
+
+    #[test]
+    fn encrypted_needs_then_wrong_password() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enc2.cala");
+        crate::save_calcula_opt(&workbook, &path, Some(b"s3cret")).unwrap();
+
+        assert!(matches!(
+            crate::load_calcula_opt(&path, None),
+            Err(FormatError::NeedsPassword)
+        ));
+        assert!(matches!(
+            crate::load_calcula_opt(&path, Some(b"wrong")),
+            Err(FormatError::WrongPassword)
+        ));
+        // Correct password still works.
+        assert!(crate::load_calcula_opt(&path, Some(b"s3cret")).is_ok());
+    }
+
+    #[test]
+    fn plain_save_is_zip_by_default() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.cala");
+        crate::save_calcula(&workbook, &path).unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..2], b"PK", "plain save must remain a ZIP");
+        assert!(!calcula_crypto::is_encrypted(&raw));
+        let loaded = crate::load_calcula(&path).unwrap();
+        assert_eq!(loaded.sheets.len(), workbook.sheets.len());
     }
 }

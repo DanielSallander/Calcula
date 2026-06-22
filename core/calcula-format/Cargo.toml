@@ -8,10 +8,12 @@ description = "Calcula native file format (.cala) - ZIP-based structured JSON"
 engine = { path = "../engine" }
 identity = { path = "../identity" }
 persistence = { path = "../persistence" }
+calcula-crypto = { path = "../calcula-crypto" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 thiserror = "1.0"
+tempfile = "3.10"
 
 [dev-dependencies]
 tempfile = "3.10"
