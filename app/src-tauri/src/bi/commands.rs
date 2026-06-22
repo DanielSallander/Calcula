@@ -558,6 +558,65 @@ pub(crate) fn friendly_bi_query_error(context: &str, e: &impl std::fmt::Display)
     }
 }
 
+/// Capture per-connection "view as" RLS roles for saving into the workbook.
+/// Merges the pending (loaded-but-not-yet-realized) roles with the live
+/// connections' current roles — live wins, and a cleared role drops the entry.
+/// Keyed by package data source id, else model path.
+pub(crate) fn collect_bi_connection_roles(
+    bi_state: &BiState,
+) -> Vec<persistence::SavedBiConnectionRole> {
+    let mut merged: std::collections::HashMap<String, String> =
+        bi_state.pending_roles.lock().unwrap().clone();
+    let connections = bi_state.connections.lock().unwrap();
+    for conn in connections.values() {
+        let key = conn
+            .package_data_source_id
+            .clone()
+            .or_else(|| conn.model_path.clone());
+        if let Some(key) = key {
+            match &conn.active_role {
+                Some(role) => {
+                    merged.insert(key, role.clone());
+                }
+                None => {
+                    merged.remove(&key);
+                }
+            }
+        }
+    }
+    merged
+        .into_iter()
+        .map(|(connection_key, active_role)| persistence::SavedBiConnectionRole {
+            connection_key,
+            active_role,
+        })
+        .collect()
+}
+
+/// Load saved per-connection RLS roles into the pending map so they re-attach
+/// when a matching connection is (re)created (re-pull / reconnect), and apply
+/// them to any connections that already exist in this session.
+pub(crate) fn load_pending_roles(
+    bi_state: &BiState,
+    saved: &[persistence::SavedBiConnectionRole],
+) {
+    let mut pending = bi_state.pending_roles.lock().unwrap();
+    pending.clear();
+    for r in saved {
+        pending.insert(r.connection_key.clone(), r.active_role.clone());
+    }
+    let mut connections = bi_state.connections.lock().unwrap();
+    for conn in connections.values_mut() {
+        let key = conn
+            .package_data_source_id
+            .as_deref()
+            .or(conn.model_path.as_deref());
+        if let Some(role) = key.and_then(|k| pending.get(k)) {
+            conn.active_role = Some(role.clone());
+        }
+    }
+}
+
 /// Set the active "view as" RLS role for a connection (`None` = unrestricted).
 /// The role is validated against the model up front for an immediate friendly
 /// error; the engine re-validates and fails closed at query time. v1 refuses
@@ -898,6 +957,9 @@ pub async fn bi_create_connection(
     // Honor the model's declared connector type — hardcoding PostgreSQL here
     // would defeat the not-yet-supported guards at the connect sites.
     let connection_type = ConnectionType::parse_or_default(&model_conn_spec.connector_type);
+    // Restore a saved "view as" RLS role for this local connection (keyed by
+    // model path), if one was persisted in the workbook.
+    let active_role = bi_state.pending_role_for(None, Some(&request.model_path));
     let connection = Connection {
         id,
         name: request.name,
@@ -917,7 +979,7 @@ pub async fn bi_create_connection(
         is_connected: false,
         active_queries: std::collections::HashMap::new(),
         package_data_source_id: None,
-        active_role: None,
+        active_role,
     };
 
     let info = connection.to_info();

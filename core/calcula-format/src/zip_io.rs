@@ -69,6 +69,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     if !workbook.object_scripts.is_empty() {
         manifest.features.push("object_scripts".to_string());
     }
+    if !workbook.bi_connection_roles.is_empty() {
+        manifest.features.push("bi_connection_roles".to_string());
+    }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
     }
@@ -206,6 +209,13 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(obj_script_json.as_bytes())?;
+    }
+
+    // Write BI connection RLS roles (subscriber "view as" selections)
+    if !workbook.bi_connection_roles.is_empty() {
+        let roles_json = serde_json::to_string_pretty(&workbook.bi_connection_roles)?;
+        zip.start_file("bi_connection_roles.json", options.clone())?;
+        zip.write_all(roles_json.as_bytes())?;
     }
 
     // Write scripts
@@ -492,6 +502,17 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read BI connection RLS roles
+    let mut bi_connection_roles: Vec<persistence::SavedBiConnectionRole> = Vec::new();
+    if manifest.features.contains(&"bi_connection_roles".to_string()) {
+        if let Some(roles) = read_optional_json::<Vec<persistence::SavedBiConnectionRole>>(
+            &mut archive,
+            "bi_connection_roles.json",
+        )? {
+            bi_connection_roles = roles;
+        }
+    }
+
     // Read ribbon filters
     let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
     if manifest.features.contains(&"ribbon_filters".to_string()) {
@@ -621,6 +642,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         pivot_definitions,
         bi_pivot_metadata,
         object_scripts,
+        bi_connection_roles,
     })
 }
 
@@ -753,6 +775,7 @@ mod tests {
             pivot_definitions: Vec::new(),
             bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
+            bi_connection_roles: Vec::new(),
         }
     }
 
@@ -905,6 +928,43 @@ mod tests {
         assert_eq!(slicer_script.object_type, persistence::ScriptableObjectType::Slicer);
         assert_eq!(slicer_script.instance_id, Some("slicer-42".to_string()));
         assert_eq!(slicer_script.access_level, persistence::ScriptAccessLevel::Unlocked);
+    }
+
+    #[test]
+    fn test_roundtrip_with_bi_connection_roles() {
+        let mut workbook = make_test_workbook();
+        workbook.bi_connection_roles.push(persistence::SavedBiConnectionRole {
+            connection_key: "ds-sales-uuid".to_string(),
+            active_role: "WestRegion".to_string(),
+        });
+        workbook.bi_connection_roles.push(persistence::SavedBiConnectionRole {
+            connection_key: "C:/models/local.model".to_string(),
+            active_role: "Analyst".to_string(),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_bi_roles.cala");
+
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.bi_connection_roles.len(), 2);
+        let pkg = loaded.bi_connection_roles.iter()
+            .find(|r| r.connection_key == "ds-sales-uuid").unwrap();
+        assert_eq!(pkg.active_role, "WestRegion");
+        let local = loaded.bi_connection_roles.iter()
+            .find(|r| r.connection_key == "C:/models/local.model").unwrap();
+        assert_eq!(local.active_role, "Analyst");
+    }
+
+    #[test]
+    fn test_roundtrip_without_bi_connection_roles_is_empty() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_no_bi_roles.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.bi_connection_roles.is_empty());
     }
 
     #[test]

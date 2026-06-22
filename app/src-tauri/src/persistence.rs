@@ -1188,6 +1188,7 @@ pub fn save_file(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     path: String,
     window: tauri::Window,
 ) -> Result<(), String> {
@@ -1220,6 +1221,10 @@ pub fn save_file(
 
     // Collect full pivot definitions from PivotState
     collect_pivot_definitions(&pivot_state, &state, &mut workbook);
+
+    // Capture per-BI-connection "view as" RLS role selections so they survive
+    // save/reload (re-applied when the connection is re-created on re-pull).
+    workbook.bi_connection_roles = crate::bi::commands::collect_bi_connection_roles(&bi_state);
 
     // Serialize subscription metadata into user_files so it persists in the .cala archive
     {
@@ -1316,6 +1321,7 @@ pub fn open_file(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     path: String,
     window: tauri::Window,
 ) -> Result<Vec<CellData>, String> {
@@ -1585,6 +1591,11 @@ pub fn open_file(
 
     // Restore full pivot definitions into PivotState
     restore_pivot_definitions(&workbook, &pivot_state, &state);
+
+    // Stage saved "view as" RLS roles so they re-attach when the BI connection
+    // is (re)created (e.g. on the next package re-pull) and apply to any that
+    // already exist in this session.
+    crate::bi::commands::load_pending_roles(&bi_state, &workbook.bi_connection_roles);
 
     // Restore object scripts (scriptable objects) from workbook
     *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();

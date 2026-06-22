@@ -76,6 +76,22 @@ pub struct Workbook {
     pub bi_pivot_metadata: Vec<serde_json::Value>,
     /// Object scripts (scriptable objects — primitive + component scripts)
     pub object_scripts: Vec<SavedObjectScript>,
+    /// Per-BI-connection "view as" RLS role selections, keyed by a stable
+    /// connection identifier (package data source id, or model path for a local
+    /// connection). Re-applied when the connection is (re)created on load.
+    pub bi_connection_roles: Vec<SavedBiConnectionRole>,
+}
+
+/// A persisted RLS "view as" role selection for one BI connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedBiConnectionRole {
+    /// Stable connection identity: the package data source id for a package
+    /// connection, or the model path for a locally-created connection.
+    pub connection_key: String,
+    /// The active role name (always Some when persisted; an unrestricted
+    /// connection simply has no entry).
+    pub active_role: String,
 }
 
 /// A pivot table definition stored in the workbook.
@@ -248,6 +264,7 @@ impl Workbook {
             pivot_definitions: Vec::new(),
             bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
+            bi_connection_roles: Vec::new(),
         }
     }
 
@@ -272,6 +289,7 @@ impl Workbook {
             pivot_definitions: Vec::new(),
             bi_pivot_metadata: Vec::new(),
             object_scripts: Vec::new(),
+            bi_connection_roles: Vec::new(),
         }
     }
 }

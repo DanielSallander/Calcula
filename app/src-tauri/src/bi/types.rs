@@ -29,6 +29,11 @@ pub struct BiState {
     pub connections: Mutex<HashMap<ConnectionId, Connection>>,
     /// Shared engine registry — multiple connections using the same model share one Engine.
     pub engine_registry: EngineRegistry,
+    /// Saved "view as" RLS roles awaiting their connection, keyed by a stable
+    /// connection identity (package data source id, or model path for a local
+    /// connection). Loaded from the workbook on open; consumed when a matching
+    /// connection is (re)created so the chosen role survives save/reload + re-pull.
+    pub pending_roles: Mutex<HashMap<String, String>>,
 }
 
 impl BiState {
@@ -36,7 +41,21 @@ impl BiState {
         Self {
             connections: Mutex::new(HashMap::new()),
             engine_registry: EngineRegistry::new(),
+            pending_roles: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Resolve the saved RLS role for a connection about to be created, by its
+    /// stable identity (package data source id preferred, then model path).
+    pub fn pending_role_for(
+        &self,
+        package_data_source_id: Option<&str>,
+        model_path: Option<&str>,
+    ) -> Option<String> {
+        let pending = self.pending_roles.lock().unwrap();
+        package_data_source_id
+            .and_then(|k| pending.get(k).cloned())
+            .or_else(|| model_path.and_then(|k| pending.get(k).cloned()))
     }
 }
 

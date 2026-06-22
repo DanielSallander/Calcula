@@ -3442,7 +3442,9 @@ fn load_embedded_data_sources(
             is_connected: false,
             active_queries: std::collections::HashMap::new(),
             package_data_source_id: Some(ds.definition.id.clone()),
-            active_role: None,
+            // Restore a saved "view as" RLS role for this package connection
+            // (keyed by package data source id), if one was persisted.
+            active_role: bi_state.pending_role_for(Some(&ds.definition.id), None),
         };
 
         bi_state.connections.lock().unwrap().insert(conn_id, connection);

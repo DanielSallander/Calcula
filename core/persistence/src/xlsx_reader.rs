@@ -272,6 +272,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         pivot_definitions: Vec::new(),
         bi_pivot_metadata: Vec::new(),
         object_scripts: Vec::new(),
+        bi_connection_roles: Vec::new(),
     };
 
     // Parse charts from the XLSX archive (separate ZIP pass)
