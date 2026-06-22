@@ -117,6 +117,16 @@ engine-connectors → engine-core (types only)
    - e. Handle **all** `AuthMethod` variants in `from_target` — return `ConnectorError::AuthMethodNotSupported` for methods you don't support.
    See `engine-connectors/src/auth.rs` for the full type definitions and checklist.
 
+9. **Document every host-facing change.** `docs/host-integration-changelog.md` is the committed log that the **Calcula Studio** and **Calcula** teams rely on to track changes to the library boundary. Whenever you make a change that those host applications need to know about, you MUST add an entry to that changelog in the same change. A change is host-facing — and therefore requires a changelog entry — if it touches any of:
+   - The public API surface (new/changed/removed public types, functions, methods, or trait signatures host apps call).
+   - The model JSON format (any serialized field, including a `MODEL_FORMAT_VERSION` bump).
+   - A request contract (`QueryRequest`, `DetailRequest`, or any other host-supplied request type — new/changed/removed fields).
+   - The result contract (shape, columns, or metadata of returned data).
+   - Error variants the host can observe.
+   - Behavioral changes in existing surface that alter what a host sees (semantics, defaults, fail-closed conditions).
+
+   Purely internal changes (refactors, private helpers, test-only code, performance work with no observable difference) do NOT need an entry. When in doubt, ask: *"Would the Calcula Studio or Calcula team have to change their code, model files, or expectations because of this?"* If yes, log it. Follow the existing per-feature format and keep the version-history table in sync.
+
 ## Coding Conventions
 
 ### Rust Style
@@ -288,3 +298,4 @@ Development should follow this order. Each milestone produces a usable library:
 - Using `panic!` / `unwrap()` in library code paths
 - Adding a new connector without implementing `ConnectorAuth` or `from_target()`
 - Storing credentials in model files (only `ConnectionTarget` is serializable; `AuthMethod` is not)
+- Making a host-facing change (public API, model JSON, request/result contract, error variant, or `MODEL_FORMAT_VERSION` bump) without adding an entry to `docs/host-integration-changelog.md`
