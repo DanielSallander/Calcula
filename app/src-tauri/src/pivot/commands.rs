@@ -4158,14 +4158,23 @@ fn expand_bi_value_fields(
     value_fields: &[BiValueFieldRef],
     item_names: &[String],
     measure_start: usize,
+    value_col_idx: &std::collections::HashMap<(String, Option<String>), usize>,
 ) -> Vec<pivot_engine::ValueField> {
+    // Prefer the engine-reported column index for (measure, item); fall back to
+    // the positional index when metadata is absent (e.g. an empty result set).
+    let resolve = |measure: &str, item: Option<&str>, positional: usize| -> usize {
+        value_col_idx
+            .get(&(measure.to_string(), item.map(|s| s.to_string())))
+            .copied()
+            .unwrap_or(positional)
+    };
     if item_names.is_empty() {
         return value_fields
             .iter()
             .enumerate()
             .map(|(i, v)| {
                 let mut vf = ValueField::new(
-                    measure_start + i,
+                    resolve(&v.measure_name, None, measure_start + i),
                     format!("[{}]", v.measure_name),
                     AggregationType::Sum, // SUM of pre-aggregated = identity
                 );
@@ -4179,7 +4188,7 @@ fn expand_bi_value_fields(
     for (m_idx, v) in value_fields.iter().enumerate() {
         for (i_idx, item) in item_names.iter().enumerate() {
             let mut vf = ValueField::new(
-                measure_start + m_idx * k + i_idx,
+                resolve(&v.measure_name, Some(item), measure_start + m_idx * k + i_idx),
                 format!("[{}]", v.measure_name),
                 AggregationType::Sum,
             );
@@ -4197,6 +4206,7 @@ fn expand_bi_value_fields(
 #[cfg(test)]
 mod calc_group_expand_tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn vf(name: &str) -> crate::pivot::types::BiValueFieldRef {
         crate::pivot::types::BiValueFieldRef {
@@ -4205,10 +4215,15 @@ mod calc_group_expand_tests {
         }
     }
 
+    /// Empty metadata map => expand falls back to positional indices.
+    fn no_meta() -> HashMap<(String, Option<String>), usize> {
+        HashMap::new()
+    }
+
     #[test]
     fn no_calc_group_one_field_per_measure() {
         let fields = vec![vf("Revenue"), vf("Cost")];
-        let out = expand_bi_value_fields(&fields, &[], 3);
+        let out = expand_bi_value_fields(&fields, &[], 3, &no_meta());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].source_index, 3);
         assert_eq!(out[0].name, "[Revenue]");
@@ -4222,7 +4237,7 @@ mod calc_group_expand_tests {
     fn calc_group_expands_measures_outer_items_inner() {
         let fields = vec![vf("Revenue"), vf("Cost")];
         let items = vec!["Current".to_string(), "YTD".to_string(), "PY".to_string()];
-        let out = expand_bi_value_fields(&fields, &items, 2);
+        let out = expand_bi_value_fields(&fields, &items, 2, &no_meta());
         // 2 measures x 3 items = 6 fields, contiguous from measure_start = 2.
         assert_eq!(out.len(), 6);
         let cols: Vec<usize> = out.iter().map(|f| f.source_index).collect();
@@ -4241,11 +4256,45 @@ mod calc_group_expand_tests {
     fn custom_base_name_combines_with_item_and_keeps_clean_key() {
         let mut f = vf("Revenue");
         f.custom_name = Some("Sales".to_string());
-        let out = expand_bi_value_fields(&[f], &["YTD".to_string()], 0);
+        let out = expand_bi_value_fields(&[f], &["YTD".to_string()], 0, &no_meta());
         assert_eq!(out[0].custom_name.as_deref(), Some("Sales [YTD]"));
         // name stays the clean base measure key so it round-trips to the measure.
         assert_eq!(out[0].name, "[Revenue]");
         assert_eq!(out[0].calc_item.as_deref(), Some("YTD"));
+    }
+
+    #[test]
+    fn metadata_index_overrides_positional_order() {
+        // Engine reports the (measure, item) columns in a DIFFERENT order than the
+        // positional measures-outer/items-inner layout. The value fields must
+        // follow the engine metadata, not the positional arithmetic.
+        let fields = vec![vf("Revenue"), vf("Cost")];
+        let items = vec!["Current".to_string(), "YTD".to_string()];
+        // Shuffled column indices (measure_start would be 2 -> positional 2,3,4,5).
+        let mut meta: HashMap<(String, Option<String>), usize> = HashMap::new();
+        meta.insert(("Revenue".to_string(), Some("Current".to_string())), 7);
+        meta.insert(("Revenue".to_string(), Some("YTD".to_string())), 5);
+        meta.insert(("Cost".to_string(), Some("Current".to_string())), 4);
+        meta.insert(("Cost".to_string(), Some("YTD".to_string())), 6);
+        let out = expand_bi_value_fields(&fields, &items, 2, &meta);
+        // Order of value FIELDS is unchanged (measures-outer/items-inner), but each
+        // field's source_index comes from the metadata, not the positional guess.
+        assert_eq!(out[0].calc_item.as_deref(), Some("Current"));
+        assert_eq!(out[0].source_index, 7); // Revenue/Current
+        assert_eq!(out[1].source_index, 5); // Revenue/YTD
+        assert_eq!(out[2].source_index, 4); // Cost/Current
+        assert_eq!(out[3].source_index, 6); // Cost/YTD
+    }
+
+    #[test]
+    fn metadata_index_used_without_calc_group() {
+        let fields = vec![vf("Revenue"), vf("Cost")];
+        let mut meta: HashMap<(String, Option<String>), usize> = HashMap::new();
+        meta.insert(("Revenue".to_string(), None), 9);
+        meta.insert(("Cost".to_string(), None), 8);
+        let out = expand_bi_value_fields(&fields, &[], 1, &meta);
+        assert_eq!(out[0].source_index, 9);
+        assert_eq!(out[1].source_index, 8);
     }
 }
 
@@ -5104,10 +5153,13 @@ pub async fn update_bi_pivot_fields(
         let mut engine = engine_arc.lock().await;
         // Apply this connection's RLS role (or clear a sibling's) before querying.
         crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
-        engine.query(query_request).await
+        // query_with_meta returns per-column metadata (measure + calculation item
+        // attribution) so the value-field -> cache-column mapping is driven by the
+        // engine's own column identity rather than fragile positional arithmetic.
+        engine.query_with_meta(query_request).await
     };
-    let batches = match query_result {
-        Ok(b) => b,
+    let (batches, result_columns) = match query_result {
+        Ok((b, m)) => (b, m),
         Err(e) => {
             // If the query failed and we were using a synthetic measure,
             // save the field assignments anyway so they persist, then return
@@ -5350,8 +5402,23 @@ pub async fn update_bi_pivot_fields(
     if synthetic_measure.is_some() {
         definition.value_fields = Vec::new();
     } else {
-        definition.value_fields =
-            expand_bi_value_fields(&request.value_fields, &calc_item_names, measure_start);
+        // Map each measure value column to its cache index from the engine's
+        // per-column metadata (base measure + applied calculation item), so the
+        // value-field mapping follows the engine's actual column identity rather
+        // than positional arithmetic. Empty/absent metadata -> positional fallback.
+        let value_col_idx: std::collections::HashMap<(String, Option<String>), usize> =
+            result_columns
+                .iter()
+                .enumerate()
+                .filter(|(_, rc)| matches!(rc.kind, bi_engine::ResultColumnKind::Measure))
+                .filter_map(|(i, rc)| rc.measure.clone().map(|m| ((m, rc.calculation_item.clone()), i)))
+                .collect();
+        definition.value_fields = expand_bi_value_fields(
+            &request.value_fields,
+            &calc_item_names,
+            measure_start,
+            &value_col_idx,
+        );
     }
 
     // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter.
