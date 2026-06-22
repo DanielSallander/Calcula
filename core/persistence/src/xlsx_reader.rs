@@ -274,6 +274,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         object_scripts: Vec::new(),
         bi_connection_roles: Vec::new(),
         bi_connections: Vec::new(),
+        bi_connection_caches: std::collections::HashMap::new(),
     };
 
     // Parse charts from the XLSX archive (separate ZIP pass)

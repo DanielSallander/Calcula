@@ -75,6 +75,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     if !workbook.bi_connections.is_empty() {
         manifest.features.push("bi_connections".to_string());
     }
+    if !workbook.bi_connection_caches.is_empty() {
+        manifest.features.push("bi_connection_caches".to_string());
+    }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
     }
@@ -227,6 +230,16 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
         let conn_json = serde_json::to_string_pretty(conn)?;
         zip.start_file(format!("bi_connections/conn_{}.json", i), options.clone())?;
         zip.write_all(conn_json.as_bytes())?;
+    }
+
+    // Write embedded BI cache blobs as raw binary entries under
+    // bi_cache/{connId}/{relfile} (connId is a UUID, relfile is an engine-
+    // sanitized cache file name — neither contains path separators).
+    for (conn_id, files) in &workbook.bi_connection_caches {
+        for (rel, bytes) in files {
+            zip.start_file(format!("bi_cache/{}/{}", conn_id, rel), options.clone())?;
+            zip.write_all(bytes)?;
+        }
     }
 
     // Write scripts
@@ -547,6 +560,36 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read embedded BI cache blobs: bi_cache/{connId}/{relfile} -> raw bytes
+    let mut bi_connection_caches: std::collections::HashMap<String, std::collections::HashMap<String, Vec<u8>>> = std::collections::HashMap::new();
+    if manifest.features.contains(&"bi_connection_caches".to_string()) {
+        let cache_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("bi_cache/") && !name.ends_with('/') {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for name in cache_names {
+            // bi_cache/{connId}/{rel}
+            let rest = &name["bi_cache/".len()..];
+            let Some(slash) = rest.find('/') else { continue };
+            let conn_id = rest[..slash].to_string();
+            let rel = rest[slash + 1..].to_string();
+            if conn_id.is_empty() || rel.is_empty() {
+                continue;
+            }
+            let mut entry = archive.by_name(&name).map_err(FormatError::Zip)?;
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content)?;
+            bi_connection_caches.entry(conn_id).or_default().insert(rel, content);
+        }
+    }
+
     // Read ribbon filters
     let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
     if manifest.features.contains(&"ribbon_filters".to_string()) {
@@ -678,6 +721,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         object_scripts,
         bi_connection_roles,
         bi_connections,
+        bi_connection_caches,
     })
 }
 
@@ -812,6 +856,7 @@ mod tests {
             object_scripts: Vec::new(),
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
+            bi_connection_caches: std::collections::HashMap::new(),
         }
     }
 
@@ -1039,6 +1084,40 @@ mod tests {
         assert_eq!(c.model_json["formatVersion"], 1);
         // Credentials are never persisted.
         assert_eq!(loaded.bi_connections[0].model_json.get("connectionString"), None);
+    }
+
+    #[test]
+    fn test_roundtrip_with_bi_connection_caches() {
+        let mut workbook = make_test_workbook();
+        let mut files = HashMap::new();
+        files.insert("metadata.json".to_string(), b"{\"tables\":[]}".to_vec());
+        // Raw binary (incl. non-UTF8 bytes) must round-trip byte-for-byte.
+        files.insert("Sales_1a2b3c4d.arrow".to_string(), vec![1u8, 2, 3, 255, 0, 42, 200]);
+        workbook.bi_connection_caches.insert("conn-1".to_string(), files);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_bi_cache.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.bi_connection_caches.len(), 1);
+        let c = loaded.bi_connection_caches.get("conn-1").unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.get("metadata.json").unwrap(), b"{\"tables\":[]}");
+        assert_eq!(
+            c.get("Sales_1a2b3c4d.arrow").unwrap(),
+            &vec![1u8, 2, 3, 255, 0, 42, 200]
+        );
+    }
+
+    #[test]
+    fn test_bi_connection_caches_absent_when_empty() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_no_bi_cache.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.bi_connection_caches.is_empty());
     }
 
     #[test]

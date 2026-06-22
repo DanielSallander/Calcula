@@ -1230,6 +1230,10 @@ pub fn save_file(
     // so they reconstruct on open without the original model file.
     workbook.bi_connections = crate::bi::commands::capture_local_bi_connections(&bi_state);
 
+    // Embed each local connection's cached table data (size-guarded) so the
+    // pivots are interactive offline on another machine.
+    workbook.bi_connection_caches = crate::bi::commands::collect_local_bi_caches(&bi_state);
+
     // Serialize subscription metadata into user_files so it persists in the .cala archive
     {
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
@@ -1603,6 +1607,7 @@ pub fn open_file(
         let id_map = crate::bi::commands::restore_local_bi_connections(
             &bi_state,
             &workbook.bi_connections,
+            &workbook.bi_connection_caches,
         );
         if !id_map.is_empty() {
             if let Ok(mut bi_meta) = pivot_state.bi_metadata.lock() {

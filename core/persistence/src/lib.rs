@@ -85,6 +85,12 @@ pub struct Workbook {
     /// on the original model file. Package-subscribed connections are NOT stored
     /// here — they reconstruct from the .calp on re-pull.
     pub bi_connections: Vec<SavedBiConnection>,
+    /// Embedded BI table-cache blobs for cross-machine offline use. Outer key =
+    /// connection id (matches SavedBiConnection.id); inner key = cache-dir file
+    /// name (e.g. "metadata.json", "Sales_1a2b3c4d.arrow"); value = raw bytes.
+    /// Only locally-authored connections are embedded. Stored as raw zip entries
+    /// (not JSON) so binary Arrow data isn't base64-bloated.
+    pub bi_connection_caches: HashMap<String, HashMap<String, Vec<u8>>>,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -311,6 +317,7 @@ impl Workbook {
             object_scripts: Vec::new(),
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
+            bi_connection_caches: HashMap::new(),
         }
     }
 
@@ -337,6 +344,7 @@ impl Workbook {
             object_scripts: Vec::new(),
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
+            bi_connection_caches: HashMap::new(),
         }
     }
 }

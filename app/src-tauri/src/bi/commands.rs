@@ -538,6 +538,35 @@ pub(crate) fn apply_connection_role(
     engine.set_active_role(role);
 }
 
+/// True if every named table is already present in this connection's engine
+/// cache (i.e. servable offline with no DB connector). False when the list is
+/// empty, the connection/engine is missing, or any table is cold. Used to skip
+/// auto-connect/auto-bind on a cache-warm connection so restored pivots are
+/// interactive offline.
+pub(crate) async fn bi_tables_cache_warm(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+    tables: &[&str],
+) -> bool {
+    if tables.is_empty() {
+        return false;
+    }
+    let engine_arc = {
+        let connections = match bi_state.connections.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        connections.get(&connection_id).and_then(|c| c.engine.clone())
+    };
+    match engine_arc {
+        Some(arc) => {
+            let guard = arc.lock().await;
+            tables.iter().all(|t| guard.cache().contains(t))
+        }
+        None => false,
+    }
+}
+
 /// Map a BI query error to a user-facing message. Row-level-security failures
 /// get a friendly, actionable hint (the engine's raw variant is otherwise
 /// opaque to an end user); everything else keeps the caller's `context` prefix
@@ -708,6 +737,92 @@ pub(crate) fn capture_local_bi_connections(
     saved
 }
 
+/// Flush + collect each LOCAL BI connection's on-disk cache for embedding in
+/// the workbook (cross-machine offline data). Sync + non-blocking (try_lock);
+/// skips package connections and any connection over the size caps. A
+/// connection's cache is embedded all-or-nothing and only when metadata.json is
+/// present (the engine needs it to reload the .arrow files).
+pub(crate) fn collect_local_bi_caches(
+    bi_state: &BiState,
+) -> std::collections::HashMap<String, std::collections::HashMap<String, Vec<u8>>> {
+    const PER_CONN_CAP: u64 = 100 * 1024 * 1024; // 100 MB / connection
+    const GLOBAL_CAP: u64 = 500 * 1024 * 1024; // 500 MB total
+    let mut out: std::collections::HashMap<String, std::collections::HashMap<String, Vec<u8>>> =
+        std::collections::HashMap::new();
+    let mut total: u64 = 0;
+    let connections = bi_state.connections.lock().unwrap();
+    for conn in connections.values() {
+        if conn.package_data_source_id.is_some() {
+            continue; // package connection — reconstructs from the .calp
+        }
+        let (engine_arc, model_key) = match (&conn.engine, &conn.model_key) {
+            (Some(e), Some(k)) => (e, k),
+            _ => continue,
+        };
+        let cache_dir = EngineRegistry::cache_dir_for(model_key);
+        // Flush the in-memory cache to disk so the embedded bytes are current.
+        // A busy engine simply embeds whatever is already on disk.
+        if let Ok(engine) = engine_arc.try_lock() {
+            EngineRegistry::save_cache_sync(&engine, &cache_dir);
+        }
+        if !cache_dir.exists() {
+            continue;
+        }
+        let mut files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        let mut conn_bytes: u64 = 0;
+        let mut over = false;
+        if let Ok(rd) = std::fs::read_dir(&cache_dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let rel = match p.file_name().and_then(|s| s.to_str()) {
+                    Some(r) => r.to_string(),
+                    None => continue,
+                };
+                match std::fs::read(&p) {
+                    Ok(bytes) => {
+                        conn_bytes += bytes.len() as u64;
+                        if conn_bytes > PER_CONN_CAP || total + conn_bytes > GLOBAL_CAP {
+                            crate::log_warn!(
+                                "BI",
+                                "skip embedding cache for connection {}: exceeds size cap",
+                                conn.id
+                            );
+                            over = true;
+                            break;
+                        }
+                        files.insert(rel, bytes);
+                    }
+                    Err(e) => crate::log_warn!(
+                        "BI",
+                        "cache file {} read failed (skipped): {}",
+                        p.display(),
+                        e
+                    ),
+                }
+            }
+        }
+        if over || files.is_empty() {
+            continue;
+        }
+        // metadata.json is required to reload — without it the .arrow files are
+        // unusable, so embed all-or-nothing per connection.
+        if !files.contains_key("metadata.json") {
+            crate::log_warn!(
+                "BI",
+                "skip embedding cache for connection {}: no metadata.json",
+                conn.id
+            );
+            continue;
+        }
+        total += conn_bytes;
+        out.insert(conn.id.to_string(), files);
+    }
+    out
+}
+
 /// Reconstruct locally-authored BI connections from the workbook on open.
 /// Each is rebuilt with its ORIGINAL id (so pivots' `data_source_id` keeps
 /// matching across save/open cycles), the embedded model goes into a fresh
@@ -718,6 +833,7 @@ pub(crate) fn capture_local_bi_connections(
 pub(crate) fn restore_local_bi_connections(
     bi_state: &BiState,
     saved: &[persistence::SavedBiConnection],
+    caches: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<u8>>>,
 ) -> std::collections::HashMap<String, ConnectionId> {
     let mut id_map = std::collections::HashMap::new();
     for sc in saved {
@@ -753,9 +869,40 @@ pub(crate) fn restore_local_bi_connections(
         let engine = build_configured_engine(model);
         let (engine_arc, was_existing, cache_dir) =
             bi_state.engine_registry.get_or_create(&model_key, engine);
-        // Load the prior session's disk cache so queries can serve offline until
-        // a refresh. A freshly-created engine is uncontended, so try_lock succeeds.
         if !was_existing {
+            // Materialize embedded offline cache blobs into this engine's
+            // cache_dir BEFORE load_cache (on another machine the dir won't
+            // pre-exist). Only for a freshly-created engine — a reused one
+            // already holds its (possibly warmer) cache.
+            if let Some(files) = caches.get(&sc.id) {
+                match std::fs::create_dir_all(&cache_dir) {
+                    Ok(()) => {
+                        let mut n = 0usize;
+                        for (rel, bytes) in files {
+                            // rel is a sanitized single cache file name; guard anyway.
+                            if rel.contains('/') || rel.contains('\\') || rel.contains("..") {
+                                continue;
+                            }
+                            match std::fs::write(cache_dir.join(rel), bytes) {
+                                Ok(()) => n += 1,
+                                Err(e) => crate::log_warn!(
+                                    "BI", "restore {}: write cache file {} failed: {}", sc.id, rel, e
+                                ),
+                            }
+                        }
+                        if n > 0 {
+                            crate::log_info!(
+                                "BI", "restore {}: materialized {} embedded cache files", sc.id, n
+                            );
+                        }
+                    }
+                    Err(e) => crate::log_warn!(
+                        "BI", "restore {}: create cache_dir failed: {}", sc.id, e
+                    ),
+                }
+            }
+            // Load the disk cache (including any blobs just materialized) so
+            // queries serve offline until a refresh. Fresh engine -> try_lock ok.
             if let Ok(mut guard) = engine_arc.try_lock() {
                 let loaded = EngineRegistry::load_cache(&mut guard, &cache_dir);
                 if !loaded.is_empty() {
@@ -1657,24 +1804,20 @@ pub async fn bi_get_column_values(
         column
     );
 
-    // Auto-connect if not already connected
-    auto_connect_bi_connection(&bi_state, connection_id).await?;
-
-    // Auto-bind ALL model tables — the query planner may need fact tables
-    // for measure computation even when we only group by a dimension column.
-    {
+    // Auto-bind ALL model tables — the query planner may need fact tables for
+    // measure computation even when we only group by a dimension column. Skip
+    // connect+bind when every table is already cache-warm (offline slicer values).
+    let all_tables: Vec<String> = {
         let engine_arc = get_engine_arc(&bi_state, connection_id)?;
-        let all_tables: Vec<String> = {
-            let engine = engine_arc.lock().await;
-            engine.model().tables().iter()
-                .map(|t| t.name().to_string())
-                .collect()
-        };
-        auto_bind_tables_on_connection(
-            &bi_state,
-            connection_id,
-            &all_tables.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        ).await?;
+        let engine = engine_arc.lock().await;
+        engine.model().tables().iter()
+            .map(|t| t.name().to_string())
+            .collect()
+    };
+    let table_refs: Vec<&str> = all_tables.iter().map(|s| s.as_str()).collect();
+    if !bi_tables_cache_warm(&bi_state, connection_id, &table_refs).await {
+        auto_connect_bi_connection(&bi_state, connection_id).await?;
+        auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
     }
 
     // The BI engine requires at least one measure. Pick the first available.
@@ -1746,21 +1889,18 @@ pub async fn bi_get_column_available_values(
     column: String,
     cross_filters: Vec<BiCrossFilter>,
 ) -> Result<Vec<String>, String> {
-    // Auto-connect + auto-bind
-    auto_connect_bi_connection(&bi_state, connection_id).await?;
-    {
+    // Auto-connect + auto-bind, unless every table is already cache-warm (offline).
+    let all_tables: Vec<String> = {
         let engine_arc = get_engine_arc(&bi_state, connection_id)?;
-        let all_tables: Vec<String> = {
-            let engine = engine_arc.lock().await;
-            engine.model().tables().iter()
-                .map(|t| t.name().to_string())
-                .collect()
-        };
-        auto_bind_tables_on_connection(
-            &bi_state,
-            connection_id,
-            &all_tables.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        ).await?;
+        let engine = engine_arc.lock().await;
+        engine.model().tables().iter()
+            .map(|t| t.name().to_string())
+            .collect()
+    };
+    let table_refs: Vec<&str> = all_tables.iter().map(|s| s.as_str()).collect();
+    if !bi_tables_cache_warm(&bi_state, connection_id, &table_refs).await {
+        auto_connect_bi_connection(&bi_state, connection_id).await?;
+        auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
     }
 
     let first_measure = {

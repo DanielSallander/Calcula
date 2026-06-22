@@ -3,7 +3,7 @@
 //! CONTEXT: Excel-compatible Pivot Table API implementation.
 
 use crate::bi::types::BiState;
-use crate::bi::commands::{auto_connect_bi_connection, auto_bind_tables_on_connection};
+use crate::bi::commands::{auto_connect_bi_connection, auto_bind_tables_on_connection, bi_tables_cache_warm};
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
@@ -4446,10 +4446,8 @@ pub async fn create_pivot_from_bi_model(
         connection_id
     );
 
-    // Auto-connect the connection
-    auto_connect_bi_connection(&bi_state, connection_id).await?;
-
-    // Extract model metadata from the connection's engine
+    // Extract model metadata from the connection's engine (reads the in-memory
+    // model; no DB connection required, so this works offline).
     let (model_tables, measures, hierarchies, calc_groups) = {
         let engine_arc = {
             let connections = bi_state.connections.lock().unwrap();
@@ -4478,9 +4476,14 @@ pub async fn create_pivot_from_bi_model(
         result
     };
 
-    // Auto-bind all model tables
+    // Connect + bind only when the model's tables aren't already cache-warm.
+    // Offline (a restored connection with embedded cache) this is skipped so a
+    // pivot can be created and queried without a live DB.
     let table_names: Vec<&str> = model_tables.iter().map(|t| t.name.as_str()).collect();
-    auto_bind_tables_on_connection(&bi_state, connection_id, &table_names).await?;
+    if !bi_tables_cache_warm(&bi_state, connection_id, &table_names).await {
+        auto_connect_bi_connection(&bi_state, connection_id).await?;
+        auto_bind_tables_on_connection(&bi_state, connection_id, &table_names).await?;
+    }
 
     log_info!(
         "PIVOT",
@@ -4789,12 +4792,8 @@ pub async fn update_bi_pivot_fields(
             .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?
     };
 
-    // Auto-connect if needed
-    log_info!("CALP-DIAG", "update_bi_pivot_fields: calling auto_connect for connection_id={}", connection_id);
-    auto_connect_bi_connection(&bi_state, connection_id).await?;
-    log_info!("CALP-DIAG", "update_bi_pivot_fields: auto_connect succeeded for connection_id={}", connection_id);
-
-    // Collect table names referenced in fields for auto-binding
+    // Collect table names referenced in fields (for the cache-warmth check below
+    // and for auto-binding when online).
     let mut referenced_tables: Vec<String> = Vec::new();
     for f in request.row_fields.iter()
         .chain(request.column_fields.iter())
@@ -4827,7 +4826,20 @@ pub async fn update_bi_pivot_fields(
         }
     }
     let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
-    auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
+
+    // Offline fast path: if every referenced table is already warm in this
+    // engine's cache, serve straight from cache and skip the connector — the
+    // query path (engine.query_with_meta below) is cache-only. This makes a
+    // restored pivot interactive offline (cross-machine, from embedded cache).
+    // Only reach for the network when a table is genuinely cold.
+    let all_warm = bi_tables_cache_warm(&bi_state, connection_id, &table_refs).await;
+    if all_warm {
+        log_info!("BI", "update_bi_pivot_fields: {} table(s) cache-warm — serving offline (no connect)", table_refs.len());
+    } else {
+        log_info!("CALP-DIAG", "update_bi_pivot_fields: calling auto_connect for connection_id={}", connection_id);
+        auto_connect_bi_connection(&bi_state, connection_id).await?;
+        auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
+    }
 
     // Guardrail: a LOOKUP field must follow at least one GROUP field from the same table.
     // Check across all zones (row + column fields combined for GROUP coverage).
