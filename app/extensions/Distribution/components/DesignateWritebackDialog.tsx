@@ -1,45 +1,74 @@
 // FILENAME: app/extensions/Distribution/components/DesignateWritebackDialog.tsx
-// PURPOSE: Dialog for publisher to designate a range as a writeback region.
-// CONTEXT: Opened from the Data menu or context menu on a selected range.
+// PURPOSE: Dialog to designate a range as a writeback region (add), or edit an
+//          existing draft region's policies/schema in place (edit).
+// CONTEXT: Opened from the Data menu / context menu on a selected range (add),
+//          or from the WritebackPane "Edit" button on a draft region (edit).
 
 import React, { useState, useCallback } from "react";
+import { emitAppEvent } from "@api";
 import {
   addWritebackRegion,
+  updateWritebackRegion,
   type WritebackRegionDeclaration,
   type ValueSchemaConfig,
   type LifecyclePolicyConfig,
 } from "@api/distribution";
 
+/** Emitted after a draft writeback region is added/updated, so the WritebackPane
+ *  (and anything else listing draft regions) can refresh. */
+export const WRITEBACK_REGIONS_CHANGED_EVENT = "distribution:writebackRegionsChanged";
+
 interface Props {
   onClose: () => void;
   data?: {
-    sheetId: string;
-    startRow: number;
-    endRow: number;
-    startCol: number;
-    endCol: number;
+    // Add mode: the selected range to designate.
+    sheetId?: string;
+    startRow?: number;
+    endRow?: number;
+    startCol?: number;
+    endCol?: number;
+    // Edit mode: the existing draft region to edit (id + selector preserved).
+    region?: WritebackRegionDeclaration;
   };
 }
 
+/** Convert a stored UTC ISO timestamp back to a `datetime-local` value (local
+ *  wall-clock "YYYY-MM-DDTHH:MM") for pre-filling the deadline input on edit. */
+function isoToLocalInput(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export function DesignateWritebackDialog({ onClose, data }: Props) {
-  const [mode, setMode] = useState<"per_subscriber" | "list_object">("per_subscriber");
-  const [valueType, setValueType] = useState<string>("number");
-  const [required, setRequired] = useState(false);
-  const [min, setMin] = useState("");
-  const [max, setMax] = useState("");
-  const [enumValues, setEnumValues] = useState("");
-  const [visibility, setVisibility] = useState<string>("own_plus_aggregate");
-  const [submissionPolicy, setSubmissionPolicy] = useState<string>("on_submit");
-  const [versionBinding, setVersionBinding] = useState<string>("lenient");
-  const [lifecyclePolicy, setLifecyclePolicy] = useState<string>("always");
-  const [deadline, setDeadline] = useState("");
-  const [aggregationHint, setAggregationHint] = useState("");
-  const [expectedRespondents, setExpectedRespondents] = useState("");
+  const editing = data?.region;
+  const s = editing?.schema;
+  const lc = editing?.lifecycle;
+
+  const [mode, setMode] = useState<"per_subscriber" | "list_object">(
+    (editing?.mode as "per_subscriber" | "list_object") ?? "per_subscriber",
+  );
+  const [valueType, setValueType] = useState<string>(s?.valueType ?? "number");
+  const [required, setRequired] = useState(s?.required ?? false);
+  const [min, setMin] = useState(s?.min != null ? String(s.min) : "");
+  const [max, setMax] = useState(s?.max != null ? String(s.max) : "");
+  const [enumValues, setEnumValues] = useState((s?.enumValues ?? []).join(", "));
+  const [visibility, setVisibility] = useState<string>(editing?.visibility ?? "own_plus_aggregate");
+  const [submissionPolicy, setSubmissionPolicy] = useState<string>(editing?.submissionPolicy ?? "on_submit");
+  const [versionBinding, setVersionBinding] = useState<string>(editing?.versionBinding ?? "lenient");
+  const [lifecyclePolicy, setLifecyclePolicy] = useState<string>(lc?.policy ?? "always");
+  const [deadline, setDeadline] = useState(isoToLocalInput(lc?.deadline));
+  const [aggregationHint, setAggregationHint] = useState(editing?.aggregationHint ?? "");
+  const [expectedRespondents, setExpectedRespondents] = useState(
+    (editing?.expectedRespondents ?? []).join(", "),
+  );
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const handleDesignate = useCallback(async () => {
-    if (!data) {
+  const handleSave = useCallback(async () => {
+    if (!editing && (!data || data.sheetId == null)) {
       setError("No range selected. Please select a range before opening this dialog.");
       return;
     }
@@ -68,21 +97,12 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
         if (!isNaN(d.getTime())) lifecycle.deadline = d.toISOString();
       }
 
-      const id = crypto.randomUUID();
       const respondents = expectedRespondents
         .split(",")
-        .map((s) => s.trim())
+        .map((v) => v.trim())
         .filter(Boolean);
 
-      const region: WritebackRegionDeclaration = {
-        id,
-        selector: {
-          sheetId: data.sheetId,
-          rowStart: data.startRow,
-          rowEnd: data.endRow,
-          colStart: data.startCol,
-          colEnd: data.endCol,
-        },
+      const common = {
         mode,
         schema,
         visibility: visibility as WritebackRegionDeclaration["visibility"],
@@ -93,24 +113,44 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
         expectedRespondents: respondents.length > 0 ? respondents : undefined,
       };
 
-      await addWritebackRegion(region);
+      if (editing) {
+        // Preserve id + selector; replace the policy/schema fields.
+        await updateWritebackRegion({ ...editing, ...common });
+      } else {
+        await addWritebackRegion({
+          id: crypto.randomUUID(),
+          selector: {
+            sheetId: data!.sheetId!,
+            rowStart: data!.startRow!,
+            rowEnd: data!.endRow!,
+            colStart: data!.startCol!,
+            colEnd: data!.endCol!,
+          },
+          ...common,
+        });
+      }
+      emitAppEvent(WRITEBACK_REGIONS_CHANGED_EVENT, {});
       onClose();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);
     }
-  }, [data, mode, valueType, required, min, max, enumValues, visibility, submissionPolicy, versionBinding, lifecyclePolicy, deadline, aggregationHint, expectedRespondents, onClose]);
+  }, [editing, data, mode, valueType, required, min, max, enumValues, visibility, submissionPolicy, versionBinding, lifecyclePolicy, deadline, aggregationHint, expectedRespondents, onClose]);
 
-  const rangeLabel = data
-    ? `Row ${data.startRow + 1}-${data.endRow + 1}, Col ${data.startCol + 1}-${data.endCol + 1}`
-    : "No range selected";
+  const sel = editing?.selector;
+  const rangeLabel = editing
+    ? `Row ${(sel!.rowStart) + 1}-${(sel!.rowEnd) + 1}, Col ${(sel!.colStart) + 1}-${(sel!.colEnd) + 1}`
+    : data && data.startRow != null
+      ? `Row ${data.startRow + 1}-${data.endRow! + 1}, Col ${data.startCol! + 1}-${data.endCol! + 1}`
+      : "No range selected";
 
   return (
     <div style={{ padding: 16, minWidth: 400 }}>
-      <h3 style={{ marginTop: 0 }}>Designate Writeback Region</h3>
+      <h3 style={{ marginTop: 0 }}>{editing ? "Edit Writeback Region" : "Designate Writeback Region"}</h3>
       <p style={{ fontSize: 12, color: "#666" }}>
         Range: <strong>{rangeLabel}</strong>
+        {editing && <span style={{ color: "#888" }}> (range can't be changed — remove &amp; re-designate to move it)</span>}
       </p>
       <p style={{ fontSize: 12, color: "#666" }}>
         Subscribers will be able to input values into these cells after subscribing.
@@ -214,8 +254,10 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
         <button onClick={onClose}>Cancel</button>
-        <button onClick={handleDesignate} disabled={submitting || !data}>
-          {submitting ? "Designating..." : "Designate Region"}
+        <button onClick={handleSave} disabled={submitting || (!editing && !data)}>
+          {submitting
+            ? (editing ? "Saving..." : "Designating...")
+            : (editing ? "Save Changes" : "Designate Region")}
         </button>
       </div>
     </div>

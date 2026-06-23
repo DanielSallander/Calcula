@@ -4,6 +4,7 @@
 // workbook, per-region state (empty/draft/submitted), deadlines, and submit buttons.
 
 import React, { useState, useEffect, useCallback } from "react";
+import { showDialog, onAppEvent } from "@api";
 import {
   getWritebackRegions,
   reconcileWriteback,
@@ -17,6 +18,8 @@ import {
   type WritebackRegionDeclaration,
   type OutboundSubmissionPreview,
 } from "@api/distribution";
+import { DESIGNATE_WRITEBACK_DIALOG_ID } from "../manifest";
+import { WRITEBACK_REGIONS_CHANGED_EVENT } from "./DesignateWritebackDialog";
 
 /** Format an ISO deadline as a relative "Due in …" / "Overdue" chip. */
 function deadlineLabel(iso?: string): { text: string; color: string } | null {
@@ -151,6 +154,10 @@ export function WritebackPane() {
 
   useEffect(() => {
     refresh();
+    // Refresh when a draft region is added/updated (from this pane's Edit button
+    // or the Data-menu Designate dialog).
+    const off = onAppEvent(WRITEBACK_REGIONS_CHANGED_EVENT, () => void refresh());
+    return off;
   }, [refresh]);
 
   // Step 1: load a read-only preview of exactly what would be sent (no send yet).
@@ -343,13 +350,22 @@ export function WritebackPane() {
               <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
                 Mode: {region.mode ?? "not set"} | Visibility: {region.visibility ?? "not set"}
               </div>
-              <button
-                onClick={() => handleRemoveDraft(region.id)}
-                style={{ marginTop: 4, fontSize: 11, color: "#c5221f" }}
-                title="Remove this draft writeback region (it won't be published)"
-              >
-                Remove
-              </button>
+              <div style={{ marginTop: 4, display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => showDialog(DESIGNATE_WRITEBACK_DIALOG_ID, { region })}
+                  style={{ fontSize: 11 }}
+                  title="Edit this draft writeback region's policies/schema"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleRemoveDraft(region.id)}
+                  style={{ fontSize: 11, color: "#c5221f" }}
+                  title="Remove this draft writeback region (it won't be published)"
+                >
+                  Remove
+                </button>
+              </div>
             </div>
           ))}
         </>
