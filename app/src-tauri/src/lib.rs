@@ -4314,6 +4314,7 @@ pub fn run() {
             calp_commands::calp_submit_region,
             calp_commands::calp_submit_all_regions,
             calp_commands::calp_export_region_submissions_csv,
+            calp_commands::calp_export_region_submissions_parquet,
             calp_commands::calp_region_response_status,
             calp_commands::calp_preview_region_submission,
             calp_commands::calp_export_package_html,

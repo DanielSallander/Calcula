@@ -44,6 +44,23 @@ export async function saveCsvReport(
 }
 
 /**
+ * Save collected-submission Parquet bytes to a user-chosen `.parquet` file.
+ * Returns the path written, or null if the user cancelled the save dialog.
+ */
+export async function saveParquetReport(
+  bytes: number[],
+  suggestedName: string,
+): Promise<string | null> {
+  const filePath = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "Parquet", extensions: ["parquet"] }],
+  });
+  if (!filePath) return null;
+  await writeBinaryFile(filePath, bytes);
+  return filePath;
+}
+
+/**
  * Open a rendered (print-ready) HTML report in a new window and trigger the
  * browser print dialog — from which the recipient picks "Save as PDF" (B).
  * Mirrors the Print extension's window.open + print pattern (no new deps).

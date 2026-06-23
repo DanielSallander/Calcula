@@ -2647,6 +2647,8 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
         registry.save_submission(&package_name, &resolved_version, sub)
             .map_err(|e| e.to_string())?;
     }
+    // Refresh the per-version Parquet rollup for downstream DB consumption.
+    materialize_submissions_parquet(&registry, &package_name, &resolved_version);
 
     // All writes succeeded — advance the local drafts.
     {
@@ -2931,6 +2933,8 @@ pub fn calp_set_submission_state(
     registry
         .save_submission(&package_name, &version, &submission)
         .map_err(|e| e.to_string())?;
+    // Refresh the per-version Parquet rollup for downstream DB consumption.
+    materialize_submissions_parquet(&registry, &package_name, &version);
     invalidate_gather_cache(&state);
 
     // Audit the publisher decision — the provenance of the return leg, so a
@@ -2990,14 +2994,14 @@ pub fn calp_load_region_submissions(
     load_region_submission_infos(&state, &region_id)
 }
 
-/// Shared loader behind `calp_load_region_submissions` and the CSV export: the
-/// current record per (submitter, cell) slot across resolved + older versions.
-fn load_region_submission_infos(
+/// The current raw record per (submitter, cell) slot for a region, across the
+/// resolved version and older ones (lenient carry-forward), sorted by submitter
+/// then cell. Shared by the dashboard projection, the CSV export, and the
+/// Parquet export so all three see exactly the same set.
+fn load_region_current_submissions(
     state: &AppState,
     region_id: &str,
-) -> Result<Vec<RegionSubmissionInfo>, String> {
-    use calp::writeback::{SubmissionState, SubmissionValue};
-
+) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
     let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
@@ -3019,8 +3023,37 @@ fn load_region_submission_infos(
         }
     }
 
-    let mut out: Vec<RegionSubmissionInfo> = by_slot
-        .into_values()
+    let mut out: Vec<_> = by_slot.into_values().collect();
+    out.sort_by(|a, b| {
+        a.submitter
+            .display_name
+            .cmp(&b.submitter.display_name)
+            .then(a.cell_row.cmp(&b.cell_row))
+            .then(a.cell_col.cmp(&b.cell_col))
+    });
+    Ok(out)
+}
+
+/// The string label for a submission state.
+fn submission_state_str(s: &calp::writeback::SubmissionState) -> &'static str {
+    use calp::writeback::SubmissionState::*;
+    match s {
+        Draft => "draft",
+        Submitted => "submitted",
+        Approved => "approved",
+        Rejected => "rejected",
+    }
+}
+
+/// Shared loader behind `calp_load_region_submissions` and the CSV export: the
+/// current record per (submitter, cell) slot, projected for the dashboard.
+fn load_region_submission_infos(
+    state: &AppState,
+    region_id: &str,
+) -> Result<Vec<RegionSubmissionInfo>, String> {
+    use calp::writeback::SubmissionValue;
+    let out: Vec<RegionSubmissionInfo> = load_region_current_submissions(state, region_id)?
+        .into_iter()
         .map(|s| {
             let (value_display, value_kind) = match &s.value {
                 SubmissionValue::Number { value } => (value.to_string(), "number"),
@@ -3030,12 +3063,6 @@ fn load_region_submission_infos(
                 }
                 SubmissionValue::Empty => (String::new(), "empty"),
             };
-            let state = match s.state {
-                SubmissionState::Draft => "draft",
-                SubmissionState::Submitted => "submitted",
-                SubmissionState::Approved => "approved",
-                SubmissionState::Rejected => "rejected",
-            };
             RegionSubmissionInfo {
                 region_id: s.region_id,
                 cell_row: s.cell_row,
@@ -3044,7 +3071,7 @@ fn load_region_submission_infos(
                 submitter_name: s.submitter.display_name,
                 value_display,
                 value_kind: value_kind.to_string(),
-                state: state.to_string(),
+                state: submission_state_str(&s.state).to_string(),
                 submitted_at: s.submitted_at,
                 updated_at: s.updated_at,
                 review_reason: s.review_reason,
@@ -3052,13 +3079,6 @@ fn load_region_submission_infos(
             }
         })
         .collect();
-    // Stable ordering: by submitter then cell.
-    out.sort_by(|a, b| {
-        a.submitter_name
-            .cmp(&b.submitter_name)
-            .then(a.cell_row.cmp(&b.cell_row))
-            .then(a.cell_col.cmp(&b.cell_col))
-    });
     Ok(out)
 }
 
@@ -3109,6 +3129,184 @@ pub fn calp_export_region_submissions_csv(
         out.push('\n');
     }
     Ok(out)
+}
+
+/// A1 reference for a 0-based (row, col): e.g. (1, 1) -> "B2".
+fn a1(row: u32, col: u32) -> String {
+    let mut letters = String::new();
+    let mut n = col as i64;
+    loop {
+        letters.insert(0, (b'A' + (n % 26) as u8) as char);
+        n = n / 26 - 1;
+        if n < 0 {
+            break;
+        }
+    }
+    format!("{}{}", letters, row + 1)
+}
+
+/// Encode a set of writeback submissions as Parquet bytes with a TYPED, columnar
+/// schema (separate `value_number`/`value_text`/`value_bool` columns + a
+/// `value_kind` discriminator), so a database can read it directly — e.g.
+/// `SELECT SUM(value_number) ... WHERE value_kind = 'number'` — without parsing
+/// per-slot JSON or guessing types from a CSV.
+fn encode_submissions_parquet(
+    subs: &[calp::writeback::WritebackSubmission],
+) -> Result<Vec<u8>, String> {
+    use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, StringBuilder, UInt32Builder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use calp::writeback::SubmissionValue;
+    use std::sync::Arc;
+
+    let mut region_id = StringBuilder::new();
+    let mut cell_row = UInt32Builder::new();
+    let mut cell_col = UInt32Builder::new();
+    let mut cell_ref = StringBuilder::new();
+    let mut submitter_id = StringBuilder::new();
+    let mut submitter_name = StringBuilder::new();
+    let mut value_number = Float64Builder::new();
+    let mut value_text = StringBuilder::new();
+    let mut value_bool = BooleanBuilder::new();
+    let mut value_kind = StringBuilder::new();
+    let mut state = StringBuilder::new();
+    let mut submitted_at = StringBuilder::new();
+    let mut updated_at = StringBuilder::new();
+    let mut reviewed_by = StringBuilder::new();
+    let mut review_reason = StringBuilder::new();
+
+    for s in subs {
+        region_id.append_value(&s.region_id);
+        cell_row.append_value(s.cell_row);
+        cell_col.append_value(s.cell_col);
+        cell_ref.append_value(a1(s.cell_row, s.cell_col));
+        submitter_id.append_value(&s.submitter.id);
+        submitter_name.append_value(&s.submitter.display_name);
+        match &s.value {
+            SubmissionValue::Number { value } => {
+                value_number.append_value(*value);
+                value_text.append_null();
+                value_bool.append_null();
+                value_kind.append_value("number");
+            }
+            SubmissionValue::Text { value } => {
+                value_number.append_null();
+                value_text.append_value(value);
+                value_bool.append_null();
+                value_kind.append_value("text");
+            }
+            SubmissionValue::Boolean { value } => {
+                value_number.append_null();
+                value_text.append_null();
+                value_bool.append_value(*value);
+                value_kind.append_value("boolean");
+            }
+            SubmissionValue::Empty => {
+                value_number.append_null();
+                value_text.append_null();
+                value_bool.append_null();
+                value_kind.append_value("empty");
+            }
+        }
+        state.append_value(submission_state_str(&s.state));
+        submitted_at.append_option(s.submitted_at.as_deref());
+        updated_at.append_value(&s.updated_at);
+        reviewed_by.append_option(s.reviewed_by.as_deref());
+        review_reason.append_option(s.review_reason.as_deref());
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("region_id", DataType::Utf8, false),
+        Field::new("cell_row", DataType::UInt32, false),
+        Field::new("cell_col", DataType::UInt32, false),
+        Field::new("cell_ref", DataType::Utf8, false),
+        Field::new("submitter_id", DataType::Utf8, false),
+        Field::new("submitter_name", DataType::Utf8, false),
+        Field::new("value_number", DataType::Float64, true),
+        Field::new("value_text", DataType::Utf8, true),
+        Field::new("value_bool", DataType::Boolean, true),
+        Field::new("value_kind", DataType::Utf8, false),
+        Field::new("state", DataType::Utf8, false),
+        Field::new("submitted_at", DataType::Utf8, true),
+        Field::new("updated_at", DataType::Utf8, false),
+        Field::new("reviewed_by", DataType::Utf8, true),
+        Field::new("review_reason", DataType::Utf8, true),
+    ]));
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(region_id.finish()),
+        Arc::new(cell_row.finish()),
+        Arc::new(cell_col.finish()),
+        Arc::new(cell_ref.finish()),
+        Arc::new(submitter_id.finish()),
+        Arc::new(submitter_name.finish()),
+        Arc::new(value_number.finish()),
+        Arc::new(value_text.finish()),
+        Arc::new(value_bool.finish()),
+        Arc::new(value_kind.finish()),
+        Arc::new(state.finish()),
+        Arc::new(submitted_at.finish()),
+        Arc::new(updated_at.finish()),
+        Arc::new(reviewed_by.finish()),
+        Arc::new(review_reason.finish()),
+    ];
+
+    let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| e.to_string())?;
+
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut buf, schema, None)
+            .map_err(|e| e.to_string())?;
+        writer.write(&batch).map_err(|e| e.to_string())?;
+        writer.close().map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
+/// Export every submission for a writeback region as Parquet bytes (typed,
+/// columnar — directly readable by DuckDB / Snowflake / Spark / pandas /
+/// Polars). The frontend saves the bytes as a `.parquet` file.
+#[tauri::command]
+pub fn calp_export_region_submissions_parquet(
+    state: State<AppState>,
+    region_id: String,
+    window: tauri::Window,
+) -> Result<Vec<u8>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let subs = load_region_current_submissions(&state, &region_id)?;
+    encode_submissions_parquet(&subs)
+}
+
+/// Best-effort: (re)materialize the per-version Parquet rollup of ALL submissions
+/// at `{version}/submissions/_rollup.parquet`, so a database can read the whole
+/// collection by pointing at the registry folder — no per-slot JSON parsing, and
+/// no manual export. It lives UNDER `submissions/` (the subscriber-written
+/// subtree excluded from the package integrity walk) so it never trips pull, and
+/// it is a non-`.json` file so it is ignored by submission loading. Called after
+/// any write to a version's submissions; failures are logged, not surfaced — the
+/// JSON slots remain the source of truth and the next write self-heals the rollup.
+fn materialize_submissions_parquet(
+    registry: &calp::registry::LocalRegistry,
+    package: &str,
+    version: &str,
+) {
+    let subs = match registry.load_all_submissions(package, version) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_warn!("CALP", "writeback rollup: load_all_submissions failed: {}", e);
+            return;
+        }
+    };
+    let bytes = match encode_submissions_parquet(&subs) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::log_warn!("CALP", "writeback rollup: parquet encode failed: {}", e);
+            return;
+        }
+    };
+    if let Err(e) = registry.write_artifact(package, version, "submissions/_rollup.parquet", &bytes) {
+        crate::log_warn!("CALP", "writeback rollup: write failed: {}", e);
+    }
 }
 
 /// Completion-tracking status for a writeback region: who the publisher expects
@@ -3835,6 +4033,70 @@ mod gather_governance_tests {
         );
         assert_eq!(st.missing, vec!["Carol".to_string()]);
         assert_eq!(st.responded, vec!["Alice (North)".to_string(), "Bob".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod writeback_export_tests {
+    //! The Parquet export/rollup encoder (used by both the on-demand export and
+    //! the auto-materialized `_rollup.parquet`).
+    use super::{a1, encode_submissions_parquet};
+    use calp::writeback::{SubmissionState, SubmissionValue, WritebackSubmission};
+    use calp::SubmitterIdentity;
+    use std::collections::HashMap;
+
+    fn sub(row: u32, col: u32, value: SubmissionValue) -> WritebackSubmission {
+        WritebackSubmission {
+            id: format!("s-{row}-{col}"),
+            region_id: "r1".to_string(),
+            cell_row: row,
+            cell_col: col,
+            cell_id: None,
+            submitter: SubmitterIdentity {
+                display_name: "Alice".into(),
+                id: "id-alice".into(),
+                extra: HashMap::new(),
+            },
+            value,
+            state: SubmissionState::Submitted,
+            created_at: "2026-06-15T00:00:00Z".into(),
+            updated_at: "2026-06-15T00:00:00Z".into(),
+            submitted_at: Some("2026-06-15T00:00:00Z".into()),
+            review_reason: None,
+            reviewed_by: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn a1_reference_formatting() {
+        assert_eq!(a1(0, 0), "A1");
+        assert_eq!(a1(1, 1), "B2");
+        assert_eq!(a1(0, 26), "AA1");
+        assert_eq!(a1(4, 1), "B5");
+    }
+
+    #[test]
+    fn parquet_encodes_mixed_types_to_a_valid_container() {
+        let subs = vec![
+            sub(1, 1, SubmissionValue::Number { value: 100.0 }),
+            sub(2, 1, SubmissionValue::Text { value: "north".into() }),
+            sub(3, 1, SubmissionValue::Boolean { value: true }),
+            sub(4, 1, SubmissionValue::Empty),
+        ];
+        let bytes = encode_submissions_parquet(&subs).unwrap();
+        // A well-formed Parquet file is framed by the "PAR1" magic at both ends;
+        // ArrowWriter + RecordBatch::try_new also validate schema/column shape.
+        assert!(bytes.len() > 8);
+        assert_eq!(&bytes[0..4], b"PAR1", "parquet header magic");
+        assert_eq!(&bytes[bytes.len() - 4..], b"PAR1", "parquet footer magic");
+    }
+
+    #[test]
+    fn parquet_handles_empty_input() {
+        let bytes = encode_submissions_parquet(&[]).unwrap();
+        assert_eq!(&bytes[0..4], b"PAR1");
+        assert_eq!(&bytes[bytes.len() - 4..], b"PAR1");
     }
 }
 

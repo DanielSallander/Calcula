@@ -13,12 +13,13 @@ import {
   loadRegionSubmissions,
   setSubmissionState,
   exportRegionSubmissionsCsv,
+  exportRegionSubmissionsParquet,
   regionResponseStatus,
   type WritebackRegionEntry,
   type RegionSubmission,
   type RegionResponseStatus,
 } from "@api/distribution";
-import { saveCsvReport } from "../lib/reportExport";
+import { saveCsvReport, saveParquetReport } from "../lib/reportExport";
 
 function colLetter(c: number): string {
   let s = "";
@@ -123,6 +124,17 @@ export function PublisherDashboardPane(): React.ReactElement {
     }
   }, [selected]);
 
+  const exportParquet = useCallback(async () => {
+    if (!selected) return;
+    setError(null);
+    try {
+      const bytes = await exportRegionSubmissionsParquet(selected);
+      await saveParquetReport(bytes, `${selected}-submissions.parquet`);
+    } catch (e: unknown) {
+      setError(String(e));
+    }
+  }, [selected]);
+
   const respondents = new Set(submissions.map((s) => s.submitterId)).size;
   const pending = submissions.filter((s) => s.state === "submitted").length;
   const approved = submissions.filter((s) => s.state === "approved").length;
@@ -156,6 +168,14 @@ export function PublisherDashboardPane(): React.ReactElement {
           title="Export this region's submissions as CSV"
         >
           Export CSV
+        </button>
+        <button
+          onClick={exportParquet}
+          disabled={!selected || submissions.length === 0}
+          style={styles.smallBtn}
+          title="Export this region's submissions as Parquet (typed, for databases)"
+        >
+          Export Parquet
         </button>
       </div>
 

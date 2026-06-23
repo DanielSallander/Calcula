@@ -640,6 +640,13 @@ export function exportRegionSubmissionsCsv(regionId: string): Promise<string> {
   return invokeBackend("calp_export_region_submissions_csv", { regionId });
 }
 
+/** Export every submission for a region as Parquet bytes (typed, columnar —
+ * directly readable by DuckDB / Snowflake / Spark / pandas / Polars). The caller
+ * saves the returned bytes as a .parquet file. */
+export function exportRegionSubmissionsParquet(regionId: string): Promise<number[]> {
+  return invokeBackend("calp_export_region_submissions_parquet", { regionId });
+}
+
 /** Completion-tracking status: declared expected respondents, who responded,
  * and who is still missing. */
 export interface RegionResponseStatus {

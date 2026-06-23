@@ -125,6 +125,7 @@ dependencies = [
  "identity",
  "log",
  "once_cell",
+ "parquet",
  "parser",
  "persistence",
  "pivot-engine",
