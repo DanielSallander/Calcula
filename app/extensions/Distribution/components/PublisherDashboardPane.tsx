@@ -14,6 +14,8 @@ import {
   setSubmissionState,
   exportRegionSubmissionsCsv,
   exportRegionSubmissionsParquet,
+  getWritebackRollup,
+  setWritebackRollup,
   regionResponseStatus,
   type WritebackRegionEntry,
   type RegionSubmission,
@@ -44,6 +46,7 @@ export function PublisherDashboardPane(): React.ReactElement {
   const [selected, setSelected] = useState<string | null>(null);
   const [submissions, setSubmissions] = useState<RegionSubmission[]>([]);
   const [status, setStatus] = useState<RegionResponseStatus | null>(null);
+  const [rollup, setRollup] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -62,12 +65,14 @@ export function PublisherDashboardPane(): React.ReactElement {
     setLoading(true);
     setError(null);
     try {
-      const [subs, st] = await Promise.all([
+      const [subs, st, rp] = await Promise.all([
         loadRegionSubmissions(regionId),
         regionResponseStatus(regionId).catch(() => null),
+        getWritebackRollup(regionId).catch(() => false),
       ]);
       setSubmissions(subs);
       setStatus(st);
+      setRollup(rp);
     } catch (e: unknown) {
       setError(String(e));
       setSubmissions([]);
@@ -135,6 +140,20 @@ export function PublisherDashboardPane(): React.ReactElement {
     }
   }, [selected]);
 
+  const toggleRollup = useCallback(
+    async (next: boolean) => {
+      if (!selected) return;
+      setError(null);
+      try {
+        await setWritebackRollup(selected, next);
+        setRollup(next);
+      } catch (e: unknown) {
+        setError(String(e)); // e.g. "Only the publisher of ... can ..."
+      }
+    },
+    [selected],
+  );
+
   const respondents = new Set(submissions.map((s) => s.submitterId)).size;
   const pending = submissions.filter((s) => s.state === "submitted").length;
   const approved = submissions.filter((s) => s.state === "approved").length;
@@ -201,6 +220,18 @@ export function PublisherDashboardPane(): React.ReactElement {
         </div>
       )}
 
+      {selected && (
+        <label style={styles.rollupRow} title="Publisher only — keeps a typed Parquet of all submissions next to the data so a database can read it without parsing JSON">
+          <input
+            type="checkbox"
+            checked={rollup}
+            onChange={(e) => toggleRollup(e.target.checked)}
+            style={{ marginRight: 6 }}
+          />
+          Auto-export submissions to Parquet (refresh <code>submissions/_rollup.parquet</code> on every submit/approve)
+        </label>
+      )}
+
       {error && <div style={styles.error}>{error}</div>}
 
       <div style={styles.list}>
@@ -254,6 +285,7 @@ const styles: Record<string, React.CSSProperties> = {
   approve: { background: "#137333", color: "#fff", borderColor: "#137333" },
   reject: { background: "#fff", color: "#c5221f", borderColor: "#e0a0a0" },
   summary: { display: "flex", alignItems: "center", flexWrap: "wrap" as const, gap: 6, padding: "6px 12px", borderBottom: "1px solid #f0f0f0", flexShrink: 0 },
+  rollupRow: { display: "flex", alignItems: "center", fontSize: 11, color: "#555", padding: "6px 12px", borderBottom: "1px solid #f0f0f0", flexShrink: 0, cursor: "pointer" },
   summaryItem: { fontSize: 12, color: "#444", fontWeight: 500 },
   chip: { fontSize: 10, padding: "1px 6px", borderRadius: 8 },
   chipPending: { background: "#fef7e0", color: "#b06000" },

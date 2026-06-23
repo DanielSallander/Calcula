@@ -2647,8 +2647,10 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
         registry.save_submission(&package_name, &resolved_version, sub)
             .map_err(|e| e.to_string())?;
     }
-    // Refresh the per-version Parquet rollup for downstream DB consumption.
-    materialize_submissions_parquet(&registry, &package_name, &resolved_version);
+    // Refresh the per-version Parquet rollup, if the publisher opted in.
+    if rollup_enabled(&registry, &package_name) {
+        materialize_submissions_parquet(&registry, &package_name, &resolved_version);
+    }
 
     // All writes succeeded — advance the local drafts.
     {
@@ -2933,8 +2935,10 @@ pub fn calp_set_submission_state(
     registry
         .save_submission(&package_name, &version, &submission)
         .map_err(|e| e.to_string())?;
-    // Refresh the per-version Parquet rollup for downstream DB consumption.
-    materialize_submissions_parquet(&registry, &package_name, &version);
+    // Refresh the per-version Parquet rollup, if the publisher opted in.
+    if rollup_enabled(&registry, &package_name) {
+        materialize_submissions_parquet(&registry, &package_name, &version);
+    }
     invalidate_gather_cache(&state);
 
     // Audit the publisher decision — the provenance of the return leg, so a
@@ -3307,6 +3311,70 @@ fn materialize_submissions_parquet(
     if let Err(e) = registry.write_artifact(package, version, "submissions/_rollup.parquet", &bytes) {
         crate::log_warn!("CALP", "writeback rollup: write failed: {}", e);
     }
+}
+
+/// Whether the publisher has opted this package into the auto-materialized
+/// Parquet rollup. Stored in the (unsigned) package manifest's `extra` —
+/// package-level, default OFF, flippable any time by the publisher. It gates
+/// *whether* the rollup is regenerated, not a security boundary, so the unsigned
+/// package manifest is the right home (no per-version, no signing churn).
+fn rollup_enabled(registry: &calp::registry::LocalRegistry, package: &str) -> bool {
+    registry
+        .get_package_manifest(package)
+        .ok()
+        .and_then(|m| m.extra.get("writebackRollup").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Read whether the Parquet rollup is enabled for the package owning a region.
+#[tauri::command]
+pub fn calp_get_writeback_rollup(
+    state: State<AppState>,
+    region_id: String,
+    window: tauri::Window,
+) -> Result<bool, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let (package_name, _v, registry_path) = owning_subscription_for_region(&state, &region_id)?;
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+    Ok(rollup_enabled(&registry, &package_name))
+}
+
+/// Publisher-only: enable/disable the auto-materialized Parquet rollup for the
+/// package owning a region. Enabling materializes it immediately so the file
+/// appears at once (not just on the next submit/approve).
+#[tauri::command]
+pub fn calp_set_writeback_rollup(
+    state: State<AppState>,
+    region_id: String,
+    enabled: bool,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(&state, &region_id)?;
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+    require_publisher(&registry, &package_name, &resolved_version)?;
+
+    let mut manifest = registry
+        .get_package_manifest(&package_name)
+        .map_err(|e| e.to_string())?;
+    if enabled {
+        manifest
+            .extra
+            .insert("writebackRollup".to_string(), serde_json::Value::Bool(true));
+    } else {
+        manifest.extra.remove("writebackRollup");
+    }
+    registry
+        .write_package_manifest(&manifest)
+        .map_err(|e| e.to_string())?;
+
+    if enabled {
+        materialize_submissions_parquet(&registry, &package_name, &resolved_version);
+    }
+    Ok(())
 }
 
 /// Completion-tracking status for a writeback region: who the publisher expects
@@ -4097,6 +4165,72 @@ mod writeback_export_tests {
         let bytes = encode_submissions_parquet(&[]).unwrap();
         assert_eq!(&bytes[0..4], b"PAR1");
         assert_eq!(&bytes[bytes.len() - 4..], b"PAR1");
+    }
+
+    // Integration: the auto-materialize writes a real rollup into a real
+    // registry, it reads back as Parquet with one row per slot, and it is
+    // invisible to the integrity walk (so it never trips pull) and to
+    // submission loading.
+    #[test]
+    fn rollup_materializes_reads_back_and_is_integrity_excluded() {
+        use calp::registry::LocalRegistry;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        // A throwaway registry under the OS temp dir.
+        let root = std::env::temp_dir().join(format!("calcula_wb_rollup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let reg = LocalRegistry::open(&root).unwrap();
+
+        // Two submissions (two slots) — one numeric, one text.
+        reg.save_submission("pkg", "1.0.0", &sub(1, 1, SubmissionValue::Number { value: 100.0 })).unwrap();
+        reg.save_submission("pkg", "1.0.0", &sub(2, 1, SubmissionValue::Text { value: "north".into() })).unwrap();
+
+        super::materialize_submissions_parquet(&reg, "pkg", "1.0.0");
+
+        // The rollup exists under submissions/ and reads back as Parquet.
+        let path = reg
+            .version_dir("pkg", "1.0.0")
+            .unwrap()
+            .join("submissions")
+            .join("_rollup.parquet");
+        assert!(path.exists(), "rollup file written");
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file).unwrap().build().unwrap();
+        let total: usize = reader.map(|b| b.unwrap().num_rows()).sum();
+        assert_eq!(total, 2, "one row per current slot");
+
+        // Excluded from the integrity walk (never an "unlisted artifact" on pull)...
+        let arts = reg.list_artifacts("pkg", "1.0.0").unwrap();
+        assert!(!arts.iter().any(|a| a.contains("_rollup")), "rollup excluded from artifacts");
+        // ...and ignored by submission loading (still exactly the two JSON slots).
+        assert_eq!(reg.load_all_submissions("pkg", "1.0.0").unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rollup_toggle_defaults_off_and_flips_on() {
+        use calp::manifest::PackageManifest;
+        use calp::registry::LocalRegistry;
+
+        let root = std::env::temp_dir().join(format!("calcula_wb_toggle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let reg = LocalRegistry::open(&root).unwrap();
+
+        let mut pm = PackageManifest::new("pkg", "report", "auth", "2026-01-01T00:00:00Z");
+        reg.write_package_manifest(&pm).unwrap();
+        // Default OFF (opt-in).
+        assert!(!super::rollup_enabled(&reg, "pkg"));
+
+        // Publisher flips it on (what calp_set_writeback_rollup persists).
+        pm.extra
+            .insert("writebackRollup".to_string(), serde_json::Value::Bool(true));
+        reg.write_package_manifest(&pm).unwrap();
+        assert!(super::rollup_enabled(&reg, "pkg"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

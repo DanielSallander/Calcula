@@ -647,6 +647,18 @@ export function exportRegionSubmissionsParquet(regionId: string): Promise<number
   return invokeBackend("calp_export_region_submissions_parquet", { regionId });
 }
 
+/** Whether the auto-materialized Parquet rollup is enabled for the package
+ * owning this region (publisher opt-in, default off). */
+export function getWritebackRollup(regionId: string): Promise<boolean> {
+  return invokeBackend("calp_get_writeback_rollup", { regionId });
+}
+
+/** Publisher-only: enable/disable the auto-materialized Parquet rollup for the
+ * package owning this region. Enabling writes the rollup immediately. */
+export function setWritebackRollup(regionId: string, enabled: boolean): Promise<void> {
+  return invokeBackend("calp_set_writeback_rollup", { regionId, enabled });
+}
+
 /** Completion-tracking status: declared expected respondents, who responded,
  * and who is still missing. */
 export interface RegionResponseStatus {
