@@ -1033,6 +1033,8 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             submitted_at: Some("2026-01-01T00:00:00Z".to_string()),
+            review_reason: None,
+            reviewed_by: None,
             extra: std::collections::HashMap::new(),
         }
     }

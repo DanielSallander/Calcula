@@ -338,17 +338,44 @@ function activate(context: ExtensionContext): void {
     const region = getRegionForCell(sheetIdx, row, col);
     if (!region) return null;
 
-    // Determine the submission value type
+    // Coerce based on the region's DECLARED type, not the string's shape — so a
+    // product code "12345" or a numeric enum label typed into a TEXT region is
+    // sent as text, not silently sniffed into a number and rejected.
     let submissionValue: SubmissionValue;
     const trimmed = value.trim();
+    const isBool = (s: string) => s.toLowerCase() === "true" || s.toLowerCase() === "false";
     if (trimmed === "") {
       submissionValue = { type: "empty" };
-    } else if (!isNaN(Number(trimmed)) && trimmed !== "") {
-      submissionValue = { type: "number", value: Number(trimmed) };
-    } else if (trimmed.toLowerCase() === "true" || trimmed.toLowerCase() === "false") {
-      submissionValue = { type: "boolean", value: trimmed.toLowerCase() === "true" };
     } else {
-      submissionValue = { type: "text", value: trimmed };
+      switch (region.valueType) {
+        case "number":
+        case "integer": {
+          const n = Number(trimmed);
+          submissionValue = isNaN(n)
+            ? { type: "text", value: trimmed } // backend will reject with a clear message
+            : { type: "number", value: n };
+          break;
+        }
+        case "boolean":
+          submissionValue = isBool(trimmed)
+            ? { type: "boolean", value: trimmed.toLowerCase() === "true" }
+            : { type: "text", value: trimmed };
+          break;
+        case "text":
+        case "date":
+        case "enum":
+          submissionValue = { type: "text", value: trimmed };
+          break;
+        default:
+          // No declared type (unschematized region): fall back to shape-sniffing.
+          if (!isNaN(Number(trimmed))) {
+            submissionValue = { type: "number", value: Number(trimmed) };
+          } else if (isBool(trimmed)) {
+            submissionValue = { type: "boolean", value: trimmed.toLowerCase() === "true" };
+          } else {
+            submissionValue = { type: "text", value: trimmed };
+          }
+      }
     }
 
     // Save as draft — if the backend rejects (schema validation, lifecycle
@@ -387,14 +414,20 @@ function activate(context: ExtensionContext): void {
 
           switch (state) {
             case "empty":
-              // Subtle fillable background tint
+              // Fillable: subtle blue tint.
               return { backgroundColor: "#f0f7ff" };
             case "draft":
-              // Draft: tinted background indicating unsaved work
+              // Unsent local edit: amber.
               return { backgroundColor: "#fff8e1" };
             case "submitted":
-              // Submitted: tinted background indicating confirmed input
-              return { backgroundColor: "#e8f5e9" };
+              // Sent, awaiting the publisher's decision: neutral blue.
+              return { backgroundColor: "#e3f2fd" };
+            case "approved":
+              // Accepted by the publisher: green.
+              return { backgroundColor: "#e6f4ea" };
+            case "rejected":
+              // Rejected — needs revision: red tint.
+              return { backgroundColor: "#fce8e6" };
             default:
               return null;
           }

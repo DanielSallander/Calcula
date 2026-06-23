@@ -331,6 +331,15 @@ pub struct GatherRegionData {
 pub struct GatherSubmission {
     pub submitter_name: String,
     pub submitter_id: String,
+    /// The cell this value was submitted into, as 0-based ABSOLUTE sheet
+    /// coordinates (matching the writeback region selector / registry storage).
+    /// Carried so the cell-aware GATHER functions (GATHER.AT, and the optional
+    /// (row,col) forms of GATHER.FROM/COUNT/SUBMITTERS) can scope a region's
+    /// submissions to one input cell — without this, a multi-cell region's
+    /// submissions are an undifferentiated bag and per-line-item consolidation
+    /// is impossible.
+    pub cell_row: u32,
+    pub cell_col: u32,
     pub value: EvalResult,
 }
 
@@ -1351,6 +1360,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::GatherFrom => self.fn_gather_from(args),
             BuiltinFunction::GatherCount => self.fn_gather_count(args),
             BuiltinFunction::GatherSubmitters => self.fn_gather_submitters(args),
+            BuiltinFunction::GatherAt => self.fn_gather_at(args),
 
             // Collection functions (3D cells)
             BuiltinFunction::Collect => self.fn_collect(args),
@@ -7074,16 +7084,35 @@ impl<'a> Evaluator<'a> {
     // Writeback aggregation (GATHER family)
     // ========================================================================
 
-    /// GATHER(region_id) — returns all visible submissions for a writeback region.
-    /// Reads from the pre-fetched gather_fn closure.
-    /// Returns a List of submission values, or an empty List if no data.
+    /// Evaluate a GATHER coordinate argument: a 1-based row/col (formula
+    /// convention, matching ROW()/COLUMN()/cell addresses) -> 0-based index.
+    /// `None` means the value was non-numeric or below 1 (an invalid cell).
+    fn gather_coord_arg(&self, arg: &Expression) -> Option<u32> {
+        let n = self.evaluate(arg).as_number()?;
+        if n < 1.0 || n.fract() != 0.0 {
+            return None;
+        }
+        Some((n as u32) - 1)
+    }
+
+    /// Resolve a region id text argument.
+    fn gather_region_arg(&self, arg: &Expression) -> Option<String> {
+        match self.evaluate(arg) {
+            EvalResult::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// GATHER(region_id) — all visible submission values for a writeback region.
+    /// Reads from the pre-fetched gather_fn closure. Returns a List of values
+    /// (across every cell and submitter), or an empty List if no data. Wrap in
+    /// SUM/AVERAGE for a region-wide rollup; use GATHER.AT for a single cell.
     fn fn_gather(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let region_id = match self.evaluate(&args[0]) {
-            EvalResult::Text(s) => s,
-            _ => return EvalResult::Error(CellError::Value),
+        let Some(region_id) = self.gather_region_arg(&args[0]) else {
+            return EvalResult::Error(CellError::Value);
         };
         let Some(gather_fn) = &self.gather_fn else {
             return EvalResult::List(Vec::new());
@@ -7095,61 +7124,138 @@ impl<'a> Evaluator<'a> {
         EvalResult::List(values)
     }
 
-    /// GATHER.FROM(region_id, submitter_id) — returns one submitter's value.
-    fn fn_gather_from(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 2 {
+    /// GATHER.AT(region_id, row, col) — every visible submitter's value for ONE
+    /// input cell (1-based ABSOLUTE sheet coordinates). Returns a List, so
+    /// SUM(GATHER.AT(region, r, c)) consolidates a single line item across all
+    /// contributors. Empty List if no submissions for that cell; #VALUE! on a
+    /// bad coordinate. This is the primitive that makes per-line-item /
+    /// tabular consolidation of a writeback template possible.
+    fn fn_gather_at(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 {
             return EvalResult::Error(CellError::Value);
         }
-        let region_id = match self.evaluate(&args[0]) {
-            EvalResult::Text(s) => s,
-            _ => return EvalResult::Error(CellError::Value),
+        let Some(region_id) = self.gather_region_arg(&args[0]) else {
+            return EvalResult::Error(CellError::Value);
+        };
+        let (Some(row), Some(col)) =
+            (self.gather_coord_arg(&args[1]), self.gather_coord_arg(&args[2]))
+        else {
+            return EvalResult::Error(CellError::Value);
+        };
+        let Some(gather_fn) = &self.gather_fn else {
+            return EvalResult::List(Vec::new());
+        };
+        let data = gather_fn(&region_id);
+        let values: Vec<EvalResult> = data
+            .submissions
+            .iter()
+            .filter(|s| s.cell_row == row && s.cell_col == col)
+            .map(|s| s.value.clone())
+            .collect();
+        EvalResult::List(values)
+    }
+
+    /// GATHER.FROM(region_id, submitter_id [, row, col]) — one submitter's
+    /// value. With 2 args, returns their first submission in the region (only
+    /// unambiguous for a single-cell region). With 4 args, returns their value
+    /// for the specific cell (1-based absolute). #N/A if that submitter has no
+    /// matching submission.
+    fn fn_gather_from(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 && args.len() != 4 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let Some(region_id) = self.gather_region_arg(&args[0]) else {
+            return EvalResult::Error(CellError::Value);
         };
         let submitter_id = match self.evaluate(&args[1]) {
             EvalResult::Text(s) => s,
             _ => return EvalResult::Error(CellError::Value),
+        };
+        // Optional cell filter (4-arg form).
+        let cell = if args.len() == 4 {
+            match (self.gather_coord_arg(&args[2]), self.gather_coord_arg(&args[3])) {
+                (Some(r), Some(c)) => Some((r, c)),
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            None
         };
         let Some(gather_fn) = &self.gather_fn else {
             return EvalResult::Error(CellError::NA);
         };
         let data = gather_fn(&region_id);
         for sub in &data.submissions {
-            if sub.submitter_id == submitter_id {
-                return sub.value.clone();
+            if sub.submitter_id != submitter_id {
+                continue;
+            }
+            match cell {
+                Some((r, c)) if sub.cell_row != r || sub.cell_col != c => continue,
+                _ => return sub.value.clone(),
             }
         }
         EvalResult::Error(CellError::NA)
     }
 
-    /// GATHER.COUNT(region_id) — count of submissions for a region.
+    /// GATHER.COUNT(region_id [, row, col]) — number of submissions for a region,
+    /// or for ONE cell (1-based absolute) when row/col are supplied.
     fn fn_gather_count(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 1 {
+        if args.len() != 1 && args.len() != 3 {
             return EvalResult::Error(CellError::Value);
         }
-        let region_id = match self.evaluate(&args[0]) {
-            EvalResult::Text(s) => s,
-            _ => return EvalResult::Error(CellError::Value),
+        let Some(region_id) = self.gather_region_arg(&args[0]) else {
+            return EvalResult::Error(CellError::Value);
+        };
+        let cell = if args.len() == 3 {
+            match (self.gather_coord_arg(&args[1]), self.gather_coord_arg(&args[2])) {
+                (Some(r), Some(c)) => Some((r, c)),
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            None
         };
         let Some(gather_fn) = &self.gather_fn else {
             return EvalResult::Number(0.0);
         };
         let data = gather_fn(&region_id);
-        EvalResult::Number(data.submissions.len() as f64)
+        let count = data
+            .submissions
+            .iter()
+            .filter(|s| match cell {
+                Some((r, c)) => s.cell_row == r && s.cell_col == c,
+                None => true,
+            })
+            .count();
+        EvalResult::Number(count as f64)
     }
 
-    /// GATHER.SUBMITTERS(region_id) — list of submitter display names.
+    /// GATHER.SUBMITTERS(region_id [, row, col]) — submitter display names for a
+    /// region, or for ONE cell (1-based absolute) when row/col are supplied.
     fn fn_gather_submitters(&self, args: &[Expression]) -> EvalResult {
-        if args.len() != 1 {
+        if args.len() != 1 && args.len() != 3 {
             return EvalResult::Error(CellError::Value);
         }
-        let region_id = match self.evaluate(&args[0]) {
-            EvalResult::Text(s) => s,
-            _ => return EvalResult::Error(CellError::Value),
+        let Some(region_id) = self.gather_region_arg(&args[0]) else {
+            return EvalResult::Error(CellError::Value);
+        };
+        let cell = if args.len() == 3 {
+            match (self.gather_coord_arg(&args[1]), self.gather_coord_arg(&args[2])) {
+                (Some(r), Some(c)) => Some((r, c)),
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            None
         };
         let Some(gather_fn) = &self.gather_fn else {
             return EvalResult::List(Vec::new());
         };
         let data = gather_fn(&region_id);
-        let names: Vec<EvalResult> = data.submissions.iter()
+        let names: Vec<EvalResult> = data
+            .submissions
+            .iter()
+            .filter(|s| match cell {
+                Some((r, c)) => s.cell_row == r && s.cell_col == c,
+                None => true,
+            })
             .map(|s| EvalResult::Text(s.submitter_name.clone()))
             .collect();
         EvalResult::List(names)
@@ -12371,6 +12477,331 @@ mod tests {
             ref_site_id: Default::default(),
         };
         assert_eq!(eval.evaluate(&expr), EvalResult::Number(9.0));
+    }
+
+    // ---- Writeback aggregation (GATHER family) ----
+    //
+    // The GATHER functions read a pre-fetched closure (set_gather_fn). In
+    // production the app populates it from GOVERNED registry submissions
+    // (build_gather_data + apply_gather_governance, in the app crate). These
+    // tests exercise the formula surface directly with a stub closure so the
+    // four GATHER builtins have a unit-level safety net.
+
+    /// Single-cell region: three submitters at the same cell (0,0).
+    fn wb_gather_data() -> GatherRegionData {
+        GatherRegionData {
+            submissions: vec![
+                GatherSubmission { submitter_name: "North".into(), submitter_id: "id-north".into(), cell_row: 0, cell_col: 0, value: EvalResult::Number(105.0) },
+                GatherSubmission { submitter_name: "South".into(), submitter_id: "id-south".into(), cell_row: 0, cell_col: 0, value: EvalResult::Number(220.0) },
+                GatherSubmission { submitter_name: "West".into(), submitter_id: "id-west".into(), cell_row: 0, cell_col: 0, value: EvalResult::Number(80.0) },
+            ],
+        }
+    }
+
+    /// Stub lookup: known region returns three submissions, anything else empty.
+    fn wb_lookup(region: &str) -> GatherRegionData {
+        if region == "fc-2026" { wb_gather_data() } else { GatherRegionData::default() }
+    }
+
+    /// Multi-cell region: a 2-row line-item column (cells at 0-based (1,1) and
+    /// (2,1)) filled by two submitters. Models the tabular-consolidation case.
+    ///   North: (1,1)=100, (2,1)=110     South: (1,1)=200, (2,1)=210
+    fn wb_grid_data() -> GatherRegionData {
+        GatherRegionData {
+            submissions: vec![
+                GatherSubmission { submitter_name: "North".into(), submitter_id: "id-north".into(), cell_row: 1, cell_col: 1, value: EvalResult::Number(100.0) },
+                GatherSubmission { submitter_name: "North".into(), submitter_id: "id-north".into(), cell_row: 2, cell_col: 1, value: EvalResult::Number(110.0) },
+                GatherSubmission { submitter_name: "South".into(), submitter_id: "id-south".into(), cell_row: 1, cell_col: 1, value: EvalResult::Number(200.0) },
+                GatherSubmission { submitter_name: "South".into(), submitter_id: "id-south".into(), cell_row: 2, cell_col: 1, value: EvalResult::Number(210.0) },
+            ],
+        }
+    }
+
+    fn wb_grid_lookup(region: &str) -> GatherRegionData {
+        if region == "budget" { wb_grid_data() } else { GatherRegionData::default() }
+    }
+
+    fn wb_num(n: f64) -> Expression {
+        Expression::Literal(Value::Number(n))
+    }
+
+    fn wb_call(func: BuiltinFunction, args: Vec<Expression>) -> Expression {
+        Expression::FunctionCall { func, args, ref_site_id: Default::default() }
+    }
+    fn wb_str(s: &str) -> Expression {
+        Expression::Literal(Value::String(s.to_string()))
+    }
+
+    #[test]
+    fn test_gather_returns_all_submission_values() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        // =GATHER("fc-2026") -> List of every visible submission value.
+        let expr = wb_call(BuiltinFunction::Gather, vec![wb_str("fc-2026")]);
+        assert_eq!(
+            eval.evaluate(&expr),
+            EvalResult::List(vec![
+                EvalResult::Number(105.0),
+                EvalResult::Number(220.0),
+                EvalResult::Number(80.0),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_sum_over_gather_aggregates() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        // =SUM(GATHER("fc-2026")) — the canonical "total of all submissions".
+        // SUM's collect_numbers unpacks the List GATHER returns.
+        let expr = wb_call(
+            BuiltinFunction::Sum,
+            vec![wb_call(BuiltinFunction::Gather, vec![wb_str("fc-2026")])],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(405.0));
+    }
+
+    #[test]
+    fn test_gather_count() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        let expr = wb_call(BuiltinFunction::GatherCount, vec![wb_str("fc-2026")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_gather_from_specific_and_unknown_submitter() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        // Known submitter -> their value.
+        let known = wb_call(
+            BuiltinFunction::GatherFrom,
+            vec![wb_str("fc-2026"), wb_str("id-south")],
+        );
+        assert_eq!(eval.evaluate(&known), EvalResult::Number(220.0));
+        // Unknown submitter -> #N/A.
+        let unknown = wb_call(
+            BuiltinFunction::GatherFrom,
+            vec![wb_str("fc-2026"), wb_str("id-nobody")],
+        );
+        assert_eq!(eval.evaluate(&unknown), EvalResult::Error(CellError::NA));
+    }
+
+    #[test]
+    fn test_gather_submitters_lists_names() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        let expr = wb_call(BuiltinFunction::GatherSubmitters, vec![wb_str("fc-2026")]);
+        assert_eq!(
+            eval.evaluate(&expr),
+            EvalResult::List(vec![
+                EvalResult::Text("North".to_string()),
+                EvalResult::Text("South".to_string()),
+                EvalResult::Text("West".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_gather_unknown_region_is_empty() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::Gather, vec![wb_str("nope")])),
+            EvalResult::List(Vec::new())
+        );
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::GatherCount, vec![wb_str("nope")])),
+            EvalResult::Number(0.0)
+        );
+    }
+
+    #[test]
+    fn test_gather_without_fn_is_inert() {
+        // No set_gather_fn (e.g. a workbook with no subscriptions): GATHER
+        // degrades to empty/zero/#N/A rather than erroring the whole formula.
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::Gather, vec![wb_str("fc-2026")])),
+            EvalResult::List(Vec::new())
+        );
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::GatherCount, vec![wb_str("fc-2026")])),
+            EvalResult::Number(0.0)
+        );
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherFrom,
+                vec![wb_str("fc-2026"), wb_str("id-south")]
+            )),
+            EvalResult::Error(CellError::NA)
+        );
+    }
+
+    #[test]
+    fn test_gather_wrong_arity_is_value_error() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_lookup(r);
+        eval.set_gather_fn(&f);
+        // GATHER with no args / GATHER.FROM with one arg -> #VALUE!.
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::Gather, vec![])),
+            EvalResult::Error(CellError::Value)
+        );
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::GatherFrom, vec![wb_str("fc-2026")])),
+            EvalResult::Error(CellError::Value)
+        );
+    }
+
+    // ---- Cell-aware GATHER (multi-cell / tabular consolidation) ----
+
+    #[test]
+    fn test_gather_at_consolidates_one_cell_across_submitters() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_grid_lookup(r);
+        eval.set_gather_fn(&f);
+        // GATHER.AT("budget", 2, 2) -> 1-based (2,2) == 0-based (1,1) -> both
+        // submitters' line-item-1 values [100, 200].
+        let at = wb_call(
+            BuiltinFunction::GatherAt,
+            vec![wb_str("budget"), wb_num(2.0), wb_num(2.0)],
+        );
+        assert_eq!(
+            eval.evaluate(&at),
+            EvalResult::List(vec![EvalResult::Number(100.0), EvalResult::Number(200.0)])
+        );
+        // SUM(GATHER.AT(...)) is the per-line-item total across all contributors.
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::Sum, vec![at])),
+            EvalResult::Number(300.0)
+        );
+        // The second line item (0-based row 2 -> 1-based 3): 110 + 210 = 320.
+        let at2 = wb_call(
+            BuiltinFunction::GatherAt,
+            vec![wb_str("budget"), wb_num(3.0), wb_num(2.0)],
+        );
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::Sum, vec![at2])),
+            EvalResult::Number(320.0)
+        );
+    }
+
+    #[test]
+    fn test_gather_at_empty_for_cell_with_no_submissions() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_grid_lookup(r);
+        eval.set_gather_fn(&f);
+        // A cell outside the submitted set -> empty List (SUM -> 0).
+        let at = wb_call(
+            BuiltinFunction::GatherAt,
+            vec![wb_str("budget"), wb_num(9.0), wb_num(9.0)],
+        );
+        assert_eq!(eval.evaluate(&at), EvalResult::List(Vec::new()));
+    }
+
+    #[test]
+    fn test_gather_at_bad_coordinate_is_value_error() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_grid_lookup(r);
+        eval.set_gather_fn(&f);
+        // 0 is not a valid 1-based coordinate.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherAt,
+                vec![wb_str("budget"), wb_num(0.0), wb_num(2.0)]
+            )),
+            EvalResult::Error(CellError::Value)
+        );
+        // Wrong arity.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherAt,
+                vec![wb_str("budget"), wb_num(2.0)]
+            )),
+            EvalResult::Error(CellError::Value)
+        );
+    }
+
+    #[test]
+    fn test_gather_from_cell_aware() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_grid_lookup(r);
+        eval.set_gather_fn(&f);
+        // North's value at line item 2 (0-based (2,1) -> 1-based (3,2)) = 110.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherFrom,
+                vec![wb_str("budget"), wb_str("id-north"), wb_num(3.0), wb_num(2.0)]
+            )),
+            EvalResult::Number(110.0)
+        );
+        // South's value at line item 1 (0-based (1,1) -> 1-based (2,2)) = 200.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherFrom,
+                vec![wb_str("budget"), wb_str("id-south"), wb_num(2.0), wb_num(2.0)]
+            )),
+            EvalResult::Number(200.0)
+        );
+        // A submitter with no value at that cell -> #N/A.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherFrom,
+                vec![wb_str("budget"), wb_str("id-north"), wb_num(9.0), wb_num(9.0)]
+            )),
+            EvalResult::Error(CellError::NA)
+        );
+    }
+
+    #[test]
+    fn test_gather_count_and_submitters_cell_aware() {
+        let grid = Grid::new();
+        let mut eval = Evaluator::new(&grid);
+        let f = |r: &str| wb_grid_lookup(r);
+        eval.set_gather_fn(&f);
+        // Whole region: 4 submissions, naming each submitter once per cell.
+        assert_eq!(
+            eval.evaluate(&wb_call(BuiltinFunction::GatherCount, vec![wb_str("budget")])),
+            EvalResult::Number(4.0)
+        );
+        // One cell (line item 1): 2 submissions.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherCount,
+                vec![wb_str("budget"), wb_num(2.0), wb_num(2.0)]
+            )),
+            EvalResult::Number(2.0)
+        );
+        // Submitters at that one cell.
+        assert_eq!(
+            eval.evaluate(&wb_call(
+                BuiltinFunction::GatherSubmitters,
+                vec![wb_str("budget"), wb_num(2.0), wb_num(2.0)]
+            )),
+            EvalResult::List(vec![
+                EvalResult::Text("North".to_string()),
+                EvalResult::Text("South".to_string()),
+            ])
+        );
     }
 
     #[test]

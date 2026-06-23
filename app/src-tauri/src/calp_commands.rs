@@ -1903,7 +1903,34 @@ pub fn calp_get_writeback_regions(
         .enumerate()
         .map(|(i, &sid)| (sid, i))
         .collect();
-    Ok(index.to_flat_list(&id_to_index))
+    let mut entries = index.to_flat_list(&id_to_index);
+
+    // Enrich each entry with its declaration's value type / required / deadline,
+    // so the client commit guard can coerce typed input and the UI can show a
+    // deadline countdown. The flat index carries no schema; the declarations do.
+    if let Ok(decls) = state.writeback_declarations.lock() {
+        for e in entries.iter_mut() {
+            if let Some(decl) = decls.iter().find(|d| d.id == e.region_id) {
+                if let Some(schema) = &decl.schema {
+                    e.value_type = Some(match schema.value_type {
+                        calp::writeback::ValueType::Number => "number",
+                        calp::writeback::ValueType::Integer => "integer",
+                        calp::writeback::ValueType::Text => "text",
+                        calp::writeback::ValueType::Date => "date",
+                        calp::writeback::ValueType::Boolean => "boolean",
+                        calp::writeback::ValueType::Enum => "enum",
+                    }.to_string());
+                    e.required = Some(schema.required);
+                }
+                if let Some(calp::writeback::LifecyclePolicy::UntilDeadline { deadline: Some(dl) }) =
+                    &decl.lifecycle
+                {
+                    e.deadline = Some(dl.clone());
+                }
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// Rebuild the writeback index from the version manifests of all active subscriptions.
@@ -2230,7 +2257,7 @@ fn check_lifecycle_policy(
         }
         Some(LifecyclePolicy::Never) => {
             if already_submitted {
-                Err("This region is one-shot: the value was already submitted and cannot be changed.".to_string())
+                Err("This region is one-shot: the value was already submitted and cannot be changed. Ask the publisher to reject it if you need to revise.".to_string())
             } else {
                 Ok(())
             }
@@ -2355,6 +2382,8 @@ pub fn calp_save_writeback_draft(
         created_at: now.clone(),
         updated_at: now,
         submitted_at: None,
+        review_reason: None,
+        reviewed_by: None,
         extra: std::collections::HashMap::new(),
     };
 
@@ -2383,6 +2412,109 @@ pub fn calp_get_writeback_layer(
     window: tauri::Window,
 ) -> Result<calp::writeback::WritebackLayer, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+    Ok(layer.clone())
+}
+
+/// Reconcile the local writeback layer's submission STATES from the registry —
+/// the return leg of the writeback loop (P0). After a subscriber submits, the
+/// publisher may approve or reject the value in the registry; without this the
+/// local layer (which drives the WritebackPane and the grid cell styling) would
+/// stay "submitted" forever and a rejected contributor would never be told.
+///
+/// For each locally-submitted (non-Draft) entry, adopt the state of the
+/// subscriber's OWN current registry record for that (region, cell) slot —
+/// newest across the resolved version and older ones (lenient carry-forward).
+/// Unsent drafts (Draft state) are left untouched.
+fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
+    // Which regions have a submitted entry whose status we should re-check?
+    let region_ids: Vec<String> = {
+        let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let mut set = std::collections::BTreeSet::new();
+        for d in &layer.drafts {
+            if !matches!(d.state, calp::writeback::SubmissionState::Draft) {
+                set.insert(d.region_id.clone());
+            }
+        }
+        set.into_iter().collect()
+    };
+    if region_ids.is_empty() {
+        return Ok(());
+    }
+
+    let own = get_subscriber_identity(state)?;
+
+    // Build (region, row, col) -> current registry record for our OWN slots.
+    let mut by_slot: std::collections::HashMap<
+        (String, u32, u32),
+        calp::writeback::WritebackSubmission,
+    > = std::collections::HashMap::new();
+    for region_id in &region_ids {
+        let Ok((package_name, resolved_version, registry_path)) =
+            owning_subscription_for_region(state, region_id)
+        else {
+            continue;
+        };
+        let Ok(registry) =
+            calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        else {
+            continue;
+        };
+        // Newest version first: resolved, then older versions sorted descending.
+        let mut older = older_package_versions(&registry, &package_name, &resolved_version);
+        older.sort_by(|a, b| match (calp::SemVer::parse(b), calp::SemVer::parse(a)) {
+            (Ok(bv), Ok(av)) => bv.cmp(&av),
+            _ => b.cmp(a),
+        });
+        let mut versions = vec![resolved_version.clone()];
+        versions.extend(older);
+
+        let mut seen: std::collections::HashSet<(String, u32, u32)> =
+            std::collections::HashSet::new();
+        for version in &versions {
+            let Ok(subs) = registry.load_submissions(&package_name, version, &own.id) else {
+                continue;
+            };
+            for s in subs {
+                if &s.region_id != region_id {
+                    continue;
+                }
+                let key = (s.region_id.clone(), s.cell_row, s.cell_col);
+                // First-seen wins => newest version's record is authoritative.
+                if seen.insert(key.clone()) {
+                    by_slot.insert(key, s);
+                }
+            }
+        }
+    }
+
+    // Adopt the registry state + review feedback onto local non-Draft entries.
+    {
+        let mut layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        for d in layer.drafts.iter_mut() {
+            if matches!(d.state, calp::writeback::SubmissionState::Draft) {
+                continue;
+            }
+            if let Some(reg) = by_slot.get(&(d.region_id.clone(), d.cell_row, d.cell_col)) {
+                d.state = reg.state.clone();
+                d.review_reason = reg.review_reason.clone();
+                d.reviewed_by = reg.reviewed_by.clone();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reconcile local submission states from the registry (approved/rejected
+/// read-back) and return the updated writeback layer. This is what the
+/// subscriber's UI calls to learn the fate of what they submitted.
+#[tauri::command]
+pub fn calp_reconcile_writeback(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<calp::writeback::WritebackLayer, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    reconcile_writeback_layer_internal(&state)?;
     let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
     Ok(layer.clone())
 }
@@ -2425,9 +2557,91 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
         return Ok(0);
     }
 
+    // OWNERSHIP (P0): every submission we write must be authored by THIS
+    // installation. Drafts are stamped with the installation identity on save,
+    // but the writeback layer is persisted in the .cala — opening a crafted file
+    // could seed a draft attributed to a victim, which would otherwise be written
+    // into the victim's registry slot. Refuse rather than impersonate.
+    let own = get_subscriber_identity(state)?;
+    if let Some(bad) = to_submit.iter().find(|s| s.submitter.id != own.id) {
+        return Err(format!(
+            "Refusing to submit: a draft is attributed to '{}', not this installation ('{}').",
+            bad.submitter.id, own.id
+        ));
+    }
+
     // Write to registry BEFORE mutating local state.
     let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
+
+    // RE-VALIDATE on the authoritative submit path (P0). Schema + lifecycle
+    // validation in calp_save_writeback_draft is UX-only and bypassable: a
+    // scripted client calling calp_submit_region directly, or a tampered .cala
+    // seeding the writeback layer, would otherwise land schema/lifecycle-
+    // violating values in the shared registry where GATHER aggregates them. The
+    // declaration is resolved from the SIGNED version manifest, not the in-memory
+    // layer. Validation runs over the whole batch BEFORE any write, so a single
+    // bad value rejects the submit atomically (drafts stay for correction).
+    let decl = registry
+        .get_version_manifest(&package_name, &resolved_version)
+        .ok()
+        .and_then(|m| m.writeback_regions)
+        .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
+    if let Some(decl) = &decl {
+        // COMPLETENESS (P1): a region the publisher marked `required` must have
+        // every cell filled before submit — otherwise a contributor can submit a
+        // partial mandatory region (2 of 5 line items) believing they're done.
+        if decl.schema.as_ref().map(|s| s.required).unwrap_or(false) {
+            let sel = &decl.selector;
+            let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+            let mut missing = Vec::new();
+            for row in sel.row_start..=sel.row_end {
+                for col in sel.col_start..=sel.col_end {
+                    let filled = layer.drafts.iter().any(|d| {
+                        d.region_id == *region_id
+                            && d.cell_row == row
+                            && d.cell_col == col
+                            && !matches!(d.value, calp::writeback::SubmissionValue::Empty)
+                    });
+                    if !filled {
+                        missing.push(format!("({}, {})", row + 1, col + 1));
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                let shown: Vec<String> = missing.iter().take(10).cloned().collect();
+                let more = if missing.len() > 10 {
+                    format!(" (+{} more)", missing.len() - 10)
+                } else {
+                    String::new()
+                };
+                return Err(format!(
+                    "This region is required — fill every cell before submitting. Missing {} cell(s): {}{}.",
+                    missing.len(),
+                    shown.join(", "),
+                    more
+                ));
+            }
+        }
+        for sub in &to_submit {
+            if let Some(schema) = &decl.schema {
+                schema.validate(&sub.value).map_err(|msg| {
+                    format!(
+                        "Submission for cell ({}, {}) failed validation: {}",
+                        sub.cell_row, sub.cell_col, msg
+                    )
+                })?;
+            }
+            // Lifecycle (deadline / one-shot / locked). One-shot & locked
+            // consult the authoritative registry record; others ignore the flag.
+            let already_submitted = matches!(
+                decl.lifecycle,
+                Some(calp::writeback::LifecyclePolicy::Never)
+                    | Some(calp::writeback::LifecyclePolicy::RequiresUnlock)
+            ) && registry_has_own_submission(state, region_id, sub.cell_row, sub.cell_col);
+            check_lifecycle_policy(decl, already_submitted, &now)?;
+        }
+    }
 
     for sub in &to_submit {
         registry.save_submission(&package_name, &resolved_version, sub)
@@ -2471,6 +2685,34 @@ pub fn calp_submit_region(
 ) -> Result<usize, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     submit_region_internal(&state, &region_id)
+}
+
+/// Submit the drafts of EVERY writeback region that has any — the "I'm done /
+/// submit all" action, so a contributor doesn't leave whole regions as unsent
+/// drafts believing they're done. Returns the total values submitted. Surfaces
+/// the first region's error (e.g. a required region with empty cells), leaving
+/// the rest unsubmitted so the contributor can fix and retry.
+#[tauri::command]
+pub fn calp_submit_all_regions(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<usize, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let region_ids: Vec<String> = {
+        let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let mut set = std::collections::BTreeSet::new();
+        for d in &layer.drafts {
+            if matches!(d.state, calp::writeback::SubmissionState::Draft) {
+                set.insert(d.region_id.clone());
+            }
+        }
+        set.into_iter().collect()
+    };
+    let mut total = 0usize;
+    for region_id in region_ids {
+        total += submit_region_internal(&state, &region_id)?;
+    }
+    Ok(total)
 }
 
 /// One value that would leave the machine on submit.
@@ -2581,6 +2823,35 @@ pub fn calp_export_package_html(
     calp::render_package_html(&registry, &package_name, &version, &opts).map_err(|e| e.to_string())
 }
 
+/// Authorize a PUBLISHER-only writeback action (approve/reject) against a
+/// package version. Proof of publisher ownership is possession of the Ed25519
+/// signing key whose public key the SIGNED version manifest asserts as
+/// `publisher_key`: the publisher's machine has `publisher-key.json` in its
+/// profile dir (written by the first publish), a subscriber does not, and a
+/// different publisher's key won't match. Returns a user-facing error otherwise.
+fn require_publisher(
+    registry: &calp::registry::LocalRegistry,
+    package_name: &str,
+    version: &str,
+) -> Result<(), String> {
+    let manifest = registry
+        .get_version_manifest(package_name, version)
+        .map_err(|e| e.to_string())?;
+    let owns = calp::signing::profile_holds_publisher_key(
+        &calcula_profile_dir(),
+        &manifest.publisher_key,
+    )
+    .map_err(|e| e.to_string())?;
+    if owns {
+        Ok(())
+    } else {
+        Err(format!(
+            "Only the publisher of '{}' can approve or reject writeback submissions.",
+            package_name
+        ))
+    }
+}
+
 /// Approve or reject a submitted writeback value (publisher action).
 /// Rewrites the submission's registry file with the new state; `on_approval`
 /// regions only aggregate Approved submissions in GATHER.
@@ -2592,6 +2863,7 @@ pub fn calp_set_submission_state(
     cell_row: u32,
     cell_col: u32,
     new_state: String,
+    reason: Option<String>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -2611,6 +2883,11 @@ pub fn calp_set_submission_state(
         owning_subscription_for_region(&state, &region_id)?;
     let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
+
+    // AUTHORIZATION (P0): approve/reject is publisher-only. Without this, any
+    // subscriber could self-approve an out-of-policy value into an on_approval
+    // aggregate, or reject a rival's so GATHER drops it.
+    require_publisher(&registry, &package_name, &resolved_version)?;
 
     // Search the resolved version first, then older ones: lenient regions
     // carry submissions forward across version bumps, and those records live
@@ -2640,13 +2917,42 @@ pub fn calp_set_submission_state(
     })?;
 
     let now = chrono::Utc::now().to_rfc3339();
+    let reviewer = get_subscriber_identity(&state).ok().map(|i| i.display_name);
     submission.state = target_state;
-    submission.updated_at = now;
+    submission.updated_at = now.clone();
+    // Attach the publisher's reason + identity so the contributor's read-back
+    // can show WHY (not just a bare "rejected"). An empty reason clears it.
+    submission.review_reason = reason
+        .as_ref()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    submission.reviewed_by = reviewer;
 
     registry
         .save_submission(&package_name, &version, &submission)
         .map_err(|e| e.to_string())?;
     invalidate_gather_cache(&state);
+
+    // Audit the publisher decision — the provenance of the return leg, so a
+    // contributor who is told "rejected" can see who decided and when.
+    {
+        let mut audit = state.audit_log.lock().map_err(|e| e.to_string())?;
+        let user = state
+            .subscriber_identity
+            .lock()
+            .ok()
+            .and_then(|id| id.as_ref().map(|i| i.display_name.clone()))
+            .unwrap_or_default();
+        audit.record(
+            calp::audit::AuditEvent::WritebackReviewed,
+            &format!(
+                "{} {}'s submission for region {} cell ({}, {})",
+                new_state, submitter_id, region_id, cell_row, cell_col
+            ),
+            &user,
+            &now,
+        );
+    }
     Ok(())
 }
 
@@ -2664,6 +2970,8 @@ pub struct RegionSubmissionInfo {
     pub state: String,
     pub submitted_at: Option<String>,
     pub updated_at: String,
+    pub review_reason: Option<String>,
+    pub reviewed_by: Option<String>,
 }
 
 /// Load EVERY submission for a writeback region across all submitters — the
@@ -2679,10 +2987,19 @@ pub fn calp_load_region_submissions(
     window: tauri::Window,
 ) -> Result<Vec<RegionSubmissionInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    load_region_submission_infos(&state, &region_id)
+}
+
+/// Shared loader behind `calp_load_region_submissions` and the CSV export: the
+/// current record per (submitter, cell) slot across resolved + older versions.
+fn load_region_submission_infos(
+    state: &AppState,
+    region_id: &str,
+) -> Result<Vec<RegionSubmissionInfo>, String> {
     use calp::writeback::{SubmissionState, SubmissionValue};
 
     let (package_name, resolved_version, registry_path) =
-        owning_subscription_for_region(&state, &region_id)?;
+        owning_subscription_for_region(state, region_id)?;
     let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
         .map_err(|e| e.to_string())?;
 
@@ -2693,7 +3010,7 @@ pub fn calp_load_region_submissions(
     let mut by_slot: std::collections::HashMap<(String, u32, u32), calp::writeback::WritebackSubmission> =
         std::collections::HashMap::new();
     for version in &versions {
-        if let Ok(subs) = registry.load_region_submissions(&package_name, version, &region_id) {
+        if let Ok(subs) = registry.load_region_submissions(&package_name, version, region_id) {
             for s in subs {
                 by_slot
                     .entry((s.submitter.id.clone(), s.cell_row, s.cell_col))
@@ -2730,6 +3047,8 @@ pub fn calp_load_region_submissions(
                 state: state.to_string(),
                 submitted_at: s.submitted_at,
                 updated_at: s.updated_at,
+                review_reason: s.review_reason,
+                reviewed_by: s.reviewed_by,
             }
         })
         .collect();
@@ -2743,10 +3062,146 @@ pub fn calp_load_region_submissions(
     Ok(out)
 }
 
+/// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
+fn csv_escape(s: &str) -> String {
+    if s.contains(|c| c == ',' || c == '"' || c == '\n' || c == '\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Export every submission for a writeback region as CSV text — the publisher's
+/// data-collection output, so collected values can be pivoted / reconciled /
+/// archived instead of being trapped behind the dashboard list. The frontend
+/// saves the returned string as a .csv file.
+#[tauri::command]
+pub fn calp_export_region_submissions_csv(
+    state: State<AppState>,
+    region_id: String,
+    window: tauri::Window,
+) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let rows = load_region_submission_infos(&state, &region_id)?;
+    let mut out =
+        String::from("submitter,submitterId,cell,value,type,state,submittedAt,updatedAt,reviewedBy,reviewReason\n");
+    for r in &rows {
+        let cell = format!("R{}C{}", r.cell_row + 1, r.cell_col + 1);
+        let fields = [
+            r.submitter_name.as_str(),
+            r.submitter_id.as_str(),
+            cell.as_str(),
+            r.value_display.as_str(),
+            r.value_kind.as_str(),
+            r.state.as_str(),
+            r.submitted_at.as_deref().unwrap_or(""),
+            r.updated_at.as_str(),
+            r.reviewed_by.as_deref().unwrap_or(""),
+            r.review_reason.as_deref().unwrap_or(""),
+        ];
+        out.push_str(
+            &fields
+                .iter()
+                .map(|f| csv_escape(f))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Completion-tracking status for a writeback region: who the publisher expects
+/// to respond, who has, and who is still missing.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionResponseStatus {
+    /// The publisher's declared expected respondents (verbatim).
+    pub expected: Vec<String>,
+    /// Distinct submitter display names that have a non-empty submission.
+    pub responded: Vec<String>,
+    /// Expected identifiers with no matching submission yet.
+    pub missing: Vec<String>,
+}
+
+/// Compute who has responded vs. who is still expected for a region — the
+/// publisher's "7 of 12 submitted / chase the rest" view. Matches each declared
+/// expected respondent case-insensitively against any submitter's display name
+/// or id (with a substring fallback so "Alice" matches "Alice (North)").
+#[tauri::command]
+pub fn calp_region_response_status(
+    state: State<AppState>,
+    region_id: String,
+    window: tauri::Window,
+) -> Result<RegionResponseStatus, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(&state, &region_id)?;
+    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let expected: Vec<String> = registry
+        .get_version_manifest(&package_name, &resolved_version)
+        .ok()
+        .and_then(|m| m.writeback_regions)
+        .and_then(|regions| regions.into_iter().find(|r| r.id == region_id))
+        .map(|d| d.expected_respondents)
+        .unwrap_or_default();
+
+    // Distinct submitters (id -> display name) with a non-empty submission,
+    // across the resolved version and older ones (lenient carry-forward).
+    let mut versions = vec![resolved_version.clone()];
+    versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
+    let mut respondents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for version in &versions {
+        if let Ok(subs) = registry.load_region_submissions(&package_name, version, &region_id) {
+            for s in subs {
+                if matches!(s.value, calp::writeback::SubmissionValue::Empty) {
+                    continue;
+                }
+                respondents
+                    .entry(s.submitter.id.clone())
+                    .or_insert(s.submitter.display_name.clone());
+            }
+        }
+    }
+
+    Ok(compute_response_status(expected, &respondents))
+}
+
+/// Pure completion-tracking computation (extracted for unit testing): given the
+/// declared expected respondents and `respondents` (id -> display name of
+/// everyone with a non-empty submission), return who responded and who's
+/// missing. An expected entry matches case-insensitively on a submitter's id or
+/// display name, with a substring fallback either way ("Alice" ⇄ "Alice (North)").
+fn compute_response_status(
+    expected: Vec<String>,
+    respondents: &std::collections::HashMap<String, String>,
+) -> RegionResponseStatus {
+    let mut responded: Vec<String> = respondents.values().cloned().collect();
+    responded.sort();
+    responded.dedup();
+
+    let matched = |exp: &str| -> bool {
+        let e = exp.trim().to_lowercase();
+        if e.is_empty() {
+            return true; // a blank expected entry isn't "missing"
+        }
+        respondents.iter().any(|(id, name)| {
+            let n = name.to_lowercase();
+            id.to_lowercase() == e || n == e || n.contains(&e) || e.contains(&n)
+        })
+    };
+    let missing: Vec<String> = expected.iter().filter(|e| !matched(e)).cloned().collect();
+
+    RegionResponseStatus { expected, responded, missing }
+}
+
 /// Apply a region's GATHER governance to its submissions: approval gating,
-/// drop cleared cells, then visibility (own_only hides others; own_plus_aggregate
-/// keeps values but anonymizes other submitters). Pure + unit-tested — this is the
-/// privacy boundary, so it must never silently change.
+/// drop cleared cells, READ-SIDE schema + deadline integrity, then visibility
+/// (own_only hides others; own_plus_aggregate keeps values but anonymizes other
+/// submitters). Pure + unit-tested — this is the privacy AND integrity boundary
+/// for what reaches an aggregate, so it must never silently change.
 fn apply_gather_governance(
     mut submissions: Vec<calp::writeback::WritebackSubmission>,
     region: &calp::WritebackRegionDeclaration,
@@ -2769,6 +3224,41 @@ fn apply_gather_governance(
     // would skew AVERAGE/COUNT/SUBMITTERS aggregates.
     submissions.retain(|s| !matches!(s.value, calp::writeback::SubmissionValue::Empty));
 
+    // READ-SIDE SCHEMA INTEGRITY (P0): the publisher's ValueSchema is enforced
+    // on the honest submit path, but the registry is a shared directory — a
+    // hand-written submission file can carry an out-of-range or wrong-type value.
+    // Drop anything that fails the region's schema so it can never reach an
+    // aggregate. (Honest submissions already passed this exact check at submit,
+    // so no legitimate value is dropped.)
+    if let Some(schema) = &region.schema {
+        submissions.retain(|s| schema.validate(&s.value).is_ok());
+    }
+
+    // READ-SIDE DEADLINE INTEGRITY (P0): a region with a passed `until_deadline`
+    // blocks new submits on the honest path, but a late or backdated file would
+    // otherwise still aggregate. Drop any submission whose `submitted_at` is at
+    // or after the deadline. Best-effort without a trusted clock: a record that
+    // lacks `submitted_at` is kept (we can't prove it was late); the schema gate
+    // above still applies to it.
+    if let Some(calp::writeback::LifecyclePolicy::UntilDeadline { deadline: Some(dl) }) =
+        &region.lifecycle
+    {
+        submissions.retain(|s| match &s.submitted_at {
+            Some(ts) => !deadline_passed(dl, ts),
+            None => true,
+        });
+    }
+
+    // Deterministic ordering BEFORE any anonymization: read_dir / HashMap order
+    // is not cross-machine stable, so GATHER and GATHER.SUBMITTERS (which read
+    // this same order) would otherwise not be index-pairable across machines.
+    submissions.sort_by(|a, b| {
+        a.cell_row
+            .cmp(&b.cell_row)
+            .then(a.cell_col.cmp(&b.cell_col))
+            .then(a.submitter.id.cmp(&b.submitter.id))
+    });
+
     // Visibility enforcement. NOTE: the policy docs say "publisher
     // sees all", but without authenticated identities (roadmap D8)
     // every gatherer is a subscriber, so the policy applies to all.
@@ -2781,14 +3271,32 @@ fn apply_gather_governance(
             });
         }
         Some(calp::writeback::VisibilityPolicy::OwnPlusAggregate) => {
-            // Values flow (aggregates need them) but other
-            // submitters' identities are anonymized.
+            // Values flow (aggregates need them) but other submitters'
+            // identities are anonymized — to a STABLE DISTINCT token ("Submitter
+            // 2") rather than a single "(anonymous)", so a roster of N
+            // contributors stays distinguishable in GATHER.SUBMITTERS. Tokens
+            // are assigned in the (already-deterministic) sorted order.
+            let mut token_for: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            let mut next: usize = 1;
+            for s in submissions.iter() {
+                let is_own = own_identity
+                    .map(|own| s.submitter.id == own.id)
+                    .unwrap_or(false);
+                if !is_own && !token_for.contains_key(&s.submitter.id) {
+                    token_for.insert(s.submitter.id.clone(), format!("Submitter {next}"));
+                    next += 1;
+                }
+            }
             for s in submissions.iter_mut() {
                 let is_own = own_identity
                     .map(|own| s.submitter.id == own.id)
                     .unwrap_or(false);
                 if !is_own {
-                    s.submitter.display_name = "(anonymous)".to_string();
+                    s.submitter.display_name = token_for
+                        .get(&s.submitter.id)
+                        .cloned()
+                        .unwrap_or_else(|| "(anonymous)".to_string());
                     s.submitter.id = String::new();
                 }
             }
@@ -2959,17 +3467,25 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
 
             let submissions = apply_gather_governance(submissions, region, own_identity.as_ref());
 
-            let gather_subs: Vec<engine::GatherSubmission> = submissions.iter().map(|s| {
-                engine::GatherSubmission {
+            let gather_subs: Vec<engine::GatherSubmission> = submissions.iter().filter_map(|s| {
+                let value = match &s.value {
+                    calp::writeback::SubmissionValue::Number { value } => engine::EvalResult::Number(*value),
+                    calp::writeback::SubmissionValue::Text { value } => engine::EvalResult::Text(value.clone()),
+                    calp::writeback::SubmissionValue::Boolean { value } => engine::EvalResult::Boolean(*value),
+                    // Governance already drops Empty; never coerce it to 0.0
+                    // (that would inject a phantom zero into SUM/AVERAGE/COUNT).
+                    calp::writeback::SubmissionValue::Empty => return None,
+                };
+                Some(engine::GatherSubmission {
                     submitter_name: s.submitter.display_name.clone(),
                     submitter_id: s.submitter.id.clone(),
-                    value: match &s.value {
-                        calp::writeback::SubmissionValue::Number { value } => engine::EvalResult::Number(*value),
-                        calp::writeback::SubmissionValue::Text { value } => engine::EvalResult::Text(value.clone()),
-                        calp::writeback::SubmissionValue::Boolean { value } => engine::EvalResult::Boolean(*value),
-                        calp::writeback::SubmissionValue::Empty => engine::EvalResult::Number(0.0),
-                    },
-                }
+                    // Carry the cell (0-based absolute) so GATHER.AT and the
+                    // cell-aware GATHER.FROM/COUNT/SUBMITTERS forms can scope a
+                    // multi-cell region's submissions to one input cell.
+                    cell_row: s.cell_row,
+                    cell_col: s.cell_col,
+                    value,
+                })
             }).collect();
 
             // First subscription declaring a region wins, matching the
@@ -2999,8 +3515,8 @@ mod gather_governance_tests {
     use std::collections::HashMap;
 
     use calp::writeback::{
-        RegionSelector, SubmissionPolicy, SubmissionState, SubmissionValue, VisibilityPolicy,
-        WritebackRegionDeclaration, WritebackSubmission,
+        LifecyclePolicy, RegionSelector, SubmissionPolicy, SubmissionState, SubmissionValue,
+        ValueSchema, ValueType, VisibilityPolicy, WritebackRegionDeclaration, WritebackSubmission,
     };
     use calp::SubmitterIdentity;
 
@@ -3033,6 +3549,8 @@ mod gather_governance_tests {
             created_at: "2026-06-15T00:00:00Z".to_string(),
             updated_at: "2026-06-15T00:00:00Z".to_string(),
             submitted_at: None,
+            review_reason: None,
+            reviewed_by: None,
             extra: HashMap::new(),
         }
     }
@@ -3060,6 +3578,7 @@ mod gather_governance_tests {
             version_binding: None,
             lifecycle: None,
             aggregation_hint: None,
+            expected_respondents: Vec::new(),
             extra: HashMap::new(),
         }
     }
@@ -3177,7 +3696,10 @@ mod gather_governance_tests {
             .iter()
             .find(|s| matches!(s.value, SubmissionValue::Number { value } if value == 20.0))
             .expect("Bob's value preserved");
-        assert_eq!(other.submitter.display_name, "(anonymous)", "Bob's name anonymized");
+        assert_eq!(
+            other.submitter.display_name, "Submitter 1",
+            "Bob anonymized to a stable distinct token"
+        );
         assert_eq!(other.submitter.id, "", "Bob's id cleared");
     }
 
@@ -3212,6 +3734,107 @@ mod gather_governance_tests {
             out.is_empty(),
             "without an own identity, own_only fails closed and reveals nothing"
         );
+    }
+
+    // --- Read-side integrity (P0): schema + deadline filtering ---
+
+    fn make_region_with(
+        schema: Option<ValueSchema>,
+        lifecycle: Option<LifecyclePolicy>,
+    ) -> WritebackRegionDeclaration {
+        let mut r = make_region(None, None);
+        r.schema = schema;
+        r.lifecycle = lifecycle;
+        r
+    }
+
+    fn number_schema(min: f64, max: f64) -> ValueSchema {
+        ValueSchema {
+            value_type: ValueType::Number,
+            required: false,
+            min: Some(min),
+            max: Some(max),
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn make_submission_at(
+        submitter_id: &str,
+        state: SubmissionState,
+        value: SubmissionValue,
+        submitted_at: Option<&str>,
+    ) -> WritebackSubmission {
+        let mut s = make_submission(submitter_id, submitter_id, state, value);
+        s.submitted_at = submitted_at.map(|t| t.to_string());
+        s
+    }
+
+    // 9. A hand-written out-of-range or wrong-type value never reaches an
+    //    aggregate — the read-side schema gate drops it.
+    #[test]
+    fn schema_drops_out_of_range_and_wrong_type_values() {
+        let region = make_region_with(Some(number_schema(0.0, 100.0)), None);
+        let subs = vec![
+            make_submission("ok", "Ok", SubmissionState::Submitted, num(50.0)),
+            make_submission("hi", "Hi", SubmissionState::Submitted, num(9999.0)),
+            make_submission(
+                "txt",
+                "Txt",
+                SubmissionState::Submitted,
+                SubmissionValue::Text { value: "oops".to_string() },
+            ),
+        ];
+        let out = apply_gather_governance(subs, &region, None);
+        assert_eq!(out.len(), 1, "only the in-range numeric value survives");
+        assert_eq!(out[0].submitter.id, "ok");
+    }
+
+    // 10. A submission made at/after an until_deadline cutoff is dropped at read
+    //     time; one made before is kept; one lacking submitted_at is best-effort kept.
+    #[test]
+    fn deadline_drops_late_submissions() {
+        let region = make_region_with(
+            None,
+            Some(LifecyclePolicy::UntilDeadline {
+                deadline: Some("2026-06-15T12:00:00Z".to_string()),
+            }),
+        );
+        let subs = vec![
+            make_submission_at("early", SubmissionState::Submitted, num(1.0), Some("2026-06-15T09:00:00Z")),
+            make_submission_at("late", SubmissionState::Submitted, num(2.0), Some("2026-06-15T15:00:00Z")),
+            make_submission_at("untimed", SubmissionState::Submitted, num(3.0), None),
+        ];
+        let out = apply_gather_governance(subs, &region, None);
+        let ids: Vec<String> = out.iter().map(|s| s.submitter.id.clone()).collect();
+        assert!(ids.contains(&"early".to_string()), "before-deadline submission kept");
+        assert!(!ids.contains(&"late".to_string()), "after-deadline submission dropped");
+        assert!(ids.contains(&"untimed".to_string()), "no timestamp -> best-effort kept");
+        assert_eq!(out.len(), 2);
+    }
+
+    // 11. Completion tracking: expected respondents are matched (case-insensitive,
+    //     with a substring fallback either way) against who actually submitted;
+    //     the rest are reported as missing; a blank expected entry is ignored.
+    #[test]
+    fn response_status_matches_and_lists_missing() {
+        let mut respondents = HashMap::new();
+        respondents.insert("id-north".to_string(), "Alice (North)".to_string());
+        respondents.insert("id-south".to_string(), "Bob".to_string());
+        let st = super::compute_response_status(
+            vec![
+                "Alice".into(),      // substring of "Alice (North)"
+                "bob".into(),        // case-insensitive match of "Bob"
+                "id-south".into(),   // match by id
+                "Carol".into(),      // nobody -> missing
+                "  ".into(),         // blank -> ignored
+            ],
+            &respondents,
+        );
+        assert_eq!(st.missing, vec!["Carol".to_string()]);
+        assert_eq!(st.responded, vec!["Alice (North)".to_string(), "Bob".to_string()]);
     }
 }
 

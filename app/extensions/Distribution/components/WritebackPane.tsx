@@ -6,8 +6,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   getWritebackRegions,
-  getWritebackLayer,
+  reconcileWriteback,
   submitRegion,
+  submitAllRegions,
   previewRegionSubmission,
   getWritebackDraftRegions,
   type WritebackRegionEntry,
@@ -15,6 +16,21 @@ import {
   type WritebackRegionDeclaration,
   type OutboundSubmissionPreview,
 } from "@api/distribution";
+
+/** Format an ISO deadline as a relative "Due in …" / "Overdue" chip. */
+function deadlineLabel(iso?: string): { text: string; color: string } | null {
+  if (!iso) return null;
+  const dl = new Date(iso).getTime();
+  if (isNaN(dl)) return null;
+  const ms = dl - Date.now();
+  if (ms <= 0) return { text: "Overdue", color: "#c5221f" };
+  const days = Math.floor(ms / 86400000);
+  const hours = Math.floor((ms % 86400000) / 3600000);
+  return {
+    text: days > 0 ? `Due in ${days}d ${hours}h` : `Due in ${hours}h`,
+    color: days < 1 ? "#b06000" : "#666",
+  };
+}
 
 function colLetter(c: number): string {
   let s = "";
@@ -117,7 +133,9 @@ export function WritebackPane() {
     try {
       const [regs, layer, drafts] = await Promise.all([
         getWritebackRegions(),
-        getWritebackLayer(),
+        // Reconcile pulls the publisher's approve/reject decisions back into the
+        // local layer so this pane shows the real fate of each submission.
+        reconcileWriteback(),
         getWritebackDraftRegions(),
       ]);
       setRegions(regs);
@@ -169,12 +187,31 @@ export function WritebackPane() {
     }
   }, [preview, refresh]);
 
+  // "I'm done": submit every region that has drafts, so the contributor doesn't
+  // leave whole regions as unsent drafts believing they're finished.
+  const handleSubmitAll = useCallback(async () => {
+    setSubmitting("__all__");
+    setSubmitError(null);
+    try {
+      const n = await submitAllRegions();
+      console.log(`[WritebackPane] Submitted ${n} values across all regions`);
+      setPreview(null);
+      await refresh();
+    } catch (err) {
+      console.error("[WritebackPane] submit-all error:", err);
+      setSubmitError(String(err));
+    } finally {
+      setSubmitting(null);
+    }
+  }, [refresh]);
+
   if (loading) {
     return <div style={{ padding: 16 }}>Loading...</div>;
   }
 
   const hasSubscriberRegions = regions.length > 0;
   const hasAuthorRegions = draftRegions.length > 0;
+  const totalDrafts = writebackLayer?.drafts.filter((d) => d.state === "draft").length ?? 0;
 
   if (!hasSubscriberRegions && !hasAuthorRegions) {
     return (
@@ -192,6 +229,18 @@ export function WritebackPane() {
           {submitError && (
             <div style={{ color: "red", fontSize: 11, marginBottom: 8 }}>{submitError}</div>
           )}
+          {totalDrafts > 0 && (
+            <button
+              onClick={handleSubmitAll}
+              disabled={submitting !== null || previewLoading !== null}
+              style={{ fontSize: 11, fontWeight: 600, marginBottom: 8 }}
+              title="Submit every region that has drafts"
+            >
+              {submitting === "__all__"
+                ? "Submitting all..."
+                : `Submit all ${totalDrafts} draft(s)`}
+            </button>
+          )}
           {regions.map((region, idx) => {
             // Match drafts by region id — bounds-only matching confused
             // overlapping coordinates across different sheets/regions.
@@ -199,9 +248,11 @@ export function WritebackPane() {
               (d) => d.regionId === region.regionId
             ) ?? [];
             const draftCount = draftsForRegion.filter((d) => d.state === "draft").length;
-            const submittedCount = draftsForRegion.filter(
-              (d) => d.state === "submitted" || d.state === "approved"
-            ).length;
+            const submittedCount = draftsForRegion.filter((d) => d.state === "submitted").length;
+            const approvedCount = draftsForRegion.filter((d) => d.state === "approved").length;
+            const rejectedCount = draftsForRegion.filter((d) => d.state === "rejected").length;
+            const isEmpty =
+              draftCount === 0 && submittedCount === 0 && approvedCount === 0 && rejectedCount === 0;
 
             return (
               <div key={region.regionId || idx} style={{
@@ -210,11 +261,30 @@ export function WritebackPane() {
                 <div style={{ fontSize: 12, fontWeight: 600 }}>
                   Sheet {region.sheetIndex + 1}, Rows {region.rowStart + 1}-{region.rowEnd + 1}, Cols {region.colStart + 1}-{region.colEnd + 1}
                 </div>
-                <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>
-                  {draftCount > 0 && <span>{draftCount} draft(s) </span>}
-                  {submittedCount > 0 && <span>{submittedCount} submitted </span>}
-                  {draftCount === 0 && submittedCount === 0 && <span>Empty</span>}
+                <div style={{ fontSize: 11, color: "#666", marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {draftCount > 0 && <span style={{ color: "#b06000" }}>{draftCount} draft</span>}
+                  {submittedCount > 0 && <span style={{ color: "#1967d2" }}>{submittedCount} pending</span>}
+                  {approvedCount > 0 && <span style={{ color: "#137333" }}>{approvedCount} approved</span>}
+                  {rejectedCount > 0 && <span style={{ color: "#c5221f" }}>{rejectedCount} rejected</span>}
+                  {isEmpty && <span>Empty</span>}
+                  {(() => {
+                    const dl = deadlineLabel(region.deadline);
+                    return dl ? <span style={{ color: dl.color, fontWeight: 600 }}>· {dl.text}</span> : null;
+                  })()}
                 </div>
+                {rejectedCount > 0 && (
+                  <div style={{ fontSize: 11, color: "#c5221f", marginTop: 4 }}>
+                    {rejectedCount} value{rejectedCount === 1 ? " was" : "s were"} rejected — re-enter
+                    {rejectedCount === 1 ? " it" : " them"} in the grid and submit again.
+                    {draftsForRegion
+                      .filter((d) => d.state === "rejected" && d.reviewReason)
+                      .map((d, i) => (
+                        <div key={i} style={{ marginTop: 2 }}>
+                          {a1(d.cellRow, d.cellCol)}: {d.reviewReason}
+                        </div>
+                      ))}
+                  </div>
+                )}
                 {draftCount > 0 && preview?.regionId !== region.regionId && (
                   <button
                     onClick={() => handleReview(region.regionId)}

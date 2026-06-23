@@ -429,6 +429,7 @@ pub enum BuiltinFunction {
     GatherFrom,
     GatherCount,
     GatherSubmitters,
+    GatherAt,
 
     // Collection functions (3D cells)
     Collect,
@@ -998,6 +999,7 @@ impl BuiltinFunction {
             "GATHER.FROM" => BuiltinFunction::GatherFrom,
             "GATHER.COUNT" => BuiltinFunction::GatherCount,
             "GATHER.SUBMITTERS" => BuiltinFunction::GatherSubmitters,
+            "GATHER.AT" => BuiltinFunction::GatherAt,
 
             // Collection functions (3D cells)
             "COLLECT" => BuiltinFunction::Collect,
@@ -1538,6 +1540,7 @@ impl BuiltinFunction {
             BuiltinFunction::GatherFrom => "GATHER.FROM",
             BuiltinFunction::GatherCount => "GATHER.COUNT",
             BuiltinFunction::GatherSubmitters => "GATHER.SUBMITTERS",
+            BuiltinFunction::GatherAt => "GATHER.AT",
             BuiltinFunction::Collect => "COLLECT",
             BuiltinFunction::DictFn => "DICT",
             BuiltinFunction::Keys => "KEYS",

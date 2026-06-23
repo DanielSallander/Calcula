@@ -151,18 +151,48 @@ pub struct WritebackRegionDeclaration {
     /// Publisher's hint about how they aggregate this region.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregation_hint: Option<String>,
+    /// Identifiers (names/emails) the publisher expects to respond, for
+    /// completion tracking. Matched case-insensitively against each submission's
+    /// submitter display name or id. Empty = no tracking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_respondents: Vec<String>,
     /// Forward-compatibility: preserves unknown fields from future format versions.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Best-effort date recognizer for writeback validation: accepts common
+/// year-first / day-first / month-first formats and the date part of an ISO
+/// datetime. Rejects free text — so "1/1/26" is accepted but "garbagexx" is not.
+fn parse_date_text(s: &str) -> bool {
+    use chrono::NaiveDate;
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // ISO 8601 datetime ("2026-01-15T10:00" / "2026-01-15 10:00") -> date part.
+    let date_part = s.split(|c| c == 'T' || c == ' ').next().unwrap_or(s);
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d/%m/%Y", "%m-%d-%Y", "%d-%m-%Y",
+        "%d.%m.%Y", "%Y.%m.%d", "%m/%d/%y", "%d/%m/%y",
+    ];
+    FORMATS
+        .iter()
+        .any(|f| NaiveDate::parse_from_str(date_part, f).is_ok())
 }
 
 impl ValueSchema {
     /// Validate a submission value against this schema.
     /// Returns Ok(()) if valid, Err(message) if invalid.
     pub fn validate(&self, value: &SubmissionValue) -> Result<(), String> {
-        // Check required
+        // Check required — Empty, or whitespace-only text, both count as blank.
         if self.required {
-            if matches!(value, SubmissionValue::Empty) {
+            let blank = match value {
+                SubmissionValue::Empty => true,
+                SubmissionValue::Text { value } => value.trim().is_empty(),
+                _ => false,
+            };
+            if blank {
                 return Err("This field is required.".to_string());
             }
         }
@@ -203,16 +233,25 @@ impl ValueSchema {
                     _ => return Err("Expected text.".to_string()),
                 };
                 if let Some(max_len) = self.max_length {
-                    if text.len() > max_len {
+                    // Count Unicode scalar values, not UTF-8 bytes — "café" / "日本語"
+                    // must not over-count under a multi-byte encoding.
+                    let len = text.chars().count();
+                    if len > max_len {
                         return Err(format!(
                             "Text length {} exceeds maximum of {}.",
-                            text.len(), max_len,
+                            len, max_len,
                         ));
                     }
                 }
                 if let Some(ref pat) = self.pattern {
-                    // Simple contains check — full regex would need a dependency
-                    if !text.contains(pat.as_str()) {
+                    // A real (anchored) regex match. If the publisher's pattern
+                    // fails to compile, fall back to a literal substring check so
+                    // a malformed declaration can never crash validation.
+                    let matches = match regex::Regex::new(pat) {
+                        Ok(re) => re.is_match(text),
+                        Err(_) => text.contains(pat.as_str()),
+                    };
+                    if !matches {
                         return Err(format!("Text does not match pattern '{}'.", pat));
                     }
                 }
@@ -235,14 +274,21 @@ impl ValueSchema {
                     ));
                 }
             }
-            ValueType::Date => {
-                // Accept text that looks like a date (basic check)
-                if let SubmissionValue::Text { value } = value {
-                    if value.len() < 8 {
+            ValueType::Date => match value {
+                // A spreadsheet date is commonly stored as a serial number;
+                // accept any finite number as a date serial.
+                SubmissionValue::Number { value } => {
+                    if !value.is_finite() {
                         return Err("Expected a date value.".to_string());
                     }
                 }
-            }
+                SubmissionValue::Text { value } => {
+                    if !parse_date_text(value) {
+                        return Err(format!("'{}' is not a recognizable date.", value));
+                    }
+                }
+                _ => return Err("Expected a date value.".to_string()),
+            },
         }
 
         Ok(())
@@ -429,6 +475,10 @@ impl WritebackIndex {
                     row_end: range.row_end,
                     col_start: range.col_start,
                     col_end: range.col_end,
+                    // Filled by the app command from the region declarations.
+                    value_type: None,
+                    required: None,
+                    deadline: None,
                 });
             }
         }
@@ -458,6 +508,19 @@ pub struct WritebackRegionEntry {
     pub row_end: u32,
     pub col_start: u32,
     pub col_end: u32,
+    /// Declared value type ("number"|"integer"|"text"|"date"|"boolean"|"enum"),
+    /// so the client can coerce typed input to the right SubmissionValue instead
+    /// of sniffing it from the string shape. Filled by the app command, not by
+    /// `to_flat_list` (the index has no schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+    /// Whether the region's schema marks values required (for the UI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    /// Submission deadline (ISO 8601) for an `until_deadline` region, surfaced
+    /// so the subscriber UI can show a countdown / overdue state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -483,10 +546,12 @@ impl ValueSchema {
         if let (Some(old_max), Some(new_max)) = (self.max, new.max) {
             if new_max < old_max { return false; }
         }
-        // For enums: new must contain all old values
+        // For enums: new must contain all old values (case-insensitive, to match
+        // validate()'s eq_ignore_ascii_case — otherwise a cosmetic casing change
+        // on a version bump silently drops carried-forward answers).
         if self.value_type == ValueType::Enum {
             for val in &self.enum_values {
-                if !new.enum_values.contains(val) {
+                if !new.enum_values.iter().any(|n| n.eq_ignore_ascii_case(val)) {
                     return false;
                 }
             }
@@ -665,6 +730,13 @@ pub struct WritebackSubmission {
     /// ISO 8601 timestamp of when it was submitted (state changed to Submitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitted_at: Option<String>,
+    /// Publisher's reason when approving/rejecting (the return-leg feedback a
+    /// contributor sees — "too high", "wrong unit", etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_reason: Option<String>,
+    /// Display name of the publisher who made the approve/reject decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_by: Option<String>,
     /// Forward-compatibility.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
@@ -776,6 +848,7 @@ mod tests {
             version_binding: None,
             lifecycle: None,
             aggregation_hint: None,
+            expected_respondents: Vec::new(),
             extra: HashMap::new(),
         }
     }
@@ -941,6 +1014,7 @@ mod tests {
             version_binding: Some(VersionBinding::Lenient),
             lifecycle: Some(LifecyclePolicy::Always),
             aggregation_hint: Some("SUM of regional forecasts".to_string()),
+            expected_respondents: Vec::new(),
             extra: HashMap::new(),
         };
 
@@ -1310,6 +1384,98 @@ mod tests {
         assert!(result.unwrap_err().contains("exceeds maximum"));
     }
 
+    fn text_schema(max_length: Option<usize>, pattern: Option<&str>) -> ValueSchema {
+        ValueSchema {
+            value_type: ValueType::Text,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: Vec::new(),
+            max_length,
+            pattern: pattern.map(|p| p.to_string()),
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn schema_max_length_counts_chars_not_bytes() {
+        let schema = text_schema(Some(4), None);
+        // 4 multi-byte chars are within a 4-CHAR limit (byte length would be >4).
+        assert!(schema.validate(&SubmissionValue::Text { value: "café".to_string() }).is_ok());
+        assert!(schema.validate(&SubmissionValue::Text { value: "日本語語".to_string() }).is_ok());
+        // 5 chars -> rejected.
+        assert!(schema.validate(&SubmissionValue::Text { value: "abcde".to_string() }).is_err());
+    }
+
+    #[test]
+    fn schema_pattern_is_real_regex() {
+        let schema = text_schema(None, Some(r"^\d{4}$"));
+        assert!(schema.validate(&SubmissionValue::Text { value: "2026".to_string() }).is_ok());
+        // The old substring behavior would WRONGLY accept this; real regex rejects.
+        assert!(schema.validate(&SubmissionValue::Text { value: "year 2026!".to_string() }).is_err());
+        assert!(schema.validate(&SubmissionValue::Text { value: "abcd".to_string() }).is_err());
+    }
+
+    #[test]
+    fn schema_validates_real_dates() {
+        let schema = ValueSchema {
+            value_type: ValueType::Date,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        };
+        for ok in ["2026-01-15", "1/15/2026", "15/01/2026", "2026-01-15T10:30", "1/1/26"] {
+            assert!(
+                schema.validate(&SubmissionValue::Text { value: ok.to_string() }).is_ok(),
+                "should accept date {ok}"
+            );
+        }
+        for bad in ["garbagexx", "not a date", "hello123"] {
+            assert!(
+                schema.validate(&SubmissionValue::Text { value: bad.to_string() }).is_err(),
+                "should reject non-date {bad}"
+            );
+        }
+        // A spreadsheet serial number is a valid date.
+        assert!(schema.validate(&SubmissionValue::Number { value: 45000.0 }).is_ok());
+    }
+
+    #[test]
+    fn schema_required_rejects_whitespace_only_text() {
+        let mut schema = text_schema(None, None);
+        schema.required = true;
+        assert!(schema.validate(&SubmissionValue::Text { value: "   ".to_string() }).is_err());
+        assert!(schema.validate(&SubmissionValue::Empty).is_err());
+        assert!(schema.validate(&SubmissionValue::Text { value: "ok".to_string() }).is_ok());
+    }
+
+    fn enum_schema(values: &[&str]) -> ValueSchema {
+        ValueSchema {
+            value_type: ValueType::Enum,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: values.iter().map(|s| s.to_string()).collect(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn schema_enum_compatibility_is_case_insensitive() {
+        let old = enum_schema(&["Low", "High"]);
+        // Same values, different casing + an added one -> still compatible
+        // (no silent drop of carried-forward answers on a cosmetic change).
+        assert!(old.is_compatible_with(&enum_schema(&["LOW", "high", "Medium"])));
+        // Actually dropping a value remains incompatible.
+        assert!(!old.is_compatible_with(&enum_schema(&["Low"])));
+    }
+
     #[test]
     fn schema_compatibility_same_type() {
         let old = make_number_schema(false, Some(0.0), Some(100.0));
@@ -1370,6 +1536,8 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             submitted_at: None,
+            review_reason: None,
+            reviewed_by: None,
             extra: HashMap::new(),
         }
     }

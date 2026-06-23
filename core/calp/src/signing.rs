@@ -102,30 +102,38 @@ impl PublisherKeypair {
     /// none exists. Key material is generated with the OS CSPRNG (OsRng), NOT
     /// the codebase's non-crypto UUID PRNG. The profile directory is created
     /// if needed. Mirrors identity_provider::load_or_create.
-    pub fn load_or_create(profile_dir: &Path) -> Result<PublisherKeypair, CalpError> {
+    /// Load an EXISTING publisher keypair from the profile directory, or
+    /// `Ok(None)` if this profile has never published (no publisher-key.json).
+    /// Unlike `load_or_create`, this NEVER creates a keypair — it is a
+    /// read-only ownership probe used to authorize publisher-only actions.
+    pub fn load_existing(profile_dir: &Path) -> Result<Option<PublisherKeypair>, CalpError> {
         let path = publisher_key_file_path(profile_dir);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let file: PublisherKeyFile = serde_json::from_str(&content)?;
+        let secret = from_hex(&file.secret_key).ok_or_else(|| {
+            CalpError::Registry("publisher-key.json: secretKey is not valid hex".to_string())
+        })?;
+        let seed: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
+            CalpError::Registry("publisher-key.json: secretKey must be 32 bytes".to_string())
+        })?;
+        let signing_key = SigningKey::from_bytes(&seed);
+        let display_name = if file.display_name.is_empty() {
+            os_display_name()
+        } else {
+            file.display_name
+        };
+        Ok(Some(PublisherKeypair {
+            signing_key,
+            display_name,
+        }))
+    }
 
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let file: PublisherKeyFile = serde_json::from_str(&content)?;
-            let secret = from_hex(&file.secret_key).ok_or_else(|| {
-                CalpError::Registry("publisher-key.json: secretKey is not valid hex".to_string())
-            })?;
-            let seed: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
-                CalpError::Registry(
-                    "publisher-key.json: secretKey must be 32 bytes".to_string(),
-                )
-            })?;
-            let signing_key = SigningKey::from_bytes(&seed);
-            let display_name = if file.display_name.is_empty() {
-                os_display_name()
-            } else {
-                file.display_name
-            };
-            return Ok(PublisherKeypair {
-                signing_key,
-                display_name,
-            });
+    pub fn load_or_create(profile_dir: &Path) -> Result<PublisherKeypair, CalpError> {
+        if let Some(kp) = Self::load_existing(profile_dir)? {
+            return Ok(kp);
         }
 
         // First publish: generate fresh key material with the OS CSPRNG.
@@ -140,7 +148,7 @@ impl PublisherKeypair {
             display_name: display_name.clone(),
         };
         let content = serde_json::to_string_pretty(&file)?;
-        std::fs::write(&path, content)?;
+        std::fs::write(publisher_key_file_path(profile_dir), content)?;
 
         Ok(PublisherKeypair {
             signing_key,
@@ -163,6 +171,31 @@ impl PublisherKeypair {
     pub fn sign(&self, bytes: &[u8]) -> String {
         let sig: Signature = self.signing_key.sign(bytes);
         to_hex(&sig.to_bytes())
+    }
+}
+
+/// Does the keypair in `profile_dir` prove ownership of `publisher_key`?
+///
+/// Returns `true` iff this profile has a `publisher-key.json` whose Ed25519
+/// public key (DERIVED from the on-disk secret key on load — not merely the
+/// stored `publicKey` field) equals `publisher_key`. Because the public key is
+/// recomputed from the secret, equality is cryptographically sound PROOF OF
+/// POSSESSION of the matching private key: forging it would require breaking
+/// Ed25519, not just editing a JSON field.
+///
+/// This is the authorization primitive for publisher-only actions
+/// (approve/reject writeback submissions). An empty `publisher_key` (an
+/// unsigned package) can never be owned, so it returns `false`.
+pub fn profile_holds_publisher_key(
+    profile_dir: &Path,
+    publisher_key: &str,
+) -> Result<bool, CalpError> {
+    if publisher_key.is_empty() {
+        return Ok(false);
+    }
+    match PublisherKeypair::load_existing(profile_dir)? {
+        Some(kp) => Ok(kp.public_key_hex() == publisher_key),
+        None => Ok(false),
     }
 }
 
@@ -363,6 +396,71 @@ mod tests {
             verify_signature("00", msg, &sig, "p", "1.0.0"),
             Err(CalpError::ManifestSignatureInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn load_existing_returns_none_when_no_keypair() {
+        let dir = TempDir::new().unwrap();
+        // A profile that never published has no publisher-key.json.
+        assert!(PublisherKeypair::load_existing(dir.path()).unwrap().is_none());
+        // ...and the probe does NOT create one (read-only).
+        assert!(!publisher_key_file_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn profile_holds_publisher_key_authorizes_only_the_owner() {
+        // The publisher's profile: publishing created publisher-key.json here.
+        let pub_dir = TempDir::new().unwrap();
+        let publisher = PublisherKeypair::load_or_create(pub_dir.path()).unwrap();
+        let pub_key = publisher.public_key_hex();
+
+        // A different participant's profile (their own, different keypair).
+        let sub_dir = TempDir::new().unwrap();
+        let _subscriber = PublisherKeypair::load_or_create(sub_dir.path()).unwrap();
+
+        // A profile that has never published at all.
+        let empty_dir = TempDir::new().unwrap();
+
+        // Only the publisher's own profile proves ownership of pub_key.
+        assert!(profile_holds_publisher_key(pub_dir.path(), &pub_key).unwrap());
+        // A different keypair does NOT match.
+        assert!(!profile_holds_publisher_key(sub_dir.path(), &pub_key).unwrap());
+        // No keypair at all does NOT match (and creates nothing).
+        assert!(!profile_holds_publisher_key(empty_dir.path(), &pub_key).unwrap());
+        assert!(!publisher_key_file_path(empty_dir.path()).exists());
+
+        // An unsigned package (empty publisher_key) can never be owned.
+        assert!(!profile_holds_publisher_key(pub_dir.path(), "").unwrap());
+    }
+
+    #[test]
+    fn profile_holds_publisher_key_rejects_forged_public_key_field() {
+        // Craft a publisher-key.json whose stored publicKey CLAIMS the victim's
+        // key but whose secretKey is a different (attacker) seed. The probe must
+        // derive the public key from the SECRET and reject the forgery.
+        let victim_dir = TempDir::new().unwrap();
+        let victim = PublisherKeypair::load_or_create(victim_dir.path()).unwrap();
+        let victim_key = victim.public_key_hex();
+
+        let attacker_dir = TempDir::new().unwrap();
+        let attacker = PublisherKeypair::load_or_create(attacker_dir.path()).unwrap();
+        let attacker_secret = to_hex(&attacker.signing_key.to_bytes());
+
+        // Overwrite the attacker's file: secret = attacker's, but publicKey lies.
+        let forged = PublisherKeyFile {
+            format_version: 1,
+            secret_key: attacker_secret,
+            public_key: victim_key.clone(), // the lie
+            display_name: "attacker".to_string(),
+        };
+        std::fs::write(
+            publisher_key_file_path(attacker_dir.path()),
+            serde_json::to_string_pretty(&forged).unwrap(),
+        )
+        .unwrap();
+
+        // The probe derives from the secret, so the forgery is rejected.
+        assert!(!profile_holds_publisher_key(attacker_dir.path(), &victim_key).unwrap());
     }
 
     #[test]

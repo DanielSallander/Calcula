@@ -69,6 +69,8 @@ pub enum AuditEvent {
     WritebackSubmitted,
     /// Writeback drafts invalidated by refresh (removed/incompatible regions).
     WritebackInvalidated,
+    /// Publisher approved or rejected a submitted writeback value.
+    WritebackReviewed,
 }
 
 impl AuditLog {

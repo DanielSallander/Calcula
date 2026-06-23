@@ -12,9 +12,13 @@ import {
   getWritebackRegions,
   loadRegionSubmissions,
   setSubmissionState,
+  exportRegionSubmissionsCsv,
+  regionResponseStatus,
   type WritebackRegionEntry,
   type RegionSubmission,
+  type RegionResponseStatus,
 } from "@api/distribution";
+import { saveCsvReport } from "../lib/reportExport";
 
 function colLetter(c: number): string {
   let s = "";
@@ -38,6 +42,7 @@ export function PublisherDashboardPane(): React.ReactElement {
   const [regions, setRegions] = useState<WritebackRegionEntry[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [submissions, setSubmissions] = useState<RegionSubmission[]>([]);
+  const [status, setStatus] = useState<RegionResponseStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -56,10 +61,16 @@ export function PublisherDashboardPane(): React.ReactElement {
     setLoading(true);
     setError(null);
     try {
-      setSubmissions(await loadRegionSubmissions(regionId));
+      const [subs, st] = await Promise.all([
+        loadRegionSubmissions(regionId),
+        regionResponseStatus(regionId).catch(() => null),
+      ]);
+      setSubmissions(subs);
+      setStatus(st);
     } catch (e: unknown) {
       setError(String(e));
       setSubmissions([]);
+      setStatus(null);
     } finally {
       setLoading(false);
     }
@@ -78,10 +89,19 @@ export function PublisherDashboardPane(): React.ReactElement {
 
   const decide = useCallback(
     async (s: RegionSubmission, newState: "approved" | "rejected") => {
+      let reason: string | null = null;
+      if (newState === "rejected") {
+        // The reason is shown back to the contributor on their read-back.
+        reason = window.prompt(
+          "Reason for rejecting (optional — the contributor will see this):",
+          "",
+        );
+        if (reason === null) return; // publisher cancelled — abort the rejection
+      }
       setBusy(`${s.submitterId}:${s.cellRow}:${s.cellCol}`);
       setError(null);
       try {
-        await setSubmissionState(s.regionId, s.submitterId, s.cellRow, s.cellCol, newState);
+        await setSubmissionState(s.regionId, s.submitterId, s.cellRow, s.cellCol, newState, reason);
         if (selected) await loadSubs(selected);
       } catch (e: unknown) {
         setError(String(e));
@@ -91,6 +111,17 @@ export function PublisherDashboardPane(): React.ReactElement {
     },
     [selected, loadSubs],
   );
+
+  const exportCsv = useCallback(async () => {
+    if (!selected) return;
+    setError(null);
+    try {
+      const csv = await exportRegionSubmissionsCsv(selected);
+      await saveCsvReport(csv, `${selected}-submissions.csv`);
+    } catch (e: unknown) {
+      setError(String(e));
+    }
+  }, [selected]);
 
   const respondents = new Set(submissions.map((s) => s.submitterId)).size;
   const pending = submissions.filter((s) => s.state === "submitted").length;
@@ -118,6 +149,14 @@ export function PublisherDashboardPane(): React.ReactElement {
         <button onClick={() => selected && loadSubs(selected)} disabled={loading || !selected} style={styles.smallBtn}>
           {loading ? "..." : "Refresh"}
         </button>
+        <button
+          onClick={exportCsv}
+          disabled={!selected || submissions.length === 0}
+          style={styles.smallBtn}
+          title="Export this region's submissions as CSV"
+        >
+          Export CSV
+        </button>
       </div>
 
       {selected && (
@@ -126,6 +165,19 @@ export function PublisherDashboardPane(): React.ReactElement {
           {pending > 0 && <span style={{ ...styles.chip, ...styles.chipPending }}>{pending} pending</span>}
           {approved > 0 && <span style={{ ...styles.chip, ...styles.chipApproved }}>{approved} approved</span>}
           {rejected > 0 && <span style={{ ...styles.chip, ...styles.chipRejected }}>{rejected} rejected</span>}
+        </div>
+      )}
+
+      {status && status.expected.length > 0 && (
+        <div style={styles.summary}>
+          <span style={styles.summaryItem}>
+            {status.responded.length} of {status.expected.length} expected responded
+          </span>
+          {status.missing.length > 0 && (
+            <span style={{ ...styles.chip, ...styles.chipPending }}>
+              waiting on: {status.missing.join(", ")}
+            </span>
+          )}
         </div>
       )}
 
@@ -147,6 +199,11 @@ export function PublisherDashboardPane(): React.ReactElement {
                   <span style={{ ...styles.badge, backgroundColor: badge.bg, color: badge.fg }}>{badge.label}</span>
                 </div>
                 <div style={styles.rowValue}>{s.valueDisplay || <em style={{ color: "#aaa" }}>(empty)</em>}</div>
+                {s.state === "rejected" && s.reviewReason && (
+                  <div style={{ fontSize: 11, color: "#c5221f", marginTop: 2 }}>
+                    Reason: {s.reviewReason}
+                  </div>
+                )}
                 <div style={styles.rowActions}>
                   {s.state !== "approved" && (
                     <button disabled={isBusy} onClick={() => decide(s, "approved")} style={{ ...styles.smallBtn, ...styles.approve }}>

@@ -33,6 +33,7 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   override_imported: { label: "Overrides imported", category: "override" },
   writeback_submitted: { label: "Writeback submitted", category: "writeback" },
   writeback_invalidated: { label: "Writeback invalidated", category: "writeback" },
+  writeback_reviewed: { label: "Writeback reviewed", category: "writeback" },
   published: { label: "Published", category: "publish" },
 };
 

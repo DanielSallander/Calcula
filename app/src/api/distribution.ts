@@ -375,6 +375,13 @@ export interface WritebackRegionEntry {
   rowEnd: number;
   colStart: number;
   colEnd: number;
+  /** Declared value type, so the commit guard coerces input to the right type
+   * instead of sniffing it from the string shape. */
+  valueType?: "number" | "integer" | "text" | "date" | "boolean" | "enum";
+  /** Whether the region's schema marks values required. */
+  required?: boolean;
+  /** Submission deadline (ISO 8601) for an until_deadline region. */
+  deadline?: string;
 }
 
 /** Fetch the current writeback regions from the backend. */
@@ -408,6 +415,8 @@ export interface WritebackRegionDeclaration {
   versionBinding?: "strict" | "lenient";
   lifecycle?: LifecyclePolicyConfig;
   aggregationHint?: string;
+  /** Identifiers the publisher expects to respond (completion tracking). */
+  expectedRespondents?: string[];
 }
 
 export interface RegionSelector {
@@ -486,6 +495,10 @@ export interface WritebackSubmission {
   createdAt: string;
   updatedAt: string;
   submittedAt?: string;
+  /** Publisher's approve/reject reason, adopted on reconcile (read-back). */
+  reviewReason?: string | null;
+  /** Publisher who decided, adopted on reconcile. */
+  reviewedBy?: string | null;
 }
 
 export interface WritebackLayer {
@@ -509,10 +522,24 @@ export function getWritebackLayer(): Promise<WritebackLayer> {
   return invokeBackend("calp_get_writeback_layer");
 }
 
+/** Reconcile local submission states from the registry (the approved/rejected
+ * read-back — the return leg of the writeback loop) and return the updated
+ * layer. Submitted entries adopt their current registry state; unsent drafts
+ * are untouched. This is how a subscriber learns the fate of what they sent. */
+export function reconcileWriteback(): Promise<WritebackLayer> {
+  return invokeBackend("calp_reconcile_writeback");
+}
+
 /** Submit all drafts for a region to the registry of the subscription that
  * declares the region. Returns count submitted. */
 export function submitRegion(regionId: string): Promise<number> {
   return invokeBackend("calp_submit_region", { regionId });
+}
+
+/** Submit the drafts of EVERY writeback region that has any ("submit all").
+ * Returns the total values submitted; surfaces the first region's error. */
+export function submitAllRegions(): Promise<number> {
+  return invokeBackend("calp_submit_all_regions");
 }
 
 /** One value that would leave the machine on submit. */
@@ -571,6 +598,7 @@ export function setSubmissionState(
   cellRow: number,
   cellCol: number,
   newState: "approved" | "rejected" | "submitted",
+  reason?: string | null,
 ): Promise<void> {
   return invokeBackend("calp_set_submission_state", {
     regionId,
@@ -578,6 +606,7 @@ export function setSubmissionState(
     cellRow,
     cellCol,
     newState,
+    reason: reason ?? null,
   });
 }
 
@@ -593,12 +622,35 @@ export interface RegionSubmission {
   state: "draft" | "submitted" | "approved" | "rejected";
   submittedAt: string | null;
   updatedAt: string;
+  /** Publisher's reason for the approve/reject decision (if any). */
+  reviewReason?: string | null;
+  /** Display name of the publisher who decided. */
+  reviewedBy?: string | null;
 }
 
 /** Load every submission for a writeback region across all submitters — the
  *  publisher's "see all" view (D5). Not filtered by per-subscriber visibility. */
 export function loadRegionSubmissions(regionId: string): Promise<RegionSubmission[]> {
   return invokeBackend("calp_load_region_submissions", { regionId });
+}
+
+/** Export every submission for a region as CSV text (publisher data-collection
+ * output). The caller saves the returned string as a .csv file. */
+export function exportRegionSubmissionsCsv(regionId: string): Promise<string> {
+  return invokeBackend("calp_export_region_submissions_csv", { regionId });
+}
+
+/** Completion-tracking status: declared expected respondents, who responded,
+ * and who is still missing. */
+export interface RegionResponseStatus {
+  expected: string[];
+  responded: string[];
+  missing: string[];
+}
+
+/** Who has responded vs. who is still expected for a region. */
+export function regionResponseStatus(regionId: string): Promise<RegionResponseStatus> {
+  return invokeBackend("calp_region_response_status", { regionId });
 }
 
 // ============================================================================

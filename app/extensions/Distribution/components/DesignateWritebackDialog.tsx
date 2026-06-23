@@ -34,6 +34,7 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
   const [lifecyclePolicy, setLifecyclePolicy] = useState<string>("always");
   const [deadline, setDeadline] = useState("");
   const [aggregationHint, setAggregationHint] = useState("");
+  const [expectedRespondents, setExpectedRespondents] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -60,10 +61,18 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
         policy: lifecyclePolicy as LifecyclePolicyConfig["policy"],
       };
       if (lifecyclePolicy === "until_deadline" && deadline) {
-        lifecycle.deadline = deadline;
+        // The datetime-local input is local wall-clock with no zone. Convert to
+        // an absolute UTC instant so the deadline means the same moment on every
+        // subscriber's machine (the backend compares it as RFC 3339 / UTC).
+        const d = new Date(deadline);
+        if (!isNaN(d.getTime())) lifecycle.deadline = d.toISOString();
       }
 
       const id = crypto.randomUUID();
+      const respondents = expectedRespondents
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
 
       const region: WritebackRegionDeclaration = {
         id,
@@ -81,6 +90,7 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
         versionBinding: versionBinding as WritebackRegionDeclaration["versionBinding"],
         lifecycle,
         aggregationHint: aggregationHint || undefined,
+        expectedRespondents: respondents.length > 0 ? respondents : undefined,
       };
 
       await addWritebackRegion(region);
@@ -90,7 +100,7 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
     } finally {
       setSubmitting(false);
     }
-  }, [data, mode, valueType, required, min, max, enumValues, visibility, submissionPolicy, versionBinding, lifecyclePolicy, deadline, aggregationHint, onClose]);
+  }, [data, mode, valueType, required, min, max, enumValues, visibility, submissionPolicy, versionBinding, lifecyclePolicy, deadline, aggregationHint, expectedRespondents, onClose]);
 
   const rangeLabel = data
     ? `Row ${data.startRow + 1}-${data.endRow + 1}, Col ${data.startCol + 1}-${data.endCol + 1}`
@@ -111,7 +121,6 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
           Mode:
           <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} style={{ marginLeft: 8 }}>
             <option value="per_subscriber">Per Subscriber</option>
-            <option value="list_object">List Object</option>
           </select>
         </label>
 
@@ -178,7 +187,6 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
             <option value="always">Always re-editable</option>
             <option value="until_deadline">Until Deadline</option>
             <option value="never">One-shot</option>
-            <option value="requires_unlock">Requires Unlock</option>
           </select>
         </label>
 
@@ -193,6 +201,12 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
           Aggregation Hint (optional):
           <input type="text" value={aggregationHint} onChange={(e) => setAggregationHint(e.target.value)}
             placeholder="e.g., SUM of regional forecasts" style={{ width: "100%" }} />
+        </label>
+
+        <label>
+          Expected respondents (optional, comma-separated):
+          <input type="text" value={expectedRespondents} onChange={(e) => setExpectedRespondents(e.target.value)}
+            placeholder="e.g., Alice, Bob, finance@corp.com" style={{ width: "100%" }} />
         </label>
       </div>
 

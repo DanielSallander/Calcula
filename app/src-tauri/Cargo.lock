@@ -953,11 +953,13 @@ name = "calp"
 version = "0.1.0"
 dependencies = [
  "calcula-format",
+ "chrono",
  "ed25519-dalek",
  "engine",
  "identity",
  "persistence",
  "rand_core 0.6.4",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

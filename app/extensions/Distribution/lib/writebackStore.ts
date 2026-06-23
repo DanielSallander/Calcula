@@ -7,9 +7,19 @@
 import {
   getWritebackRegions,
   getWritebackLayer,
+  reconcileWriteback,
   type WritebackRegionEntry,
   type WritebackSubmission,
 } from "@api/distribution";
+
+/** Cell writeback status: not-yet-filled, local unsent edit, sent & awaiting
+ * the publisher's decision, accepted, or rejected (needs revision). */
+export type WritebackCellState =
+  | "empty"
+  | "draft"
+  | "submitted"
+  | "approved"
+  | "rejected";
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -82,7 +92,12 @@ export function hasWritebackRegions(): boolean {
 export async function refreshWritebackSnapshot(): Promise<WritebackRegionEntry[]> {
   const [regions, layer] = await Promise.all([
     getWritebackRegions(),
-    getWritebackLayer().catch(() => ({ formatVersion: 1, drafts: [] })),
+    // Reconcile first so cell states reflect the publisher's approve/reject
+    // decisions (the return leg). Falls back to the plain layer if reconcile
+    // fails (e.g. offline registry), and to empty if that fails too.
+    reconcileWriteback()
+      .catch(() => getWritebackLayer())
+      .catch(() => ({ formatVersion: 1, drafts: [] })),
   ]);
   // Atomic replacement — no intermediate empty state
   snapshot = regions;
@@ -109,18 +124,24 @@ export function getRegionForCell(
 }
 
 /**
- * Get the writeback state for a cell: "empty" | "draft" | "submitted".
- * Returns null if the cell is not in a writeback region.
+ * Get the writeback state for a cell: "empty" | "draft" | "submitted" |
+ * "approved" | "rejected". Returns null if the cell is not in a writeback
+ * region. Matches the draft by REGION + cell (not cell alone) so a same-named
+ * coordinate in another sheet's region can't bleed in.
  */
 export function getWritebackCellState(
   sheetIndex: number,
   row: number,
   col: number,
-): "empty" | "draft" | "submitted" | null {
-  if (!isWritebackCell(sheetIndex, row, col)) return null;
-  const draft = drafts.find((d) => d.cellRow === row && d.cellCol === col);
+): WritebackCellState | null {
+  const region = getRegionForCell(sheetIndex, row, col);
+  if (!region) return null;
+  const draft = drafts.find(
+    (d) => d.regionId === region.regionId && d.cellRow === row && d.cellCol === col,
+  );
   if (!draft) return "empty";
-  return draft.state === "draft" ? "draft" : "submitted";
+  // draft.state is "draft" | "submitted" | "approved" | "rejected".
+  return draft.state;
 }
 
 /** Update the active sheet index (called on sheet change events). */

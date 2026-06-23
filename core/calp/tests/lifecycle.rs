@@ -91,6 +91,7 @@ fn make_region_declaration(sheet_id: identity::SheetId) -> WritebackRegionDeclar
         version_binding: Some(VersionBinding::Lenient),
         lifecycle: None,
         aggregation_hint: Some("SUM of regional forecasts".to_string()),
+        expected_respondents: Vec::new(),
         extra: HashMap::new(),
     }
 }
@@ -161,6 +162,8 @@ fn make_submission(
         created_at: "2026-06-15T02:00:00Z".to_string(),
         updated_at: updated_at.to_string(),
         submitted_at: Some(updated_at.to_string()),
+        review_reason: None,
+        reviewed_by: None,
         extra: HashMap::new(),
     }
 }
