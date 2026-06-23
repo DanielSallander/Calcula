@@ -11,6 +11,8 @@ import ReactDOM from "react-dom/client";
 import { App } from "./shell";
 import { exposeExtensionRuntimeGlobals } from "./api/extensionRuntime";
 import { initObjectScriptBadges } from "./api/objectScriptBadge";
+import { initSkinLoader } from "./core/theme/skinLoader";
+import { getBootPreferredSkinId, applyAppearancePolicyAfterPaint } from "./api/appearancePolicy";
 import "./index.css";
 
 // C2: publish the host's React singleton BEFORE any extension loads, so
@@ -22,6 +24,14 @@ exposeExtensionRuntimeGlobals();
 // T4: wire the shared object script-presence cache so grid-object overlays
 // (slicers, charts, ...) can show a "has script" badge in design mode.
 initObjectScriptBadges();
+
+// Appearance: inject the active App Skin's CSS variables BEFORE first paint so a
+// persisted (or, for unmanaged installs, the built-in) skin shows with no flash.
+// The user's persisted choice (localStorage) is read synchronously here; the
+// enterprise managed-default policy is resolved asynchronously just after paint
+// (it requires a Tauri round-trip) and only swaps if the user hasn't chosen.
+initSkinLoader(getBootPreferredSkinId());
+void applyAppearancePolicyAfterPaint();
 
 // NOTE: Feature extensions (pivot, etc.) are loaded in useExtensionInitializer
 // AFTER bootstrapShell() so that services (DialogExtensions, etc.) are available.

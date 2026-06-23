@@ -81,8 +81,12 @@ export const AppEvents = {
   // Zoom events
   ZOOM_CHANGED: "app:zoom-changed",
 
-  // Theme events
+  // Document Theme events (Office-style cell-content colors). NOT app appearance.
   THEME_CHANGED: "app:theme-changed",
+
+  // App Appearance / Skin events (application chrome + grid skin). Distinct from
+  // THEME_CHANGED so reskinning the app never marks the document dirty.
+  APPEARANCE_CHANGED: "app:appearance-changed",
 
   // Workbook lifecycle events
   BEFORE_SAVE: "app:before-save",

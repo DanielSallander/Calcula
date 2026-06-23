@@ -2,8 +2,28 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import * as UI from '../../api/ui';
 import { CommandRegistry } from '../../api/commands';
+import { getActiveSkin, subscribeToAppearance } from '../../api/appearance';
 import { restoreFocusToGrid } from './MenuBar.events';
 import * as S from './MenuBar.styles';
+
+// ============================================================================
+// BrandingLogo - renders the active skin's logo asset (e.g. a corporate brand)
+// in the menu-bar corner. Renders nothing when the active skin has no logo.
+// ============================================================================
+
+function BrandingLogo(): React.ReactElement | null {
+  const [logo, setLogo] = useState<string | undefined>(() => getActiveSkin().assets?.logo);
+  useEffect(() => subscribeToAppearance(() => setLogo(getActiveSkin().assets?.logo)), []);
+  if (!logo) return null;
+  return (
+    <img
+      src={logo}
+      alt=""
+      aria-hidden="true"
+      style={{ height: 16, maxWidth: 120, marginLeft: "auto", marginRight: 8, alignSelf: "center", objectFit: "contain" }}
+    />
+  );
+}
 
 // Re-export for external consumers
 export type { MenuItem, Menu } from './MenuBar.types';
@@ -271,6 +291,7 @@ export function MenuBar(): React.ReactElement {
           )}
         </S.MenuContainer>
       ))}
+      <BrandingLogo />
     </S.MenuBarContainer>
   );
 }

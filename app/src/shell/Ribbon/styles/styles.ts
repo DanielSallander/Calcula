@@ -31,7 +31,7 @@ export const groupStyles: React.CSSProperties = {
  */
 export const groupTitleStyles: React.CSSProperties = {
   fontSize: "10px",
-  color: "#999",
+  color: "var(--text-tertiary)",
   textAlign: "center",
   marginTop: "2px",
   textTransform: "uppercase",
@@ -44,7 +44,7 @@ export const groupTitleStyles: React.CSSProperties = {
  */
 export const groupSeparatorStyles: React.CSSProperties = {
   width: "1px",
-  backgroundColor: "#e5e5e5",
+  backgroundColor: "var(--border-default)",
   margin: "4px 10px",
   alignSelf: "stretch",
 };
@@ -68,7 +68,7 @@ export const placeholderStyles: React.CSSProperties = {
   justifyContent: "center",
   height: "100%",
   padding: "16px",
-  color: "#888",
+  color: "var(--text-secondary)",
   fontSize: "13px",
   fontStyle: "italic",
 };
@@ -88,7 +88,7 @@ export const formatButtonStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "14px",
-  color: "#333",
+  color: "var(--text-primary)",
 };
 
 /**
@@ -107,7 +107,7 @@ export const largeButtonStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
-  color: "#333",
+  color: "var(--text-primary)",
   gap: "2px",
 };
 
@@ -126,7 +126,7 @@ export const smallButtonStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
-  color: "#333",
+  color: "var(--text-primary)",
   gap: "4px",
 };
 
@@ -146,7 +146,7 @@ export const pasteButtonStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
-  color: "#333",
+  color: "var(--text-primary)",
   gap: "2px",
 };
 
@@ -165,7 +165,7 @@ export const clipboardButtonStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
-  color: "#333",
+  color: "var(--text-primary)",
 };
 
 /**
@@ -192,7 +192,7 @@ export const colorButtonStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "14px",
-  color: "#333",
+  color: "var(--text-primary)",
 };
 
 /**
@@ -213,12 +213,12 @@ export const numberFormatButtonStyles: React.CSSProperties = {
   width: "90px",
   height: "28px",
   padding: "4px 8px",
-  border: "1px solid #d0d0d0",
+  border: "1px solid var(--border-default)",
   borderRadius: "3px",
-  backgroundColor: "#fff",
+  backgroundColor: "var(--bg-surface)",
   cursor: "pointer",
   fontSize: "12px",
-  color: "#333",
+  color: "var(--text-primary)",
 };
 
 /**
@@ -227,7 +227,7 @@ export const numberFormatButtonStyles: React.CSSProperties = {
 export const dropdownArrowStyles: React.CSSProperties = {
   fontSize: "8px",
   marginLeft: "2px",
-  color: "#666",
+  color: "var(--text-secondary)",
 };
 
 /**
@@ -236,8 +236,8 @@ export const dropdownArrowStyles: React.CSSProperties = {
 export const numberFormatDropdownStyles: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  backgroundColor: "#ffffff",
-  border: "1px solid #c0c0c0",
+  backgroundColor: "var(--bg-surface)",
+  border: "1px solid var(--border-default)",
   borderRadius: "4px",
   boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
   padding: "4px 0",
@@ -258,7 +258,7 @@ export const numberFormatOptionStyles: React.CSSProperties = {
   backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "12px",
-  color: "#333",
+  color: "var(--text-primary)",
   textAlign: "left",
 };
 
@@ -267,14 +267,14 @@ export const numberFormatOptionStyles: React.CSSProperties = {
  */
 export const formatLabelStyles: React.CSSProperties = {
   fontWeight: 500,
-  color: "#333",
+  color: "var(--text-primary)",
 };
 
 /**
  * Format example styles (right side of option).
  */
 export const formatExampleStyles: React.CSSProperties = {
-  color: "#888",
+  color: "var(--text-secondary)",
   fontSize: "11px",
   marginLeft: "12px",
 };
@@ -285,8 +285,8 @@ export const formatExampleStyles: React.CSSProperties = {
 export const colorPickerDropdownStyles: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  backgroundColor: "#ffffff",
-  border: "1px solid #c0c0c0",
+  backgroundColor: "var(--bg-surface)",
+  border: "1px solid var(--border-default)",
   borderRadius: "4px",
   boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
   padding: "8px",
@@ -321,12 +321,12 @@ export const colorSwatchStyles: React.CSSProperties = {
 export const noColorButtonStyles: React.CSSProperties = {
   width: "100%",
   padding: "6px 8px",
-  border: "1px solid #d0d0d0",
+  border: "1px solid var(--border-default)",
   borderRadius: "3px",
-  backgroundColor: "#fafafa",
+  backgroundColor: "var(--bg-surface-disabled)",
   cursor: "pointer",
   fontSize: "11px",
-  color: "#333",
+  color: "var(--text-primary)",
   textAlign: "center",
 };
 
@@ -339,8 +339,8 @@ export function getFormatButtonStyle(
 ): React.CSSProperties {
   return {
     ...formatButtonStyles,
-    backgroundColor: isActive ? "#d0e0f0" : "transparent",
-    borderColor: isActive ? "#0078d4" : "transparent",
+    backgroundColor: isActive ? "var(--ribbon-button-active-bg)" : "transparent",
+    borderColor: isActive ? "var(--accent-color)" : "transparent",
     ...additionalStyles,
   };
 }
@@ -366,7 +366,7 @@ export function getNumberFormatButtonStyle(
 ): React.CSSProperties {
   return {
     ...formatButtonStyles,
-    backgroundColor: isActive ? "#d0e0f0" : "transparent",
-    borderColor: isActive ? "#0078d4" : "transparent",
+    backgroundColor: isActive ? "var(--ribbon-button-active-bg)" : "transparent",
+    borderColor: isActive ? "var(--accent-color)" : "transparent",
   };
 }

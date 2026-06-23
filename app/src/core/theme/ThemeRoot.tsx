@@ -1,27 +1,19 @@
 //! FILENAME: app/src/core/theme/ThemeRoot.tsx
-import React from 'react';
-import { defaultTheme } from './defaultTheme';
+import React from "react";
+import { initSkinLoader } from "./skinLoader";
 
 interface ThemeRootProps {
   children: React.ReactNode;
 }
 
 /**
- * Injects the default theme variables into the document root.
- * Later, this component will be replaced by the Extension System's theme loader.
+ * Theme boundary for the React tree. The App Skin system now owns CSS-variable
+ * injection via the runtime skinLoader (initialized in main.tsx before first
+ * paint). This component is a thin pass-through that also calls initSkinLoader()
+ * idempotently as a safety net for entry points that don't run main.tsx's boot
+ * sequence (e.g. the standalone script/chart editor windows).
  */
 export const ThemeRoot: React.FC<ThemeRootProps> = ({ children }) => {
-  // Convert the theme map to a CSS string: "--token: value;"
-  const cssVars = Object.entries(defaultTheme)
-    .map(([key, value]) => `${key}: ${value};`)
-    .join(' ');
-
-  return (
-    <>
-      <style>
-        {`:root { ${cssVars} }`}
-      </style>
-      {children}
-    </>
-  );
+  initSkinLoader();
+  return <>{children}</>;
 };

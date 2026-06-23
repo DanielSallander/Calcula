@@ -81,6 +81,7 @@ pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
+pub mod managed_policy;
 pub mod state_digest;
 pub mod security;
 pub mod net_commands;
@@ -3692,6 +3693,14 @@ pub fn run() {
     // package that requires a newer Calcula (honest "update the app").
     calp::set_host_app_version(env!("CARGO_PKG_VERSION"));
 
+    // Resolve the machine-wide ADVISORY appearance policy once at startup (reads
+    // %PROGRAMDATA%\Calcula\policy.json; missing = unmanaged). This pre-trusts a
+    // signed corporate skin and seeds the org default for the frontend resolver.
+    let appearance_policy = managed_policy::resolve_effective_policy(
+        &managed_policy::read_managed_policy(),
+        &crate::calp_commands::calcula_profile_dir(),
+    );
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -3708,6 +3717,7 @@ pub fn run() {
         .manage(ribbon_filter::RibbonFilterState::new())
         .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
+        .manage(managed_policy::ManagedAppearanceState(std::sync::Mutex::new(appearance_policy)))
         .invoke_handler(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
@@ -4325,6 +4335,10 @@ pub fn run() {
             calp_commands::calp_refresh_data,
             calp_commands::calp_save_data_source_config,
             calp_commands::calp_get_data_sources,
+            // Managed appearance policy (advisory org default)
+            managed_policy::get_effective_appearance_policy,
+            managed_policy::refresh_managed_appearance,
+            managed_policy::publish_skin_pack,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

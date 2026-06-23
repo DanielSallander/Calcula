@@ -12,10 +12,11 @@ import {
   type SupportedLocaleEntry,
 } from "@api/locale";
 import { KeybindingsPage } from "./components/KeybindingsPage";
+import { AppearancePage } from "./components/AppearancePage";
 
 const h = React.createElement;
 
-type SettingsTab = "general" | "keybindings";
+type SettingsTab = "general" | "appearance" | "keybindings";
 
 // ============================================================================
 // Settings Storage
@@ -101,10 +102,17 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
         onClick: () => setActiveTab("general"),
       }, "General"),
       h("button", {
+        style: activeTab === "appearance" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
+        onClick: () => setActiveTab("appearance"),
+      }, "Appearance"),
+      h("button", {
         style: activeTab === "keybindings" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
         onClick: () => setActiveTab("keybindings"),
       }, "Keyboard Shortcuts"),
     ),
+
+    // Appearance tab
+    activeTab === "appearance" && h(AppearancePage, null),
 
     // Keybindings tab
     activeTab === "keybindings" && h(KeybindingsPage, null),
@@ -224,11 +232,13 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     overflow: "hidden",
     fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+    backgroundColor: "var(--panel-bg)",
+    color: "var(--text-primary)",
   },
   tabBar: {
     display: "flex",
     gap: 0,
-    borderBottom: "1px solid #e0e0e0",
+    borderBottom: "1px solid var(--border-default)",
     padding: "0 12px",
     flexShrink: 0,
   },
@@ -236,7 +246,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "10px 16px",
     fontSize: 12,
     fontWeight: 500,
-    color: "#777",
+    color: "var(--text-secondary)",
     backgroundColor: "transparent",
     border: "none",
     borderBottom: "2px solid transparent",
@@ -244,9 +254,9 @@ const styles: Record<string, React.CSSProperties> = {
     outline: "none",
   },
   tabActive: {
-    color: "#333",
+    color: "var(--text-primary)",
     fontWeight: 600,
-    borderBottomColor: "#10b981",
+    borderBottomColor: "var(--accent-primary)",
   },
   generalContent: {
     flex: 1,
@@ -261,10 +271,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     textTransform: "uppercase" as const,
     letterSpacing: "0.04em",
-    color: "#777",
+    color: "var(--text-secondary)",
     marginBottom: 14,
     paddingBottom: 6,
-    borderBottom: "1px solid #e0e0e0",
+    borderBottom: "1px solid var(--border-default)",
   },
   setting: {
     marginBottom: 16,
@@ -272,7 +282,7 @@ const styles: Record<string, React.CSSProperties> = {
   settingLabel: {
     fontSize: 12,
     fontWeight: 500,
-    color: "#333",
+    color: "var(--text-primary)",
     marginBottom: 10,
   },
   radioGroup: {
@@ -286,17 +296,17 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: 8,
     fontSize: 12,
-    color: "#444",
+    color: "var(--text-secondary)",
     cursor: "pointer",
   },
   radioInput: {
     margin: 0,
     cursor: "pointer",
-    accentColor: "#10b981",
+    accentColor: "var(--accent-primary)",
   },
   settingHint: {
     fontSize: 11,
-    color: "#999",
+    color: "var(--text-tertiary)",
     marginTop: 10,
     lineHeight: "1.5",
   },
@@ -305,18 +315,18 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "6px 8px",
     fontSize: 12,
     borderRadius: 4,
-    border: "1px solid #ccc",
-    backgroundColor: "#fff",
-    color: "#333",
+    border: "1px solid var(--border-default)",
+    backgroundColor: "var(--bg-surface)",
+    color: "var(--text-primary)",
     cursor: "pointer",
     outline: "none",
   },
   localePreview: {
     marginTop: 12,
     padding: "10px 12px",
-    backgroundColor: "#f8f9fa",
+    backgroundColor: "var(--bg-surface)",
     borderRadius: 4,
-    border: "1px solid #e8e8e8",
+    border: "1px solid var(--border-default)",
     display: "flex",
     flexDirection: "column",
     gap: 6,
@@ -328,11 +338,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
   },
   previewLabel: {
-    color: "#777",
+    color: "var(--text-secondary)",
     fontWeight: 500,
   },
   previewValue: {
-    color: "#333",
+    color: "var(--text-primary)",
     fontFamily: "'Cascadia Code', 'Consolas', monospace",
   },
 };

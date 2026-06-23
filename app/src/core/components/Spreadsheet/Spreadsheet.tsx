@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
+import { useActiveGridTheme } from "../../theme/useActiveGridTheme";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
@@ -78,6 +79,10 @@ function SpreadsheetContent({
   const { refs, state, handlers } = useSpreadsheet();
   const gridState = useGridState();
   const { dispatch } = useGridContext();
+
+  // Active App Skin's merged grid theme — stable reference until the skin changes,
+  // so passing it to <GridCanvas> repaints exactly once per skin switch.
+  const gridTheme = useActiveGridTheme();
 
   // 2. Extract Refs
   const { containerRef, focusContainerRef, canvasRef } = refs;
@@ -1242,6 +1247,7 @@ function SpreadsheetContent({
         <S.CanvasLayer $scrollbarSize={SCROLLBAR_SIZE}>
           <GridCanvas
             ref={canvasRef}
+            theme={gridTheme}
             config={config}
             viewport={viewport}
             selection={selection}

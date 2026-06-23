@@ -935,6 +935,51 @@ export type {
 } from "../core/types/types";
 
 // ============================================================================
+// App Appearance / Skins API
+// ----------------------------------------------------------------------------
+// The application chrome + grid SKIN (light/dark/custom). This is DISTINCT from
+// the Document Theme API above (which colors cell content). Use these to read,
+// switch, and contribute skins; never reuse THEME_CHANGED for appearance.
+// ============================================================================
+
+export {
+  listAvailableSkins,
+  getActiveSkin,
+  getActiveSkinId,
+  setActiveSkin,
+  registerSkin,
+  onSkinChanged,
+  subscribeToAppearance,
+  getSkinTokens,
+  getSkinGridTheme,
+  LIGHT_SKIN_ID,
+  DARK_SKIN_ID,
+  BUILTIN_DEFAULT_SKIN_ID,
+} from "./appearance";
+
+export type {
+  Skin,
+  SkinBase,
+  SkinDensity,
+  SkinAssets,
+  ThemeTokenName,
+  AccessibilityOverride,
+  AppearanceChangedPayload,
+} from "./appearance";
+
+// Enterprise appearance policy (advisory default) + accessibility resolution.
+export {
+  resolveEffectiveSkinId,
+  getManagedAppearanceInfo,
+  refreshManagedAppearance,
+  getUserAccessibility,
+  setUserAccessibility,
+  applyAccessibilityFromPrefs,
+} from "./appearancePolicy";
+
+export type { EffectiveAppearancePolicy, SkinTrust } from "./appearancePolicy";
+
+// ============================================================================
 // Fill Lists API (Custom AutoFill Lists)
 // ============================================================================
 

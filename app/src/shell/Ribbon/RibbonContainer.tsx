@@ -162,8 +162,8 @@ export function RibbonContainer(): React.ReactElement {
   return (
     <div
       style={{
-        backgroundColor: "#f5f5f5",
-        borderBottom: "1px solid #d0d0d0",
+        backgroundColor: "var(--panel-bg)",
+        borderBottom: "1px solid var(--border-default)",
         position: "relative",
         zIndex: 10,
       }}
@@ -174,7 +174,7 @@ export function RibbonContainer(): React.ReactElement {
           display: "flex",
           gap: "4px",
           padding: "0 8px",
-          borderBottom: "1px solid #d0d0d0",
+          borderBottom: "1px solid var(--border-default)",
           height: "30px",
           alignItems: "flex-end",
           overflow: "hidden",
@@ -193,7 +193,7 @@ export function RibbonContainer(): React.ReactElement {
                 position: "relative",
                 padding: "6px 16px",
                 border: "none",
-                backgroundColor: isActive ? "#fff" : "transparent",
+                backgroundColor: isActive ? "var(--bg-surface)" : "transparent",
                 borderTopLeftRadius: "4px",
                 borderTopRightRadius: "4px",
                 cursor: "pointer",
@@ -201,9 +201,9 @@ export function RibbonContainer(): React.ReactElement {
                 fontSize: "12px",
                 color: accentColor
                   ? isActive ? accentColor : accentColor + "cc"
-                  : "#333",
+                  : "var(--text-primary)",
                 fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-                borderBottom: isActive ? "1px solid #fff" : "none",
+                borderBottom: isActive ? "1px solid var(--bg-surface)" : "none",
                 borderTop: accentColor ? `3px solid ${accentColor}` : "none",
                 marginBottom: "-1px",
               }}
@@ -219,7 +219,7 @@ export function RibbonContainer(): React.ReactElement {
                     height: 13,
                     padding: "0 3px",
                     borderRadius: 7,
-                    backgroundColor: "#0078d4",
+                    backgroundColor: "var(--accent-color)",
                     color: "#fff",
                     fontSize: 9,
                     fontWeight: 600,
@@ -242,7 +242,7 @@ export function RibbonContainer(): React.ReactElement {
           <div
             style={{
               padding: "6px 16px",
-              color: "#999",
+              color: "var(--text-tertiary)",
               fontStyle: "italic",
               fontSize: "12px",
             }}
@@ -259,7 +259,7 @@ export function RibbonContainer(): React.ReactElement {
         style={{
           height: isMinimized && !tempExpanded ? "0px" : "92px",
           padding: isMinimized && !tempExpanded ? "0 8px" : "6px 8px",
-          backgroundColor: "#fff",
+          backgroundColor: "var(--bg-surface)",
           display: isMinimized && !tempExpanded ? "none" : "flex",
           gap: "0",
           position: isMinimized && tempExpanded ? "absolute" : "relative",
@@ -267,7 +267,7 @@ export function RibbonContainer(): React.ReactElement {
           right: isMinimized && tempExpanded ? 0 : undefined,
           zIndex: isMinimized && tempExpanded ? 100 : undefined,
           boxShadow: isMinimized && tempExpanded ? "0 4px 12px rgba(0,0,0,0.15)" : undefined,
-          borderBottom: isMinimized && tempExpanded ? "1px solid #d0d0d0" : undefined,
+          borderBottom: isMinimized && tempExpanded ? "1px solid var(--border-default)" : undefined,
         }}
       >
         {groups.length > 0 ? (
@@ -277,7 +277,7 @@ export function RibbonContainer(): React.ReactElement {
               style={{
                 display: "flex",
                 flexDirection: "column",
-                borderRight: idx < groups.length - 1 ? "1px solid #e5e5e5" : "none",
+                borderRight: idx < groups.length - 1 ? "1px solid var(--border-default)" : "none",
                 paddingLeft: idx === 0 ? "4px" : "10px",
                 paddingRight: "10px",
               }}
@@ -288,7 +288,7 @@ export function RibbonContainer(): React.ReactElement {
               <div
                 style={{
                   fontSize: "10px",
-                  color: "#999",
+                  color: "var(--text-tertiary)",
                   textAlign: "center",
                   marginTop: "2px",
                   textTransform: "uppercase" as const,
@@ -309,7 +309,7 @@ export function RibbonContainer(): React.ReactElement {
               alignItems: "center",
               justifyContent: "center",
               width: "100%",
-              color: "#999",
+              color: "var(--text-tertiary)",
               fontStyle: "italic",
               fontSize: "12px",
             }}
