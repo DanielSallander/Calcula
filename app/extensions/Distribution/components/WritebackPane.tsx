@@ -11,6 +11,7 @@ import {
   submitAllRegions,
   previewRegionSubmission,
   getWritebackDraftRegions,
+  removeWritebackRegion,
   type WritebackRegionEntry,
   type WritebackLayer as WritebackLayerType,
   type WritebackRegionDeclaration,
@@ -187,6 +188,21 @@ export function WritebackPane() {
     }
   }, [preview, refresh]);
 
+  // Author-side: drop a draft writeback region designated by mistake (the
+  // designate dialog only adds; this is the matching remove control).
+  const handleRemoveDraft = useCallback(
+    async (regionId: string) => {
+      setSubmitError(null);
+      try {
+        await removeWritebackRegion(regionId);
+        await refresh();
+      } catch (err) {
+        setSubmitError(String(err));
+      }
+    },
+    [refresh],
+  );
+
   // "I'm done": submit every region that has drafts, so the contributor doesn't
   // leave whole regions as unsent drafts believing they're finished.
   const handleSubmitAll = useCallback(async () => {
@@ -327,6 +343,13 @@ export function WritebackPane() {
               <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>
                 Mode: {region.mode ?? "not set"} | Visibility: {region.visibility ?? "not set"}
               </div>
+              <button
+                onClick={() => handleRemoveDraft(region.id)}
+                style={{ marginTop: 4, fontSize: 11, color: "#c5221f" }}
+                title="Remove this draft writeback region (it won't be published)"
+              >
+                Remove
+              </button>
             </div>
           ))}
         </>
