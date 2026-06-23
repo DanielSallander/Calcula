@@ -2885,6 +2885,23 @@ pub fn evaluate_formula_raw_with_ast_and_files(
     user_files: &HashMap<String, Vec<u8>>,
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
 ) -> EvalResult {
+    evaluate_formula_raw_with_ast_files_and_cube(
+        grids, sheet_names, current_sheet_index, ast, user_files, udf_fn, None,
+    )
+}
+
+/// Like `evaluate_formula_raw_with_ast_and_files` but also threads the pre-fetched
+/// CUBE data, so a dependent cube cell (e.g. C1=CUBEVALUE(.., B2)) recomputes
+/// correctly when its precedent (B2=CUBEMEMBER(..)) is edited.
+pub fn evaluate_formula_raw_with_ast_files_and_cube(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    user_files: &HashMap<String, Vec<u8>>,
+    udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
+    cube: Option<std::sync::Arc<engine::CubePrefetch>>,
+) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
     }
@@ -2899,6 +2916,9 @@ pub fn evaluate_formula_raw_with_ast_and_files(
     evaluator.set_file_reader(&reader);
     if let Some(uf) = udf_fn {
         evaluator.set_udf_fn(uf);
+    }
+    if let Some(c) = cube {
+        evaluator.set_cube_prefetch(c);
     }
     evaluator.evaluate(ast)
 }
@@ -3959,6 +3979,7 @@ pub fn run() {
             bi::bi_get_column_available_values,
             bi::bi_get_region_at_cell,
             bi::bi_save_all_caches,
+            bi::cube::cube_prefetch,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,

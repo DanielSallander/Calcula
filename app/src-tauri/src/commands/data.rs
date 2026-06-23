@@ -12,7 +12,6 @@ use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
     evaluate_formula_multi_sheet_with_files,
     evaluate_formula_multi_sheet_with_ast_and_files,
-    evaluate_formula_raw_with_ast_and_files,
     evaluate_formula_raw_with_files_and_pivot,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_cell_input_invariant,
@@ -501,6 +500,7 @@ pub fn update_cell(
     col: u32,
     value: String,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    cube_results: Option<engine::CubePrefetch>,
 ) -> Result<UpdateCellResult, String> {
     use std::time::Instant;
     let perf_t0 = Instant::now();
@@ -509,6 +509,11 @@ pub fn update_cell(
     // any). When the frontend omits udfResults, this is None -> behavior is
     // identical to before (the engine emits #NAME? for any UDF call).
     let udf_resolver = udf_results.as_ref().map(|t| crate::scripting::udf::make_udf_resolver(t));
+
+    // Pre-fetched CUBE data (CUBEVALUE/CUBEMEMBER/...) for this edit, resolved by
+    // the async `cube_prefetch` command before this synchronous recalc. Shared via
+    // Arc so the main eval and the dependent-recalc cascade both serve it cheaply.
+    let cube_arc = cube_results.map(std::sync::Arc::new);
 
     // Lock user files for FILEREAD/FILELINES/FILEEXISTS support
     let user_files = user_files_state.files.lock().unwrap();
@@ -800,6 +805,7 @@ pub fn update_cell(
                 let rh_map = state.row_heights.lock().unwrap().clone();
                 let cw_map = state.column_widths.lock().unwrap().clone();
                 let eval_ctx = engine::EvalContext {
+                    cube_prefetch: cube_arc.clone(),
                     current_row: Some(row),
                     current_col: Some(col),
                     row_heights: Some(rh_map),
@@ -1044,9 +1050,10 @@ pub fn update_cell(
                     // Get the AST (cached or freshly parsed) and evaluate to raw EvalResult
                     let (raw_result, ast_to_cache) = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                         perf_cache_hits += 1;
-                        let result = evaluate_formula_raw_with_ast_and_files(
+                        let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids, &sheet_names, active_sheet, cached_ast, &user_files,
                             udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
+                            cube_arc.clone(),
                         );
                         (result, None)
                     } else {
@@ -1071,9 +1078,10 @@ pub fn update_cell(
                             };
                             crate::convert_expr(&resolved)
                         }).map_err(|e| format!("{}", e)) {
-                            let result = evaluate_formula_raw_with_ast_and_files(
+                            let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
                                 &grids, &sheet_names, active_sheet, &engine_ast, &user_files,
                                 udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
+                                cube_arc.clone(),
                             );
                             (result, Some(engine_ast))
                         } else {
@@ -1840,6 +1848,7 @@ pub fn update_cells_batch(
 
                     // Use raw evaluation to get EvalResult for spill handling
                     let eval_ctx = engine::EvalContext {
+                        cube_prefetch: None,
                         current_row: Some(row),
                         current_col: Some(col),
                         row_heights: None,
@@ -4236,6 +4245,7 @@ pub fn fill_range(
                             new_cell.set_cached_ast(engine_ast.clone());
 
                             let eval_ctx = engine::EvalContext {
+                                cube_prefetch: None,
                                 current_row: Some(tr),
                                 current_col: Some(tc),
                                 row_heights: None,

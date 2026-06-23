@@ -96,6 +96,7 @@ fn evaluate_property(
     };
 
     let eval_ctx = engine::EvalContext {
+        cube_prefetch: None,
         current_row: Some(target_row),
         current_col: Some(target_col),
         row_heights: Some(row_heights.clone()),

@@ -51,6 +51,41 @@ export function setUdfResolveHook(hook: UdfResolveHook | null): void {
   udfResolveHook = hook;
 }
 
+// ============================================================================
+// CUBE formula pre-resolution
+// ----------------------------------------------------------------------------
+// CUBE functions (CUBEVALUE/CUBEMEMBER/...) query a BI model asynchronously, but
+// the Rust recalc is synchronous. Like UDFs, we pre-fetch their results BEFORE
+// update_cell: the async `cube_prefetch` command resolves every cube call the
+// edit affects, and the synchronous evaluator serves the returned table. The
+// IPC is gated to cube-bearing edits so ordinary edits stay on the fast path.
+// ============================================================================
+
+/** True when a formula input references any CUBE function. Exported for testing. */
+export function inputReferencesCube(input: string): boolean {
+  return /\bCUBE[A-Z]*\s*\(/i.test(input);
+}
+
+// Once a CUBE formula has been entered this session, ANY later edit may feed a
+// cube cell (e.g. editing a plain precedent that a CUBEVALUE filters on), so we
+// keep pre-fetching. This refreshes cube dependents that a non-cube edit would
+// otherwise leave stale. Reset via resetCubeSession() (e.g. on new/blank file).
+let sessionHasCube = false;
+
+/** Reset the per-session "workbook has cube formulas" latch. */
+export function resetCubeSession(): void {
+  sessionHasCube = false;
+}
+
+/** Whether the pending edit should trigger a cube pre-fetch. */
+function shouldPrefetchCube(input: string): boolean {
+  if (inputReferencesCube(input)) {
+    sessionHasCube = true;
+    return true;
+  }
+  return sessionHasCube;
+}
+
 /** A cell write observed at the bridge, surfaced to the macro recorder. */
 export interface RecordedCellWrite {
   row: number;
@@ -186,11 +221,22 @@ export async function updateCell(
       console.warn("[udf] resolve hook failed; proceeding without UDF results", e);
     }
   }
+  // Pre-resolve any CUBE formulas the edit affects so the synchronous backend
+  // recalc can serve their BI-model results. Best-effort: failure must not block
+  // the edit (the cube cells just show #N/A until data is available).
+  let cubeResults: unknown | undefined;
+  if (shouldPrefetchCube(input)) {
+    try {
+      cubeResults = await invoke("cube_prefetch", { row, col, value: input });
+    } catch (e) {
+      console.warn("[cube] prefetch failed; proceeding without cube data", e);
+    }
+  }
   // FIXED: Mapped 'input' to 'value' to match Rust command signature
-  const result = await invoke<UpdateCellResult>(
-    "update_cell",
-    udfResults ? { row, col, value: input, udfResults } : { row, col, value: input },
-  );
+  const args: Record<string, unknown> = { row, col, value: input };
+  if (udfResults) args.udfResults = udfResults;
+  if (cubeResults) args.cubeResults = cubeResults;
+  const result = await invoke<UpdateCellResult>("update_cell", args);
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.cells.length} cells | ipc=${dt.toFixed(1)}ms`);
   recordCellWrites([{ row, col, value: input }]);

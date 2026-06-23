@@ -1511,6 +1511,7 @@ pub fn set_calculated_column(
             // Convert to engine AST and evaluate
             let engine_ast = crate::convert_expr(&resolved);
             let eval_ctx = engine::EvalContext {
+                cube_prefetch: None,
                 current_row: Some(row),
                 current_col: Some(abs_col),
                 row_heights: None,

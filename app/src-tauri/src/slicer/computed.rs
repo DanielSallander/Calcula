@@ -86,6 +86,7 @@ fn evaluate_slicer_property(
 
     // Slicer formulas don't have a specific cell context, use (0, 0)
     let eval_ctx = engine::EvalContext {
+        cube_prefetch: None,
         current_row: Some(0),
         current_col: Some(0),
         row_heights: Some(row_heights.clone()),

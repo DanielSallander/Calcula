@@ -20,6 +20,7 @@
 
 use crate::cell::{CellError, CellValue, DictKey};
 use crate::coord::col_to_index;
+use crate::cube::{cube_call_key, CubeBinding, CubeCallResult, CubePrefetch, CubeResolver};
 use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
@@ -317,6 +318,13 @@ pub struct EvalContext {
     /// Set of 0-indexed row indices that are hidden (by filter, grouping, or manual hide).
     /// Used by SUBTOTAL function codes 101-111 to exclude hidden rows.
     pub hidden_rows: Option<HashSet<u32>>,
+    /// Pre-fetched data for the CUBE function family (CUBEVALUE, CUBEMEMBER, ...).
+    /// Built by an async pass in the app layer BEFORE this synchronous recalc
+    /// (cube queries are async and cannot run under the recalc lock — see
+    /// app/src-tauri/src/bi/cube.rs). `None` => cube functions evaluate to #N/A.
+    /// An `Arc` so it is cheap to attach to the per-cell `EvalContext` built in
+    /// recalc loops without deep-cloning the (potentially large) prefetch.
+    pub cube_prefetch: Option<std::sync::Arc<CubePrefetch>>,
 }
 
 /// Pre-fetched data for a single writeback region, used by GATHER functions.
@@ -374,6 +382,30 @@ pub struct Evaluator<'a> {
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
+}
+
+/// Adapter that lets the evaluator resolve cube arguments through the shared
+/// `crate::cube::CubeResolver` machinery, so the evaluator and the async
+/// pre-pass compute identical call keys. Borrows only `Grid` + `CubePrefetch`
+/// (both `Sync`) — NOT the whole `Evaluator` (whose `RefCell` scope is `!Sync`).
+struct EvalCubeResolver<'e> {
+    prefetch: &'e CubePrefetch,
+    grid: &'e Grid,
+}
+
+impl<'e> CubeResolver for EvalCubeResolver<'e> {
+    fn binding_at(&self, row: u32, col: u32) -> Option<&CubeBinding> {
+        self.prefetch.binding_at(row, col)
+    }
+    fn cell_text(&self, row: u32, col: u32) -> Option<String> {
+        let cell = self.grid.get_cell(row, col)?;
+        match &cell.value {
+            CellValue::Text(s) => Some(s.clone()),
+            CellValue::Number(n) => Some(format!("{}", n)),
+            CellValue::Boolean(b) => Some(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
+            _ => None,
+        }
+    }
 }
 
 impl<'a> Evaluator<'a> {
@@ -458,6 +490,14 @@ impl<'a> Evaluator<'a> {
         f: &'a dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>,
     ) {
         self.udf_fn = Some(f);
+    }
+
+    /// Injects the pre-fetched CUBE data into the evaluation context. Used by
+    /// eval paths that build their own `EvalContext` (e.g. the dependent-recalc
+    /// cascade via `with_multi_sheet`); paths using `with_context` set
+    /// `EvalContext::cube_prefetch` directly instead.
+    pub fn set_cube_prefetch(&mut self, prefetch: std::sync::Arc<CubePrefetch>) {
+        self.context.cube_prefetch = Some(prefetch);
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -1354,6 +1394,16 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::GroupBy => self.fn_groupby(args),
             BuiltinFunction::PivotBy => self.fn_pivotby(args),
             BuiltinFunction::GetPivotData => self.fn_getpivotdata(args),
+
+            // CUBE functions (Calcula BI model). All resolve against the
+            // pre-fetched CubePrefetch injected before this synchronous recalc.
+            BuiltinFunction::CubeValue => self.fn_cube_value(args),
+            BuiltinFunction::CubeMember => self.fn_cube_member(args),
+            BuiltinFunction::CubeSet => self.fn_cube_set(args),
+            BuiltinFunction::CubeSetCount => self.fn_cube_set_count(args),
+            BuiltinFunction::CubeRankedMember => self.fn_cube_ranked_member(args),
+            BuiltinFunction::CubeMemberProperty => self.fn_cube_member_property(args),
+            BuiltinFunction::CubeKpiMember => self.fn_cube_kpi_member(args),
 
             // Writeback aggregation (GATHER family)
             BuiltinFunction::Gather => self.fn_gather(args),
@@ -6923,6 +6973,80 @@ impl<'a> Evaluator<'a> {
             Some(value) => EvalResult::Number(value),
             None => EvalResult::Error(CellError::Ref),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // CUBE function family (Calcula BI model)
+    //
+    // Every cube call is resolved the SAME way: build the deterministic key via
+    // the shared `crate::cube::cube_call_key` (so the async pre-pass and this
+    // synchronous evaluator always agree), then serve the pre-fetched result.
+    // All the BI intelligence lives in the pre-pass (app/src-tauri/src/bi/cube.rs).
+    // ------------------------------------------------------------------
+
+    /// Shared resolution for all 7 cube functions.
+    fn eval_cube(&self, func_name: &str, args: &[Expression]) -> EvalResult {
+        let prefetch = match self.context.cube_prefetch.as_deref() {
+            Some(p) => p,
+            // No cube data was pre-fetched for THIS recalc (e.g. an unrelated
+            // edit, a full recalc / F9, or a paste). Preserve the cell's last
+            // computed value rather than clobbering it to #N/A — cube cells
+            // refresh on a cube-bearing edit, and an unrelated recalc must not
+            // wipe them. Falls back to #N/A only when there is nothing to keep.
+            None => return self.preserved_cube_value(),
+        };
+        let resolver = EvalCubeResolver { prefetch, grid: self.grid };
+        let key = match cube_call_key(func_name, args, &resolver) {
+            Ok(k) => k,
+            Err(e) => return EvalResult::Error(e.to_cell_error()),
+        };
+        match prefetch.result(&key) {
+            Some(CubeCallResult::Number(n)) => EvalResult::Number(*n),
+            Some(CubeCallResult::Text(s)) => EvalResult::Text(s.clone()),
+            Some(CubeCallResult::Object { caption }) => EvalResult::Text(caption.clone()),
+            Some(CubeCallResult::Error(e)) => EvalResult::Error(e.to_cell_error()),
+            None => EvalResult::Error(CellError::NA),
+        }
+    }
+
+    /// The cube cell's existing stored value, used when no cube prefetch is
+    /// available so an unrelated recalc does not clobber a cube result. Returns
+    /// #N/A when the position is unknown or the cell is empty (e.g. first eval).
+    fn preserved_cube_value(&self) -> EvalResult {
+        if let (Some(r), Some(c)) = (self.context.current_row, self.context.current_col) {
+            if let Some(cell) = self.grid.get_cell(r, c) {
+                return match &cell.value {
+                    CellValue::Number(n) => EvalResult::Number(*n),
+                    CellValue::Text(s) => EvalResult::Text(s.clone()),
+                    CellValue::Boolean(b) => EvalResult::Boolean(*b),
+                    CellValue::Error(e) => EvalResult::Error(e.clone()),
+                    _ => EvalResult::Error(CellError::NA),
+                };
+            }
+        }
+        EvalResult::Error(CellError::NA)
+    }
+
+    fn fn_cube_value(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBEVALUE", args)
+    }
+    fn fn_cube_member(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBEMEMBER", args)
+    }
+    fn fn_cube_set(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBESET", args)
+    }
+    fn fn_cube_set_count(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBESETCOUNT", args)
+    }
+    fn fn_cube_ranked_member(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBERANKEDMEMBER", args)
+    }
+    fn fn_cube_member_property(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBEMEMBERPROPERTY", args)
+    }
+    fn fn_cube_kpi_member(&self, args: &[Expression]) -> EvalResult {
+        self.eval_cube("CUBEKPIMEMBER", args)
     }
 
     fn fn_pivotby(&self, args: &[Expression]) -> EvalResult {
@@ -14140,6 +14264,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(1); // Hide row index 1 (A2 = 20)
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14158,6 +14283,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(1); // Hide row index 1 (A2 = 20)
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14176,6 +14302,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(1);
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14194,6 +14321,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(2); // Hide row index 2 (A3 = 30)
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14212,6 +14340,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(0); // Hide row index 0 (A1 = 10)
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14230,6 +14359,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(1);
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14308,6 +14438,7 @@ mod tests {
         hidden.insert(1);
         hidden.insert(2);
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -14326,6 +14457,7 @@ mod tests {
         let mut hidden = HashSet::new();
         hidden.insert(1);
         let ctx = EvalContext {
+            cube_prefetch: None,
             current_row: Some(0),
             current_col: Some(0),
             hidden_rows: Some(hidden),
@@ -15451,5 +15583,104 @@ mod tests {
             EvalResult::Number(n) => assert!(*n > 0.0, "VDB should be positive, got {}", n),
             _ => panic!("Expected Number, got {:?}", result),
         }
+    }
+}
+
+#[cfg(test)]
+mod cube_serve_tests {
+    //! Tests the evaluator SERVE side: given a pre-fetched `CubePrefetch`, the
+    //! cube functions must return the right value/caption, and a `CellRef`
+    //! argument must resolve through the per-cell binding (the cube-object cell
+    //! duality). No BI engine is involved — only the synchronous serve path.
+    use super::*;
+    use crate::cube::{cube_call_key, CubeBinding, CubeBindingKind, CubeCallResult, CubePrefetch, CubeResolver};
+    use std::sync::Arc;
+
+    struct PrefetchResolver<'a> {
+        pf: &'a CubePrefetch,
+    }
+    impl CubeResolver for PrefetchResolver<'_> {
+        fn binding_at(&self, row: u32, col: u32) -> Option<&CubeBinding> {
+            self.pf.binding_at(row, col)
+        }
+        fn cell_text(&self, _row: u32, _col: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn args_of(ast: &Expression) -> &[Expression] {
+        match ast {
+            Expression::FunctionCall { args, .. } => args,
+            _ => panic!("expected a function call AST"),
+        }
+    }
+
+    #[test]
+    fn cubevalue_served_from_prefetch() {
+        let grid = Grid::new();
+        let ast = parser::parse(r#"=CUBEVALUE("Sales","[Revenue]")"#).unwrap();
+        let mut pf = CubePrefetch::default();
+        let key = cube_call_key("CUBEVALUE", args_of(&ast), &PrefetchResolver { pf: &pf }).unwrap();
+        pf.results.insert(key, CubeCallResult::Number(225.0));
+
+        let mut ev = Evaluator::new(&grid);
+        ev.set_cube_prefetch(Arc::new(pf));
+        assert_eq!(ev.evaluate(&ast), EvalResult::Number(225.0));
+    }
+
+    #[test]
+    fn cubemember_caption_and_cellref_feeds_cubevalue() {
+        let grid = Grid::new();
+        let mut pf = CubePrefetch::default();
+        // B2 (0-based (1,1)) carries a CUBEMEMBER object for Sweden.
+        pf.insert_binding(
+            1,
+            1,
+            CubeBinding {
+                connection: "Sales".into(),
+                kind: CubeBindingKind::Member,
+                expression: "Geo[Country]=Sweden".into(),
+                caption: "Sweden".into(),
+                members: vec![],
+                scalar: None,
+            },
+        );
+
+        // The CUBEMEMBER cell itself displays its caption.
+        let mem = parser::parse(r#"=CUBEMEMBER("Sales","Geo[Country]=Sweden")"#).unwrap();
+        let mkey = cube_call_key("CUBEMEMBER", args_of(&mem), &PrefetchResolver { pf: &pf }).unwrap();
+        pf.results.insert(mkey, CubeCallResult::Object { caption: "Sweden".into() });
+
+        // C1 = CUBEVALUE("Sales","[Revenue]", B2) keys on B2's BINDING, not its
+        // displayed caption.
+        let cv = parser::parse(r#"=CUBEVALUE("Sales","[Revenue]",B2)"#).unwrap();
+        let ckey = cube_call_key("CUBEVALUE", args_of(&cv), &PrefetchResolver { pf: &pf }).unwrap();
+        pf.results.insert(ckey, CubeCallResult::Number(99.0));
+
+        let mut ev = Evaluator::new(&grid);
+        ev.set_cube_prefetch(Arc::new(pf));
+        assert_eq!(ev.evaluate(&mem), EvalResult::Text("Sweden".into()));
+        assert_eq!(ev.evaluate(&cv), EvalResult::Number(99.0));
+    }
+
+    #[test]
+    fn cube_error_result_maps_to_cell_error() {
+        let grid = Grid::new();
+        let ast = parser::parse(r#"=CUBEVALUE("Nope","[Revenue]")"#).unwrap();
+        let mut pf = CubePrefetch::default();
+        let key = cube_call_key("CUBEVALUE", args_of(&ast), &PrefetchResolver { pf: &pf }).unwrap();
+        pf.results.insert(key, CubeCallResult::Error(crate::cube::CubeError::Name));
+
+        let mut ev = Evaluator::new(&grid);
+        ev.set_cube_prefetch(Arc::new(pf));
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Name));
+    }
+
+    #[test]
+    fn cube_without_prefetch_is_na() {
+        let grid = Grid::new();
+        let ast = parser::parse(r#"=CUBEVALUE("Sales","[Revenue]")"#).unwrap();
+        let ev = Evaluator::new(&grid);
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::NA));
     }
 }

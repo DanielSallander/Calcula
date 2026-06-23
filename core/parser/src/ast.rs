@@ -424,6 +424,16 @@ pub enum BuiltinFunction {
     PivotBy,
     GetPivotData,
 
+    // CUBE functions (query a Calcula BI model). Resolved via a pre-fetched
+    // CubePrefetch injected before the synchronous recalc (see core/engine/src/cube.rs).
+    CubeValue,
+    CubeMember,
+    CubeSet,
+    CubeSetCount,
+    CubeRankedMember,
+    CubeMemberProperty,
+    CubeKpiMember,
+
     // Writeback aggregation (GATHER family)
     Gather,
     GatherFrom,
@@ -994,6 +1004,15 @@ impl BuiltinFunction {
             "PIVOTBY" => BuiltinFunction::PivotBy,
             "GETPIVOTDATA" => BuiltinFunction::GetPivotData,
 
+            // CUBE functions (Calcula BI model)
+            "CUBEVALUE" => BuiltinFunction::CubeValue,
+            "CUBEMEMBER" => BuiltinFunction::CubeMember,
+            "CUBESET" => BuiltinFunction::CubeSet,
+            "CUBESETCOUNT" => BuiltinFunction::CubeSetCount,
+            "CUBERANKEDMEMBER" => BuiltinFunction::CubeRankedMember,
+            "CUBEMEMBERPROPERTY" => BuiltinFunction::CubeMemberProperty,
+            "CUBEKPIMEMBER" => BuiltinFunction::CubeKpiMember,
+
             // Writeback aggregation (GATHER family)
             "GATHER" => BuiltinFunction::Gather,
             "GATHER.FROM" => BuiltinFunction::GatherFrom,
@@ -1536,6 +1555,13 @@ impl BuiltinFunction {
             BuiltinFunction::GroupBy => "GROUPBY",
             BuiltinFunction::PivotBy => "PIVOTBY",
             BuiltinFunction::GetPivotData => "GETPIVOTDATA",
+            BuiltinFunction::CubeValue => "CUBEVALUE",
+            BuiltinFunction::CubeMember => "CUBEMEMBER",
+            BuiltinFunction::CubeSet => "CUBESET",
+            BuiltinFunction::CubeSetCount => "CUBESETCOUNT",
+            BuiltinFunction::CubeRankedMember => "CUBERANKEDMEMBER",
+            BuiltinFunction::CubeMemberProperty => "CUBEMEMBERPROPERTY",
+            BuiltinFunction::CubeKpiMember => "CUBEKPIMEMBER",
             BuiltinFunction::Gather => "GATHER",
             BuiltinFunction::GatherFrom => "GATHER.FROM",
             BuiltinFunction::GatherCount => "GATHER.COUNT",
@@ -2069,6 +2095,13 @@ impl BuiltinFunction {
             FunctionMeta::new("COLUMNS", "Lookup & Reference", "COLUMNS(array)", "Returns the number of columns in a reference"),
             FunctionMeta::new("TRANSPOSE", "Lookup & Reference", "TRANSPOSE(array)", "Returns the transpose of an array"),
             FunctionMeta::new("GETPIVOTDATA", "Lookup & Reference", "GETPIVOTDATA(data_field, pivot_table, [field1, item1], ...)", "Retrieves data from a pivot table"),
+            FunctionMeta::new("CUBEVALUE", "Cube", "CUBEVALUE(connection, [member_expression1], ...)", "Returns an aggregated value from a Calcula BI model"),
+            FunctionMeta::new("CUBEMEMBER", "Cube", "CUBEMEMBER(connection, member_expression, [caption])", "Returns a member or tuple from a Calcula BI model"),
+            FunctionMeta::new("CUBESET", "Cube", "CUBESET(connection, set_expression, [caption], [sort_order], [sort_by])", "Defines a calculated set of members or tuples"),
+            FunctionMeta::new("CUBESETCOUNT", "Cube", "CUBESETCOUNT(set)", "Returns the number of items in a set"),
+            FunctionMeta::new("CUBERANKEDMEMBER", "Cube", "CUBERANKEDMEMBER(connection, set_expression, rank, [caption])", "Returns the nth, or ranked, member in a set"),
+            FunctionMeta::new("CUBEMEMBERPROPERTY", "Cube", "CUBEMEMBERPROPERTY(connection, member_expression, property)", "Returns the value of a member property from a Calcula BI model"),
+            FunctionMeta::new("CUBEKPIMEMBER", "Cube", "CUBEKPIMEMBER(connection, kpi_name, kpi_property, [caption])", "Returns a key performance indicator (KPI) property"),
             FunctionMeta::new("AREAS", "Lookup & Reference", "AREAS(reference)", "Returns the number of areas in a reference"),
             FunctionMeta::new("CELL", "Lookup & Reference", "CELL(info_type, [reference])", "Returns information about a cell"),
             FunctionMeta::new("FORMULATEXT", "Lookup & Reference", "FORMULATEXT(reference)", "Returns a formula as text"),

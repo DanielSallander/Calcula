@@ -331,6 +331,7 @@ pub fn collect_udf_calls(
             if let Some(ast) = cell.get_cached_ast() {
                 let ast = ast.clone();
                 let eval_ctx = engine::EvalContext {
+                    cube_prefetch: None,
                     current_row: Some(r),
                     current_col: Some(c),
                     row_heights: None,
@@ -385,6 +386,7 @@ pub fn collect_udf_calls(
                     if let Some(ast) = cell.get_cached_ast() {
                         let ast = ast.clone();
                         let eval_ctx = engine::EvalContext {
+                            cube_prefetch: None,
                             current_row: Some(r),
                             current_col: Some(c),
                             row_heights: None,

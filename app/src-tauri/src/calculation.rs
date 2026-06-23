@@ -160,6 +160,7 @@ fn evaluate_single_formula(
 
             let engine_ast = crate::convert_expr(&resolved);
             let eval_ctx = engine::EvalContext {
+                cube_prefetch: None,
                 current_row: Some(row),
                 current_col: Some(col),
                 row_heights: Some(row_heights.clone()),

@@ -6,6 +6,7 @@ pub mod ast_alignment;
 pub mod ast_render;
 pub mod cell;
 pub mod coord;
+pub mod cube;
 pub mod custom_format;
 pub mod date_serial;
 pub mod dependency_extractor;
@@ -24,6 +25,10 @@ pub mod undo;
 // Re-export commonly used types at the crate root
 pub use cell::{Cell, CellError, CellValue, DictKey, RichTextRun};
 pub use coord::{a1_to_coord, col_to_index, coord_to_a1, index_to_col, CellCoord};
+pub use cube::{
+    cell_key as cube_cell_key, cube_call_key, cube_function_name, resolve_cube_arg, CubeBinding,
+    CubeBindingKind, CubeCallResult, CubeError, CubePrefetch, CubeResolver,
+};
 pub use custom_format::{FormatColor, FormatResult, format_color_to_css};
 pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
 pub use dependency_graph::{CycleError, DependencyGraph};

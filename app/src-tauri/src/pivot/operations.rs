@@ -1293,6 +1293,7 @@ pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotSt
 
     for (row, col, formula) in formula_cells {
         let eval_ctx = engine::EvalContext {
+            cube_prefetch: None,
             current_row: Some(row),
             current_col: Some(col),
             row_heights: Some(row_heights.clone()),
