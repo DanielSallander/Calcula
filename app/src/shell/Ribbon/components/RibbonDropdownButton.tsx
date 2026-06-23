@@ -29,14 +29,14 @@ const containerStyles: React.CSSProperties = {
 };
 
 const hoverStyles: React.CSSProperties = {
-  backgroundColor: "#e5e5e5",
-  borderColor: "#aaa",
+  backgroundColor: "var(--bg-surface-disabled)",
+  borderColor: "var(--border-default)",
 };
 
 const disabledStyles: React.CSSProperties = {
   opacity: 0.5,
   cursor: "not-allowed",
-  backgroundColor: "#f5f5f5",
+  backgroundColor: "var(--bg-surface-disabled)",
 };
 
 /**

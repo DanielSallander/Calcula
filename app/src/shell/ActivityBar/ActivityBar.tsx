@@ -279,7 +279,7 @@ const styles: Record<string, React.CSSProperties> = {
     height: 16,
     padding: "0 4px",
     borderRadius: 8,
-    backgroundColor: "#0078d4",
+    backgroundColor: "var(--accent-color)",
     color: "#fff",
     fontSize: 9,
     fontWeight: 600,

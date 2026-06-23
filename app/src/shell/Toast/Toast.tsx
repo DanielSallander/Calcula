@@ -30,6 +30,9 @@ function ToastItem({ toast }: { toast: ToastItem }): React.ReactElement {
         boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
         fontSize: 13,
         fontFamily: "system-ui, -apple-system, sans-serif",
+        // Text stays literal-dark: the variant backgrounds above are fixed light
+        // semantic tints (not tokenized), so a token here would invert to light
+        // text on a light box in the Dark skin.
         color: "#333",
         maxWidth: 380,
         lineHeight: 1.4,

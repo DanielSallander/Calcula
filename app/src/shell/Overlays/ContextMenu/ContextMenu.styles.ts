@@ -99,7 +99,7 @@ export const SearchInput = styled.input`
   box-sizing: border-box;
 
   &:focus {
-    border-color: #0078d4;
+    border-color: var(--accent-color);
   }
 
   &::placeholder {

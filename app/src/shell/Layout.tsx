@@ -61,7 +61,7 @@ function LoadingScreen(): React.ReactElement {
         justifyContent: "center",
         height: "100vh",
         width: "100vw",
-        backgroundColor: "#f5f5f5",
+        backgroundColor: "var(--panel-bg)",
         fontFamily: "system-ui, -apple-system, sans-serif",
       }}
     >
@@ -75,7 +75,7 @@ function LoadingScreen(): React.ReactElement {
       >
         Calcula
       </div>
-      <div style={{ fontSize: "14px", color: "#666" }}>Loading extensions...</div>
+      <div style={{ fontSize: "14px", color: "var(--text-secondary)" }}>Loading extensions...</div>
     </div>
   );
 }
@@ -93,7 +93,7 @@ function ErrorScreen({ error }: { error: Error }): React.ReactElement {
         justifyContent: "center",
         height: "100vh",
         width: "100vw",
-        backgroundColor: "#fff5f5",
+        backgroundColor: "var(--panel-bg)",
         fontFamily: "system-ui, -apple-system, sans-serif",
       }}
     >
@@ -101,13 +101,13 @@ function ErrorScreen({ error }: { error: Error }): React.ReactElement {
         style={{
           fontSize: "24px",
           fontWeight: 600,
-          color: "#c00",
+          color: "var(--text-error)",
           marginBottom: "16px",
         }}
       >
         Initialization Error
       </div>
-      <div style={{ fontSize: "14px", color: "#666", maxWidth: "400px", textAlign: "center" }}>
+      <div style={{ fontSize: "14px", color: "var(--text-secondary)", maxWidth: "400px", textAlign: "center" }}>
         {error.message}
       </div>
     </div>
@@ -319,7 +319,7 @@ function LayoutInner(): React.ReactElement {
         height: "100vh",
         width: "100vw",
         overflow: "hidden",
-        backgroundColor: "#ffffff",
+        backgroundColor: "var(--bg-surface)",
       }}
     >
       {/* Hook-based menus (renders nothing, just activates hooks) */}

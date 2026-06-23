@@ -86,13 +86,13 @@ export function PanelContextMenu({
     backgroundColor: "transparent",
     cursor: "pointer",
     fontSize: "12px",
-    color: "#333",
+    color: "var(--ctx-menu-text)",
     fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
     textAlign: "left",
   };
 
   const handleMouseEnter = (e: React.MouseEvent) => {
-    (e.target as HTMLElement).style.backgroundColor = "#f0f0f0";
+    (e.target as HTMLElement).style.backgroundColor = "var(--ctx-menu-item-hover-bg)";
   };
   const handleMouseLeave = (e: React.MouseEvent) => {
     (e.target as HTMLElement).style.backgroundColor = "transparent";
@@ -106,8 +106,8 @@ export function PanelContextMenu({
         left: position.x,
         top: position.y,
         zIndex: 10000,
-        backgroundColor: "#fff",
-        border: "1px solid #d0d0d0",
+        backgroundColor: "var(--ctx-menu-bg)",
+        border: "1px solid var(--ctx-menu-border)",
         borderRadius: 4,
         boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
         padding: "4px 0",
@@ -121,12 +121,12 @@ export function PanelContextMenu({
         onMouseLeave={handleMouseLeave}
       >
         {targetPlacement === "sidebar" ? (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#555" strokeWidth="1.2">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
             <rect x="1" y="2" width="14" height="12" rx="1" />
             <line x1="5" y1="2" x2="5" y2="14" />
           </svg>
         ) : (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#555" strokeWidth="1.2">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
             <rect x="1" y="2" width="14" height="12" rx="1" />
             <line x1="1" y1="5" x2="15" y2="5" />
           </svg>
@@ -135,7 +135,7 @@ export function PanelContextMenu({
       </button>
 
       {/* Separator */}
-      <div style={{ height: 1, backgroundColor: "#e5e5e5", margin: "4px 0" }} />
+      <div style={{ height: 1, backgroundColor: "var(--ctx-menu-separator)", margin: "4px 0" }} />
 
       <button
         onClick={handleEditScript}
@@ -143,7 +143,7 @@ export function PanelContextMenu({
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#555" strokeWidth="1.2">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
           <path d="M2 12l1-4 7-7 3 3-7 7-4 1z" />
           <path d="M10 4l3 3" />
         </svg>

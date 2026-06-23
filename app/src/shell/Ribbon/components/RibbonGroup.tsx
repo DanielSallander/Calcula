@@ -17,7 +17,7 @@ export function RibbonGroup({ label, children }: RibbonGroupProps): React.ReactE
       style={{
         display: "flex",
         flexDirection: "column",
-        borderRight: "1px solid #e5e5e5",
+        borderRight: "1px solid var(--border-default)",
         paddingRight: "12px",
         marginRight: "12px",
       }}
@@ -35,7 +35,7 @@ export function RibbonGroup({ label, children }: RibbonGroupProps): React.ReactE
       <div
         style={{
           fontSize: "10px",
-          color: "#999",
+          color: "var(--text-tertiary)",
           textAlign: "center",
           marginTop: "4px",
           paddingTop: "4px",

@@ -18,5 +18,5 @@ export const StyledInput = styled.input<StyledInputProps>`
   font-family: Consolas, 'Courier New', monospace;
   outline: none;
   background-color: ${props => props.$isFocused ? v('--formula-input-bg-focused') : v('--formula-input-bg')};
-  color: ${props => props.$isSpillRef ? '#888' : v('--formula-input-text')};
+  color: ${props => props.$isSpillRef ? v('--text-tertiary') : v('--formula-input-text')};
 `;

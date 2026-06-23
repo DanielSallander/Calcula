@@ -19,8 +19,8 @@ export const TaskPaneWrapper = styled.div<{
   display: flex;
   flex-direction: column;
   height: 100%;
-  background-color: #f8f9fa;
-  border-left: 1px solid #e0e0e0;
+  background-color: var(--panel-bg);
+  border-left: 1px solid var(--border-default);
   overflow: hidden;
 
   /* Fixed width */
@@ -62,7 +62,7 @@ export const ResizeHandle = styled.div`
 
   &:hover,
   &:active {
-    background: #0078d4;
+    background: var(--accent-color);
   }
 `;
 
@@ -72,8 +72,8 @@ export const Header = styled.div`
   justify-content: space-between;
   min-height: 36px;
   padding: 0 8px;
-  background: #ffffff;
-  border-bottom: 1px solid #e0e0e0;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 `;
 
@@ -100,8 +100,8 @@ export const Tab = styled.button<{ $active: boolean }>`
   padding: 6px 12px;
   border: none;
   border-radius: 4px 4px 0 0;
-  background: ${({ $active }) => ($active ? "#f8f9fa" : "transparent")};
-  color: ${({ $active }) => ($active ? "#333" : "#666")};
+  background: ${({ $active }) => ($active ? "var(--panel-bg)" : "transparent")};
+  color: ${({ $active }) => ($active ? "var(--text-primary)" : "var(--text-secondary)")};
   font-size: 12px;
   font-weight: ${({ $active }) => ($active ? 600 : 400)};
   cursor: pointer;
@@ -109,8 +109,8 @@ export const Tab = styled.button<{ $active: boolean }>`
   transition: background 0.1s, color 0.1s;
 
   &:hover {
-    background: ${({ $active }) => ($active ? "#f8f9fa" : "#f0f0f0")};
-    color: #333;
+    background: ${({ $active }) => ($active ? "var(--panel-bg)" : "var(--bg-surface-disabled)")};
+    color: var(--text-primary);
   }
 `;
 
@@ -131,13 +131,13 @@ export const TabCloseButton = styled.span`
   border: none;
   border-radius: 3px;
   background: transparent;
-  color: #999;
+  color: var(--text-tertiary);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
 
   &:hover {
-    background: #e0e0e0;
-    color: #333;
+    background: var(--bg-surface-disabled);
+    color: var(--text-primary);
   }
 `;
 
@@ -158,13 +158,13 @@ export const HeaderButton = styled.button`
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #666;
+  color: var(--text-secondary);
   font-size: 16px;
   cursor: pointer;
 
   &:hover {
-    background: #e0e0e0;
-    color: #333;
+    background: var(--bg-surface-disabled);
+    color: var(--text-primary);
   }
 `;
 
@@ -182,7 +182,7 @@ export const EmptyState = styled.div`
   justify-content: center;
   height: 100%;
   padding: 24px;
-  color: #999;
+  color: var(--text-tertiary);
   text-align: center;
   font-size: 13px;
 `;

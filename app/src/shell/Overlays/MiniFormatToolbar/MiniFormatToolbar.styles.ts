@@ -92,7 +92,7 @@ export const MiniSelect = styled.select`
   }
 
   &:focus {
-    border-color: #0078d4;
+    border-color: var(--accent-color);
   }
 `;
 
@@ -141,7 +141,7 @@ export const ColorCell = styled.button<{ $color: string; $selected?: boolean }>`
   height: 14px;
   padding: 0;
   border: ${(p) =>
-    p.$selected ? "2px solid #0078d4" : "1px solid rgba(128,128,128,0.3)"};
+    p.$selected ? "2px solid var(--accent-color)" : "1px solid rgba(128,128,128,0.3)"};
   border-radius: 2px;
   background-color: ${(p) => p.$color};
   cursor: pointer;

@@ -28,7 +28,7 @@ export function SectionRibbonRenderer({ sections }: SectionRibbonRendererProps):
           style={{
             display: "flex",
             flexDirection: "column",
-            borderRight: idx < sections.length - 1 ? "1px solid #e5e5e5" : "none",
+            borderRight: idx < sections.length - 1 ? "1px solid var(--border-default)" : "none",
             paddingLeft: idx === 0 ? "4px" : "10px",
             paddingRight: "10px",
           }}
@@ -39,7 +39,7 @@ export function SectionRibbonRenderer({ sections }: SectionRibbonRendererProps):
           <div
             style={{
               fontSize: "10px",
-              color: "#999",
+              color: "var(--text-tertiary)",
               textAlign: "center",
               marginTop: "2px",
               textTransform: "uppercase" as const,
@@ -106,7 +106,7 @@ export function SectionSidebarRenderer({ sections }: SectionSidebarRendererProps
       {sections.map((section) => {
         const isCollapsed = collapsed.has(section.id);
         return (
-          <div key={section.id} style={isSingleSection ? undefined : { borderBottom: "1px solid #e5e5e5" }}>
+          <div key={section.id} style={isSingleSection ? undefined : { borderBottom: "1px solid var(--border-default)" }}>
             {/* Section header — hidden for single-section panels */}
             {!isSingleSection && (
               <button
@@ -122,7 +122,7 @@ export function SectionSidebarRenderer({ sections }: SectionSidebarRendererProps
                   cursor: "pointer",
                   fontSize: "11px",
                   fontWeight: 600,
-                  color: "#555",
+                  color: "var(--text-secondary)",
                   textTransform: "uppercase",
                   letterSpacing: "0.5px",
                   fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
