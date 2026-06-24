@@ -61,7 +61,7 @@ export const chartSpecJsonSchema: object = {
     },
     palette: {
       type: "string",
-      description: "Color palette name. Built-in palettes: 'default', 'pastel', 'vivid', 'earth', 'ocean', 'monochrome'.",
+      description: "Color palette name. Built-in palettes: 'default', 'vivid', 'pastel', 'ocean'.",
     },
     markOptions: {
       description: "Mark-specific options. The available properties depend on the chart type (mark).",
@@ -79,6 +79,9 @@ export const chartSpecJsonSchema: object = {
         { $ref: "#/definitions/FunnelMarkOptions" },
         { $ref: "#/definitions/TreemapMarkOptions" },
         { $ref: "#/definitions/StockMarkOptions" },
+        { $ref: "#/definitions/BoxPlotMarkOptions" },
+        { $ref: "#/definitions/SunburstMarkOptions" },
+        { $ref: "#/definitions/ParetoMarkOptions" },
         { $ref: "#/definitions/RuleMarkOptions" },
         { $ref: "#/definitions/TextMarkOptions" },
       ],
@@ -104,6 +107,29 @@ export const chartSpecJsonSchema: object = {
     dataLabels: {
       $ref: "#/definitions/DataLabelSpec",
       description: "Data labels displayed on chart data points.",
+    },
+    trendlines: {
+      type: "array",
+      description: "Trendlines overlaid on chart series (linear, exponential, polynomial, power, logarithmic, movingAverage).",
+      items: { $ref: "#/definitions/TrendlineSpec" },
+    },
+    dataTable: {
+      $ref: "#/definitions/DataTableOptions",
+      description: "Data table displayed below the chart plot area.",
+    },
+    filters: {
+      $ref: "#/definitions/ChartFilters",
+      description: "Non-destructive filters that hide series or categories without removing them from the data source.",
+    },
+    dataPointOverrides: {
+      type: "array",
+      description: "Per-data-point visual overrides (format an individual bar, slice, or marker independently of its series).",
+      items: { $ref: "#/definitions/DataPointOverride" },
+    },
+    seriesRefs: {
+      type: "array",
+      description: "Per-series cell references for SERIES() formula reconstruction (from XLSX import or computed). Usually managed automatically.",
+      items: { $ref: "#/definitions/SeriesRef" },
     },
   },
   definitions: {
@@ -287,9 +313,8 @@ export const chartSpecJsonSchema: object = {
         gridLines: { type: "boolean", description: "Show grid lines extending from this axis." },
         showLabels: { type: "boolean", description: "Show tick labels on this axis." },
         labelAngle: {
-          type: "integer",
-          enum: [0, 45, 90],
-          description: "Label rotation in degrees. 0 = horizontal, 45 = diagonal, 90 = vertical.",
+          type: "number",
+          description: "Label rotation in degrees. Any angle is supported (e.g. 0 = horizontal, 45 = diagonal, 90 = vertical, -30 = up-tilted).",
         },
         min: {
           type: ["number", "null"],
@@ -312,6 +337,24 @@ export const chartSpecJsonSchema: object = {
           type: "string",
           description: "Number format string for tick labels (e.g. \",.2f\", \"$,.0f\", \"%\").",
         },
+        majorUnit: { type: ["number", "null"], description: "Distance between major tick marks. null = auto." },
+        minorUnit: { type: ["number", "null"], description: "Distance between minor tick marks. null = auto." },
+        displayUnit: {
+          type: "string",
+          enum: ["none", "hundreds", "thousands", "tenThousands", "hundredThousands", "millions", "tenMillions", "hundredMillions", "billions", "trillions"],
+          description: "Display unit for value axis. Divides values by the unit factor.",
+        },
+        showDisplayUnitLabel: { type: "boolean", description: "Show a label on the chart indicating the display unit." },
+        majorTickMark: { type: "string", enum: ["none", "inside", "outside", "cross"], description: "Major tick mark type. Default: \"outside\"." },
+        minorTickMark: { type: "string", enum: ["none", "inside", "outside", "cross"], description: "Minor tick mark type. Default: \"none\"." },
+        labelPosition: { type: "string", enum: ["nextToAxis", "high", "low", "none"], description: "Axis label position. Default: \"nextToAxis\"." },
+        crossesAt: { type: "string", enum: ["auto", "min", "max", "value"], description: "Where the perpendicular axis crosses. Default: \"auto\"." },
+        crossesAtValue: { type: "number", description: "Custom value where the axis crosses (when crossesAt is \"value\")." },
+        reverse: { type: "boolean", description: "Reverse the axis direction." },
+        lineColor: { type: "string", description: "Axis line color override. Omit to use theme color." },
+        lineWidth: { type: "number", minimum: 0, description: "Axis line width in pixels. Default: 1." },
+        lineDash: { type: "array", items: { type: "number" }, description: "Axis line dash pattern [dashLength, gapLength]. Omit for solid." },
+        showLine: { type: "boolean", description: "Whether to show the axis line itself. Default: true." },
       },
       additionalProperties: false,
     },
@@ -335,6 +378,15 @@ export const chartSpecJsonSchema: object = {
       properties: {
         borderRadius: { type: "number", minimum: 0, description: "Corner radius on bars in pixels. Default: 2." },
         barGap: { type: "number", minimum: 0, description: "Gap between bars in a group in pixels. Default: 2." },
+        stackMode: {
+          type: "string",
+          enum: ["none", "stacked", "percentStacked"],
+          description: "Stacking mode. Default: \"none\".",
+        },
+        errorBars: { $ref: "#/definitions/ErrorBarOptions", description: "Error bars configuration." },
+        fill: { $ref: "#/definitions/GradientFill", description: "Gradient fill applied to all bars (overrides series colors)." },
+        seriesOverlap: { type: "number", minimum: -100, maximum: 100, description: "Series overlap percentage (-100 to 100). Positive = overlap, negative = gap. Default: 0." },
+        gapWidth: { type: "number", minimum: 0, maximum: 500, description: "Gap between category groups as percentage of bar width (0-500). Default: 150." },
       },
       additionalProperties: false,
     },
@@ -350,6 +402,21 @@ export const chartSpecJsonSchema: object = {
         lineWidth: { type: "number", minimum: 0.5, description: "Line width in pixels. Default: 2." },
         showMarkers: { type: "boolean", description: "Show point markers at data points. Default: true." },
         markerRadius: { type: "number", minimum: 1, description: "Point marker radius in pixels. Default: 4." },
+        stackMode: {
+          type: "string",
+          enum: ["none", "stacked", "percentStacked"],
+          description: "Stacking mode. Default: \"none\".",
+        },
+        errorBars: { $ref: "#/definitions/ErrorBarOptions", description: "Error bars configuration." },
+        showDropLines: { type: "boolean", description: "Show drop lines from data points down to the category axis." },
+        dropLineColor: { type: "string", description: "Drop line color. Omit to use series color at reduced opacity." },
+        dropLineDash: { type: "array", items: { type: "number" }, description: "Drop line dash pattern. Default: [3, 3]." },
+        showHighLowLines: { type: "boolean", description: "Show high-low lines connecting the highest and lowest points at each category." },
+        highLowLineColor: { type: "string", description: "High-low line color. Default: \"#666666\"." },
+        showUpDownBars: { type: "boolean", description: "Show up/down bars between the first and last data series." },
+        upBarColor: { type: "string", description: "Fill color for \"up\" bars (last series > first series). Default: \"#70AD47\"." },
+        downBarColor: { type: "string", description: "Fill color for \"down\" bars (last series < first series). Default: \"#E15759\"." },
+        upDownBarWidth: { type: "number", minimum: 0, description: "Width of up/down bars in pixels. Default: 8." },
       },
       additionalProperties: false,
     },
@@ -372,6 +439,14 @@ export const chartSpecJsonSchema: object = {
         showMarkers: { type: "boolean", description: "Show point markers. Default: false." },
         markerRadius: { type: "number", minimum: 1, description: "Marker radius in pixels. Default: 4." },
         stacked: { type: "boolean", description: "Stack overlapping areas. Default: false." },
+        stackMode: {
+          type: "string",
+          enum: ["none", "stacked", "percentStacked"],
+          description: "Stacking mode (supersedes the `stacked` boolean). Default: \"none\".",
+        },
+        fill: { $ref: "#/definitions/GradientFill", description: "Gradient fill for the area (applied per series)." },
+        showDropLines: { type: "boolean", description: "Show drop lines from data points down to the category axis." },
+        dropLineColor: { type: "string", description: "Drop line color. Omit to use series color at reduced opacity." },
       },
       additionalProperties: false,
     },
@@ -385,6 +460,7 @@ export const chartSpecJsonSchema: object = {
           description: "Point shape. Default: \"circle\".",
         },
         pointSize: { type: "number", minimum: 1, description: "Point size (radius in pixels). Default: 5." },
+        errorBars: { $ref: "#/definitions/ErrorBarOptions", description: "Error bars configuration." },
       },
       additionalProperties: false,
     },
@@ -631,6 +707,11 @@ export const chartSpecJsonSchema: object = {
             { $ref: "#/definitions/BubbleMarkOptions" },
             { $ref: "#/definitions/HistogramMarkOptions" },
             { $ref: "#/definitions/FunnelMarkOptions" },
+            { $ref: "#/definitions/TreemapMarkOptions" },
+            { $ref: "#/definitions/StockMarkOptions" },
+            { $ref: "#/definitions/BoxPlotMarkOptions" },
+            { $ref: "#/definitions/SunburstMarkOptions" },
+            { $ref: "#/definitions/ParetoMarkOptions" },
             { $ref: "#/definitions/RuleMarkOptions" },
             { $ref: "#/definitions/TextMarkOptions" },
           ],
@@ -813,6 +894,125 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    ErrorBarOptions: {
+      type: "object",
+      description: "Error bars for showing uncertainty/variability on bar, line, and scatter charts.",
+      required: ["enabled", "type", "direction"],
+      properties: {
+        enabled: { type: "boolean", description: "Whether error bars are enabled." },
+        type: {
+          type: "string",
+          enum: ["standardError", "percentage", "standardDeviation", "custom"],
+          description: "How to compute the error bar extent.",
+        },
+        value: { type: "number", description: "Value for percentage (e.g. 10 = +/-10%), stddev multiplier, or custom fixed amount. Default: 10." },
+        direction: { type: "string", enum: ["both", "plus", "minus"], description: "Which direction to draw error bars. Default: \"both\"." },
+        color: { type: "string", description: "Override color (hex). Default: \"#333333\"." },
+        lineWidth: { type: "number", minimum: 0, description: "Line width in pixels. Default: 1.5." },
+      },
+      additionalProperties: false,
+    },
+    GradientStop: {
+      type: "object",
+      description: "A color stop in a gradient.",
+      required: ["offset", "color"],
+      properties: {
+        offset: { type: "number", minimum: 0, maximum: 1, description: "Position along the gradient (0-1)." },
+        color: { type: "string", description: "Color at this stop (hex)." },
+      },
+      additionalProperties: false,
+    },
+    GradientFill: {
+      type: "object",
+      description: "A gradient fill specification.",
+      required: ["type", "stops"],
+      properties: {
+        type: { type: "string", enum: ["linear", "radial"], description: "Gradient type." },
+        direction: {
+          type: "string",
+          enum: ["topToBottom", "bottomToTop", "leftToRight", "rightToLeft", "topLeftToBottomRight", "bottomRightToTopLeft", "topRightToBottomLeft", "bottomLeftToTopRight"],
+          description: "Direction for linear gradients. Default: \"topToBottom\".",
+        },
+        stops: {
+          type: "array",
+          minItems: 2,
+          items: { $ref: "#/definitions/GradientStop" },
+          description: "Color stops. At least 2 required.",
+        },
+      },
+      additionalProperties: false,
+    },
+    TrendlineSpec: {
+      type: "object",
+      description: "A trendline drawn over a chart series.",
+      required: ["type"],
+      properties: {
+        type: {
+          type: "string",
+          enum: ["linear", "exponential", "polynomial", "power", "logarithmic", "movingAverage"],
+          description: "Trendline type.",
+        },
+        seriesIndex: { type: "integer", minimum: 0, description: "Index of the series this trendline applies to. Default: 0." },
+        color: { type: ["string", "null"], description: "Override color (hex). null = use series color (darkened)." },
+        lineWidth: { type: "number", minimum: 0, description: "Line width in pixels. Default: 2." },
+        strokeDash: { type: "array", items: { type: "number" }, description: "Dash pattern (e.g. [6, 3]). Default: [6, 3]." },
+        polynomialDegree: { type: "integer", minimum: 2, description: "Polynomial degree (only for \"polynomial\" type). Default: 2." },
+        movingAveragePeriod: { type: "integer", minimum: 1, description: "Window size for moving average (number of data points). Default: 3." },
+        showEquation: { type: "boolean", description: "Show the trendline equation on the chart. Default: false." },
+        showRSquared: { type: "boolean", description: "Show the R-squared value on the chart. Default: false." },
+        label: { type: "string", description: "Optional label. If omitted, auto-generated from type." },
+      },
+      additionalProperties: false,
+    },
+    DataTableOptions: {
+      type: "object",
+      description: "Grid of values rendered below the chart plot area.",
+      required: ["enabled"],
+      properties: {
+        enabled: { type: "boolean", description: "Whether the data table is shown." },
+        showLegendKeys: { type: "boolean", description: "Show legend color swatches in the first column. Default: true." },
+        showHorizontalBorder: { type: "boolean", description: "Show horizontal borders between rows. Default: true." },
+        showVerticalBorder: { type: "boolean", description: "Show vertical borders between columns. Default: true." },
+        showOutlineBorder: { type: "boolean", description: "Show an outline border around the entire table. Default: true." },
+      },
+      additionalProperties: false,
+    },
+    SeriesRef: {
+      type: "object",
+      description: "Per-series cell references for SERIES() formula reconstruction (e.g. from XLSX import).",
+      properties: {
+        nameRef: { type: "string", description: "Cell reference for the series name (e.g. \"Sheet1!$B$1\")." },
+        catRef: { type: "string", description: "Range reference for category labels (e.g. \"Sheet1!$A$2:$A$10\")." },
+        valRef: { type: "string", description: "Range reference for series values (e.g. \"Sheet1!$B$2:$B$10\")." },
+      },
+      additionalProperties: false,
+    },
+    ChartFilters: {
+      type: "object",
+      description: "Non-destructive filters that hide series or categories without removing them from the data source.",
+      required: ["hiddenSeries", "hiddenCategories"],
+      properties: {
+        hiddenSeries: { type: "array", items: { type: "integer", minimum: 0 }, description: "Indices of series to hide. Empty = all visible." },
+        hiddenCategories: { type: "array", items: { type: "integer", minimum: 0 }, description: "Indices of categories to hide. Empty = all visible." },
+      },
+      additionalProperties: false,
+    },
+    DataPointOverride: {
+      type: "object",
+      description: "Visual override for a single data point (format an individual bar, slice, or marker independently of its series).",
+      required: ["seriesIndex", "categoryIndex"],
+      properties: {
+        seriesIndex: { type: "integer", minimum: 0, description: "Index of the series this override applies to." },
+        categoryIndex: { type: "integer", minimum: 0, description: "Index of the category (data point) within the series." },
+        color: { type: "string", description: "Override fill color (hex)." },
+        opacity: { type: "number", minimum: 0, maximum: 1, description: "Override opacity (0-1)." },
+        borderColor: { type: "string", description: "Override border/stroke color." },
+        borderWidth: { type: "number", minimum: 0, description: "Override border/stroke width." },
+        exploded: { type: "number", description: "For pie/donut charts: pull out this slice by the given offset in pixels." },
+        gradientFill: { $ref: "#/definitions/GradientFill", description: "Gradient fill override for this data point." },
+      },
+      additionalProperties: false,
+    },
   },
   additionalProperties: false,
 };
@@ -840,13 +1040,17 @@ export function generateSpecReference(): string {
   lines.push("| xAxis | AxisSpec | X-axis configuration |");
   lines.push("| yAxis | AxisSpec | Y-axis configuration |");
   lines.push("| legend | LegendSpec | Legend configuration |");
-  lines.push("| palette | string | Color palette: default, pastel, vivid, earth, ocean, monochrome |");
+  lines.push("| palette | string | Color palette: default, vivid, pastel, ocean |");
   lines.push("| markOptions | object | Mark-specific options (varies by chart type) |");
   lines.push("| layers | LayerSpec[] | Additional layers overlaid on the chart (annotations, overlays) |");
   lines.push("| transform | TransformSpec[] | Data transform pipeline (filter, sort, aggregate, etc.) |");
   lines.push("| config | ChartConfig | Theme overrides (colors, fonts, spacing) |");
   lines.push("| tooltip | TooltipSpec | Tooltip display configuration |");
   lines.push("| dataLabels | DataLabelSpec | Data labels on data points |");
+  lines.push("| trendlines | TrendlineSpec[] | Trendlines overlaid on series (linear, polynomial, movingAverage, ...) |");
+  lines.push("| dataTable | DataTableOptions | Data table grid below the plot area |");
+  lines.push("| filters | ChartFilters | Non-destructive hide of series/categories |");
+  lines.push("| dataPointOverrides | DataPointOverride[] | Per-point color/opacity/border/explode overrides |");
   lines.push("");
 
   lines.push("## ChartSeries");

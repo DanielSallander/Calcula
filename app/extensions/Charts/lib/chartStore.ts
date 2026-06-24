@@ -56,6 +56,36 @@ function fromEntry(entry: ChartEntry): ChartDefinition {
   return JSON.parse(entry.specJson) as ChartDefinition;
 }
 
+/** True for non-null, non-array objects (the values we recurse into when merging). */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Recursively merge `patch` into `base`, returning a new object.
+ * - Nested plain objects merge recursively, so a partial patch like
+ *   `{ xAxis: { title: "X" } }` updates only `title` and preserves the rest of
+ *   `xAxis` (the previous shallow spread dropped every sibling field).
+ * - Arrays, primitives, `null`, and `undefined` REPLACE the target. In
+ *   particular `{ filters: undefined }` clears `filters` — several callers rely
+ *   on undefined-to-clear semantics.
+ */
+function deepMergeSpec<T>(base: T, patch: Partial<T>): T {
+  if (!isPlainObject(base) || !isPlainObject(patch)) {
+    return patch as T;
+  }
+  const result: Record<string, unknown> = { ...(base as Record<string, unknown>) };
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    const existing = result[key];
+    if (isPlainObject(value) && isPlainObject(existing)) {
+      result[key] = deepMergeSpec(existing, value as Record<string, unknown>);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result as T;
+}
+
 // ============================================================================
 // Debounced Persistence (for high-frequency operations like drag/resize)
 // ============================================================================
@@ -177,7 +207,12 @@ export function getAllCharts(): ChartDefinition[] {
 }
 
 /**
- * Update the spec for an existing chart.
+ * Update the spec for an existing chart via a deep-merge patch.
+ *
+ * Nested objects (axes, scale, theme, ...) merge field-by-field, so a partial
+ * patch never clobbers sibling properties. Arrays replace wholesale and an
+ * explicit `undefined` clears a field. For a full overwrite (where omitted
+ * fields must be deleted), use {@link replaceChartSpec} instead.
  */
 export function updateChartSpec(
   chartId: string,
@@ -185,8 +220,23 @@ export function updateChartSpec(
 ): void {
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
-    chart.spec = { ...chart.spec, ...specUpdates };
+    chart.spec = deepMergeSpec(chart.spec, specUpdates);
     // Debounced persist — spec changes during interactive editing
+    scheduleSave(chartId);
+  }
+}
+
+/**
+ * Replace the entire spec for an existing chart (full overwrite, not a merge).
+ *
+ * Used by the chart editor dialog, which holds the complete spec: deletions made
+ * in the Spec tab must take effect, which a merge cannot express. For partial,
+ * additive updates use {@link updateChartSpec}.
+ */
+export function replaceChartSpec(chartId: string, spec: ChartSpec): void {
+  const chart = charts.find((c) => c.chartId === chartId);
+  if (chart) {
+    chart.spec = spec;
     scheduleSave(chartId);
   }
 }

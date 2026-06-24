@@ -24,7 +24,7 @@ import type {
   PivotDataSource,
 } from "../types";
 import { isPivotDataSource } from "../types";
-import { createChart, getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
+import { createChart, getChartById, replaceChartSpec, syncChartRegions } from "../lib/chartStore";
 import { autoDetectSeries } from "../lib/chartDataReader";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { autoDetectPivotSeries } from "../lib/pivotChartDataReader";
@@ -128,6 +128,28 @@ function parseRangeReference(
   };
 }
 
+/**
+ * ChartSpec keys backed by dedicated dialog UI state. Every other field
+ * (layers, transform, config/theme, tooltip, dataLabels, dataTable, trendlines,
+ * filters, dataPointOverrides, seriesRefs, ...) is preserved verbatim in
+ * `specOverlay` so the Spec tab can author advanced features the UI doesn't
+ * expose — instead of silently dropping them.
+ */
+const MANAGED_SPEC_KEYS = new Set<keyof ChartSpec>([
+  "mark",
+  "markOptions",
+  "title",
+  "palette",
+  "xAxis",
+  "yAxis",
+  "legend",
+  "hasHeaders",
+  "seriesOrientation",
+  "categoryIndex",
+  "series",
+  "data",
+]);
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -185,6 +207,11 @@ export function CreateChartDialog({
     position: "bottom",
   });
 
+  // Advanced spec fields not represented by dedicated UI state (layers,
+  // transforms, theme, tooltip, data labels, data table, trendlines, filters,
+  // per-point overrides, ...). Preserved across edits so the Spec tab is lossless.
+  const [specOverlay, setSpecOverlay] = useState<Partial<ChartSpec>>({});
+
   // Preview data and resolved spec (with cell references like "=A1" resolved)
   const [previewData, setPreviewData] = useState<ParsedChartData | null>(null);
   const [resolvedSpec, setResolvedSpec] = useState<ChartSpec | null>(null);
@@ -224,6 +251,8 @@ export function CreateChartDialog({
     }
 
     const spec: ChartSpec = {
+      // Advanced fields first so dialog-managed fields below always win.
+      ...specOverlay,
       mark,
       data: dataSource,
       hasHeaders,
@@ -240,7 +269,7 @@ export function CreateChartDialog({
       spec.markOptions = markOptions;
     }
     return spec;
-  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, currentSheetIndex, isPivotMode, pivotId]);
+  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, currentSheetIndex, isPivotMode, pivotId]);
 
   // Handle spec updates from the Design tab or Spec tab
   const handleSpecChange = useCallback((updates: Partial<ChartSpec>) => {
@@ -256,6 +285,31 @@ export function CreateChartDialog({
     if (updates.seriesOrientation !== undefined) setOrientation(updates.seriesOrientation);
     if (updates.categoryIndex !== undefined) setCategoryIndex(updates.categoryIndex);
     if (updates.series !== undefined) setSeries(updates.series);
+
+    // Capture every field the dedicated UI doesn't manage. A full-spec edit
+    // (Spec tab / pop-out window) carries the required fields, so it REPLACES
+    // the overlay — honoring deletions of advanced fields. A partial edit
+    // (e.g. a Design-tab data-label toggle) MERGES into the existing overlay.
+    const isFullSpec =
+      updates.mark !== undefined &&
+      updates.series !== undefined &&
+      updates.xAxis !== undefined &&
+      updates.yAxis !== undefined &&
+      updates.legend !== undefined;
+
+    setSpecOverlay((prev) => {
+      const next: Record<string, unknown> = isFullSpec ? {} : { ...prev };
+      for (const key of Object.keys(updates) as (keyof ChartSpec)[]) {
+        if (MANAGED_SPEC_KEYS.has(key)) continue;
+        const value = updates[key];
+        if (value === undefined) {
+          delete next[key as string];
+        } else {
+          next[key as string] = value;
+        }
+      }
+      return next as Partial<ChartSpec>;
+    });
   }, []);
 
   // Load sheet info on open
@@ -265,6 +319,7 @@ export function CreateChartDialog({
       setError(null);
       setActiveTab(isPivotMode ? "design" : "data");
       setSpecFullView(false);
+      setSpecOverlay({});
       setDialogPos(null); // Reset to centered
       loadSheets();
 
@@ -294,6 +349,15 @@ export function CreateChartDialog({
           if (spec.legend) setLegend(spec.legend);
           if (spec.palette) setPalette(spec.palette);
           if (spec.markOptions) setMarkOptions(spec.markOptions);
+          // Preserve advanced fields the dialog UI doesn't manage so editing and
+          // re-saving never drops them.
+          const overlay: Record<string, unknown> = {};
+          for (const key of Object.keys(spec) as (keyof ChartSpec)[]) {
+            if (!MANAGED_SPEC_KEYS.has(key)) {
+              overlay[key as string] = spec[key];
+            }
+          }
+          setSpecOverlay(overlay as Partial<ChartSpec>);
           setHasAutoDetected(true);
         }
       }
@@ -543,8 +607,9 @@ export function CreateChartDialog({
       const chartHeight = 400;
 
       if (isEditMode && editChartId != null) {
-        // Update the existing chart's spec
-        updateChartSpec(editChartId, currentSpec);
+        // Replace the existing chart's spec wholesale — the dialog holds the
+        // complete spec, so advanced fields deleted in the Spec tab must go too.
+        replaceChartSpec(editChartId, currentSpec);
         syncChartRegions();
         emitAppEvent(ChartEvents.CHART_UPDATED, { chartId: editChartId });
         emitAppEvent(AppEvents.GRID_REFRESH);

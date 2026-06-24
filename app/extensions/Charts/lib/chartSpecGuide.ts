@@ -89,7 +89,7 @@ The \`mark\` field determines the chart type:
 
 ## Data Sources
 
-The \`data\` field accepts three formats:
+The \`data\` field accepts four formats:
 
 **A1 reference string** (most common):
 \`\`\`json
@@ -104,6 +104,11 @@ The \`data\` field accepts three formats:
 **Explicit coordinates** (0-based, inclusive):
 \`\`\`json
 "data": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": 9, "endCol": 3 }
+\`\`\`
+
+**Pivot table source** (for PivotCharts — reads the pivot's aggregated output):
+\`\`\`json
+"data": { "type": "pivot", "pivotId": "<pivot uuid>" }
 \`\`\`
 
 ## Series Configuration

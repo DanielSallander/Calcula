@@ -22,8 +22,9 @@ export interface LinearScale {
 export function createLinearScale(
   domain: [number, number],
   range: [number, number],
+  options?: { zero?: boolean; nice?: boolean },
 ): LinearScale {
-  const [d0, d1] = niceExtent(domain[0], domain[1]);
+  const [d0, d1] = niceExtent(domain[0], domain[1], options?.zero ?? true, options?.nice ?? true);
   const [r0, r1] = range;
   const dSpan = d1 - d0 || 1;
   const rSpan = r1 - r0;
@@ -254,8 +255,9 @@ export function createPowScale(
   domain: [number, number],
   range: [number, number],
   exponent = 2,
+  options?: { zero?: boolean; nice?: boolean },
 ): LinearScale {
-  const [d0, d1] = niceExtent(domain[0], domain[1]);
+  const [d0, d1] = niceExtent(domain[0], domain[1], options?.zero ?? true, options?.nice ?? true);
   const [r0, r1] = range;
 
   const sign = (v: number) => (v < 0 ? -1 : 1);
@@ -296,8 +298,9 @@ export function createPowScale(
 export function createSqrtScale(
   domain: [number, number],
   range: [number, number],
+  options?: { zero?: boolean; nice?: boolean },
 ): LinearScale {
-  return createPowScale(domain, range, 0.5);
+  return createPowScale(domain, range, 0.5, options);
 }
 
 // ============================================================================
@@ -318,21 +321,30 @@ export function createScaleFromSpec(
   const type = scaleSpec?.type ?? "linear";
 
   // Apply domain override if specified
-  let d: [number, number] = scaleSpec?.domain ?? domain;
+  const d: [number, number] = scaleSpec?.domain ?? domain;
 
   // Reverse range if requested
-  let r: [number, number] = scaleSpec?.reverse ? [range[1], range[0]] : range;
+  const r: [number, number] = scaleSpec?.reverse ? [range[1], range[0]] : range;
+
+  // Honor scale.zero / scale.nice. When the user pins an explicit domain we use
+  // it verbatim by default (no zero-injection, no nice-rounding) unless they
+  // also set zero/nice; with an auto domain we keep the legacy zero+nice
+  // behavior so existing charts are unchanged.
+  const hasExplicitDomain = scaleSpec?.domain != null;
+  const zero = scaleSpec?.zero ?? !hasExplicitDomain;
+  const nice = scaleSpec?.nice ?? !hasExplicitDomain;
 
   switch (type) {
     case "log":
+      // Log scales cannot include zero; zero/nice do not apply.
       return createLogScale(d, r);
     case "pow":
-      return createPowScale(d, r, scaleSpec?.exponent ?? 2);
+      return createPowScale(d, r, scaleSpec?.exponent ?? 2, { zero, nice });
     case "sqrt":
-      return createSqrtScale(d, r);
+      return createSqrtScale(d, r, { zero, nice });
     case "linear":
     default:
-      return createLinearScale(d, r);
+      return createLinearScale(d, r, { zero, nice });
   }
 }
 
@@ -341,26 +353,39 @@ export function createScaleFromSpec(
 // ============================================================================
 
 /**
- * Extend a domain to "nice" round numbers.
+ * Extend a domain, optionally injecting zero and rounding to "nice" numbers.
+ * @param zero Include zero in the domain (default true). Disable for line/scatter via scale.zero=false.
+ * @param nice Round the bounds out to nice step multiples (default true).
  */
-function niceExtent(min: number, max: number): [number, number] {
+function niceExtent(
+  min: number,
+  max: number,
+  zero = true,
+  nice = true,
+): [number, number] {
   if (min === max) {
     if (min === 0) return [0, 1];
-    return min > 0 ? [0, min * 1.2] : [min * 1.2, 0];
+    if (zero) return min > 0 ? [0, min * 1.2] : [min * 1.2, 0];
+    // No zero-injection: pad symmetrically around the single value.
+    const pad = Math.abs(min) * 0.1 || 1;
+    return [min - pad, min + pad];
   }
 
   let lo = min;
   let hi = max;
 
-  // Always include zero for bar charts
-  if (lo > 0) lo = 0;
-  if (hi < 0) hi = 0;
+  // Include zero in the domain unless disabled.
+  if (zero) {
+    if (lo > 0) lo = 0;
+    if (hi < 0) hi = 0;
+  }
 
-  const span = hi - lo;
-  const step = niceStep(lo, hi, 5);
-
-  lo = Math.floor(lo / step) * step;
-  hi = Math.ceil(hi / step) * step;
+  // Round the bounds out to nice step multiples unless disabled.
+  if (nice) {
+    const step = niceStep(lo, hi, 5);
+    lo = Math.floor(lo / step) * step;
+    hi = Math.ceil(hi / step) * step;
+  }
 
   return [lo, hi];
 }
