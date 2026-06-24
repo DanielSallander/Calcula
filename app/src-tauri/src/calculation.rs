@@ -134,6 +134,7 @@ fn evaluate_single_formula(
     named_ranges_map: &std::collections::HashMap<String, crate::named_ranges::NamedRange>,
     row_heights: &std::collections::HashMap<u32, f64>,
     column_widths: &std::collections::HashMap<u32, f64>,
+    cube: Option<&std::sync::Arc<engine::CubePrefetch>>,
 ) -> engine::CellValue {
     match parser::parse(formula) {
         Ok(parsed) => {
@@ -160,7 +161,7 @@ fn evaluate_single_formula(
 
             let engine_ast = crate::convert_expr(&resolved);
             let eval_ctx = engine::EvalContext {
-                cube_prefetch: None,
+                cube_prefetch: cube.cloned(),
                 current_row: Some(row),
                 current_col: Some(col),
                 row_heights: Some(row_heights.clone()),
@@ -314,7 +315,11 @@ fn partition_formula_cells(
 /// When iterative calculation is enabled, circular references are resolved
 /// by repeatedly evaluating the circular group until convergence.
 #[tauri::command]
-pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
+    // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
+    // on the frontend before calling). Shared via Arc so each formula's eval gets
+    // it cheaply; None => cube cells preserve their last value (see eval_cube).
+    let cube_arc = cube_results.map(std::sync::Arc::new);
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -390,6 +395,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
             &styles, &user_files, &pivot_data_fn, &gather_fn,
             &tables_map, &table_names_map, &named_ranges_map,
             &row_heights, &column_widths,
+            cube_arc.as_ref(),
         );
 
         if let Some(cell) = grid.get_cell(*row, *col) {
@@ -467,6 +473,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         &styles, &user_files, &pivot_data_fn, &gather_fn,
                         &tables_map, &table_names_map, &named_ranges_map,
                         &row_heights, &column_widths,
+                        cube_arc.as_ref(),
                     );
 
                     let new_numeric = cell_value_as_f64(&new_result);
@@ -631,6 +638,7 @@ pub(crate) fn recalculate_sheet_values(
             &styles, &user_files, &pivot_data_fn, &gather_fn,
             &tables_map, &table_names_map, &named_ranges_map,
             &row_heights, &column_widths,
+            None,
         );
         if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
             let mut updated = cell.clone();
@@ -667,6 +675,7 @@ pub(crate) fn recalculate_sheet_values(
                         &styles, &user_files, &pivot_data_fn, &gather_fn,
                         &tables_map, &table_names_map, &named_ranges_map,
                         &row_heights, &column_widths,
+                        None,
                     );
                     let new_numeric = cell_value_as_f64(&new_result);
                     if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
@@ -696,7 +705,7 @@ pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFiles
     log_enter_info!("CMD", "calculate_sheet");
 
     // For now, calculate_sheet does the same as calculate_now since we have a single sheet
-    let result = calculate_now(state, user_files_state, pivot_state);
+    let result = calculate_now(state, user_files_state, pivot_state, None);
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result

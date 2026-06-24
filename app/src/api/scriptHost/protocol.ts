@@ -109,8 +109,13 @@ export const CLASS_DEADLINES_MS: Record<string, number> = {
 };
 /** In-flight call cap per script; excess rejects HostError{rpc-saturated}. */
 export const MAX_INFLIGHT_CALLS = 32;
-/** Relayed methodCall deadline (ms). */
-export const METHOD_CALL_TIMEOUT_MS = 5_000;
+/** Relayed methodCall deadline (ms). Must be >= CALL_TIMEOUT_MS: a relayed
+ *  method body may itself `await` a broker capability call (e.g. a custom
+ *  function doing `cube.value(...)` under bi.query), which is bounded by the
+ *  worker's own CALL_TIMEOUT_MS. A shorter relay deadline would abandon the
+ *  call before the in-worker work could possibly finish, surfacing spurious
+ *  timeouts for BI-backed UDFs. Kept equal so the worker's deadline governs. */
+export const METHOD_CALL_TIMEOUT_MS = CALL_TIMEOUT_MS;
 /** Per-worker outbound event queue high-water mark. */
 export const EVENT_QUEUE_HIGH_WATER = 256;
 /** Render request: no response within this window -> drop in-flight, degrade. */

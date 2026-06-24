@@ -3546,6 +3546,37 @@ export async function biGetModelInfo(
   return invoke<BiModelInfo | null>("bi_get_model_info", { connectionId });
 }
 
+/** Distinct values of a model column (a dimension's members), e.g. all Countries.
+ *  Used by the CUBE formula builder to pick a specific member value. */
+export async function biGetColumnValues(
+  connectionId: string,
+  table: string,
+  column: string,
+): Promise<string[]> {
+  return invoke<string[]>("bi_get_column_values", { connectionId, table, column });
+}
+
+/** A workbook-local calculated measure (name + engine measure expression). */
+export interface CalculatedMeasure {
+  name: string;
+  expression: string;
+}
+
+/** Get the workbook-local calculated measures defined for a connection. */
+export async function biGetCalculatedMeasures(
+  connectionId: string,
+): Promise<CalculatedMeasure[]> {
+  return invoke<CalculatedMeasure[]>("bi_get_calculated_measures", { connectionId });
+}
+
+/** Replace a connection's calculated measures (validated + applied to the engine). */
+export async function biSetCalculatedMeasures(
+  connectionId: string,
+  measures: CalculatedMeasure[],
+): Promise<void> {
+  return invoke<void>("bi_set_calculated_measures", { connectionId, measures });
+}
+
 /** Set the active "view as" RLS role for a connection (null = unrestricted). */
 export async function biSetActiveRole(
   connectionId: string,

@@ -3980,6 +3980,12 @@ pub fn run() {
             bi::bi_get_region_at_cell,
             bi::bi_save_all_caches,
             bi::cube::cube_prefetch,
+            bi::cube::cube_prefetch_all,
+            bi::cube::cube_udf_value,
+            bi::cube::cube_udf_kpi,
+            bi::cube::cube_udf_members,
+            bi::measures::bi_get_calculated_measures,
+            bi::measures::bi_set_calculated_measures,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,

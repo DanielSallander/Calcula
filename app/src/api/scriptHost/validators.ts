@@ -199,6 +199,42 @@ export const vBiQuery: Validator = ([connectionId, request]) => {
   return true;
 };
 
+export const vCubeValue: Validator = ([connection, members]) => {
+  if (!isBoundedString(connection, MAX_KEY) || (connection as string).length === 0) {
+    return "connection must be a non-empty string";
+  }
+  if (!Array.isArray(members) || members.length > MAX_BI_LIST) {
+    return `members must be an array (max ${MAX_BI_LIST})`;
+  }
+  for (const m of members) {
+    if (!isBoundedString(m, MAX_KEY)) return "each member must be a string";
+  }
+  return true;
+};
+
+export const vCubeKpi: Validator = ([connection, kpi, property]) => {
+  if (!isBoundedString(connection, MAX_KEY) || (connection as string).length === 0) {
+    return "connection must be a non-empty string";
+  }
+  if (!isBoundedString(kpi, MAX_KEY) || (kpi as string).length === 0) {
+    return "kpi must be a non-empty string";
+  }
+  if (typeof property !== "number" || !Number.isInteger(property)) {
+    return "property must be an integer (1=Value, 2=Goal, 3=Status)";
+  }
+  return true;
+};
+
+export const vCubeMembers: Validator = ([connection, level]) => {
+  if (!isBoundedString(connection, MAX_KEY) || (connection as string).length === 0) {
+    return "connection must be a non-empty string";
+  }
+  if (!isBoundedString(level, MAX_KEY) || (level as string).length === 0) {
+    return "level must be a non-empty string (e.g. \"Geo[Country]\")";
+  }
+  return true;
+};
+
 export const vUdf: Validator = ([name, args]) => {
   if (!isBoundedString(name, MAX_KEY) || (name as string).length === 0) {
     return "udf name must be a non-empty string";

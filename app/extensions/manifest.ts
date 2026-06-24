@@ -81,6 +81,8 @@ import ExternalDataExtension from "./ExternalData";
 import SelectVisibleCellsExtension from "./SelectVisibleCells";
 import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
+import CubeFormulasExtension from "./CubeFormulas";
+import CustomFunctionsExtension from "./CustomFunctions";
 import AIChatExtension from "./AIChat";
 import JsonViewExtension from "./JsonView";
 import ErrorCheckingExtension from "./ErrorChecking";
@@ -187,6 +189,10 @@ export const builtInExtensions: ExtensionModule[] = [
   TimelineSlicerExtension,
   ControlsExtension,
   BusinessIntelligenceExtension,
+  // CUBE formula builder — needs BI connections to exist first
+  CubeFormulasExtension,
+  // Custom Functions (JS UDFs) — sandboxed; can use cube.* from CubeFormulas/BI
+  CustomFunctionsExtension,
   AIChatExtension,
   JsonViewExtension,
   DistributionExtension,

@@ -70,6 +70,165 @@ pub async fn cube_prefetch(
     Ok(build_cube_prefetch(&state, &bi_state, Some((row, col, value))).await)
 }
 
+/// Pre-fetch cube data for EVERY cube cell on the active sheet (no specific
+/// edit). Called by the frontend before a full recalc (`calculate_now`) so cube
+/// cells refresh against current model data — e.g. after a calculated measure
+/// is added/edited, or on F9.
+#[tauri::command]
+pub async fn cube_prefetch_all(
+    state: tauri::State<'_, AppState>,
+    bi_state: tauri::State<'_, BiState>,
+) -> Result<CubePrefetch, String> {
+    Ok(build_cube_prefetch(&state, &bi_state, None).await)
+}
+
+// ===========================================================================
+// Script-facing cube API (Layer 1): cube.value / cube.kpi for user scripts
+//
+// A user script (object script, or a future UDF) can query the BI model with
+// CUBE member-expression ergonomics instead of building a QueryRequest. These
+// reuse the SAME resolution helpers as the formula path, but take resolved
+// STRING arguments (no cell references), so no CubeResolver is involved. They
+// are brokered through the `bi.query` capability (model-scoped, read-only).
+// ===========================================================================
+
+fn cube_err_message(e: CubeError) -> String {
+    match e {
+        CubeError::Name => "Unknown BI connection".to_string(),
+        CubeError::Value => "Invalid member expression".to_string(),
+        CubeError::NotAvailable => "No data available".to_string(),
+        CubeError::Reference => "Invalid reference".to_string(),
+    }
+}
+
+/// Resolve a CUBEVALUE from raw member-expression strings (a measure + member
+/// filters). `Ok(None)` means the query ran but returned no value.
+pub async fn script_cube_value(
+    bi: &BiState,
+    connection: &str,
+    members: &[String],
+) -> Result<Option<f64>, CubeError> {
+    let mut ctx = CubeCtx::new(bi);
+    let conn_id = ctx.conn(connection).await?;
+
+    let mut measures: Vec<String> = Vec::new();
+    let mut filters: Vec<(String, String)> = Vec::new();
+    for s in members {
+        if s.trim().is_empty() {
+            continue;
+        }
+        for m in parse_members(s)? {
+            match m {
+                MemberExpr::Measure(name) => measures.push(name),
+                MemberExpr::Member { column, value, .. } => filters.push((column, value)),
+                MemberExpr::Level { .. } => return Err(CubeError::Value),
+            }
+        }
+    }
+
+    let measure = match measures.first() {
+        Some(m) => m.clone(),
+        None => match ctx.meta(&conn_id).await.and_then(|m| m.first_measure) {
+            Some(m) => m,
+            None => return Err(CubeError::NotAvailable),
+        },
+    };
+
+    match query_scalar(bi, &conn_id, &measure, &filters).await {
+        Ok(v) => Ok(Some(v)),
+        Err(CubeError::NotAvailable) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Resolve a KPI value/goal/status (property 1/2/3) for a script.
+pub async fn script_cube_kpi(
+    bi: &BiState,
+    connection: &str,
+    kpi: &str,
+    property: i64,
+) -> Result<Option<f64>, CubeError> {
+    let mut ctx = CubeCtx::new(bi);
+    let conn_id = ctx.conn(connection).await?;
+    let kpi_data = fetch_kpi(bi, &conn_id, kpi).await.ok_or(CubeError::NotAvailable)?;
+    // Treat "no rows" as no value (null) to match script_cube_value's contract,
+    // rather than surfacing it as an error.
+    let value = match query_scalar(bi, &conn_id, &kpi_data.base_measure, &[]).await {
+        Ok(v) => v,
+        Err(CubeError::NotAvailable) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let goal = match &kpi_data.target {
+        bi_engine::KpiTarget::Constant(v) => *v,
+        bi_engine::KpiTarget::Measure(m) => match query_scalar(bi, &conn_id, m, &[]).await {
+            Ok(v) => v,
+            Err(CubeError::NotAvailable) => return Ok(None),
+            Err(e) => return Err(e),
+        },
+    };
+    let result = match property {
+        1 => value,
+        2 => goal,
+        3 => compute_status(value, goal, &kpi_data.bands) as f64,
+        _ => return Err(CubeError::NotAvailable),
+    };
+    Ok(Some(result))
+}
+
+/// Distinct members of a level (Table[Column]) for a script to iterate.
+pub async fn script_cube_members(
+    bi: &BiState,
+    connection: &str,
+    member_or_level: &str,
+) -> Result<Vec<String>, CubeError> {
+    let mut ctx = CubeCtx::new(bi);
+    let conn_id = ctx.conn(connection).await?;
+    match parse_member_expr(member_or_level)? {
+        MemberExpr::Level { table, column } => distinct_members(&mut ctx, &conn_id, &table, &column).await,
+        _ => Err(CubeError::Value),
+    }
+}
+
+#[tauri::command]
+pub async fn cube_udf_value(
+    bi_state: tauri::State<'_, BiState>,
+    connection: String,
+    members: Vec<String>,
+    window: tauri::Window,
+) -> Result<Option<f64>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    script_cube_value(&bi_state, &connection, &members)
+        .await
+        .map_err(cube_err_message)
+}
+
+#[tauri::command]
+pub async fn cube_udf_kpi(
+    bi_state: tauri::State<'_, BiState>,
+    connection: String,
+    kpi: String,
+    property: i64,
+    window: tauri::Window,
+) -> Result<Option<f64>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    script_cube_kpi(&bi_state, &connection, &kpi, property)
+        .await
+        .map_err(cube_err_message)
+}
+
+#[tauri::command]
+pub async fn cube_udf_members(
+    bi_state: tauri::State<'_, BiState>,
+    connection: String,
+    level: String,
+    window: tauri::Window,
+) -> Result<Vec<String>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    script_cube_members(&bi_state, &connection, &level)
+        .await
+        .map_err(cube_err_message)
+}
+
 // ===========================================================================
 // Public entry point
 // ===========================================================================
@@ -784,7 +943,11 @@ async fn resolve_set_binding(
 
 fn conn_id_by_name(bi: &BiState, name: &str) -> Option<ConnectionId> {
     let conns = bi.connections.lock().unwrap();
-    conns.values().find(|c| c.name == name).map(|c| c.id.clone())
+    if let Some(c) = conns.values().find(|c| c.name == name) {
+        return Some(c.id.clone());
+    }
+    // Fall back to treating the string as a connection id (scripts use ids).
+    ConnectionId::parse(name).filter(|id| conns.contains_key(id))
 }
 
 fn engine_arc_by_id(
@@ -1467,6 +1630,8 @@ mod integration_tests {
             active_queries: HashMap::new(),
             package_data_source_id: None,
             active_role: None,
+            base_model: None,
+            calculated_measures: vec![],
         };
         let bi = BiState::new();
         bi.connections.lock().unwrap().insert(id, conn);
@@ -1562,5 +1727,53 @@ mod integration_tests {
         .unwrap();
         assert_eq!(status.scalar, Some(1.0));
         assert_eq!(status.caption, "On Track");
+    }
+
+    // ---- Script-facing API (Layer 1) ----
+
+    #[tokio::test]
+    async fn script_value_by_name_and_id() {
+        let (bi, id) = make_state().await;
+        // By connection NAME.
+        let v = script_cube_value(&bi, "Sales", &["[Revenue]".into()]).await.unwrap();
+        assert_eq!(v, Some(225.0));
+        // By connection ID string (scripts use ids).
+        let v2 = script_cube_value(&bi, &id.to_string(), &["[Revenue]".into()]).await.unwrap();
+        assert_eq!(v2, Some(225.0));
+    }
+
+    #[tokio::test]
+    async fn script_value_with_member_filter() {
+        let (bi, _id) = make_state().await;
+        let v = script_cube_value(
+            &bi,
+            "Sales",
+            &["[Revenue]".into(), "Sales[country]=USA".into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, Some(175.0));
+    }
+
+    #[tokio::test]
+    async fn script_value_unknown_connection_errors() {
+        let (bi, _id) = make_state().await;
+        let err = script_cube_value(&bi, "Nope", &["[Revenue]".into()]).await.unwrap_err();
+        assert_eq!(err, CubeError::Name);
+    }
+
+    #[tokio::test]
+    async fn script_kpi_value_and_status() {
+        let (bi, _id) = make_state().await;
+        assert_eq!(script_cube_kpi(&bi, "Sales", "Revenue KPI", 1).await.unwrap(), Some(225.0));
+        // 225/200 = 1.125 -> On Track (1).
+        assert_eq!(script_cube_kpi(&bi, "Sales", "Revenue KPI", 3).await.unwrap(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn script_members_lists_distinct() {
+        let (bi, _id) = make_state().await;
+        let members = script_cube_members(&bi, "Sales", "Sales[country]").await.unwrap();
+        assert_eq!(members, vec!["UK".to_string(), "USA".to_string()]);
     }
 }

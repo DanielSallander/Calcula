@@ -681,37 +681,52 @@ pub(crate) fn capture_local_bi_connections(
             Some(arc) => arc,
             None => continue,
         };
-        // Serialize the live model. try_lock keeps the sync save path non-blocking;
-        // engines are idle at save time so this normally succeeds. If busy, fall
-        // back to the on-disk model file when one is still present.
-        let model_json = match engine_arc.try_lock() {
-            Ok(engine) => match serde_json::to_value(engine.model()) {
+        // Persist the BASE model (without workbook-local calculated measures) so
+        // restore can re-apply the measures as an overlay without double-adding.
+        // For locally-authored connections base_model is owned data (no lock).
+        // Otherwise serialize the live model (try_lock; fall back to the file).
+        let model_json = if let Some(base) = &conn.base_model {
+            match serde_json::to_value(base) {
                 Ok(v) => v,
                 Err(e) => {
                     crate::log_warn!(
                         "BI",
-                        "skip persisting connection {}: model serialize failed: {}",
+                        "skip persisting connection {}: base model serialize failed: {}",
                         conn.id, e
                     );
                     continue;
                 }
-            },
-            Err(_) => match conn
-                .model_path
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            {
-                Some(v) => v,
-                None => {
-                    crate::log_warn!(
-                        "BI",
-                        "skip persisting connection {}: engine busy and no model file",
-                        conn.id
-                    );
-                    continue;
-                }
-            },
+            }
+        } else {
+            match engine_arc.try_lock() {
+                Ok(engine) => match serde_json::to_value(engine.model()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        crate::log_warn!(
+                            "BI",
+                            "skip persisting connection {}: model serialize failed: {}",
+                            conn.id, e
+                        );
+                        continue;
+                    }
+                },
+                Err(_) => match conn
+                    .model_path
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                {
+                    Some(v) => v,
+                    None => {
+                        crate::log_warn!(
+                            "BI",
+                            "skip persisting connection {}: engine busy and no model file",
+                            conn.id
+                        );
+                        continue;
+                    }
+                },
+            }
         };
         saved.push(persistence::SavedBiConnection {
             id: conn.id.to_string(),
@@ -730,6 +745,14 @@ pub(crate) fn capture_local_bi_connections(
                     model_table: b.model_table.clone(),
                     schema: b.schema.clone(),
                     source_table: b.source_table.clone(),
+                })
+                .collect(),
+            calculated_measures: conn
+                .calculated_measures
+                .iter()
+                .map(|m| persistence::SavedCalculatedMeasure {
+                    name: m.name.clone(),
+                    expression: m.expression.clone(),
                 })
                 .collect(),
         });
@@ -866,6 +889,7 @@ pub(crate) fn restore_local_bi_connections(
             Some(p) => ModelKey::from_model_path(p),
             None => ModelKey::from_model_path(&format!("local:{}", sc.id)),
         };
+        let base_model = model.clone();
         let engine = build_configured_engine(model);
         let (engine_arc, was_existing, cache_dir) =
             bi_state.engine_registry.get_or_create(&model_key, engine);
@@ -943,10 +967,22 @@ pub(crate) fn restore_local_bi_connections(
             active_queries: std::collections::HashMap::new(),
             package_data_source_id: None,
             active_role: None, // applied by load_pending_roles
+            base_model: Some(base_model),
+            calculated_measures: sc
+                .calculated_measures
+                .iter()
+                .map(|m| crate::bi::types::CalculatedMeasure {
+                    name: m.name.clone(),
+                    expression: m.expression.clone(),
+                })
+                .collect(),
         };
         bi_state.connections.lock().unwrap().insert(conn_id, connection);
         id_map.insert(sc.id.clone(), conn_id);
     }
+    // Re-apply workbook-local calculated measures to each restored engine
+    // (base + union of measures for the model). Fresh engines -> try_lock ok.
+    super::measures::reapply_all_calculated_measures(bi_state);
     id_map
 }
 
@@ -1236,6 +1272,10 @@ pub async fn bi_create_connection(
 
     let model_key = ModelKey::from_model_path(&request.model_path);
 
+    // Keep the base model (no workbook-local measures) so calculated measures
+    // can be applied later as `base + measures` via engine.set_model.
+    let base_model = model.clone();
+
     // Get or create shared engine via the registry (standard auto-tier +
     // query-cache config; shared with workbook reconstruct).
     let engine = build_configured_engine(model);
@@ -1277,6 +1317,20 @@ pub async fn bi_create_connection(
     // Restore a saved "view as" RLS role for this local connection (keyed by
     // model path), if one was persisted in the workbook.
     let active_role = bi_state.pending_role_for(None, Some(&request.model_path));
+    // Calculated measures belong to the MODEL. When reusing a shared engine that
+    // already has them baked in, inherit the set from a sibling so this
+    // connection knows about them (for the dialog + persistence). No re-apply
+    // needed — the engine already carries them.
+    let seed_measures: Vec<crate::bi::types::CalculatedMeasure> = if was_existing {
+        let conns = bi_state.connections.lock().unwrap();
+        conns
+            .values()
+            .find(|c| c.model_key.as_ref() == Some(&model_key))
+            .map(|c| c.calculated_measures.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let connection = Connection {
         id,
         name: request.name,
@@ -1297,6 +1351,8 @@ pub async fn bi_create_connection(
         active_queries: std::collections::HashMap::new(),
         package_data_source_id: None,
         active_role,
+        base_model: Some(base_model),
+        calculated_measures: seed_measures,
     };
 
     let info = connection.to_info();
@@ -2195,7 +2251,7 @@ pub async fn bi_refresh_connection(
 
     // Clear query cache so refreshed queries hit the database for fresh data
     {
-        let mut engine = engine_arc.lock().await;
+        let engine = engine_arc.lock().await;
         engine.clear_query_cache();
     }
 

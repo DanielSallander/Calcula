@@ -1803,8 +1803,7 @@ impl<'a> Evaluator<'a> {
                     // binding above SHADOWS a same-named UDF. Args are evaluated so
                     // the resolver receives concrete values; the resolver serves
                     // results pre-fetched off-thread (it can never call JS back into
-                    // this synchronous, lock-held recalc). A None result (the name
-                    // is not a registered/pre-fetched UDF) falls through to #NAME?.
+                    // this synchronous, lock-held recalc).
                     _ => {
                         if let Some(udf) = self.udf_fn {
                             let eval_args: Vec<EvalResult> =
@@ -1812,8 +1811,18 @@ impl<'a> Evaluator<'a> {
                             if let Some(result) = udf(&key, &eval_args) {
                                 return result;
                             }
+                            // The resolver was wired and had its chance but does not
+                            // know this name — a genuine unknown function: #NAME?.
+                            return EvalResult::Error(CellError::Name);
                         }
-                        EvalResult::Error(CellError::Name)
+                        // No UDF resolver was wired for THIS recalc (e.g. a full
+                        // recalc / F9 / paste / calculate_now that did not pre-fetch
+                        // UDFs). Preserve the cell's last computed value rather than
+                        // clobbering a working custom-function result to #NAME?, just
+                        // as eval_cube preserves a cube cell with no prefetch. Falls
+                        // back to #NAME? when there is nothing to keep (first eval /
+                        // truly unknown name).
+                        self.preserved_udf_value()
                     }
                 }
             },
@@ -7025,6 +7034,26 @@ impl<'a> Evaluator<'a> {
             }
         }
         EvalResult::Error(CellError::NA)
+    }
+
+    /// A UDF (custom-function) cell's existing stored value, used when no UDF
+    /// resolver is wired for this recalc so an unrelated recalc (F9 / paste /
+    /// calculate_now) does not clobber a working custom-function result. Returns
+    /// #NAME? when the position is unknown or the cell is empty (first eval /
+    /// genuinely unknown name) — preserving the "unrecognized function" meaning.
+    fn preserved_udf_value(&self) -> EvalResult {
+        if let (Some(r), Some(c)) = (self.context.current_row, self.context.current_col) {
+            if let Some(cell) = self.grid.get_cell(r, c) {
+                return match &cell.value {
+                    CellValue::Number(n) => EvalResult::Number(*n),
+                    CellValue::Text(s) => EvalResult::Text(s.clone()),
+                    CellValue::Boolean(b) => EvalResult::Boolean(*b),
+                    CellValue::Error(e) => EvalResult::Error(e.clone()),
+                    _ => EvalResult::Error(CellError::Name),
+                };
+            }
+        }
+        EvalResult::Error(CellError::Name)
     }
 
     fn fn_cube_value(&self, args: &[Expression]) -> EvalResult {
@@ -12944,12 +12973,61 @@ mod tests {
 
     #[test]
     fn test_custom_name_without_udf_fn_is_name_error() {
-        // With no resolver set the Custom arm must still yield #NAME? (the hook
-        // must not change behavior when UDFs are absent).
+        // With no resolver set AND no prior value to keep (empty grid / unknown
+        // position), the Custom arm must still yield #NAME? (the hook must not
+        // change behavior when UDFs are absent and there is nothing to preserve).
         let grid = Grid::new();
         let eval = Evaluator::new(&grid);
         let expr = Expression::FunctionCall {
             func: BuiltinFunction::Custom("WHATEVER".to_string()),
+            args: vec![Expression::Literal(Value::Number(1.0))],
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Name));
+    }
+
+    #[test]
+    fn test_custom_without_udf_fn_preserves_existing_value() {
+        // A full recalc / F9 / calculate_now does NOT wire a UDF resolver. In that
+        // case a =MYFUNC(...) cell must KEEP its last computed value rather than
+        // being clobbered to #NAME? (the HIGH lifecycle bug). Mirrors how a cube
+        // cell is preserved when no cube prefetch is present.
+        let mut grid = Grid::new();
+        grid.set_cell(2, 1, Cell::new_number(42.0)); // C2 already holds 42
+        let ctx = EvalContext {
+            current_row: Some(2),
+            current_col: Some(1),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx); // no set_udf_fn
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Custom("MYFUNC".to_string()),
+            args: vec![Expression::Literal(Value::Number(1.0))],
+            ref_site_id: Default::default(),
+        };
+        // Preserved, not #NAME?.
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(42.0));
+    }
+
+    #[test]
+    fn test_custom_with_udf_fn_returning_none_is_name_error() {
+        // When a resolver IS wired but does not know the name (genuine unknown /
+        // typo), it must still surface #NAME? even if the cell holds a stale value
+        // — the resolver had its chance, so this is a real "unknown function".
+        let mut grid = Grid::new();
+        grid.set_cell(2, 1, Cell::new_number(42.0));
+        let ctx = EvalContext {
+            current_row: Some(2),
+            current_col: Some(1),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let mut eval = Evaluator::with_context(&grid, ms, ctx);
+        let udf = |_name: &str, _args: &[EvalResult]| -> Option<EvalResult> { None };
+        eval.set_udf_fn(&udf);
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Custom("NOPE".to_string()),
             args: vec![Expression::Literal(Value::Number(1.0))],
             ref_site_id: Default::default(),
         };

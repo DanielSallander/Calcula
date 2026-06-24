@@ -75,6 +75,7 @@ export {
   getCalculationMode,
   getCalculationState,
   calculateNow,
+  recalcWithCube,
   calculateSheet,
   getIterationSettings,
   setIterationSettings,

@@ -199,6 +199,21 @@ export function buildExtensionContext(post: PostFn): {
       listBiConnections(): Promise<unknown> {
         return brokerCall("cap.biListConnections", []);
       },
+      // CUBE convenience (bi.query trust class): query a BI model with member-
+      // expression ergonomics instead of building a QueryRequest. `connection`
+      // is a connection name or id; members are CUBE member expressions like
+      // "[Revenue]" or "Geo[Country]=Sweden".
+      cube: {
+        value(connection: string, ...members: string[]): Promise<number | null> {
+          return brokerCall("cap.cubeValue", [connection, members]) as Promise<number | null>;
+        },
+        kpi(connection: string, kpi: string, property: number): Promise<number | null> {
+          return brokerCall("cap.cubeKpi", [connection, kpi, property]) as Promise<number | null>;
+        },
+        members(connection: string, level: string): Promise<string[]> {
+          return brokerCall("cap.cubeMembers", [connection, level]) as Promise<string[]>;
+        },
+      },
     },
 
     // Surfaces that cannot cross the worker boundary throw on access.

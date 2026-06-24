@@ -77,6 +77,11 @@ export function resetCubeSession(): void {
   sessionHasCube = false;
 }
 
+/** Whether a CUBE formula has been seen this session (gates full-recalc prefetch). */
+export function workbookHasCubeFormulas(): boolean {
+  return sessionHasCube;
+}
+
 /** Whether the pending edit should trigger a cube pre-fetch. */
 function shouldPrefetchCube(input: string): boolean {
   if (inputReferencesCube(input)) {
@@ -762,11 +767,33 @@ export async function getCalculationState(): Promise<string> {
   return invoke<string>("get_calculation_state");
 }
 
+async function recalcAll(forceCube: boolean): Promise<CellData[]> {
+  // Pre-resolve cube formulas across the sheet so a full recalc refreshes them
+  // against current model data (e.g. after a calculated measure changes, or F9).
+  // Gated on the workbook having cube formulas (avoids the IPC otherwise) unless
+  // forced. Best-effort: a failure must not block the recalc.
+  let cubeResults: unknown | undefined;
+  if (forceCube || workbookHasCubeFormulas()) {
+    try {
+      cubeResults = await invoke("cube_prefetch_all", {});
+    } catch (e) {
+      console.warn("[cube] full prefetch failed; cube cells keep last values", e);
+    }
+  }
+  return invoke<CellData[]>("calculate_now", cubeResults ? { cubeResults } : {});
+}
+
 export async function calculateNow(): Promise<CellData[]> {
   console.log("[tauri-api] calculateNow - recalculating all formulas");
-  const result = await invoke<CellData[]>("calculate_now");
+  const result = await recalcAll(false);
   console.log(`[tauri-api] calculateNow returned ${result.length} updated cells`);
   return result;
+}
+
+/** Full recalc that ALWAYS refreshes cube formulas (used after a BI model change
+ *  such as adding/editing a calculated measure). */
+export async function recalcWithCube(): Promise<CellData[]> {
+  return recalcAll(true);
 }
 
 export async function calculateSheet(): Promise<CellData[]> {

@@ -784,6 +784,23 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_bi_sql", { connectionId, sql });
     }
+    case "cap.cubeValue": {
+      // CUBE convenience over the bi.query trust class: a measure sliced by member
+      // filters, resolved via the same model-scoped path as the cube formulas.
+      const [connection, members] = args as [string, string[]];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("cube_udf_value", { connection, members });
+    }
+    case "cap.cubeKpi": {
+      const [connection, kpi, property] = args as [string, string, number];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("cube_udf_kpi", { connection, kpi, property });
+    }
+    case "cap.cubeMembers": {
+      const [connection, level] = args as [string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("cube_udf_members", { connection, level });
+    }
 
     default:
       throw new BrokerError("UnknownMethod", `No host implementation for ${method}`);

@@ -115,6 +115,22 @@ pub struct Connection {
     /// a sibling connection's role can never leak into this one's results.
     /// In-memory for now; not yet persisted across app restarts.
     pub active_role: Option<String>,
+    /// The model as originally loaded (no workbook-local calculated measures).
+    /// Kept so calculated measures can be (re)applied as `base + measures` via
+    /// `engine.set_model(...)` without re-reading the source. Schema-only (small).
+    pub base_model: Option<bi_engine::DataModel>,
+    /// Workbook-local calculated measures defined for this connection's model
+    /// (e.g. `[Profit Margin] = [Profit]/[Revenue]`). Persisted in the workbook;
+    /// applied to the engine's model so CUBE formulas + pivots can use them.
+    pub calculated_measures: Vec<CalculatedMeasure>,
+}
+
+/// A workbook-local calculated measure: a name + an engine measure expression.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedMeasure {
+    pub name: String,
+    pub expression: String,
 }
 
 /// Supported connection types.

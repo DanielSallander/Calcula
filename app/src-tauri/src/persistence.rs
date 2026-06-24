@@ -1216,6 +1216,7 @@ pub fn save_file(
                 state.clone(),
                 user_files_state.clone(),
                 pivot_state.clone(),
+                None,
             );
         }
     }

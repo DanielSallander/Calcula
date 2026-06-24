@@ -4398,6 +4398,8 @@ fn load_embedded_data_sources(
             }
         };
 
+        // Keep the base model so calculated measures can be applied later.
+        let base_model = model.clone();
         // Create the BI engine (no database connection yet)
         let mut engine = bi_engine::Engine::new(model);
         engine.set_auto_tier_config(bi_engine::AutoTierConfig {
@@ -4464,6 +4466,8 @@ fn load_embedded_data_sources(
             // Restore a saved "view as" RLS role for this package connection
             // (keyed by package data source id), if one was persisted.
             active_role: bi_state.pending_role_for(Some(&ds.definition.id), None),
+            base_model: Some(base_model),
+            calculated_measures: Vec::new(),
         };
 
         bi_state.connections.lock().unwrap().insert(conn_id, connection);

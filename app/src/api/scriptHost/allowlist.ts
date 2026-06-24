@@ -8,6 +8,7 @@
 import {
   vAny, vNotify, vExpose, vCall, vHook, vGetState, vSetState, vDecl, vNone,
   vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vBiQuery, vBiSql,
+  vCubeValue, vCubeKpi, vCubeMembers,
   vKey, vKV, vUdf, type Validator,
 } from "./validators";
 import { AppEvents } from "../events";
@@ -76,6 +77,16 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.biSql":             { tier: "restricted", capability: "bi.sql", class: "net",
                              validate: vBiSql, limits: { maxRows: 100_000 },
                              desc: "Run read-only RAW SQL against a BI connection's database (any reachable table)" },
+  // CUBE convenience over bi.query: member-expression ergonomics (same trust class).
+  "cap.cubeValue":         { tier: "restricted", capability: "bi.query", class: "net",
+                             validate: vCubeValue, limits: { maxRows: 100_000 },
+                             desc: "Resolve a CUBE value (a measure sliced by member filters) from a BI model" },
+  "cap.cubeKpi":           { tier: "restricted", capability: "bi.query", class: "net",
+                             validate: vCubeKpi, limits: { maxRows: 100_000 },
+                             desc: "Resolve a KPI value/goal/status from a BI model" },
+  "cap.cubeMembers":       { tier: "restricted", capability: "bi.query", class: "net",
+                             validate: vCubeMembers, limits: { maxRows: 100_000 },
+                             desc: "List the distinct members of a BI model level (column)" },
   "cap.storageGet":        { tier: "restricted", capability: "storage", class: "read",
                              validate: vKey, desc: "Read script-private data stored in the workbook" },
   "cap.storageSet":        { tier: "restricted", capability: "storage", class: "mutate",

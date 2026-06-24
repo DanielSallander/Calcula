@@ -266,6 +266,11 @@ function buildCapsShim(rt: WorkerRuntime): {
   biQuery(connectionId: string, request: BiQueryRequestShim): Promise<BiQueryResultShim>;
   biSql(connectionId: string, sql: string): Promise<BiQueryResultShim>;
   listBiConnections(): Promise<BiConnectionSummary[]>;
+  cube: {
+    value(connection: string, ...members: string[]): Promise<number | null>;
+    kpi(connection: string, kpi: string, property: number): Promise<number | null>;
+    members(connection: string, level: string): Promise<string[]>;
+  };
 } {
   return {
     async fetch(url, init) {
@@ -297,6 +302,17 @@ function buildCapsShim(rt: WorkerRuntime): {
     },
     async listBiConnections() {
       return (await call(rt, "cap.biListConnections", [])) as BiConnectionSummary[];
+    },
+    cube: {
+      async value(connection: string, ...members: string[]) {
+        return (await call(rt, "cap.cubeValue", [connection, members])) as number | null;
+      },
+      async kpi(connection: string, kpi: string, property: number) {
+        return (await call(rt, "cap.cubeKpi", [connection, kpi, property])) as number | null;
+      },
+      async members(connection: string, level: string) {
+        return (await call(rt, "cap.cubeMembers", [connection, level])) as string[];
+      },
     },
   };
 }

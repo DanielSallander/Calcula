@@ -364,6 +364,19 @@ pub fn set_script_security_level(
 // Script Module CRUD Commands
 // ============================================================================
 
+/// Reserved-id prefix for records the workbook stores in the module-script map
+/// that are NOT user-authored runnable code (e.g. the Custom Functions library,
+/// persisted as JSON under `__calcula_custom_functions__`). These records reuse
+/// the persisted-with-the-workbook script map for storage convenience, but they
+/// must never surface in the Script Editor / code inventory, and the user must
+/// not be able to delete or rename them out from under the owning feature.
+const RESERVED_SCRIPT_PREFIX: &str = "__calcula_";
+
+/// True for reserved internal records (see `RESERVED_SCRIPT_PREFIX`).
+fn is_reserved_script_id(id: &str) -> bool {
+    id.starts_with(RESERVED_SCRIPT_PREFIX)
+}
+
 /// List all saved script modules (lightweight: id + name only).
 #[tauri::command]
 pub fn list_scripts(
@@ -376,6 +389,9 @@ pub fn list_scripts(
 
     let mut summaries: Vec<ScriptSummary> = scripts
         .values()
+        // Hide reserved internal data records (e.g. the Custom Functions JSON
+        // store) from the Script Editor / code inventory — they are not code.
+        .filter(|s| !is_reserved_script_id(&s.id))
         .map(|s| ScriptSummary {
             id: s.id.clone(),
             name: s.name.clone(),
@@ -426,6 +442,12 @@ pub fn delete_script(
     script_state: State<ScriptState>,
     id: String,
 ) -> Result<(), String> {
+    // Reserved internal records (e.g. the Custom Functions store) are owned by a
+    // feature, not the user — deleting one here would silently wipe that feature.
+    if is_reserved_script_id(&id) {
+        return Err(format!("Script '{}' is reserved and cannot be deleted", id));
+    }
+
     let mut scripts = script_state
         .workbook_scripts
         .lock()
@@ -444,6 +466,11 @@ pub fn rename_script(
     id: String,
     new_name: String,
 ) -> Result<(), String> {
+    // Reserved internal records must keep their well-known id/name.
+    if is_reserved_script_id(&id) {
+        return Err(format!("Script '{}' is reserved and cannot be renamed", id));
+    }
+
     let mut scripts = script_state
         .workbook_scripts
         .lock()
@@ -461,6 +488,17 @@ pub fn rename_script(
 mod tests {
     use super::*;
     use engine::Cell;
+
+    /// Reserved internal records (the Custom Functions JSON store and any other
+    /// `__calcula_`-prefixed data record) are recognized so they can be hidden
+    /// from the Script Editor and protected from user delete/rename.
+    #[test]
+    fn test_reserved_script_id_detection() {
+        assert!(is_reserved_script_id("__calcula_custom_functions__"));
+        assert!(is_reserved_script_id("__calcula_anything"));
+        assert!(!is_reserved_script_id("my_script"));
+        assert!(!is_reserved_script_id("calcula_helper")); // no leading "__"
+    }
 
     /// A changed literal value produces an update carrying the new literal,
     /// flagged invariant so the edit pipeline does not re-localize it.

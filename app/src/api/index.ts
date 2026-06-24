@@ -136,6 +136,7 @@ export {
   undo,
   redo,
   removeDuplicates,
+  updateCell,
   updateCellsBatch,
   // Clipboard
   getInternalClipboard,
@@ -168,6 +169,10 @@ export {
   updateCellOnSheets,
   applyFormattingToSheets,
   clearRangeOnSheets,
+  // Functions (built-in formula catalog)
+  getAllFunctions,
+  getFunctionsByCategory,
+  getFunctionTemplate,
 } from "./lib";
 
 export type {
@@ -361,6 +366,25 @@ export type { AppEventName, FillCompletedPayload, CellValueChange, CellValuesCha
 
 export { emitTauriEvent, listenTauriEvent } from "./backend";
 export type { UnlistenFn } from "./backend";
+
+// BI model metadata (for the CUBE formula builder + other model-aware UI)
+export {
+  biGetConnections,
+  biGetModelInfo,
+  biGetColumnValues,
+  biGetCalculatedMeasures,
+  biSetCalculatedMeasures,
+} from "./backend";
+export type {
+  ConnectionInfo,
+  BiModelInfo,
+  BiTableInfo,
+  BiColumnInfo,
+  BiMeasureInfo,
+  BiHierarchyMeta,
+  BiKpiInfo,
+  CalculatedMeasure,
+} from "./backend";
 
 // ============================================================================
 // JSON View (generic object inspection/editing)
@@ -803,6 +827,19 @@ export {
 export type {
   CustomFunctionDef,
 } from "./formulaFunctions";
+// User-authored JS formula functions (sandboxed): generate library + install.
+export {
+  generateLibrarySource,
+  installCustomFunctions,
+  uninstallCustomFunctions,
+  customFunctionsInstalled,
+  loadPersistedLibrary,
+  savePersistedLibrary,
+  loadAndInstallCustomFunctions,
+  validateFunctionName,
+  validateParam,
+} from "./customFunctions";
+export type { CustomFunctionUdf, CustomFunctionLibrary } from "./customFunctions";
 // UDF evaluation bridge (Wave 3 / C1): makes registered custom functions
 // actually evaluate in worksheet formulas (broker-mediated, pre-fetched).
 export {
@@ -1291,6 +1328,7 @@ export {
   getCalculationMode,
   getCalculationState,
   calculateNow,
+  recalcWithCube,
   calculateSheet,
   getIterationSettings,
   setIterationSettings,

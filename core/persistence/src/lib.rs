@@ -122,6 +122,17 @@ pub struct SavedBiConnection {
     pub model_json: serde_json::Value,
     #[serde(default)]
     pub bindings: Vec<SavedBiBinding>,
+    /// Workbook-local calculated measures defined for this connection's model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculated_measures: Vec<SavedCalculatedMeasure>,
+}
+
+/// A workbook-local calculated measure (name + engine measure expression).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCalculatedMeasure {
+    pub name: String,
+    pub expression: String,
 }
 
 /// A model-table -> source-table binding for a persisted BI connection.

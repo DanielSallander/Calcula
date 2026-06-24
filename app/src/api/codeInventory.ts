@@ -21,6 +21,12 @@
 //            STDEV, ...) which are app code, not "code in THIS file"; listing
 //            them would mislead. UDFs registered by an object script are already
 //            represented by that owning object script.
+//          - We DO enumerate the user-authored Custom Functions library (the
+//            formula-udf surface): each function body runs in the worker realm
+//            under the library's declared ceiling (e.g. bi.query for cube.*), so
+//            its code and reach must be visible here, never hidden. The raw JSON
+//            store record is filtered out of the module list (it is data, not
+//            code) — we surface the parsed functions instead.
 
 import type { ScriptSurfaceId } from "./scriptSurfaces";
 import type { CapabilityId } from "./scriptHost/capabilityIds";
@@ -32,6 +38,7 @@ import {
 } from "./moduleScriptBackend";
 import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
+import { loadPersistedLibrary, CUSTOM_FUNCTIONS_SCRIPT_ID } from "./customFunctions";
 
 /** One normalized code unit residing in the open workbook. */
 export interface CodeUnit {
@@ -215,6 +222,40 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       source,
       lineCount: lineCount(source),
     });
+  }
+
+  // ---- Custom functions (formula-udf surface; worker-realm, declared ceiling) -
+  // Each user-authored UDF body runs in the same hardened worker realm under the
+  // library's declared capabilities (e.g. bi.query for cube.*). The whole library
+  // shares ONE mount, so the live tier/grant join uses that single handle.
+  const customLib = await safely("custom functions", async () => {
+    const lib = await loadPersistedLibrary();
+    return lib ? [lib] : [];
+  });
+  const libHandle = handleById.get(CUSTOM_FUNCTIONS_SCRIPT_ID);
+  for (const lib of customLib) {
+    const declared = (lib.capabilities ?? []) as CapabilityId[];
+    for (const fn of lib.functions) {
+      const name = fn.name.trim();
+      if (!name) continue;
+      const params = fn.params.map((p) => p.trim()).filter(Boolean);
+      // Show the code as a readable function rather than the raw stored body.
+      const source = `function ${name.toUpperCase()}(${params.join(", ")}) {\n${fn.body}\n}`;
+      units.push({
+        surfaceId: "formula-udf",
+        id: `${CUSTOM_FUNCTIONS_SCRIPT_ID}::${name.toUpperCase()}`,
+        name: `${name.toUpperCase()}(${params.join(", ")})`,
+        residence: "Custom Function — worker-realm sandbox",
+        provenance: "local",
+        sourcePackage: null,
+        declaredCapabilities: declared,
+        liveGrants: libHandle ? ([...libHandle.grants] as CapabilityId[]) : null,
+        tier: libHandle ? libHandle.tier : "restricted",
+        mounted: !!libHandle,
+        source,
+        lineCount: lineCount(source),
+      });
+    }
   }
 
   return units;

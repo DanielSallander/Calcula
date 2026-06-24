@@ -5,6 +5,7 @@
 pub mod types;
 pub mod commands;
 pub mod cube;
+pub mod measures;
 pub mod engine_registry;
 pub mod credential_cache;
 
