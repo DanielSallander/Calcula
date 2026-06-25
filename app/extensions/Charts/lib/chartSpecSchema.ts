@@ -41,8 +41,11 @@ export const chartSpecJsonSchema: object = {
   properties: {
     mark: {
       type: "string",
-      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto"],
-      description: "Chart type. Determines the visual mark used to represent data.",
+      // `examples` (not `enum`) so Monaco autocompletes the built-ins while a
+      // registered custom mark id is still valid (not flagged as an error).
+      examples: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto"],
+      pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+      description: "Chart type. Built-in marks (bar, line, pie, ...) autocomplete; a registered custom mark id is also valid.",
     },
     data: {
       description: "Data source. Can be a DataRangeRef object (cell coordinates), an A1 reference string (e.g. \"Sheet1!A1:D10\"), a named range name (e.g. \"SalesData\"), or a PivotDataSource for PivotCharts.",

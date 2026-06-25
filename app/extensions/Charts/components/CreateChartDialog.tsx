@@ -15,7 +15,7 @@ import { emitAppEvent, AppEvents } from "@api/events";
 
 import type {
   ChartSpec,
-  ChartType,
+  ChartMark,
   ChartSeries,
   DataRangeRef,
   ParsedChartData,
@@ -183,7 +183,7 @@ export function CreateChartDialog({
   const [series, setSeries] = useState<ChartSeries[]>([]);
 
   // Design tab state (managed as a spec, updated via partial merges)
-  const [mark, setMark] = useState<ChartType>("bar");
+  const [mark, setMark] = useState<ChartMark>("bar");
   const [markOptions, setMarkOptions] = useState<MarkOptions | undefined>(undefined);
   const [title, setTitle] = useState<string | null>(null);
   const [palette, setPalette] = useState("default");

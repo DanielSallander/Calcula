@@ -3,6 +3,8 @@
 // CONTEXT: The ChartSpec is the single source of truth for chart rendering.
 //          The dialog produces it, the renderer reads it, the script editor exposes it.
 
+import { getChartMarkMeta } from "@api/chartMarks";
+
 // ============================================================================
 // Chart Types
 // ============================================================================
@@ -28,14 +30,27 @@ export type ChartType =
   | "sunburst"
   | "pareto";
 
+/**
+ * A chart mark: a built-in {@link ChartType}, or any custom mark id registered
+ * via the @api chart-mark registry. The `(string & {})` keeps built-in
+ * autocomplete while still accepting arbitrary registered marks.
+ */
+export type ChartMark = ChartType | (string & {});
+
 /** Chart types that use cartesian axes (X/Y). */
 export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo" | "bubble" | "histogram" | "stock" | "boxPlot" | "pareto";
 
 /** Chart types that use polar/radial layout (no axes). */
 export type RadialChartType = "pie" | "donut" | "radar";
 
-/** Check if a chart type uses cartesian axes. */
-export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
+/**
+ * Whether a mark uses cartesian axes (X/Y). Driven by the registered mark's
+ * layout family when available, with a built-in fallback so it works before the
+ * registry is populated and for unknown marks (which default to cartesian).
+ */
+export function isCartesianChart(mark: string): boolean {
+  const family = getChartMarkMeta(mark)?.layoutFamily;
+  if (family) return family === "cartesian";
   return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel" && mark !== "treemap" && mark !== "sunburst";
 }
 
@@ -657,8 +672,8 @@ export interface LegendSpec {
 // Layer Specification
 // ============================================================================
 
-/** Mark types available in layers (chart types + annotation marks). */
-export type LayerMarkType = ChartType | "rule" | "text";
+/** Mark types available in layers (chart marks + annotation marks). */
+export type LayerMarkType = ChartMark | "rule" | "text";
 
 /** A layer overlaid on the primary chart. */
 export interface LayerSpec {
@@ -1050,8 +1065,8 @@ export interface EncodingSpec {
 
 /** The complete, declarative chart specification. */
 export interface ChartSpec {
-  /** Chart type. */
-  mark: ChartType;
+  /** Chart type — a built-in or a registered custom mark. */
+  mark: ChartMark;
   /** Data source: a DataRangeRef, an A1 reference string, or a named range name. */
   data: DataSource;
   /** Whether the first row/column of the range contains headers. */

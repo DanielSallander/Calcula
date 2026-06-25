@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry } from "../chartDispatch";
 import { registerChartMark, getChartMark, listChartMarks } from "../markRegistry";
 import { resolveChartTheme } from "../chartTheme";
+import { isCartesianChart } from "../../types";
 import type { ChartSpec, ChartType, ParsedChartData, ChartLayout } from "../../types";
 
 const BUILT_INS: ChartType[] = [
@@ -40,13 +41,16 @@ describe("chart mark registry", () => {
     for (const m of BUILT_INS) expect(marks).toContain(m);
   });
 
-  it("exposes a complete definition for each built-in", () => {
+  it("exposes a complete definition (with meta) for each built-in", () => {
     for (const m of BUILT_INS) {
       const def = getChartMark(m);
       expect(def).toBeDefined();
       expect(typeof def!.paint).toBe("function");
       expect(typeof def!.computeLayout).toBe("function");
       expect(typeof def!.computeGeometry).toBe("function");
+      expect(typeof def!.meta.label).toBe("string");
+      expect(["cartesian", "radial", "other"]).toContain(def!.meta.layoutFamily);
+      expect(def!.meta.builtin).toBe(true);
     }
   });
 
@@ -56,6 +60,7 @@ describe("chart mark registry", () => {
     let measured = false;
 
     registerChartMark("__test_mark__", {
+      meta: { label: "Test Mark", layoutFamily: "cartesian" },
       paint: () => { painted = true; },
       computeLayout: (width, height): ChartLayout => {
         laidOut = true;
@@ -87,5 +92,35 @@ describe("chart mark registry", () => {
     const layout = dispatchComputeLayout(100, 80, spec, data, theme);
     expect(dispatchComputeGeometry(data, spec, layout, theme)).toEqual({ type: "bars", rects: [] });
     expect(() => dispatchPaint({} as unknown as CanvasRenderingContext2D, data, spec, layout, theme)).not.toThrow();
+  });
+});
+
+describe("isCartesianChart honors registered mark metadata", () => {
+  const layoutFn = (width: number, height: number): ChartLayout =>
+    ({ width, height, margin: { top: 0, right: 0, bottom: 0, left: 0 }, plotArea: { x: 0, y: 0, width, height } });
+
+  it("keeps built-in classification", () => {
+    expect(isCartesianChart("bar")).toBe(true);
+    expect(isCartesianChart("line")).toBe(true);
+    expect(isCartesianChart("pie")).toBe(false);
+    expect(isCartesianChart("radar")).toBe(false);
+    expect(isCartesianChart("sunburst")).toBe(false);
+  });
+
+  it("uses the registered layoutFamily for custom marks", () => {
+    registerChartMark("__custom_radial__", {
+      meta: { label: "Custom Radial", layoutFamily: "radial" },
+      paint: () => {}, computeLayout: layoutFn, computeGeometry: () => ({ type: "bars", rects: [] }),
+    });
+    registerChartMark("__custom_cartesian__", {
+      meta: { label: "Custom Cartesian", layoutFamily: "cartesian" },
+      paint: () => {}, computeLayout: layoutFn, computeGeometry: () => ({ type: "bars", rects: [] }),
+    });
+    expect(isCartesianChart("__custom_radial__")).toBe(false);
+    expect(isCartesianChart("__custom_cartesian__")).toBe(true);
+  });
+
+  it("defaults unknown marks to cartesian", () => {
+    expect(isCartesianChart("__unregistered_mark__")).toBe(true);
   });
 });

@@ -2,8 +2,9 @@
 // PURPOSE: Design tab of the chart dialog. Chart type, title, axis, legend, palette, mark options.
 
 import React from "react";
-import type { ChartSpec, ChartType, DataLabelSpec, DataTableOptions, ErrorBarOptions, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
+import type { ChartSpec, ChartType, ChartMark, DataLabelSpec, DataTableOptions, ErrorBarOptions, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
 import { isCartesianChart } from "../../types";
+import { listChartMarks, getChartMarkMeta } from "@api/chartMarks";
 import { PALETTES, PALETTE_NAMES } from "../../rendering/chartTheme";
 import {
   FieldGroup,
@@ -20,7 +21,7 @@ interface DesignTabProps {
   onSpecChange: (updates: Partial<ChartSpec>) => void;
 }
 
-/** All available chart types with display names. */
+/** Built-in chart types with display names (the canonical, always-present list). */
 const CHART_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "bar", label: "Bar Chart" },
   { value: "horizontalBar", label: "Horizontal Bar Chart" },
@@ -42,6 +43,18 @@ const CHART_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "pareto", label: "Pareto" },
 ];
 
+/**
+ * Chart-type options for the picker: the built-ins (always present) plus any
+ * custom marks registered via the @api chart-mark registry, appended.
+ */
+function chartTypeOptions(): Array<{ value: string; label: string }> {
+  const builtinValues = new Set<string>(CHART_TYPES.map((t) => t.value));
+  const custom = listChartMarks()
+    .filter((m) => !builtinValues.has(m))
+    .map((m) => ({ value: m, label: getChartMarkMeta(m)?.label ?? m }));
+  return [...CHART_TYPES, ...custom];
+}
+
 export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
   const cartesian = isCartesianChart(spec.mark);
 
@@ -52,9 +65,9 @@ export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactEl
         <Label>Chart Type</Label>
         <Select
           value={spec.mark}
-          onChange={(e) => onSpecChange({ mark: e.target.value as ChartType })}
+          onChange={(e) => onSpecChange({ mark: e.target.value as ChartMark })}
         >
-          {CHART_TYPES.map(({ value, label }) => (
+          {chartTypeOptions().map(({ value, label }) => (
             <option key={value} value={value}>
               {label}
             </option>

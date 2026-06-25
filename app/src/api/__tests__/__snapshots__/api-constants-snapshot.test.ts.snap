@@ -6,6 +6,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "AFTER_OPEN": "app:after-open",
   "AFTER_SAVE": "app:after-save",
   "ANNOTATIONS_CHANGED": "app:annotations-changed",
+  "APPEARANCE_CHANGED": "app:appearance-changed",
   "BEFORE_CLOSE": "app:before-close",
   "BEFORE_NEW": "app:before-new",
   "BEFORE_OPEN": "app:before-open",

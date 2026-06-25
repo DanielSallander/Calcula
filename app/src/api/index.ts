@@ -1579,6 +1579,24 @@ export type {
   IBiConnectionService,
 } from "./componentStoreRegistry";
 
+// ============================================================================
+// Chart Mark Registry (IoC for built-in + extension chart types)
+// ============================================================================
+
+export {
+  registerChartMark,
+  getChartMark,
+  getChartMarkMeta,
+  isChartMarkRegistered,
+  listChartMarks,
+} from "./chartMarks";
+
+export type {
+  ChartMarkDefinition,
+  ChartMarkMeta,
+  ChartMarkLayout,
+} from "./chartMarks";
+
 export {
   listObjectScripts,
   getObjectScript,

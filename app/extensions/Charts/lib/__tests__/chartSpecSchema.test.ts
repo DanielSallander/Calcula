@@ -35,12 +35,15 @@ describe("chartSpecJsonSchema", () => {
     expect(required).toContain("palette");
   });
 
-  it("mark enum lists all 18 chart types", () => {
-    const markEnum: string[] = schema.properties.mark.enum;
-    expect(markEnum).toHaveLength(18);
-    expect(markEnum).toContain("bar");
-    expect(markEnum).toContain("sunburst");
-    expect(markEnum).toContain("pareto");
+  it("mark lists all 18 built-ins as examples and is open to custom marks", () => {
+    const examples: string[] = schema.properties.mark.examples;
+    expect(examples).toHaveLength(18);
+    expect(examples).toContain("bar");
+    expect(examples).toContain("sunburst");
+    expect(examples).toContain("pareto");
+    // Open (no enum) so registered custom marks are not flagged; pattern guards ids.
+    expect(schema.properties.mark.enum).toBeUndefined();
+    expect(typeof schema.properties.mark.pattern).toBe("string");
   });
 
   it("has definitions for all referenced types", () => {
@@ -246,6 +249,17 @@ describe("chartSpecJsonSchema drift guard", () => {
     // seriesOverlap is a bar-only option; invalid under a line chart.
     const spec = { ...buildDefaultSpec(dataRange, true, autoDetected, "line"), markOptions: { seriesOverlap: 5 } as any };
     expect(schemaViolations(spec, SCHEMA).length).toBeGreaterThan(0);
+  });
+
+  it("accepts a custom (registered) mark with arbitrary markOptions", () => {
+    // A custom mark matches no narrowing rule, so markOptions stays the loose
+    // base object — not rejected.
+    const spec = {
+      ...buildDefaultSpec(dataRange, true, autoDetected, "bar"),
+      mark: "customRadial" as ChartType,
+      markOptions: { anything: 1, foo: "x" } as Record<string, unknown>,
+    };
+    expect(schemaViolations(spec, SCHEMA)).toEqual([]);
   });
 
   it("allows any numeric axis label angle (not just 0/45/90)", () => {
