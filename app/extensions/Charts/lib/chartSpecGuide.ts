@@ -144,6 +144,8 @@ series model automatically.
 - **x / y / color**: each binds a source column (\`field\`) by header name.
 - **color** splits the data into one series per distinct value (compiled via a
   pivot) — perfect for long data. Without \`color\`, \`y\` is a single series.
+- **size** sizes points by a field — renders as a bubble chart.
+- **order** sorts the data by a field (\`{ "field": "Revenue", "sort": "desc" }\`).
 - **type** \`"temporal"\` or \`"quantitative"\` gives the X axis a time/value scale.
 - **aggregate** (sum, mean, ...) groups rows by category.
 - **scale / title** on a channel set that axis's scale / title.

@@ -1042,6 +1042,8 @@ export interface ChannelDef {
   scale?: ScaleSpec;
   /** Axis/legend title (null = none). */
   title?: string | null;
+  /** Sort direction (used by the `order` channel). */
+  sort?: "asc" | "desc";
 }
 
 /**
@@ -1057,6 +1059,10 @@ export interface EncodingSpec {
   y?: ChannelDef;
   /** Splits the data into one series per distinct value of this field. */
   color?: ChannelDef;
+  /** Sizes points by this field — renders as a bubble chart. */
+  size?: ChannelDef;
+  /** Sorts the data by this field (use `sort` for direction). */
+  order?: ChannelDef;
 }
 
 // ============================================================================

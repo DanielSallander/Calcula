@@ -31,6 +31,8 @@ export function lowerEncoding(spec: ChartSpec, headers: string[]): ChartSpec {
   const x = enc.x;
   const y = enc.y;
   const color = enc.color;
+  const size = enc.size;
+  const order = enc.order;
 
   // ── Axes from x / y channels ──
   out.xAxis = { ...spec.xAxis };
@@ -45,32 +47,47 @@ export function lowerEncoding(spec: ChartSpec, headers: string[]): ChartSpec {
   if (y?.scale) out.yAxis.scale = y.scale;
 
   const op = y?.aggregate;
+  let transforms: TransformSpec[] = [...(spec.transform ?? [])];
 
   if (color?.field && x?.field && y?.field) {
     // ── Long data → wide series via pivot (one series per color value). ──
     out.categoryIndex = 0;
     out.series = [];
-    out.transform = [
+    transforms = [
       { type: "pivot", category: x.field, key: color.field, value: y.field, op: op ?? "sum" },
-      ...(spec.transform ?? []),
+      ...transforms,
     ];
-    return out;
+  } else {
+    out.categoryIndex = findColumn(headers, x?.field) >= 0 ? findColumn(headers, x?.field) : spec.categoryIndex;
+
+    const yIdx = findColumn(headers, y?.field);
+    const sizeIdx = findColumn(headers, size?.field);
+
+    if (size?.field && yIdx >= 0 && sizeIdx >= 0) {
+      // ── Size channel → bubble: y series + size series, size drives radius. ──
+      out.mark = "bubble";
+      out.series = [
+        { name: y?.field ?? "Value", sourceIndex: yIdx, color: null },
+        { name: size.field, sourceIndex: sizeIdx, color: null },
+      ];
+      out.markOptions = { ...(spec.markOptions ?? {}), sizeSeriesIndex: 1 } as ChartSpec["markOptions"];
+    } else {
+      // ── Single value series. ──
+      out.series = yIdx >= 0
+        ? [{ name: y?.field ?? "Value", sourceIndex: yIdx, color: null }]
+        : spec.series;
+      if (op && y?.field) {
+        // Group by category and aggregate the single value series.
+        transforms.unshift({ type: "aggregate", groupBy: ["$category"], op, field: y.field, as: y.field });
+      }
+    }
   }
 
-  // ── Single value series. ──
-  const catIdx = findColumn(headers, x?.field);
-  const yIdx = findColumn(headers, y?.field);
-
-  out.categoryIndex = catIdx >= 0 ? catIdx : spec.categoryIndex;
-  out.series = yIdx >= 0
-    ? [{ name: y?.field ?? "Value", sourceIndex: yIdx, color: null }]
-    : spec.series;
-
-  const transforms: TransformSpec[] = [...(spec.transform ?? [])];
-  if (op && y?.field) {
-    // Group by category and aggregate the single value series.
-    transforms.unshift({ type: "aggregate", groupBy: ["$category"], op, field: y.field, as: y.field });
+  // ── Order channel → sort the resulting data. ──
+  if (order?.field) {
+    transforms.push({ type: "sort", field: order.field, order: order.sort ?? "asc" });
   }
+
   if (transforms.length > 0) out.transform = transforms;
 
   return out;

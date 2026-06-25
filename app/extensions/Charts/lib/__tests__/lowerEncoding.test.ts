@@ -94,4 +94,38 @@ describe("lowerEncoding", () => {
     expect(lowered.categoryIndex).toBe(1);
     expect(lowered.series).toEqual([{ name: "X", sourceIndex: 3, color: null }]);
   });
+
+  it("compiles the order channel into a sort transform (appended last)", () => {
+    const lowered = lowerEncoding(specWith({ x: { field: "Date" }, y: { field: "Sales" }, order: { field: "Sales", sort: "desc" } }), headers);
+    expect(lowered.transform).toEqual([
+      { type: "sort", field: "Sales", order: "desc" },
+    ]);
+  });
+
+  it("orders after an aggregate", () => {
+    const lowered = lowerEncoding(specWith({ x: { field: "Date" }, y: { field: "Sales", aggregate: "sum" }, order: { field: "Sales" } }), headers);
+    expect(lowered.transform).toEqual([
+      { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales", as: "Sales" },
+      { type: "sort", field: "Sales", order: "asc" },
+    ]);
+  });
+
+  it("compiles the size channel into a bubble with a size series", () => {
+    const lowered = lowerEncoding(specWith({ x: { field: "Date" }, y: { field: "Sales" }, size: { field: "Region" } }), headers);
+    expect(lowered.mark).toBe("bubble");
+    expect(lowered.series).toEqual([
+      { name: "Sales", sourceIndex: 2, color: null },
+      { name: "Region", sourceIndex: 1, color: null },
+    ]);
+    expect((lowered.markOptions as { sizeSeriesIndex?: number })?.sizeSeriesIndex).toBe(1);
+  });
+
+  it("appends order after a color pivot", () => {
+    const lowered = lowerEncoding(
+      specWith({ x: { field: "Date" }, y: { field: "Sales" }, color: { field: "Region" }, order: { field: "$category" } }),
+      headers,
+    );
+    expect(lowered.transform?.[0]).toMatchObject({ type: "pivot" });
+    expect(lowered.transform?.[lowered.transform.length - 1]).toMatchObject({ type: "sort", field: "$category" });
+  });
 });
