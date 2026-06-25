@@ -193,6 +193,30 @@ Shared X applies only to nominal, pre-aggregated categories (one row per categor
 per panel); panels with a numeric/date X axis or repeated category labels keep
 their own X. Chart filters apply to the whole-chart view, not to facet panels.
 
+## Concatenation (concat)
+
+Where \`repeat\` and \`facet\` tile *one* chart over slices of *one* dataset,
+\`concat\` lays out **several independent charts** — each with its own data range,
+mark, and axes — in a grid. Ideal for a mini dashboard.
+
+\`\`\`json
+"concat": {
+  "columns": 2,
+  "charts": [
+    { "mark": "bar",  "data": "Sheet1!A1:B13", "series": [ ... ], "title": "Revenue", ... },
+    { "mark": "line", "data": "Sheet1!A1:C13", "series": [ ... ], "title": "Growth",  ... }
+  ]
+}
+\`\`\`
+
+- **charts** (required) is the list of child specs; each is a complete chart and
+  may itself use transforms, layers, or even \`facet\`/\`repeat\`.
+- **columns** sets the grid: \`1\` stacks vertically, the child count gives a
+  single row, anything else wraps (default: auto, ~√n).
+
+Each child is read independently, so the container's own \`data\` is ignored. v1
+caps the grid at 50 panels.
+
 ## Cell References
 
 String fields support cell references for dynamic content:

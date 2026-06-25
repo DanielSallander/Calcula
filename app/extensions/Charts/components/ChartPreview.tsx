@@ -5,6 +5,7 @@
 
 import React, { useRef, useEffect } from "react";
 import type { ChartSpec, ParsedChartData } from "../types";
+import { hasRenderableData } from "../types";
 import { resolveChartTheme } from "../rendering/chartTheme";
 import { dispatchPaint, dispatchComputeLayout } from "../rendering/chartDispatch";
 import { PreviewContainer, PreviewCanvas } from "./CreateChartDialog.styles";
@@ -19,7 +20,7 @@ export function ChartPreview({ spec, data }: ChartPreviewProps): React.ReactElem
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !data || data.series.length === 0) {
+    if (!canvas || !hasRenderableData(data)) {
       // Draw empty state
       if (canvas) {
         const ctx = canvas.getContext("2d");

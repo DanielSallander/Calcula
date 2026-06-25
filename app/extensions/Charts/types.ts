@@ -1086,6 +1086,23 @@ export interface FacetSpec {
   sharedXScale?: boolean;
 }
 
+/**
+ * Concatenation: lay out several INDEPENDENT charts in a tiled grid (the
+ * Vega-Lite `concat`/`hconcat`/`vconcat` idea). Unlike repeat/facet — which
+ * tile ONE spec over partitions of one dataset — each concat child is a full
+ * chart with its own data range, mark, and encoding. The reader reads every
+ * child (one ParsedChartData each, carried on {@link ParsedChartData.concat});
+ * chartDispatch paints each as a complete chart in its cell. Use `columns` for
+ * orientation: `1` stacks vertically (vconcat), `charts.length` is a single row
+ * (hconcat), anything else wraps into a grid. Takes precedence over facet/repeat.
+ */
+export interface ConcatSpec {
+  /** The child chart specifications, rendered left-to-right, top-to-bottom. */
+  charts: ChartSpec[];
+  /** Number of columns in the grid. Default: auto (~√n). */
+  columns?: number;
+}
+
 export interface EncodingSpec {
   /** Category axis (X). */
   x?: ChannelDef;
@@ -1168,6 +1185,13 @@ export interface ChartSpec {
    * tiled above the painters. Takes precedence over `repeat`.
    */
   facet?: FacetSpec;
+
+  /**
+   * Concatenation: tile several independent child charts in a grid. Each child
+   * is read separately (panels ride on the parsed data's `concat`) and painted
+   * as a full chart. Takes precedence over `facet` and `repeat`.
+   */
+  concat?: ConcatSpec;
 }
 
 // ============================================================================
@@ -1236,6 +1260,23 @@ export interface ParsedChartData {
    * The panel datasets do not nest (their own `facets` is always undefined).
    */
   facets?: Array<{ value: string; data: ParsedChartData }>;
+  /**
+   * Concatenation panels: one fully-resolved (spec, data) pair per child of
+   * {@link ConcatSpec}, precomputed by the data reader and painted as complete
+   * charts by chartDispatch. Present only when `spec.concat` has children.
+   */
+  concat?: Array<{ spec: ChartSpec; data: ParsedChartData }>;
+}
+
+/**
+ * Whether parsed data has anything to render: direct numeric series, or
+ * composition panels (concat/facet). A concat container always has empty
+ * top-level `series` — its data lives entirely on `concat` — so callers must use
+ * this rather than `data.series.length` to decide whether to paint.
+ */
+export function hasRenderableData(data: ParsedChartData | null | undefined): data is ParsedChartData {
+  if (!data) return false;
+  return data.series.length > 0 || (data.concat?.length ?? 0) > 0 || (data.facets?.length ?? 0) > 0;
 }
 
 // ============================================================================

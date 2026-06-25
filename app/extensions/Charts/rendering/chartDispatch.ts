@@ -88,6 +88,13 @@ export function dispatchPaint(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
+  // Concatenation: several independent child charts (precomputed in data.concat).
+  // Outermost composition — takes precedence over facet and repeat.
+  if (spec.concat && data.concat && data.concat.length > 0) {
+    paintConcat(ctx, data, spec, layout, theme);
+    return;
+  }
+
   // Faceting: one panel per distinct field value (precomputed in data.facets).
   // Takes precedence over repeat.
   if (spec.facet && data.facets && data.facets.length > 0) {
@@ -368,6 +375,44 @@ function paintFaceted(
 }
 
 // ============================================================================
+// Concatenation (concat)
+// ============================================================================
+
+/**
+ * Tile several independent child charts (data.concat) into a grid. Each panel
+ * is a complete chart — painted via the full dispatchPaint with its own spec +
+ * data — so it keeps its own axes, mark, legend, annotations, and may itself be
+ * faceted/repeated. Per-panel hit geometry is omitted in v1 (whole-chart
+ * selection), mirroring repeat/facet.
+ */
+function paintConcat(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: ChartLayout,
+  theme: ChartRenderTheme,
+): void {
+  const panels = data.concat;
+  if (!panels || panels.length === 0) return;
+
+  // `columns` lives on the container spec; the painted spec is each child's.
+  const cells = repeatLayout(panels.length, spec.concat?.columns, layout.width, layout.height);
+
+  for (let i = 0; i < panels.length; i++) {
+    const cell = cells[i];
+    const panel = panels[i];
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cell.x, cell.y, cell.width, cell.height);
+    ctx.clip();
+    ctx.translate(cell.x, cell.y);
+    const subLayout = dispatchComputeLayout(cell.width, cell.height, panel.spec, panel.data, theme);
+    dispatchPaint(ctx, panel.data, panel.spec, subLayout, theme);
+    ctx.restore();
+  }
+}
+
+// ============================================================================
 // Layout Dispatch
 // ============================================================================
 
@@ -404,9 +449,13 @@ export function dispatchComputeGeometry(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): HitGeometry {
-  // Small multiples / facets have no per-datum hit geometry in v1 (whole-chart
-  // selection). Guard facet only when panels actually exist (else fall through).
-  if (spec.repeat || (spec.facet && data.facets && data.facets.length > 0)) {
+  // Small multiples / facets / concat have no per-datum hit geometry in v1
+  // (whole-chart selection). Guard facet/concat only when panels actually exist.
+  if (
+    spec.repeat ||
+    (spec.facet && data.facets && data.facets.length > 0) ||
+    (spec.concat && data.concat && data.concat.length > 0)
+  ) {
     return { type: "bars", rects: [] };
   }
   const def = getChartMark(spec.mark);

@@ -155,6 +155,10 @@ export const chartSpecJsonSchema: object = {
       $ref: "#/definitions/FacetSpec",
       description: "Faceting: render one panel per distinct value of a categorical field. Takes precedence over repeat.",
     },
+    concat: {
+      $ref: "#/definitions/ConcatSpec",
+      description: "Concatenation: tile several independent child charts in a grid. Takes precedence over facet and repeat.",
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -998,6 +1002,16 @@ export const chartSpecJsonSchema: object = {
         columns: { type: "integer", minimum: 1, description: "Number of columns in the grid. Default: auto (~sqrt of panel count)." },
         sharedYScale: { type: "boolean", description: "Share one Y scale across all panels. Default: true." },
         sharedXScale: { type: "boolean", description: "Share one X scale (ordered union of categories) across panels. Default: true." },
+      },
+      additionalProperties: false,
+    },
+    ConcatSpec: {
+      type: "object",
+      description: "Concatenation: tile several independent child charts in a grid. Each child is a full ChartSpec with its own data/mark/encoding. v1 validates children loosely (each is fully checked when it renders).",
+      required: ["charts"],
+      properties: {
+        charts: { type: "array", items: { type: "object" }, description: "Child chart specifications, laid out left-to-right, top-to-bottom." },
+        columns: { type: "integer", minimum: 1, description: "Number of columns in the grid. 1 = vertical stack, charts.length = single row. Default: auto (~sqrt)." },
       },
       additionalProperties: false,
     },

@@ -7,6 +7,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../types";
+import { hasRenderableData } from "../types";
 import { resolveChartTheme } from "../rendering/chartTheme";
 import { dispatchPaint, dispatchComputeLayout } from "../rendering/chartDispatch";
 import {
@@ -218,7 +219,7 @@ function PreviewCanvas({ spec, data }: {
     canvas.height = h * dpr;
     ctx.scale(dpr, dpr);
 
-    if (!spec || !data || data.series.length === 0) {
+    if (!spec || !hasRenderableData(data)) {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, w, h);
       ctx.fillStyle = "#999999";
@@ -245,7 +246,7 @@ function PreviewCanvas({ spec, data }: {
 
     const observer = new ResizeObserver(() => {
       const canvas = canvasRef.current;
-      if (!canvas || !spec || !data || data.series.length === 0) return;
+      if (!canvas || !spec || !hasRenderableData(data)) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 

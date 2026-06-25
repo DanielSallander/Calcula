@@ -487,9 +487,12 @@ export function CreateChartDialog({
       });
   }, [sourceRange, hasHeaders, orientation, currentSheetIndex]);
 
-  // Update preview when spec changes (also resolves cell references)
+  // Update preview when spec changes (also resolves cell references).
+  // Composition containers (concat/facet/repeat) read their data via children /
+  // partitions, so an empty top-level series is normal — still fetch for them.
   useEffect(() => {
-    if (!currentSpec || currentSpec.series.length === 0) {
+    const isComposition = !!(currentSpec && (currentSpec.concat || currentSpec.facet || currentSpec.repeat));
+    if (!currentSpec || (currentSpec.series.length === 0 && !isComposition)) {
       setPreviewData(null);
       setResolvedSpec(null);
       setDiagnostics([]);
@@ -592,7 +595,10 @@ export function CreateChartDialog({
           throw new Error("Invalid range format. Use a range like Sheet1!A1:D10.");
         }
 
-        if (series.length === 0) {
+        // Composition containers (concat/facet/repeat) get their series from
+        // children / partitions, so an empty top-level series is valid for them.
+        const isComposition = !!(currentSpec.concat || currentSpec.facet || currentSpec.repeat);
+        if (series.length === 0 && !isComposition) {
           throw new Error("Please select at least one data series.");
         }
       }

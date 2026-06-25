@@ -49,7 +49,7 @@ export async function readChartData(spec: ChartSpec): Promise<ParsedChartData> {
  * Use this when you need the resolved spec for rendering (e.g., "=A1" in title
  * resolves to the cell value).
  */
-export async function readChartDataResolved(spec: ChartSpec): Promise<{
+export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise<{
   spec: ChartSpec;
   data: ParsedChartData;
   /** Data before chart filters applied (for filter dropdown to show all options). */
@@ -60,6 +60,20 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   // Resolve cell references (=A1, =Sheet1!B5) in string fields
   const resolvedSpec = await resolveSpecReferences(spec);
   const diagnostics: TransformDiagnostic[] = [];
+
+  // Concatenation: read each child chart independently and tile them. The
+  // container has no data of its own, so this short-circuits the single-source
+  // read entirely. Takes precedence over facet/repeat. Bounded by depth so a
+  // nested/cyclic concat spec can't recurse without limit.
+  if (resolvedSpec.concat && resolvedSpec.concat.charts.length > 0 && depth < MAX_CONCAT_DEPTH) {
+    const concat = await assembleConcat(
+      resolvedSpec.concat.charts,
+      (child) => readChartDataResolved(child, depth + 1),
+      diagnostics,
+    );
+    const empty: ParsedChartData = { categories: [], series: [] };
+    return { spec: resolvedSpec, data: { ...empty, concat }, unfilteredData: empty, diagnostics };
+  }
 
   // Handle pivot data source: read directly from pivot view
   if (isPivotDataSource(resolvedSpec.data)) {
@@ -216,6 +230,40 @@ function withCategoryField(d: ParsedChartData): ParsedChartData {
 
 /** Upper bound on facet panels — guards against cardinality explosion. */
 export const MAX_FACETS = 50;
+
+/** Upper bound on concat panels — bounds the number of child reads. */
+export const MAX_CONCAT_PANELS = 50;
+
+/** Max concat nesting depth — guards against deeply nested / cyclic specs. */
+export const MAX_CONCAT_DEPTH = 4;
+
+/**
+ * Read a concat container's children into renderable panels. Each child is read
+ * independently via the injected `readChild` (in production a recursive
+ * readChartDataResolved). Uses allSettled so ONE failing child (bad range,
+ * malformed spec) is dropped rather than failing the whole dashboard — the rest
+ * still render. Children beyond {@link MAX_CONCAT_PANELS} are ignored. Child
+ * diagnostics from successful reads are appended to `diagnostics`.
+ *
+ * Pure given `readChild` (no IO of its own) — unit-tested with a fake reader.
+ */
+export async function assembleConcat(
+  charts: ChartSpec[],
+  readChild: (child: ChartSpec) => Promise<{ spec: ChartSpec; data: ParsedChartData; diagnostics: TransformDiagnostic[] }>,
+  diagnostics: TransformDiagnostic[],
+): Promise<Array<{ spec: ChartSpec; data: ParsedChartData }>> {
+  const children = charts.slice(0, MAX_CONCAT_PANELS);
+  const results = await Promise.allSettled(children.map((child) => readChild(child)));
+  const concat: Array<{ spec: ChartSpec; data: ParsedChartData }> = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") {
+      concat.push({ spec: r.value.spec, data: r.value.data });
+      diagnostics.push(...r.value.diagnostics);
+    }
+    // Rejected children are dropped: one bad panel must not blank the dashboard.
+  }
+  return concat;
+}
 
 /**
  * Partition the long source rows by a categorical field's distinct values,
