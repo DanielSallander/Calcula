@@ -22,6 +22,7 @@ import type {
   SeriesOrientation,
   MarkOptions,
   PivotDataSource,
+  TransformDiagnostic,
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { createChart, getChartById, replaceChartSpec, syncChartRegions } from "../lib/chartStore";
@@ -215,6 +216,8 @@ export function CreateChartDialog({
   // Preview data and resolved spec (with cell references like "=A1" resolved)
   const [previewData, setPreviewData] = useState<ParsedChartData | null>(null);
   const [resolvedSpec, setResolvedSpec] = useState<ChartSpec | null>(null);
+  // Non-fatal transform issues from the preview pipeline, shown in the Spec tab.
+  const [diagnostics, setDiagnostics] = useState<TransformDiagnostic[]>([]);
 
   // UI state
   const [isLoading, setIsLoading] = useState(false);
@@ -489,6 +492,7 @@ export function CreateChartDialog({
     if (!currentSpec || currentSpec.series.length === 0) {
       setPreviewData(null);
       setResolvedSpec(null);
+      setDiagnostics([]);
       return;
     }
 
@@ -496,11 +500,13 @@ export function CreateChartDialog({
       .then((result) => {
         setResolvedSpec(result.spec);
         setPreviewData(result.data);
+        setDiagnostics(result.diagnostics);
       })
       .catch((err) => {
         console.error("[CreateChartDialog] Preview data fetch failed:", err);
         setPreviewData(null);
         setResolvedSpec(null);
+        setDiagnostics([]);
       });
   }, [currentSpec]);
 
@@ -511,12 +517,12 @@ export function CreateChartDialog({
     }
   }, [currentSpec]);
 
-  // Push preview data updates to the external spec editor window (if open)
+  // Push preview data + diagnostics updates to the external spec editor window (if open)
   useEffect(() => {
     if (isSpecEditorWindowOpen()) {
-      emitPreviewDataUpdated(previewData);
+      emitPreviewDataUpdated(previewData, diagnostics);
     }
-  }, [previewData]);
+  }, [previewData, diagnostics]);
 
   // Listen for spec changes from the external spec editor window
   useEffect(() => {
@@ -782,6 +788,7 @@ export function CreateChartDialog({
                   : undefined
               }
               previewData={previewData}
+              diagnostics={diagnostics}
             />
           )}
 

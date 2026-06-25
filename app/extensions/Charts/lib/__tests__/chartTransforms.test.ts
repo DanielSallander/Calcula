@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { applyTransforms } from "../chartTransforms";
-import type { ParsedChartData, TransformSpec } from "../../types";
+import type { ParsedChartData, TransformSpec, TransformDiagnostic } from "../../types";
 
 // ============================================================================
 // Test Helpers
@@ -879,5 +879,102 @@ describe("filter transform: formula predicates", () => {
       { type: "filter", field: "$category", predicate: '$category <> "Jan"' },
     ]);
     expect(result.categories).toEqual(["Feb", "Mar", "Apr", "May"]);
+  });
+});
+
+// ============================================================================
+// Transform diagnostics (A5)
+// ============================================================================
+
+describe("transform diagnostics", () => {
+  it("reports an error for an invalid calculate expression", () => {
+    const diags: TransformDiagnostic[] = [];
+    const result = applyTransforms(makeData(), [
+      { type: "calculate", expr: "1 +", as: "X" },
+    ], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatchObject({ index: 0, transformType: "calculate", severity: "error" });
+    // Values still produced (all zeros), never a crash.
+    expect(result.series.find((s) => s.name === "X")!.values).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it("reports a warning when calculate rows cannot be evaluated", () => {
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(makeData(), [
+      { type: "calculate", expr: "Missing + 1", as: "X" },
+    ], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatchObject({ transformType: "calculate", severity: "warning" });
+    expect(diags[0].message).toContain("5 of 5 rows");
+  });
+
+  it("reports a warning for an unknown filter field", () => {
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(makeData(), [
+      { type: "filter", field: "Nope", predicate: "> 0" },
+    ], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatchObject({ transformType: "filter", severity: "warning" });
+    expect(diags[0].message).toContain("unknown field");
+  });
+
+  it("reports a warning for an invalid filter predicate", () => {
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(makeData(), [
+      { type: "filter", field: "Sales", predicate: "AND(" },
+    ], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0].message).toContain("invalid predicate");
+  });
+
+  it("reports unknown fields for sort, window, and bin", () => {
+    for (const t of [
+      { type: "sort", field: "Nope" } as TransformSpec,
+      { type: "window", op: "running_sum", field: "Nope", as: "X" } as TransformSpec,
+      { type: "bin", field: "Nope", as: "X" } as TransformSpec,
+    ]) {
+      const diags: TransformDiagnostic[] = [];
+      applyTransforms(makeData(), [t], diags);
+      expect(diags).toHaveLength(1);
+      expect(diags[0].message).toContain("unknown field");
+    }
+  });
+
+  it("reports unknown groupBy fields in aggregate", () => {
+    const data: ParsedChartData = {
+      categories: ["A", "A", "B"],
+      series: [{ name: "V", values: [1, 2, 3], color: null }],
+    };
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(data, [
+      { type: "aggregate", groupBy: ["$category", "Ghost"], op: "sum", field: "V", as: "T" },
+    ], diags);
+    expect(diags.some((d) => d.message.includes("groupBy"))).toBe(true);
+  });
+
+  it("reports the correct transform index in a pipeline", () => {
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(makeData(), [
+      { type: "sort", field: "Sales", order: "desc" },
+      { type: "filter", field: "Nope", predicate: "> 0" },
+    ], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0].index).toBe(1);
+  });
+
+  it("produces no diagnostics for valid transforms", () => {
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(makeData(), [
+      { type: "calculate", expr: "Sales - Cost", as: "Profit" },
+      { type: "filter", field: "Profit", predicate: "> 0" },
+      { type: "sort", field: "Sales", order: "desc" },
+    ], diags);
+    expect(diags).toEqual([]);
+  });
+
+  it("works without a diagnostics collector (no crash)", () => {
+    expect(() => applyTransforms(makeData(), [
+      { type: "calculate", expr: "1 +", as: "X" },
+    ])).not.toThrow();
   });
 });

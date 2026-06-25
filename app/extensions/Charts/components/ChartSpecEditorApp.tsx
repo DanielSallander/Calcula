@@ -6,7 +6,7 @@
 //          Includes a Reference panel with full ChartSpec documentation.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { ChartSpec, ParsedChartData } from "../types";
+import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../types";
 import { resolveChartTheme } from "../rendering/chartTheme";
 import { dispatchPaint, dispatchComputeLayout } from "../rendering/chartDispatch";
 import {
@@ -119,6 +119,18 @@ const errorBarStyle: React.CSSProperties = {
   borderTop: "1px solid #3c3c3c",
   flexShrink: 0,
   minHeight: "20px",
+};
+
+const diagnosticsBarStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "2px",
+  fontSize: "11px",
+  padding: "3px 12px",
+  borderTop: "1px solid #3c3c3c",
+  flexShrink: 0,
+  maxHeight: "96px",
+  overflow: "auto",
 };
 
 const statusBarStyle: React.CSSProperties = {
@@ -684,6 +696,7 @@ type ViewMode = "editor" | "reference" | "guide" | "ai-prompt";
 export function ChartSpecEditorApp(): React.ReactElement {
   const [spec, setSpec] = useState<ChartSpec | null>(null);
   const [previewData, setPreviewData] = useState<ParsedChartData | null>(null);
+  const [diagnostics, setDiagnostics] = useState<TransformDiagnostic[]>([]);
   const [jsonText, setJsonText] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -699,6 +712,7 @@ export function ChartSpecEditorApp(): React.ReactElement {
     const openPromise = onOpenWithSpec((payload) => {
       setSpec(payload.spec);
       setPreviewData(payload.previewData);
+      setDiagnostics(payload.diagnostics ?? []);
       setJsonText(JSON.stringify(payload.spec, null, 2));
       setParseError(null);
       setIsEditing(false);
@@ -718,6 +732,7 @@ export function ChartSpecEditorApp(): React.ReactElement {
     unlisteners.push(
       onPreviewDataUpdated((payload) => {
         setPreviewData(payload.data);
+        setDiagnostics(payload.diagnostics ?? []);
       }),
     );
 
@@ -882,6 +897,18 @@ export function ChartSpecEditorApp(): React.ReactElement {
       {/* Error bar */}
       {parseError && (
         <div style={errorBarStyle}>{parseError}</div>
+      )}
+
+      {/* Transform diagnostics */}
+      {diagnostics.length > 0 && (
+        <div style={diagnosticsBarStyle}>
+          {diagnostics.map((d, i) => (
+            <div key={i} style={{ color: d.severity === "error" ? "#e15759" : "#d9a13a" }}>
+              <strong>{d.severity === "error" ? "Error" : "Warning"}</strong>
+              {` (transform ${d.index + 1}, ${d.transformType}): ${d.message}`}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Status bar */}

@@ -5,7 +5,7 @@
 //          Uses Monaco editor for IntelliSense, autocomplete, and validation.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { ChartSpec, ParsedChartData } from "../../types";
+import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../../types";
 import {
   FieldGroup,
   Label,
@@ -22,6 +22,8 @@ interface SpecTabProps {
   previewPanel?: React.ReactNode;
   /** Current preview data, passed to the pop-out window. */
   previewData?: ParsedChartData | null;
+  /** Non-fatal transform issues from the data pipeline, shown below the editor. */
+  diagnostics?: TransformDiagnostic[];
 }
 
 // ============================================================================
@@ -125,10 +127,37 @@ function ResizeHandle({ onDragStart, onDrag }: { onDragStart: () => void; onDrag
 }
 
 // ============================================================================
+// Diagnostics
+// ============================================================================
+
+const diagnosticsStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "2px",
+  fontSize: "11px",
+  padding: "2px 0",
+};
+
+/** Renders the transform pipeline diagnostics (errors + warnings) below the editor. */
+function DiagnosticsList({ diagnostics }: { diagnostics?: TransformDiagnostic[] }): React.ReactElement | null {
+  if (!diagnostics || diagnostics.length === 0) return null;
+  return (
+    <div style={diagnosticsStyle}>
+      {diagnostics.map((d, i) => (
+        <div key={i} style={{ color: d.severity === "error" ? "#e15759" : "#d9a13a" }}>
+          <strong>{d.severity === "error" ? "Error" : "Warning"}</strong>
+          {` (transform ${d.index + 1}, ${d.transformType}): ${d.message}`}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================================
 // Component
 // ============================================================================
 
-export function SpecTab({ spec, onSpecChange, isFullView, onToggleFullView, previewPanel, previewData }: SpecTabProps): React.ReactElement {
+export function SpecTab({ spec, onSpecChange, isFullView, onToggleFullView, previewPanel, previewData, diagnostics }: SpecTabProps): React.ReactElement {
   const [jsonText, setJsonText] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -211,8 +240,8 @@ export function SpecTab({ spec, onSpecChange, isFullView, onToggleFullView, prev
 
   // Pop out to separate window
   const handlePopOut = useCallback(() => {
-    openSpecEditorWindow(spec, previewData ?? null);
-  }, [spec, previewData]);
+    openSpecEditorWindow(spec, previewData ?? null, diagnostics);
+  }, [spec, previewData, diagnostics]);
 
   // ---- Full-view layout: header + split pane + buttons ----
   if (isFullView && previewPanel) {
@@ -249,6 +278,7 @@ export function SpecTab({ spec, onSpecChange, isFullView, onToggleFullView, prev
             <div style={errorStyle}>
               {parseError ?? ""}
             </div>
+            <DiagnosticsList diagnostics={diagnostics} />
           </div>
 
           {/* Resize handle */}
@@ -306,6 +336,8 @@ export function SpecTab({ spec, onSpecChange, isFullView, onToggleFullView, prev
       <div style={errorStyle}>
         {parseError ?? ""}
       </div>
+
+      <DiagnosticsList diagnostics={diagnostics} />
 
       <div style={buttonRowStyle}>
         <button style={miniButtonStyle} onClick={handleFormat} title="Format JSON">

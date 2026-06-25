@@ -770,6 +770,23 @@ export type TransformSpec =
   | WindowTransform
   | BinTransform;
 
+/**
+ * A non-fatal issue encountered while applying a transform. Transforms still
+ * produce best-effort data; these diagnostics let the editor surface problems
+ * (an unknown field, an expression that could not be evaluated, ...) instead of
+ * silently returning zeros or unfiltered data.
+ */
+export interface TransformDiagnostic {
+  /** Index of the offending transform within the spec's transform[] pipeline. */
+  index: number;
+  /** The transform type that produced the diagnostic. */
+  transformType: TransformSpec["type"];
+  /** "error" = the transform could not run at all; "warning" = it ran with issues. */
+  severity: "error" | "warning";
+  /** Human-readable description shown in the spec editor. */
+  message: string;
+}
+
 // ============================================================================
 // Deep Theming & Tooltip Config
 // ============================================================================

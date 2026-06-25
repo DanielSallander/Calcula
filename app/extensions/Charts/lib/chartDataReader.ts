@@ -66,6 +66,7 @@ import type {
   DataRangeRef,
   ParsedChartData,
   SeriesOrientation,
+  TransformDiagnostic,
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
@@ -101,9 +102,12 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   data: ParsedChartData;
   /** Data before chart filters applied (for filter dropdown to show all options). */
   unfilteredData: ParsedChartData;
+  /** Non-fatal issues from the transform pipeline (for the spec editor). */
+  diagnostics: TransformDiagnostic[];
 }> {
   // Resolve cell references (=A1, =Sheet1!B5) in string fields
   const resolvedSpec = await resolveSpecReferences(spec);
+  const diagnostics: TransformDiagnostic[] = [];
 
   // Handle pivot data source: read directly from pivot view
   if (isPivotDataSource(resolvedSpec.data)) {
@@ -111,7 +115,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-      parsedData = applyTransforms(parsedData, resolvedSpec.transform);
+      parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics);
     }
 
     const unfilteredData = parsedData;
@@ -119,7 +123,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
     // Apply chart filters (hide series/categories)
     parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
 
-    return { spec: resolvedSpec, data: parsedData, unfilteredData };
+    return { spec: resolvedSpec, data: parsedData, unfilteredData, diagnostics };
   }
 
   // Standard cell range data source
@@ -157,7 +161,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
 
   // Apply data transforms if specified
   if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-    parsedData = applyTransforms(parsedData, resolvedSpec.transform);
+    parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics);
   }
 
   const unfilteredData = parsedData;
@@ -165,7 +169,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   // Apply chart filters (hide series/categories)
   parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
 
-  return { spec: resolvedSpec, data: parsedData, unfilteredData };
+  return { spec: resolvedSpec, data: parsedData, unfilteredData, diagnostics };
 }
 
 /**

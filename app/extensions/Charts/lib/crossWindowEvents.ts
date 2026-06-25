@@ -6,7 +6,7 @@
 
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 import type { UnlistenFn } from "@api/backend";
-import type { ChartSpec, ParsedChartData } from "../types";
+import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../types";
 
 // ============================================================================
 // Event Names
@@ -34,6 +34,7 @@ export const ChartSpecEditorEvents = {
 export interface OpenWithSpecPayload {
   spec: ChartSpec;
   previewData: ParsedChartData | null;
+  diagnostics?: TransformDiagnostic[];
 }
 
 export interface SpecChangedPayload {
@@ -46,14 +47,15 @@ export interface SpecUpdatedPayload {
 
 export interface PreviewDataUpdatedPayload {
   data: ParsedChartData | null;
+  diagnostics?: TransformDiagnostic[];
 }
 
 // ============================================================================
 // Emit Functions
 // ============================================================================
 
-export async function emitOpenWithSpec(spec: ChartSpec, previewData: ParsedChartData | null): Promise<void> {
-  await emitTauriEvent(ChartSpecEditorEvents.OPEN_WITH_SPEC, { spec, previewData } satisfies OpenWithSpecPayload);
+export async function emitOpenWithSpec(spec: ChartSpec, previewData: ParsedChartData | null, diagnostics?: TransformDiagnostic[]): Promise<void> {
+  await emitTauriEvent(ChartSpecEditorEvents.OPEN_WITH_SPEC, { spec, previewData, diagnostics } satisfies OpenWithSpecPayload);
 }
 
 export async function emitSpecChanged(spec: Partial<ChartSpec>): Promise<void> {
@@ -64,8 +66,8 @@ export async function emitSpecUpdated(spec: ChartSpec): Promise<void> {
   await emitTauriEvent(ChartSpecEditorEvents.SPEC_UPDATED, { spec } satisfies SpecUpdatedPayload);
 }
 
-export async function emitPreviewDataUpdated(data: ParsedChartData | null): Promise<void> {
-  await emitTauriEvent(ChartSpecEditorEvents.PREVIEW_DATA_UPDATED, { data } satisfies PreviewDataUpdatedPayload);
+export async function emitPreviewDataUpdated(data: ParsedChartData | null, diagnostics?: TransformDiagnostic[]): Promise<void> {
+  await emitTauriEvent(ChartSpecEditorEvents.PREVIEW_DATA_UPDATED, { data, diagnostics } satisfies PreviewDataUpdatedPayload);
 }
 
 export async function emitChartSpecEditorClosed(): Promise<void> {

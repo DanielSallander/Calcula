@@ -4,7 +4,7 @@
 //          Follows the same pattern as ScriptEditor/lib/openEditorWindow.ts.
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { ChartSpec, ParsedChartData } from "../types";
+import type { ChartSpec, ParsedChartData, TransformDiagnostic } from "../types";
 import { emitOpenWithSpec, onEditorReady } from "./crossWindowEvents";
 
 // ============================================================================
@@ -26,12 +26,13 @@ let specEditorWindow: WebviewWindow | null = null;
 export async function openSpecEditorWindow(
   spec: ChartSpec,
   previewData: ParsedChartData | null,
+  diagnostics?: TransformDiagnostic[],
 ): Promise<void> {
   // If window already exists, focus it and transfer spec
   if (specEditorWindow) {
     try {
       await specEditorWindow.setFocus();
-      await emitOpenWithSpec(spec, previewData);
+      await emitOpenWithSpec(spec, previewData, diagnostics);
       return;
     } catch {
       // Window was closed externally, clean up reference
@@ -58,7 +59,7 @@ export async function openSpecEditorWindow(
   const sendSpec = async () => {
     if (specSent) return;
     specSent = true;
-    await emitOpenWithSpec(spec, previewData);
+    await emitOpenWithSpec(spec, previewData, diagnostics);
   };
 
   // Listen for the editor's "ready" signal (emitted after React mounts + listeners registered)

@@ -6,6 +6,7 @@
 import type {
   ParsedChartData,
   TransformSpec,
+  TransformDiagnostic,
   FilterTransform,
   SortTransform,
   AggregateTransform,
@@ -30,59 +31,104 @@ import {
 /**
  * Apply a sequence of transforms to parsed chart data.
  * Each transform is pure — returns a new ParsedChartData without mutating the input.
+ *
+ * Pass `diagnostics` to collect non-fatal issues (unknown fields, un-evaluable
+ * expressions). Transforms still produce best-effort data either way; the array
+ * is purely for surfacing problems in the editor (roadmap A5).
  */
 export function applyTransforms(
   data: ParsedChartData,
   transforms: TransformSpec[],
+  diagnostics?: TransformDiagnostic[],
 ): ParsedChartData {
-  return transforms.reduce((d, t) => applyOne(d, t), data);
+  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics), data);
 }
 
 // ============================================================================
 // Dispatcher
 // ============================================================================
 
-function applyOne(data: ParsedChartData, transform: TransformSpec): ParsedChartData {
+function applyOne(
+  data: ParsedChartData,
+  transform: TransformSpec,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   switch (transform.type) {
     case "filter":
-      return applyFilter(data, transform);
+      return applyFilter(data, transform, index, diagnostics);
     case "sort":
-      return applySort(data, transform);
+      return applySort(data, transform, index, diagnostics);
     case "aggregate":
-      return applyAggregate(data, transform);
+      return applyAggregate(data, transform, index, diagnostics);
     case "calculate":
-      return applyCalculate(data, transform);
+      return applyCalculate(data, transform, index, diagnostics);
     case "window":
-      return applyWindow(data, transform);
+      return applyWindow(data, transform, index, diagnostics);
     case "bin":
-      return applyBin(data, transform);
-    default:
+      return applyBin(data, transform, index, diagnostics);
+    default: {
+      const unknownType = (transform as { type?: string }).type ?? "unknown";
+      diagnostics?.push({
+        index,
+        transformType: unknownType as TransformSpec["type"],
+        severity: "warning",
+        message: `Unknown transform type "${unknownType}".`,
+      });
       return data;
+    }
   }
+}
+
+/** Push a diagnostic if a collector was provided (no-op otherwise). */
+function report(
+  diagnostics: TransformDiagnostic[] | undefined,
+  index: number,
+  transformType: TransformSpec["type"],
+  severity: "error" | "warning",
+  message: string,
+): void {
+  diagnostics?.push({ index, transformType, severity, message });
+}
+
+/** Extract a readable message from a thrown value. */
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 // ============================================================================
 // Filter
 // ============================================================================
 
-function applyFilter(data: ParsedChartData, t: FilterTransform): ParsedChartData {
+function applyFilter(
+  data: ParsedChartData,
+  t: FilterTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   const { field, predicate } = t;
 
   const seriesIdx = field === "$category" ? -1 : findSeriesIndex(data, field);
-  if (field !== "$category" && seriesIdx < 0) return data;
+  if (field !== "$category" && seriesIdx < 0) {
+    report(diagnostics, index, "filter", "warning", `Filter: unknown field "${field}" — no rows removed.`);
+    return data;
+  }
 
   const exprSrc = predicateToExpr(predicate);
-  if (exprSrc === null) return data;
+  if (exprSrc === null) return data; // Empty predicate: intentional no-op.
 
   let compiled: CompiledFormula;
   try {
     compiled = compileFormula(exprSrc);
-  } catch {
+  } catch (err) {
     // Unparseable predicate — leave the data untouched rather than dropping rows.
+    report(diagnostics, index, "filter", "warning", `Filter: invalid predicate ${JSON.stringify(predicate)} — ${errMessage(err)}. No rows removed.`);
     return data;
   }
 
   const sanitized = sanitizeNames(data);
+  let errorCount = 0;
+  let firstError = "";
   const keep: boolean[] = data.categories.map((cat, ci) => {
     const fieldVal: FormulaValue = field === "$category"
       ? cat
@@ -90,12 +136,19 @@ function applyFilter(data: ParsedChartData, t: FilterTransform): ParsedChartData
     const scope = buildRowScope(data, sanitized, ci, fieldVal);
     try {
       return toBoolean(compiled(scope));
-    } catch {
+    } catch (err) {
       // A row whose predicate errors (e.g. an unknown name) is kept — filtering
       // must never silently drop data on a broken expression.
+      errorCount++;
+      if (!firstError) firstError = errMessage(err);
       return true;
     }
   });
+
+  if (errorCount > 0) {
+    report(diagnostics, index, "filter", "warning",
+      `Filter: predicate could not be evaluated for ${errorCount} of ${keep.length} rows (kept) — ${firstError}.`);
+  }
 
   return filterByMask(data, keep);
 }
@@ -140,7 +193,12 @@ function filterByMask(data: ParsedChartData, keep: boolean[]): ParsedChartData {
 // Sort
 // ============================================================================
 
-function applySort(data: ParsedChartData, t: SortTransform): ParsedChartData {
+function applySort(
+  data: ParsedChartData,
+  t: SortTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   const { field, order = "asc" } = t;
   const n = data.categories.length;
   if (n === 0) return data;
@@ -148,7 +206,10 @@ function applySort(data: ParsedChartData, t: SortTransform): ParsedChartData {
   const indices = Array.from({ length: n }, (_, i) => i);
   const seriesIdx = field === "$category" ? -1 : findSeriesIndex(data, field);
 
-  if (field !== "$category" && seriesIdx < 0) return data;
+  if (field !== "$category" && seriesIdx < 0) {
+    report(diagnostics, index, "sort", "warning", `Sort: unknown field "${field}" — order unchanged.`);
+    return data;
+  }
 
   indices.sort((a, b) => {
     let cmp: number;
@@ -176,10 +237,25 @@ function reorderByIndices(data: ParsedChartData, indices: number[]): ParsedChart
 // Aggregate
 // ============================================================================
 
-function applyAggregate(data: ParsedChartData, t: AggregateTransform): ParsedChartData {
+function applyAggregate(
+  data: ParsedChartData,
+  t: AggregateTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   const { groupBy, op, field, as } = t;
   const seriesIdx = findSeriesIndex(data, field);
-  if (seriesIdx < 0) return data;
+  if (seriesIdx < 0) {
+    report(diagnostics, index, "aggregate", "warning", `Aggregate: unknown field "${field}" — transform skipped.`);
+    return data;
+  }
+
+  // Warn about any groupBy field that doesn't exist (it is silently ignored).
+  for (const gb of groupBy) {
+    if (gb !== "$category" && findSeriesIndex(data, gb) < 0) {
+      report(diagnostics, index, "aggregate", "warning", `Aggregate: unknown groupBy field "${gb}" — ignored.`);
+    }
+  }
 
   // Group by category labels (for now, groupBy always operates on categories)
   const groups = new Map<string, number[]>();
@@ -251,30 +327,44 @@ function computeAggregate(op: AggregateOp, values: number[]): number {
 // Calculate
 // ============================================================================
 
-function applyCalculate(data: ParsedChartData, t: CalculateTransform): ParsedChartData {
+function applyCalculate(
+  data: ParsedChartData,
+  t: CalculateTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   const { expr, as } = t;
 
   // Compile once, evaluate per row against that row's scope.
   let compiled: CompiledFormula | null = null;
   try {
     compiled = compileFormula(expr);
-  } catch {
+  } catch (err) {
+    report(diagnostics, index, "calculate", "error", `Calculate "${as}": invalid expression — ${errMessage(err)}. Values set to 0.`);
     compiled = null;
   }
 
   const sanitized = sanitizeNames(data);
+  let errorCount = 0;
+  let firstError = "";
   const newValues: number[] = data.categories.map((_, ci) => {
     if (!compiled) return 0;
     const scope = buildRowScope(data, sanitized, ci);
     try {
       const num = toNumber(compiled(scope));
       return Number.isFinite(num) ? num : 0;
-    } catch {
-      // Non-numeric result or evaluation error — fall back to 0 (matches the
-      // prior behavior; surfacing these as diagnostics is roadmap item A5).
+    } catch (err) {
+      // Non-numeric result or evaluation error — fall back to 0.
+      errorCount++;
+      if (!firstError) firstError = errMessage(err);
       return 0;
     }
   });
+
+  if (errorCount > 0) {
+    report(diagnostics, index, "calculate", "warning",
+      `Calculate "${as}": ${errorCount} of ${newValues.length} rows could not be evaluated (set to 0) — ${firstError}.`);
+  }
 
   // Check if a series with this name already exists — replace it
   const existingIdx = data.series.findIndex((s) => s.name === as);
@@ -298,10 +388,18 @@ function applyCalculate(data: ParsedChartData, t: CalculateTransform): ParsedCha
 // Window
 // ============================================================================
 
-function applyWindow(data: ParsedChartData, t: WindowTransform): ParsedChartData {
+function applyWindow(
+  data: ParsedChartData,
+  t: WindowTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   const { op, field, as } = t;
   const seriesIdx = findSeriesIndex(data, field);
-  if (seriesIdx < 0) return data;
+  if (seriesIdx < 0) {
+    report(diagnostics, index, "window", "warning", `Window: unknown field "${field}" — transform skipped.`);
+    return data;
+  }
 
   const srcValues = data.series[seriesIdx].values;
   const newValues: number[] = [];
@@ -358,10 +456,18 @@ function applyWindow(data: ParsedChartData, t: WindowTransform): ParsedChartData
 // Bin
 // ============================================================================
 
-function applyBin(data: ParsedChartData, t: BinTransform): ParsedChartData {
+function applyBin(
+  data: ParsedChartData,
+  t: BinTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): ParsedChartData {
   const { field, binCount = 10, as } = t;
   const seriesIdx = findSeriesIndex(data, field);
-  if (seriesIdx < 0) return data;
+  if (seriesIdx < 0) {
+    report(diagnostics, index, "bin", "warning", `Bin: unknown field "${field}" — transform skipped.`);
+    return data;
+  }
 
   const srcValues = data.series[seriesIdx].values;
   if (srcValues.length === 0) return data;
