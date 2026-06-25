@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { applyTransforms } from "../chartTransforms";
-import type { ParsedChartData, TransformSpec, TransformDiagnostic } from "../../types";
+import type { ParsedChartData, TransformSpec, TransformDiagnostic, TidyData } from "../../types";
 
 // ============================================================================
 // Test Helpers
@@ -1103,5 +1103,79 @@ describe("lookup transform", () => {
     ]);
     applyTransforms(main, [{ type: "lookup", from: "X" }], diags, lookupData);
     expect(diags.some((d) => d.transformType === "lookup" && d.message.includes("no categories matched"))).toBe(true);
+  });
+});
+
+// ============================================================================
+// Pivot Transform (C2)
+// ============================================================================
+
+describe("pivot transform", () => {
+  const empty: ParsedChartData = { categories: [], series: [] };
+  const tidy: TidyData = {
+    fields: [
+      { name: "Region", values: ["N", "N", "S", "S"] },
+      { name: "Month", values: ["Jan", "Feb", "Jan", "Feb"] },
+      { name: "Sales", values: ["10", "20", "30", "40"] },
+    ],
+  };
+
+  it("spreads a long table into wide series", () => {
+    const result = applyTransforms(
+      empty,
+      [{ type: "pivot", category: "Region", key: "Month", value: "Sales" }],
+      undefined,
+      undefined,
+      tidy,
+    );
+    expect(result.categories).toEqual(["N", "S"]);
+    expect(result.series.map((s) => s.name)).toEqual(["Jan", "Feb"]);
+    expect(result.series[0].values).toEqual([10, 30]); // Jan: N=10, S=30
+    expect(result.series[1].values).toEqual([20, 40]); // Feb: N=20, S=40
+  });
+
+  it("aggregates rows that share a (category, key)", () => {
+    const dupTidy: TidyData = {
+      fields: [
+        { name: "Region", values: ["N", "N", "N"] },
+        { name: "Month", values: ["Jan", "Jan", "Feb"] },
+        { name: "Sales", values: ["10", "5", "20"] },
+      ],
+    };
+    const summed = applyTransforms(empty, [{ type: "pivot", category: "Region", key: "Month", value: "Sales", op: "sum" }], undefined, undefined, dupTidy);
+    expect(summed.series.find((s) => s.name === "Jan")!.values).toEqual([15]);
+
+    const meaned = applyTransforms(empty, [{ type: "pivot", category: "Region", key: "Month", value: "Sales", op: "mean" }], undefined, undefined, dupTidy);
+    expect(meaned.series.find((s) => s.name === "Jan")!.values).toEqual([7.5]);
+  });
+
+  it("fills missing (category, key) combinations with 0", () => {
+    const sparse: TidyData = {
+      fields: [
+        { name: "Region", values: ["N", "S"] },
+        { name: "Month", values: ["Jan", "Feb"] },
+        { name: "Sales", values: ["10", "40"] },
+      ],
+    };
+    const result = applyTransforms(empty, [{ type: "pivot", category: "Region", key: "Month", value: "Sales" }], undefined, undefined, sparse);
+    // N has only Jan, S has only Feb -> the cross cells are 0.
+    expect(result.categories).toEqual(["N", "S"]);
+    expect(result.series.find((s) => s.name === "Jan")!.values).toEqual([10, 0]);
+    expect(result.series.find((s) => s.name === "Feb")!.values).toEqual([0, 40]);
+  });
+
+  it("warns on unknown columns and leaves data unchanged", () => {
+    const diags: TransformDiagnostic[] = [];
+    const result = applyTransforms(empty, [{ type: "pivot", category: "Nope", key: "Month", value: "Sales" }], diags, undefined, tidy);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatchObject({ transformType: "pivot", severity: "warning" });
+    expect(result).toBe(empty);
+  });
+
+  it("warns when there is no tidy (cell-range) source", () => {
+    const diags: TransformDiagnostic[] = [];
+    applyTransforms(empty, [{ type: "pivot", category: "Region", key: "Month", value: "Sales" }], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatchObject({ transformType: "pivot", severity: "warning" });
   });
 });

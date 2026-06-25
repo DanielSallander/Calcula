@@ -392,6 +392,28 @@ export const CHART_EXAMPLES: ChartExample[] = [
       ],
     },
   },
+  {
+    id: "pivot-long",
+    name: "Pivot long data into series",
+    description: "A long table (rows of Region | Month | Sales) reshaped so each Month becomes a series across Regions. Reference source columns by header; place pivot first.",
+    category: "Data shaping",
+    spec: {
+      mark: "bar",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [{ name: "Sales", sourceIndex: 2, color: null }],
+      title: "Sales by Region & Month",
+      xAxis: axis(),
+      yAxis: axis(null, true),
+      legend: { visible: true, position: "top" },
+      palette: "default",
+      transform: [
+        { type: "pivot", category: "Region", key: "Month", value: "Sales", op: "sum" },
+      ],
+    },
+  },
 ];
 
 // ============================================================================

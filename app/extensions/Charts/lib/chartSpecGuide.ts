@@ -593,6 +593,19 @@ range is read as a lookup table (first column = key, header row = series names):
 Categories with no match use \`default\` (0 if omitted). Omit \`fields\` to add
 every series from the secondary range.
 
+### Pivot — Reshape Long Data into Series
+When your data is *long* (one row per observation, e.g. \`Region | Month | Sales\`),
+pivot spreads a key column into series. Reference source columns by header name
+and place pivot first:
+\`\`\`json
+"transform": [
+  { "type": "pivot", "category": "Region", "key": "Month", "value": "Sales", "op": "sum" }
+]
+\`\`\`
+This makes \`Region\` the X axis and one series per \`Month\`, summing \`Sales\` in
+each cell. (Going the other way — *wide* columns — needs no transform: each
+column is already its own series.)
+
 ### Chaining Transforms
 
 Transforms compose — the output of one feeds the next:

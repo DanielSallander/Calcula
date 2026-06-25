@@ -780,6 +780,24 @@ export interface LookupTransform {
   default?: number;
 }
 
+/**
+ * Pivot transform: reshape a long source table into wide series. The distinct
+ * values of `key` become the series, spread across the distinct values of
+ * `category`, aggregating `value`. Operates on the source columns (by header
+ * name), so it should be the first transform.
+ */
+export interface PivotTransform {
+  type: "pivot";
+  /** Source column whose distinct values become the categories (X axis). */
+  category: string;
+  /** Source column whose distinct values become the series (one per value). */
+  key: string;
+  /** Source column whose values are aggregated into each category/key cell. */
+  value: string;
+  /** Aggregation for multiple rows sharing a (category, key). Default: "sum". */
+  op?: AggregateOp;
+}
+
 /** A data transform step. Applied in sequence before rendering. */
 export type TransformSpec =
   | FilterTransform
@@ -788,7 +806,21 @@ export type TransformSpec =
   | CalculateTransform
   | WindowTransform
   | BinTransform
-  | LookupTransform;
+  | LookupTransform
+  | PivotTransform;
+
+/** A single source column, as a long-format field (used by the pivot transform). */
+export interface TidyField {
+  /** Column name — the header text, or a generated label like "Column 2". */
+  name: string;
+  /** Raw display value for each source row. */
+  values: string[];
+}
+
+/** A long-format view of the source range: one TidyField per source column. */
+export interface TidyData {
+  fields: TidyField[];
+}
 
 /**
  * A non-fatal issue encountered while applying a transform. Transforms still

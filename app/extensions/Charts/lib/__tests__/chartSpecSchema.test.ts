@@ -87,6 +87,7 @@ describe("chartSpecJsonSchema", () => {
     expect(refs).toContain("#/definitions/WindowTransform");
     expect(refs).toContain("#/definitions/BinTransform");
     expect(refs).toContain("#/definitions/LookupTransform");
+    expect(refs).toContain("#/definitions/PivotTransform");
   });
 
   it("survives JSON roundtrip", () => {
@@ -318,6 +319,7 @@ describe("chartSpecJsonSchema drift guard", () => {
         { type: "window", op: "running_sum", field: "Profit", as: "Cumulative" },
         { type: "bin", field: "Profit", binCount: 8, as: "Bins" },
         { type: "lookup", from: "Targets!A1:B13", fields: ["Target"], default: 0 },
+        { type: "pivot", category: "Region", key: "Month", value: "Sales", op: "sum" },
       ],
       config: {
         theme: {

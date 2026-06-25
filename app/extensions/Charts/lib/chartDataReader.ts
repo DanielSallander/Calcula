@@ -15,6 +15,8 @@ import type {
   SeriesOrientation,
   TransformSpec,
   TransformDiagnostic,
+  TidyData,
+  TidyField,
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
@@ -112,9 +114,12 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
     ? parseColumnOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series)
     : parseRowOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series);
 
+  // Long-format view of the source columns, for the pivot transform.
+  const tidyData = buildTidyData(grid, numRows, numCols, hasHeaders, seriesOrientation);
+
   // Apply data transforms if specified
   if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-    parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData);
+    parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData, tidyData);
   }
 
   const unfilteredData = parsedData;
@@ -182,6 +187,41 @@ async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
 function withCategoryField(d: ParsedChartData): ParsedChartData {
   const categoryField = detectCategoryField(d.categories);
   return categoryField ? { ...d, categoryField } : d;
+}
+
+/**
+ * Build a long-format view of the source range — one field per source column
+ * (columns orientation) or per source row (rows orientation), named by its
+ * header. Used by the pivot transform to reshape long tables into wide series.
+ */
+function buildTidyData(
+  grid: string[][],
+  numRows: number,
+  numCols: number,
+  hasHeaders: boolean,
+  orientation: SeriesOrientation,
+): TidyData {
+  const fields: TidyField[] = [];
+
+  if (orientation === "columns") {
+    const dataStartRow = hasHeaders ? 1 : 0;
+    for (let c = 0; c < numCols; c++) {
+      const header = hasHeaders ? (grid[0]?.[c] ?? "").trim() : "";
+      const values: string[] = [];
+      for (let r = dataStartRow; r < numRows; r++) values.push(grid[r]?.[c] ?? "");
+      fields.push({ name: header || `Column ${c + 1}`, values });
+    }
+  } else {
+    const dataStartCol = hasHeaders ? 1 : 0;
+    for (let r = 0; r < numRows; r++) {
+      const header = hasHeaders ? (grid[r]?.[0] ?? "").trim() : "";
+      const values: string[] = [];
+      for (let c = dataStartCol; c < numCols; c++) values.push(grid[r]?.[c] ?? "");
+      fields.push({ name: header || `Row ${r + 1}`, values });
+    }
+  }
+
+  return { fields };
 }
 
 /**

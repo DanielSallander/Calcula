@@ -834,6 +834,7 @@ export const chartSpecJsonSchema: object = {
         { $ref: "#/definitions/WindowTransform" },
         { $ref: "#/definitions/BinTransform" },
         { $ref: "#/definitions/LookupTransform" },
+        { $ref: "#/definitions/PivotTransform" },
       ],
     },
     FilterTransform: {
@@ -921,6 +922,19 @@ export const chartSpecJsonSchema: object = {
         },
         fields: { type: "array", items: { type: "string" }, description: "Series names from the secondary source to add. Omit to add all." },
         default: { type: "number", description: "Value used when a category has no match. Default: 0." },
+      },
+      additionalProperties: false,
+    },
+    PivotTransform: {
+      type: "object",
+      description: "Reshape a long source table into wide series: spread the distinct values of `key` into series across `category`, aggregating `value`. Operates on the source columns (by header name) — place it first.",
+      required: ["type", "category", "key", "value"],
+      properties: {
+        type: { type: "string", const: "pivot" },
+        category: { type: "string", description: "Source column whose distinct values become the categories (X)." },
+        key: { type: "string", description: "Source column whose distinct values become the series." },
+        value: { type: "string", description: "Source column whose values are aggregated into each cell." },
+        op: { type: "string", enum: ["sum", "mean", "median", "min", "max", "count"], description: "Aggregation for multiple rows sharing a (category, key). Default: \"sum\"." },
       },
       additionalProperties: false,
     },
@@ -1416,6 +1430,16 @@ export function generateSpecReference(): string {
   lines.push("| from | DataSource | yes | A1 reference, named range, or DataRangeRef |");
   lines.push("| fields | string[] | no | Series names to add (omit = all) |");
   lines.push("| default | number | no | Value for unmatched categories (default: 0) |");
+  lines.push("");
+  lines.push("### pivot");
+  lines.push("Reshape a long source table into wide series (spread a key column into series). Place it first.");
+  lines.push("| Property | Type | Required | Description |");
+  lines.push("|----------|------|----------|-------------|");
+  lines.push("| type | \"pivot\" | yes | |");
+  lines.push("| category | string | yes | Source column -> categories (X) |");
+  lines.push("| key | string | yes | Source column -> series |");
+  lines.push("| value | string | yes | Source column -> aggregated cell values |");
+  lines.push("| op | string | no | sum, mean, median, min, max, count (default: sum) |");
   lines.push("");
   lines.push("Example: Filter and sort a bar chart:");
   lines.push("```json");

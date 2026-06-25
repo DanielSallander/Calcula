@@ -14,6 +14,8 @@ import type {
   WindowTransform,
   BinTransform,
   LookupTransform,
+  PivotTransform,
+  TidyData,
   AggregateOp,
 } from "../types";
 import {
@@ -24,6 +26,7 @@ import {
   type FormulaScope,
   type FormulaValue,
 } from "./chartFormula";
+import { parseDisplayNumber } from "./chartFieldTypes";
 
 // ============================================================================
 // Public API
@@ -42,8 +45,9 @@ export function applyTransforms(
   transforms: TransformSpec[],
   diagnostics?: TransformDiagnostic[],
   lookupData?: Map<number, ParsedChartData>,
+  tidyData?: TidyData,
 ): ParsedChartData {
-  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData), data);
+  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData, tidyData), data);
 }
 
 // ============================================================================
@@ -56,6 +60,7 @@ function applyOne(
   index: number,
   diagnostics?: TransformDiagnostic[],
   lookupData?: Map<number, ParsedChartData>,
+  tidyData?: TidyData,
 ): ParsedChartData {
   switch (transform.type) {
     case "filter":
@@ -72,6 +77,8 @@ function applyOne(
       return applyBin(data, transform, index, diagnostics);
     case "lookup":
       return applyLookup(data, transform, index, diagnostics, lookupData);
+    case "pivot":
+      return applyPivot(data, transform, index, diagnostics, tidyData);
     default: {
       const unknownType = (transform as { type?: string }).type ?? "unknown";
       diagnostics?.push({
@@ -580,6 +587,76 @@ function applyLookup(
   }
 
   return { categories: data.categories, series };
+}
+
+// ============================================================================
+// Pivot (long -> wide reshape of the source)
+// ============================================================================
+
+function applyPivot(
+  data: ParsedChartData,
+  t: PivotTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+  tidyData?: TidyData,
+): ParsedChartData {
+  if (!tidyData) {
+    report(diagnostics, index, "pivot", "warning", "Pivot: requires a cell-range data source — left unchanged.");
+    return data;
+  }
+
+  const catField = tidyData.fields.find((f) => f.name === t.category);
+  const keyField = tidyData.fields.find((f) => f.name === t.key);
+  const valField = tidyData.fields.find((f) => f.name === t.value);
+
+  const missing: string[] = [];
+  if (!catField) missing.push(t.category);
+  if (!keyField) missing.push(t.key);
+  if (!valField) missing.push(t.value);
+  if (!catField || !keyField || !valField) {
+    report(diagnostics, index, "pivot", "warning", `Pivot: unknown column(s): ${missing.join(", ")} — left unchanged.`);
+    return data;
+  }
+
+  const op = t.op ?? "sum";
+  const rowCount = Math.min(catField.values.length, keyField.values.length, valField.values.length);
+
+  const categories: string[] = [];
+  const catIndex = new Map<string, number>();
+  const keys: string[] = [];
+  const keyIndex = new Map<string, number>();
+  // grouped[categoryIndex][keyIndex] = the numeric values to aggregate.
+  const grouped: number[][][] = [];
+
+  for (let r = 0; r < rowCount; r++) {
+    const cat = catField.values[r] ?? "";
+    const key = keyField.values[r] ?? "";
+    const num = parseDisplayNumber(valField.values[r] ?? "");
+
+    let ci = catIndex.get(cat);
+    if (ci === undefined) {
+      ci = categories.length;
+      catIndex.set(cat, ci);
+      categories.push(cat);
+      grouped.push([]);
+    }
+    let ki = keyIndex.get(key);
+    if (ki === undefined) {
+      ki = keys.length;
+      keyIndex.set(key, ki);
+      keys.push(key);
+    }
+    if (!grouped[ci][ki]) grouped[ci][ki] = [];
+    if (!Number.isNaN(num)) grouped[ci][ki].push(num);
+  }
+
+  const series = keys.map((name, ki) => ({
+    name,
+    color: null,
+    values: categories.map((_, ci) => computeAggregate(op, grouped[ci][ki] ?? [])),
+  }));
+
+  return { categories, series };
 }
 
 // ============================================================================
