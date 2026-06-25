@@ -556,8 +556,8 @@ export interface ValueCondition {
 // Scale Specification
 // ============================================================================
 
-/** Scale type for value axes. */
-export type ScaleType = "linear" | "log" | "pow" | "sqrt";
+/** Scale type for value axes. "time" marks a temporal axis (epoch-ms domain). */
+export type ScaleType = "linear" | "log" | "pow" | "sqrt" | "time";
 
 /** Scale configuration for a value axis. */
 export interface ScaleSpec {

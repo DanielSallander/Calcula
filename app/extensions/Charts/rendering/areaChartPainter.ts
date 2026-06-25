@@ -6,7 +6,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOpti
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { applyFillStyle } from "./gradientFill";
-import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
+import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -15,6 +15,8 @@ import {
   drawTitle,
   drawLegend,
   formatTickValue,
+  resolveScatterXAxis,
+  type ScatterXAxis,
 } from "./chartPainterUtils";
 
 // ============================================================================
@@ -87,10 +89,9 @@ export function paintAreaChart(
     [plotArea.y + plotArea.height, plotArea.y],
   );
 
-  const xScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
+  // Opt-in quantitative/temporal X (when xAxis.scale is set and categories are
+  // numeric/dates); otherwise evenly-spaced categories.
+  const xAxis = resolveScatterXAxis(data, spec, plotArea, { requireScale: true });
 
   // Compute the baseline Y pixel position (y=0, clamped to plot area)
   const baselineY = Math.min(
@@ -121,7 +122,7 @@ export function paintAreaChart(
 
     for (let ci = 0; ci < data.categories.length; ci++) {
       let rawValue = series.values[ci] ?? 0;
-      const x = xScale.scaleIndex(ci);
+      const x = xAxis.xOf(ci);
 
       if (isPercent && categoryTotals[ci] > 0) {
         rawValue = (rawValue / categoryTotals[ci]) * 100;
@@ -152,7 +153,7 @@ export function paintAreaChart(
   }
 
   // 4. Axes
-  drawAreaAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  drawAreaAxes(ctx, xAxis, yScale, plotArea, spec, theme);
 
   // 5. Areas and lines (clip to plot area)
   ctx.save();
@@ -431,7 +432,7 @@ function lineStepPath(
 
 function drawAreaAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  xScale: ReturnType<typeof createPointScale>,
+  xAxis: ScatterXAxis,
   yScale: ReturnType<typeof createLinearScale>,
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
@@ -459,28 +460,27 @@ function drawAreaAxes(
     ctx.fillStyle = theme.axisLabelColor;
     ctx.font = `${theme.labelFontSize}px ${theme.fontFamily}`;
 
-    for (let ci = 0; ci < xScale.domain.length; ci++) {
-      const category = xScale.domain[ci];
-      const x = xScale.scaleIndex(ci);
+    for (const tick of xAxis.ticks) {
+      const x = tick.x;
       const y = xAxisY + 4;
 
       ctx.save();
       if (spec.xAxis.labelAngle === 0) {
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
-        ctx.fillText(category, x, y);
+        ctx.fillText(tick.label, x, y);
       } else if (spec.xAxis.labelAngle === 45) {
         ctx.translate(x, y);
         ctx.rotate(-Math.PI / 4);
         ctx.textAlign = "right";
         ctx.textBaseline = "top";
-        ctx.fillText(category, 0, 0);
+        ctx.fillText(tick.label, 0, 0);
       } else {
         ctx.translate(x, y);
         ctx.rotate(-Math.PI / 2);
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        ctx.fillText(category, 0, 0);
+        ctx.fillText(tick.label, 0, 0);
       }
       ctx.restore();
     }
@@ -577,10 +577,7 @@ export function computeAreaPointMarkers(
     [plotArea.y + plotArea.height, plotArea.y],
   );
 
-  const xScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
+  const xAxis = resolveScatterXAxis(data, spec, plotArea, { requireScale: true });
 
   // Pre-compute category totals for percent stacking
   const categoryTotals: number[] = [];
@@ -618,7 +615,7 @@ export function computeAreaPointMarkers(
       markers.push({
         seriesIndex: si,
         categoryIndex: ci,
-        cx: xScale.scaleIndex(ci),
+        cx: xAxis.xOf(ci),
         cy: yScale.scale(displayValue),
         radius: markerRadius,
         value: originalValue,

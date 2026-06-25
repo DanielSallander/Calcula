@@ -282,8 +282,8 @@ export const chartSpecJsonSchema: object = {
       properties: {
         type: {
           type: "string",
-          enum: ["linear", "log", "pow", "sqrt"],
-          description: "Scale type. Default: \"linear\". Use \"log\" for exponential data, \"sqrt\" for area-proportional.",
+          enum: ["linear", "log", "pow", "sqrt", "time"],
+          description: "Scale type. Default: \"linear\". Use \"log\" for exponential data, \"sqrt\" for area-proportional, \"time\" for a temporal X axis on line/area/scatter (when the category column is dates).",
         },
         domain: {
           type: "array",

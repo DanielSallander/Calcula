@@ -712,24 +712,30 @@ export interface ScatterXAxis {
 }
 
 /**
- * Resolve the X axis for scatter/bubble charts. When the data carries a typed
- * `categoryField`, the X axis is value-proportional (quantitative, honoring
- * xAxis.scale/min/max/tickFormat) or time-proportional (temporal, with
- * calendar-aware date ticks). Otherwise it falls back to evenly-spaced
- * categories (the original behavior), so charts with text categories are
- * unaffected.
+ * Resolve the cartesian X axis. When the data carries a typed `categoryField`,
+ * the X axis is value-proportional (quantitative, honoring xAxis.scale/min/max/
+ * tickFormat) or time-proportional (temporal, with calendar-aware date ticks).
+ * Otherwise it falls back to evenly-spaced categories (the original behavior),
+ * so charts with text categories are unaffected.
+ *
+ * `options.requireScale` makes the proportional axis opt-in: it is used only
+ * when the user has set `xAxis.scale`. Scatter/bubble leave it off (proportional
+ * is their natural default); line/area turn it on so existing category-axis
+ * charts stay pixel-identical unless a value/time axis is explicitly requested.
  */
 export function resolveScatterXAxis(
   data: ParsedChartData,
   spec: ChartSpec,
   plotArea: { x: number; width: number },
+  options?: { requireScale?: boolean },
 ): ScatterXAxis {
   const range: [number, number] = [plotArea.x, plotArea.x + plotArea.width];
   const lo = Math.min(range[0], range[1]);
   const hi = Math.max(range[0], range[1]);
   const field = data.categoryField;
+  const optedIn = !options?.requireScale || spec.xAxis.scale != null;
 
-  if (field && field.values.length === data.categories.length && field.values.length > 0) {
+  if (field && optedIn && field.values.length === data.categories.length && field.values.length > 0) {
     const cv = field.values;
     const xMin = spec.xAxis.min ?? Math.min(...cv);
     const xMax = spec.xAxis.max ?? Math.max(...cv);

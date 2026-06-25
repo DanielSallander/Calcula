@@ -126,6 +126,27 @@ export const CHART_EXAMPLES: ChartExample[] = [
     },
   },
 
+  {
+    id: "time-series-line",
+    name: "Time series (date axis)",
+    description: "A line on a true time axis — set xAxis.scale to \"time\" and use a date category column for proportionally-spaced points with calendar-aware ticks.",
+    category: "Basics",
+    spec: {
+      mark: "line",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [{ name: "Value", sourceIndex: 1, color: null }],
+      title: "Over Time",
+      xAxis: { title: "Date", gridLines: false, showLabels: true, labelAngle: 0, min: null, max: null, scale: { type: "time" } },
+      yAxis: axis(null, true),
+      legend: { visible: false, position: "bottom" },
+      palette: "default",
+      markOptions: { interpolation: "smooth", lineWidth: 2, showMarkers: true },
+    },
+  },
+
   // ── Styling ──────────────────────────────────────────────────────────────
   {
     id: "conditional-color",
