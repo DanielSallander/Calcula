@@ -20,6 +20,7 @@ import {
 import { MonacoSpecEditor } from "./MonacoSpecEditor";
 import { generateSpecReference } from "../lib/chartSpecSchema";
 import { generateSpecGuide } from "../lib/chartSpecGuide";
+import { getExamplesByCategory, type ChartExample } from "../lib/chartExamples";
 
 // ============================================================================
 // Styles
@@ -465,6 +466,49 @@ function GuidePanel(): React.ReactElement {
 }
 
 // ============================================================================
+// Examples Panel
+// ============================================================================
+
+function ExamplesPanel({ onLoad }: { onLoad: (example: ChartExample) => void }): React.ReactElement {
+  const grouped = getExamplesByCategory();
+  return (
+    <div style={referencePanelStyle}>
+      <div style={{ fontSize: "12px", color: "#888", marginBottom: "12px" }}>
+        Ready-to-load starting points. Loading one replaces the editor contents —
+        adapt the <code style={{ color: "#ce9178" }}>data</code> and{" "}
+        <code style={{ color: "#ce9178" }}>series</code> to your own sheet.
+      </div>
+      {Object.entries(grouped).map(([category, examples]) => (
+        <div key={category}>
+          <h2 style={{ fontSize: "15px", fontWeight: 600, margin: "16px 0 8px 0", color: "#569cd6" }}>{category}</h2>
+          {examples.map((ex) => (
+            <div
+              key={ex.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "12px",
+                padding: "8px 10px",
+                marginBottom: "6px",
+                border: "1px solid #3c3c3c",
+                borderRadius: "4px",
+                backgroundColor: "#252526",
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, color: "#e0e0e0" }}>{ex.name}</div>
+                <div style={{ fontSize: "12px", color: "#888" }}>{ex.description}</div>
+              </div>
+              <button style={btnStyle} onClick={() => onLoad(ex)}>Load</button>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================================
 // AI Prompt Panel
 // ============================================================================
 
@@ -687,7 +731,7 @@ function AiPromptPanel({ currentSpec }: { currentSpec: string }): React.ReactEle
 // View Modes
 // ============================================================================
 
-type ViewMode = "editor" | "reference" | "guide" | "ai-prompt";
+type ViewMode = "editor" | "reference" | "guide" | "examples" | "ai-prompt";
 
 // ============================================================================
 // Main App Component
@@ -848,6 +892,12 @@ export function ChartSpecEditorApp(): React.ReactElement {
           Guide
         </button>
         <button
+          style={viewMode === "examples" ? btnActiveStyle : btnStyle}
+          onClick={() => setViewMode("examples")}
+        >
+          Examples
+        </button>
+        <button
           style={viewMode === "ai-prompt" ? btnActiveStyle : btnStyle}
           onClick={() => setViewMode("ai-prompt")}
         >
@@ -890,6 +940,13 @@ export function ChartSpecEditorApp(): React.ReactElement {
         </div>
       ) : viewMode === "guide" ? (
         <GuidePanel />
+      ) : viewMode === "examples" ? (
+        <ExamplesPanel
+          onLoad={(ex) => {
+            handleChange(JSON.stringify(ex.spec, null, 2));
+            setViewMode("editor");
+          }}
+        />
       ) : (
         <AiPromptPanel currentSpec={jsonText} />
       )}
@@ -918,6 +975,7 @@ export function ChartSpecEditorApp(): React.ReactElement {
           viewMode === "editor" ? `${lineCount} lines` :
           viewMode === "reference" ? "Reference" :
           viewMode === "guide" ? "Guide" :
+          viewMode === "examples" ? "Examples" :
           "AI Prompt"
         }</span>
       </div>

@@ -9,6 +9,7 @@ import { getSeriesColor } from "./chartTheme";
 import type { LinearScale, BandScale } from "./scales";
 import { createScaleFromSpec, createPointScale } from "./scales";
 import { applyFillStyle } from "./gradientFill";
+import { timeTicks } from "../lib/chartFieldTypes";
 
 // ============================================================================
 // Layout Computation (shared for cartesian charts)
@@ -711,9 +712,10 @@ export interface ScatterXAxis {
 }
 
 /**
- * Resolve the X axis for scatter/bubble charts. When the data carries numeric
- * `categoryValues`, the X axis is quantitative — value-proportional and honoring
- * xAxis.scale/min/max/tickFormat. Otherwise it falls back to evenly-spaced
+ * Resolve the X axis for scatter/bubble charts. When the data carries a typed
+ * `categoryField`, the X axis is value-proportional (quantitative, honoring
+ * xAxis.scale/min/max/tickFormat) or time-proportional (temporal, with
+ * calendar-aware date ticks). Otherwise it falls back to evenly-spaced
  * categories (the original behavior), so charts with text categories are
  * unaffected.
  */
@@ -723,16 +725,29 @@ export function resolveScatterXAxis(
   plotArea: { x: number; width: number },
 ): ScatterXAxis {
   const range: [number, number] = [plotArea.x, plotArea.x + plotArea.width];
-  const cv = data.categoryValues;
+  const lo = Math.min(range[0], range[1]);
+  const hi = Math.max(range[0], range[1]);
+  const field = data.categoryField;
 
-  if (cv && cv.length === data.categories.length && cv.length > 0 && cv.every((v) => Number.isFinite(v))) {
+  if (field && field.values.length === data.categories.length && field.values.length > 0) {
+    const cv = field.values;
     const xMin = spec.xAxis.min ?? Math.min(...cv);
     const xMax = spec.xAxis.max ?? Math.max(...cv);
+    const tickCount = spec.xAxis.tickCount ?? 5;
+
+    if (field.type === "temporal") {
+      // Linear positioning over epoch-ms with calendar-aware date ticks.
+      const span = (xMax - xMin) || 1;
+      const xAt = (ms: number) => range[0] + ((ms - xMin) / span) * (range[1] - range[0]);
+      const ticks = timeTicks(xMin, xMax, tickCount)
+        .map((t) => ({ x: xAt(t.value), label: t.label }))
+        .filter((tk) => tk.x >= lo - 0.5 && tk.x <= hi + 0.5);
+      return { xOf: (ci) => xAt(cv[ci]), ticks, numeric: true };
+    }
+
+    // Quantitative: value-proportional scale (honors xAxis.scale/min/max/tickFormat).
     const scale = createScaleFromSpec(spec.xAxis.scale, [xMin, xMax], range);
     const fmt = spec.xAxis.tickFormat;
-    const tickCount = spec.xAxis.tickCount ?? 5;
-    const lo = Math.min(range[0], range[1]);
-    const hi = Math.max(range[0], range[1]);
     const ticks = scale
       .ticks(tickCount)
       .map((t) => ({ x: scale.scale(t), label: fmt ? formatTickValueWithFormat(t, fmt) : formatTickValue(t) }))

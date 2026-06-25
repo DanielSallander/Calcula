@@ -177,6 +177,10 @@ Interpolation modes: \`"linear"\`, \`"smooth"\`, \`"step"\`
 \`\`\`
 Shapes: \`"circle"\`, \`"square"\`, \`"diamond"\`, \`"triangle"\`
 
+**Quantitative & temporal X:** when the category column is entirely numeric or
+entirely dates, scatter and bubble charts position points by value (or time) on
+a proportional X axis — not evenly spaced. Dates get calendar-aware tick labels.
+
 ### Pie / Donut
 \`\`\`json
 "markOptions": {

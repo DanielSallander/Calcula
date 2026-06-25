@@ -40,7 +40,7 @@ describe("resolveScatterXAxis", () => {
     const data: ParsedChartData = {
       categories: ["0", "10", "20"],
       series: [{ name: "Y", values: [1, 2, 3], color: null }],
-      categoryValues: [0, 10, 20],
+      categoryField: { type: "quantitative", values: [0, 10, 20] },
     };
     const xAxis = resolveScatterXAxis(data, scatterSpec(), plotArea);
     expect(xAxis.numeric).toBe(true);
@@ -53,7 +53,7 @@ describe("resolveScatterXAxis", () => {
     const data: ParsedChartData = {
       categories: ["0", "10", "100"],
       series: [{ name: "Y", values: [1, 2, 3], color: null }],
-      categoryValues: [0, 10, 100],
+      categoryField: { type: "quantitative", values: [0, 10, 100] },
     };
     const xAxis = resolveScatterXAxis(data, scatterSpec(), plotArea);
     const gap01 = xAxis.xOf(1) - xAxis.xOf(0);
@@ -65,7 +65,7 @@ describe("resolveScatterXAxis", () => {
     const data: ParsedChartData = {
       categories: ["0", "100"],
       series: [{ name: "Y", values: [1, 2], color: null }],
-      categoryValues: [0, 100],
+      categoryField: { type: "quantitative", values: [0, 100] },
     };
     const spec = scatterSpec({
       xAxis: { title: null, gridLines: false, showLabels: true, labelAngle: 0, min: 0, max: 200 },
@@ -94,7 +94,7 @@ describe("scatter/bubble markers use numeric X when available", () => {
     const data: ParsedChartData = {
       categories: ["0", "10", "20"],
       series: [{ name: "Y", values: [5, 6, 7], color: null }],
-      categoryValues: [0, 10, 20],
+      categoryField: { type: "quantitative", values: [0, 10, 20] },
     };
     const markers = computeScatterPointMarkers(data, scatterSpec(), layout, theme);
     expect(markers).toHaveLength(3);
@@ -110,7 +110,7 @@ describe("scatter/bubble markers use numeric X when available", () => {
         { name: "Y", values: [5, 6, 7], color: null },
         { name: "Size", values: [1, 2, 3], color: null },
       ],
-      categoryValues: [0, 50, 100],
+      categoryField: { type: "quantitative", values: [0, 50, 100] },
     };
     const spec = scatterSpec({ mark: "bubble", series: [
       { name: "Y", sourceIndex: 1, color: null },
@@ -133,5 +133,35 @@ describe("scatter/bubble markers use numeric X when available", () => {
     const gap01 = markers[1].cx - markers[0].cx;
     const gap12 = markers[2].cx - markers[1].cx;
     expect(gap01).toBeCloseTo(gap12);
+  });
+});
+
+describe("temporal X axis (C2)", () => {
+  const temporalData: ParsedChartData = {
+    categories: ["2024-01-01", "2024-07-01", "2025-01-01"],
+    series: [{ name: "Y", values: [1, 2, 3], color: null }],
+    categoryField: {
+      type: "temporal",
+      values: [Date.UTC(2024, 0, 1), Date.UTC(2024, 6, 1), Date.UTC(2025, 0, 1)],
+    },
+  };
+
+  it("positions points proportionally in time with date-formatted ticks", () => {
+    const xAxis = resolveScatterXAxis(temporalData, scatterSpec(), plotArea);
+    expect(xAxis.numeric).toBe(true);
+    expect(xAxis.xOf(0)).toBeCloseTo(0);
+    expect(xAxis.xOf(2)).toBeCloseTo(100);
+    // Mid date sits roughly halfway (≈49.5% of the year).
+    expect(xAxis.xOf(1)).toBeGreaterThan(40);
+    expect(xAxis.xOf(1)).toBeLessThan(60);
+    expect(xAxis.ticks.length).toBeGreaterThan(0);
+    expect(typeof xAxis.ticks[0].label).toBe("string");
+  });
+
+  it("scatter markers are positioned by timestamp", () => {
+    const markers = computeScatterPointMarkers(temporalData, scatterSpec(), layout, theme);
+    expect(markers).toHaveLength(3);
+    expect(markers[0].cx).toBeCloseTo(0);
+    expect(markers[2].cx).toBeCloseTo(100);
   });
 });

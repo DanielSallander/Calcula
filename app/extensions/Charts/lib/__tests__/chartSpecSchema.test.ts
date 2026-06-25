@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { chartSpecJsonSchema, generateSpecReference } from "../chartSpecSchema";
 import { buildDefaultSpec } from "../chartSpecDefaults";
 import { PALETTE_NAMES } from "../../rendering/chartTheme";
+import { schemaViolations, collectRefs } from "./schemaValidate";
 import type { ChartSpec, ChartType, DataRangeRef } from "../../types";
 
 // ============================================================================
@@ -171,74 +172,6 @@ describe("generateSpecReference", () => {
 const SCHEMA = chartSpecJsonSchema as any;
 const DEFS = SCHEMA.definitions as Record<string, any>;
 
-function resolveRef(node: any): any {
-  let n = node;
-  while (n && n.$ref) {
-    n = DEFS[String(n.$ref).replace("#/definitions/", "")];
-  }
-  return n;
-}
-
-/**
- * Collect `additionalProperties:false` (unknown property) and missing-`required`
- * violations of `value` against `node`. oneOf/anyOf passes if ANY branch is clean.
- */
-function violations(value: any, node: any, path: string): string[] {
-  const s = resolveRef(node);
-  if (!s) return [];
-
-  const branches: any[] | undefined = s.oneOf ?? s.anyOf;
-  if (Array.isArray(branches)) {
-    let best: string[] | null = null;
-    for (const branch of branches) {
-      const errs = violations(value, branch, path);
-      if (errs.length === 0) return [];
-      if (best === null || errs.length < best.length) best = errs;
-    }
-    return best ?? [];
-  }
-
-  const looksObject = s.type === "object" || s.properties !== undefined;
-  if (looksObject && value && typeof value === "object" && !Array.isArray(value)) {
-    const out: string[] = [];
-    const props = s.properties ?? {};
-    if (Array.isArray(s.required)) {
-      for (const req of s.required) {
-        if (value[req] === undefined) out.push(`${path}: missing required '${req}'`);
-      }
-    }
-    for (const key of Object.keys(value)) {
-      if (value[key] === undefined) continue;
-      if (props[key] !== undefined) {
-        out.push(...violations(value[key], props[key], `${path}.${key}`));
-      } else if (s.additionalProperties === false) {
-        out.push(`${path}: unknown property '${key}'`);
-      }
-    }
-    return out;
-  }
-
-  if ((s.type === "array" || s.items !== undefined) && Array.isArray(value)) {
-    const out: string[] = [];
-    value.forEach((item, i) => out.push(...violations(item, s.items, `${path}[${i}]`)));
-    return out;
-  }
-
-  return [];
-}
-
-function collectRefs(node: any, acc: string[]): void {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    node.forEach((n) => collectRefs(n, acc));
-    return;
-  }
-  for (const [k, v] of Object.entries(node)) {
-    if (k === "$ref" && typeof v === "string") acc.push(v);
-    else collectRefs(v, acc);
-  }
-}
-
 // Canonical ChartSpec top-level keys (mirror of types.ts ChartSpec). Update only
 // when ChartSpec itself changes — then update the schema to match.
 const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
@@ -277,12 +210,41 @@ describe("chartSpecJsonSchema drift guard", () => {
     expect(missing).toEqual([]);
   });
 
-  it("wires every *MarkOptions definition into the top-level markOptions oneOf", () => {
-    const markOptionDefs = Object.keys(DEFS).filter((d) => d.endsWith("MarkOptions"));
-    const wired = new Set(
-      (SCHEMA.properties.markOptions.oneOf as any[]).map((b) => b.$ref?.replace("#/definitions/", "")),
+  it("narrows markOptions per mark (every chart type covered, mapped to a real def)", () => {
+    const rules = SCHEMA.allOf as any[];
+    expect(Array.isArray(rules)).toBe(true);
+
+    // Every chart type is covered by some if-condition.
+    const coveredMarks = new Set(rules.flatMap((r) => r.if.properties.mark.enum as string[]));
+    for (const mark of ALL_CHART_TYPES) {
+      expect(coveredMarks.has(mark)).toBe(true);
+    }
+
+    // Each then-branch points at a real *MarkOptions definition, and every
+    // chart-type options def is referenced (Rule/Text are layer-only).
+    const narrowedDefs = rules.map((r) => r.then.properties.markOptions.$ref.replace("#/definitions/", ""));
+    for (const def of narrowedDefs) {
+      expect(DEFS[def]).toBeDefined();
+    }
+    const chartTypeOptionDefs = Object.keys(DEFS).filter(
+      (d) => d.endsWith("MarkOptions") && d !== "RuleMarkOptions" && d !== "TextMarkOptions",
     );
-    expect(markOptionDefs.filter((d) => !wired.has(d))).toEqual([]);
+    for (const def of chartTypeOptionDefs) {
+      expect(narrowedDefs).toContain(def);
+    }
+  });
+
+  it("accepts markOptions matching the chart type", () => {
+    const line = { ...buildDefaultSpec(dataRange, true, autoDetected, "line"), markOptions: { interpolation: "smooth", showDropLines: true } };
+    expect(schemaViolations(line, SCHEMA)).toEqual([]);
+    const bar = { ...buildDefaultSpec(dataRange, true, autoDetected, "bar"), markOptions: { borderRadius: 4, stackMode: "stacked" } };
+    expect(schemaViolations(bar, SCHEMA)).toEqual([]);
+  });
+
+  it("rejects markOptions that belong to a different mark", () => {
+    // seriesOverlap is a bar-only option; invalid under a line chart.
+    const spec = { ...buildDefaultSpec(dataRange, true, autoDetected, "line"), markOptions: { seriesOverlap: 5 } as any };
+    expect(schemaViolations(spec, SCHEMA).length).toBeGreaterThan(0);
   });
 
   it("allows any numeric axis label angle (not just 0/45/90)", () => {
@@ -300,7 +262,7 @@ describe("chartSpecJsonSchema drift guard", () => {
   it("validates the default spec for every chart type", () => {
     for (const mark of ALL_CHART_TYPES) {
       const spec = buildDefaultSpec(dataRange, true, autoDetected, mark);
-      expect(violations(spec, SCHEMA, mark)).toEqual([]);
+      expect(schemaViolations(spec, SCHEMA)).toEqual([]);
     }
   });
 
@@ -382,6 +344,6 @@ describe("chartSpecJsonSchema drift guard", () => {
       ],
     };
 
-    expect(violations(spec, SCHEMA, "spec")).toEqual([]);
+    expect(schemaViolations(spec, SCHEMA)).toEqual([]);
   });
 });

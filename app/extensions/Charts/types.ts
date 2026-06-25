@@ -1050,6 +1050,24 @@ export interface ChartDefinition {
 // Parsed Data (output of chartDataReader)
 // ============================================================================
 
+/**
+ * The inferred type of a data field (Vega-Lite inspired). Series are always
+ * quantitative in the current model; the category field can be any of these.
+ */
+export type FieldType = "nominal" | "ordinal" | "quantitative" | "temporal";
+
+/**
+ * A typed view of the category column, set only when it is fully quantitative
+ * or temporal. Drives a value-proportional (numeric) or time-proportional X
+ * axis for scatter/bubble charts instead of evenly-spaced categories.
+ */
+export interface CategoryField {
+  /** Whether the category values are plain numbers or timestamps. */
+  type: "quantitative" | "temporal";
+  /** Numeric value (quantitative) or epoch-milliseconds (temporal) per category. */
+  values: number[];
+}
+
 /** Parsed chart data ready for rendering. */
 export interface ParsedChartData {
   /** Category labels (X axis for cartesian, slice labels for radial). */
@@ -1061,11 +1079,10 @@ export interface ParsedChartData {
     color: string | null;
   }>;
   /**
-   * Numeric value of each category, set only when the category column is fully
-   * numeric. Enables a true quantitative X axis for scatter/bubble charts
-   * (value-proportional positioning) instead of evenly-spaced categories.
+   * Typed category field, present only when every category parses as a number
+   * or a date. Enables quantitative/temporal X axes for scatter & bubble.
    */
-  categoryValues?: number[];
+  categoryField?: CategoryField;
 }
 
 // ============================================================================

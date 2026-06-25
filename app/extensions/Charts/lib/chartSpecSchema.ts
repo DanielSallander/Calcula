@@ -3,6 +3,34 @@
 //          validation, and hover documentation in the chart spec editor.
 // CONTEXT: Mirrors the TypeScript ChartSpec interface from types.ts.
 
+/**
+ * Per-mark narrowing of `markOptions`: each chart type's options are validated
+ * against (and autocompleted as) the one matching *MarkOptions definition. This
+ * replaces an ambiguous `oneOf` — minimal options like `{ borderRadius: 4 }`
+ * match several branches, which the JSON language service reports as invalid.
+ */
+const MARK_OPTION_NARROWING = [
+  { marks: ["bar", "horizontalBar"], def: "BarMarkOptions" },
+  { marks: ["line"], def: "LineMarkOptions" },
+  { marks: ["area"], def: "AreaMarkOptions" },
+  { marks: ["scatter"], def: "ScatterMarkOptions" },
+  { marks: ["pie", "donut"], def: "PieMarkOptions" },
+  { marks: ["waterfall"], def: "WaterfallMarkOptions" },
+  { marks: ["combo"], def: "ComboMarkOptions" },
+  { marks: ["radar"], def: "RadarMarkOptions" },
+  { marks: ["bubble"], def: "BubbleMarkOptions" },
+  { marks: ["histogram"], def: "HistogramMarkOptions" },
+  { marks: ["funnel"], def: "FunnelMarkOptions" },
+  { marks: ["treemap"], def: "TreemapMarkOptions" },
+  { marks: ["stock"], def: "StockMarkOptions" },
+  { marks: ["boxPlot"], def: "BoxPlotMarkOptions" },
+  { marks: ["sunburst"], def: "SunburstMarkOptions" },
+  { marks: ["pareto"], def: "ParetoMarkOptions" },
+].map(({ marks, def }) => ({
+  if: { properties: { mark: { enum: marks } }, required: ["mark"] },
+  then: { properties: { markOptions: { $ref: `#/definitions/${def}` } } },
+}));
+
 /** JSON Schema object for ChartSpec, consumable by Monaco's JSON language service. */
 export const chartSpecJsonSchema: object = {
   $schema: "http://json-schema.org/draft-07/schema#",
@@ -64,27 +92,8 @@ export const chartSpecJsonSchema: object = {
       description: "Color palette name. Built-in palettes: 'default', 'vivid', 'pastel', 'ocean'.",
     },
     markOptions: {
-      description: "Mark-specific options. The available properties depend on the chart type (mark).",
-      oneOf: [
-        { $ref: "#/definitions/BarMarkOptions" },
-        { $ref: "#/definitions/LineMarkOptions" },
-        { $ref: "#/definitions/AreaMarkOptions" },
-        { $ref: "#/definitions/ScatterMarkOptions" },
-        { $ref: "#/definitions/PieMarkOptions" },
-        { $ref: "#/definitions/WaterfallMarkOptions" },
-        { $ref: "#/definitions/ComboMarkOptions" },
-        { $ref: "#/definitions/RadarMarkOptions" },
-        { $ref: "#/definitions/BubbleMarkOptions" },
-        { $ref: "#/definitions/HistogramMarkOptions" },
-        { $ref: "#/definitions/FunnelMarkOptions" },
-        { $ref: "#/definitions/TreemapMarkOptions" },
-        { $ref: "#/definitions/StockMarkOptions" },
-        { $ref: "#/definitions/BoxPlotMarkOptions" },
-        { $ref: "#/definitions/SunburstMarkOptions" },
-        { $ref: "#/definitions/ParetoMarkOptions" },
-        { $ref: "#/definitions/RuleMarkOptions" },
-        { $ref: "#/definitions/TextMarkOptions" },
-      ],
+      type: "object",
+      description: "Mark-specific options. The available properties depend on the chart type (`mark`) — see the matching *MarkOptions definition. Narrowed per mark by the schema's allOf/if-then rules.",
     },
     layers: {
       type: "array",
@@ -132,6 +141,8 @@ export const chartSpecJsonSchema: object = {
       items: { $ref: "#/definitions/SeriesRef" },
     },
   },
+  // Narrow markOptions to the matching definition based on the chart type.
+  allOf: MARK_OPTION_NARROWING,
   definitions: {
     DataRangeRef: {
       type: "object",
