@@ -147,6 +147,10 @@ export const chartSpecJsonSchema: object = {
       $ref: "#/definitions/EncodingSpec",
       description: "Encoding-channel description (x/y/color over a long table). Compiled to the series model before rendering.",
     },
+    repeat: {
+      $ref: "#/definitions/RepeatSpec",
+      description: "Small multiples: render one sub-chart per series in a tiled grid.",
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -969,6 +973,15 @@ export const chartSpecJsonSchema: object = {
         color: { $ref: "#/definitions/ChannelDef", description: "Splits the data into one series per distinct value of this field." },
         size: { $ref: "#/definitions/ChannelDef", description: "Sizes points by this field — renders as a bubble chart." },
         order: { $ref: "#/definitions/ChannelDef", description: "Sorts the data by this field (use `sort` for direction)." },
+      },
+      additionalProperties: false,
+    },
+    RepeatSpec: {
+      type: "object",
+      description: "Small multiples: render the chart once per series in a tiled grid, sharing the Y scale for comparability.",
+      properties: {
+        columns: { type: "integer", minimum: 1, description: "Number of columns in the grid. Default: auto (~sqrt of series count)." },
+        sharedYScale: { type: "boolean", description: "Share one Y scale across all sub-charts. Default: true." },
       },
       additionalProperties: false,
     },

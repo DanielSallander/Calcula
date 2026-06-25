@@ -1052,6 +1052,19 @@ export interface ChannelDef {
  * via a pivot); without it, `y` is a single series. Compiles to the series
  * model — it never reaches the painters.
  */
+/**
+ * Small-multiples: render the chart once per series in a tiled grid (the
+ * Vega-Lite `repeat` idea over the data's columns/series). Each sub-chart shows
+ * the categories against one series, sharing the Y scale for comparability.
+ * Faceting by a field's distinct values is a future extension.
+ */
+export interface RepeatSpec {
+  /** Number of columns in the grid. Default: auto (~√n). */
+  columns?: number;
+  /** Share one Y scale across all sub-charts (comparable). Default: true. */
+  sharedYScale?: boolean;
+}
+
 export interface EncodingSpec {
   /** Category axis (X). */
   x?: ChannelDef;
@@ -1121,6 +1134,12 @@ export interface ChartSpec {
    * axes) before rendering; the painters never see it.
    */
   encoding?: EncodingSpec;
+
+  /**
+   * Small multiples: render one sub-chart per series in a tiled grid. Composed
+   * above the painters (chartDispatch), so the painters never see it.
+   */
+  repeat?: RepeatSpec;
 }
 
 // ============================================================================

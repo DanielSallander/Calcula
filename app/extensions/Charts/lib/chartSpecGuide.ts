@@ -153,6 +153,23 @@ series model automatically.
 Wide data (one column per series) needs no encoding — each column is already a
 series.
 
+## Small Multiples (repeat)
+
+Add a \`repeat\` object to render the chart once **per series** in a tiled grid —
+ideal for comparing several metrics side by side. Each sub-chart is titled with
+its series name and shares one Y scale so the panels are comparable.
+
+\`\`\`json
+"repeat": { "columns": 2, "sharedYScale": true }
+\`\`\`
+
+- **columns** sets the grid width (default: auto, ~√n).
+- **sharedYScale** \`true\` (default) gives every panel the same Y range; set
+  \`false\` to scale each panel independently.
+
+Works with any mark. (Faceting by a field's distinct values is a future
+extension.)
+
 ## Cell References
 
 String fields support cell references for dynamic content:

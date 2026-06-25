@@ -441,6 +441,33 @@ export const CHART_EXAMPLES: ChartExample[] = [
       },
     },
   },
+
+  // ── Composition ──────────────────────────────────────────────────────────
+  {
+    id: "repeat-small-multiples",
+    name: "Small multiples (repeat)",
+    description: "Render one panel per series in a tiled grid, sharing the Y scale so the metrics are directly comparable.",
+    category: "Composition",
+    spec: {
+      mark: "line",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [
+        { name: "Revenue", sourceIndex: 1, color: null },
+        { name: "Cost", sourceIndex: 2, color: null },
+        { name: "Profit", sourceIndex: 3, color: null },
+      ],
+      title: "Metrics over Time",
+      xAxis: axis(),
+      yAxis: axis(null, true),
+      legend: { visible: false, position: "bottom" },
+      palette: "default",
+      markOptions: { interpolation: "smooth", lineWidth: 2, showMarkers: false },
+      repeat: { columns: 2, sharedYScale: true },
+    },
+  },
 ];
 
 // ============================================================================

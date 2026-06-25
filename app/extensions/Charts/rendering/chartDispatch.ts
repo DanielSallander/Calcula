@@ -88,6 +88,12 @@ export function dispatchPaint(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
+  // Small multiples: render one sub-chart per series into a tiled grid.
+  if (spec.repeat) {
+    paintRepeated(ctx, data, spec, layout, theme);
+    return;
+  }
+
   // Paint the primary mark
   paintMark(ctx, data, spec.mark, spec, layout, theme);
 
@@ -153,6 +159,103 @@ function paintMark(
 }
 
 // ============================================================================
+// Small Multiples (repeat)
+// ============================================================================
+
+/** A single cell rect in the small-multiples grid (in logical pixels). */
+export interface RepeatCell {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Tile a `width`x`height` area into a grid of `count` cells. Columns default to
+ * ~sqrt(count) for a roughly square grid; the last row may be partially filled.
+ * Pure (no canvas) so the grid math is unit-testable.
+ */
+export function repeatLayout(
+  count: number,
+  columns: number | undefined,
+  width: number,
+  height: number,
+): RepeatCell[] {
+  if (count <= 0) return [];
+  const cols = columns && columns > 0 ? Math.min(Math.floor(columns), count) : Math.ceil(Math.sqrt(count));
+  const rows = Math.ceil(count / cols);
+  const cellW = width / cols;
+  const cellH = height / rows;
+  const cells: RepeatCell[] = [];
+  for (let i = 0; i < count; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    cells.push({ x: c * cellW, y: r * cellH, width: cellW, height: cellH });
+  }
+  return cells;
+}
+
+/**
+ * Render the chart once per series into a tiled grid. Each sub-chart is a
+ * single-series version of the parent (same mark), titled with the series name,
+ * legend suppressed, sharing one Y scale for comparability (unless disabled).
+ * Per-facet hit geometry is omitted in v1 (selection targets the whole chart).
+ */
+function paintRepeated(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: ChartLayout,
+  theme: ChartRenderTheme,
+): void {
+  const seriesList = data.series;
+  if (seriesList.length === 0) return;
+
+  const cells = repeatLayout(seriesList.length, spec.repeat?.columns, layout.width, layout.height);
+
+  // Shared Y domain across all sub-charts (comparable scales).
+  let sharedMin: number | null = null;
+  let sharedMax: number | null = null;
+  if (spec.repeat?.sharedYScale !== false) {
+    const all = seriesList.flatMap((s) => s.values);
+    if (all.length > 0) {
+      sharedMin = Math.min(...all);
+      sharedMax = Math.max(...all);
+    }
+  }
+
+  for (let i = 0; i < seriesList.length; i++) {
+    const cell = cells[i];
+    const series = seriesList[i];
+    const subData: ParsedChartData = {
+      categories: data.categories,
+      series: [series],
+      categoryField: data.categoryField,
+    };
+    const subSpec: ChartSpec = {
+      ...spec,
+      repeat: undefined,
+      title: series.name,
+      legend: { ...spec.legend, visible: false },
+      layers: undefined,
+      trendlines: undefined,
+      dataLabels: undefined,
+      dataTable: undefined,
+      yAxis: sharedMin !== null && sharedMax !== null ? { ...spec.yAxis, min: sharedMin, max: sharedMax } : spec.yAxis,
+    };
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cell.x, cell.y, cell.width, cell.height);
+    ctx.clip();
+    ctx.translate(cell.x, cell.y);
+    const subLayout = dispatchComputeLayout(cell.width, cell.height, subSpec, subData, theme);
+    paintMark(ctx, subData, subSpec.mark, subSpec, subLayout, theme);
+    ctx.restore();
+  }
+}
+
+// ============================================================================
 // Layout Dispatch
 // ============================================================================
 
@@ -189,6 +292,8 @@ export function dispatchComputeGeometry(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): HitGeometry {
+  // Small multiples have no per-datum hit geometry in v1 (whole-chart selection).
+  if (spec.repeat) return { type: "bars", rects: [] };
   const def = getChartMark(spec.mark);
   return def ? def.computeGeometry(data, spec, layout, theme) : { type: "bars", rects: [] };
 }
