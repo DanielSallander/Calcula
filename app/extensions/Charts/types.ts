@@ -1103,6 +1103,25 @@ export interface ConcatSpec {
   columns?: number;
 }
 
+/**
+ * A named parameter — a variable referenceable from `filter`/`calculate`
+ * expressions (write it as `[Name]`, e.g. `value > [Threshold]`). The value is a
+ * literal, or read live from a single worksheet cell (`cellRef`) — when bound to
+ * a cell, the chart re-evaluates as that cell changes, giving spreadsheet-native
+ * interactivity. This is the foundation of the Vega-Lite param/selection model;
+ * interactive selection/widget bindings are layered on later.
+ */
+export interface ParamSpec {
+  /** Identifier used in expressions (as `[Name]`). Must not be a reserved name. */
+  name: string;
+  /** Literal default value (used when there is no cellRef, or the cell is empty). */
+  value?: number | string | boolean;
+  /** Single same-sheet cell reference (e.g. "=B1") read live for the value. */
+  cellRef?: string;
+  /** Optional human description (for the editor / documentation). */
+  description?: string;
+}
+
 export interface EncodingSpec {
   /** Category axis (X). */
   x?: ChannelDef;
@@ -1192,6 +1211,14 @@ export interface ChartSpec {
    * as a full chart. Takes precedence over `facet` and `repeat`.
    */
   concat?: ConcatSpec;
+
+  /**
+   * Named parameters referenceable from filter/calculate expressions (as
+   * `[Name]`). Resolved once per read (literal or live cell value) and injected
+   * into the expression scope. Cell-bound params make the chart react to grid
+   * edits. Definitions persist; live/interactive values (later) stay ephemeral.
+   */
+  params?: ParamSpec[];
 }
 
 // ============================================================================

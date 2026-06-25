@@ -159,6 +159,11 @@ export const chartSpecJsonSchema: object = {
       $ref: "#/definitions/ConcatSpec",
       description: "Concatenation: tile several independent child charts in a grid. Takes precedence over facet and repeat.",
     },
+    params: {
+      type: "array",
+      items: { $ref: "#/definitions/ParamSpec" },
+      description: "Named parameters referenceable from filter/calculate expressions as [Name]. Value is a literal or a live single-cell reference.",
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -1012,6 +1017,18 @@ export const chartSpecJsonSchema: object = {
       properties: {
         charts: { type: "array", items: { type: "object" }, description: "Child chart specifications, laid out left-to-right, top-to-bottom." },
         columns: { type: "integer", minimum: 1, description: "Number of columns in the grid. 1 = vertical stack, charts.length = single row. Default: auto (~sqrt)." },
+      },
+      additionalProperties: false,
+    },
+    ParamSpec: {
+      type: "object",
+      description: "A named parameter referenceable from filter/calculate expressions as [Name]. Value is a literal OR a live single same-sheet cell (cellRef, e.g. \"=B1\"); cell-bound params re-evaluate as that cell changes.",
+      required: ["name"],
+      properties: {
+        name: { type: "string", description: "Identifier used in expressions as [Name]. Must not be a reserved name ($index/$category/value/$value)." },
+        value: { type: ["number", "string", "boolean"], description: "Literal default value (used when there is no cellRef or the cell is empty)." },
+        cellRef: { type: "string", description: "Single same-sheet cell reference (e.g. \"=B1\") read live for the value." },
+        description: { type: "string", description: "Optional human description." },
       },
       additionalProperties: false,
     },

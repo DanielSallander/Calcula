@@ -21,6 +21,8 @@ import type {
 import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransforms } from "./chartTransforms";
+import { resolveParams } from "./chartParams";
+import type { FormulaValue } from "./chartFormula";
 import { readPivotChartData } from "./pivotChartDataReader";
 import { applyChartFilters } from "./chartFilters";
 import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
@@ -75,6 +77,10 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
     return { spec: resolvedSpec, data: { ...empty, concat }, unfilteredData: empty, diagnostics };
   }
 
+  // Resolve named parameters once (literal or live cell value); injected into
+  // filter/calculate expression scopes below. Empty map when none are declared.
+  const params = await resolveParams(resolvedSpec);
+
   // Handle pivot data source: read directly from pivot view
   if (isPivotDataSource(resolvedSpec.data)) {
     let parsedData = await readPivotChartData(resolvedSpec.data);
@@ -83,7 +89,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
       // Pre-resolve lookup sources (async) so the sync pipeline can join by index.
       const lookupData = await resolveLookupSources(resolvedSpec.transform);
-      parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData);
+      parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData, undefined, params);
     }
 
     const unfilteredData = parsedData;
@@ -145,7 +151,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
   // Apply data transforms if specified. Lookups are resolved against the lowered
   // transforms so encoding (which may prepend a pivot) keeps indices aligned.
   if (lowered.transform && lowered.transform.length > 0) {
-    parsedData = applyTransforms(parsedData, lowered.transform, diagnostics, lookupData, tidyData);
+    parsedData = applyTransforms(parsedData, lowered.transform, diagnostics, lookupData, tidyData, params);
   }
 
   const unfilteredData = parsedData;
@@ -157,7 +163,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
   // re-running transforms per panel). Unsupported specs return undefined → the
   // top-level data renders as a single chart.
   const facets = lowered.facet?.field
-    ? partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData)
+    ? partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params)
     : undefined;
 
   const finalData = withCategoryField(parsedData);
@@ -286,6 +292,7 @@ export function partitionByFacet(
   facetField: string,
   lowered: ChartSpec,
   lookupData: Map<number, ParsedChartData>,
+  params?: ReadonlyMap<string, FormulaValue>,
 ): Array<{ value: string; data: ParsedChartData }> | undefined {
   // v1: needs a header row in columns orientation to reference the field by name.
   if (orientation !== "columns" || !hasHeaders) return undefined;
@@ -324,7 +331,7 @@ export function partitionByFacet(
     let parsed = parseColumnOriented(subGrid, subRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
     if (lowered.transform && lowered.transform.length > 0) {
       const subTidy = buildTidyData(subGrid, subRows, numCols, hasHeaders, orientation);
-      parsed = applyTransforms(parsed, lowered.transform, sink, lookupData, subTidy);
+      parsed = applyTransforms(parsed, lowered.transform, sink, lookupData, subTidy, params);
     }
     // NOTE: chart filters (hiddenCategories/hiddenSeries) are POSITIONAL indices
     // into the top-level chart's arrays — they don't map onto each panel's own

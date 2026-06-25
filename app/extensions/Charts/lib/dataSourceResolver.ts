@@ -230,6 +230,23 @@ async function resolveCellValue(
 }
 
 /**
+ * Resolve a param's single-cell reference to its display value. Same-sheet only:
+ * a sheet-qualified ref (containing "!") returns null so the caller falls back
+ * to the literal default — getViewportCells reads the active sheet, so a
+ * cross-sheet ref would silently read the wrong cell. Accepts "=B1" or "B1".
+ */
+export async function resolveParamCell(
+  cellRef: string,
+  fallbackSheetIndex: number,
+): Promise<string | null> {
+  const body = (cellRef.startsWith("=") ? cellRef.slice(1) : cellRef).trim();
+  if (body === "" || body.includes("!")) return null;
+  // Single same-sheet cell only — a range would silently read its top-left cell.
+  if (!isCellReference(`=${body}`)) return null;
+  return resolveCellValue(`=${body}`, fallbackSheetIndex);
+}
+
+/**
  * Resolve a string field that may be a cell reference.
  * If it starts with "=" and is a valid cell ref, fetches the cell value.
  * Otherwise returns the original string unchanged.

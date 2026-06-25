@@ -539,6 +539,29 @@ export const CHART_EXAMPLES: ChartExample[] = [
       },
     },
   },
+
+  // ── Interactivity ──────────────────────────────────────────────────────────
+  {
+    id: "param-threshold-filter",
+    name: "Cell-bound parameter filter",
+    description: "Declare a Threshold param read live from cell B1 and filter to rows above it. Type a new value in B1 and the chart re-filters — spreadsheet-native interactivity.",
+    category: "Interactivity",
+    spec: {
+      mark: "bar",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+      title: "Revenue above Threshold",
+      xAxis: axis(),
+      yAxis: axis("Revenue", true),
+      legend: { visible: false, position: "bottom" },
+      palette: "default",
+      params: [{ name: "Threshold", cellRef: "=B1", value: 100, description: "Minimum revenue to show" }],
+      transform: [{ type: "filter", field: "Revenue", predicate: "value > [Threshold]" }],
+    },
+  },
 ];
 
 // ============================================================================

@@ -217,6 +217,33 @@ mark, and axes — in a grid. Ideal for a mini dashboard.
 Each child is read independently, so the container's own \`data\` is ignored. v1
 caps the grid at 50 panels.
 
+## Parameters
+
+Declare named **params** and reference them from \`filter\` / \`calculate\`
+expressions as \`[Name]\`. A param's value is a literal, or read live from a single
+same-sheet cell — when bound to a cell, the chart re-evaluates as that cell
+changes, giving spreadsheet-native interactivity (type a new threshold in a cell
+and the chart re-filters).
+
+\`\`\`json
+"params": [
+  { "name": "Threshold", "cellRef": "=B1", "value": 100 },
+  { "name": "Region", "value": "North" }
+],
+"transform": [
+  { "type": "filter", "field": "Sales", "predicate": "value > [Threshold]" }
+]
+\`\`\`
+
+- **name** (required) — referenced as \`[Name]\`; must not be a reserved name
+  (\`value\`, \`$category\`, \`$index\`, \`$value\`).
+- **value** — literal default (used when there is no \`cellRef\`, or the cell is empty).
+- **cellRef** — a single same-sheet cell (e.g. \`"=B1"\`); cross-sheet refs are not
+  supported and fall back to the default.
+
+Params resolve once per read and only affect \`filter\`/\`calculate\` expressions
+(not the legacy shorthand like \`"> 100"\` — write a full predicate to use a param).
+
 ## Cell References
 
 String fields support cell references for dynamic content:

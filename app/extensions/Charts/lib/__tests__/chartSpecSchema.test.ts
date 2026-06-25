@@ -182,7 +182,7 @@ const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
   "mark", "data", "hasHeaders", "seriesOrientation", "categoryIndex", "series",
   "title", "xAxis", "yAxis", "legend", "palette", "markOptions", "layers",
   "transform", "config", "tooltip", "trendlines", "dataLabels", "dataTable",
-  "seriesRefs", "filters", "dataPointOverrides", "encoding", "repeat", "facet", "concat",
+  "seriesRefs", "filters", "dataPointOverrides", "encoding", "repeat", "facet", "concat", "params",
 ];
 
 const ALL_CHART_TYPES: ChartType[] = [
@@ -357,6 +357,10 @@ describe("chartSpecJsonSchema drift guard", () => {
           seriesIndex: 0, categoryIndex: 1, color: "#FFD700", opacity: 0.8, borderColor: "#000000", borderWidth: 1, exploded: 10,
           gradientFill: { type: "radial", stops: [{ offset: 0, color: "#ffffff" }, { offset: 1, color: "#000000" }] },
         },
+      ],
+      params: [
+        { name: "Threshold", value: 100, description: "Min revenue" },
+        { name: "Region", cellRef: "=B1" },
       ],
     };
 

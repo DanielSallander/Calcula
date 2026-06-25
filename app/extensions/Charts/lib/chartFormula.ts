@@ -122,11 +122,12 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
-    // Bracketed identifier: [Any Name]
+    // Bracketed identifier: [Any Name] — trimmed so [ Name ] == [Name] and aligns
+    // with trimmed param/series names.
     if (ch === "[") {
       const end = input.indexOf("]", i + 1);
       if (end === -1) throw new FormulaError("#SYNTAX! unterminated [reference]");
-      tokens.push({ k: "id", v: input.slice(i + 1, end) });
+      tokens.push({ k: "id", v: input.slice(i + 1, end).trim() });
       i = end + 1;
       continue;
     }

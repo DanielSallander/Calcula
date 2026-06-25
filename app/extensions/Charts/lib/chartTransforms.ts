@@ -46,8 +46,9 @@ export function applyTransforms(
   diagnostics?: TransformDiagnostic[],
   lookupData?: Map<number, ParsedChartData>,
   tidyData?: TidyData,
+  params?: ReadonlyMap<string, FormulaValue>,
 ): ParsedChartData {
-  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData, tidyData), data);
+  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData, tidyData, params), data);
 }
 
 // ============================================================================
@@ -61,16 +62,17 @@ function applyOne(
   diagnostics?: TransformDiagnostic[],
   lookupData?: Map<number, ParsedChartData>,
   tidyData?: TidyData,
+  params?: ReadonlyMap<string, FormulaValue>,
 ): ParsedChartData {
   switch (transform.type) {
     case "filter":
-      return applyFilter(data, transform, index, diagnostics);
+      return applyFilter(data, transform, index, diagnostics, params);
     case "sort":
       return applySort(data, transform, index, diagnostics);
     case "aggregate":
       return applyAggregate(data, transform, index, diagnostics);
     case "calculate":
-      return applyCalculate(data, transform, index, diagnostics);
+      return applyCalculate(data, transform, index, diagnostics, params);
     case "window":
       return applyWindow(data, transform, index, diagnostics);
     case "bin":
@@ -117,6 +119,7 @@ function applyFilter(
   t: FilterTransform,
   index: number,
   diagnostics?: TransformDiagnostic[],
+  params?: ReadonlyMap<string, FormulaValue>,
 ): ParsedChartData {
   const { field, predicate } = t;
 
@@ -145,7 +148,7 @@ function applyFilter(
     const fieldVal: FormulaValue = field === "$category"
       ? cat
       : (data.series[seriesIdx].values[ci] ?? 0);
-    const scope = buildRowScope(data, sanitized, ci, fieldVal);
+    const scope = buildRowScope(data, sanitized, ci, fieldVal, params);
     try {
       return toBoolean(compiled(scope));
     } catch (err) {
@@ -350,6 +353,7 @@ function applyCalculate(
   t: CalculateTransform,
   index: number,
   diagnostics?: TransformDiagnostic[],
+  params?: ReadonlyMap<string, FormulaValue>,
 ): ParsedChartData {
   const { expr, as } = t;
 
@@ -367,7 +371,7 @@ function applyCalculate(
   let firstError = "";
   const newValues: number[] = data.categories.map((_, ci) => {
     if (!compiled) return 0;
-    const scope = buildRowScope(data, sanitized, ci);
+    const scope = buildRowScope(data, sanitized, ci, undefined, params);
     try {
       const num = toNumber(compiled(scope));
       return Number.isFinite(num) ? num : 0;
@@ -673,18 +677,24 @@ function sanitizeNames(data: ParsedChartData): string[] {
 }
 
 /**
- * Build the formula scope for one row: every series value (by exact name — use
- * [brackets] for names with spaces — and by underscore form), the built-ins
- * $index and $category, and, for filters, the field's value as `value`/`$value`.
- * Built-ins are set last so they win over any same-named series.
+ * Build the formula scope for one row: named params (referenced as [Name]), every
+ * series value (by exact name — use [brackets] for names with spaces — and by
+ * underscore form), the built-ins $index and $category, and, for filters, the
+ * field's value as `value`/`$value`. Precedence is built-ins > series > params:
+ * params are written FIRST so a real series (and a built-in) always wins over a
+ * same-named param — a param can only fill a name nothing else uses.
  */
 function buildRowScope(
   data: ParsedChartData,
   sanitized: string[],
   ci: number,
   fieldValue?: FormulaValue,
+  params?: ReadonlyMap<string, FormulaValue>,
 ): FormulaScope {
   const scope: FormulaScope = new Map();
+  if (params) {
+    for (const [name, value] of params) scope.set(name, value);
+  }
   for (let si = 0; si < data.series.length; si++) {
     const v = data.series[si].values[ci] ?? 0;
     scope.set(data.series[si].name, v);
