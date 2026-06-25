@@ -68,14 +68,18 @@ describe("applyTransforms - wrong field types", () => {
     expect(() => applyTransforms(data, [t])).toThrow(TypeError);
   });
 
-  it("calculate with undefined expression throws TypeError", () => {
+  it("calculate with undefined expression is handled gracefully (zeros)", () => {
     const data = sampleData();
     const t: CalculateTransform = {
       type: "calculate",
       as: "NewField",
-      expression: undefined as any,
+      expr: undefined as any,
     };
-    expect(() => applyTransforms(data, [t])).toThrow(TypeError);
+    let result!: ReturnType<typeof applyTransforms>;
+    expect(() => { result = applyTransforms(data, [t]); }).not.toThrow();
+    const field = result.series.find((s) => s.name === "NewField");
+    expect(field).toBeDefined();
+    expect(field!.values).toEqual([0, 0, 0, 0, 0]);
   });
 });
 
@@ -84,25 +88,30 @@ describe("applyTransforms - wrong field types", () => {
 // ============================================================================
 
 describe("applyTransforms - circular/self-referencing calculate", () => {
-  it("calculate expression referencing its own output field throws", () => {
+  it("calculate referencing its own output reads the pre-transform value", () => {
     const data = sampleData();
     const t: CalculateTransform = {
       type: "calculate",
       as: "Sales",
-      expression: "Sales * 2",
+      expr: "Sales * 2",
     };
-    // Self-reference causes TypeError in evaluateExpression when series lookup fails
-    expect(() => applyTransforms(data, [t])).toThrow(TypeError);
+    let result!: ReturnType<typeof applyTransforms>;
+    expect(() => { result = applyTransforms(data, [t]); }).not.toThrow();
+    // Reads the input Sales (10..50) and doubles it, replacing the series.
+    expect(result.series.find((s) => s.name === "Sales")!.values).toEqual([20, 40, 60, 80, 100]);
   });
 
-  it("two calculate transforms referencing each other throws", () => {
+  it("two calculate transforms referencing each other resolve to zeros, not a crash", () => {
     const data = sampleData();
     const transforms: TransformSpec[] = [
-      { type: "calculate", as: "X", expression: "Y * 2" } as CalculateTransform,
-      { type: "calculate", as: "Y", expression: "X * 2" } as CalculateTransform,
+      { type: "calculate", as: "X", expr: "Y * 2" } as CalculateTransform,
+      { type: "calculate", as: "Y", expr: "X * 2" } as CalculateTransform,
     ];
-    // Y doesn't exist for the first transform, causing TypeError
-    expect(() => applyTransforms(data, transforms)).toThrow(TypeError);
+    // Y is unknown when X is computed (-> 0); X is then 0 when Y is computed (-> 0).
+    let result!: ReturnType<typeof applyTransforms>;
+    expect(() => { result = applyTransforms(data, transforms); }).not.toThrow();
+    expect(result.series.find((s) => s.name === "X")!.values.every((v) => v === 0)).toBe(true);
+    expect(result.series.find((s) => s.name === "Y")!.values.every((v) => v === 0)).toBe(true);
   });
 });
 

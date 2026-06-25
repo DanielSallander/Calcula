@@ -831,7 +831,7 @@ export const chartSpecJsonSchema: object = {
       properties: {
         type: { type: "string", const: "filter" },
         field: { type: "string", description: "Series name to evaluate. Use \"$category\" for category labels." },
-        predicate: { type: "string", description: "Predicate: \"> 100\", \"!= 0\", \"<= 50\", \"= text\". Ops: >, <, >=, <=, =, !=" },
+        predicate: { type: "string", description: "Shorthand comparison on the field (\"> 100\", \"!= 0\", \"= North\"), or a full boolean formula referencing value/$category/$index/series, e.g. AND(value > 100, $category <> \"Total\"). Ops: > < >= <= = <> (!=); functions: IF/AND/OR/NOT." },
       },
       additionalProperties: false,
     },
@@ -865,7 +865,7 @@ export const chartSpecJsonSchema: object = {
       required: ["type", "expr", "as"],
       properties: {
         type: { type: "string", const: "calculate" },
-        expr: { type: "string", description: "Expression: \"Revenue * 1.1\", \"Revenue - Cost\". Variables: series names, $index, $category." },
+        expr: { type: "string", description: "Formula expression per row: \"Revenue - Cost\", \"IF(Revenue > 0, Revenue, 0)\". Variables: series names ([brackets] for spaces), $index, $category. Functions: IF/AND/OR/ABS/ROUND/MIN/MAX/SUM/SQRT and text fns. Non-numeric results become 0." },
         as: { type: "string", description: "Name for the resulting series." },
       },
       additionalProperties: false,

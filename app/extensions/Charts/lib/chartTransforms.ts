@@ -14,6 +14,14 @@ import type {
   BinTransform,
   AggregateOp,
 } from "../types";
+import {
+  compileFormula,
+  toNumber,
+  toBoolean,
+  type CompiledFormula,
+  type FormulaScope,
+  type FormulaValue,
+} from "./chartFormula";
 
 // ============================================================================
 // Public API
@@ -59,57 +67,64 @@ function applyOne(data: ParsedChartData, transform: TransformSpec): ParsedChartD
 
 function applyFilter(data: ParsedChartData, t: FilterTransform): ParsedChartData {
   const { field, predicate } = t;
-  const parsed = parsePredicate(predicate);
-  if (!parsed) return data;
 
   const seriesIdx = field === "$category" ? -1 : findSeriesIndex(data, field);
   if (field !== "$category" && seriesIdx < 0) return data;
 
-  // Build index mask of rows to keep
+  const exprSrc = predicateToExpr(predicate);
+  if (exprSrc === null) return data;
+
+  let compiled: CompiledFormula;
+  try {
+    compiled = compileFormula(exprSrc);
+  } catch {
+    // Unparseable predicate — leave the data untouched rather than dropping rows.
+    return data;
+  }
+
+  const sanitized = sanitizeNames(data);
   const keep: boolean[] = data.categories.map((cat, ci) => {
-    if (field === "$category") {
-      return evaluatePredicate(parsed, cat);
+    const fieldVal: FormulaValue = field === "$category"
+      ? cat
+      : (data.series[seriesIdx].values[ci] ?? 0);
+    const scope = buildRowScope(data, sanitized, ci, fieldVal);
+    try {
+      return toBoolean(compiled(scope));
+    } catch {
+      // A row whose predicate errors (e.g. an unknown name) is kept — filtering
+      // must never silently drop data on a broken expression.
+      return true;
     }
-    return evaluatePredicate(parsed, data.series[seriesIdx].values[ci]);
   });
 
   return filterByMask(data, keep);
 }
 
-interface ParsedPredicate {
-  op: string;
-  value: string;
-}
+/**
+ * Convert a filter predicate into a boolean formula expression.
+ * - Legacy shorthand ("> 100", "!= Total", "= Mar") becomes `value <op> <rhs>`,
+ *   with a numeric rhs kept bare and a textual rhs quoted.
+ * - Anything else is treated as a full boolean expression and can reference
+ *   `value` (the field's value), `$category`, `$index`, and series by name —
+ *   e.g. `AND(value > 100, $category <> "Total")`.
+ * Returns null for an empty predicate (no filtering applied).
+ */
+function predicateToExpr(predicate: string): string | null {
+  const trimmed = predicate.trim();
+  if (trimmed === "") return null;
 
-function parsePredicate(pred: string): ParsedPredicate | null {
-  const trimmed = pred.trim();
-  // Match operators: >=, <=, !=, >, <, =
-  const match = trimmed.match(/^(>=|<=|!=|>|<|=)\s*(.+)$/);
-  if (!match) return null;
-  return { op: match[1], value: match[2].trim() };
-}
-
-function evaluatePredicate(pred: ParsedPredicate, actual: string | number): boolean {
-  const numActual = typeof actual === "number" ? actual : parseFloat(actual as string);
-  const numTarget = parseFloat(pred.value);
-  const isNumeric = !isNaN(numActual) && !isNaN(numTarget);
-
-  switch (pred.op) {
-    case ">":
-      return isNumeric && numActual > numTarget;
-    case "<":
-      return isNumeric && numActual < numTarget;
-    case ">=":
-      return isNumeric && numActual >= numTarget;
-    case "<=":
-      return isNumeric && numActual <= numTarget;
-    case "=":
-      return isNumeric ? numActual === numTarget : String(actual) === pred.value;
-    case "!=":
-      return isNumeric ? numActual !== numTarget : String(actual) !== pred.value;
-    default:
-      return true;
+  const m = trimmed.match(/^(>=|<=|<>|!=|>|<|=)\s*(.+)$/);
+  if (m) {
+    const op = m[1] === "!=" ? "<>" : m[1];
+    const rhs = m[2].trim();
+    const asNumber = Number(rhs);
+    const rhsExpr = rhs !== "" && Number.isFinite(asNumber)
+      ? rhs
+      : `"${rhs.replace(/"/g, '""')}"`;
+    return `value ${op} ${rhsExpr}`;
   }
+
+  return trimmed;
 }
 
 function filterByMask(data: ParsedChartData, keep: boolean[]): ParsedChartData {
@@ -238,23 +253,28 @@ function computeAggregate(op: AggregateOp, values: number[]): number {
 
 function applyCalculate(data: ParsedChartData, t: CalculateTransform): ParsedChartData {
   const { expr, as } = t;
-  const newValues: number[] = [];
 
-  // Build variable name → series index mapping
-  const varMap = new Map<string, number>();
-  for (let si = 0; si < data.series.length; si++) {
-    // Store both original name and sanitized name (spaces → underscores)
-    varMap.set(data.series[si].name, si);
-    const sanitized = data.series[si].name.replace(/\s+/g, "_");
-    if (sanitized !== data.series[si].name) {
-      varMap.set(sanitized, si);
+  // Compile once, evaluate per row against that row's scope.
+  let compiled: CompiledFormula | null = null;
+  try {
+    compiled = compileFormula(expr);
+  } catch {
+    compiled = null;
+  }
+
+  const sanitized = sanitizeNames(data);
+  const newValues: number[] = data.categories.map((_, ci) => {
+    if (!compiled) return 0;
+    const scope = buildRowScope(data, sanitized, ci);
+    try {
+      const num = toNumber(compiled(scope));
+      return Number.isFinite(num) ? num : 0;
+    } catch {
+      // Non-numeric result or evaluation error — fall back to 0 (matches the
+      // prior behavior; surfacing these as diagnostics is roadmap item A5).
+      return 0;
     }
-  }
-
-  for (let ci = 0; ci < data.categories.length; ci++) {
-    const result = evaluateExpression(expr, data, ci, varMap);
-    newValues.push(result);
-  }
+  });
 
   // Check if a series with this name already exists — replace it
   const existingIdx = data.series.findIndex((s) => s.name === as);
@@ -272,187 +292,6 @@ function applyCalculate(data: ParsedChartData, t: CalculateTransform): ParsedCha
       { name: as, values: newValues, color: null },
     ],
   };
-}
-
-function evaluateExpression(
-  expr: string,
-  data: ParsedChartData,
-  ci: number,
-  varMap: Map<string, number>,
-): number {
-  // Replace variable references with their numeric values
-  // Sort by name length descending to avoid partial matches (e.g., "Revenue Total" before "Revenue")
-  let resolved = expr;
-  const names = [...varMap.entries()].sort((a, b) => b[0].length - a[0].length);
-
-  for (const [name, si] of names) {
-    // Use word boundary-aware replacement
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`\\b${escaped}\\b`, "g");
-    resolved = resolved.replace(re, String(data.series[si].values[ci] ?? 0));
-  }
-
-  // Replace built-in variables
-  resolved = resolved.replace(/\$index/g, String(ci));
-  resolved = resolved.replace(/\$category/g, `"${data.categories[ci]}"`);
-
-  // Evaluate the expression safely with a pure arithmetic parser.
-  // No eval / new Function — runs under a no-unsafe-eval CSP.
-  try {
-    // Validate: only allow digits, operators, parentheses, decimal points, spaces, minus.
-    // Defense in depth — evalArithmetic rejects anything else too.
-    const sanitized = resolved.replace(/"[^"]*"/g, "0"); // Replace string literals for validation
-    if (!/^[\d\s+\-*/().e]+$/i.test(sanitized)) {
-      return 0;
-    }
-    const result = evalArithmetic(resolved);
-    return typeof result === "number" && isFinite(result) ? result : 0;
-  } catch {
-    return 0;
-  }
-}
-
-// ============================================================================
-// Safe arithmetic evaluator (recursive-descent parser, no eval/new Function)
-// ============================================================================
-
-type ArithToken =
-  | { kind: "num"; value: number }
-  | { kind: "op"; value: "+" | "-" | "*" | "/" }
-  | { kind: "lparen" }
-  | { kind: "rparen" };
-
-/**
- * Evaluate a pure arithmetic expression containing only numbers, the binary
- * operators + - * /, unary +/-, and parentheses. Uses a recursive-descent
- * parser with JS-matching precedence/associativity and normal JS number
- * arithmetic. Returns 0 on ANY tokenize/parse error or non-finite result —
- * matching the old `try { ... } catch { return 0; }` + isFinite guard.
- *
- * Exported for unit testing. Does NOT use eval, new Function, or any dynamic
- * code execution, so it is safe under a no-unsafe-eval Content-Security-Policy.
- */
-export function evalArithmetic(resolved: string): number {
-  let tokens: ArithToken[];
-  try {
-    tokens = tokenizeArithmetic(resolved);
-  } catch {
-    return 0;
-  }
-  if (tokens.length === 0) return 0;
-
-  let pos = 0;
-
-  const peek = (): ArithToken | undefined => tokens[pos];
-
-  // expr := term (('+'|'-') term)*   [left-associative]
-  const parseExpr = (): number => {
-    let value = parseTerm();
-    for (;;) {
-      const tok = peek();
-      if (tok && tok.kind === "op" && (tok.value === "+" || tok.value === "-")) {
-        pos++;
-        const rhs = parseTerm();
-        value = tok.value === "+" ? value + rhs : value - rhs;
-      } else {
-        break;
-      }
-    }
-    return value;
-  };
-
-  // term := factor (('*'|'/') factor)*   [left-associative]
-  const parseTerm = (): number => {
-    let value = parseFactor();
-    for (;;) {
-      const tok = peek();
-      if (tok && tok.kind === "op" && (tok.value === "*" || tok.value === "/")) {
-        pos++;
-        const rhs = parseFactor();
-        value = tok.value === "*" ? value * rhs : value / rhs;
-      } else {
-        break;
-      }
-    }
-    return value;
-  };
-
-  // factor := ('-'|'+')? (number | '(' expr ')')
-  const parseFactor = (): number => {
-    const tok = peek();
-    if (tok && tok.kind === "op" && (tok.value === "-" || tok.value === "+")) {
-      pos++;
-      const operand = parseFactor();
-      return tok.value === "-" ? -operand : operand;
-    }
-    if (tok && tok.kind === "num") {
-      pos++;
-      return tok.value;
-    }
-    if (tok && tok.kind === "lparen") {
-      pos++;
-      const value = parseExpr();
-      const closing = peek();
-      if (!closing || closing.kind !== "rparen") {
-        throw new Error("expected ')'");
-      }
-      pos++;
-      return value;
-    }
-    throw new Error("unexpected token");
-  };
-
-  try {
-    const value = parseExpr();
-    if (pos !== tokens.length) {
-      // Trailing tokens — malformed expression.
-      return 0;
-    }
-    return typeof value === "number" && isFinite(value) ? value : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function tokenizeArithmetic(input: string): ArithToken[] {
-  const tokens: ArithToken[] = [];
-  // Numbers: optional leading digits, optional fraction, optional exponent.
-  // Matches 1, 1.5, .5, 1e3, 1.5e-3 (case-insensitive 'e').
-  const numberRe = /\d*\.?\d+(?:e[+-]?\d+)?/iy;
-  let i = 0;
-  while (i < input.length) {
-    const ch = input[i];
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") {
-      i++;
-      continue;
-    }
-    if (ch === "+" || ch === "-" || ch === "*" || ch === "/") {
-      tokens.push({ kind: "op", value: ch });
-      i++;
-      continue;
-    }
-    if (ch === "(") {
-      tokens.push({ kind: "lparen" });
-      i++;
-      continue;
-    }
-    if (ch === ")") {
-      tokens.push({ kind: "rparen" });
-      i++;
-      continue;
-    }
-    // Try to match a number starting at i.
-    numberRe.lastIndex = i;
-    const m = numberRe.exec(input);
-    if (m && m.index === i) {
-      tokens.push({ kind: "num", value: parseFloat(m[0]) });
-      i = numberRe.lastIndex;
-      continue;
-    }
-    // Unexpected character.
-    throw new Error(`unexpected character '${ch}'`);
-  }
-  return tokens;
 }
 
 // ============================================================================
@@ -572,4 +411,36 @@ function formatBinEdge(value: number): string {
 
 function findSeriesIndex(data: ParsedChartData, name: string): number {
   return data.series.findIndex((s) => s.name === name);
+}
+
+/** Underscore form of each series name (so "Revenue Total" is usable as Revenue_Total). */
+function sanitizeNames(data: ParsedChartData): string[] {
+  return data.series.map((s) => s.name.replace(/\s+/g, "_"));
+}
+
+/**
+ * Build the formula scope for one row: every series value (by exact name — use
+ * [brackets] for names with spaces — and by underscore form), the built-ins
+ * $index and $category, and, for filters, the field's value as `value`/`$value`.
+ * Built-ins are set last so they win over any same-named series.
+ */
+function buildRowScope(
+  data: ParsedChartData,
+  sanitized: string[],
+  ci: number,
+  fieldValue?: FormulaValue,
+): FormulaScope {
+  const scope: FormulaScope = new Map();
+  for (let si = 0; si < data.series.length; si++) {
+    const v = data.series[si].values[ci] ?? 0;
+    scope.set(data.series[si].name, v);
+    scope.set(sanitized[si], v);
+  }
+  scope.set("$index", ci);
+  scope.set("$category", data.categories[ci] ?? "");
+  if (fieldValue !== undefined) {
+    scope.set("value", fieldValue);
+    scope.set("$value", fieldValue);
+  }
+  return scope;
 }

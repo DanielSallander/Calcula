@@ -3,77 +3,8 @@
 //          calculate, window, bin).
 
 import { describe, it, expect } from "vitest";
-import { applyTransforms, evalArithmetic } from "../chartTransforms";
+import { applyTransforms } from "../chartTransforms";
 import type { ParsedChartData, TransformSpec } from "../../types";
-
-// ============================================================================
-// evalArithmetic (safe recursive-descent arithmetic parser, no eval)
-// ============================================================================
-
-describe("evalArithmetic", () => {
-  it("evaluates integers", () => {
-    expect(evalArithmetic("42")).toBe(42);
-    expect(evalArithmetic("0")).toBe(0);
-    expect(evalArithmetic("1+2+3")).toBe(6);
-  });
-
-  it("evaluates decimals", () => {
-    expect(evalArithmetic("1.5")).toBe(1.5);
-    expect(evalArithmetic(".5")).toBe(0.5);
-    expect(evalArithmetic("1.5+2.25")).toBe(3.75);
-  });
-
-  it("respects multiplication precedence over addition", () => {
-    expect(evalArithmetic("2+3*4")).toBe(14);
-    expect(evalArithmetic("2*3+4")).toBe(10);
-  });
-
-  it("respects parentheses", () => {
-    expect(evalArithmetic("(1+2)*3")).toBe(9);
-    expect(evalArithmetic("2*(3+4)")).toBe(14);
-    expect(evalArithmetic("((1+2)*(3+4))")).toBe(21);
-  });
-
-  it("handles scientific notation", () => {
-    expect(evalArithmetic("1e3")).toBe(1000);
-    expect(evalArithmetic("1.5e-3")).toBe(0.0015);
-    expect(evalArithmetic("2e2+1")).toBe(201);
-  });
-
-  it("handles unary minus and plus", () => {
-    expect(evalArithmetic("-5")).toBe(-5);
-    expect(evalArithmetic("10*-2")).toBe(-20);
-    expect(evalArithmetic("+7")).toBe(7);
-    expect(evalArithmetic("-(2+3)")).toBe(-5);
-    expect(evalArithmetic("--5")).toBe(5);
-  });
-
-  it("handles division with non-integer results", () => {
-    expect(evalArithmetic("10/4")).toBe(2.5);
-    expect(evalArithmetic("9/3")).toBe(3);
-  });
-
-  it("is left-associative for subtraction and division", () => {
-    expect(evalArithmetic("10-3-2")).toBe(5);
-    expect(evalArithmetic("16/2/2")).toBe(4);
-  });
-
-  it("returns 0 for malformed or empty input", () => {
-    expect(evalArithmetic("")).toBe(0);
-    expect(evalArithmetic("   ")).toBe(0);
-    expect(evalArithmetic("1+")).toBe(0);
-    expect(evalArithmetic("1 2")).toBe(0); // trailing tokens
-    expect(evalArithmetic("(1+2")).toBe(0); // unbalanced paren
-    expect(evalArithmetic("1+2)")).toBe(0); // trailing paren
-    expect(evalArithmetic("abc")).toBe(0); // unexpected char
-    expect(evalArithmetic("*5")).toBe(0); // leading binary op
-  });
-
-  it("returns 0 for non-finite results (division by zero)", () => {
-    expect(evalArithmetic("1/0")).toBe(0);
-    expect(evalArithmetic("-1/0")).toBe(0);
-  });
-});
 
 // ============================================================================
 // Test Helpers
@@ -859,5 +790,94 @@ describe("edge: negative and zero values", () => {
     ]);
     const total = result.series[0].values.reduce((a, b) => a + b, 0);
     expect(total).toBe(3);
+  });
+});
+
+// ============================================================================
+// Formula-powered calculate & filter (B1)
+// ============================================================================
+
+describe("calculate transform: formula functions", () => {
+  it("supports IF with a numeric condition", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "calculate", expr: "IF(Sales > 200, 1, 0)", as: "Flag" },
+    ]);
+    const flag = result.series.find((s) => s.name === "Flag")!;
+    // Sales = [100, 200, 300, 150, 250] -> >200 at Mar, May
+    expect(flag.values).toEqual([0, 0, 1, 0, 1]);
+  });
+
+  it("references $category (regression: previously evaluated to 0)", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "calculate", expr: 'IF($category = "Mar", Sales, 0)', as: "MarOnly" },
+    ]);
+    const marOnly = result.series.find((s) => s.name === "MarOnly")!;
+    expect(marOnly.values).toEqual([0, 0, 300, 0, 0]);
+  });
+
+  it("supports nested math functions (ROUND, division)", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "calculate", expr: "ROUND(Cost / Sales * 100, 1)", as: "Ratio%" },
+    ]);
+    const ratio = result.series.find((s) => s.name === "Ratio%")!;
+    // Cost/Sales*100: 80, 60, 60, 60, 60
+    expect(ratio.values).toEqual([80, 60, 60, 60, 60]);
+  });
+
+  it("supports ABS", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "calculate", expr: "ABS(Cost - Sales)", as: "AbsGap" },
+    ]);
+    const gap = result.series.find((s) => s.name === "AbsGap")!;
+    expect(gap.values).toEqual([20, 80, 120, 60, 100]);
+  });
+
+  it("coerces non-numeric (string) results to 0", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "calculate", expr: '$category & "!"', as: "Label" },
+    ]);
+    const label = result.series.find((s) => s.name === "Label")!;
+    expect(label.values).toEqual([0, 0, 0, 0, 0]);
+  });
+});
+
+describe("filter transform: formula predicates", () => {
+  it("supports compound AND across fields", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "filter", field: "Sales", predicate: "AND(value > 100, Cost < 180)" },
+    ]);
+    // Sales>100: Feb,Mar,Apr,May ; Cost<180: Jan,Feb,Apr,May ; AND -> Feb,Apr,May
+    expect(result.categories).toEqual(["Feb", "Apr", "May"]);
+  });
+
+  it("supports compound OR", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "filter", field: "Sales", predicate: "OR(value < 120, value > 240)" },
+    ]);
+    // Sales<120: Jan(100) ; Sales>240: Mar(300), May(250)
+    expect(result.categories).toEqual(["Jan", "Mar", "May"]);
+  });
+
+  it("supports text functions on $category", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "filter", field: "$category", predicate: 'LEFT($category, 1) = "M"' },
+    ]);
+    expect(result.categories).toEqual(["Mar", "May"]);
+  });
+
+  it("supports a full <> comparison on $category", () => {
+    const data = makeData();
+    const result = applyTransforms(data, [
+      { type: "filter", field: "$category", predicate: '$category <> "Jan"' },
+    ]);
+    expect(result.categories).toEqual(["Feb", "Mar", "Apr", "May"]);
   });
 });

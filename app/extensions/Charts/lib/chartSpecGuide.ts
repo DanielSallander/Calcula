@@ -496,11 +496,18 @@ Use \`"$category"\` to reference category labels.
 ]
 \`\`\`
 
-Operators: \`>\`, \`<\`, \`>=\`, \`<=\`, \`=\`, \`!=\`
+Operators: \`>\`, \`<\`, \`>=\`, \`<=\`, \`=\`, \`<>\` (\`!=\` also accepted)
 
 Filter by category:
 \`\`\`json
 { "type": "filter", "field": "$category", "predicate": "!= Total" }
+\`\`\`
+
+The predicate can also be a full boolean formula referencing \`value\` (the
+field's value), \`$category\`, \`$index\`, and other series by name — combine
+conditions with \`AND\`, \`OR\`, \`NOT\`:
+\`\`\`json
+{ "type": "filter", "field": "Revenue", "predicate": "AND(value > 100, $category <> \\"Total\\")" }
 \`\`\`
 
 ### Sort — Reorder Data
@@ -538,7 +545,16 @@ Operations: \`sum\`, \`mean\`, \`median\`, \`min\`, \`max\`, \`count\`
 ]
 \`\`\`
 
-Available variables: series names (spaces become underscores), \`$index\`, \`$category\`.
+Available variables: series names, \`$index\`, \`$category\`. Names with spaces
+use the underscore form (\`Revenue_Total\`) or bracket form (\`[Revenue Total]\`).
+
+Expressions support arithmetic (\`+ - * / ^\`), comparisons, string
+concatenation (\`&\`), and functions — \`IF\`, \`AND\`, \`OR\`, \`NOT\`, \`ABS\`,
+\`ROUND\`, \`MIN\`, \`MAX\`, \`SUM\`, \`SQRT\`, and text functions (\`LEFT\`,
+\`MID\`, \`UPPER\`, \`CONCAT\`, ...):
+\`\`\`json
+{ "type": "calculate", "expr": "IF(Revenue > 0, ROUND(Profit / Revenue * 100, 1), 0)", "as": "Margin %" }
+\`\`\`
 
 ### Window — Running Calculations
 \`\`\`json

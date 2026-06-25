@@ -86,7 +86,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Chart transforms",
     runtime: "main-thread",
     containment:
-      "Pure data pipeline; expressions via evalArithmetic (recursive-descent, no eval/new Function)",
+      "Pure data pipeline; calculate/filter expressions via chartFormula (recursive-descent parser, no eval/new Function)",
     capabilities: [],
     gate: "n/a (pure declarative, not an execution surface)",
     executesUserCode: false,

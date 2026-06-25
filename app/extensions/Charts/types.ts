@@ -690,8 +690,12 @@ export interface FilterTransform {
   /** Series name to evaluate. Use "$category" for the category label. */
   field: string;
   /**
-   * Predicate string applied to each value: "> 100", "!= 0", "<= 50",
-   * "= someText" (for categories). Supports: >, <, >=, <=, =, !=
+   * Predicate evaluated per data point — keep the point when it is true.
+   * Shorthand applies a comparison to `field`'s value: "> 100", "!= 0",
+   * "<= 50", "= North". Or write a full boolean formula referencing `value`
+   * (the field's value), `$category`, `$index`, and other series by name, e.g.
+   * `AND(value > 100, $category <> "Total")`. Operators: > < >= <= = <> (and
+   * the alias !=), plus functions like IF/AND/OR/NOT.
    */
   predicate: string;
 }
@@ -722,9 +726,13 @@ export interface AggregateTransform {
 export interface CalculateTransform {
   type: "calculate";
   /**
-   * Expression string. Supports references to series by name:
-   * "Revenue * 1.1", "Revenue - Cost", "Revenue / Total * 100"
-   * Available variables: series names (spaces replaced with _), $index, $category.
+   * Formula expression evaluated per row (result becomes the new series value).
+   * References series by name ("Revenue - Cost", "Revenue / Total * 100"); names
+   * with spaces use the underscore form (Revenue_Total) or [bracket] form
+   * ([Revenue Total]). Available variables: series names, $index, $category.
+   * Supports arithmetic (+ - * / ^), comparisons, string concat (&), and
+   * functions: IF, AND, OR, NOT, ABS, ROUND, MIN, MAX, SUM, SQRT, and text
+   * functions (LEFT, MID, UPPER, ...). Non-numeric results become 0.
    */
   expr: string;
   /** Name for the resulting series. */
