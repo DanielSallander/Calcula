@@ -10,8 +10,11 @@ import type {
   ParsedChartData,
   HitGeometry,
   BarRect,
+  PointMarker,
+  SliceArc,
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
+import { registerChartMark, getChartMark } from "./markRegistry";
 
 import { paintBarChart, computeLayout as computeBarLayout, computeBarRects } from "./barChartPainter";
 import { paintLineChart, computeLineLayout, computeLinePointMarkers } from "./lineChartPainter";
@@ -36,6 +39,42 @@ import { paintTrendlines } from "./trendlinePainter";
 import { paintDataLabels } from "./dataLabelPainter";
 import { paintErrorBars } from "./errorBarPainter";
 import { paintDataTable, computeDataTableHeight } from "./dataTablePainter";
+
+// ============================================================================
+// Built-in Mark Registration
+// ============================================================================
+// The 18 built-in marks register through the same registry a third-party would
+// use, so the dispatch functions below are data-driven lookups rather than
+// hardcoded switch statements.
+
+type GeomFn<T> = (data: ParsedChartData, spec: ChartSpec, layout: ChartLayout, theme: ChartRenderTheme) => T;
+
+/** Wrap a *Rects/*Markers/*Arcs geometry function as a HitGeometry producer. */
+const asBars = (fn: GeomFn<BarRect[]>): GeomFn<HitGeometry> => (d, s, l, t) => ({ type: "bars", rects: fn(d, s, l, t) });
+const asPoints = (fn: GeomFn<PointMarker[]>): GeomFn<HitGeometry> => (d, s, l, t) => ({ type: "points", markers: fn(d, s, l, t) });
+const asSlices = (fn: GeomFn<SliceArc[]>): GeomFn<HitGeometry> => (d, s, l, t) => ({ type: "slices", arcs: fn(d, s, l, t) });
+
+registerChartMark("bar", { paint: paintBarChart, computeLayout: computeBarLayout, computeGeometry: asBars(computeBarRects) });
+registerChartMark("horizontalBar", { paint: paintHorizontalBarChart, computeLayout: computeHorizontalBarLayout, computeGeometry: asBars(computeHorizontalBarRects) });
+registerChartMark("line", { paint: paintLineChart, computeLayout: computeLineLayout, computeGeometry: asPoints(computeLinePointMarkers) });
+registerChartMark("area", { paint: paintAreaChart, computeLayout: computeAreaLayout, computeGeometry: asPoints(computeAreaPointMarkers) });
+registerChartMark("scatter", { paint: paintScatterChart, computeLayout: computeScatterLayout, computeGeometry: asPoints(computeScatterPointMarkers) });
+
+const pieDefinition = { paint: paintPieChart, computeLayout: computePieLayout, computeGeometry: asSlices(computePieSliceArcs) };
+registerChartMark("pie", pieDefinition);
+registerChartMark("donut", pieDefinition);
+
+registerChartMark("waterfall", { paint: paintWaterfallChart, computeLayout: computeWaterfallLayout, computeGeometry: asBars(computeWaterfallBarRects) });
+registerChartMark("combo", { paint: paintComboChart, computeLayout: computeComboLayout, computeGeometry: computeComboHitGeometry });
+registerChartMark("radar", { paint: paintRadarChart, computeLayout: computeRadarLayout, computeGeometry: asPoints(computeRadarPointMarkers) });
+registerChartMark("bubble", { paint: paintBubbleChart, computeLayout: computeBubbleLayout, computeGeometry: asPoints(computeBubblePointMarkers) });
+registerChartMark("histogram", { paint: paintHistogramChart, computeLayout: computeHistogramLayout, computeGeometry: asBars(computeHistogramBarRects) });
+registerChartMark("funnel", { paint: paintFunnelChart, computeLayout: computeFunnelLayout, computeGeometry: asBars(computeFunnelBarRects) });
+registerChartMark("treemap", { paint: paintTreemapChart, computeLayout: computeTreemapLayout, computeGeometry: asBars(computeTreemapBarRects) });
+registerChartMark("stock", { paint: paintStockChart, computeLayout: computeStockLayout, computeGeometry: asBars(computeStockBarRects) });
+registerChartMark("boxPlot", { paint: paintBoxPlotChart, computeLayout: computeBoxPlotLayout, computeGeometry: asBars(computeBoxPlotBarRects) });
+registerChartMark("sunburst", { paint: paintSunburstChart, computeLayout: computeSunburstLayout, computeGeometry: asBars(computeSunburstBarRects) });
+registerChartMark("pareto", { paint: paintParetoChart, computeLayout: computeParetoLayout, computeGeometry: computeParetoHitGeometry });
 
 // ============================================================================
 // Paint Dispatch
@@ -101,7 +140,7 @@ export function dispatchPaint(
   }
 }
 
-/** Paint a single mark type (no layer iteration). */
+/** Paint a single mark type (no layer iteration). No-op for an unregistered mark. */
 function paintMark(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   data: ParsedChartData,
@@ -110,60 +149,7 @@ function paintMark(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
-  switch (mark) {
-    case "bar":
-      paintBarChart(ctx, data, spec, layout, theme);
-      break;
-    case "horizontalBar":
-      paintHorizontalBarChart(ctx, data, spec, layout, theme);
-      break;
-    case "line":
-      paintLineChart(ctx, data, spec, layout, theme);
-      break;
-    case "area":
-      paintAreaChart(ctx, data, spec, layout, theme);
-      break;
-    case "scatter":
-      paintScatterChart(ctx, data, spec, layout, theme);
-      break;
-    case "pie":
-    case "donut":
-      paintPieChart(ctx, data, spec, layout, theme);
-      break;
-    case "waterfall":
-      paintWaterfallChart(ctx, data, spec, layout, theme);
-      break;
-    case "combo":
-      paintComboChart(ctx, data, spec, layout, theme);
-      break;
-    case "radar":
-      paintRadarChart(ctx, data, spec, layout, theme);
-      break;
-    case "bubble":
-      paintBubbleChart(ctx, data, spec, layout, theme);
-      break;
-    case "histogram":
-      paintHistogramChart(ctx, data, spec, layout, theme);
-      break;
-    case "funnel":
-      paintFunnelChart(ctx, data, spec, layout, theme);
-      break;
-    case "treemap":
-      paintTreemapChart(ctx, data, spec, layout, theme);
-      break;
-    case "stock":
-      paintStockChart(ctx, data, spec, layout, theme);
-      break;
-    case "boxPlot":
-      paintBoxPlotChart(ctx, data, spec, layout, theme);
-      break;
-    case "sunburst":
-      paintSunburstChart(ctx, data, spec, layout, theme);
-      break;
-    case "pareto":
-      paintParetoChart(ctx, data, spec, layout, theme);
-      break;
-  }
+  getChartMark(mark)?.paint(ctx, data, spec, layout, theme);
 }
 
 // ============================================================================
@@ -178,29 +164,9 @@ export function dispatchComputeLayout(
   data: ParsedChartData,
   theme: ChartRenderTheme,
 ): ChartLayout {
-  let layout: ChartLayout;
-
-  switch (spec.mark) {
-    case "bar": layout = computeBarLayout(width, height, spec, data, theme); break;
-    case "horizontalBar": layout = computeHorizontalBarLayout(width, height, spec, data, theme); break;
-    case "line": layout = computeLineLayout(width, height, spec, data, theme); break;
-    case "area": layout = computeAreaLayout(width, height, spec, data, theme); break;
-    case "scatter": layout = computeScatterLayout(width, height, spec, data, theme); break;
-    case "pie":
-    case "donut": layout = computePieLayout(width, height, spec, data, theme); break;
-    case "waterfall": layout = computeWaterfallLayout(width, height, spec, data, theme); break;
-    case "combo": layout = computeComboLayout(width, height, spec, data, theme); break;
-    case "radar": layout = computeRadarLayout(width, height, spec, data, theme); break;
-    case "bubble": layout = computeBubbleLayout(width, height, spec, data, theme); break;
-    case "histogram": layout = computeHistogramLayout(width, height, spec, data, theme); break;
-    case "funnel": layout = computeFunnelLayout(width, height, spec, data, theme); break;
-    case "treemap": layout = computeTreemapLayout(width, height, spec, data, theme); break;
-    case "stock": layout = computeStockLayout(width, height, spec, data, theme); break;
-    case "boxPlot": layout = computeBoxPlotLayout(width, height, spec, data, theme); break;
-    case "sunburst": layout = computeSunburstLayout(width, height, spec, data, theme); break;
-    case "pareto": layout = computeParetoLayout(width, height, spec, data, theme); break;
-    default: layout = computeBarLayout(width, height, spec, data, theme); break;
-  }
+  // Unregistered marks fall back to the bar layout (always registered).
+  const def = getChartMark(spec.mark) ?? getChartMark("bar")!;
+  const layout = def.computeLayout(width, height, spec, data, theme);
 
   // Reserve space for data table below the plot area
   const dtHeight = computeDataTableHeight(spec, data);
@@ -216,50 +182,15 @@ export function dispatchComputeLayout(
 // Hit Geometry Dispatch
 // ============================================================================
 
-/** Compute hit geometry for any chart type. */
+/** Compute hit geometry for any chart type. Empty geometry for an unregistered mark. */
 export function dispatchComputeGeometry(
   data: ParsedChartData,
   spec: ChartSpec,
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): HitGeometry {
-  switch (spec.mark) {
-    case "bar":
-      return { type: "bars", rects: computeBarRects(data, spec, layout, theme) };
-    case "horizontalBar":
-      return { type: "bars", rects: computeHorizontalBarRects(data, spec, layout, theme) };
-    case "line":
-      return { type: "points", markers: computeLinePointMarkers(data, spec, layout, theme) };
-    case "area":
-      return { type: "points", markers: computeAreaPointMarkers(data, spec, layout, theme) };
-    case "scatter":
-      return { type: "points", markers: computeScatterPointMarkers(data, spec, layout, theme) };
-    case "pie":
-    case "donut":
-      return { type: "slices", arcs: computePieSliceArcs(data, spec, layout, theme) };
-    case "waterfall":
-      return { type: "bars", rects: computeWaterfallBarRects(data, spec, layout, theme) };
-    case "combo":
-      return computeComboHitGeometry(data, spec, layout, theme);
-    case "radar":
-      return { type: "points", markers: computeRadarPointMarkers(data, spec, layout, theme) };
-    case "bubble":
-      return { type: "points", markers: computeBubblePointMarkers(data, spec, layout, theme) };
-    case "histogram":
-      return { type: "bars", rects: computeHistogramBarRects(data, spec, layout, theme) };
-    case "funnel":
-      return { type: "bars", rects: computeFunnelBarRects(data, spec, layout, theme) };
-    case "treemap":
-      return { type: "bars", rects: computeTreemapBarRects(data, spec, layout, theme) };
-    case "stock":
-      return { type: "bars", rects: computeStockBarRects(data, spec, layout, theme) };
-    case "boxPlot":
-      return { type: "bars", rects: computeBoxPlotBarRects(data, spec, layout, theme) };
-    case "sunburst":
-      return { type: "bars", rects: computeSunburstBarRects(data, spec, layout, theme) };
-    case "pareto":
-      return computeParetoHitGeometry(data, spec, layout, theme);
-  }
+  const def = getChartMark(spec.mark);
+  return def ? def.computeGeometry(data, spec, layout, theme) : { type: "bars", rects: [] };
 }
 
 // ============================================================================
