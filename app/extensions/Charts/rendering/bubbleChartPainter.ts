@@ -7,7 +7,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, BubbleMarkOp
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
-import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
+import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -16,6 +16,8 @@ import {
   drawTitle,
   drawLegend,
   formatTickValue,
+  resolveScatterXAxis,
+  type ScatterXAxis,
 } from "./chartPainterUtils";
 
 // ============================================================================
@@ -70,10 +72,7 @@ export function paintBubbleChart(
     [plotArea.y + plotArea.height, plotArea.y],
   );
 
-  const xScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
+  const xAxis = resolveScatterXAxis(data, spec, plotArea);
 
   // Compute size scale
   const sizeValues = sizeSeries ? sizeSeries.values : [];
@@ -100,7 +99,7 @@ export function paintBubbleChart(
   }
 
   // 4. Axes
-  drawBubbleAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  drawBubbleAxes(ctx, xAxis, yScale, plotArea, spec, theme);
 
   // 5. Bubbles
   ctx.save();
@@ -119,7 +118,7 @@ export function paintBubbleChart(
       const color = resolvePointColor(encoding, spec.palette, origIdx, series.color, value, category);
       const pointOpacity = resolvePointOpacity(encoding, value, category) ?? bubbleOpacity;
 
-      const x = xScale.scaleIndex(ci);
+      const x = xAxis.xOf(ci);
       const y = yScale.scale(value);
       const r = getBubbleRadius(ci);
 
@@ -153,7 +152,7 @@ export function paintBubbleChart(
 
 function drawBubbleAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  xScale: ReturnType<typeof createPointScale>,
+  xAxis: ScatterXAxis,
   yScale: ReturnType<typeof createLinearScale>,
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
@@ -183,9 +182,8 @@ function drawBubbleAxes(
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
 
-    for (let ci = 0; ci < xScale.domain.length; ci++) {
-      const x = xScale.scaleIndex(ci);
-      ctx.fillText(xScale.domain[ci], x, xAxisY + 4);
+    for (const tick of xAxis.ticks) {
+      ctx.fillText(tick.label, tick.x, xAxisY + 4);
     }
   }
 
@@ -264,10 +262,7 @@ export function computeBubblePointMarkers(
     [plotArea.y + plotArea.height, plotArea.y],
   );
 
-  const xScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
+  const xAxis = resolveScatterXAxis(data, spec, plotArea);
 
   const sizeValues = sizeSeries ? sizeSeries.values : [];
   const sizeMin = sizeValues.length > 0 ? Math.min(...sizeValues.filter((v) => v > 0)) : 1;
@@ -287,7 +282,7 @@ export function computeBubblePointMarkers(
       markers.push({
         seriesIndex: si,
         categoryIndex: ci,
-        cx: xScale.scaleIndex(ci),
+        cx: xAxis.xOf(ci),
         cy: yScale.scale(value),
         radius: bubbleR,
         value,

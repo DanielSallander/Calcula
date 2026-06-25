@@ -8,7 +8,7 @@ import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity, resolvePointSize } from "../lib/encodingResolver";
 import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
-import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
+import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -17,6 +17,8 @@ import {
   drawTitle,
   drawLegend,
   formatTickValue,
+  resolveScatterXAxis,
+  type ScatterXAxis,
 } from "./chartPainterUtils";
 
 // ============================================================================
@@ -63,10 +65,7 @@ export function paintScatterChart(
     [plotArea.y + plotArea.height, plotArea.y],
   );
 
-  const xScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
+  const xAxis = resolveScatterXAxis(data, spec, plotArea);
 
   // 1. Background
   drawChartBackground(ctx, layout, theme);
@@ -80,7 +79,7 @@ export function paintScatterChart(
   }
 
   // 4. Axes
-  drawScatterAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  drawScatterAxes(ctx, xAxis, yScale, plotArea, spec, theme);
 
   // 5. Points
   ctx.save();
@@ -109,7 +108,7 @@ export function paintScatterChart(
       if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
       ctx.fillStyle = color;
 
-      const x = xScale.scaleIndex(ci);
+      const x = xAxis.xOf(ci);
       const y = yScale.scale(value);
       drawPoint(ctx, x, y, resolvedSize, pointShape);
 
@@ -172,7 +171,7 @@ function drawPoint(
 
 function drawScatterAxes(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  xScale: ReturnType<typeof createPointScale>,
+  xAxis: ScatterXAxis,
   yScale: ReturnType<typeof createLinearScale>,
   plotArea: { x: number; y: number; width: number; height: number },
   spec: ChartSpec,
@@ -202,9 +201,8 @@ function drawScatterAxes(
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
 
-    for (let ci = 0; ci < xScale.domain.length; ci++) {
-      const x = xScale.scaleIndex(ci);
-      ctx.fillText(xScale.domain[ci], x, xAxisY + 4);
+    for (const tick of xAxis.ticks) {
+      ctx.fillText(tick.label, tick.x, xAxisY + 4);
     }
   }
 
@@ -276,10 +274,7 @@ export function computeScatterPointMarkers(
     [plotArea.y + plotArea.height, plotArea.y],
   );
 
-  const xScale = createPointScale(
-    data.categories,
-    [plotArea.x, plotArea.x + plotArea.width],
-  );
+  const xAxis = resolveScatterXAxis(data, spec, plotArea);
 
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
@@ -288,7 +283,7 @@ export function computeScatterPointMarkers(
       markers.push({
         seriesIndex: si,
         categoryIndex: ci,
-        cx: xScale.scaleIndex(ci),
+        cx: xAxis.xOf(ci),
         cy: yScale.scale(value),
         radius: pointSize,
         value,

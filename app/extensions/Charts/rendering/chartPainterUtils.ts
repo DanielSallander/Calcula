@@ -7,6 +7,7 @@ import type { ChartSpec, ParsedChartData, ChartLayout } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import type { LinearScale, BandScale } from "./scales";
+import { createScaleFromSpec, createPointScale } from "./scales";
 import { applyFillStyle } from "./gradientFill";
 
 // ============================================================================
@@ -694,4 +695,52 @@ export function formatTickValue(value: number): string {
   if (Math.abs(value) >= 1_000) return (value / 1_000).toFixed(1) + "K";
   if (Number.isInteger(value)) return value.toString();
   return value.toFixed(1);
+}
+
+// ============================================================================
+// Scatter / Bubble X axis (quantitative when the category column is numeric)
+// ============================================================================
+
+export interface ScatterXAxis {
+  /** Map a category index to its x pixel coordinate. */
+  xOf(ci: number): number;
+  /** Tick marks (pixel + label) to draw along the x axis. */
+  ticks: Array<{ x: number; label: string }>;
+  /** True when the x axis is quantitative (value-proportional) vs evenly-spaced categories. */
+  numeric: boolean;
+}
+
+/**
+ * Resolve the X axis for scatter/bubble charts. When the data carries numeric
+ * `categoryValues`, the X axis is quantitative — value-proportional and honoring
+ * xAxis.scale/min/max/tickFormat. Otherwise it falls back to evenly-spaced
+ * categories (the original behavior), so charts with text categories are
+ * unaffected.
+ */
+export function resolveScatterXAxis(
+  data: ParsedChartData,
+  spec: ChartSpec,
+  plotArea: { x: number; width: number },
+): ScatterXAxis {
+  const range: [number, number] = [plotArea.x, plotArea.x + plotArea.width];
+  const cv = data.categoryValues;
+
+  if (cv && cv.length === data.categories.length && cv.length > 0 && cv.every((v) => Number.isFinite(v))) {
+    const xMin = spec.xAxis.min ?? Math.min(...cv);
+    const xMax = spec.xAxis.max ?? Math.max(...cv);
+    const scale = createScaleFromSpec(spec.xAxis.scale, [xMin, xMax], range);
+    const fmt = spec.xAxis.tickFormat;
+    const tickCount = spec.xAxis.tickCount ?? 5;
+    const lo = Math.min(range[0], range[1]);
+    const hi = Math.max(range[0], range[1]);
+    const ticks = scale
+      .ticks(tickCount)
+      .map((t) => ({ x: scale.scale(t), label: fmt ? formatTickValueWithFormat(t, fmt) : formatTickValue(t) }))
+      .filter((tk) => tk.x >= lo - 0.5 && tk.x <= hi + 0.5);
+    return { xOf: (ci) => scale.scale(cv[ci]), ticks, numeric: true };
+  }
+
+  const point = createPointScale(data.categories, range);
+  const ticks = data.categories.map((c, i) => ({ x: point.scaleIndex(i), label: c }));
+  return { xOf: (ci) => point.scaleIndex(ci), ticks, numeric: false };
 }

@@ -308,6 +308,56 @@ describe("aggregate transform", () => {
     ]);
     expect(result.categories).toEqual(data.categories);
   });
+
+  it("defaults the output name to the field name when `as` is omitted", () => {
+    const data: ParsedChartData = {
+      categories: ["A", "A", "B"],
+      series: [{ name: "Sales", values: [10, 20, 30], color: null }],
+    };
+    const result = applyTransforms(data, [
+      { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales" },
+    ]);
+    expect(result.series).toHaveLength(1);
+    expect(result.series[0].name).toBe("Sales");
+    expect(result.series[0].values).toEqual([30, 30]);
+  });
+});
+
+describe("aggregate transform: multi-series", () => {
+  const data: ParsedChartData = {
+    categories: ["A", "A", "B"],
+    series: [
+      { name: "Sales", values: [10, 20, 30], color: null },
+      { name: "Profit", values: [1, 2, 3], color: "#ff0000" },
+    ],
+  };
+
+  it("aggregates every series per group when field is omitted", () => {
+    const result = applyTransforms(data, [
+      { type: "aggregate", groupBy: ["$category"], op: "sum" },
+    ]);
+    expect(result.categories).toEqual(["A", "B"]);
+    expect(result.series).toHaveLength(2);
+    expect(result.series[0]).toMatchObject({ name: "Sales", values: [30, 30] });
+    expect(result.series[1]).toMatchObject({ name: "Profit", values: [3, 3], color: "#ff0000" });
+  });
+
+  it("treats field: \"*\" the same as omitting field", () => {
+    const result = applyTransforms(data, [
+      { type: "aggregate", groupBy: ["$category"], op: "mean", field: "*" },
+    ]);
+    expect(result.series).toHaveLength(2);
+    expect(result.series[0].values).toEqual([15, 30]); // mean(10,20)=15, mean(30)=30
+    expect(result.series[1].values).toEqual([1.5, 3]);
+  });
+
+  it("returns data unchanged when there are no series", () => {
+    const empty: ParsedChartData = { categories: ["A", "B"], series: [] };
+    const result = applyTransforms(empty, [
+      { type: "aggregate", groupBy: ["$category"], op: "sum" },
+    ]);
+    expect(result).toBe(empty);
+  });
 });
 
 // ============================================================================
@@ -976,5 +1026,82 @@ describe("transform diagnostics", () => {
     expect(() => applyTransforms(makeData(), [
       { type: "calculate", expr: "1 +", as: "X" },
     ])).not.toThrow();
+  });
+});
+
+// ============================================================================
+// Lookup Transform (B3)
+// ============================================================================
+
+describe("lookup transform", () => {
+  function secondary(series: ParsedChartData["series"], categories = ["Jan", "Mar", "May"]): ParsedChartData {
+    return { categories, series };
+  }
+
+  it("joins matching categories and adds the series, defaulting unmatched to 0", () => {
+    const main = makeData();
+    const lookupData = new Map<number, ParsedChartData>([
+      [0, secondary([{ name: "Target", values: [90, 280, 240], color: null }])],
+    ]);
+    const result = applyTransforms(main, [{ type: "lookup", from: "X" }], undefined, lookupData);
+    const target = result.series.find((s) => s.name === "Target")!;
+    expect(target).toBeDefined();
+    // categories Jan,Feb,Mar,Apr,May -> 90, 0, 280, 0, 240
+    expect(target.values).toEqual([90, 0, 280, 0, 240]);
+    expect(result.categories).toEqual(main.categories);
+    expect(result.series).toHaveLength(3);
+  });
+
+  it("uses the provided default for unmatched categories", () => {
+    const main = makeData();
+    const lookupData = new Map<number, ParsedChartData>([
+      [0, secondary([{ name: "Target", values: [90, 280, 240], color: null }])],
+    ]);
+    const result = applyTransforms(main, [{ type: "lookup", from: "X", default: -1 }], undefined, lookupData);
+    const target = result.series.find((s) => s.name === "Target")!;
+    expect(target.values).toEqual([90, -1, 280, -1, 240]);
+  });
+
+  it("adds only the requested fields", () => {
+    const main = makeData();
+    const lookupData = new Map<number, ParsedChartData>([
+      [0, secondary([
+        { name: "Target", values: [90, 280, 240], color: null },
+        { name: "Quota", values: [1, 2, 3], color: null },
+      ])],
+    ]);
+    const result = applyTransforms(main, [{ type: "lookup", from: "X", fields: ["Target"] }], undefined, lookupData);
+    expect(result.series.some((s) => s.name === "Target")).toBe(true);
+    expect(result.series.some((s) => s.name === "Quota")).toBe(false);
+  });
+
+  it("replaces an existing series with the same name (aligned by category)", () => {
+    const main = makeData();
+    const lookupData = new Map<number, ParsedChartData>([
+      [0, secondary([{ name: "Sales", values: [11, 33, 55], color: null }])],
+    ]);
+    const result = applyTransforms(main, [{ type: "lookup", from: "X" }], undefined, lookupData);
+    expect(result.series).toHaveLength(2); // Sales replaced, Cost kept
+    const sales = result.series.find((s) => s.name === "Sales")!;
+    expect(sales.values).toEqual([11, 0, 33, 0, 55]);
+  });
+
+  it("warns and leaves data unchanged when the lookup data is missing", () => {
+    const main = makeData();
+    const diags: TransformDiagnostic[] = [];
+    const result = applyTransforms(main, [{ type: "lookup", from: "X" }], diags);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]).toMatchObject({ transformType: "lookup", severity: "warning" });
+    expect(result.series).toHaveLength(2);
+  });
+
+  it("warns when no categories match", () => {
+    const main = makeData();
+    const diags: TransformDiagnostic[] = [];
+    const lookupData = new Map<number, ParsedChartData>([
+      [0, secondary([{ name: "Target", values: [1, 2], color: null }], ["X", "Y"])],
+    ]);
+    applyTransforms(main, [{ type: "lookup", from: "X" }], diags, lookupData);
+    expect(diags.some((d) => d.transformType === "lookup" && d.message.includes("no categories matched"))).toBe(true);
   });
 });

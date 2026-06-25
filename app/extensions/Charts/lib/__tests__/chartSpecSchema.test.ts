@@ -85,6 +85,7 @@ describe("chartSpecJsonSchema", () => {
     expect(refs).toContain("#/definitions/CalculateTransform");
     expect(refs).toContain("#/definitions/WindowTransform");
     expect(refs).toContain("#/definitions/BinTransform");
+    expect(refs).toContain("#/definitions/LookupTransform");
   });
 
   it("survives JSON roundtrip", () => {
@@ -354,6 +355,7 @@ describe("chartSpecJsonSchema drift guard", () => {
         { type: "calculate", expr: "Profit * 1.1", as: "Adjusted" },
         { type: "window", op: "running_sum", field: "Profit", as: "Cumulative" },
         { type: "bin", field: "Profit", binCount: 8, as: "Bins" },
+        { type: "lookup", from: "Targets!A1:B13", fields: ["Target"], default: 0 },
       ],
       config: {
         theme: {

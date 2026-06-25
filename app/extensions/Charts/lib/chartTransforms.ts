@@ -13,6 +13,7 @@ import type {
   CalculateTransform,
   WindowTransform,
   BinTransform,
+  LookupTransform,
   AggregateOp,
 } from "../types";
 import {
@@ -40,8 +41,9 @@ export function applyTransforms(
   data: ParsedChartData,
   transforms: TransformSpec[],
   diagnostics?: TransformDiagnostic[],
+  lookupData?: Map<number, ParsedChartData>,
 ): ParsedChartData {
-  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics), data);
+  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData), data);
 }
 
 // ============================================================================
@@ -53,6 +55,7 @@ function applyOne(
   transform: TransformSpec,
   index: number,
   diagnostics?: TransformDiagnostic[],
+  lookupData?: Map<number, ParsedChartData>,
 ): ParsedChartData {
   switch (transform.type) {
     case "filter":
@@ -67,6 +70,8 @@ function applyOne(
       return applyWindow(data, transform, index, diagnostics);
     case "bin":
       return applyBin(data, transform, index, diagnostics);
+    case "lookup":
+      return applyLookup(data, transform, index, diagnostics, lookupData);
     default: {
       const unknownType = (transform as { type?: string }).type ?? "unknown";
       diagnostics?.push({
@@ -244,11 +249,6 @@ function applyAggregate(
   diagnostics?: TransformDiagnostic[],
 ): ParsedChartData {
   const { groupBy, op, field, as } = t;
-  const seriesIdx = findSeriesIndex(data, field);
-  if (seriesIdx < 0) {
-    report(diagnostics, index, "aggregate", "warning", `Aggregate: unknown field "${field}" — transform skipped.`);
-    return data;
-  }
 
   // Warn about any groupBy field that doesn't exist (it is silently ignored).
   for (const gb of groupBy) {
@@ -257,11 +257,9 @@ function applyAggregate(
     }
   }
 
-  // Group by category labels (for now, groupBy always operates on categories)
+  // Group row indices by the groupBy key (category by default).
   const groups = new Map<string, number[]>();
-
   for (let ci = 0; ci < data.categories.length; ci++) {
-    // Build group key from groupBy fields
     const keyParts: string[] = [];
     for (const gb of groupBy) {
       if (gb === "$category") {
@@ -278,21 +276,34 @@ function applyAggregate(
     groups.get(key)!.push(ci);
   }
 
-  const newCategories: string[] = [];
-  const newValues: number[] = [];
+  const groupEntries = [...groups];
+  // Use the first part of the key as the category name (split back).
+  const newCategories = groupEntries.map(([key]) => key.split("|||")[0]);
 
-  for (const [key, indices] of groups) {
-    // Use the first part of the key as category name (split back)
-    newCategories.push(key.split("|||")[0]);
-    const values = indices.map((i) => data.series[seriesIdx].values[i]);
-    newValues.push(computeAggregate(op, values));
+  // Multi-series mode: aggregate EVERY series per group, preserving all series.
+  if (field === undefined || field === "*") {
+    if (data.series.length === 0) return data;
+    const series = data.series.map((s) => ({
+      name: s.name,
+      color: s.color,
+      values: groupEntries.map(([, idxs]) => computeAggregate(op, idxs.map((i) => s.values[i]))),
+    }));
+    return { categories: newCategories, series };
   }
 
+  // Single-series mode: aggregate the named field into one output series.
+  const seriesIdx = findSeriesIndex(data, field);
+  if (seriesIdx < 0) {
+    report(diagnostics, index, "aggregate", "warning", `Aggregate: unknown field "${field}" — transform skipped.`);
+    return data;
+  }
+
+  const values = groupEntries.map(([, idxs]) => computeAggregate(op, idxs.map((i) => data.series[seriesIdx].values[i])));
   return {
     categories: newCategories,
     series: [{
-      name: as,
-      values: newValues,
+      name: as ?? field,
+      values,
       color: data.series[seriesIdx].color,
     }],
   };
@@ -509,6 +520,66 @@ function applyBin(
 
 function formatBinEdge(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+// ============================================================================
+// Lookup (join a second data source by category)
+// ============================================================================
+
+function applyLookup(
+  data: ParsedChartData,
+  t: LookupTransform,
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+  lookupData?: Map<number, ParsedChartData>,
+): ParsedChartData {
+  // The secondary source is resolved+read asynchronously before the (sync)
+  // pipeline runs and supplied here keyed by transform index.
+  const resolved = lookupData?.get(index);
+  if (!resolved) {
+    report(diagnostics, index, "lookup", "warning", "Lookup: secondary data could not be loaded — no series added.");
+    return data;
+  }
+
+  // Map each secondary category label to its row (first occurrence wins).
+  const secByCategory = new Map<string, number>();
+  resolved.categories.forEach((c, i) => {
+    if (!secByCategory.has(c)) secByCategory.set(c, i);
+  });
+
+  const wanted = t.fields && t.fields.length > 0
+    ? resolved.series.filter((s) => t.fields!.includes(s.name))
+    : resolved.series;
+
+  if (wanted.length === 0) {
+    report(diagnostics, index, "lookup", "warning", "Lookup: no matching fields found in the secondary source.");
+    return data;
+  }
+
+  const matchedCategories = data.categories.filter((c) => secByCategory.has(c)).length;
+  if (matchedCategories === 0) {
+    report(diagnostics, index, "lookup", "warning", "Lookup: no categories matched the secondary source.");
+  }
+
+  const def = t.default ?? 0;
+  const added = wanted.map((s) => ({
+    name: s.name,
+    color: s.color,
+    values: data.categories.map((cat) => {
+      const i = secByCategory.get(cat);
+      return i === undefined ? def : (s.values[i] ?? def);
+    }),
+  }));
+
+  // Merge into the existing series, replacing any with the same name.
+  const series = [...data.series];
+  for (const a of added) {
+    const existingIdx = series.findIndex((s) => s.name === a.name);
+    if (existingIdx >= 0) series[existingIdx] = a;
+    else series.push(a);
+  }
+
+  return { categories: data.categories, series };
 }
 
 // ============================================================================

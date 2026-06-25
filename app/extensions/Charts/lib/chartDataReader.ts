@@ -64,8 +64,10 @@ import type {
   ChartSpec,
   ChartSeries,
   DataRangeRef,
+  DataSource,
   ParsedChartData,
   SeriesOrientation,
+  TransformSpec,
   TransformDiagnostic,
 } from "../types";
 import { isPivotDataSource } from "../types";
@@ -109,13 +111,17 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   const resolvedSpec = await resolveSpecReferences(spec);
   const diagnostics: TransformDiagnostic[] = [];
 
+  // Pre-resolve any lookup transforms' secondary sources (async) so the
+  // synchronous transform pipeline can join them by index.
+  const lookupData = await resolveLookupSources(resolvedSpec.transform);
+
   // Handle pivot data source: read directly from pivot view
   if (isPivotDataSource(resolvedSpec.data)) {
     let parsedData = await readPivotChartData(resolvedSpec.data);
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-      parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics);
+      parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData);
     }
 
     const unfilteredData = parsedData;
@@ -123,7 +129,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
     // Apply chart filters (hide series/categories)
     parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
 
-    return { spec: resolvedSpec, data: parsedData, unfilteredData, diagnostics };
+    return { spec: resolvedSpec, data: withCategoryValues(parsedData), unfilteredData, diagnostics };
   }
 
   // Standard cell range data source
@@ -161,7 +167,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
 
   // Apply data transforms if specified
   if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-    parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics);
+    parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData);
   }
 
   const unfilteredData = parsedData;
@@ -169,7 +175,69 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   // Apply chart filters (hide series/categories)
   parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
 
-  return { spec: resolvedSpec, data: parsedData, unfilteredData, diagnostics };
+  return { spec: resolvedSpec, data: withCategoryValues(parsedData), unfilteredData, diagnostics };
+}
+
+/**
+ * Read every `lookup` transform's secondary source into a ParsedChartData,
+ * keyed by the transform's index. Done before the synchronous transform
+ * pipeline so the join itself stays pure. Failures are left unset — applyLookup
+ * surfaces a diagnostic for those.
+ */
+async function resolveLookupSources(
+  transforms: TransformSpec[] | undefined,
+): Promise<Map<number, ParsedChartData>> {
+  const map = new Map<number, ParsedChartData>();
+  if (!transforms) return map;
+  for (let i = 0; i < transforms.length; i++) {
+    const t = transforms[i];
+    if (t.type === "lookup") {
+      try {
+        map.set(i, await readLookupRange(t.from));
+      } catch {
+        // Leave unset; applyLookup reports a "could not be loaded" diagnostic.
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * Read a lookup table range as a ParsedChartData: columns orientation, header
+ * row, first column as the join key (categories), remaining columns as series.
+ */
+async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
+  const ref = await resolveDataSource(from);
+  const detected = await autoDetectSeries(ref, true);
+
+  const cells = await getViewportCells(ref.startRow, ref.startCol, ref.endRow, ref.endCol);
+  const numRows = ref.endRow - ref.startRow + 1;
+  const numCols = ref.endCol - ref.startCol + 1;
+  const grid: string[][] = Array.from({ length: numRows }, () => Array(numCols).fill(""));
+  for (const cell of cells) {
+    const r = cell.row - ref.startRow;
+    const c = cell.col - ref.startCol;
+    if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
+      grid[r][c] = cell.display;
+    }
+  }
+
+  return parseColumnOriented(grid, numRows, numCols, true, detected.categoryIndex, detected.series);
+}
+
+/**
+ * Attach numeric categoryValues when the (post-transform) category labels are
+ * all finite numbers — enabling a quantitative X axis for scatter/bubble.
+ * Computed here, after transforms/filters, so the values always align with the
+ * final categories (transforms rebuild categories and drop any stale values).
+ */
+function withCategoryValues(d: ParsedChartData): ParsedChartData {
+  if (d.categories.length === 0) return d;
+  const values = d.categories.map(parseDisplayNumber);
+  if (values.every((v) => Number.isFinite(v))) {
+    return { ...d, categoryValues: values };
+  }
+  return d;
 }
 
 /**

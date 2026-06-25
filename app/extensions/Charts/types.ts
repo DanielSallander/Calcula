@@ -716,10 +716,14 @@ export interface AggregateTransform {
   groupBy: string[];
   /** Aggregation operation. */
   op: AggregateOp;
-  /** Series name whose values to aggregate. */
-  field: string;
-  /** Name for the resulting series. */
-  as: string;
+  /**
+   * Series name whose values to aggregate into a single output series.
+   * Omit (or use "*") to aggregate EVERY series per group, producing a
+   * multi-series result that preserves all series.
+   */
+  field?: string;
+  /** Name for the resulting series. Used only with `field`; ignored when aggregating all series. */
+  as?: string;
 }
 
 /** Calculate transform: create a new series from a simple expression. */
@@ -761,6 +765,21 @@ export interface BinTransform {
   as: string;
 }
 
+/**
+ * Lookup transform: join a second data source by category label, adding its
+ * series to the chart. The secondary range is read as a lookup table (columns
+ * orientation, first column = key, header row = series names).
+ */
+export interface LookupTransform {
+  type: "lookup";
+  /** Secondary data source to join (A1 reference string, named range, or DataRangeRef). */
+  from: DataSource;
+  /** Series names from the secondary source to add. Omit to add all of them. */
+  fields?: string[];
+  /** Value used when a category has no match in the secondary source. Default: 0. */
+  default?: number;
+}
+
 /** A data transform step. Applied in sequence before rendering. */
 export type TransformSpec =
   | FilterTransform
@@ -768,7 +787,8 @@ export type TransformSpec =
   | AggregateTransform
   | CalculateTransform
   | WindowTransform
-  | BinTransform;
+  | BinTransform
+  | LookupTransform;
 
 /**
  * A non-fatal issue encountered while applying a transform. Transforms still
@@ -1040,6 +1060,12 @@ export interface ParsedChartData {
     values: number[];
     color: string | null;
   }>;
+  /**
+   * Numeric value of each category, set only when the category column is fully
+   * numeric. Enables a true quantitative X axis for scatter/bubble charts
+   * (value-proportional positioning) instead of evenly-spaced categories.
+   */
+  categoryValues?: number[];
 }
 
 // ============================================================================

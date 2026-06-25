@@ -822,6 +822,7 @@ export const chartSpecJsonSchema: object = {
         { $ref: "#/definitions/CalculateTransform" },
         { $ref: "#/definitions/WindowTransform" },
         { $ref: "#/definitions/BinTransform" },
+        { $ref: "#/definitions/LookupTransform" },
       ],
     },
     FilterTransform: {
@@ -848,14 +849,14 @@ export const chartSpecJsonSchema: object = {
     },
     AggregateTransform: {
       type: "object",
-      description: "Group by categories and aggregate series values.",
-      required: ["type", "groupBy", "op", "field", "as"],
+      description: "Group by categories and aggregate series values. With `field`, produces one output series; omit `field` (or use \"*\") to aggregate every series per group (multi-series result).",
+      required: ["type", "groupBy", "op"],
       properties: {
         type: { type: "string", const: "aggregate" },
         groupBy: { type: "array", items: { type: "string" }, description: "Fields to group by. Use \"$category\" for category labels." },
         op: { type: "string", enum: ["sum", "mean", "median", "min", "max", "count"], description: "Aggregation operation." },
-        field: { type: "string", description: "Series name whose values to aggregate." },
-        as: { type: "string", description: "Name for the resulting series." },
+        field: { type: "string", description: "Series name to aggregate into one output series. Omit (or \"*\") to aggregate all series." },
+        as: { type: "string", description: "Name for the resulting series (single-field mode only). Defaults to the field name." },
       },
       additionalProperties: false,
     },
@@ -891,6 +892,24 @@ export const chartSpecJsonSchema: object = {
         field: { type: "string", description: "Series name whose values to bin." },
         binCount: { type: "integer", minimum: 2, description: "Number of bins. Default: 10." },
         as: { type: "string", description: "Name for the binned category output." },
+      },
+      additionalProperties: false,
+    },
+    LookupTransform: {
+      type: "object",
+      description: "Join a second data source by category label, adding its series to the chart. The secondary range is read as a lookup table (columns orientation, first column = key, header row = series names).",
+      required: ["type", "from"],
+      properties: {
+        type: { type: "string", const: "lookup" },
+        from: {
+          description: "Secondary data source: an A1 reference string, a named range, or a DataRangeRef.",
+          oneOf: [
+            { $ref: "#/definitions/DataRangeRef" },
+            { type: "string", description: "A1 reference (e.g. \"Sheet1!A1:B10\") or named range name." },
+          ],
+        },
+        fields: { type: "array", items: { type: "string" }, description: "Series names from the secondary source to add. Omit to add all." },
+        default: { type: "number", description: "Value used when a category has no match. Default: 0." },
       },
       additionalProperties: false,
     },
@@ -1349,8 +1368,8 @@ export function generateSpecReference(): string {
   lines.push("| type | \"aggregate\" | yes | |");
   lines.push("| groupBy | string[] | yes | [\"$category\"] or series names |");
   lines.push("| op | string | yes | sum, mean, median, min, max, count |");
-  lines.push("| field | string | yes | Series to aggregate |");
-  lines.push("| as | string | yes | Output series name |");
+  lines.push("| field | string | no | Series to aggregate. Omit (or \"*\") to aggregate all series (multi-series) |");
+  lines.push("| as | string | no | Output series name (single-field mode). Defaults to field name |");
   lines.push("");
   lines.push("### calculate");
   lines.push("Create a new series from an expression.");
@@ -1377,6 +1396,15 @@ export function generateSpecReference(): string {
   lines.push("| field | string | yes | Series to bin |");
   lines.push("| binCount | integer | no | Number of bins (default: 10) |");
   lines.push("| as | string | yes | Output series name |");
+  lines.push("");
+  lines.push("### lookup");
+  lines.push("Join a second data source by category label, adding its series.");
+  lines.push("| Property | Type | Required | Description |");
+  lines.push("|----------|------|----------|-------------|");
+  lines.push("| type | \"lookup\" | yes | |");
+  lines.push("| from | DataSource | yes | A1 reference, named range, or DataRangeRef |");
+  lines.push("| fields | string[] | no | Series names to add (omit = all) |");
+  lines.push("| default | number | no | Value for unmatched categories (default: 0) |");
   lines.push("");
   lines.push("Example: Filter and sort a bar chart:");
   lines.push("```json");

@@ -537,6 +537,12 @@ Alphabetical sort:
 
 Operations: \`sum\`, \`mean\`, \`median\`, \`min\`, \`max\`, \`count\`
 
+Omit \`field\` (or use \`"*"\`) to aggregate **every** series per group, keeping a
+multi-series result — e.g. sum each metric by category:
+\`\`\`json
+{ "type": "aggregate", "groupBy": ["$category"], "op": "sum" }
+\`\`\`
+
 ### Calculate — Computed Series
 \`\`\`json
 "transform": [
@@ -571,6 +577,17 @@ Operations: \`running_sum\`, \`running_mean\`, \`rank\`
   { "type": "bin", "field": "Revenue", "binCount": 8, "as": "Revenue Bins" }
 ]
 \`\`\`
+
+### Lookup — Join a Second Range
+Join another range by category label and pull its series in. The secondary
+range is read as a lookup table (first column = key, header row = series names):
+\`\`\`json
+"transform": [
+  { "type": "lookup", "from": "Targets!A1:B13", "fields": ["Target"], "default": 0 }
+]
+\`\`\`
+Categories with no match use \`default\` (0 if omitted). Omit \`fields\` to add
+every series from the secondary range.
 
 ### Chaining Transforms
 
