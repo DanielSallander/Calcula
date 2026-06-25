@@ -24,6 +24,7 @@ import { applyTransforms } from "./chartTransforms";
 import { readPivotChartData } from "./pivotChartDataReader";
 import { applyChartFilters } from "./chartFilters";
 import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
+import { lowerEncoding } from "./lowerEncoding";
 
 // ============================================================================
 // Public API
@@ -60,16 +61,14 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   const resolvedSpec = await resolveSpecReferences(spec);
   const diagnostics: TransformDiagnostic[] = [];
 
-  // Pre-resolve any lookup transforms' secondary sources (async) so the
-  // synchronous transform pipeline can join them by index.
-  const lookupData = await resolveLookupSources(resolvedSpec.transform);
-
   // Handle pivot data source: read directly from pivot view
   if (isPivotDataSource(resolvedSpec.data)) {
     let parsedData = await readPivotChartData(resolvedSpec.data);
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
+      // Pre-resolve lookup sources (async) so the sync pipeline can join by index.
+      const lookupData = await resolveLookupSources(resolvedSpec.transform);
       parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData);
     }
 
@@ -82,7 +81,7 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   }
 
   // Standard cell range data source
-  const { hasHeaders, seriesOrientation, categoryIndex, series } = resolvedSpec;
+  const { hasHeaders, seriesOrientation } = resolvedSpec;
 
   // Resolve the data source to concrete coordinates
   const dataRef = await resolveDataSource(resolvedSpec.data);
@@ -110,24 +109,32 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
     }
   }
 
+  // Compile an encoding spec to the series model now that we know the headers.
+  const headers = seriesOrientation === "columns"
+    ? (grid[0] ?? [])
+    : grid.map((row) => row[0] ?? "");
+  const lowered = resolvedSpec.encoding ? lowerEncoding(resolvedSpec, headers) : resolvedSpec;
+
   let parsedData = seriesOrientation === "columns"
-    ? parseColumnOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series)
-    : parseRowOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series);
+    ? parseColumnOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series)
+    : parseRowOriented(grid, numRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
 
   // Long-format view of the source columns, for the pivot transform.
   const tidyData = buildTidyData(grid, numRows, numCols, hasHeaders, seriesOrientation);
 
-  // Apply data transforms if specified
-  if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-    parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData, tidyData);
+  // Apply data transforms if specified. Lookups are resolved against the lowered
+  // transforms so encoding (which may prepend a pivot) keeps indices aligned.
+  if (lowered.transform && lowered.transform.length > 0) {
+    const lookupData = await resolveLookupSources(lowered.transform);
+    parsedData = applyTransforms(parsedData, lowered.transform, diagnostics, lookupData, tidyData);
   }
 
   const unfilteredData = parsedData;
 
   // Apply chart filters (hide series/categories)
-  parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
+  parsedData = applyChartFilters(parsedData, lowered.filters);
 
-  return { spec: resolvedSpec, data: withCategoryField(parsedData), unfilteredData, diagnostics };
+  return { spec: lowered, data: withCategoryField(parsedData), unfilteredData, diagnostics };
 }
 
 /**

@@ -179,7 +179,7 @@ const CHART_SPEC_KEYS: Array<keyof ChartSpec> = [
   "mark", "data", "hasHeaders", "seriesOrientation", "categoryIndex", "series",
   "title", "xAxis", "yAxis", "legend", "palette", "markOptions", "layers",
   "transform", "config", "tooltip", "trendlines", "dataLabels", "dataTable",
-  "seriesRefs", "filters", "dataPointOverrides",
+  "seriesRefs", "filters", "dataPointOverrides", "encoding",
 ];
 
 const ALL_CHART_TYPES: ChartType[] = [

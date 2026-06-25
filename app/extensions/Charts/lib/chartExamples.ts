@@ -414,6 +414,33 @@ export const CHART_EXAMPLES: ChartExample[] = [
       ],
     },
   },
+
+  // ── Encoding ───────────────────────────────────────────────────────────────
+  {
+    id: "encoding-color",
+    name: "Encoding: color by field",
+    description: "Describe the chart with encoding channels over a long table — x=Date, y=Sales, color=Region — and Calcula compiles it to one line per Region.",
+    category: "Encoding",
+    spec: {
+      mark: "line",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [],
+      title: "Sales by Region over Time",
+      xAxis: axis("Date"),
+      yAxis: axis("Sales", true),
+      legend: { visible: true, position: "top" },
+      palette: "default",
+      markOptions: { interpolation: "smooth", lineWidth: 2, showMarkers: false },
+      encoding: {
+        x: { field: "Date", type: "temporal" },
+        y: { field: "Sales", aggregate: "sum" },
+        color: { field: "Region" },
+      },
+    },
+  },
 ];
 
 // ============================================================================

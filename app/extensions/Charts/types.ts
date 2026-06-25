@@ -1005,6 +1005,46 @@ export interface ChartFilters {
 }
 
 // ============================================================================
+// Encoding Channels (Vega-Lite inspired grammar; lowered to the series model)
+// ============================================================================
+
+/**
+ * A single encoding channel: binds a source column (`field`) to a visual role.
+ * Optionally typed and aggregated. This is the grammar-of-graphics authoring
+ * layer — `lowerEncoding` compiles an EncodingSpec down to the series model
+ * (categoryIndex / series / transforms / axes), so the renderer is unchanged.
+ */
+export interface ChannelDef {
+  /** Source column name (matched against the header row). */
+  field: string;
+  /** Field type. Drives axis treatment (temporal/quantitative → value/time X). */
+  type?: FieldType;
+  /** Aggregation applied when grouping (e.g. sum revenue per category). */
+  aggregate?: AggregateOp;
+  /** Time bucketing hint; presence implies a temporal axis. */
+  timeUnit?: string;
+  /** Scale override for this channel's axis. */
+  scale?: ScaleSpec;
+  /** Axis/legend title (null = none). */
+  title?: string | null;
+}
+
+/**
+ * Encoding describes the chart in terms of channels over a (typically long)
+ * table. `color` splits the data into one series per distinct value (compiled
+ * via a pivot); without it, `y` is a single series. Compiles to the series
+ * model — it never reaches the painters.
+ */
+export interface EncodingSpec {
+  /** Category axis (X). */
+  x?: ChannelDef;
+  /** Value axis (Y). */
+  y?: ChannelDef;
+  /** Splits the data into one series per distinct value of this field. */
+  color?: ChannelDef;
+}
+
+// ============================================================================
 // Chart Specification (Vega-Lite inspired)
 // ============================================================================
 
@@ -1054,6 +1094,12 @@ export interface ChartSpec {
   filters?: ChartFilters;
   /** Per-data-point visual overrides (individual bar/slice/point formatting). */
   dataPointOverrides?: DataPointOverride[];
+  /**
+   * Optional encoding-channel description (x/y/color over a long table). When
+   * present it is compiled to the series model (categoryIndex/series/transforms/
+   * axes) before rendering; the painters never see it.
+   */
+  encoding?: EncodingSpec;
 }
 
 // ============================================================================

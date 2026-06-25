@@ -140,6 +140,10 @@ export const chartSpecJsonSchema: object = {
       description: "Per-series cell references for SERIES() formula reconstruction (from XLSX import or computed). Usually managed automatically.",
       items: { $ref: "#/definitions/SeriesRef" },
     },
+    encoding: {
+      $ref: "#/definitions/EncodingSpec",
+      description: "Encoding-channel description (x/y/color over a long table). Compiled to the series model before rendering.",
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -938,6 +942,30 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    ChannelDef: {
+      type: "object",
+      description: "An encoding channel binding a source column to a visual role.",
+      required: ["field"],
+      properties: {
+        field: { type: "string", description: "Source column name (matched against the header row)." },
+        type: { type: "string", enum: ["nominal", "ordinal", "quantitative", "temporal"], description: "Field type. temporal/quantitative drive a time/value X axis." },
+        aggregate: { type: "string", enum: ["sum", "mean", "median", "min", "max", "count"], description: "Aggregation applied when grouping." },
+        timeUnit: { type: "string", description: "Time bucketing hint; presence implies a temporal axis." },
+        scale: { $ref: "#/definitions/ScaleSpec", description: "Scale override for this channel's axis." },
+        title: { type: ["string", "null"], description: "Axis/legend title (null = none)." },
+      },
+      additionalProperties: false,
+    },
+    EncodingSpec: {
+      type: "object",
+      description: "Encoding channels over a (typically long) table. `color` splits the data into one series per distinct value (via pivot); without it, `y` is a single series. Compiled to the series model.",
+      properties: {
+        x: { $ref: "#/definitions/ChannelDef", description: "Category axis (X)." },
+        y: { $ref: "#/definitions/ChannelDef", description: "Value axis (Y)." },
+        color: { $ref: "#/definitions/ChannelDef", description: "Splits the data into one series per distinct value of this field." },
+      },
+      additionalProperties: false,
+    },
     ErrorBarOptions: {
       type: "object",
       description: "Error bars for showing uncertainty/variability on bar, line, and scatter charts.",
@@ -1095,6 +1123,7 @@ export function generateSpecReference(): string {
   lines.push("| dataTable | DataTableOptions | Data table grid below the plot area |");
   lines.push("| filters | ChartFilters | Non-destructive hide of series/categories |");
   lines.push("| dataPointOverrides | DataPointOverride[] | Per-point color/opacity/border/explode overrides |");
+  lines.push("| encoding | EncodingSpec | Channel description (x/y/color); compiled to the series model |");
   lines.push("");
 
   lines.push("## ChartSeries");

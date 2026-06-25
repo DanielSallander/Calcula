@@ -48,8 +48,10 @@ describe("chart examples gallery", () => {
     expect(specs.some((s) => s.transform?.some((t) => t.type === "calculate"))).toBe(true);
     expect(specs.some((s) => s.transform?.some((t) => t.type === "lookup"))).toBe(true);
     expect(specs.some((s) => s.transform?.some((t) => t.type === "aggregate"))).toBe(true);
+    expect(specs.some((s) => s.transform?.some((t) => t.type === "pivot"))).toBe(true);
     expect(specs.some((s) => s.series.some((ser) => ser.encoding))).toBe(true);
     expect(specs.some((s) => s.layers && s.layers.length > 0)).toBe(true);
     expect(specs.some((s) => s.config?.theme)).toBe(true);
+    expect(specs.some((s) => s.encoding)).toBe(true);
   });
 });

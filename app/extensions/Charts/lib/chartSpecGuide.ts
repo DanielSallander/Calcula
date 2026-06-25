@@ -127,6 +127,30 @@ Each series maps a column (or row) from the data range to visual marks.
 - **color**: Override hex color, or \`null\` to use the palette
 - **encoding**: Per-data-point visual overrides (see Conditional Encoding)
 
+## Encoding Channels
+
+Instead of listing series, you can describe a chart with **encoding channels**
+over a long table (the grammar-of-graphics style). Calcula compiles it to the
+series model automatically.
+
+\`\`\`json
+"encoding": {
+  "x": { "field": "Date", "type": "temporal" },
+  "y": { "field": "Sales", "aggregate": "sum" },
+  "color": { "field": "Region" }
+}
+\`\`\`
+
+- **x / y / color**: each binds a source column (\`field\`) by header name.
+- **color** splits the data into one series per distinct value (compiled via a
+  pivot) — perfect for long data. Without \`color\`, \`y\` is a single series.
+- **type** \`"temporal"\` or \`"quantitative"\` gives the X axis a time/value scale.
+- **aggregate** (sum, mean, ...) groups rows by category.
+- **scale / title** on a channel set that axis's scale / title.
+
+Wide data (one column per series) needs no encoding — each column is already a
+series.
+
 ## Cell References
 
 String fields support cell references for dynamic content:
