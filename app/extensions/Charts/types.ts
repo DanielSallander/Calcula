@@ -1056,13 +1056,34 @@ export interface ChannelDef {
  * Small-multiples: render the chart once per series in a tiled grid (the
  * Vega-Lite `repeat` idea over the data's columns/series). Each sub-chart shows
  * the categories against one series, sharing the Y scale for comparability.
- * Faceting by a field's distinct values is a future extension.
+ * To split by a field's distinct values instead, see {@link FacetSpec}.
  */
 export interface RepeatSpec {
   /** Number of columns in the grid. Default: auto (~√n). */
   columns?: number;
   /** Share one Y scale across all sub-charts (comparable). Default: true. */
   sharedYScale?: boolean;
+}
+
+/**
+ * Faceting: render one chart panel per distinct value of a categorical field
+ * (the Vega-Lite `facet` idea). Unlike {@link RepeatSpec} — which splits the
+ * wide series — faceting partitions the long source ROWS by `field`, so it is
+ * resolved in the data reader (one ParsedChartData per facet value, carried on
+ * {@link ParsedChartData.facets}). Composed above the painters in chartDispatch.
+ * v1: cell-range source, columns orientation, header row required; transforms
+ * run per panel (Vega-Lite semantics). When unsupported it falls back to a
+ * single chart. Takes precedence over `repeat` when both are set.
+ */
+export interface FacetSpec {
+  /** Source column (by header name) whose distinct values define the panels. */
+  field: string;
+  /** Number of columns in the grid. Default: auto (~√n). */
+  columns?: number;
+  /** Share one Y scale across all panels (comparable). Default: true. */
+  sharedYScale?: boolean;
+  /** Share one X scale — the ordered union of categories across panels. Default: true. */
+  sharedXScale?: boolean;
 }
 
 export interface EncodingSpec {
@@ -1140,6 +1161,13 @@ export interface ChartSpec {
    * above the painters (chartDispatch), so the painters never see it.
    */
   repeat?: RepeatSpec;
+
+  /**
+   * Faceting: render one panel per distinct value of a categorical field.
+   * Resolved in the data reader (panels ride on the parsed data's `facets`) and
+   * tiled above the painters. Takes precedence over `repeat`.
+   */
+  facet?: FacetSpec;
 }
 
 // ============================================================================
@@ -1201,6 +1229,13 @@ export interface ParsedChartData {
    * or a date. Enables quantitative/temporal X axes for scatter & bubble.
    */
   categoryField?: CategoryField;
+  /**
+   * Faceting panels: one parsed dataset per distinct value of {@link FacetSpec}'s
+   * field, precomputed by the data reader and tiled by chartDispatch. Present
+   * only when `spec.facet` resolved successfully (cell-range, columns, headers).
+   * The panel datasets do not nest (their own `facets` is always undefined).
+   */
+  facets?: Array<{ value: string; data: ParsedChartData }>;
 }
 
 // ============================================================================

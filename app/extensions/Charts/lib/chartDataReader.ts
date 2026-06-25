@@ -122,10 +122,15 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   // Long-format view of the source columns, for the pivot transform.
   const tidyData = buildTidyData(grid, numRows, numCols, hasHeaders, seriesOrientation);
 
+  // Resolve lookup sources once (async); reused by the top-level transform run
+  // AND by every facet panel so faceting never re-reads ranges.
+  const lookupData = lowered.transform && lowered.transform.length > 0
+    ? await resolveLookupSources(lowered.transform)
+    : new Map<number, ParsedChartData>();
+
   // Apply data transforms if specified. Lookups are resolved against the lowered
   // transforms so encoding (which may prepend a pivot) keeps indices aligned.
   if (lowered.transform && lowered.transform.length > 0) {
-    const lookupData = await resolveLookupSources(lowered.transform);
     parsedData = applyTransforms(parsedData, lowered.transform, diagnostics, lookupData, tidyData);
   }
 
@@ -134,7 +139,20 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
   // Apply chart filters (hide series/categories)
   parsedData = applyChartFilters(parsedData, lowered.filters);
 
-  return { spec: lowered, data: withCategoryField(parsedData), unfilteredData, diagnostics };
+  // Faceting: one panel per distinct value of facet.field (partitions long rows,
+  // re-running transforms per panel). Unsupported specs return undefined → the
+  // top-level data renders as a single chart.
+  const facets = lowered.facet?.field
+    ? partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData)
+    : undefined;
+
+  const finalData = withCategoryField(parsedData);
+  return {
+    spec: lowered,
+    data: facets ? { ...finalData, facets } : finalData,
+    unfilteredData,
+    diagnostics,
+  };
 }
 
 /**
@@ -194,6 +212,77 @@ async function readLookupRange(from: DataSource): Promise<ParsedChartData> {
 function withCategoryField(d: ParsedChartData): ParsedChartData {
   const categoryField = detectCategoryField(d.categories);
   return categoryField ? { ...d, categoryField } : d;
+}
+
+/** Upper bound on facet panels — guards against cardinality explosion. */
+export const MAX_FACETS = 50;
+
+/**
+ * Partition the long source rows by a categorical field's distinct values,
+ * producing one ParsedChartData per value (a facet panel). The field is matched
+ * by exact (trimmed) header name. Distinct values are taken in first-seen order
+ * and capped at {@link MAX_FACETS}. Transforms run PER PANEL (Vega-Lite facet
+ * semantics) over the panel's row subset, reusing the single pre-resolved
+ * `lookupData` map (no async re-read). Returns `undefined` (→ caller renders a
+ * single chart) when faceting is unsupported for this spec: pivot data source
+ * (no grid), rows orientation, no header row, an unknown field, or no rows.
+ *
+ * Pure given its inputs (no IO) — unit-tested directly.
+ */
+export function partitionByFacet(
+  grid: string[][],
+  numRows: number,
+  numCols: number,
+  hasHeaders: boolean,
+  orientation: SeriesOrientation,
+  facetField: string,
+  lowered: ChartSpec,
+  lookupData: Map<number, ParsedChartData>,
+): Array<{ value: string; data: ParsedChartData }> | undefined {
+  // v1: needs a header row in columns orientation to reference the field by name.
+  if (orientation !== "columns" || !hasHeaders) return undefined;
+
+  const headerRow = grid[0] ?? [];
+  const target = facetField.trim();
+  const facetCol = headerRow.findIndex((h) => (h ?? "").trim() === target);
+  if (facetCol < 0) return undefined;
+
+  // Distinct facet values in first-seen (row) order, capped.
+  const seen = new Set<string>();
+  const order: string[] = [];
+  for (let r = 1; r < numRows; r++) {
+    const v = (grid[r]?.[facetCol] ?? "").trim();
+    if (!seen.has(v)) {
+      seen.add(v);
+      order.push(v);
+      if (order.length >= MAX_FACETS) break;
+    }
+  }
+  if (order.length === 0) return undefined;
+
+  const header = grid[0];
+  // Per-panel transforms surface diagnostics on the full-data run already; keep
+  // a throwaway sink here so the same warnings aren't reported once per panel.
+  const sink: TransformDiagnostic[] = [];
+
+  return order.map((value) => {
+    // Header row + only the rows whose facet cell matches this value.
+    const subGrid: string[][] = [header];
+    for (let r = 1; r < numRows; r++) {
+      if ((grid[r]?.[facetCol] ?? "").trim() === value) subGrid.push(grid[r]);
+    }
+    const subRows = subGrid.length;
+
+    let parsed = parseColumnOriented(subGrid, subRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
+    if (lowered.transform && lowered.transform.length > 0) {
+      const subTidy = buildTidyData(subGrid, subRows, numCols, hasHeaders, orientation);
+      parsed = applyTransforms(parsed, lowered.transform, sink, lookupData, subTidy);
+    }
+    // NOTE: chart filters (hiddenCategories/hiddenSeries) are POSITIONAL indices
+    // into the top-level chart's arrays — they don't map onto each panel's own
+    // category/series set, so they are intentionally not applied per panel (v1).
+    return { value: value || "(blank)", data: withCategoryField(parsed) };
+  });
 }
 
 /**

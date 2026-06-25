@@ -468,6 +468,26 @@ export const CHART_EXAMPLES: ChartExample[] = [
       repeat: { columns: 2, sharedYScale: true },
     },
   },
+  {
+    id: "facet-by-field",
+    name: "Facet by field",
+    description: "Split a long table into one panel per distinct value of a categorical column (e.g. Region). Panels share X and Y scales so they are directly comparable.",
+    category: "Composition",
+    spec: {
+      mark: "bar",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 1,
+      series: [{ name: "Sales", sourceIndex: 2, color: null }],
+      title: "Sales by Month, per Region",
+      xAxis: axis(),
+      yAxis: axis(null, true),
+      legend: { visible: false, position: "bottom" },
+      palette: "default",
+      facet: { field: "Region", columns: 2, sharedYScale: true, sharedXScale: true },
+    },
+  },
 ];
 
 // ============================================================================

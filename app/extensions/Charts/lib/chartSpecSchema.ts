@@ -151,6 +151,10 @@ export const chartSpecJsonSchema: object = {
       $ref: "#/definitions/RepeatSpec",
       description: "Small multiples: render one sub-chart per series in a tiled grid.",
     },
+    facet: {
+      $ref: "#/definitions/FacetSpec",
+      description: "Faceting: render one panel per distinct value of a categorical field. Takes precedence over repeat.",
+    },
   },
   // Narrow markOptions to the matching definition based on the chart type.
   allOf: MARK_OPTION_NARROWING,
@@ -982,6 +986,18 @@ export const chartSpecJsonSchema: object = {
       properties: {
         columns: { type: "integer", minimum: 1, description: "Number of columns in the grid. Default: auto (~sqrt of series count)." },
         sharedYScale: { type: "boolean", description: "Share one Y scale across all sub-charts. Default: true." },
+      },
+      additionalProperties: false,
+    },
+    FacetSpec: {
+      type: "object",
+      description: "Faceting: one panel per distinct value of a categorical field (referenced by header name). Partitions long source rows; v1 supports a cell-range source with a header row in columns orientation, else falls back to a single chart.",
+      required: ["field"],
+      properties: {
+        field: { type: "string", description: "Source column header whose distinct values define the panels." },
+        columns: { type: "integer", minimum: 1, description: "Number of columns in the grid. Default: auto (~sqrt of panel count)." },
+        sharedYScale: { type: "boolean", description: "Share one Y scale across all panels. Default: true." },
+        sharedXScale: { type: "boolean", description: "Share one X scale (ordered union of categories) across panels. Default: true." },
       },
       additionalProperties: false,
     },

@@ -88,6 +88,13 @@ export function dispatchPaint(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
+  // Faceting: one panel per distinct field value (precomputed in data.facets).
+  // Takes precedence over repeat.
+  if (spec.facet && data.facets && data.facets.length > 0) {
+    paintFaceted(ctx, data, spec, layout, theme);
+    return;
+  }
+
   // Small multiples: render one sub-chart per series into a tiled grid.
   if (spec.repeat) {
     paintRepeated(ctx, data, spec, layout, theme);
@@ -256,6 +263,111 @@ function paintRepeated(
 }
 
 // ============================================================================
+// Faceting (facet by field)
+// ============================================================================
+
+/**
+ * Re-index a panel's series onto a shared, ordered category list, filling
+ * categories the panel lacks with 0 so every panel plots against the same X.
+ * Drops categoryField (the shared union is treated as plain categories).
+ */
+function alignToCategories(data: ParsedChartData, categories: string[]): ParsedChartData {
+  const pos = new Map<string, number>();
+  data.categories.forEach((c, i) => { if (!pos.has(c)) pos.set(c, i); });
+  const series = data.series.map((s) => ({
+    name: s.name,
+    color: s.color,
+    values: categories.map((c) => {
+      const i = pos.get(c);
+      return i === undefined ? 0 : (s.values[i] ?? 0);
+    }),
+  }));
+  return { categories, series };
+}
+
+/**
+ * Render one panel per facet value (data.facets) into a tiled grid. Each panel
+ * is the precomputed single-facet dataset, titled with its value, legend off,
+ * sharing one Y scale and (by default) one X scale — the ordered union of
+ * categories across panels — for comparability. Per-facet hit geometry is
+ * omitted in v1 (selection targets the whole chart), mirroring paintRepeated.
+ */
+function paintFaceted(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: ChartLayout,
+  theme: ChartRenderTheme,
+): void {
+  const facets = data.facets;
+  if (!facets || facets.length === 0) return;
+
+  const cells = repeatLayout(facets.length, spec.facet?.columns, layout.width, layout.height);
+
+  // Shared X = ordered union of every panel's categories (0-filling gaps). Only
+  // safe when categories are nominal AND unique per panel: a typed (numeric/
+  // temporal) X would lose its proportional axis, and duplicate category labels
+  // would collapse rows and drop data. In either case keep each panel's own X
+  // (still renders correctly, just not aligned).
+  const canShareX = spec.facet?.sharedXScale !== false
+    && !facets.some((f) => f.data.categoryField)
+    && !facets.some((f) => new Set(f.data.categories).size !== f.data.categories.length);
+
+  let sharedCategories: string[] | null = null;
+  if (canShareX) {
+    const seen = new Set<string>();
+    const union: string[] = [];
+    for (const f of facets) {
+      for (const c of f.data.categories) {
+        if (!seen.has(c)) { seen.add(c); union.push(c); }
+      }
+    }
+    sharedCategories = union;
+  }
+
+  // Align panels to the shared X first, so the shared Y domain (below) includes
+  // any 0-fills and never clips them beneath yMin.
+  const panels = facets.map((f) => (sharedCategories ? alignToCategories(f.data, sharedCategories) : f.data));
+
+  // Shared Y domain across all (aligned) panels (comparable scales).
+  let sharedMin: number | null = null;
+  let sharedMax: number | null = null;
+  if (spec.facet?.sharedYScale !== false) {
+    const all = panels.flatMap((p) => p.series.flatMap((s) => s.values));
+    if (all.length > 0) {
+      sharedMin = Math.min(...all);
+      sharedMax = Math.max(...all);
+    }
+  }
+
+  for (let i = 0; i < facets.length; i++) {
+    const cell = cells[i];
+    const panelData = panels[i];
+    const subSpec: ChartSpec = {
+      ...spec,
+      facet: undefined,
+      repeat: undefined,
+      title: facets[i].value,
+      legend: { ...spec.legend, visible: false },
+      layers: undefined,
+      trendlines: undefined,
+      dataLabels: undefined,
+      dataTable: undefined,
+      yAxis: sharedMin !== null && sharedMax !== null ? { ...spec.yAxis, min: sharedMin, max: sharedMax } : spec.yAxis,
+    };
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cell.x, cell.y, cell.width, cell.height);
+    ctx.clip();
+    ctx.translate(cell.x, cell.y);
+    const subLayout = dispatchComputeLayout(cell.width, cell.height, subSpec, panelData, theme);
+    paintMark(ctx, panelData, subSpec.mark, subSpec, subLayout, theme);
+    ctx.restore();
+  }
+}
+
+// ============================================================================
 // Layout Dispatch
 // ============================================================================
 
@@ -292,8 +404,11 @@ export function dispatchComputeGeometry(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): HitGeometry {
-  // Small multiples have no per-datum hit geometry in v1 (whole-chart selection).
-  if (spec.repeat) return { type: "bars", rects: [] };
+  // Small multiples / facets have no per-datum hit geometry in v1 (whole-chart
+  // selection). Guard facet only when panels actually exist (else fall through).
+  if (spec.repeat || (spec.facet && data.facets && data.facets.length > 0)) {
+    return { type: "bars", rects: [] };
+  }
   const def = getChartMark(spec.mark);
   return def ? def.computeGeometry(data, spec, layout, theme) : { type: "bars", rects: [] };
 }

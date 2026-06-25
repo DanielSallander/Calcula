@@ -167,8 +167,31 @@ its series name and shares one Y scale so the panels are comparable.
 - **sharedYScale** \`true\` (default) gives every panel the same Y range; set
   \`false\` to scale each panel independently.
 
-Works with any mark. (Faceting by a field's distinct values is a future
-extension.)
+Works with any mark.
+
+## Faceting (facet by field)
+
+Where \`repeat\` splits the *series*, \`facet\` splits the *rows* — it renders one
+panel per distinct value of a categorical column, ideal for long tables.
+
+\`\`\`json
+"facet": { "field": "Region", "columns": 2, "sharedYScale": true, "sharedXScale": true }
+\`\`\`
+
+- **field** (required) is the source column header to group by; each distinct
+  value becomes a titled panel.
+- **columns** sets the grid width (default: auto, ~√n).
+- **sharedYScale** / **sharedXScale** \`true\` (default) make panels comparable —
+  one Y range, and an X axis that is the ordered union of all panels' categories
+  (missing categories show as 0). Set \`false\` to fit each panel independently.
+
+Transforms run **per panel** (each panel summarizes its own rows). v1 supports a
+cell-range source with a header row in columns orientation, and caps the grid at
+50 panels; other cases fall back to a single chart.
+
+Shared X applies only to nominal, pre-aggregated categories (one row per category
+per panel); panels with a numeric/date X axis or repeated category labels keep
+their own X. Chart filters apply to the whole-chart view, not to facet panels.
 
 ## Cell References
 
