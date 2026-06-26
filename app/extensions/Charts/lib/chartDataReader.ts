@@ -59,6 +59,8 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   unfilteredData: ParsedChartData;
   /** Non-fatal issues from the transform pipeline (for the spec editor). */
   diagnostics: TransformDiagnostic[];
+  /** Resolved param name -> value map (for on-canvas widget display/stepping). */
+  params: ReadonlyMap<string, FormulaValue>;
 }> {
   // Resolve cell references (=A1, =Sheet1!B5) in string fields
   let resolvedSpec = await resolveSpecReferences(spec);
@@ -75,7 +77,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
       diagnostics,
     );
     const empty: ParsedChartData = { categories: [], series: [] };
-    return { spec: resolvedSpec, data: { ...empty, concat }, unfilteredData: empty, diagnostics };
+    return { spec: resolvedSpec, data: { ...empty, concat }, unfilteredData: empty, diagnostics, params: new Map() };
   }
 
   // Resolve named parameters once (live widget value / literal / cell value);
@@ -117,6 +119,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
       data: selection ? { ...pivotData, selection } : pivotData,
       unfilteredData,
       diagnostics,
+      params,
     };
   }
 
@@ -203,6 +206,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     data: finalData,
     unfilteredData,
     diagnostics,
+    params,
   };
 }
 

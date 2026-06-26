@@ -289,12 +289,19 @@ persists):
 from a cell or (forthcoming) a bound widget for interactive zoom.
 
 **Bound widgets** — declare \`bind\` on a param (\`{ "input": "stepper", "min": 0,
-"max": 100, "step": 10 }\`, or \`"cycle"\`/\`"segment"\` over \`options\`) to make it
-interactively adjustable; a live widget value overrides the literal/cell default.
+"max": 100, "step": 10 }\`, or \`"cycle"\`/\`"segment"\` over \`options\`) to render an
+on-canvas control (shown at the chart's top-left while it is selected). Clicking
+the control changes the live value, which overrides the literal/cell default —
+pair it with \`maxParam\` for interactive zoom.
 
-v1: single (non-composed) charts; the chart must be selected first, then click a
-datum. (Interval/brush selection needs a Core drag hook; on-canvas widget
-controls are a forthcoming follow-up.)
+**Interval brush** — add \`"brush": true\` to a \`select:"point"\` param to select by
+dragging a rectangle over the plot (a plain click selects the one datum under it,
+a drag selects the covered set). Brushable marks: bar, horizontalBar, scatter,
+bubble.
+
+v1: single (non-composed) charts; the chart must be selected first, then
+interact. Brush works in the plot area (drag the title/border still moves the
+chart).
 
 ## Cell References
 

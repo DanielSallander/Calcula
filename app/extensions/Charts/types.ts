@@ -1177,6 +1177,13 @@ export interface ParamSpec {
    * time, never persisted); only this binding declaration persists.
    */
   bind?: ParamBinding;
+  /**
+   * With select:"point", make selection a drag-to-brush INTERVAL gesture (S6):
+   * dragging a rectangle over the plot selects every covered datum; a plain
+   * click selects the single datum under it. Requires the Core body-drag hook;
+   * brushable marks only (bar/horizontalBar/scatter/bubble).
+   */
+  brush?: boolean;
 }
 
 /** Declares an interactive on-canvas control for a {@link ParamSpec} (C5 S5). */

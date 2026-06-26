@@ -183,6 +183,30 @@ export function createOverlayMoveHandlers(
       },
     }));
 
+    // Generic body-drag claim (e.g. a chart brush): an overlay may take over the
+    // in-body drag instead of being moved. Consulted ONLY on a confirmed body hit
+    // and ONLY when the registration opts in, so non-opting overlays fall through
+    // to the unchanged movable/move path below. The overlay then owns the drag
+    // stream via its own window mousemove/up listeners.
+    const registration = getOverlayRegistration(region.type);
+    if (registration?.claimsBodyDrag) {
+      const bounds = getFloatingCanvasBounds(region, config, viewport);
+      const claimed = registration.claimsBodyDrag({
+        region,
+        canvasX: mouseX,
+        canvasY: mouseY,
+        row: 0,
+        col: 0,
+        floatingCanvasBounds: bounds ?? undefined,
+      });
+      if (claimed) {
+        window.dispatchEvent(new CustomEvent("floatingObject:bodyDragStart", {
+          detail: { regionId: region.id, regionType: region.type, data: region.data, canvasX: mouseX, canvasY: mouseY },
+        }));
+        return true; // claimed: skip the move; the overlay owns the drag
+      }
+    }
+
     // Only start a move drag if the region is movable (extensions set this via data)
     if (region.data?.movable === false) {
       return true; // consumed the click, but no drag

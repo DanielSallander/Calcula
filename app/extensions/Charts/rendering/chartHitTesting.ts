@@ -65,8 +65,15 @@ export function hitTestRect(
     }
   };
   const pushPoints = (markers: PointMarker[]) => {
+    const bonus = 3; // generous hit radius (matches hitTestPoints) so a click lands
     for (const m of markers) {
-      if (m.cx >= x0 && m.cx <= x1 && m.cy >= y0 && m.cy <= y1) {
+      // Treat each marker as a disc: include it when its centre is within the
+      // rect inflated by the radius. This makes a zero-size brush (a plain click)
+      // select the marker under it, not just markers whose centre is inside.
+      const dx = m.cx < x0 ? x0 - m.cx : m.cx > x1 ? m.cx - x1 : 0;
+      const dy = m.cy < y0 ? y0 - m.cy : m.cy > y1 ? m.cy - y1 : 0;
+      const reach = m.radius + bonus;
+      if (dx * dx + dy * dy <= reach * reach) {
         out.push({ type: "point", seriesIndex: m.seriesIndex, categoryIndex: m.categoryIndex, value: m.value, seriesName: m.seriesName, categoryName: m.categoryName });
       }
     }

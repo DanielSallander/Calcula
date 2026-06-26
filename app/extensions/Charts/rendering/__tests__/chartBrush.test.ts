@@ -31,16 +31,23 @@ describe("hitTestRect (brush -> datum set)", () => {
     expect(hits.map((h) => h.categoryName)).toEqual(["Jan", "Feb", "Mar"]);
   });
 
-  it("uses centre-in-rect for point markers", () => {
-    const points: HitGeometry = {
-      type: "points",
-      markers: [
-        { cx: 10, cy: 10, radius: 4, seriesIndex: 0, categoryIndex: 0, value: 1, seriesName: "S", categoryName: "A" },
-        { cx: 50, cy: 50, radius: 4, seriesIndex: 0, categoryIndex: 1, value: 2, seriesName: "S", categoryName: "B" },
-      ],
-    };
+  const points: HitGeometry = {
+    type: "points",
+    markers: [
+      { cx: 10, cy: 10, radius: 4, seriesIndex: 0, categoryIndex: 0, value: 1, seriesName: "S", categoryName: "A" },
+      { cx: 50, cy: 50, radius: 4, seriesIndex: 0, categoryIndex: 1, value: 2, seriesName: "S", categoryName: "B" },
+    ],
+  };
+
+  it("includes markers a brush rect covers (disc vs rect)", () => {
     const hits = hitTestRect({ x: 0, y: 0, width: 20, height: 20 }, points);
     expect(hits.map((h) => h.categoryName)).toEqual(["A"]);
+  });
+
+  it("a zero-size brush (plain click) selects the marker under or near the point", () => {
+    expect(hitTestRect({ x: 10, y: 10, width: 0, height: 0 }, points).map((h) => h.categoryName)).toEqual(["A"]); // on centre
+    expect(hitTestRect({ x: 12, y: 12, width: 0, height: 0 }, points).map((h) => h.categoryName)).toEqual(["A"]); // within radius+bonus
+    expect(hitTestRect({ x: 30, y: 30, width: 0, height: 0 }, points)).toEqual([]); // between points -> none
   });
 
   it("does not brush radial slices in v1", () => {

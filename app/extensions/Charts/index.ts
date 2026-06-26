@@ -14,6 +14,7 @@ import {
 import { getActiveSheet } from "@api/lib";
 import {
   removeGridRegionsByType,
+  requestOverlayRedraw,
   type OverlayRenderContext,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
@@ -74,6 +75,7 @@ import {
   isHoveringAxis,
   getHoverState,
   removeChartFromCache,
+  setBrushMarquee,
 } from "./rendering/chartRenderer";
 import {
   hitTestQuickAccessButtons,
@@ -82,7 +84,7 @@ import {
   getActivePopup,
   type QuickAccessButtonType,
 } from "./rendering/quickAccessButtons";
-import { hitTestBarChart, hitTestGeometry } from "./rendering/chartHitTesting";
+import { hitTestBarChart, hitTestGeometry, hitTestRect } from "./rendering/chartHitTesting";
 import {
   setPointSelection,
   clearPointSelection,
@@ -92,9 +94,11 @@ import {
   isDataHit,
   SELECTION_SUPPORTED_MARKS,
   matchingSharedParams,
+  brushKeysFromHits,
 } from "./handlers/chartPointSelection";
 import { parseParamCellTarget } from "./lib/dataSourceResolver";
-import { clearAllWidgetValues } from "./handlers/chartWidgetValues";
+import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
+import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
 import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
@@ -444,6 +448,22 @@ function activate(context: ExtensionContext): void {
         renderChart(ctx);
       },
       hitTest: hitTestChart,
+      // S6: claim an in-plot drag as a brush (interval select) instead of a move.
+      // Only for a selected, brushable chart, inside the plot area, off any widget.
+      claimsBodyDrag: (ctx) => {
+        const cid = ctx.region.data?.chartId as string | undefined;
+        if (!cid) return false;
+        const ch = getChartById(cid);
+        if (!ch || !isChartSelected(cid) || !SELECTION_SUPPORTED_MARKS.has(ch.spec.mark)) return false;
+        if (!ch.spec.params?.some((p) => p.select === "point" && p.brush)) return false;
+        const cached = getCachedChartData(cid);
+        const pa = cached?.layout?.plotArea;
+        if (!pa) return false;
+        if (cached?.widgetControls && isInWidgetArea(ctx.canvasX, ctx.canvasY, cached.widgetControls)) return false;
+        const loc = getChartLocalCoords(cid, ctx.canvasX, ctx.canvasY);
+        if (!loc) return false;
+        return loc.localX >= pa.x && loc.localX <= pa.x + pa.width && loc.localY >= pa.y && loc.localY <= pa.y + pa.height;
+      },
       priority: 15, // Above table (5) and pivot (10)
     }),
   );
@@ -645,6 +665,62 @@ function activate(context: ExtensionContext): void {
   );
 
   // -----------------------------------------------------------------------
+  // Interval brush (S6): the Core body-drag hook hands us the in-plot drag via
+  // floatingObject:bodyDragStart; we track move/up on our existing window
+  // listeners and finalize via hitTestRect. A plain click (zero-size rect)
+  // selects the one datum under it; a drag selects the covered set.
+  // -----------------------------------------------------------------------
+  // start + end in chart-local coords, both sourced from the extension's own
+  // canvas basis (lastCanvasX/Y -> getChartLocalCoords) so they never mix bases.
+  let brushDrag: { chartId: string; startX: number; startY: number; endX: number; endY: number } | null = null;
+
+  const finalizeBrush = (d: { chartId: string; startX: number; startY: number; endX: number; endY: number }) => {
+    const cached = getCachedChartData(d.chartId);
+    const param = getChartById(d.chartId)?.spec.params?.find((p) => p.select === "point" && p.brush);
+    if (cached?.hitGeometry && param) {
+      const rect = {
+        x: Math.min(d.startX, d.endX),
+        y: Math.min(d.startY, d.endY),
+        width: Math.abs(d.endX - d.startX),
+        height: Math.abs(d.endY - d.startY),
+      };
+      const on = param.on ?? "category";
+      const keys = brushKeysFromHits(hitTestRect(rect, cached.hitGeometry), on);
+      if (keys.length > 0) {
+        setPointSelection(d.chartId, { [param.name]: { on, values: keys } });
+        // Mirror the click path's side effects: S7c writeback + S7b bus.
+        if (param.writeTo) {
+          const target = parseParamCellTarget(param.writeTo);
+          if (target) void updateCell(target.row, target.col, keys[0]);
+        }
+      } else {
+        clearPointSelection(d.chartId);
+      }
+      if (param.sharedAs) {
+        emitAppEvent("chart:param-changed", { sourceChartId: d.chartId, sharedAs: param.sharedAs, on, values: keys });
+      }
+    }
+    invalidateChartCache(d.chartId);
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+
+  const handleBodyDragStart = (e: Event) => {
+    const detail = (e as CustomEvent).detail as { regionType: string; data?: { chartId?: string } };
+    if (detail.regionType !== "chart") return;
+    const cid = detail.data?.chartId;
+    if (!cid) return;
+    // Use the extension's own canvas basis (lastCanvasX/Y from the prior
+    // mousemove ~ the mousedown position) so start/move/end share one space.
+    const loc = getChartLocalCoords(cid, lastCanvasX, lastCanvasY);
+    if (!loc) return;
+    clearPendingClick(); // the brush mouseup must not also be read as a click
+    brushDrag = { chartId: cid, startX: loc.localX, startY: loc.localY, endX: loc.localX, endY: loc.localY };
+    setBrushMarquee({ chartId: cid, x: loc.localX, y: loc.localY, width: 0, height: 0 });
+  };
+  window.addEventListener("floatingObject:bodyDragStart", handleBodyDragStart);
+  cleanupFunctions.push(() => window.removeEventListener("floatingObject:bodyDragStart", handleBodyDragStart));
+
+  // -----------------------------------------------------------------------
   // Mousemove for Tooltips
   // -----------------------------------------------------------------------
 
@@ -664,6 +740,24 @@ function activate(context: ExtensionContext): void {
     // Store last position for use in click handler
     lastCanvasX = canvasX;
     lastCanvasY = canvasY;
+
+    // Interval brush in progress: update the stored end + marquee from current.
+    if (brushDrag) {
+      const loc = getChartLocalCoords(brushDrag.chartId, canvasX, canvasY);
+      if (loc) {
+        brushDrag.endX = loc.localX;
+        brushDrag.endY = loc.localY;
+        setBrushMarquee({
+          chartId: brushDrag.chartId,
+          x: Math.min(brushDrag.startX, loc.localX),
+          y: Math.min(brushDrag.startY, loc.localY),
+          width: Math.abs(loc.localX - brushDrag.startX),
+          height: Math.abs(loc.localY - brushDrag.startY),
+        });
+        requestOverlayRedraw();
+      }
+      return;
+    }
 
     // Skip if mouse is outside the grid container
     if (canvasX < 0 || canvasY < 0 || canvasX > rect.width || canvasY > rect.height) {
@@ -700,6 +794,15 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   const handleMouseUp = () => {
+    // Finish an interval brush (S6) before the normal click handling.
+    if (brushDrag) {
+      const d = brushDrag;
+      brushDrag = null;
+      setBrushMarquee(null);
+      finalizeBrush(d);
+      return;
+    }
+
     const click = consumePendingClick();
     if (!click) return;
 
@@ -729,6 +832,25 @@ function activate(context: ExtensionContext): void {
       const btnHit = findClickedFieldButton(local.localX, local.localY, cachedData.pivotFieldButtons);
       if (btnHit) {
         handlePivotFieldButtonClick(click.chartId, btnHit, click.canvasX, click.canvasY);
+        return;
+      }
+    }
+
+    // On-canvas bound-param widget controls (C5 S5). Drawn (and cached) only when
+    // the chart is selected, so a hit here only happens on a follow-up click —
+    // route it to the widget value change. Absolute canvas coords (main-canvas).
+    if (cachedData.widgetControls && cachedData.widgetControls.length > 0) {
+      const wHit = hitTestWidgetControls(click.canvasX, click.canvasY, cachedData.widgetControls);
+      if (wHit) {
+        // Seed the step base from what the widget displays (widget > resolved
+        // cell > literal default) so the first +/- continues from that value.
+        const current = getWidgetValue(click.chartId, wHit.paramName)
+          ?? cachedData.resolvedParams?.get(wHit.paramName)
+          ?? getChartById(click.chartId)?.spec.params?.find((p) => p.name === wHit.paramName)?.value;
+        const next = "option" in wHit.action ? wHit.action.option : nextWidgetValue(wHit.bind, current, wHit.action.dir);
+        setWidgetValue(click.chartId, wHit.paramName, next);
+        invalidateChartCache(click.chartId);
+        context.events.emit(AppEvents.GRID_REFRESH);
         return;
       }
     }

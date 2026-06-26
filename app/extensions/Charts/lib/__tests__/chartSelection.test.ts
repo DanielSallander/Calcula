@@ -8,7 +8,7 @@ import { resolvePointColor, resolvePointOpacity } from "../encodingResolver";
 import {
   getPointSelection, setPointSelection, clearPointSelection, clearAllPointSelections,
   pointSelectionKey, buildPointSelection, isDataHit, SELECTION_SUPPORTED_MARKS,
-  matchingSharedParams,
+  matchingSharedParams, brushKeysFromHits,
 } from "../../handlers/chartPointSelection";
 import { parseParamCellTarget } from "../dataSourceResolver";
 import type { ParamSpec } from "../../types";
@@ -110,6 +110,18 @@ describe("click-to-key helpers", () => {
     expect(parseParamCellTarget("=A1:B2")).toBeNull();
     expect(parseParamCellTarget("=Sheet2!A1")).toBeNull();
     expect(parseParamCellTarget("=")).toBeNull();
+  });
+
+  it("brushKeysFromHits (S6) yields unique keys per `on`, dropping blanks", () => {
+    const hits = [
+      { categoryName: "Jan", seriesName: "A" },
+      { categoryName: "Jan", seriesName: "B" }, // dup category
+      { categoryName: "Feb", seriesName: "A" },
+      { categoryName: "", seriesName: "A" },     // blank category dropped
+    ];
+    expect(brushKeysFromHits(hits, "category")).toEqual(["Jan", "Feb"]);
+    expect(brushKeysFromHits(hits, "series")).toEqual(["A", "B"]);
+    expect(brushKeysFromHits([], "category")).toEqual([]);
   });
 
   it("isDataHit distinguishes real datums from background/axis/miss", () => {

@@ -1046,6 +1046,7 @@ export const chartSpecJsonSchema: object = {
         filter: { type: "boolean", description: "With select:'point' + on:'category', a click also filters the chart to the selected categories (empty selection = full data)." },
         sharedAs: { type: "string", description: "Cross-chart link key: select params sharing this value mirror each other's selection." },
         writeTo: { type: "string", description: "Single same-sheet cell (e.g. \"=B1\") to write the clicked label/value back to on each point selection." },
+        brush: { type: "boolean", description: "With select:'point', selection becomes a drag-to-brush interval (a click selects one datum, a drag selects the covered set). Brushable marks only." },
         bind: {
           type: "object",
           description: "Bind the param to an interactive on-canvas control (stepper/cycle/segment). The live value is ephemeral; only this declaration persists.",

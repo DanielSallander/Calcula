@@ -24,7 +24,14 @@ import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
 import { clearPointSelection } from "../handlers/chartPointSelection";
-import { clearWidgetValues } from "../handlers/chartWidgetValues";
+import { clearWidgetValues, getWidgetValue } from "../handlers/chartWidgetValues";
+import {
+  computeWidgetControls,
+  drawWidgetControls,
+  hasWidgetControls,
+  type WidgetControl,
+} from "./paramWidgets";
+import type { FormulaValue } from "../lib/chartFormula";
 import { hitTestGeometry } from "./chartHitTesting";
 import { formatTickValue } from "./chartPainterUtils";
 import type {
@@ -112,9 +119,22 @@ interface CachedChartData {
   unfilteredData?: ParsedChartData;
   /** Quick access button positions (computed during render, used for hit-testing). */
   quickAccessButtons?: QuickAccessButton[];
+  /** On-canvas bound-param control zones (S5; computed during render, hit-tested). */
+  widgetControls?: WidgetControl[];
+  /** Resolved param values (widget>cell>literal) — for widget label + step base. */
+  resolvedParams?: ReadonlyMap<string, FormulaValue>;
 }
 
 const chartDataCache = new Map<string, CachedChartData>();
+
+/** Live brush marquee (S6): chart-local rect drawn during an interval-select drag. */
+export interface BrushMarquee { chartId: string; x: number; y: number; width: number; height: number }
+let brushMarquee: BrushMarquee | null = null;
+
+/** Set (or clear with null) the live brush marquee rectangle. */
+export function setBrushMarquee(m: BrushMarquee | null): void {
+  brushMarquee = m;
+}
 
 /**
  * Get cached chart data for hit-testing. Returns null if not yet rendered.
@@ -470,6 +490,20 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     if (cachedData) {
       cachedData.quickAccessButtons = qaButtons;
     }
+
+    // On-canvas bound-param controls (S5), top-left strip.
+    if (hasWidgetControls(chart.spec)) {
+      const controls = computeWidgetControls(chart.spec, canvasX, canvasY, (name) => {
+        const p = chart.spec.params?.find((pp) => pp.name === name);
+        // Display precedence mirrors resolveParams: widget > resolved (cell) > literal.
+        const v = getWidgetValue(chartId, name) ?? cachedData?.resolvedParams?.get(name) ?? p?.value ?? "";
+        return String(v);
+      });
+      drawWidgetControls(ctx, controls);
+      if (cachedData) cachedData.widgetControls = controls;
+    } else if (cachedData) {
+      cachedData.widgetControls = undefined;
+    }
   }
 
   // 6. Draw tooltip (always on top)
@@ -479,6 +513,19 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     if (!tooltipChart?.spec.tooltip || tooltipChart.spec.tooltip.enabled !== false) {
       drawTooltip(ctx, canvasX, canvasY, chartWidth, chartHeight, hoverState, tooltipChart?.spec.tooltip);
     }
+  }
+
+  // 7. Brush marquee (S6) — live interval-select rectangle over the raster.
+  if (brushMarquee && brushMarquee.chartId === chartId) {
+    const mx = canvasX + brushMarquee.x;
+    const my = canvasY + brushMarquee.y;
+    ctx.save();
+    ctx.fillStyle = "rgba(14,99,156,0.12)";
+    ctx.fillRect(mx, my, brushMarquee.width, brushMarquee.height);
+    ctx.strokeStyle = "#0e639c";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(mx + 0.5, my + 0.5, brushMarquee.width, brushMarquee.height);
+    ctx.restore();
   }
 
   ctx.restore();
@@ -627,6 +674,7 @@ async function renderChartAsync(
       logicalHeight,
       pivotFieldButtons,
       unfilteredData,
+      resolvedParams: resolved.params,
     });
 
     // Trigger a canvas redraw so the cached chart gets composited.

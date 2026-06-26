@@ -66,6 +66,23 @@ export function buildPointSelection(
 }
 
 /**
+ * The unique selection keys covered by a brush (S6) — each hit's category or
+ * series name per `on`, de-duplicated, blanks dropped. Pure. A zero-size brush
+ * (a click) yields the single datum under the point. Empty => clears selection.
+ */
+export function brushKeysFromHits(
+  hits: ReadonlyArray<{ categoryName?: string; seriesName?: string }>,
+  on: "category" | "series",
+): string[] {
+  const out: string[] = [];
+  for (const h of hits) {
+    const k = on === "series" ? h.seriesName ?? "" : h.categoryName ?? "";
+    if (k !== "" && !out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
+/**
  * The other charts that mirror a cross-chart-linked selection (S7b): every chart
  * (except the source) with a select:"point" param whose sharedAs matches. Pure.
  */

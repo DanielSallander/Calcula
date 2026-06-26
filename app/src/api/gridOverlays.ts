@@ -84,6 +84,15 @@ export type OverlayHitTestFn = (context: OverlayHitTestContext) => boolean;
  */
 export type OverlayCursorFn = (context: OverlayHitTestContext) => string | null;
 
+/**
+ * A function deciding whether an overlay claims an in-body click-drag (e.g. a
+ * chart brush) instead of letting Core convert the drag into a move. Consulted at
+ * mousedown after the overlay is selected; returning true makes Core dispatch a
+ * generic "floatingObject:bodyDragStart" event and NOT start a move — the overlay
+ * then owns the drag via its own window listeners.
+ */
+export type OverlayClaimsBodyDragFn = (context: OverlayHitTestContext) => boolean;
+
 // ============================================================================
 // Lifecycle Events
 // ============================================================================
@@ -117,6 +126,14 @@ export interface OverlayRegistration {
    * over this overlay. Return null to use the default cursor logic.
    */
   getCursor?: OverlayCursorFn;
+  /**
+   * Optional: claim an in-body click-drag instead of letting Core start a move.
+   * Consulted at mousedown after selection; if it returns true Core dispatches a
+   * generic "floatingObject:bodyDragStart" event and does NOT begin a move — the
+   * overlay tracks the drag (move/up) via its own window listeners. Default: no
+   * claim, so the existing move/select behavior is unchanged.
+   */
+  claimsBodyDrag?: OverlayClaimsBodyDragFn;
 }
 
 // ============================================================================
