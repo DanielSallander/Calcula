@@ -117,7 +117,7 @@ export function generateTransformSource(defs: ChartTransformScript[]): string {
 let mountedTypes = new Set<string>();
 let mounted = false;
 let installQueue: Promise<unknown> = Promise.resolve();
-let lastGood: { lib: ChartTransformLibrary; source: string } | null = null;
+let lastGood: { lib: ChartTransformLibrary; source: string; sourcePackage: string | null } | null = null;
 
 /** True when at least one authored transform is currently mounted. */
 export function chartTransformsInstalled(): boolean {
@@ -160,8 +160,11 @@ function teardownInstalled(): void {
   mountedTypes = new Set();
 }
 
-/** Mount `source` and record the exposed transform types (no rollback/queue). */
-async function rawInstall(lib: ChartTransformLibrary, source: string): Promise<void> {
+/** Mount `source` and record the exposed transform types (no rollback/queue).
+ *  When `sourcePackage` is set the worker is mounted as DISTRIBUTED provenance so
+ *  the broker does NOT auto-grant/auto-declare ui.html (which it does for local
+ *  scripts) — a distributed library only gets the capabilities the user consented. */
+async function rawInstall(lib: ChartTransformLibrary, source: string, sourcePackage?: string | null): Promise<void> {
   teardownInstalled();
   const defs = lib.transforms.filter((d) => d.type.trim() && d.body.trim());
   if (defs.length === 0 || !source) return;
@@ -172,6 +175,8 @@ async function rawInstall(lib: ChartTransformLibrary, source: string): Promise<v
     instanceId: LIB_INSTANCE_ID,
     source,
     accessLevel: "restricted",
+    provenance: sourcePackage ? "distributed" : undefined,
+    packageName: sourcePackage ?? undefined,
     declaredCapabilities: lib.capabilities ?? [],
     apiVersion: "1.0.0",
   });
@@ -179,7 +184,7 @@ async function rawInstall(lib: ChartTransformLibrary, source: string): Promise<v
   mountedTypes = new Set(defs.map((d) => d.type.trim()));
 }
 
-async function doInstall(lib: ChartTransformLibrary): Promise<void> {
+async function doInstall(lib: ChartTransformLibrary, sourcePackage?: string | null): Promise<void> {
   const defs = lib.transforms.filter((d) => d.type.trim() && d.body.trim());
   // Validate + generate FIRST (a bad type throws here, BEFORE any teardown), so an
   // invalid edit never tears down a working library.
@@ -190,17 +195,17 @@ async function doInstall(lib: ChartTransformLibrary): Promise<void> {
   const source = defs.length ? generateTransformSource(defs) : "";
   const prev = lastGood;
   try {
-    await rawInstall(lib, source);
-    lastGood = { lib, source };
+    await rawInstall(lib, source, sourcePackage);
+    lastGood = { lib, source, sourcePackage: sourcePackage ?? null };
   } catch (e) {
     if (prev) {
       try {
-        await rawInstall(prev.lib, prev.source);
+        await rawInstall(prev.lib, prev.source, prev.sourcePackage);
       } catch {
-        uninstallChartTransforms();
+        await queuedTeardown();
       }
     } else {
-      uninstallChartTransforms();
+      await queuedTeardown();
     }
     throw e;
   }
@@ -208,39 +213,88 @@ async function doInstall(lib: ChartTransformLibrary): Promise<void> {
 
 /**
  * Mount the library's transforms in the sandbox. Replaces any previously-installed
- * library. Serialized; on failure the previous working library is restored.
+ * library. Serialized; on failure the previous working library is restored. Pass
+ * `opts.sourcePackage` for a DISTRIBUTED library (mounts as distributed provenance).
  */
-export function installChartTransformLibrary(lib: ChartTransformLibrary): Promise<void> {
-  const run = () => doInstall(lib);
+export function installChartTransformLibrary(lib: ChartTransformLibrary, opts?: { sourcePackage?: string | null }): Promise<void> {
+  const run = () => doInstall(lib, opts?.sourcePackage);
   const next = installQueue.then(run, run);
   installQueue = next.catch(() => undefined);
   return next;
 }
 
-/** Public uninstall: tear down the mounted library AND drop the rollback target
- *  (deactivate / no-library-on-open). NOT called mid-install — rawInstall uses
- *  teardownInstalled() so an install/rollback never nukes its own `lastGood`
- *  (which is what makes TWO consecutive failed edits still roll back to good). */
-export function uninstallChartTransforms(): void {
+/** The teardown body — tear down the mounted library AND drop the rollback target. */
+function teardownAll(): void {
   teardownInstalled();
   lastGood = null;
+}
+
+/** Public uninstall: tear down the mounted library AND drop the rollback target
+ *  (deactivate / no-library-on-open). SYNC — used where no install can be in flight. */
+export function uninstallChartTransforms(): void {
+  teardownAll();
+}
+
+/** Queued uninstall: tears down AFTER any in-flight install settles, so a gate that
+ *  must keep a not-yet-consented distributed library UNMOUNTED can't race a suspended
+ *  install (which would resume past the teardown and re-mount). Use from the gate. */
+export function uninstallChartTransformsQueued(): Promise<void> {
+  return queuedTeardown();
+}
+
+function queuedTeardown(): Promise<void> {
+  const run = () => { teardownAll(); };
+  const next = installQueue.then(run, run);
+  installQueue = next.catch(() => undefined);
+  return next;
 }
 
 // ---------------------------------------------------------------------------
 // Persistence (reserved workbook script; source is JSON, never executed as code)
 // ---------------------------------------------------------------------------
 
-/** Load the persisted chart-transform library from the workbook, or null. */
-export async function loadPersistedTransformLibrary(): Promise<ChartTransformLibrary | null> {
+/** The persisted library plus its PROVENANCE. `sourcePackage` is the .calp the
+ *  library was distributed from (non-null ⇒ distributed, gate behind consent);
+ *  null/absent ⇒ locally authored (auto-install). */
+export interface PersistedTransformLibrary {
+  lib: ChartTransformLibrary;
+  sourcePackage: string | null;
+}
+
+/** Load the persisted library WITH its provenance, or null. The reserved module
+ *  script's `sourcePackage` is stamped ONLY by the .calp pull (never by
+ *  savePersistedTransformLibrary, which writes null) — so a non-null value is the
+ *  authoritative "this came from a distributed package" signal. */
+export async function loadPersistedTransformLibraryWithProvenance(): Promise<PersistedTransformLibrary | null> {
   try {
-    const data = await invoke<{ source: string }>("get_script", { id: PERSIST_SCRIPT_ID });
+    const data = await invoke<{ source: string; sourcePackage?: string | null }>("get_script", { id: PERSIST_SCRIPT_ID });
     if (!data?.source) return null;
     const parsed = JSON.parse(data.source) as ChartTransformLibrary;
     if (!parsed || !Array.isArray(parsed.transforms)) return null;
-    return parsed;
+    return { lib: parsed, sourcePackage: data.sourcePackage ?? null };
   } catch {
     return null;
   }
+}
+
+/** Load the persisted chart-transform library from the workbook, or null
+ *  (provenance-agnostic — used by the authoring dialog). */
+export async function loadPersistedTransformLibrary(): Promise<ChartTransformLibrary | null> {
+  return (await loadPersistedTransformLibraryWithProvenance())?.lib ?? null;
+}
+
+/**
+ * The canonical "consent source" for a distributed transform library: the library
+ * JSON PREFIXED with one `// @capability <id>` pragma per declared capability.
+ * Hashing/consenting over THIS (rather than the bare JSON) makes the shared
+ * distributed-consent store work verbatim — a transform-logic edit OR a capability
+ * expansion both change this string (→ source-hash change → re-prompt), and
+ * isConsentCurrent's pragma-based capability-expansion check matches the granted
+ * set. Pure + exported for the gate + tests.
+ */
+export function transformLibraryConsentSource(lib: ChartTransformLibrary): string {
+  const pragmas = (lib.capabilities ?? []).map((c) => `// @capability ${c}`).join("\n");
+  return (pragmas ? pragmas + "\n" : "") + JSON.stringify(lib);
 }
 
 /** Persist the library into the workbook (saved with the .cala). */
@@ -257,17 +311,8 @@ export async function savePersistedTransformLibrary(lib: ChartTransformLibrary):
   });
 }
 
-/** Load the persisted library (if any) and install it. Call on startup + open.
- *  Best-effort: a corrupt/failing library must not throw into the open path. */
-export async function loadAndInstallChartTransforms(): Promise<void> {
-  try {
-    const lib = await loadPersistedTransformLibrary();
-    if (lib && lib.transforms.length > 0) {
-      await installChartTransformLibrary(lib);
-    } else {
-      uninstallChartTransforms();
-    }
-  } catch (e) {
-    console.error("[chartTransformScripts] failed to install persisted chart transforms", e);
-  }
-}
+// NOTE: there is intentionally no loadAndInstall* here. Mounting a DISTRIBUTED
+// (.calp) transform library must be gated behind explicit user consent, which is
+// orchestrated in the Charts extension (it owns the open lifecycle + the consent
+// dialog) via loadPersistedTransformLibraryWithProvenance + installChartTransformLibrary.
+// Local libraries (sourcePackage null) auto-install there too.

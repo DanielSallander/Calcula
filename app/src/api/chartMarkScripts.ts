@@ -54,6 +54,9 @@ export type SandboxMarkRegistrar = (
 ) => void;
 
 const PERSIST_SCRIPT_ID = "__calcula_chart_marks__";
+/** The reserved mark-library script id — exported as the stable CONSENT-VIEW id for
+ *  the distributed-consent gate (the whole library is one consent unit). */
+export const CHART_MARKS_SCRIPT_ID = PERSIST_SCRIPT_ID;
 /** Reserved markId namespace — keeps authored marks from ever colliding with a
  *  built-in id and makes the surface auditable. */
 export const MARK_ID_PREFIX = "sandbox:";
@@ -107,7 +110,7 @@ export function generateMarkSource(body: string): string {
 
 let installed: Array<{ markId: string; scriptId: string }> = [];
 let installQueue: Promise<unknown> = Promise.resolve();
-let lastGood: ChartMarkLibrary | null = null;
+let lastGood: { lib: ChartMarkLibrary; sourcePackage: string | null } | null = null;
 
 /** True when at least one authored mark is currently mounted+registered. */
 export function chartMarksInstalled(): boolean {
@@ -130,8 +133,11 @@ function teardownInstalled(): void {
   installed = [];
 }
 
-/** Mount each mark's worker and register its shim (no rollback/queue). */
-async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar): Promise<void> {
+/** Mount each mark's worker and register its shim (no rollback/queue). When
+ *  `sourcePackage` is set, each mark worker is mounted as DISTRIBUTED provenance so
+ *  the broker does not auto-grant ui.html (marks are paint-only either way, but this
+ *  keeps the consent model honest — a distributed mark holds no un-consented cap). */
+async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar, sourcePackage?: string | null): Promise<void> {
   teardownInstalled();
   const marks = lib.marks.filter((m) => m.markId.trim() && m.body.trim());
   for (const m of marks) {
@@ -147,6 +153,8 @@ async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar
       instanceId: scriptId,
       source,
       accessLevel: "restricted",
+      provenance: sourcePackage ? "distributed" : undefined,
+      packageName: sourcePackage ?? undefined,
       declaredCapabilities: [],
       apiVersion: "1.0.0",
     });
@@ -158,7 +166,7 @@ async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar
   }
 }
 
-async function doInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar): Promise<void> {
+async function doInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar, sourcePackage?: string | null): Promise<void> {
   // Validate every markId BEFORE any teardown so a bad edit can't strip a working
   // library. (Body compile errors surface at mount and trigger rollback below.)
   for (const m of lib.marks) {
@@ -168,17 +176,17 @@ async function doInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar)
   }
   const prev = lastGood;
   try {
-    await rawInstall(lib, registrar);
-    lastGood = lib;
+    await rawInstall(lib, registrar, sourcePackage);
+    lastGood = { lib, sourcePackage: sourcePackage ?? null };
   } catch (e) {
     if (prev) {
       try {
-        await rawInstall(prev, registrar);
+        await rawInstall(prev.lib, registrar, prev.sourcePackage);
       } catch {
-        uninstallChartMarks();
+        await queuedTeardown();
       }
     } else {
-      uninstallChartMarks();
+      await queuedTeardown();
     }
     throw e;
   }
@@ -187,38 +195,82 @@ async function doInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar)
 /**
  * Mount the library's marks in the sandbox and register each as a chart mark.
  * Replaces any previously-installed library. Serialized; on failure the previous
- * working library is restored (the user keeps a usable set of marks).
+ * working library is restored (the user keeps a usable set of marks). Pass
+ * `opts.sourcePackage` for a DISTRIBUTED library (mounts as distributed provenance).
  */
-export function installChartMarkLibrary(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar): Promise<void> {
-  const run = () => doInstall(lib, registrar);
+export function installChartMarkLibrary(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar, opts?: { sourcePackage?: string | null }): Promise<void> {
+  const run = () => doInstall(lib, registrar, opts?.sourcePackage);
   const next = installQueue.then(run, run);
   installQueue = next.catch(() => undefined);
   return next;
 }
 
-/** Public uninstall: tear down every authored mark AND drop the rollback target
- *  (deactivate / no-library-on-open). NOT called mid-install — rawInstall uses
- *  teardownInstalled() so an install/rollback never nukes its own `lastGood`. */
-export function uninstallChartMarks(): void {
+/** The teardown body — tear down every authored mark AND drop the rollback target. */
+function teardownAll(): void {
   teardownInstalled();
   lastGood = null;
+}
+
+/** Public uninstall: tear down every authored mark AND drop the rollback target
+ *  (deactivate / no-library-on-open). SYNC — used where no install can be in flight. */
+export function uninstallChartMarks(): void {
+  teardownAll();
+}
+
+/** Queued uninstall: tears down AFTER any in-flight install settles, so a gate that
+ *  must keep a not-yet-consented distributed library UNMOUNTED can't race a suspended
+ *  install (which would resume past the teardown and re-mount). Use from the gate. */
+export function uninstallChartMarksQueued(): Promise<void> {
+  return queuedTeardown();
+}
+
+function queuedTeardown(): Promise<void> {
+  const run = () => { teardownAll(); };
+  const next = installQueue.then(run, run);
+  installQueue = next.catch(() => undefined);
+  return next;
 }
 
 // ---------------------------------------------------------------------------
 // Persistence (reserved workbook script; source is JSON, never executed as code)
 // ---------------------------------------------------------------------------
 
-/** Load the persisted chart-mark library from the workbook, or null. */
-export async function loadPersistedMarkLibrary(): Promise<ChartMarkLibrary | null> {
+/** The persisted mark library plus its PROVENANCE. `sourcePackage` non-null ⇒ the
+ *  library came from a distributed .calp (gate behind consent); null ⇒ local. */
+export interface PersistedMarkLibrary {
+  lib: ChartMarkLibrary;
+  sourcePackage: string | null;
+}
+
+/** Load the persisted mark library WITH its provenance, or null. `sourcePackage`
+ *  is stamped ONLY by the .calp pull (savePersistedMarkLibrary writes null), so a
+ *  non-null value authoritatively means "distributed". */
+export async function loadPersistedMarkLibraryWithProvenance(): Promise<PersistedMarkLibrary | null> {
   try {
-    const data = await invoke<{ source: string }>("get_script", { id: PERSIST_SCRIPT_ID });
+    const data = await invoke<{ source: string; sourcePackage?: string | null }>("get_script", { id: PERSIST_SCRIPT_ID });
     if (!data?.source) return null;
     const parsed = JSON.parse(data.source) as ChartMarkLibrary;
     if (!parsed || !Array.isArray(parsed.marks)) return null;
-    return parsed;
+    return { lib: parsed, sourcePackage: data.sourcePackage ?? null };
   } catch {
     return null;
   }
+}
+
+/** Load the persisted chart-mark library from the workbook, or null
+ *  (provenance-agnostic — used by the authoring dialog). */
+export async function loadPersistedMarkLibrary(): Promise<ChartMarkLibrary | null> {
+  return (await loadPersistedMarkLibraryWithProvenance())?.lib ?? null;
+}
+
+/**
+ * The canonical "consent source" for a distributed mark library: the library JSON.
+ * Marks are PAINT-ONLY (capability-free), so no `// @capability` pragmas — but a
+ * marks-logic edit still changes this string, so the shared distributed-consent
+ * store re-prompts on any change (source-hash). Pure + exported for the gate + tests.
+ */
+export function markLibraryConsentSource(lib: ChartMarkLibrary): string {
+  return JSON.stringify(lib);
 }
 
 /** Persist the library into the workbook (saved with the .cala). */
@@ -235,17 +287,8 @@ export async function savePersistedMarkLibrary(lib: ChartMarkLibrary): Promise<v
   });
 }
 
-/** Load the persisted library (if any) and install it. Call on startup + open.
- *  Best-effort: a corrupt/failing library must not throw into the open path. */
-export async function loadAndInstallChartMarks(registrar: SandboxMarkRegistrar): Promise<void> {
-  try {
-    const lib = await loadPersistedMarkLibrary();
-    if (lib && lib.marks.length > 0) {
-      await installChartMarkLibrary(lib, registrar);
-    } else {
-      uninstallChartMarks();
-    }
-  } catch (e) {
-    console.error("[chartMarkScripts] failed to install persisted chart marks", e);
-  }
-}
+// NOTE: there is intentionally no loadAndInstall* here. Mounting a DISTRIBUTED
+// (.calp) mark library must be gated behind explicit user consent (it is still
+// user-authored code arriving from a third party), orchestrated in the Charts
+// extension via loadPersistedMarkLibraryWithProvenance + installChartMarkLibrary.
+// Local libraries (sourcePackage null) auto-install there too.

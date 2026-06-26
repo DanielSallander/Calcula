@@ -25,6 +25,8 @@ import {
   uninstallChartMarks,
   chartMarksInstalled,
   loadPersistedMarkLibrary,
+  loadPersistedMarkLibraryWithProvenance,
+  markLibraryConsentSource,
   MARK_ID_PREFIX,
   type ChartMarkLibrary,
 } from "../chartMarkScripts";
@@ -160,5 +162,27 @@ describe("loadPersistedMarkLibrary", () => {
     expect(await loadPersistedMarkLibrary()).toBeNull();
     invoke.mockRejectedValue(new Error("not found"));
     expect(await loadPersistedMarkLibrary()).toBeNull();
+  });
+});
+
+describe("loadPersistedMarkLibraryWithProvenance (.calp consent gate)", () => {
+  it("surfaces sourcePackage from get_script (distributed)", async () => {
+    invoke.mockResolvedValue({ source: JSON.stringify(lib("sandbox:x")), sourcePackage: "Acme Reports" });
+    const res = await loadPersistedMarkLibraryWithProvenance();
+    expect(res?.sourcePackage).toBe("Acme Reports");
+    expect(res?.lib.marks[0].markId).toBe("sandbox:x");
+  });
+  it("reports null provenance for a locally-authored library", async () => {
+    invoke.mockResolvedValue({ source: JSON.stringify(lib("sandbox:x")) });
+    expect((await loadPersistedMarkLibraryWithProvenance())?.sourcePackage).toBeNull();
+  });
+});
+
+describe("markLibraryConsentSource", () => {
+  it("is the library JSON (capability-free, so no @capability pragmas)", () => {
+    const l = lib("sandbox:x");
+    const src = markLibraryConsentSource(l);
+    expect(src).toBe(JSON.stringify(l));
+    expect(src).not.toContain("// @capability");
   });
 });

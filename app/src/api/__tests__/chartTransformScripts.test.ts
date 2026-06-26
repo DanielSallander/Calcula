@@ -27,6 +27,8 @@ import {
   isSandboxTransformMounted,
   runSandboxTransform,
   loadPersistedTransformLibrary,
+  loadPersistedTransformLibraryWithProvenance,
+  transformLibraryConsentSource,
   TRANSFORM_TYPE_PREFIX,
   type ChartTransformLibrary,
 } from "../chartTransformScripts";
@@ -172,5 +174,38 @@ describe("loadPersistedTransformLibrary", () => {
     expect(await loadPersistedTransformLibrary()).toBeNull();
     invoke.mockRejectedValue(new Error("not found"));
     expect(await loadPersistedTransformLibrary()).toBeNull();
+  });
+});
+
+describe("loadPersistedTransformLibraryWithProvenance (.calp consent gate)", () => {
+  it("surfaces sourcePackage from get_script (distributed) alongside the library", async () => {
+    invoke.mockResolvedValue({ source: JSON.stringify(lib("sandbox:x")), sourcePackage: "Acme Reports" });
+    const res = await loadPersistedTransformLibraryWithProvenance();
+    expect(res?.sourcePackage).toBe("Acme Reports");
+    expect(res?.lib.transforms[0].type).toBe("sandbox:x");
+  });
+  it("reports null provenance for a locally-authored library", async () => {
+    invoke.mockResolvedValue({ source: JSON.stringify(lib("sandbox:x")), sourcePackage: null });
+    expect((await loadPersistedTransformLibraryWithProvenance())?.sourcePackage).toBeNull();
+    // Absent sourcePackage field also reads as local (null).
+    invoke.mockResolvedValue({ source: JSON.stringify(lib("sandbox:x")) });
+    expect((await loadPersistedTransformLibraryWithProvenance())?.sourcePackage).toBeNull();
+  });
+});
+
+describe("transformLibraryConsentSource", () => {
+  it("prefixes a @capability pragma per declared capability so the shared store re-prompts on cap change", () => {
+    const src = transformLibraryConsentSource({ transforms: lib("sandbox:x").transforms, capabilities: ["bi.query"] });
+    expect(src).toContain("// @capability bi.query");
+    expect(src).toContain('"transforms"');
+    // A capability expansion changes the string (→ source-hash change → re-prompt).
+    const expanded = transformLibraryConsentSource({ transforms: lib("sandbox:x").transforms, capabilities: ["bi.query", "net.fetch"] });
+    expect(expanded).not.toBe(src);
+    expect(expanded).toContain("// @capability net.fetch");
+  });
+  it("emits no pragmas for a capability-free library", () => {
+    const src = transformLibraryConsentSource({ transforms: lib("sandbox:x").transforms });
+    expect(src).not.toContain("// @capability");
+    expect(src).toBe(JSON.stringify({ transforms: lib("sandbox:x").transforms }));
   });
 });

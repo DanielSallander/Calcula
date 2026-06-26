@@ -10,16 +10,32 @@ import {
   AppEvents,
   columnToLetter,
   registerChartStoreService,
-  loadAndInstallChartMarks,
+  installChartMarkLibrary,
   uninstallChartMarks,
-  loadAndInstallChartTransforms,
+  uninstallChartMarksQueued,
+  loadPersistedMarkLibraryWithProvenance,
+  markLibraryConsentSource,
+  CHART_MARKS_SCRIPT_ID,
+  installChartTransformLibrary,
   uninstallChartTransforms,
+  uninstallChartTransformsQueued,
+  loadPersistedTransformLibraryWithProvenance,
+  transformLibraryConsentSource,
+  CHART_TRANSFORMS_SCRIPT_ID,
   registerMenuItem,
   DialogExtensions,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 import { ChartMarksDialog } from "./components/ChartMarksDialog";
 import { ChartTransformsDialog } from "./components/ChartTransformsDialog";
+import { ChartLibraryConsentDialog } from "./components/ChartLibraryConsentDialog";
+import {
+  isLibraryConsentCurrent,
+  mountConsentedLibrary,
+  grantLibraryConsent,
+  requestedCapabilityDescriptors,
+  type LibraryGateDescriptor,
+} from "./lib/distributedLibraryGate";
 import { getActiveSheet } from "@api/lib";
 import {
   removeGridRegionsByType,
@@ -1097,40 +1113,218 @@ function activate(context: ExtensionContext): void {
       // Ignore
     }
   };
-  // Sandboxed authored chart marks (B8.D.2): load the persisted mark library and
-  // mount+register each mark's blit shim (registerSandboxMark is supplied as the
-  // registrar — it stays in this extension since it builds Charts-internal shims).
-  // Re-run on workbook open (a freshly opened .cala may carry its own library).
-  const loadChartMarks = async () => {
-    try {
-      await loadAndInstallChartMarks(registerSandboxMark);
-      invalidateAllChartCaches();
-      context.events.emit(AppEvents.GRID_REFRESH);
-    } catch {
-      // Ignore — a bad mark library must not break activation/open.
-    }
+  // ===== Distributed (.calp) consent gate for sandboxed chart libraries =====
+  // A reserved chart-mark / chart-transform library that arrived inside a
+  // distributed .calp must NOT auto-mount on open — the project vision requires
+  // explicit consent for code from external packages. A LOCALLY-authored library
+  // (sourcePackage null) still auto-installs. The library is treated as ONE
+  // "script" in the SHARED distributed-consent store (@api/distributedConsent),
+  // keyed under a NAMESPACED package id so it never collides with object-script
+  // consent. Transforms can carry bi.query; marks are paint-only (no capability).
+  // pendingLibraryGates holds the descriptor the user is being prompted for, WITH
+  // the load-generation (epoch) it was produced under. resetLibraryGateState() bumps
+  // the epoch; any async load/grant carrying a stale epoch bails — so a workbook
+  // switch (or a re-emit) mid-consent can never mount/record a prior workbook's lib.
+  interface PendingGate { d: LibraryGateDescriptor; epoch: number }
+  const pendingLibraryGates = new Map<string, PendingGate>();
+  const libraryConsentQueue: Array<Record<string, unknown>> = [];
+  let activeLibraryConsentKey: string | null = null;
+  let gateEpoch = 0;
+
+  const CHART_LIBRARY_CONSENT_DIALOG_ID = "chart:libraryConsent";
+  context.ui.dialogs.register({
+    id: CHART_LIBRARY_CONSENT_DIALOG_ID,
+    title: "Chart Code Security",
+    component: ChartLibraryConsentDialog,
+    width: 460,
+    height: 420,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CHART_LIBRARY_CONSENT_DIALOG_ID));
+
+  const dialogPayload = (d: LibraryGateDescriptor): Record<string, unknown> => ({
+    consentKey: d.consentKey,
+    displayPackage: d.displayPackage,
+    artifactLabel: d.artifactLabel,
+    itemNames: d.itemNames,
+    requestedCapabilities: requestedCapabilityDescriptors(d.capabilities),
+  });
+
+  // One prompt at a time (dialog state is keyed by dialog id).
+  const showNextLibraryConsent = (): void => {
+    if (activeLibraryConsentKey !== null) return;
+    const next = libraryConsentQueue.shift();
+    if (!next) return;
+    activeLibraryConsentKey = next.consentKey as string;
+    context.ui.dialogs.show(CHART_LIBRARY_CONSENT_DIALOG_ID, next);
   };
-  void loadChartMarks();
+
+  const enqueueLibraryConsent = (d: LibraryGateDescriptor, epoch: number): void => {
+    pendingLibraryGates.set(d.consentKey, { d, epoch });
+    const payload = dialogPayload(d);
+    // The displayed prompt MUST match the descriptor a grant will apply — else a
+    // stale dialog (e.g. paint-only) could approve a newer, capability-expanded
+    // library. So when this key is already showing/queued, REFRESH its payload
+    // rather than silently keeping the old one.
+    if (activeLibraryConsentKey === d.consentKey) {
+      context.ui.dialogs.show(CHART_LIBRARY_CONSENT_DIALOG_ID, payload);
+      return;
+    }
+    const queued = libraryConsentQueue.find((r) => r.consentKey === d.consentKey);
+    if (queued) {
+      Object.assign(queued, payload);
+      return;
+    }
+    libraryConsentQueue.push(payload);
+    showNextLibraryConsent();
+  };
+
+  // Advance the queue when the consent dialog closes (Allow, Block, or Escape). On a
+  // close with no decision (Escape/overlay-dismiss bypasses the component handlers),
+  // the descriptor is still in the map -> drop it (fail-closed); grant/deny already
+  // deleted it synchronously before this fires, so this is a no-op for those.
   cleanupFunctions.push(
-    context.events.on(AppEvents.AFTER_OPEN, () => { void loadChartMarks(); }),
+    DialogExtensions.onChange(() => {
+      if (activeLibraryConsentKey === null) return;
+      const stillOpen = DialogExtensions.getVisibleDialogs()
+        .some((dd) => dd.definition.id === CHART_LIBRARY_CONSENT_DIALOG_ID);
+      if (!stillOpen) {
+        pendingLibraryGates.delete(activeLibraryConsentKey);
+        activeLibraryConsentKey = null;
+        showNextLibraryConsent();
+      }
+    }),
   );
 
-  // Sandboxed authored chart transforms (Feature 1): load + mount the persisted
-  // transform library so the data reader can route spec.transform[] of a mounted
-  // sandbox type through the worker. Re-run on open (a freshly opened .cala may
-  // carry its own library); invalidate so charts re-read through the new transforms.
-  const loadChartTransforms = async () => {
+  const refreshAfterLibraryChange = (): void => {
+    invalidateAllChartCaches();
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+
+  // Chart-mark library: local → auto-install; distributed → gate behind consent.
+  const loadChartMarks = async () => {
+    const epoch = gateEpoch;
     try {
-      await loadAndInstallChartTransforms();
-      invalidateAllChartCaches();
-      context.events.emit(AppEvents.GRID_REFRESH);
-    } catch {
-      // Ignore — a bad transform library must not break activation/open.
+      const res = await loadPersistedMarkLibraryWithProvenance();
+      if (gateEpoch !== epoch) return; // superseded by a workbook switch
+      if (!res || res.lib.marks.length === 0) { uninstallChartMarks(); return; }
+      const { lib, sourcePackage } = res;
+      if (!sourcePackage) {
+        await installChartMarkLibrary(lib, registerSandboxMark);
+        refreshAfterLibraryChange();
+        return;
+      }
+      // Distributed — ensure not mounted (queued, so it can't race an in-flight
+      // install) until consent is confirmed, then gate.
+      await uninstallChartMarksQueued();
+      if (gateEpoch !== epoch) return;
+      const d: LibraryGateDescriptor = {
+        scriptId: CHART_MARKS_SCRIPT_ID,
+        consentKey: `chart-marks:${sourcePackage}`,
+        displayPackage: sourcePackage,
+        artifactLabel: "chart mark",
+        itemNames: lib.marks.map((m) => m.label || m.markId),
+        capabilities: [],
+        syntheticSource: markLibraryConsentSource(lib),
+        install: () => installChartMarkLibrary(lib, registerSandboxMark, { sourcePackage }),
+      };
+      const current = await isLibraryConsentCurrent(d);
+      if (gateEpoch !== epoch) return;
+      if (current) { await mountConsentedLibrary(d); refreshAfterLibraryChange(); }
+      else enqueueLibraryConsent(d, epoch);
+    } catch (e) {
+      console.error("[Charts] chart-mark library gate failed", e);
     }
   };
+
+  // Chart-transform library: same gate; carries its declared capabilities (bi.query).
+  const loadChartTransforms = async () => {
+    const epoch = gateEpoch;
+    try {
+      const res = await loadPersistedTransformLibraryWithProvenance();
+      if (gateEpoch !== epoch) return;
+      if (!res || res.lib.transforms.length === 0) { uninstallChartTransforms(); return; }
+      const { lib, sourcePackage } = res;
+      if (!sourcePackage) {
+        await installChartTransformLibrary(lib);
+        refreshAfterLibraryChange();
+        return;
+      }
+      await uninstallChartTransformsQueued();
+      if (gateEpoch !== epoch) return;
+      const d: LibraryGateDescriptor = {
+        scriptId: CHART_TRANSFORMS_SCRIPT_ID,
+        consentKey: `chart-transforms:${sourcePackage}`,
+        displayPackage: sourcePackage,
+        artifactLabel: "chart transform",
+        itemNames: lib.transforms.map((t) => t.label || t.type),
+        capabilities: lib.capabilities ?? [],
+        syntheticSource: transformLibraryConsentSource(lib),
+        install: () => installChartTransformLibrary(lib, { sourcePackage }),
+      };
+      const current = await isLibraryConsentCurrent(d);
+      if (gateEpoch !== epoch) return;
+      if (current) { await mountConsentedLibrary(d); refreshAfterLibraryChange(); }
+      else enqueueLibraryConsent(d, epoch);
+    } catch (e) {
+      console.error("[Charts] chart-transform library gate failed", e);
+    }
+  };
+
+  const reloadChartLibraries = (): void => { void loadChartMarks(); void loadChartTransforms(); };
+
+  // Apply / decline consent — act ONLY on a gate WE enqueued (keyed by consentKey),
+  // so this never reacts to the ScriptableObjects object-script consent flow. The
+  // epoch check rejects a grant whose workbook was already replaced.
+  cleanupFunctions.push(
+    onAppEvent("charts:library-consent-granted", async (detail) => {
+      const { consentKey } = detail as { consentKey: string };
+      const pending = pendingLibraryGates.get(consentKey);
+      if (!pending || pending.epoch !== gateEpoch) { pendingLibraryGates.delete(consentKey); return; }
+      pendingLibraryGates.delete(consentKey);
+      try {
+        await grantLibraryConsent(pending.d);
+        refreshAfterLibraryChange();
+      } catch (e) {
+        console.error("[Charts] failed to grant chart-library consent", e);
+      }
+    }),
+  );
+  cleanupFunctions.push(
+    onAppEvent("charts:library-consent-denied", (detail) => {
+      const { consentKey } = detail as { consentKey: string };
+      if (!pendingLibraryGates.delete(consentKey)) return;
+      // Library stays unmounted; charts fall back to built-in/identity behavior.
+      refreshAfterLibraryChange();
+    }),
+  );
+
+  // Reset gate state BEFORE re-running on a new/opened workbook, so a prior
+  // workbook's package can never leak its consent prompt (or in-flight load/grant)
+  // into a different one. Bumping the epoch invalidates any suspended async work;
+  // closing a stale dialog stops it being approved against the new workbook.
+  const resetLibraryGateState = (): void => {
+    gateEpoch++;
+    pendingLibraryGates.clear();
+    libraryConsentQueue.length = 0;
+    if (activeLibraryConsentKey !== null) {
+      DialogExtensions.closeDialog(CHART_LIBRARY_CONSENT_DIALOG_ID);
+      activeLibraryConsentKey = null;
+    }
+  };
+
+  void loadChartMarks();
   void loadChartTransforms();
   cleanupFunctions.push(
-    context.events.on(AppEvents.AFTER_OPEN, () => { void loadChartTransforms(); }),
+    context.events.on(AppEvents.AFTER_OPEN, () => { resetLibraryGateState(); reloadChartLibraries(); }),
+  );
+  cleanupFunctions.push(
+    context.events.on(AppEvents.AFTER_NEW, () => { resetLibraryGateState(); reloadChartLibraries(); }),
+  );
+  // Re-run when a .calp pull materializes new libraries (no reopen needed) — matches
+  // the ScriptableObjects object-script consent behavior. (Same workbook → no reset,
+  // so an in-flight prompt for the same package is refreshed, not duplicated.)
+  cleanupFunctions.push(
+    onAppEvent("calp:scripts-pulled", () => { reloadChartLibraries(); }),
   );
 
   cleanupFunctions.push(

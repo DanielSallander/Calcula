@@ -844,25 +844,30 @@ export type { CustomFunctionUdf, CustomFunctionLibrary } from "./customFunctions
 export {
   installChartMarkLibrary,
   uninstallChartMarks,
+  uninstallChartMarksQueued,
   chartMarksInstalled,
   loadPersistedMarkLibrary,
+  loadPersistedMarkLibraryWithProvenance,
   savePersistedMarkLibrary,
-  loadAndInstallChartMarks,
+  markLibraryConsentSource,
+  CHART_MARKS_SCRIPT_ID,
   validateMarkId,
   generateMarkSource,
   markScriptId,
   MARK_ID_PREFIX,
 } from "./chartMarkScripts";
-export type { ChartMarkScript, ChartMarkLibrary, MarkLayoutFamily, SandboxMarkRegistrar } from "./chartMarkScripts";
+export type { ChartMarkScript, ChartMarkLibrary, MarkLayoutFamily, SandboxMarkRegistrar, PersistedMarkLibrary } from "./chartMarkScripts";
 // Sandboxed chart transforms (Feature 1): author/persist/mount a transform library
 // + the reader-side routing (isSandboxTransformMounted / runSandboxTransform).
 export {
   installChartTransformLibrary,
   uninstallChartTransforms,
+  uninstallChartTransformsQueued,
   chartTransformsInstalled,
   loadPersistedTransformLibrary,
+  loadPersistedTransformLibraryWithProvenance,
   savePersistedTransformLibrary,
-  loadAndInstallChartTransforms,
+  transformLibraryConsentSource,
   validateTransformType,
   generateTransformSource,
   isSandboxTransformMounted,
@@ -870,7 +875,7 @@ export {
   TRANSFORM_TYPE_PREFIX,
   CHART_TRANSFORMS_SCRIPT_ID,
 } from "./chartTransformScripts";
-export type { ChartTransformScript, ChartTransformLibrary } from "./chartTransformScripts";
+export type { ChartTransformScript, ChartTransformLibrary, PersistedTransformLibrary } from "./chartTransformScripts";
 // UDF evaluation bridge (Wave 3 / C1): makes registered custom functions
 // actually evaluate in worksheet formulas (broker-mediated, pre-fetched).
 export {
@@ -1581,6 +1586,21 @@ export type { SandboxHitGeometry, SandboxHitRect } from "./scriptHost/protocol";
 export { resolveCapabilityRequest, getGrantedOrigins, getScriptGrants, revokeCapability, recordCapabilityGrant, describeCapability } from "./scriptHost/capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./scriptHost/capabilities";
 export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./scriptHost/capabilities";
+// Distributed-script consent store (promoted from ScriptableObjects so the Charts
+// sandboxed transform/mark libraries reuse the SAME store + file, not a parallel one).
+export {
+  sha256Hex,
+  loadConsents,
+  recordConsent,
+  isConsentCurrent,
+  getChangedScripts,
+} from "./distributedConsent";
+export type {
+  ConsentedScript,
+  CapabilityGrant,
+  ConsentRecord,
+  ChangedScript,
+} from "./distributedConsent";
 export type { DeclaredCapabilities } from "./scriptHost/capabilities";
 
 export {
