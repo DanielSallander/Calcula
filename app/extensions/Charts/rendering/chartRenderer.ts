@@ -19,9 +19,10 @@ import {
 import { drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
-import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects } from "./chartDispatch";
+import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects, isComposed } from "./chartDispatch";
 import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
 import { clearPointSelection } from "../handlers/chartPointSelection";
 import { clearWidgetValues, getWidgetValue } from "../handlers/chartWidgetValues";
@@ -682,7 +683,10 @@ async function renderChartAsync(
       data,
       layout,
       hitGeometry,
-      barRects: extractBarRects(hitGeometry),
+      // barRects (deprecated; drives the editor sub-selection click path) stays
+      // empty for composed charts so cross-panel hit geometry doesn't leak panel-0
+      // bars into whole-chart sub-selection. Point-selection uses hitGeometry.
+      barRects: isComposed(spec, data) ? [] : extractBarRects(hitGeometry),
       logicalWidth,
       logicalHeight,
       pivotFieldButtons,
@@ -1024,12 +1028,18 @@ function drawTooltip(
   const swatchX = tx + paddingX;
   let textStartX = tx + paddingX;
   const chart = getChartById(hover.chartId);
-  if (showSeries && chart && hitResult.seriesIndex != null) {
+  const hoverCached = getCachedChartData(hover.chartId);
+  if (showSeries && chart && hoverCached && hitResult.seriesIndex != null) {
     const swatchY = ty + paddingY + (lineHeight - swatchSize) / 2;
+    // Use the PAINTED (filtered) series so the swatch matches the mark exactly,
+    // and the stable palette slot (pre-filter position) so hiding an earlier
+    // series doesn't shift the swatch color. seriesPaletteIndex degrades to the
+    // painter index when no filter ran.
+    const paintedSeries = hoverCached.data.series[hitResult.seriesIndex];
     const color = getSeriesColor(
       chart.spec.palette,
-      hitResult.seriesIndex,
-      chart.spec.series[hitResult.seriesIndex]?.color ?? null,
+      seriesPaletteIndex(hoverCached.data, hitResult.seriesIndex),
+      paintedSeries?.color ?? null,
     );
     ctx.fillStyle = color;
     ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);

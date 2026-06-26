@@ -6,6 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import type { LinearScale, BandScale } from "./scales";
 import { createScaleFromSpec, createPointScale } from "./scales";
 import { applyFillStyle } from "./gradientFill";
@@ -173,7 +174,7 @@ export function drawLegend(
     ctx,
     data.series.map((s, i) => ({
       name: s.name,
-      color: getSeriesColor(spec.palette, i, s.color),
+      color: getSeriesColor(spec.palette, seriesPaletteIndex(data, i), s.color),
     })),
     spec,
     layout,

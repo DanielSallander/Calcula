@@ -44,7 +44,7 @@ import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInter
 import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
 import { setColumnWidth, setRowHeight, setAllDimensions, updateConfig, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
-import { cellEvents } from "../../lib/cellEvents";
+import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry, CoreCommands } from "../../../api/commands";
 import { emitAppEvent, AppEvents } from "../../../api/events";
@@ -211,6 +211,10 @@ export function useSpreadsheetSelection({
 
         if (
           selection &&
+          // Active-sheet changes only (sheetIndex undefined = active sheet); a
+          // cross-sheet dependent whose coords happen to match the active
+          // selection must not overwrite the formula-bar content.
+          event.sheetIndex === undefined &&
           event.row === selection.endRow &&
           event.col === selection.endCol &&
           !isEditing
@@ -969,12 +973,7 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        cellEvents.emitBatch(
-          updatedCells
-            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
-            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
-          "fill",
-        );
+        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Down failed:", error);
@@ -1004,12 +1003,7 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        cellEvents.emitBatch(
-          updatedCells
-            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
-            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
-          "fill",
-        );
+        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Right failed:", error);
@@ -1039,12 +1033,7 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        cellEvents.emitBatch(
-          updatedCells
-            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
-            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
-          "fill",
-        );
+        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Up failed:", error);
@@ -1074,12 +1063,7 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        cellEvents.emitBatch(
-          updatedCells
-            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
-            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
-          "fill",
-        );
+        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Left failed:", error);

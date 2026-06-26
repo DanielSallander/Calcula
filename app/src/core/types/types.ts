@@ -1021,6 +1021,12 @@ export interface CellUpdateResult {
 export interface CellChangeEvent {
   row: number;
   col: number;
+  /**
+   * Sheet the change occurred on. Absent means "the active sheet" (the historical
+   * implicit contract). Cross-sheet emitters set it so sheet-scoped consumers can
+   * tell an off-sheet edit from an active-sheet one.
+   */
+  sheetIndex?: number;
   oldValue?: string;
   newValue: string;
   formula: string | null;

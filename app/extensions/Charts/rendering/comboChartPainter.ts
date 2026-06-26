@@ -15,6 +15,7 @@ import type {
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { createLinearScale, createBandScale, createPointScale, createScaleFromSpec } from "./scales";
 import type { LinearScale } from "./scales";
 import {
@@ -146,7 +147,7 @@ export function paintComboChart(
   // Areas
   for (const si of areaSeries) {
     const series = data.series[si];
-    const color = getSeriesColor(spec.palette, si, series.color);
+    const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
     const ys = getYScale(si);
     const points = data.categories.map((_cat, ci) => ({
       x: xPointScale.scaleIndex(ci),
@@ -192,7 +193,7 @@ export function paintComboChart(
       for (let bi = 0; bi < barSeries.length; bi++) {
         const si = barSeries[bi];
         const series = data.series[si];
-        const color = getSeriesColor(spec.palette, si, series.color);
+        const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
         const ys = getYScale(si);
         const value = series.values[ci] ?? 0;
 
@@ -221,7 +222,7 @@ export function paintComboChart(
   // Lines
   for (const si of lineSeries) {
     const series = data.series[si];
-    const color = getSeriesColor(spec.palette, si, series.color);
+    const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
     const ys = getYScale(si);
     const points = data.categories.map((_cat, ci) => ({
       x: xPointScale.scaleIndex(ci),

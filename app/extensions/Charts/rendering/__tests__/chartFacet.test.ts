@@ -76,6 +76,14 @@ describe("dispatchPaint faceting", () => {
     }
   });
 
+  it("threads the parent selection into every facet panel (linked cross-panel highlight)", () => {
+    const calls = recordingMark("__facet_sel__");
+    const selection = { p: { on: "category" as const, values: ["Feb"] } };
+    dispatchPaint(stubCtx, { ...faceted, selection }, facetSpec("__facet_sel__"), layoutFn(200, 200), theme);
+    expect(calls).toHaveLength(2);
+    for (const c of calls) expect(c.data.selection).toBe(selection);
+  });
+
   it("shares the X scale as the ordered union of panel categories", () => {
     const calls = recordingMark("__facet_unionx__");
     dispatchPaint(stubCtx, faceted, facetSpec("__facet_unionx__"), layoutFn(200, 200), theme);
@@ -155,9 +163,17 @@ describe("dispatchPaint faceting", () => {
     expect(calls[0].data.categoryField).toEqual({ type: "quantitative", values: [1, 2] });
   });
 
-  it("has no per-datum hit geometry while faceting", () => {
+  it("composes per-panel hit geometry while faceting (cross-panel selection)", () => {
     const spec = facetSpec("bar");
-    expect(dispatchComputeGeometry(faceted, spec, layoutFn(200, 200), theme)).toEqual({ type: "bars", rects: [] });
+    const geo = dispatchComputeGeometry(faceted, spec, layoutFn(200, 200), theme);
+    // One composite group per facet panel (North, South).
+    expect(geo.type).toBe("composite");
+    if (geo.type !== "composite") throw new Error("expected composite");
+    expect(geo.groups).toHaveLength(2);
+    for (const g of geo.groups) {
+      expect(g.type).toBe("bars");
+      if (g.type === "bars") expect(g.rects.length).toBeGreaterThan(0);
+    }
   });
 
   it("falls through to a single chart when facet is set but no panels exist", () => {

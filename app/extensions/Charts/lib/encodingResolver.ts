@@ -3,7 +3,7 @@
 // CONTEXT: Used by chart painters to determine per-point visual properties
 //          (color, opacity, size) based on SeriesEncoding definitions.
 
-import type { ConditionalValue, ValueCondition, SeriesEncoding, ChartSelectionMap, ChartSpec } from "../types";
+import type { ConditionalValue, ValueCondition, SeriesEncoding, ChartSelectionMap, ChartSpec, ParsedChartData } from "../types";
 import { getSeriesColor } from "../rendering/chartTheme";
 
 /**
@@ -16,6 +16,29 @@ import { getSeriesColor } from "../rendering/chartTheme";
  */
 export function resolveSeriesEncoding(spec: ChartSpec, seriesName: string): SeriesEncoding | undefined {
   return spec.series.find((s) => s.name === seriesName)?.encoding;
+}
+
+/**
+ * The STABLE palette slot for a painted series: its position in the PRE-FILTER
+ * data (data.keptSeriesIndices[painterIndex], the painter->original map the data
+ * reader threads on when a series filter dropped something). So hiding a
+ * lower-index series does NOT recolor the survivors (Excel keeps colors stable).
+ *
+ * Data-driven, NOT spec-name-driven on purpose: the pre-filter data position is
+ * the true colour slot, and a positional map is unambiguous even when two series
+ * share a header name (a name lookup would collapse duplicates onto one colour)
+ * or a transform created/reordered series (a name lookup would mis-resolve).
+ * Absent map = identity (no filter ran), so unfiltered charts and each
+ * single-series small-multiple panel keep palette[painterIndex] (panel 0 ->
+ * palette[0], uniform across panels) exactly as before. Pure. getSeriesColor
+ * already short-circuits on an explicit colour override, so pass this
+ * unconditionally.
+ */
+export function seriesPaletteIndex(
+  data: Pick<ParsedChartData, "keptSeriesIndices">,
+  painterIndex: number,
+): number {
+  return data.keptSeriesIndices ? (data.keptSeriesIndices[painterIndex] ?? painterIndex) : painterIndex;
 }
 
 /**

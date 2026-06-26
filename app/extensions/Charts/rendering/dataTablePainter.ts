@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { formatTickValue } from "./chartPainterUtils";
 
 // ============================================================================
@@ -120,7 +121,7 @@ export function paintDataTable(
       const swatchSize = 8;
       const swatchX = tableLeft + (legendColWidth - swatchSize) / 2;
       const swatchY = rowY + (ROW_HEIGHT - swatchSize) / 2;
-      const color = getSeriesColor(spec.palette, si, series.color);
+      const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
       ctx.fillStyle = color;
       ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
     }

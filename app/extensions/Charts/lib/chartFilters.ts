@@ -30,6 +30,8 @@ export function applySelectionKeep(
     ...data,
     categories: keptIdx.map((i) => data.categories[i]),
     series: data.series.map((s) => ({ ...s, values: keptIdx.map((i) => s.values[i]) })),
+    // Compose with any prior category filter so the map stays painter→ORIGINAL.
+    keptCategoryIndices: keptIdx.map((i) => data.keptCategoryIndices ? data.keptCategoryIndices[i] : i),
   };
 }
 
@@ -52,11 +54,16 @@ export function applyChartFilters(
 
   let filteredSeries = data.series;
   let filteredCategories = data.categories;
+  // Carry any prior maps through (composition), so the result stays painter→ORIGINAL.
+  let keptSeriesIndices = data.keptSeriesIndices;
+  let keptCategoryIndices = data.keptCategoryIndices;
 
   // Filter series
   if (hasSeriesFilter) {
     const hiddenSet = new Set(hiddenSeries);
-    filteredSeries = data.series.filter((_, i) => !hiddenSet.has(i));
+    const survivingS = data.series.map((_, i) => i).filter((i) => !hiddenSet.has(i));
+    filteredSeries = survivingS.map((i) => data.series[i]);
+    keptSeriesIndices = survivingS.map((i) => data.keptSeriesIndices ? data.keptSeriesIndices[i] : i);
   }
 
   // Filter categories
@@ -73,10 +80,16 @@ export function applyChartFilters(
       ...s,
       values: visibleCatIndices.map((i) => s.values[i]),
     }));
+    keptCategoryIndices = visibleCatIndices.map((i) => data.keptCategoryIndices ? data.keptCategoryIndices[i] : i);
   }
 
   return {
+    // Spread to preserve fields the painter still needs (categoryField, selection)
+    // — the old return dropped them, a latent bug since this runs before they matter.
+    ...data,
     categories: filteredCategories,
     series: filteredSeries,
+    keptSeriesIndices,
+    keptCategoryIndices,
   };
 }

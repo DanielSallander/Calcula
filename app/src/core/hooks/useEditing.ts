@@ -34,7 +34,7 @@ import {
 } from "../../core/state/gridActions";
 import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo, updateCellOnSheets } from "../lib/tauri-api";
 import { isSheetGroupingActive, getGroupedSheetIndices } from "../state/sheetGrouping";
-import { cellEvents } from "../lib/cellEvents";
+import { cellEvents, cellToChange } from "../lib/cellEvents";
 import { emitAppEvent, AppEvents } from "../lib/events";
 import {
   rangeToReference,
@@ -1497,22 +1497,15 @@ export function useEditing(): UseEditingReturn {
           formula: primaryCell.formula ?? null,
         });
 
-        // Emit events for same-sheet dependent cells only
-        // Cross-sheet cells (sheetIndex defined) are already updated in the backend
-        // and will be fetched fresh when switching sheets
+        // Emit events for dependent cells. cellToChange carries each cell's
+        // sheetIndex through (undefined = active sheet), so cross-sheet dependents
+        // (a formula on another sheet that recalculated) stay tagged with their
+        // own sheet — sheet-aware consumers (renderCache, chart invalidation)
+        // invalidate the right sheet now instead of waiting for a sheet switch.
+        // The active-sheet formula-bar listener guards on sheetIndex === undefined,
+        // so a cross-sheet dependent can't corrupt the active selection's content.
         for (let i = 1; i < updatedCells.length; i++) {
-          const depCell = updatedCells[i];
-          // Skip cross-sheet cells - sheetIndex is undefined for same-sheet cells
-          if (depCell.sheetIndex !== undefined) {
-            continue;
-          }
-          cellEvents.emit({
-            row: depCell.row,
-            col: depCell.col,
-            oldValue: undefined,
-            newValue: depCell.display,
-            formula: depCell.formula ?? null,
-          });
+          cellEvents.emit(cellToChange(updatedCells[i]));
         }
         const perfT4Events = performance.now();
 

@@ -5,7 +5,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, SliceArc, PieMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
+import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import { valuesToAngles } from "./scales";
 import {
@@ -83,8 +83,9 @@ export function paintPieChart(
     const { startAngle, endAngle } = angles[i];
     if (startAngle === endAngle) continue;
 
-    // Apply data point override (series 0 for pie, category index = i)
-    const override = getOverrideFromMap(overrideMap, 0, i);
+    // Apply data point override (series 0 for pie, category index = i). Overrides
+    // are keyed in authoring space — translate the painter slice index first.
+    const override = getOverrideFromMap(overrideMap, 0, toAuthoringIndices(data, 0, i).categoryIndex);
     const color = override?.color ?? getSeriesColor(spec.palette, i, null);
     const explodeOffset = override?.exploded ?? 0;
 
@@ -151,8 +152,8 @@ export function paintPieChart(
 
       const midAngle = (startAngle + endAngle) / 2;
 
-      // Account for exploded slice offset in label position
-      const override = getOverrideFromMap(overrideMap, 0, i);
+      // Account for exploded slice offset in label position (authoring-space key)
+      const override = getOverrideFromMap(overrideMap, 0, toAuthoringIndices(data, 0, i).categoryIndex);
       const explodeOffset = override?.exploded ?? 0;
       const lx = centerX + Math.cos(midAngle) * (labelRadius + explodeOffset);
       const ly = centerY + Math.sin(midAngle) * (labelRadius + explodeOffset);

@@ -9,7 +9,7 @@ import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
 import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, getMergedRegions, mergeCells, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput, type FormulaShiftInput, type MergedRegion } from "../lib/tauri-api";
-import { cellEvents } from "../lib/cellEvents";
+import { cellEvents, cellToChange } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
 import { calculateAutoScrollDelta } from "./useMouseSelection/utils/autoScrollUtils";
@@ -1205,17 +1205,10 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         }
         const perfFillT2 = performance.now();
 
-        // Emit batch event for all updated cells (single notification instead of N)
-        const batchEvents = updatedCells
-          .filter((cell) => cell.sheetIndex === undefined)
-          .map((cell) => ({
-            row: cell.row,
-            col: cell.col,
-            oldValue: undefined,
-            newValue: cell.display,
-            formula: cell.formula ?? null,
-          }));
-        cellEvents.emitBatch(batchEvents, "fill");
+        // Emit batch event for all updated cells (single notification instead of N).
+        // cellToChange carries each cell's sheetIndex through (undefined = active
+        // sheet) so a fill that spills onto another sheet stays correctly tagged.
+        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
         const perfFillT3 = performance.now();
 
         console.log(
@@ -1435,17 +1428,10 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         }
         const perfAutoT2 = performance.now();
 
-        // Emit batch event for all updated cells (single notification instead of N)
-        const batchEvents = updatedCells
-          .filter((cell) => cell.sheetIndex === undefined)
-          .map((cell) => ({
-            row: cell.row,
-            col: cell.col,
-            oldValue: undefined,
-            newValue: cell.display,
-            formula: cell.formula ?? null,
-          }));
-        cellEvents.emitBatch(batchEvents, "fill");
+        // Emit batch event for all updated cells (single notification instead of N).
+        // cellToChange carries each cell's sheetIndex through (undefined = active
+        // sheet) so a fill that spills onto another sheet stays correctly tagged.
+        cellEvents.emitBatch(updatedCells.map(cellToChange), "fill");
         const perfAutoT3 = performance.now();
 
         console.log(

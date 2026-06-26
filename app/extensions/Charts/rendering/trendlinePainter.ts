@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { computeTrendline } from "../lib/trendlineComputation";
 import { createPointScale, createScaleFromSpec } from "./scales";
 
@@ -62,9 +63,9 @@ export function paintTrendlines(
     const result = computeTrendline(data, trendline);
     if (!result || result.points.length < 2) continue;
 
-    // Determine color
+    // Determine color — stable palette slot for the series the trendline tracks.
     const seriesIndex = trendline.seriesIndex ?? 0;
-    const seriesColor = getSeriesColor(spec.palette, seriesIndex, data.series[seriesIndex]?.color ?? null);
+    const seriesColor = getSeriesColor(spec.palette, seriesPaletteIndex(data, seriesIndex), data.series[seriesIndex]?.color ?? null);
     const color = trendline.color ?? darkenColor(seriesColor, 0.3);
 
     const lineWidth = trendline.lineWidth ?? 2;

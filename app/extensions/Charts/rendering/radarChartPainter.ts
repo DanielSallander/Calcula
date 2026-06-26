@@ -6,6 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, RadarMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import {
   computeRadialLayout,
   drawChartBackground,
@@ -142,7 +143,7 @@ export function paintRadarChart(
   // 6. Draw series polygons
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
-    const color = getSeriesColor(spec.palette, si, series.color);
+    const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
 
     // Compute polygon vertices
     const points: Array<{ x: number; y: number }> = [];

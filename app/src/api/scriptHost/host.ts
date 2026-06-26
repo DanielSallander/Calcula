@@ -1164,12 +1164,14 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     // ---- cell ----
     case "cell.onEdit":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes?: Array<{ row: number; col: number; oldValue?: string; newValue: string; formula?: string | null }> };
+        const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; oldValue?: string; newValue: string; formula?: string | null }> };
         forwardEvent(mw, hook, {
           changes: (d.changes ?? []).map((change) => ({
             row: change.row,
             col: change.col,
-            sheetIndex: activeSheetIndexForEvents,
+            // Per-change sheet when the emitter tagged a cross-sheet edit; else the
+            // active sheet (the historical implicit contract).
+            sheetIndex: change.sheetIndex ?? activeSheetIndexForEvents,
             oldValue: change.oldValue,
             newValue: change.newValue,
             formula: change.formula,
@@ -1253,10 +1255,13 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       const unsubCells = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
         const range = getSourceRange();
         if (range) {
-          if (range.sheetIndex !== undefined && range.sheetIndex !== activeSheetIndexForEvents) return;
-          const d = detail as { changes?: Array<{ row: number; col: number }> };
+          // The chart's data sheet; a change with no per-change sheet is assumed
+          // active-sheet (the historical implicit contract).
+          const chartSheet = range.sheetIndex ?? activeSheetIndexForEvents;
+          const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number }> };
           const hit = d.changes?.some(
             (c) =>
+              (c.sheetIndex ?? activeSheetIndexForEvents) === chartSheet &&
               c.row >= range.startRow && c.row <= range.endRow &&
               c.col >= range.startCol && c.col <= range.endCol,
           );
@@ -1309,7 +1314,8 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       // table:dataChanged for THIS table is emitted (e.g. by our own setters /
       // addRow). Range membership uses the seeded mirror coords; over-firing on
       // ambiguity is acceptable for v1.
-      const inTableRange = (changes: Array<{ row: number; col: number }>): boolean => {
+      const inTableRange = (changes: Array<{ row: number; col: number; sheetIndex?: number }>): boolean => {
+        const tableSheet = getMirror(mw, "table.sheetIndex");
         const startRow = getMirror(mw, "table.startRow");
         const startCol = getMirror(mw, "table.startCol");
         const endRow = getMirror(mw, "table.endRow");
@@ -1318,15 +1324,22 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
           return true; // unknown bounds -> over-fire
         }
         const t: TableLike = {
-          sheetIndex: 0,
+          sheetIndex: tableSheet ?? 0,
           startRow, startCol, endRow, endCol,
           styleOptions: { headerRow: false, totalRow: false },
           columns: [],
         };
-        return changes.some((c) => tableContains(t, c.row, c.col));
+        // Gate by sheet too (a change with no per-change sheet is assumed active,
+        // the historical implicit contract) so a cross-sheet dependent that
+        // coincidentally falls in the table's bbox doesn't spuriously fire.
+        return changes.some(
+          (c) =>
+            (c.sheetIndex ?? activeSheetIndexForEvents) === (tableSheet ?? activeSheetIndexForEvents) &&
+            tableContains(t, c.row, c.col),
+        );
       };
       const unsubCells = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes?: Array<{ row: number; col: number; newValue: string }> };
+        const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; newValue: string }> };
         const changes = d.changes ?? [];
         if (!inTableRange(changes)) return;
         pushTableMirror(mw, instanceId);
@@ -1362,12 +1375,17 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
         return { sheetIndex, startRow, startCol, endRow, endCol };
       };
       const unsubCells = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes?: Array<{ row: number; col: number; newValue: string }> };
+        const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; newValue: string }> };
         const changes = d.changes ?? [];
         const coords = coordsFromMirror();
         // Unknown bounds -> over-fire. Known bounds -> only when a change lands
-        // inside (sheet filter omitted; CELL_VALUES_CHANGED carries no sheet).
-        const hit = !coords || changes.some((c) => namedRangeContains(coords, c.row, c.col));
+        // inside AND on the named range's sheet (a change with no per-change sheet
+        // is assumed active-sheet, the historical implicit contract).
+        const hit = !coords || changes.some(
+          (c) =>
+            (c.sheetIndex ?? activeSheetIndexForEvents) === coords.sheetIndex &&
+            namedRangeContains(coords, c.row, c.col),
+        );
         if (!hit) return;
         pushNamedRangeMirror(mw, instanceId);
         forwardEvent(mw, hook, { changes });

@@ -5,6 +5,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
 import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
@@ -170,7 +171,7 @@ export function paintAreaChart(
       const points = seriesPoints[si];
       if (points.length === 0) continue;
 
-      const color = getSeriesColor(spec.palette, si, data.series[si].color);
+      const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), data.series[si].color);
 
       // Compute the bottom edge of this area (previous series top, or baseline)
       const bottomPoints: Array<{ x: number; y: number }> = [];
@@ -222,7 +223,7 @@ export function paintAreaChart(
       const points = seriesPoints[si];
       if (points.length === 0) continue;
 
-      const color = getSeriesColor(spec.palette, si, data.series[si].color);
+      const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), data.series[si].color);
 
       ctx.globalAlpha = fillOpacity;
       ctx.fillStyle = color;
@@ -251,7 +252,7 @@ export function paintAreaChart(
     const points = seriesPoints[si];
     if (points.length === 0) continue;
 
-    const color = getSeriesColor(spec.palette, si, data.series[si].color);
+    const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), data.series[si].color);
 
     ctx.strokeStyle = color;
     ctx.lineWidth = lineWidth;
@@ -297,7 +298,7 @@ export function paintAreaChart(
     ctx.lineWidth = 1;
 
     for (let si = 0; si < data.series.length; si++) {
-      const color = dropColor ?? getSeriesColor(spec.palette, si, data.series[si].color);
+      const color = dropColor ?? getSeriesColor(spec.palette, seriesPaletteIndex(data, si), data.series[si].color);
       ctx.strokeStyle = color;
       ctx.globalAlpha = dropColor ? 1 : 0.4;
       ctx.beginPath();

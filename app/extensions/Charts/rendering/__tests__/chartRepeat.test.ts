@@ -116,6 +116,23 @@ describe("dispatchPaint small multiples", () => {
     expect(maxs).toEqual([20, 20, 20]);
   });
 
+  it("threads the parent selection into every panel (linked cross-panel highlight)", () => {
+    const seen: Array<ParsedChartData> = [];
+    registerChartMark("__repeat_sel__", {
+      meta: { label: "Repeat Sel", layoutFamily: "cartesian" },
+      paint: (_ctx, d) => { seen.push(d as ParsedChartData); },
+      computeLayout: layoutFn,
+      computeGeometry: () => ({ type: "bars", rects: [] }),
+    });
+
+    const selection = { p: { on: "category" as const, values: ["a"] } };
+    const spec = repeatSpec("__repeat_sel__", { repeat: { columns: 2 } });
+    dispatchPaint(stubCtx, { ...threeSeries, selection }, spec, layoutFn(200, 200), theme);
+
+    expect(seen).toHaveLength(3);
+    for (const panel of seen) expect(panel.selection).toBe(selection);
+  });
+
   it("leaves each panel's Y scale independent when sharedYScale is false", () => {
     const mins: Array<number | null> = [];
     registerChartMark("__repeat_indep__", {
@@ -132,9 +149,24 @@ describe("dispatchPaint small multiples", () => {
     expect(mins).toEqual([null, null, null]);
   });
 
-  it("has no per-datum hit geometry while repeating", () => {
+  it("composes per-panel hit geometry while repeating (cross-panel selection)", () => {
     const spec = repeatSpec("bar", { repeat: { columns: 2 } });
-    expect(dispatchComputeGeometry(threeSeries, spec, layoutFn(200, 200), theme)).toEqual({ type: "bars", rects: [] });
+    const geo = dispatchComputeGeometry(threeSeries, spec, layoutFn(200, 200), theme);
+    // One composite group per series panel (3 series -> 3 panels).
+    expect(geo.type).toBe("composite");
+    if (geo.type !== "composite") throw new Error("expected composite");
+    expect(geo.groups).toHaveLength(3);
+    // Every panel yields hit-testable bars (each panel is a single series x 2 cats).
+    for (const g of geo.groups) {
+      expect(g.type).toBe("bars");
+      if (g.type === "bars") expect(g.rects.length).toBeGreaterThan(0);
+    }
+    // Panels are offset into chart-local space: at columns:2 the 2nd panel starts
+    // at x>=100 (right column), so some bar must lie in the right half.
+    const allRects = geo.groups.flatMap((g) => (g.type === "bars" ? g.rects : []));
+    expect(allRects.some((r) => r.x >= 100)).toBe(true);
+    // ...and some in the left column (x < 100).
+    expect(allRects.some((r) => r.x < 100)).toBe(true);
   });
 
   it("paints nothing (no throw) when there are no series", () => {

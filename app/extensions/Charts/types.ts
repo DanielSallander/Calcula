@@ -1378,6 +1378,23 @@ export interface ParsedChartData {
    * absent for previews/export. Never persisted.
    */
   selection?: ChartSelectionMap;
+  /**
+   * Painter-space → authoring-space series index map: keptSeriesIndices[paintSi]
+   * is the ORIGINAL (pre-filter) series index. Present only when a series filter
+   * (hiddenSeries) dropped something; absent means identity. Used to translate a
+   * painter index back to authoring space for dataPointOverrides — overrides are
+   * keyed in unfiltered space so they stay anchored to the same datum when a
+   * lower-index series/category is hidden. See [[project_chart_spec_roadmap]].
+   */
+  keptSeriesIndices?: number[];
+  /**
+   * Painter-space → authoring-space category index map: keptCategoryIndices[paintCi]
+   * is the ORIGINAL (pre-filter) category index. Present only when a category
+   * filter (hiddenCategories or selection-keep) dropped something; absent means
+   * identity. Composes across both filter stages. Used to translate
+   * dataPointOverrides keys (see {@link keptSeriesIndices}).
+   */
+  keptCategoryIndices?: number[];
 }
 
 /**

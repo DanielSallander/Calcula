@@ -5,7 +5,7 @@
 import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, BarMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding } from "../lib/encodingResolver";
+import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -197,7 +197,7 @@ function drawHorizontalBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category, sel);
+      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, value, category, sel);
 
       const barY = groupY + si * (barHeight + theme.barGap);
       const barEnd = xScale.scale(value);
@@ -270,7 +270,7 @@ function drawStackedHorizontalBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, rawValue, category, sel);
+      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, rawValue, category, sel);
 
       let value = rawValue;
       if (stackMode === "percentStacked" && categoryTotal > 0) {

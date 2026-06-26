@@ -4,7 +4,7 @@
 // that need to respond to cell changes. This enables the canvas to refresh
 // when cells change without tight coupling between editing and rendering.
 
-import type { CellChangeEvent } from "../types";
+import type { CellChangeEvent, CellData } from "../types";
 import { AppEvents, emitAppEvent } from "./events";
 
 import type { CellValueChange, CellValuesChangedPayload } from "../../api/events";
@@ -13,6 +13,24 @@ import type { CellValueChange, CellValuesChangedPayload } from "../../api/events
  * Source of a cell value change, used in the CELL_VALUES_CHANGED payload.
  */
 export type CellChangeSource = CellValuesChangedPayload["source"];
+
+/**
+ * Map a backend CellData (the shape returned by fill/edit/paste ops) to a
+ * CellChangeEvent for emit/emitBatch. Carries the cell's `sheetIndex` THROUGH
+ * (undefined = active sheet) so cross-sheet edits stay tagged with their own
+ * sheet — sheet-aware consumers (renderCache, chart invalidation, script hooks)
+ * then attribute them correctly instead of the previous active-sheet-only filter
+ * which silently dropped off-sheet cells.
+ */
+export function cellToChange(c: CellData): CellChangeEvent {
+  return {
+    row: c.row,
+    col: c.col,
+    sheetIndex: c.sheetIndex,
+    newValue: c.display,
+    formula: c.formula,
+  };
+}
 
 /**
  * Callback type for cell change listeners.
@@ -103,6 +121,7 @@ class CellEventEmitter {
     this.pendingChanges.push({
       row: event.row,
       col: event.col,
+      sheetIndex: event.sheetIndex,
       oldValue: event.oldValue,
       newValue: event.newValue,
       formula: event.formula,

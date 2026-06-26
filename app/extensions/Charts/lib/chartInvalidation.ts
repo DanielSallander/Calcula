@@ -13,6 +13,12 @@ import { parseParamCellTarget } from "./dataSourceResolver";
 export interface ChangedCell {
   row: number;
   col: number;
+  /**
+   * Sheet the change occurred on. Absent means "the active sheet" — resolved by
+   * the caller via `activeSheetIndex`. Set for cross-sheet edits so a change on
+   * another sheet doesn't wrongly match a chart whose data lives on this one.
+   */
+  sheetIndex?: number;
 }
 
 /** True when the chart depends on cells we cannot cheaply bound -> always invalidate. */
@@ -37,23 +43,36 @@ function hasUnboundedDeps(spec: ChartSpec): boolean {
 /**
  * Whether any changed cell falls in the chart's read-set: its data-range bbox
  * (coordinates only) or a bound param's cell. Unbounded-dependency charts return
- * true (conservative). Sheet index is ignored — changes are active-sheet and
- * over-invalidating an inactive-sheet chart is harmless (it re-reads on
- * activation). Pure.
+ * true (conservative).
+ *
+ * Sheet-aware via the ACTIVE sheet, NOT spec.data.sheetIndex: a coordinate chart
+ * reads its cells through getViewportCells, which is active-sheet-only (a
+ * coordinate range and a same-sheet param ref can't read cross-sheet), so ONLY an
+ * active-sheet change can affect it. A change with no `sheetIndex` is assumed
+ * active (the historical implicit contract); a change tagged with another sheet is
+ * ignored (it can't be in the chart's read-set). Gating on spec.data.sheetIndex
+ * would be wrong — the fetch ignores it, so when chart placement and data sheet
+ * diverge a real active-sheet edit would be missed (under-invalidation). Pure.
  */
-export function chartIntersectsChanges(spec: ChartSpec, changes: ReadonlyArray<ChangedCell>): boolean {
+export function chartIntersectsChanges(
+  spec: ChartSpec,
+  changes: ReadonlyArray<ChangedCell>,
+  activeSheetIndex: number,
+): boolean {
   if (changes.length === 0) return false;
   if (hasUnboundedDeps(spec)) return true;
 
   const d = spec.data as DataRangeRef;
+  const onActiveSheet = (c: ChangedCell): boolean => (c.sheetIndex ?? activeSheetIndex) === activeSheetIndex;
   for (const c of changes) {
+    if (!onActiveSheet(c)) continue;
     if (c.row >= d.startRow && c.row <= d.endRow && c.col >= d.startCol && c.col <= d.endCol) return true;
   }
   // A change to a bound param's cell affects the chart even outside the data bbox.
   for (const p of spec.params ?? []) {
     if (!p.cellRef) continue;
     const t = parseParamCellTarget(p.cellRef);
-    if (t && changes.some((c) => c.row === t.row && c.col === t.col)) return true;
+    if (t && changes.some((c) => onActiveSheet(c) && c.row === t.row && c.col === t.col)) return true;
   }
   return false;
 }

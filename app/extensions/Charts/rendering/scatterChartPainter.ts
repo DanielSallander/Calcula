@@ -6,8 +6,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, ScatterMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { resolvePointColor, resolvePointOpacity, resolvePointSize, resolveSeriesEncoding } from "../lib/encodingResolver";
-import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
+import { resolvePointColor, resolvePointOpacity, resolvePointSize, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
+import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -97,12 +97,13 @@ export function paintScatterChart(
       const value = series.values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
       const sel = { seriesName: series.name, selection: data.selection };
-      let color = resolvePointColor(encoding, spec.palette, si, series.color, value, category, sel);
+      let color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), series.color, value, category, sel);
       const resolvedSize = resolvePointSize(encoding, value, category, sel) ?? pointSize;
       let pointOpacity = resolvePointOpacity(encoding, value, category, sel);
 
-      // Apply data point override
-      const override = getOverrideFromMap(overrideMap, si, ci);
+      // Apply data point override (keyed in authoring space — translate first)
+      const a = toAuthoringIndices(data, si, ci);
+      const override = getOverrideFromMap(overrideMap, a.seriesIndex, a.categoryIndex);
       if (override?.color) color = override.color;
       if (override?.opacity !== undefined) pointOpacity = override.opacity;
 

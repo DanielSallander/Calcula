@@ -147,8 +147,10 @@ class CellRenderCache {
 
 const cellCaches = new Map<string, CellRenderCache>();
 
-// Active sheet index for CELL_VALUES_CHANGED invalidation (the event carries
-// no sheet index; UI edits always target the active sheet).
+// Active sheet index — the fallback for a change that carries no per-change
+// sheetIndex (the historical implicit contract: UI edits target the active
+// sheet). Cross-sheet edits now tag each change, so they invalidate the right
+// sheet's cache rather than the active one.
 let activeSheetIndex = 0;
 let invalidationWired = false;
 
@@ -162,11 +164,11 @@ function wireInvalidation(): void {
     }
   });
   onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-    const d = detail as { changes?: Array<{ row: number; col: number }> } | undefined;
+    const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number }> } | undefined;
     if (!d?.changes) return;
     for (const cache of cellCaches.values()) {
       for (const change of d.changes) {
-        cache.markStale(activeSheetIndex, change.row, change.col);
+        cache.markStale(change.sheetIndex ?? activeSheetIndex, change.row, change.col);
       }
     }
     if (d.changes.length > 0) {

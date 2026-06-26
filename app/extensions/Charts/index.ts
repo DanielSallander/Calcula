@@ -50,6 +50,7 @@ import {
   undoDeleteChart,
   canUndoDeleteChart,
   setActiveSheetIndex,
+  getActiveSheetIndex,
   loadChartsFromBackend,
   getChartById,
   updateChartSpec,
@@ -85,6 +86,7 @@ import {
   type QuickAccessButtonType,
 } from "./rendering/quickAccessButtons";
 import { hitTestBarChart, hitTestGeometry, hitTestRect } from "./rendering/chartHitTesting";
+import { isComposed } from "./rendering/chartDispatch";
 import {
   setPointSelection,
   clearPointSelection,
@@ -460,6 +462,11 @@ function activate(context: ExtensionContext): void {
         const cached = getCachedChartData(cid);
         const pa = cached?.layout?.plotArea;
         if (!pa) return false;
+        // Composed charts (repeat/facet/concat) tile independent sub-scales; a
+        // single brush rectangle across panels has no well-defined interval, so
+        // the interval brush is OFF for them in v1. A plain click still selects a
+        // panel datum (handled in the mouseup hit-test path, not the body-drag).
+        if (cached.data && isComposed(ch.spec, cached.data)) return false;
         if (cached?.widgetControls && isInWidgetArea(ctx.canvasX, ctx.canvasY, cached.widgetControls)) return false;
         const loc = getChartLocalCoords(cid, ctx.canvasX, ctx.canvasY);
         if (!loc) return false;
@@ -490,16 +497,17 @@ function activate(context: ExtensionContext): void {
     context.events.on(AppEvents.CELLS_UPDATED, (detail) => {
       const charts = getAllCharts();
       if (charts.length === 0) return;
-      const changes = (detail as { changes?: Array<{ row: number; col: number }> } | undefined)?.changes;
+      const changes = (detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number }> } | undefined)?.changes;
       if (!changes || changes.length === 0) {
         invalidateAllChartCaches();
         resetSubSelection();
         context.events.emit(AppEvents.GRID_REFRESH);
         return;
       }
+      const activeSheetIndex = getActiveSheetIndex();
       let any = false;
       for (const chart of charts) {
-        if (chartIntersectsChanges(chart.spec, changes)) {
+        if (chartIntersectsChanges(chart.spec, changes, activeSheetIndex)) {
           invalidateChartCache(chart.chartId);
           any = true;
         }

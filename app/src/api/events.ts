@@ -130,6 +130,14 @@ export const AppEvents = {
 export interface CellValueChange {
   row: number;
   col: number;
+  /**
+   * Sheet the change occurred on. Absent means "the active sheet" — the historical
+   * implicit contract, kept so existing single-sheet emitters need no change.
+   * Cross-sheet emitters (fills/edits that touch other sheets) MUST set it so
+   * sheet-scoped consumers (chart invalidation, render-cache staleness) don't
+   * mistake an off-sheet edit for an active-sheet one.
+   */
+  sheetIndex?: number;
   oldValue?: string;
   newValue: string;
   formula?: string | null;

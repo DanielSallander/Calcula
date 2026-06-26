@@ -6,8 +6,8 @@
 import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, BarMarkOptions, StackMode, GradientFill } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding } from "../lib/encodingResolver";
-import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
+import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding, seriesPaletteIndex } from "../lib/encodingResolver";
+import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
 import { applyFillStyle } from "./gradientFill";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
@@ -205,10 +205,11 @@ function drawBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      let color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category, sel);
+      let color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, value, category, sel);
 
-      // Apply data point override
-      const override = getOverrideFromMap(overrideMap, si, ci);
+      // Apply data point override (keyed in authoring space — translate first)
+      const a = toAuthoringIndices(data, si, ci);
+      const override = getOverrideFromMap(overrideMap, a.seriesIndex, a.categoryIndex);
       if (override?.color) color = override.color;
 
       const barX = groupX + si * effectiveBarStep;
@@ -287,7 +288,7 @@ function drawStackedBars(
       const category = data.categories[ci] ?? "";
       const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
-      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, rawValue, category, sel);
+      const color = resolvePointColor(encoding, spec.palette, seriesPaletteIndex(data, si), data.series[si].color, rawValue, category, sel);
 
       let value = rawValue;
       if (stackMode === "percentStacked" && categoryTotal > 0) {

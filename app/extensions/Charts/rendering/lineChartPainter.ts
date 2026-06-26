@@ -6,7 +6,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, LineMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
+import { seriesPaletteIndex } from "../lib/encodingResolver";
+import { buildOverrideMap, getOverrideFromMap, toAuthoringIndices } from "../lib/dataPointOverrides";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -129,7 +130,7 @@ export function paintLineChart(
 
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
-    const color = getSeriesColor(spec.palette, si, series.color);
+    const color = getSeriesColor(spec.palette, seriesPaletteIndex(data, si), series.color);
     const points = allSeriesPoints[si];
 
     if (points.length === 0) continue;
@@ -156,7 +157,9 @@ export function paintLineChart(
       const overrideMap = buildOverrideMap(spec.dataPointOverrides);
       for (let ci = 0; ci < points.length; ci++) {
         const pt = points[ci];
-        const override = getOverrideFromMap(overrideMap, si, ci);
+        // Overrides are keyed in authoring space — translate the painter (si,ci).
+        const a = toAuthoringIndices(data, si, ci);
+        const override = getOverrideFromMap(overrideMap, a.seriesIndex, a.categoryIndex);
         const markerColor = override?.color ?? color;
         const markerOpacity = override?.opacity;
 
@@ -187,7 +190,7 @@ export function paintLineChart(
     ctx.lineWidth = 1;
 
     for (let si = 0; si < data.series.length; si++) {
-      const color = dropColor ?? getSeriesColor(spec.palette, si, data.series[si].color);
+      const color = dropColor ?? getSeriesColor(spec.palette, seriesPaletteIndex(data, si), data.series[si].color);
       ctx.strokeStyle = color;
       ctx.globalAlpha = dropColor ? 1 : 0.4;
       ctx.beginPath();

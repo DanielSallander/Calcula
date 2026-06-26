@@ -111,10 +111,16 @@ describe("dispatchPaint concatenation", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("has no per-datum hit geometry while concatenating", () => {
+  it("composes per-panel hit geometry while concatenating (recursing into each child)", () => {
     const a = childSpec("bar", "A");
     const b = childSpec("bar", "B");
-    expect(dispatchComputeGeometry(concatData(a, b), containerSpec([a, b]), layoutFn(200, 200), theme)).toEqual({ type: "bars", rects: [] });
+    const geo = dispatchComputeGeometry(concatData(a, b), containerSpec([a, b]), layoutFn(200, 200), theme);
+    // One composite group per concat panel — each recurses through the child's
+    // own mark geometry (bar) rather than the empty whole-chart placeholder.
+    expect(geo.type).toBe("composite");
+    if (geo.type !== "composite") throw new Error("expected composite");
+    expect(geo.groups).toHaveLength(2);
+    for (const g of geo.groups) expect(g.type).toBe("bars");
   });
 
   it("falls through to a single chart when concat is set but no panels exist", () => {

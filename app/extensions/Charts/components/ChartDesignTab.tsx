@@ -19,6 +19,7 @@ import { JsonToggleEditor } from "../../JsonView/components/JsonToggleEditor";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache, getCachedChartData } from "../rendering/chartRenderer";
 import { getCurrentChartId, getSubSelection } from "../handlers/selectionHandler";
+import { toAuthoringIndices } from "../lib/dataPointOverrides";
 import { ChartEvents } from "../lib/chartEvents";
 import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
 import { CHART_DIALOG_ID } from "../manifest";
@@ -816,15 +817,23 @@ export function ChartDesignTab({
             if (subSel.level === "dataPoint" && chartId != null) {
               const isPieOrDonut = spec.mark === "pie" || spec.mark === "donut";
               const cachedData = getCachedChartData(chartId);
-              const categoryName = cachedData?.unfilteredData?.categories?.[subSel.categoryIndex ?? 0] ?? "";
+              // subSel indices are PAINTER (post-filter) space; the painted point's
+              // label is in the same space (the filtered data's categories).
+              const categoryName = cachedData?.data?.categories?.[subSel.categoryIndex ?? 0] ?? "";
+              // dataPointOverrides are keyed in AUTHORING (unfiltered) space — translate
+              // the painter sub-selection so the override anchors to the right datum
+              // even with a series/category filter active.
+              const authoring = cachedData
+                ? toAuthoringIndices(cachedData.data, subSel.seriesIndex ?? 0, subSel.categoryIndex ?? 0)
+                : { seriesIndex: subSel.seriesIndex ?? 0, categoryIndex: subSel.categoryIndex ?? 0 };
               return (
                 <button
                   className={s.actionBtn}
                   onClick={() => {
                     showDialog("chart:dataPointFormat", {
                       chartId,
-                      seriesIndex: subSel.seriesIndex,
-                      categoryIndex: subSel.categoryIndex,
+                      seriesIndex: authoring.seriesIndex,
+                      categoryIndex: authoring.categoryIndex,
                       categoryName,
                       isPieOrDonut,
                     });

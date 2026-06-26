@@ -88,24 +88,16 @@ export function dispatchPaint(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): void {
-  // Concatenation: several independent child charts (precomputed in data.concat).
-  // Outermost composition — takes precedence over facet and repeat.
-  if (spec.concat && data.concat && data.concat.length > 0) {
-    paintConcat(ctx, data, spec, layout, theme);
-    return;
-  }
-
-  // Faceting: one panel per distinct field value (precomputed in data.facets).
-  // Takes precedence over repeat.
-  if (spec.facet && data.facets && data.facets.length > 0) {
-    paintFaceted(ctx, data, spec, layout, theme);
-    return;
-  }
-
-  // Small multiples: render one sub-chart per series into a tiled grid.
-  if (spec.repeat) {
-    paintRepeated(ctx, data, spec, layout, theme);
-    return;
+  // Composition: concat (outermost) > facet > repeat. derivePanels resolves the
+  // active mode into a unified (cell, subSpec, subData) list; paintPanels tiles
+  // them. The SAME derivation drives composePanelGeometry so panels are
+  // hit-testable (cross-panel selection / tooltips), not whole-chart-only.
+  if (isComposed(spec, data)) {
+    const panels = derivePanels(data, spec, layout);
+    if (panels) {
+      paintPanels(ctx, panels, theme);
+      return;
+    }
   }
 
   // Paint the primary mark
@@ -210,70 +202,6 @@ export function repeatLayout(
 }
 
 /**
- * Render the chart once per series into a tiled grid. Each sub-chart is a
- * single-series version of the parent (same mark), titled with the series name,
- * legend suppressed, sharing one Y scale for comparability (unless disabled).
- * Per-facet hit geometry is omitted in v1 (selection targets the whole chart).
- */
-function paintRepeated(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  data: ParsedChartData,
-  spec: ChartSpec,
-  layout: ChartLayout,
-  theme: ChartRenderTheme,
-): void {
-  const seriesList = data.series;
-  if (seriesList.length === 0) return;
-
-  const cells = repeatLayout(seriesList.length, spec.repeat?.columns, layout.width, layout.height);
-
-  // Shared Y domain across all sub-charts (comparable scales).
-  let sharedMin: number | null = null;
-  let sharedMax: number | null = null;
-  if (spec.repeat?.sharedYScale !== false) {
-    const all = seriesList.flatMap((s) => s.values);
-    if (all.length > 0) {
-      sharedMin = Math.min(...all);
-      sharedMax = Math.max(...all);
-    }
-  }
-
-  for (let i = 0; i < seriesList.length; i++) {
-    const cell = cells[i];
-    const series = seriesList[i];
-    const subData: ParsedChartData = {
-      categories: data.categories,
-      series: [series],
-      categoryField: data.categoryField,
-    };
-    const subSpec: ChartSpec = {
-      ...spec,
-      repeat: undefined,
-      title: series.name,
-      legend: { ...spec.legend, visible: false },
-      layers: undefined,
-      trendlines: undefined,
-      dataLabels: undefined,
-      dataTable: undefined,
-      yAxis: sharedMin !== null && sharedMax !== null ? { ...spec.yAxis, min: sharedMin, max: sharedMax } : spec.yAxis,
-    };
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(cell.x, cell.y, cell.width, cell.height);
-    ctx.clip();
-    ctx.translate(cell.x, cell.y);
-    const subLayout = dispatchComputeLayout(cell.width, cell.height, subSpec, subData, theme);
-    paintMark(ctx, subData, subSpec.mark, subSpec, subLayout, theme);
-    ctx.restore();
-  }
-}
-
-// ============================================================================
-// Faceting (facet by field)
-// ============================================================================
-
-/**
  * Re-index a panel's series onto a shared, ordered category list, filling
  * categories the panel lacks with 0 so every panel plots against the same X.
  * Drops categoryField (the shared union is treated as plain categories).
@@ -292,124 +220,200 @@ function alignToCategories(data: ParsedChartData, categories: string[]): ParsedC
   return { categories, series };
 }
 
+// ============================================================================
+// Unified panel derivation (repeat / facet / concat)
+// ============================================================================
+
+/** One tiled panel: its grid cell + the (spec, data) to render inside it. */
+interface DerivedPanel {
+  cell: RepeatCell;
+  subSpec: ChartSpec;
+  subData: ParsedChartData;
+  /**
+   * concat panels are COMPLETE charts (own axes/mark/legend, may nest) painted
+   * via the full dispatchPaint / dispatchComputeGeometry; repeat & facet panels
+   * are a single mark of the parent spec (paintMark / mark.computeGeometry).
+   */
+  composed: boolean;
+}
+
+/** Is this spec+data an active composition (concat > facet > repeat)? */
+export function isComposed(spec: ChartSpec, data: ParsedChartData): boolean {
+  return !!(
+    (spec.concat && data.concat && data.concat.length > 0) ||
+    (spec.facet && data.facets && data.facets.length > 0) ||
+    spec.repeat
+  );
+}
+
+/** Strip composition + per-chart annotations from a sub-panel's spec (shared by
+ *  repeat & facet), applying an optional shared Y domain for comparable scales. */
+function panelSubSpec(spec: ChartSpec, title: string, sharedMin: number | null, sharedMax: number | null): ChartSpec {
+  return {
+    ...spec,
+    facet: undefined,
+    repeat: undefined,
+    title,
+    legend: { ...spec.legend, visible: false },
+    layers: undefined,
+    trendlines: undefined,
+    dataLabels: undefined,
+    dataTable: undefined,
+    yAxis: sharedMin !== null && sharedMax !== null ? { ...spec.yAxis, min: sharedMin, max: sharedMax } : spec.yAxis,
+  };
+}
+
 /**
- * Render one panel per facet value (data.facets) into a tiled grid. Each panel
- * is the precomputed single-facet dataset, titled with its value, legend off,
- * sharing one Y scale and (by default) one X scale — the ordered union of
- * categories across panels — for comparability. Per-facet hit geometry is
- * omitted in v1 (selection targets the whole chart), mirroring paintRepeated.
+ * Resolve the active composition into a flat list of tiled panels — the SINGLE
+ * source of truth for both painting (paintPanels) and hit geometry
+ * (composePanelGeometry), so the two never drift. Precedence concat > facet >
+ * repeat mirrors dispatchPaint. Returns null when nothing is composed.
+ *
+ * repeat/facet panels carry the parent's live `selection` so a point-selection
+ * highlights the matching datum in EVERY panel (linked / cross-panel highlight).
+ * concat panels are independent charts and keep their own (read-time) data.
  */
-function paintFaceted(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  data: ParsedChartData,
-  spec: ChartSpec,
-  layout: ChartLayout,
-  theme: ChartRenderTheme,
-): void {
-  const facets = data.facets;
-  if (!facets || facets.length === 0) return;
+function derivePanels(data: ParsedChartData, spec: ChartSpec, layout: ChartLayout): DerivedPanel[] | null {
+  // Concatenation: several independent child charts (outermost composition).
+  if (spec.concat && data.concat && data.concat.length > 0) {
+    const panels = data.concat;
+    const cells = repeatLayout(panels.length, spec.concat.columns, layout.width, layout.height);
+    return panels.map((p, i) => ({ cell: cells[i], subSpec: p.spec, subData: p.data, composed: true }));
+  }
 
-  const cells = repeatLayout(facets.length, spec.facet?.columns, layout.width, layout.height);
+  // Faceting: one panel per distinct field value.
+  if (spec.facet && data.facets && data.facets.length > 0) {
+    const facets = data.facets;
+    const cells = repeatLayout(facets.length, spec.facet.columns, layout.width, layout.height);
 
-  // Shared X = ordered union of every panel's categories (0-filling gaps). Only
-  // safe when categories are nominal AND unique per panel: a typed (numeric/
-  // temporal) X would lose its proportional axis, and duplicate category labels
-  // would collapse rows and drop data. In either case keep each panel's own X
-  // (still renders correctly, just not aligned).
-  const canShareX = spec.facet?.sharedXScale !== false
-    && !facets.some((f) => f.data.categoryField)
-    && !facets.some((f) => new Set(f.data.categories).size !== f.data.categories.length);
+    // Shared X = ordered union of every panel's categories (0-filling gaps). Only
+    // safe when categories are nominal AND unique per panel: a typed (numeric/
+    // temporal) X would lose its proportional axis, and duplicate category labels
+    // would collapse rows and drop data. Otherwise keep each panel's own X.
+    const canShareX = spec.facet.sharedXScale !== false
+      && !facets.some((f) => f.data.categoryField)
+      && !facets.some((f) => new Set(f.data.categories).size !== f.data.categories.length);
 
-  let sharedCategories: string[] | null = null;
-  if (canShareX) {
-    const seen = new Set<string>();
-    const union: string[] = [];
-    for (const f of facets) {
-      for (const c of f.data.categories) {
-        if (!seen.has(c)) { seen.add(c); union.push(c); }
+    let sharedCategories: string[] | null = null;
+    if (canShareX) {
+      const seen = new Set<string>();
+      const union: string[] = [];
+      for (const f of facets) {
+        for (const c of f.data.categories) {
+          if (!seen.has(c)) { seen.add(c); union.push(c); }
+        }
+      }
+      sharedCategories = union;
+    }
+
+    // Align to shared X first so the shared Y domain includes any 0-fills.
+    const aligned = facets.map((f) => (sharedCategories ? alignToCategories(f.data, sharedCategories) : f.data));
+
+    let sharedMin: number | null = null;
+    let sharedMax: number | null = null;
+    if (spec.facet.sharedYScale !== false) {
+      const all = aligned.flatMap((p) => p.series.flatMap((s) => s.values));
+      if (all.length > 0) {
+        sharedMin = Math.min(...all);
+        sharedMax = Math.max(...all);
       }
     }
-    sharedCategories = union;
+
+    return facets.map((f, i) => ({
+      cell: cells[i],
+      subSpec: panelSubSpec(spec, f.value, sharedMin, sharedMax),
+      // Thread the parent selection so the highlight is linked across panels.
+      subData: { ...aligned[i], selection: data.selection },
+      composed: false,
+    }));
   }
 
-  // Align panels to the shared X first, so the shared Y domain (below) includes
-  // any 0-fills and never clips them beneath yMin.
-  const panels = facets.map((f) => (sharedCategories ? alignToCategories(f.data, sharedCategories) : f.data));
+  // Small multiples: one single-series sub-chart per series.
+  if (spec.repeat) {
+    const seriesList = data.series;
+    if (seriesList.length === 0) return [];
+    const cells = repeatLayout(seriesList.length, spec.repeat.columns, layout.width, layout.height);
 
-  // Shared Y domain across all (aligned) panels (comparable scales).
-  let sharedMin: number | null = null;
-  let sharedMax: number | null = null;
-  if (spec.facet?.sharedYScale !== false) {
-    const all = panels.flatMap((p) => p.series.flatMap((s) => s.values));
-    if (all.length > 0) {
-      sharedMin = Math.min(...all);
-      sharedMax = Math.max(...all);
+    let sharedMin: number | null = null;
+    let sharedMax: number | null = null;
+    if (spec.repeat.sharedYScale !== false) {
+      const all = seriesList.flatMap((s) => s.values);
+      if (all.length > 0) {
+        sharedMin = Math.min(...all);
+        sharedMax = Math.max(...all);
+      }
     }
+
+    return seriesList.map((series, i) => ({
+      cell: cells[i],
+      subSpec: panelSubSpec(spec, series.name, sharedMin, sharedMax),
+      // Single-series panel; thread the parent selection for linked highlight.
+      subData: { categories: data.categories, series: [series], categoryField: data.categoryField, selection: data.selection },
+      composed: false,
+    }));
   }
 
-  for (let i = 0; i < facets.length; i++) {
-    const cell = cells[i];
-    const panelData = panels[i];
-    const subSpec: ChartSpec = {
-      ...spec,
-      facet: undefined,
-      repeat: undefined,
-      title: facets[i].value,
-      legend: { ...spec.legend, visible: false },
-      layers: undefined,
-      trendlines: undefined,
-      dataLabels: undefined,
-      dataTable: undefined,
-      yAxis: sharedMin !== null && sharedMax !== null ? { ...spec.yAxis, min: sharedMin, max: sharedMax } : spec.yAxis,
-    };
+  return null;
+}
 
+/** Paint every derived panel into its clipped, translated cell. */
+function paintPanels(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  panels: DerivedPanel[],
+  theme: ChartRenderTheme,
+): void {
+  for (const { cell, subSpec, subData, composed } of panels) {
     ctx.save();
     ctx.beginPath();
     ctx.rect(cell.x, cell.y, cell.width, cell.height);
     ctx.clip();
     ctx.translate(cell.x, cell.y);
-    const subLayout = dispatchComputeLayout(cell.width, cell.height, subSpec, panelData, theme);
-    paintMark(ctx, panelData, subSpec.mark, subSpec, subLayout, theme);
+    const subLayout = dispatchComputeLayout(cell.width, cell.height, subSpec, subData, theme);
+    if (composed) dispatchPaint(ctx, subData, subSpec, subLayout, theme);
+    else paintMark(ctx, subData, subSpec.mark, subSpec, subLayout, theme);
     ctx.restore();
   }
 }
 
-// ============================================================================
-// Concatenation (concat)
-// ============================================================================
+/** Translate every coordinate in a hit geometry by (dx, dy). Pure. */
+function offsetGeometry(g: HitGeometry, dx: number, dy: number): HitGeometry {
+  switch (g.type) {
+    case "bars":
+      return { type: "bars", rects: g.rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy })) };
+    case "points":
+      return { type: "points", markers: g.markers.map((m) => ({ ...m, cx: m.cx + dx, cy: m.cy + dy })) };
+    case "slices":
+      return { type: "slices", arcs: g.arcs.map((a) => ({ ...a, centerX: a.centerX + dx, centerY: a.centerY + dy })) };
+    case "composite":
+      return { type: "composite", groups: g.groups.map((gr) => offsetGeometry(gr, dx, dy)) };
+  }
+}
 
 /**
- * Tile several independent child charts (data.concat) into a grid. Each panel
- * is a complete chart — painted via the full dispatchPaint with its own spec +
- * data — so it keeps its own axes, mark, legend, annotations, and may itself be
- * faceted/repeated. Per-panel hit geometry is omitted in v1 (whole-chart
- * selection), mirroring repeat/facet.
+ * Compose per-panel hit geometry for a composed chart: compute each panel's
+ * geometry at its own cell-local layout (the SAME layout paintPanels paints
+ * with), translate it into chart-local space by the cell offset, and union as a
+ * composite. concat panels recurse through dispatchComputeGeometry (so a nested
+ * facet/concat panel is itself hit-testable). Returns empty bars when nothing
+ * is composed. Mirrors paintPanels so hit geometry never drifts from the paint.
  */
-function paintConcat(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+function composePanelGeometry(
   data: ParsedChartData,
   spec: ChartSpec,
   layout: ChartLayout,
   theme: ChartRenderTheme,
-): void {
-  const panels = data.concat;
-  if (!panels || panels.length === 0) return;
-
-  // `columns` lives on the container spec; the painted spec is each child's.
-  const cells = repeatLayout(panels.length, spec.concat?.columns, layout.width, layout.height);
-
-  for (let i = 0; i < panels.length; i++) {
-    const cell = cells[i];
-    const panel = panels[i];
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(cell.x, cell.y, cell.width, cell.height);
-    ctx.clip();
-    ctx.translate(cell.x, cell.y);
-    const subLayout = dispatchComputeLayout(cell.width, cell.height, panel.spec, panel.data, theme);
-    dispatchPaint(ctx, panel.data, panel.spec, subLayout, theme);
-    ctx.restore();
+): HitGeometry {
+  const panels = derivePanels(data, spec, layout);
+  if (!panels) return { type: "bars", rects: [] };
+  const groups: HitGeometry[] = [];
+  for (const { cell, subSpec, subData, composed } of panels) {
+    const subLayout = dispatchComputeLayout(cell.width, cell.height, subSpec, subData, theme);
+    const g = composed
+      ? dispatchComputeGeometry(subData, subSpec, subLayout, theme)
+      : (getChartMark(subSpec.mark)?.computeGeometry(subData, subSpec, subLayout, theme) ?? { type: "bars", rects: [] });
+    groups.push(offsetGeometry(g, cell.x, cell.y));
   }
+  return { type: "composite", groups };
 }
 
 // ============================================================================
@@ -449,14 +453,11 @@ export function dispatchComputeGeometry(
   layout: ChartLayout,
   theme: ChartRenderTheme,
 ): HitGeometry {
-  // Small multiples / facets / concat have no per-datum hit geometry in v1
-  // (whole-chart selection). Guard facet/concat only when panels actually exist.
-  if (
-    spec.repeat ||
-    (spec.facet && data.facets && data.facets.length > 0) ||
-    (spec.concat && data.concat && data.concat.length > 0)
-  ) {
-    return { type: "bars", rects: [] };
+  // Composed charts (repeat / facet / concat) compose per-panel geometry offset
+  // into chart-local space, so individual panel datums are hit-testable
+  // (cross-panel tooltips + point-selection) — not whole-chart-only as in v1.
+  if (isComposed(spec, data)) {
+    return composePanelGeometry(data, spec, layout, theme);
   }
   const def = getChartMark(spec.mark);
   return def ? def.computeGeometry(data, spec, layout, theme) : { type: "bars", rects: [] };

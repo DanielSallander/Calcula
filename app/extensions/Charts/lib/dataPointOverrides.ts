@@ -3,7 +3,26 @@
 // CONTEXT: Used by chart painters to look up and apply DataPointOverride
 //          settings for individual bars, slices, points, etc.
 
-import type { DataPointOverride, ChartSpec } from "../types";
+import type { DataPointOverride, ChartSpec, ParsedChartData } from "../types";
+
+/**
+ * Translate a PAINTER-space (post-filter) series/category index pair to
+ * AUTHORING-space (pre-filter / original) using the kept-index maps the data
+ * reader threads onto ParsedChartData. dataPointOverrides are keyed in authoring
+ * space, so painters MUST translate before {@link getOverrideFromMap}; otherwise
+ * hiding a lower-index series/category aliases an override onto the wrong datum.
+ * Absent maps mean identity (no filter ran). Pure.
+ */
+export function toAuthoringIndices(
+  data: Pick<ParsedChartData, "keptSeriesIndices" | "keptCategoryIndices">,
+  seriesIndex: number,
+  categoryIndex: number,
+): { seriesIndex: number; categoryIndex: number } {
+  return {
+    seriesIndex: data.keptSeriesIndices ? (data.keptSeriesIndices[seriesIndex] ?? seriesIndex) : seriesIndex,
+    categoryIndex: data.keptCategoryIndices ? (data.keptCategoryIndices[categoryIndex] ?? categoryIndex) : categoryIndex,
+  };
+}
 
 /**
  * Find a data point override for a specific series + category index.
