@@ -43,6 +43,12 @@ The simplest chart needs just a mark type, a data source, and series:
 **Tip:** Start by creating a chart with the Design tab, then switch to the
 Spec tab to see the generated JSON and customize it further.
 
+**Insert snippets:** In the Spec editor, press \`Ctrl+Space\` (or start typing a
+feature name like \`transform\`, \`trendline\`, \`layer\`, \`param\`, \`facet\`) to insert
+a ready-made, tab-stop-editable block for that feature. Press \`Tab\` to jump
+between the editable fields. The **Examples** panel loads a whole starter chart;
+snippets add one feature to the chart you already have.
+
 ## Progressive Customization
 
 The ChartSpec is designed to be progressively customizable:
