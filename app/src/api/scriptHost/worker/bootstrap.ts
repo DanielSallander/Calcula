@@ -131,7 +131,10 @@ function handleRenderCells(reqId: number, cells: RenderCellRequest[]): void {
 }
 
 function handleRenderDraw(reqId: number, target: RenderDrawTarget, w: number, h: number, dpr: number): void {
-  const hook = target.kind === "shape" ? "canvasRenderer" : "itemRenderer";
+  const hook =
+    target.kind === "shape" ? "canvasRenderer"
+      : target.kind === "chartMark" ? "markRenderer"
+        : "itemRenderer";
   const renderer = runtime ? getRenderer(runtime, hook) : null;
   if (!renderer || typeof OffscreenCanvas === "undefined") {
     post({ t: "renderDrawResult", reqId, bitmap: null });
@@ -150,6 +153,11 @@ function handleRenderDraw(reqId: number, target: RenderDrawTarget, w: number, h:
       // host blits inside its own save/translate/clip, so scripts can never
       // paint outside their region.
       (renderer as (c: unknown, b: unknown) => void)(ctx, { x: 0, y: 0, width: w, height: h });
+    } else if (target.kind === "chartMark") {
+      // Chart mark renderer — signature (ctx, paintContext, bounds). Bounds are
+      // LOCAL (origin 0,0, sized to the plot area); the host clips+blits into the
+      // chart's plot rectangle, so the mark can only paint its own plot pixels.
+      (renderer as (c: unknown, p: unknown, b: unknown) => void)(ctx, target.item, { x: 0, y: 0, width: w, height: h });
     } else {
       // Slicer item renderer — unchanged user signature: (item, ctx, bounds).
       (renderer as (i: unknown, c: unknown, b: unknown) => void)(target.item, ctx, { x: 0, y: 0, width: w, height: h });

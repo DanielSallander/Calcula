@@ -224,7 +224,7 @@ export function getCellRenderStats(): Array<{ scriptId: string; hits: number; mi
 // Bitmap cache (shape canvasRenderer + slicer itemRenderer)
 // ============================================================================
 
-export type BitmapKind = "shape" | "slicerItem";
+export type BitmapKind = "shape" | "slicerItem" | "chartMark";
 
 interface BitmapEntry {
   bitmap: ImageBitmap;
@@ -236,6 +236,7 @@ interface BitmapEntry {
 const bitmapCaches: Record<BitmapKind, Map<string, BitmapEntry>> = {
   shape: new Map(),
   slicerItem: new Map(),
+  chartMark: new Map(),
 };
 
 /** Per-slicer item-key index so a slicer can be invalidated wholesale. */
@@ -257,6 +258,15 @@ export function storeBitmap(kind: BitmapKind, key: string, entry: BitmapEntry): 
     keys.add(key);
   }
   requestRepaint();
+  // Chart rasters are version-gated (re-rendered only on a version bump), NOT
+  // re-blit every frame like shapes/slicers — so a bare repaint would re-composite
+  // the SAME stale chart raster (painted before this bitmap arrived). Signal the
+  // Charts extension to invalidate + re-render the affected chart so its sandbox
+  // shim re-runs and hits this freshly-stored bitmap. Fires only on a real
+  // chart-mark bitmap arrival (a miss resolved), so no repaint loop.
+  if (kind === "chartMark" && typeof window !== "undefined") {
+    window.dispatchEvent(new Event("chartMark:bitmapReady"));
+  }
 }
 
 export function getBitmap(kind: BitmapKind, key: string): BitmapEntry | undefined {

@@ -1082,6 +1082,20 @@ function activate(context: ExtensionContext): void {
   }).then((un) => { unlistenBackendCharts = un; });
   cleanupFunctions.push(() => { unlistenBackendCharts?.(); });
 
+  // Sandboxed chart marks (B8.D): a worker-rendered bitmap arrived after a cache
+  // miss. Chart rasters are version-gated (not re-blit per frame like shapes), so
+  // invalidate + re-render so the sandbox shim re-runs and HITS the new bitmap.
+  // Fires only on a real bitmap arrival (a resolved miss) -> no repaint loop.
+  const handleChartMarkBitmap = () => {
+    invalidateAllChartCaches();
+    requestOverlayRedraw();
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
+  window.addEventListener("chartMark:bitmapReady", handleChartMarkBitmap);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("chartMark:bitmapReady", handleChartMarkBitmap);
+  });
+
   // Dynamic data ranges: re-render charts when table definitions change
   // (e.g., table auto-expands when new rows are added)
   const handleTableDefsUpdated = () => {

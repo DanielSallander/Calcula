@@ -31,6 +31,13 @@ export interface ChartMarkMeta {
   layoutFamily: "cartesian" | "radial" | "other";
   /** True for the built-in marks (lets the UI group built-in vs custom). */
   builtin?: boolean;
+  /**
+   * True for a SANDBOXED mark (B8.D): its `paint` is a host-side shim that blits
+   * a worker-rendered ImageBitmap into the plot area rather than drawing
+   * synchronously. The mark code runs in a Worker realm with no main-thread
+   * canvas/DOM access. Built-in + in-process custom marks leave this unset.
+   */
+  sandboxed?: boolean;
 }
 
 /**

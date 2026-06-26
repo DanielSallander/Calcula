@@ -1542,6 +1542,8 @@ export {
   hasShapeBitmapRenderer,
   getSlicerItemBitmap,
   hasSlicerItemBitmapRenderer,
+  getChartMarkBitmap,
+  hasChartMarkBitmapRenderer,
 } from "./scriptHost/host";
 export { getCellRenderStats } from "./scriptHost/renderCache";
 export { resolveCapabilityRequest, getGrantedOrigins, getScriptGrants, revokeCapability, recordCapabilityGrant, describeCapability } from "./scriptHost/capabilities";

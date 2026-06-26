@@ -44,10 +44,12 @@ export interface RenderCellRequest {
 }
 
 export type RenderDrawTarget = {
-  kind: "shape" | "slicerItem";
-  /** Cache key (shape instanceId, or slicer item key). */
+  kind: "shape" | "slicerItem" | "chartMark";
+  /** Cache key (shape instanceId, slicer item key, or chart-mark composite key).
+   *  MUST NOT contain '|' — requestDraw builds the in-flight key as `${kind}|${key}`. */
   key: string;
-  /** Slicer items carry the item payload the renderer receives. */
+  /** The structured-clone payload the renderer receives: a slicer item, or a
+   *  chart mark's { spec, data, layout, theme } paint context. */
   item?: unknown;
 };
 

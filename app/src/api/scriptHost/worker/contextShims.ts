@@ -671,6 +671,27 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         },
       };
 
+    case "chartMark":
+      // A sandboxed custom chart mark (B8.D): the script registers a markRenderer
+      // that paints the plot area into a worker OffscreenCanvas. The host blits
+      // the returned bitmap into the chart's clipped plot rect — the mark never
+      // touches the real canvas/DOM and needs no capability (paint-only).
+      return {
+        ...base,
+        instanceId,
+        render: {
+          markRenderer(renderer: unknown): CleanupFn {
+            rt.renderers.set("markRenderer", renderer);
+            rt.post({ t: "hookRegistered", hook: "markRenderer" });
+            return () => {
+              rt.renderers.delete("markRenderer");
+              callFire(rt, "render.invalidate", []);
+            };
+          },
+          invalidate: () => callFire(rt, "render.invalidate", []),
+        },
+      };
+
     default:
       // textbox / future types: base surface only.
       return base;

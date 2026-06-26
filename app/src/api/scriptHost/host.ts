@@ -396,7 +396,7 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
           clearTimeout(pending.timer);
           mw.drawsInFlight.delete(pending.key);
           if (msg.bitmap) {
-            const [kind, key] = pending.key.split("|", 2) as ["shape" | "slicerItem", string];
+            const [kind, key] = pending.key.split("|", 2) as ["shape" | "slicerItem" | "chartMark", string];
             storeBitmap(kind, key, { bitmap: msg.bitmap, w: msg.bitmap.width, h: msg.bitmap.height, dpr: 1 });
           }
         }
@@ -1099,6 +1099,12 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
   }
   if (hook === "itemRenderer") {
     // Slicer item bitmaps self-invalidate by key; nothing further to wire.
+    mw.declaredRenderHooks.add(hook);
+    return;
+  }
+  if (hook === "markRenderer") {
+    // Chart-mark bitmaps self-invalidate by composite key (markId+spec+data+size);
+    // nothing further to wire, like the slicer item renderer.
     mw.declaredRenderHooks.add(hook);
     return;
   }
@@ -1857,10 +1863,45 @@ export function hasSlicerItemBitmapRenderer(slicerId: string): boolean {
   return findWorkerForInstance("slicer", slicerId) !== null;
 }
 
+/**
+ * Host blit API for a sandboxed chart mark (B8.D). Mirrors getSlicerItemBitmap:
+ * the caller (the Charts sandbox shim) builds a composite `key` that bakes in the
+ * mark id + spec/data signature + plot size, so it self-invalidates. The worker
+ * paints the plot area into an OffscreenCanvas from the cloned `item` payload
+ * ({ spec, data, layout, theme }) and returns an ImageBitmap. Synchronous:
+ * returns the cached bitmap or null (and single-flight requests one on a miss).
+ */
+export function getChartMarkBitmap(
+  instanceId: string,
+  key: string,
+  item: unknown,
+  w: number,
+  h: number,
+  dpr: number,
+): ImageBitmap | null {
+  const cached = getBitmap("chartMark", key);
+  if (cached) {
+    return cached.bitmap;
+  }
+  const mw = findWorkerForInstance("chartMark", instanceId);
+  if (mw) {
+    requestDraw(mw, { kind: "chartMark", key, item }, w, h, dpr);
+  }
+  return null;
+}
+
+/** True when a worker-realm script provides a mark renderer for this chart mark. */
+export function hasChartMarkBitmapRenderer(instanceId: string): boolean {
+  return findWorkerForInstance("chartMark", instanceId) !== null;
+}
+
 function findWorkerForInstance(objectType: string, instanceId: string): MountedWorker | null {
   for (const mw of mounted.values()) {
     if (mw.definition.objectType === objectType && mw.definition.instanceId === instanceId) {
-      const rendererHook = objectType === "shape" ? "canvasRenderer" : "itemRenderer";
+      const rendererHook =
+        objectType === "shape" ? "canvasRenderer"
+          : objectType === "chartMark" ? "markRenderer"
+            : "itemRenderer";
       // Only workers that declared the renderer hook can draw.
       return mw.declaredRenderHooks.has(rendererHook) ? mw : null;
     }
