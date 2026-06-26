@@ -227,6 +227,17 @@ export function updateChartSpec(
 }
 
 /**
+ * Compute (WITHOUT mutating the store) the spec that {@link updateChartSpec} would
+ * produce for a deep-merge patch — used by the broker chart-write path to validate
+ * the merged result BEFORE committing it. Returns null for an unknown chart. Pure.
+ */
+export function mergeSpecPreview(chartId: string, specUpdates: Partial<ChartSpec>): ChartSpec | null {
+  const chart = charts.find((c) => c.chartId === chartId);
+  if (!chart) return null;
+  return deepMergeSpec(chart.spec, specUpdates);
+}
+
+/**
  * Replace the entire spec for an existing chart (full overwrite, not a merge).
  *
  * Used by the chart editor dialog, which holds the complete spec: deletions made

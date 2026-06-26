@@ -563,8 +563,21 @@ export interface ChartContext extends BaseObjectContext {
   /** Get the chart specification (opaque JSON). */
   getSpec(): Record<string, unknown>;
 
-  /** Update the chart specification. */
+  /**
+   * Deep-merge a partial patch into the chart spec. The merged result is
+   * validated against the ChartSpec schema; the returned promise REJECTS if the
+   * edit would produce an invalid spec (unknown key, wrong type, bad enum), so a
+   * script can `try/await` to learn it wrote garbage instead of silently
+   * corrupting the chart.
+   */
   updateSpec(patch: Record<string, unknown>): Promise<void>;
+
+  /**
+   * Replace the ENTIRE chart spec (full re-author, not a merge — omitted fields
+   * are dropped). The spec is schema-validated; the promise REJECTS on an invalid
+   * spec. Use {@link getSpec} as the read side.
+   */
+  replaceSpec(fullSpec: Record<string, unknown>): Promise<void>;
 
   /** Style customization. */
   style: {

@@ -834,7 +834,18 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       const [patch] = args as [Record<string, unknown>];
       const store = getChartStoreService();
       if (store) {
+        // Throws on a schema violation -> brokerCall audits ok:false + the
+        // script's awaited updateSpec() rejects. Mirror only on success.
         store.updateChartSpec(instanceId, patch);
+        pushChartSpecMirror(mw, instanceId);
+      }
+      return undefined;
+    }
+    case "chart.replaceSpec": {
+      const [fullSpec] = args as [Record<string, unknown>];
+      const store = getChartStoreService();
+      if (store) {
+        store.replaceChartSpec(instanceId, fullSpec);
         pushChartSpecMirror(mw, instanceId);
       }
       return undefined;

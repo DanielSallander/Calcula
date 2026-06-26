@@ -54,7 +54,12 @@ export interface ITimelineStoreService {
 
 export interface IChartStoreService {
   getChartById(id: string): { specJson: string } | null;
+  /** Deep-merge a partial patch into the chart's spec. Validates the merged
+   *  result against the ChartSpec schema; throws on a schema violation. */
   updateChartSpec(chartId: string, specUpdates: Record<string, unknown>): void;
+  /** Replace the chart's entire spec (full re-author). Validates the spec against
+   *  the ChartSpec schema; throws on a schema violation. */
+  replaceChartSpec(chartId: string, fullSpec: Record<string, unknown>): void;
   /** Set a canvas-style property override on a chart. */
   setStyleProperty(chartId: string, name: string, value: string): void;
 }

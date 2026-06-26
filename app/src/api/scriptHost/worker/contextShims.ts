@@ -505,6 +505,7 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         onDataChange: (h: Handler) => registerHook(rt, "onDataChange", h),
         getSpec: () => mirror<Record<string, unknown>>(rt, "chart.spec", {}),
         updateSpec: (patch: unknown) => setState(rt, "chart.updateSpec", [patch]),
+        replaceSpec: (fullSpec: unknown) => setState(rt, "chart.replaceSpec", [fullSpec]),
         style: {
           setProperty: (name: string, value: unknown) => setStateFire(rt, "chart.setStyleProperty", [name, value]),
         },

@@ -322,8 +322,12 @@ declare interface ChartContext extends BaseObjectContext {
   onDataChange(handler: () => void): () => void;
   /** Get the chart specification (JSON object). */
   getSpec(): Record<string, unknown>;
-  /** Update the chart specification (merge patch). */
+  /** Update the chart specification (merge patch). Schema-validated — the promise
+   *  rejects if the merged spec would be invalid. */
   updateSpec(patch: Record<string, unknown>): Promise<void>;
+  /** Replace the entire chart specification (full re-author). Schema-validated —
+   *  the promise rejects on an invalid spec. */
+  replaceSpec(fullSpec: Record<string, unknown>): Promise<void>;
   /** Style customization. */
   style: {
     /** Set a canvas-style property override (stored in chart spec). */

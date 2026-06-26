@@ -197,7 +197,15 @@ function setup(chart) {
 
   // == Data Access ==
   // const spec = chart.getSpec();
-  // chart.updateSpec({ title: "Updated Title" });
+  //
+  // updateSpec merges a partial patch; replaceSpec re-authors the whole spec.
+  // Both validate against the chart schema, so await + catch to learn if the
+  // edit was rejected (unknown key / wrong type):
+  // try {
+  //   await chart.updateSpec({ title: "Updated Title" });
+  // } catch (e) {
+  //   chart.log("Rejected: " + e.message);
+  // }
 }
 `;
 

@@ -67,7 +67,21 @@ export const vHook: Validator = ([name]) =>
     : "event name must be a non-empty string";
 
 export const vGetState: Validator = () => true;
-export const vSetState: Validator = () => true;
+/** Cheap broker-side pre-filter for object.setState. Most aspects are validated
+ *  by their own store impl; chart spec writes additionally get a shape+size gate
+ *  here (runs BEFORE the tier check, no state reads) so an oversized / non-object
+ *  spec is rejected uniformly before reaching the extension's schema validator. */
+export const vSetState: Validator = ([aspect, aspectArgs]) => {
+  if (aspect === "chart.updateSpec" || aspect === "chart.replaceSpec") {
+    if (!Array.isArray(aspectArgs) || aspectArgs.length < 1) return "expected a spec argument";
+    const spec = aspectArgs[0];
+    if (typeof spec !== "object" || spec === null || Array.isArray(spec)) return "spec must be an object";
+    let size = 0;
+    try { size = JSON.stringify(spec).length; } catch { return "spec must be JSON-serializable"; }
+    if (size > 2_000_000) return "spec too large (max 2 MB)";
+  }
+  return true;
+};
 export const vDecl: Validator = ([decls]) =>
   typeof decls === "object" && decls !== null ? true : "expected a declarations object";
 

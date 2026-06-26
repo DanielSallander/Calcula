@@ -54,7 +54,11 @@ import {
   loadChartsFromBackend,
   getChartById,
   updateChartSpec,
+  replaceChartSpec as storeReplaceChartSpec,
+  mergeSpecPreview,
 } from "./lib/chartStore";
+import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
+import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
 import type { DataRangeRef } from "./types";
 import { QuickAccessPopup } from "./components/QuickAccessPopup";
@@ -207,11 +211,30 @@ function activate(context: ExtensionContext): void {
       return { specJson: JSON.stringify(chart.spec) };
     },
     updateChartSpec(chartId: string, specUpdates: Record<string, unknown>) {
-      updateChartSpec(chartId, specUpdates as Partial<import("./types").ChartSpec>);
+      // Deep-merge the patch onto the live spec WITHOUT committing, validate the
+      // merged result against the schema, then replace. A script can no longer
+      // blind-merge garbage/typo/wrong-typed keys (the broker audits the throw).
+      const merged = mergeSpecPreview(chartId, specUpdates as Partial<ChartSpec>);
+      if (!merged) return; // unknown chart — no-op (matches the store)
+      const violations = validateMergedSpec(merged);
+      if (violations.length > 0) {
+        throw new Error(`Invalid chart spec update: ${violations.slice(0, 8).join("; ")}`);
+      }
+      storeReplaceChartSpec(chartId, merged);
+    },
+    replaceChartSpec(chartId: string, fullSpec: Record<string, unknown>) {
+      // Full re-author: validate the complete spec before overwriting.
+      const violations = validateChartSpec(fullSpec);
+      if (violations.length > 0) {
+        throw new Error(`Invalid chart spec: ${violations.slice(0, 8).join("; ")}`);
+      }
+      // Validated above, so the cast is sound (TS can't narrow from the schema check).
+      storeReplaceChartSpec(chartId, fullSpec as unknown as ChartSpec);
     },
     setStyleProperty(chartId: string, name: string, value: string) {
-      // Canvas-style override stored in chart spec as custom properties
-      updateChartSpec(chartId, { [`_style_${name}`]: value } as Partial<import("./types").ChartSpec>);
+      // Canvas-style override stored in chart spec as a reserved _style_ key
+      // (tolerated by validation). Separate constrained name+value setter.
+      updateChartSpec(chartId, { [`_style_${name}`]: value } as Partial<ChartSpec>);
     },
   });
 
