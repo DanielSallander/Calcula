@@ -1608,6 +1608,18 @@ export {
   listChartMarks,
 } from "./chartMarks";
 
+// Custom chart-data transform registry (dogfooding extension point, symmetric to
+// the chart-mark registry).
+export {
+  registerChartTransform,
+  unregisterChartTransform,
+  getChartTransform,
+  isChartTransformRegistered,
+  listChartTransforms,
+  isBuiltinTransformType,
+} from "./chartTransforms";
+export type { ChartTransformDefinition, ChartTransformContext } from "./chartTransforms";
+
 export type {
   ChartMarkDefinition,
   ChartMarkMeta,

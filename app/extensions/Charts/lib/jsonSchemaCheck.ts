@@ -71,6 +71,11 @@ export function schemaViolations(value: unknown, schema: any): string[] {
       for (const sub of s.allOf) out.push(...viol(value, sub, path));
     }
 
+    // not: the value must FAIL the subschema.
+    if (s.not !== undefined && viol(value, s.not, path).length === 0) {
+      out.push(`${path}: must not match the excluded schema`);
+    }
+
     // if / then / else.
     if (s.if) {
       const condOk = viol(value, s.if, path).length === 0;

@@ -91,6 +91,29 @@ describe("chartSpecJsonSchema", () => {
     expect(refs).toContain("#/definitions/BinTransform");
     expect(refs).toContain("#/definitions/LookupTransform");
     expect(refs).toContain("#/definitions/PivotTransform");
+    expect(refs).toContain("#/definitions/CustomTransform");
+  });
+
+  it("validates a CUSTOM transform while keeping built-ins strict (oneOf via `not`)", () => {
+    const axis = { title: null, gridLines: false, showLabels: true, labelAngle: 0, min: null, max: null };
+    const base: Record<string, unknown> = {
+      mark: "bar", data: "Sheet1!A1:B3", hasHeaders: true, seriesOrientation: "columns",
+      categoryIndex: 0, series: [{ name: "S", sourceIndex: 1, color: null }], title: null,
+      xAxis: axis, yAxis: axis, legend: { visible: false, position: "bottom" }, palette: "default",
+    };
+    // A custom (non-built-in) transform with arbitrary params -> valid.
+    const customOk = { ...base, transform: [{ type: "myThing", threshold: 5, label: "x" }] };
+    expect(schemaViolations(customOk, schema)).toEqual([]);
+
+    // A well-formed built-in -> still valid (matches its own def, NOT CustomTransform).
+    const builtinOk = { ...base, transform: [{ type: "filter", field: "S", predicate: "> 1" }] };
+    expect(schemaViolations(builtinOk, schema)).toEqual([]);
+
+    // A MALFORMED built-in (filter missing predicate) -> still flagged: it can't
+    // match FilterTransform (missing required) NOR CustomTransform (type is a
+    // built-in, excluded by `not`), so the oneOf reports a violation.
+    const builtinBad = { ...base, transform: [{ type: "filter", field: "S" }] };
+    expect(schemaViolations(builtinBad, schema).length).toBeGreaterThan(0);
   });
 
   it("survives JSON roundtrip", () => {

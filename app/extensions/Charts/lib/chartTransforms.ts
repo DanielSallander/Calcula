@@ -27,6 +27,7 @@ import {
   type FormulaValue,
 } from "./chartFormula";
 import { parseDisplayNumber } from "./chartFieldTypes";
+import { getChartTransform } from "@api/chartTransforms";
 
 // ============================================================================
 // Public API
@@ -83,9 +84,46 @@ function applyOne(
       return applyPivot(data, transform, index, diagnostics, tidyData);
     default: {
       const unknownType = (transform as { type?: string }).type ?? "unknown";
+      // Not a built-in — consult the custom-transform registry (the dogfooding
+      // extension point). A registered transform runs sandboxed-by-contract as a
+      // pure data->data function; a throw or a malformed return degrades to a
+      // diagnostic + the input data (never crashes the pipeline).
+      const custom = getChartTransform(unknownType);
+      if (custom) {
+        try {
+          const out = custom.apply(data, transform, { params }) as ParsedChartData;
+          // Deep shape guard: categories[] AND every series element {name, values[]}
+          // — a downstream built-in/painter indexes s.values directly, and that
+          // throw would be OUTSIDE this try/catch (next pipeline step), crashing
+          // the whole render. Reject a malformed return here instead.
+          const validShape =
+            out != null &&
+            Array.isArray(out.categories) &&
+            Array.isArray(out.series) &&
+            out.series.every((s) => s != null && typeof s.name === "string" && Array.isArray(s.values));
+          if (validShape) {
+            return out;
+          }
+          diagnostics?.push({
+            index,
+            transformType: unknownType,
+            severity: "error",
+            message: `Custom transform "${unknownType}" returned invalid chart data.`,
+          });
+          return data;
+        } catch (e) {
+          diagnostics?.push({
+            index,
+            transformType: unknownType,
+            severity: "error",
+            message: `Custom transform "${unknownType}" failed: ${e instanceof Error ? e.message : String(e)}`,
+          });
+          return data;
+        }
+      }
       diagnostics?.push({
         index,
-        transformType: unknownType as TransformSpec["type"],
+        transformType: unknownType,
         severity: "warning",
         message: `Unknown transform type "${unknownType}".`,
       });

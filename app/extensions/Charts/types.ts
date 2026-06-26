@@ -868,8 +868,9 @@ export interface TidyData {
 export interface TransformDiagnostic {
   /** Index of the offending transform within the spec's transform[] pipeline. */
   index: number;
-  /** The transform type that produced the diagnostic. */
-  transformType: TransformSpec["type"];
+  /** The transform type that produced the diagnostic (a built-in type, or a
+   *  custom/unknown transform type string). */
+  transformType: string;
   /** "error" = the transform could not run at all; "warning" = it ran with issues. */
   severity: "error" | "warning";
   /** Human-readable description shown in the spec editor. */

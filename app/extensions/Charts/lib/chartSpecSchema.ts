@@ -871,7 +871,22 @@ export const chartSpecJsonSchema: object = {
         { $ref: "#/definitions/BinTransform" },
         { $ref: "#/definitions/LookupTransform" },
         { $ref: "#/definitions/PivotTransform" },
+        { $ref: "#/definitions/CustomTransform" },
       ],
+    },
+    CustomTransform: {
+      type: "object",
+      description: "A 3rd-party transform contributed via registerChartTransform. Its `type` is any non-built-in id; it carries arbitrary params the registered transform reads.",
+      required: ["type"],
+      properties: {
+        type: {
+          type: "string",
+          // Must NOT be a built-in type (those have their own strict schemas), so
+          // the oneOf stays unambiguous: a built-in object matches only its own def.
+          not: { enum: ["filter", "sort", "aggregate", "calculate", "window", "bin", "lookup", "pivot"] },
+          description: "Custom transform type id (must not be a built-in).",
+        },
+      },
     },
     FilterTransform: {
       type: "object",
