@@ -6,7 +6,7 @@
 //          chart deselect, and chart removal. Distinct from the design-mode
 //          editor sub-selection (selectionHandler.ts).
 
-import type { ChartSelectionMap } from "../types";
+import type { ChartSelectionMap, ParamSpec } from "../types";
 
 /**
  * Marks whose painters consume data.selection (and so can highlight a point
@@ -63,4 +63,25 @@ export function buildPointSelection(
   key: string,
 ): ChartSelectionMap {
   return { [paramName]: { on, values: [key] } };
+}
+
+/**
+ * The other charts that mirror a cross-chart-linked selection (S7b): every chart
+ * (except the source) with a select:"point" param whose sharedAs matches. Pure.
+ */
+export function matchingSharedParams(
+  charts: ReadonlyArray<{ chartId: string; spec: { params?: ParamSpec[] } }>,
+  sourceChartId: string,
+  sharedAs: string,
+): Array<{ chartId: string; paramName: string; on: "category" | "series" }> {
+  const out: Array<{ chartId: string; paramName: string; on: "category" | "series" }> = [];
+  for (const c of charts) {
+    if (c.chartId === sourceChartId) continue;
+    const p = c.spec.params?.find((pp) => pp.select === "point" && pp.sharedAs === sharedAs);
+    // The target's OWN `on` defines the dimension its selection keys on — not the
+    // source's. (An incompatible source/target `on` simply won't match, which
+    // degrades to no highlight rather than keying the wrong field.)
+    if (p) out.push({ chartId: c.chartId, paramName: p.name, on: p.on ?? "category" });
+  }
+  return out;
 }

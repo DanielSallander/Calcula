@@ -363,6 +363,14 @@ export const chartSpecJsonSchema: object = {
           type: ["number", "null"],
           description: "Maximum value for value axis. Use null for auto-scale.",
         },
+        minParam: {
+          type: "string",
+          description: "Bind min to a named param (e.g. \"[Zoom]\"), resolved at read time; falls back to auto when missing/non-numeric.",
+        },
+        maxParam: {
+          type: "string",
+          description: "Bind max to a named param (e.g. \"[Zoom]\"), resolved at read time; falls back to auto when missing/non-numeric.",
+        },
         scale: {
           $ref: "#/definitions/ScaleSpec",
           description: "Scale configuration (type, domain override, log/pow/sqrt). Default: linear.",
@@ -1035,6 +1043,22 @@ export const chartSpecJsonSchema: object = {
         description: { type: "string", description: "Optional human description." },
         select: { type: "string", enum: ["point"], description: "Makes this an interactive selection param: 'point' = clicking a datum sets it. Reference via a condition's inSelection to highlight." },
         on: { type: "string", enum: ["category", "series"], description: "What a click selects on: the datum's category label (default) or series." },
+        filter: { type: "boolean", description: "With select:'point' + on:'category', a click also filters the chart to the selected categories (empty selection = full data)." },
+        sharedAs: { type: "string", description: "Cross-chart link key: select params sharing this value mirror each other's selection." },
+        writeTo: { type: "string", description: "Single same-sheet cell (e.g. \"=B1\") to write the clicked label/value back to on each point selection." },
+        bind: {
+          type: "object",
+          description: "Bind the param to an interactive on-canvas control (stepper/cycle/segment). The live value is ephemeral; only this declaration persists.",
+          required: ["input"],
+          properties: {
+            input: { type: "string", enum: ["stepper", "cycle", "segment"], description: "Control kind." },
+            options: { type: "array", items: { oneOf: [{ type: "string" }, { type: "number" }] }, description: "Allowed values for cycle/segment." },
+            min: { type: "number", description: "Lower bound (stepper)." },
+            max: { type: "number", description: "Upper bound (stepper)." },
+            step: { type: "number", description: "Increment (stepper, default 1)." },
+          },
+          additionalProperties: false,
+        },
       },
       additionalProperties: false,
     },

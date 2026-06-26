@@ -8,7 +8,10 @@ import { resolvePointColor, resolvePointOpacity } from "../encodingResolver";
 import {
   getPointSelection, setPointSelection, clearPointSelection, clearAllPointSelections,
   pointSelectionKey, buildPointSelection, isDataHit, SELECTION_SUPPORTED_MARKS,
+  matchingSharedParams,
 } from "../../handlers/chartPointSelection";
+import { parseParamCellTarget } from "../dataSourceResolver";
+import type { ParamSpec } from "../../types";
 import type { SeriesEncoding, ChartSelectionMap } from "../../types";
 
 const HOT = "#hot";
@@ -78,6 +81,35 @@ describe("click-to-key helpers", () => {
 
   it("buildPointSelection produces a single-datum map", () => {
     expect(buildPointSelection("sel", "category", "Jan")).toEqual({ sel: { on: "category", values: ["Jan"] } });
+  });
+
+  it("matchingSharedParams (S7b) finds cross-linked charts, excluding the source", () => {
+    const mk = (chartId: string, params: ParamSpec[]) => ({ chartId, spec: { params } });
+    const charts = [
+      mk("A", [{ name: "p", select: "point", sharedAs: "region" }]),
+      mk("B", [{ name: "q", select: "point", sharedAs: "region" }]),
+      mk("C", [{ name: "r", select: "point", sharedAs: "other" }]),
+      mk("D", [{ name: "s", select: "point" }]),
+    ];
+    expect(matchingSharedParams(charts, "A", "region")).toEqual([{ chartId: "B", paramName: "q", on: "category" }]);
+    expect(matchingSharedParams(charts, "X", "region").map((t) => t.chartId)).toEqual(["A", "B"]);
+    expect(matchingSharedParams(charts, "A", "none")).toEqual([]);
+  });
+
+  it("matchingSharedParams reports each TARGET's own `on` (not the source's)", () => {
+    const charts = [
+      { chartId: "A", spec: { params: [{ name: "p", select: "point", sharedAs: "k", on: "category" } as ParamSpec] } },
+      { chartId: "B", spec: { params: [{ name: "q", select: "point", sharedAs: "k", on: "series" } as ParamSpec] } },
+    ];
+    expect(matchingSharedParams(charts, "A", "k")).toEqual([{ chartId: "B", paramName: "q", on: "series" }]);
+  });
+
+  it("parseParamCellTarget (S7c) parses a same-sheet single cell, rejects ranges/cross-sheet", () => {
+    expect(parseParamCellTarget("=B1")).toEqual({ row: 0, col: 1 });
+    expect(parseParamCellTarget("C3")).toEqual({ row: 2, col: 2 });
+    expect(parseParamCellTarget("=A1:B2")).toBeNull();
+    expect(parseParamCellTarget("=Sheet2!A1")).toBeNull();
+    expect(parseParamCellTarget("=")).toBeNull();
   });
 
   it("isDataHit distinguishes real datums from background/axis/miss", () => {

@@ -21,11 +21,11 @@ import type {
 import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransforms } from "./chartTransforms";
-import { resolveParams } from "./chartParams";
+import { resolveParams, selectionFilterCategories, applyAxisParamBindings } from "./chartParams";
 import { getPointSelection } from "../handlers/chartPointSelection";
 import type { FormulaValue } from "./chartFormula";
 import { readPivotChartData } from "./pivotChartDataReader";
-import { applyChartFilters } from "./chartFilters";
+import { applyChartFilters, applySelectionKeep } from "./chartFilters";
 import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
 import { lowerEncoding } from "./lowerEncoding";
 
@@ -61,7 +61,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   diagnostics: TransformDiagnostic[];
 }> {
   // Resolve cell references (=A1, =Sheet1!B5) in string fields
-  const resolvedSpec = await resolveSpecReferences(spec);
+  let resolvedSpec = await resolveSpecReferences(spec);
   const diagnostics: TransformDiagnostic[] = [];
 
   // Concatenation: read each child chart independently and tile them. The
@@ -78,9 +78,12 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     return { spec: resolvedSpec, data: { ...empty, concat }, unfilteredData: empty, diagnostics };
   }
 
-  // Resolve named parameters once (literal or live cell value); injected into
-  // filter/calculate expression scopes below. Empty map when none are declared.
-  const params = await resolveParams(resolvedSpec);
+  // Resolve named parameters once (live widget value / literal / cell value);
+  // injected into filter/calculate expression scopes below. Empty when none.
+  const params = await resolveParams(resolvedSpec, chartId);
+
+  // Bind param-driven axis domains (S7a) so painters read the zoomed min/max.
+  resolvedSpec = applyAxisParamBindings(resolvedSpec, params);
 
   // Live point-selection (ephemeral) for THIS chart, attached to the returned
   // data so conditional encoding's `inSelection` can highlight. Only the top-
@@ -102,6 +105,11 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
 
     // Apply chart filters (hide series/categories)
     parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
+
+    // Selection-as-filter (S4): keep only the clicked categories. After the
+    // unfilteredData snapshot so the filter dropdown still lists all options.
+    const pivotKeep = selectionFilterCategories(resolvedSpec, selection);
+    if (pivotKeep) parsedData = applySelectionKeep(parsedData, pivotKeep);
 
     const pivotData = withCategoryField(parsedData);
     return {
@@ -170,6 +178,15 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
 
   // Apply chart filters (hide series/categories)
   parsedData = applyChartFilters(parsedData, lowered.filters);
+
+  // Selection-as-filter (S4): keep only the clicked categories. Single-chart
+  // only — skipped when faceting (partitionByFacet re-runs transforms per panel,
+  // which would blank panels lacking the category). After unfilteredData so the
+  // filter dropdown still lists all options.
+  if (!lowered.facet?.field) {
+    const keep = selectionFilterCategories(lowered, selection);
+    if (keep) parsedData = applySelectionKeep(parsedData, keep);
+  }
 
   // Faceting: one panel per distinct value of facet.field (partitions long rows,
   // re-running transforms per panel). Unsupported specs return undefined → the

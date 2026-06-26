@@ -38,6 +38,55 @@ export function hitTestGeometry(
 }
 
 // ============================================================================
+// Rectangle (Brush) Hit-Testing — interval selection (C5 S6, additive half)
+// ============================================================================
+
+/**
+ * Return every datum whose geometry intersects a brush rectangle (chart-local
+ * coords). Bars use AABB intersection; points use centre-in-rect; radial slices
+ * are not brushable in v1 (returns none). Pure — drives interval selection once
+ * Core surfaces the in-plot drag gesture (the gesture itself is Core-owned).
+ */
+export function hitTestRect(
+  rect: { x: number; y: number; width: number; height: number },
+  geometry: HitGeometry,
+): ChartHitResult[] {
+  const x0 = Math.min(rect.x, rect.x + rect.width);
+  const x1 = Math.max(rect.x, rect.x + rect.width);
+  const y0 = Math.min(rect.y, rect.y + rect.height);
+  const y1 = Math.max(rect.y, rect.y + rect.height);
+  const out: ChartHitResult[] = [];
+
+  const pushBars = (rects: BarRect[]) => {
+    for (const b of rects) {
+      if (b.x <= x1 && b.x + b.width >= x0 && b.y <= y1 && b.y + b.height >= y0) {
+        out.push({ type: "bar", seriesIndex: b.seriesIndex, categoryIndex: b.categoryIndex, value: b.value, seriesName: b.seriesName, categoryName: b.categoryName });
+      }
+    }
+  };
+  const pushPoints = (markers: PointMarker[]) => {
+    for (const m of markers) {
+      if (m.cx >= x0 && m.cx <= x1 && m.cy >= y0 && m.cy <= y1) {
+        out.push({ type: "point", seriesIndex: m.seriesIndex, categoryIndex: m.categoryIndex, value: m.value, seriesName: m.seriesName, categoryName: m.categoryName });
+      }
+    }
+  };
+
+  switch (geometry.type) {
+    case "bars": pushBars(geometry.rects); break;
+    case "points": pushPoints(geometry.markers); break;
+    case "slices": break; // radial marks are not brushable in v1
+    case "composite":
+      for (const g of geometry.groups) {
+        if (g.type === "bars") pushBars(g.rects);
+        else if (g.type === "points") pushPoints(g.markers);
+      }
+      break;
+  }
+  return out;
+}
+
+// ============================================================================
 // Bar Chart Hit-Testing
 // ============================================================================
 

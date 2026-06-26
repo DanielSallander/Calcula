@@ -247,6 +247,19 @@ export async function resolveParamCell(
 }
 
 /**
+ * Parse a single same-sheet cell write target ("=B1" or "B1") to {row, col}
+ * (0-based). Returns null for a range, a sheet-qualified ref, or an invalid ref
+ * — the caller skips the write (writeback is same-sheet single-cell only, S7c).
+ */
+export function parseParamCellTarget(cellRef: string): { row: number; col: number } | null {
+  const body = (cellRef.startsWith("=") ? cellRef.slice(1) : cellRef).trim();
+  if (body === "" || body.includes("!")) return null;
+  const parsed = parseA1Reference(body);
+  if (!parsed || parsed.startRow !== parsed.endRow || parsed.startCol !== parsed.endCol) return null;
+  return { row: parsed.startRow, col: parsed.startCol };
+}
+
+/**
  * Resolve a string field that may be a cell reference.
  * If it starts with "=" and is a valid cell ref, fetches the cell value.
  * Otherwise returns the original string unchanged.

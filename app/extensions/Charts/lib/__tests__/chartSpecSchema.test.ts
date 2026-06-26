@@ -311,7 +311,7 @@ describe("chartSpecJsonSchema drift guard", () => {
         majorTickMark: "outside", minorTickMark: "none", labelPosition: "nextToAxis",
         crossesAt: "auto", reverse: false, lineColor: "#999999", lineWidth: 1, lineDash: [2, 2], showLine: true,
       },
-      yAxis: { title: "USD", gridLines: true, showLabels: true, labelAngle: 0, min: 0, max: null },
+      yAxis: { title: "USD", gridLines: true, showLabels: true, labelAngle: 0, min: 0, max: null, minParam: "[Floor]", maxParam: "[Threshold]" },
       legend: { visible: true, position: "bottom" },
       palette: "default",
       markOptions: {
@@ -359,9 +359,9 @@ describe("chartSpecJsonSchema drift guard", () => {
         },
       ],
       params: [
-        { name: "Threshold", value: 100, description: "Min revenue" },
-        { name: "Region", cellRef: "=B1" },
-        { name: "Picked", select: "point", on: "category" },
+        { name: "Threshold", value: 100, description: "Min revenue", bind: { input: "stepper", min: 0, max: 1000, step: 50 } },
+        { name: "Region", cellRef: "=B1", bind: { input: "cycle", options: ["North", "South"] } },
+        { name: "Picked", select: "point", on: "category", filter: true, sharedAs: "region", writeTo: "=C1" },
       ],
     };
 

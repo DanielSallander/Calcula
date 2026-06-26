@@ -268,8 +268,33 @@ selection — then reference it from a **conditional encoding** via
   then shows only it in the highlight \`value\` and the rest in \`otherwise\`.
 - Click empty chart space to clear. The selection is **ephemeral** (never saved).
 
+A select param also supports these opt-ins (all ephemeral; only the declaration
+persists):
+
+- **filter** \`true\` — a click also **filters** the chart to the selected
+  categories (not just highlights), empty selection = full data. (on:category.)
+- **sharedAs** \`"key"\` — **cross-chart linking**: charts whose select params share
+  the same key mirror each other's selection (click one, the others follow).
+- **writeTo** \`"=B1"\` — **write back** the clicked label to a same-sheet cell, so
+  formulas and other charts react. (Written as normal cell input — a label that
+  looks like a number/formula is interpreted as such.)
+
+\`\`\`json
+"params": [{ "name": "picked", "select": "point", "on": "category",
+            "filter": true, "sharedAs": "region", "writeTo": "=B1" }]
+\`\`\`
+
+**Param-driven zoom** — bind an axis domain to a param: \`yAxis.maxParam: "[Zoom]"\`
+(and \`minParam\`) resolves the param to the axis max/min at read time. Drive it
+from a cell or (forthcoming) a bound widget for interactive zoom.
+
+**Bound widgets** — declare \`bind\` on a param (\`{ "input": "stepper", "min": 0,
+"max": 100, "step": 10 }\`, or \`"cycle"\`/\`"segment"\` over \`options\`) to make it
+interactively adjustable; a live widget value overrides the literal/cell default.
+
 v1: single (non-composed) charts; the chart must be selected first, then click a
-datum. Highlight-only (selection-as-filter is a later addition).
+datum. (Interval/brush selection needs a Core drag hook; on-canvas widget
+controls are a forthcoming follow-up.)
 
 ## Cell References
 

@@ -589,6 +589,26 @@ export const CHART_EXAMPLES: ChartExample[] = [
       params: [{ name: "picked", select: "point", on: "category", description: "Clicked category" }],
     },
   },
+  {
+    id: "click-to-filter",
+    name: "Click to filter (drill)",
+    description: "Click a category to filter the chart down to it (filter:true); click empty space to restore. Also writes the clicked label to a cell and can link to other charts via sharedAs.",
+    category: "Interactivity",
+    spec: {
+      mark: "bar",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [{ name: "Revenue", sourceIndex: 1, color: null }],
+      title: "Revenue (click a bar to drill)",
+      xAxis: axis(),
+      yAxis: axis("Revenue", true),
+      legend: { visible: false, position: "bottom" },
+      palette: "default",
+      params: [{ name: "drill", select: "point", on: "category", filter: true, writeTo: "=F1", sharedAs: "region" }],
+    },
+  },
 ];
 
 // ============================================================================

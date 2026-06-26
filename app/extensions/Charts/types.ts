@@ -632,6 +632,14 @@ export interface AxisSpec {
   min: number | null;
   /** Max value for value axis (null = auto). */
   max: number | null;
+  /**
+   * Bind this axis's min/max to a named param (referenced as "[Name]"), resolved
+   * at read time and written into min/max before painting. Combined with a
+   * stepper widget on the param this gives interactive zoom. Falls back to the
+   * data-derived domain when the param is missing or non-numeric. (C5 S7a.)
+   */
+  minParam?: string;
+  maxParam?: string;
   /** Scale configuration for this axis. */
   scale?: ScaleSpec;
   /** Desired number of tick marks. Default: 5 */
@@ -1143,6 +1151,46 @@ export interface ParamSpec {
   select?: "point";
   /** What a click selects on: the datum's "category" label (default) or "series". */
   on?: "category" | "series";
+  /**
+   * When true (with select:"point", on:"category"), a click also FILTERS the
+   * chart to the selected categories (not just highlights). An empty selection
+   * restores the full data. v1: category filtering on single (non-faceted) charts.
+   */
+  filter?: boolean;
+  /**
+   * Cross-chart link key (S7b): charts whose select params share the same
+   * sharedAs value mirror each other's selection — clicking a datum in one
+   * updates the others. The live value stays ephemeral; only this binding persists.
+   */
+  sharedAs?: string;
+  /**
+   * Write the clicked label/value back to this single same-sheet cell on each
+   * point selection (S7c), so formulas/other charts can react. Empty selection
+   * does not write. e.g. "=B1". The label is written as normal cell input, so a
+   * label that looks like a number/formula/boolean is interpreted as such.
+   */
+  writeTo?: string;
+  /**
+   * Bind the param to an interactive on-canvas control (S5): a +/- "stepper"
+   * (min/max/step), a "cycle" button or "segment" picker over `options`. The
+   * live widget value is ephemeral (overrides the literal/cell default at read
+   * time, never persisted); only this binding declaration persists.
+   */
+  bind?: ParamBinding;
+}
+
+/** Declares an interactive on-canvas control for a {@link ParamSpec} (C5 S5). */
+export interface ParamBinding {
+  /** Control kind: numeric +/- stepper, option cycler, or segmented picker. */
+  input: "stepper" | "cycle" | "segment";
+  /** Allowed values for "cycle" / "segment". */
+  options?: (string | number)[];
+  /** Lower bound for "stepper". */
+  min?: number;
+  /** Upper bound for "stepper". */
+  max?: number;
+  /** Increment for "stepper" (default 1). */
+  step?: number;
 }
 
 export interface EncodingSpec {

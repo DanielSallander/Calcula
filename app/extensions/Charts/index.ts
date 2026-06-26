@@ -91,7 +91,12 @@ import {
   buildPointSelection,
   isDataHit,
   SELECTION_SUPPORTED_MARKS,
+  matchingSharedParams,
 } from "./handlers/chartPointSelection";
+import { parseParamCellTarget } from "./lib/dataSourceResolver";
+import { clearAllWidgetValues } from "./handlers/chartWidgetValues";
+import { onAppEvent } from "@api/events";
+import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource } from "./types";
 import type { PivotChartFieldButton } from "./types";
@@ -470,6 +475,27 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
+  // Cross-chart param bus (S7b): mirror a point-selection to every chart that
+  // shares the same `sharedAs` key. Listeners only update their ephemeral store +
+  // invalidate; they never re-broadcast, and the source chart is skipped — so
+  // there is no feedback loop.
+  cleanupFunctions.push(
+    onAppEvent<{ sourceChartId: string; sharedAs: string; on: "category" | "series"; values: string[] }>(
+      "chart:param-changed",
+      ({ sourceChartId, sharedAs, values }) => {
+        const targets = matchingSharedParams(getAllCharts(), sourceChartId, sharedAs);
+        if (targets.length === 0) return;
+        for (const t of targets) {
+          // Key the mirrored selection on the TARGET param's own `on` dimension.
+          if (values.length > 0) setPointSelection(t.chartId, buildPointSelection(t.paramName, t.on, values[0]));
+          else clearPointSelection(t.chartId);
+          invalidateChartCache(t.chartId);
+        }
+        context.events.emit(AppEvents.GRID_REFRESH);
+      },
+    ),
+  );
+
   // Listen for pivot table changes to invalidate pivot-sourced chart caches
   const handlePivotChanged = () => {
     const charts = getAllCharts();
@@ -719,10 +745,24 @@ function activate(context: ExtensionContext): void {
       const hit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
       // hitTestGeometry always returns an object — only a real datum sets a
       // selection; a background/axis click clears it (back to all-highlighted).
+      const values: string[] = [];
       if (isDataHit(hit)) {
-        setPointSelection(click.chartId, buildPointSelection(selectParam.name, on, pointSelectionKey(hit, on)));
+        const key = pointSelectionKey(hit, on);
+        values.push(key);
+        setPointSelection(click.chartId, buildPointSelection(selectParam.name, on, key));
+        // S7c: write the clicked label/value back to a same-sheet cell so
+        // formulas / other charts can react (fire-and-forget; safe — its
+        // CELLS_UPDATED only re-renders, the ephemeral selection survives).
+        if (selectParam.writeTo) {
+          const target = parseParamCellTarget(selectParam.writeTo);
+          if (target) void updateCell(target.row, target.col, key);
+        }
       } else {
         clearPointSelection(click.chartId);
+      }
+      // S7b: mirror the selection to cross-linked charts (same sharedAs key).
+      if (selectParam.sharedAs) {
+        emitAppEvent("chart:param-changed", { sourceChartId: click.chartId, sharedAs: selectParam.sharedAs, on, values });
       }
       invalidateChartCache(click.chartId);
       context.events.emit(AppEvents.GRID_REFRESH);
@@ -738,8 +778,8 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
   });
-  // Drop ephemeral point-selection state on deactivation (no leak across reloads).
-  cleanupFunctions.push(() => clearAllPointSelections());
+  // Drop ephemeral point-selection + widget state on deactivation (no leak).
+  cleanupFunctions.push(() => { clearAllPointSelections(); clearAllWidgetValues(); });
 
   // -----------------------------------------------------------------------
   // Right-click context menu for chart elements (axes)
@@ -841,9 +881,10 @@ function activate(context: ExtensionContext): void {
       setActiveSheetIndex(idx);
       deselectChart();
       emitChartSelectionEvent();
-      // Drop ephemeral point-selections on file open/new so they don't survive
-      // into a freshly loaded workbook (kept across plain cell edits).
+      // Drop ephemeral point-selections + widget values on file open/new so they
+      // don't survive into a freshly loaded workbook (kept across plain cell edits).
       clearAllPointSelections();
+      clearAllWidgetValues();
       invalidateAllChartCaches();
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);

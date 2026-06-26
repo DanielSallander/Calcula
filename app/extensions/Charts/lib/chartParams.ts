@@ -8,11 +8,12 @@
 //          CELLS_UPDATED -> invalidate-all handler re-reads). Selections/widgets
 //          build on this same carry vehicle later.
 
-import type { ChartSpec, ParamSpec } from "../types";
+import type { ChartSpec, ParamSpec, ChartSelectionMap, AxisSpec } from "../types";
 import { isDataRangeRef } from "../types";
 import type { FormulaValue } from "./chartFormula";
 import { resolveParamCell } from "./dataSourceResolver";
 import { parseDisplayNumber } from "./chartFieldTypes";
+import { getWidgetValue } from "../handlers/chartWidgetValues";
 
 /** Names reserved by the formula scope; a param may not shadow them. */
 export const RESERVED_PARAM_NAMES: ReadonlySet<string> = new Set(["$index", "$category", "value", "$value"]);
@@ -85,14 +86,71 @@ export function validateParams(params: ParamSpec[] | undefined): string[] {
   return issues;
 }
 
+/** Resolve an axis-binding token ("[Name]" or "Name") to a finite number, else null. */
+function resolveAxisParam(token: string | undefined, params: ReadonlyMap<string, FormulaValue>): number | null {
+  if (!token) return null;
+  const name = token.startsWith("[") && token.endsWith("]") ? token.slice(1, -1).trim() : token.trim();
+  if (!params.has(name)) return null;
+  const v = params.get(name)!;
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Resolve AxisSpec.minParam/maxParam bindings (S7a) into concrete min/max on the
+ * x and y axes, so painters read the param-driven domain. A missing/non-numeric
+ * param leaves the existing min/max (data-derived). Returns the same spec object
+ * when neither axis binds a param. Pure.
+ */
+export function applyAxisParamBindings(spec: ChartSpec, params: ReadonlyMap<string, FormulaValue>): ChartSpec {
+  const bind = (axis: AxisSpec): AxisSpec => {
+    if (!axis.minParam && !axis.maxParam) return axis;
+    const min = resolveAxisParam(axis.minParam, params);
+    const max = resolveAxisParam(axis.maxParam, params);
+    if (min === null && max === null) return axis;
+    return { ...axis, min: min !== null ? min : axis.min, max: max !== null ? max : axis.max };
+  };
+  const xAxis = bind(spec.xAxis);
+  const yAxis = bind(spec.yAxis);
+  if (xAxis === spec.xAxis && yAxis === spec.yAxis) return spec;
+  return { ...spec, xAxis, yAxis };
+}
+
+/**
+ * The set of category labels to KEEP for selection-as-filter (S4): the union of
+ * the live selection values across every select:"point" + filter + on:"category"
+ * param. Returns undefined when no such param has an active selection (-> no
+ * filtering, full data). Pure.
+ */
+export function selectionFilterCategories(
+  spec: ChartSpec,
+  selection: ChartSelectionMap | undefined,
+): string[] | undefined {
+  if (!selection || !spec.params) return undefined;
+  const keep: string[] = [];
+  let active = false;
+  for (const p of spec.params) {
+    if (p.select === "point" && p.filter && (p.on ?? "category") === "category") {
+      const entry = selection[p.name];
+      if (entry && entry.on === "category" && entry.values.length > 0) {
+        active = true;
+        for (const v of entry.values) if (!keep.includes(v)) keep.push(v);
+      }
+    }
+  }
+  return active ? keep : undefined;
+}
+
 /**
  * Resolve a spec's declared params to a name -> FormulaValue scope map. Async
  * (cell reads), called once per chart read. Best-effort: a param with a missing/
  * reserved/duplicate name is skipped; every accepted param ALWAYS gets an entry
- * (its cell value, else its literal default, else "") so an expression that
- * references it never throws #NAME?. Empty map when the spec declares no params.
+ * (its widget value, else cell value, else literal default, else "") so an
+ * expression that references it never throws #NAME?. Empty map when the spec
+ * declares no params. Precedence: live bound-widget value (chartId) > cellRef >
+ * literal default.
  */
-export async function resolveParams(spec: ChartSpec): Promise<Map<string, FormulaValue>> {
+export async function resolveParams(spec: ChartSpec, chartId?: string): Promise<Map<string, FormulaValue>> {
   const out = new Map<string, FormulaValue>();
   const params = spec.params;
   if (!params || params.length === 0) return out;
@@ -103,9 +161,14 @@ export async function resolveParams(spec: ChartSpec): Promise<Map<string, Formul
     const name = (p.name ?? "").trim();
     if (name === "" || RESERVED_PARAM_NAMES.has(name) || out.has(name)) continue;
 
+    // A live bound-widget value (S5) overrides the literal/cell default.
+    const widget = chartId !== undefined ? getWidgetValue(chartId, name) : undefined;
+
     let resolved: FormulaValue;
-    // A same-sheet cell ref is read live; cross-sheet/empty falls back to default.
-    if (p.cellRef) {
+    if (widget !== undefined) {
+      resolved = widget;
+    } else if (p.cellRef) {
+      // A same-sheet cell ref is read live; cross-sheet/empty falls back to default.
       const display = await resolveParamCell(p.cellRef, sheetIndex);
       resolved = display !== null ? coerceCellValue(display) : coerceToFormulaValue(p.value ?? "");
     } else {

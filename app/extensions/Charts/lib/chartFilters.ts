@@ -6,6 +6,34 @@
 import type { ParsedChartData, ChartFilters } from "../types";
 
 /**
+ * Keep only the categories whose label is in `keep` (selection-as-filter, S4).
+ * Aligns every series' values to the kept categories. An empty/undefined keep
+ * set is a no-op (full data) — matching the "empty selection = all" semantics.
+ * Pure; does not mutate the input.
+ */
+export function applySelectionKeep(
+  data: ParsedChartData,
+  keep: readonly string[] | undefined,
+): ParsedChartData {
+  if (!keep || keep.length === 0) return data;
+  const keepSet = new Set(keep);
+  const keptIdx = data.categories
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => keepSet.has(c))
+    .map(({ i }) => i);
+  if (keptIdx.length === data.categories.length) return data; // nothing dropped
+  // None of the kept labels exist in the current data (stale selection after a
+  // grid edit, or the category was hidden by a positional filter). Treat as a
+  // no-op (full data) rather than blanking the chart.
+  if (keptIdx.length === 0) return data;
+  return {
+    ...data,
+    categories: keptIdx.map((i) => data.categories[i]),
+    series: data.series.map((s) => ({ ...s, values: keptIdx.map((i) => s.values[i]) })),
+  };
+}
+
+/**
  * Apply non-destructive filters to parsed chart data.
  * Removes hidden series and hidden categories from the data.
  * Returns a new ParsedChartData with filtered content.

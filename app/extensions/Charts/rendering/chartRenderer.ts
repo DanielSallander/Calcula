@@ -24,6 +24,7 @@ import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
 import { clearPointSelection } from "../handlers/chartPointSelection";
+import { clearWidgetValues } from "../handlers/chartWidgetValues";
 import { hitTestGeometry } from "./chartHitTesting";
 import { formatTickValue } from "./chartPainterUtils";
 import type {
@@ -89,6 +90,7 @@ export function removeChartFromCache(chartId: string): void {
   pendingRenders.delete(chartId);
   chartDataCache.delete(chartId);
   clearPointSelection(chartId);
+  clearWidgetValues(chartId);
 }
 
 // ============================================================================
