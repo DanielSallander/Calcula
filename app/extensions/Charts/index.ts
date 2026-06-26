@@ -12,8 +12,11 @@ import {
   registerChartStoreService,
   loadAndInstallChartMarks,
   uninstallChartMarks,
+  registerMenuItem,
+  DialogExtensions,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
+import { ChartMarksDialog } from "./components/ChartMarksDialog";
 import { getActiveSheet } from "@api/lib";
 import {
   removeGridRegionsByType,
@@ -255,6 +258,20 @@ function activate(context: ExtensionContext): void {
     priority: 50,
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister(DATA_POINT_FORMAT_DIALOG_ID));
+
+  // Chart Marks manager (B8.D.3): author sandboxed custom chart types.
+  const CHART_MARKS_DIALOG_ID = "chart:marksManager";
+  context.ui.dialogs.register({
+    id: CHART_MARKS_DIALOG_ID,
+    component: ChartMarksDialog,
+    priority: 110,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CHART_MARKS_DIALOG_ID));
+  registerMenuItem("insert", {
+    id: "insert:chartMarks",
+    label: "Custom Chart Marks...",
+    action: () => DialogExtensions.openDialog(CHART_MARKS_DIALOG_ID, {}),
+  });
 
   // Register axis context menu overlay
   const AXIS_CONTEXT_MENU_ID = "chart:axisContextMenu";
