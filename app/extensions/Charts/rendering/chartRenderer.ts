@@ -596,6 +596,7 @@ async function renderChartAsync(
   version: number,
 ): Promise<void> {
   pendingRenders.add(chartId);
+  let superseded = false;
 
   try {
     const chart = getChartById(chartId);
@@ -613,9 +614,15 @@ async function renderChartAsync(
     const spec = resolved.spec;
     const unfilteredData = resolved.unfilteredData;
 
-    // Check if version is still current (might have changed during async fetch)
+    // Check if version is still current (might have changed during async fetch).
+    // If a newer version superseded this render, flag it so finally re-requests a
+    // redraw — otherwise the latest version would never paint until an unrelated
+    // refresh re-enters the scheduler.
     const currentVersion = chartVersions.get(chartId) ?? 0;
-    if (currentVersion !== version) return;
+    if (currentVersion !== version) {
+      superseded = true;
+      return;
+    }
 
     // Create OffscreenCanvas and paint
     const offscreen = new OffscreenCanvas(pxWidth, pxHeight);
@@ -631,6 +638,12 @@ async function renderChartAsync(
     if (isPivotDataSource(spec.data)) {
       pivotFields = await fetchPivotChartFields(spec.data.pivotId);
       if (pivotFields.length === 0) pivotFields = undefined;
+      // Re-check after this second await (pivot only): a version bump here would
+      // otherwise write a stale-version cache and skip the superseded redraw.
+      if ((chartVersions.get(chartId) ?? 0) !== version) {
+        superseded = true;
+        return;
+      }
     }
 
     const layout = dispatchComputeLayout(
@@ -685,6 +698,10 @@ async function renderChartAsync(
     console.error(`[Charts] Failed to render chart ${chartId}:`, err, (err as Error)?.stack);
   } finally {
     pendingRenders.delete(chartId);
+    // Superseded mid-flight: re-request a redraw now that pendingRenders is clear
+    // so the sync render path re-enters and schedules the latest version. It only
+    // schedules when the cache is stale/missing, so this terminates (no busy-loop).
+    if (superseded) requestOverlayRedraw();
   }
 }
 

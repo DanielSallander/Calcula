@@ -6,7 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, ScatterMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { resolvePointColor, resolvePointOpacity, resolvePointSize } from "../lib/encodingResolver";
+import { resolvePointColor, resolvePointOpacity, resolvePointSize, resolveSeriesEncoding } from "../lib/encodingResolver";
 import { buildOverrideMap, getOverrideFromMap } from "../lib/dataPointOverrides";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
@@ -91,7 +91,7 @@ export function paintScatterChart(
 
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
-    const encoding = spec.series[si]?.encoding;
+    const encoding = resolveSeriesEncoding(spec, data.series[si].name);
 
     for (let ci = 0; ci < data.categories.length; ci++) {
       const value = series.values[ci] ?? 0;

@@ -5,7 +5,7 @@
 import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, BarMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
+import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding } from "../lib/encodingResolver";
 import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -195,7 +195,7 @@ function drawHorizontalBars(
     for (let si = 0; si < numSeries; si++) {
       const value = data.series[si].values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
-      const encoding = spec.series[si]?.encoding;
+      const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
       const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category, sel);
 
@@ -268,7 +268,7 @@ function drawStackedHorizontalBars(
     for (let si = 0; si < numSeries; si++) {
       const rawValue = data.series[si].values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
-      const encoding = spec.series[si]?.encoding;
+      const encoding = resolveSeriesEncoding(spec, data.series[si].name);
       const sel = { seriesName: data.series[si].name, selection: data.selection };
       const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, rawValue, category, sel);
 

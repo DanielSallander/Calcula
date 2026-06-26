@@ -3,8 +3,20 @@
 // CONTEXT: Used by chart painters to determine per-point visual properties
 //          (color, opacity, size) based on SeriesEncoding definitions.
 
-import type { ConditionalValue, ValueCondition, SeriesEncoding, ChartSelectionMap } from "../types";
+import type { ConditionalValue, ValueCondition, SeriesEncoding, ChartSelectionMap, ChartSpec } from "../types";
 import { getSeriesColor } from "../rendering/chartTheme";
+
+/**
+ * Resolve a series' conditional encoding by NAME against the (unfiltered) spec.
+ * Painters receive post-filter / post-transform data whose series indices no
+ * longer line up with spec.series (a hidden lower-index series shifts the rest;
+ * transforms rename/add/collapse series), so an index lookup mis-resolves. Name
+ * matching is identical on the 1:1 happy path and degrades to undefined (no
+ * encoding) for transform-created series — strictly better than a stale index.
+ */
+export function resolveSeriesEncoding(spec: ChartSpec, seriesName: string): SeriesEncoding | undefined {
+  return spec.series.find((s) => s.name === seriesName)?.encoding;
+}
 
 /**
  * Per-datum selection context passed to the resolvers so a condition's

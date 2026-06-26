@@ -6,7 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, BubbleMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
+import { resolvePointColor, resolvePointOpacity, resolveSeriesEncoding } from "../lib/encodingResolver";
 import { createLinearScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
@@ -110,7 +110,7 @@ export function paintBubbleChart(
   for (let si = 0; si < valueSeries.length; si++) {
     const series = valueSeries[si];
     const origIdx = data.series.indexOf(series);
-    const encoding = spec.series[origIdx]?.encoding;
+    const encoding = resolveSeriesEncoding(spec, series.name);
 
     for (let ci = 0; ci < data.categories.length; ci++) {
       const value = series.values[ci] ?? 0;
