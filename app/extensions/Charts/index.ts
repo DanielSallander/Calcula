@@ -10,7 +10,10 @@ import {
   AppEvents,
   columnToLetter,
   registerChartStoreService,
+  loadAndInstallChartMarks,
+  uninstallChartMarks,
 } from "@api";
+import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 import { getActiveSheet } from "@api/lib";
 import {
   removeGridRegionsByType,
@@ -1060,6 +1063,24 @@ function activate(context: ExtensionContext): void {
       // Ignore
     }
   };
+  // Sandboxed authored chart marks (B8.D.2): load the persisted mark library and
+  // mount+register each mark's blit shim (registerSandboxMark is supplied as the
+  // registrar — it stays in this extension since it builds Charts-internal shims).
+  // Re-run on workbook open (a freshly opened .cala may carry its own library).
+  const loadChartMarks = async () => {
+    try {
+      await loadAndInstallChartMarks(registerSandboxMark);
+      invalidateAllChartCaches();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    } catch {
+      // Ignore — a bad mark library must not break activation/open.
+    }
+  };
+  void loadChartMarks();
+  cleanupFunctions.push(
+    context.events.on(AppEvents.AFTER_OPEN, () => { void loadChartMarks(); }),
+  );
+
   cleanupFunctions.push(
     context.events.on(AppEvents.AFTER_OPEN, reloadCharts),
   );
@@ -1311,6 +1332,9 @@ function activate(context: ExtensionContext): void {
 
 function deactivate(): void {
   console.log("[Chart Extension] Unregistering...");
+
+  // Tear down authored sandboxed marks (unregister shims + unmount workers).
+  uninstallChartMarks();
 
   // Cleanup event listeners
   cleanupFunctions.forEach((fn) => fn());

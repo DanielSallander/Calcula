@@ -840,6 +840,20 @@ export {
   validateParam,
 } from "./customFunctions";
 export type { CustomFunctionUdf, CustomFunctionLibrary } from "./customFunctions";
+// Sandboxed chart marks (B8.D.2): author/persist/mount/register a chart-mark library.
+export {
+  installChartMarkLibrary,
+  uninstallChartMarks,
+  chartMarksInstalled,
+  loadPersistedMarkLibrary,
+  savePersistedMarkLibrary,
+  loadAndInstallChartMarks,
+  validateMarkId,
+  generateMarkSource,
+  markScriptId,
+  MARK_ID_PREFIX,
+} from "./chartMarkScripts";
+export type { ChartMarkScript, ChartMarkLibrary, MarkLayoutFamily, SandboxMarkRegistrar } from "./chartMarkScripts";
 // UDF evaluation bridge (Wave 3 / C1): makes registered custom functions
 // actually evaluate in worksheet formulas (broker-mediated, pre-fetched).
 export {
@@ -1587,6 +1601,7 @@ export type {
 
 export {
   registerChartMark,
+  unregisterChartMark,
   getChartMark,
   getChartMarkMeta,
   isChartMarkRegistered,

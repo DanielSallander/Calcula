@@ -59,9 +59,22 @@ export interface ChartMarkDefinition {
 
 const registry = new Map<string, ChartMarkDefinition>();
 
-/** Register (or override) a chart mark by id. Built-ins and extensions use this. */
+/** Register (or override) a chart mark by id. Built-ins and extensions use this.
+ *  REFUSES to overwrite a registered BUILT-IN mark (so an authored/sandboxed mark
+ *  can never shadow "bar"/"pie"/etc. and hijack existing charts). */
 export function registerChartMark(mark: string, def: ChartMarkDefinition): void {
+  const existing = registry.get(mark);
+  if (existing?.meta.builtin) {
+    throw new Error(`Cannot override built-in chart mark "${mark}".`);
+  }
   registry.set(mark, def);
+}
+
+/** Remove a registered (non-built-in) mark — e.g. when a sandboxed mark library is
+ *  uninstalled/edited. No-op for an unknown id; refuses to drop a built-in. */
+export function unregisterChartMark(mark: string): void {
+  if (registry.get(mark)?.meta.builtin) return;
+  registry.delete(mark);
 }
 
 /** Look up a registered mark's definition, or undefined. */
