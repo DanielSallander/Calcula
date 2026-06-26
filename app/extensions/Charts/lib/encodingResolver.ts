@@ -3,8 +3,20 @@
 // CONTEXT: Used by chart painters to determine per-point visual properties
 //          (color, opacity, size) based on SeriesEncoding definitions.
 
-import type { ConditionalValue, ValueCondition, SeriesEncoding } from "../types";
+import type { ConditionalValue, ValueCondition, SeriesEncoding, ChartSelectionMap } from "../types";
 import { getSeriesColor } from "../rendering/chartTheme";
+
+/**
+ * Per-datum selection context passed to the resolvers so a condition's
+ * `inSelection` can test membership. Optional everywhere — omitting it (as every
+ * pre-selection call site does) leaves behavior identical.
+ */
+export interface SelectionContext {
+  /** The datum's series name (for `on: "series"` selections). */
+  seriesName: string;
+  /** The chart's live point-selection state, keyed by select-param name. */
+  selection?: ChartSelectionMap;
+}
 
 // ============================================================================
 // Condition Evaluation
@@ -18,7 +30,17 @@ function evaluateCondition(
   condition: ValueCondition,
   value: number,
   category: string,
+  sel?: SelectionContext,
 ): boolean {
+  // Point-selection membership: an empty/absent selection counts as "all in"
+  // (Vega-Lite empty:true) so the chart looks normal before the first click.
+  if (condition.inSelection !== undefined) {
+    const entry = sel?.selection?.[condition.inSelection];
+    if (!entry || entry.values.length === 0) return true;
+    const key = entry.on === "series" ? sel?.seriesName ?? "" : category;
+    return entry.values.includes(key);
+  }
+
   const testValue = condition.field === "category" ? category : value;
 
   if (condition.oneOf != null) {
@@ -50,10 +72,11 @@ export function resolveConditional<T>(
   encoding: ConditionalValue<T>,
   value: number,
   category: string,
+  sel?: SelectionContext,
 ): T {
   if (typeof encoding === "object" && encoding !== null && "condition" in encoding) {
     const cond = encoding as { condition: ValueCondition; value: T; otherwise: T };
-    return evaluateCondition(cond.condition, value, category)
+    return evaluateCondition(cond.condition, value, category, sel)
       ? cond.value
       : cond.otherwise;
   }
@@ -75,9 +98,10 @@ export function resolvePointColor(
   seriesColorOverride: string | null,
   value: number,
   category: string,
+  sel?: SelectionContext,
 ): string {
   if (encoding?.color != null) {
-    return resolveConditional(encoding.color, value, category);
+    return resolveConditional(encoding.color, value, category, sel);
   }
   return getSeriesColor(palette, seriesIndex, seriesColorOverride);
 }
@@ -90,9 +114,10 @@ export function resolvePointOpacity(
   encoding: SeriesEncoding | undefined,
   value: number,
   category: string,
+  sel?: SelectionContext,
 ): number | undefined {
   if (encoding?.opacity != null) {
-    return resolveConditional(encoding.opacity, value, category);
+    return resolveConditional(encoding.opacity, value, category, sel);
   }
   return undefined;
 }
@@ -105,9 +130,10 @@ export function resolvePointSize(
   encoding: SeriesEncoding | undefined,
   value: number,
   category: string,
+  sel?: SelectionContext,
 ): number | undefined {
   if (encoding?.size != null) {
-    return resolveConditional(encoding.size, value, category);
+    return resolveConditional(encoding.size, value, category, sel);
   }
   return undefined;
 }

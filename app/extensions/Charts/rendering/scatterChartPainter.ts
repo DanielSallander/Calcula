@@ -96,9 +96,10 @@ export function paintScatterChart(
     for (let ci = 0; ci < data.categories.length; ci++) {
       const value = series.values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
-      let color = resolvePointColor(encoding, spec.palette, si, series.color, value, category);
-      const resolvedSize = resolvePointSize(encoding, value, category) ?? pointSize;
-      let pointOpacity = resolvePointOpacity(encoding, value, category);
+      const sel = { seriesName: series.name, selection: data.selection };
+      let color = resolvePointColor(encoding, spec.palette, si, series.color, value, category, sel);
+      const resolvedSize = resolvePointSize(encoding, value, category, sel) ?? pointSize;
+      let pointOpacity = resolvePointOpacity(encoding, value, category, sel);
 
       // Apply data point override
       const override = getOverrideFromMap(overrideMap, si, ci);

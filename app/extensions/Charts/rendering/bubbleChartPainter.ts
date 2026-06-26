@@ -115,8 +115,9 @@ export function paintBubbleChart(
     for (let ci = 0; ci < data.categories.length; ci++) {
       const value = series.values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
-      const color = resolvePointColor(encoding, spec.palette, origIdx, series.color, value, category);
-      const pointOpacity = resolvePointOpacity(encoding, value, category) ?? bubbleOpacity;
+      const sel = { seriesName: series.name, selection: data.selection };
+      const color = resolvePointColor(encoding, spec.palette, origIdx, series.color, value, category, sel);
+      const pointOpacity = resolvePointOpacity(encoding, value, category, sel) ?? bubbleOpacity;
 
       const x = xAxis.xOf(ci);
       const y = yScale.scale(value);

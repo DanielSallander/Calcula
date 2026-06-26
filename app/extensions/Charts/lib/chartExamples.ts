@@ -562,6 +562,33 @@ export const CHART_EXAMPLES: ChartExample[] = [
       transform: [{ type: "filter", field: "Revenue", predicate: "value > [Threshold]" }],
     },
   },
+  {
+    id: "click-to-highlight",
+    name: "Click to highlight",
+    description: "Click a bar to highlight it (others dim) via a point-selection param + conditional color. The chart looks normal until you click; click empty space to clear.",
+    category: "Interactivity",
+    spec: {
+      mark: "bar",
+      data: RANGE,
+      hasHeaders: true,
+      seriesOrientation: "columns",
+      categoryIndex: 0,
+      series: [{
+        name: "Revenue",
+        sourceIndex: 1,
+        color: null,
+        encoding: {
+          color: { condition: { field: "category", inSelection: "picked" }, value: "#4E79A7", otherwise: "#d6d6d6" },
+        },
+      }],
+      title: "Revenue (click to focus)",
+      xAxis: axis(),
+      yAxis: axis("Revenue", true),
+      legend: { visible: false, position: "bottom" },
+      palette: "default",
+      params: [{ name: "picked", select: "point", on: "category", description: "Clicked category" }],
+    },
+  },
 ];
 
 // ============================================================================

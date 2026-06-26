@@ -244,6 +244,33 @@ and the chart re-filters).
 Params resolve once per read and only affect \`filter\`/\`calculate\` expressions
 (not the legacy shorthand like \`"> 100"\` — write a full predicate to use a param).
 
+## Selection (Click to Highlight)
+
+Make a param interactive with \`select: "point"\` — clicking a datum stores the
+selection — then reference it from a **conditional encoding** via
+\`condition.inSelection\` to highlight the clicked datum (and dim the rest).
+
+\`\`\`json
+"params": [{ "name": "picked", "select": "point", "on": "category" }],
+"series": [{
+  "name": "Revenue", "sourceIndex": 1, "color": null,
+  "encoding": {
+    "color": { "condition": { "field": "category", "inSelection": "picked" },
+               "value": "#4E79A7", "otherwise": "#cccccc" }
+  }
+}]
+\`\`\`
+
+- **select** \`"point"\` arms click-to-select; **on** chooses what a click keys on:
+  the datum's \`"category"\` label (default) or its \`"series"\`.
+- **condition.inSelection** names the select param. An **empty selection counts
+  as all-in**, so the chart looks normal until the first click; clicking a datum
+  then shows only it in the highlight \`value\` and the rest in \`otherwise\`.
+- Click empty chart space to clear. The selection is **ephemeral** (never saved).
+
+v1: single (non-composed) charts; the chart must be selected first, then click a
+datum. Highlight-only (selection-as-filter is a later addition).
+
 ## Cell References
 
 String fields support cell references for dynamic content:

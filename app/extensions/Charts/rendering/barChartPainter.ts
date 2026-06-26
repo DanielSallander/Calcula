@@ -204,7 +204,8 @@ function drawBars(
       const value = data.series[si].values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
       const encoding = spec.series[si]?.encoding;
-      let color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category);
+      const sel = { seriesName: data.series[si].name, selection: data.selection };
+      let color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category, sel);
 
       // Apply data point override
       const override = getOverrideFromMap(overrideMap, si, ci);
@@ -222,7 +223,7 @@ function drawBars(
 
       if (clippedHeight <= 0) continue;
 
-      let pointOpacity = resolvePointOpacity(encoding, value, category);
+      let pointOpacity = resolvePointOpacity(encoding, value, category, sel);
       if (override?.opacity !== undefined) pointOpacity = override.opacity;
       if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
 
@@ -285,7 +286,8 @@ function drawStackedBars(
       let rawValue = data.series[si].values[ci] ?? 0;
       const category = data.categories[ci] ?? "";
       const encoding = spec.series[si]?.encoding;
-      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, rawValue, category);
+      const sel = { seriesName: data.series[si].name, selection: data.selection };
+      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, rawValue, category, sel);
 
       let value = rawValue;
       if (stackMode === "percentStacked" && categoryTotal > 0) {
@@ -317,7 +319,7 @@ function drawStackedBars(
 
       if (clippedHeight <= 0) continue;
 
-      const pointOpacity = resolvePointOpacity(encoding, rawValue, category);
+      const pointOpacity = resolvePointOpacity(encoding, rawValue, category, sel);
       if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
       ctx.fillStyle = color;
 

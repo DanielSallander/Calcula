@@ -294,7 +294,7 @@ describe("chartSpecJsonSchema drift guard", () => {
           sourceIndex: 1,
           color: null,
           encoding: {
-            color: { condition: { field: "value", lt: 0 }, value: "#E15759", otherwise: "#4E79A7" },
+            color: { condition: { field: "value", lt: 0, inSelection: "Picked" }, value: "#E15759", otherwise: "#4E79A7" },
             opacity: 0.9,
             size: 5,
             strokeDash: [6, 3],
@@ -361,6 +361,7 @@ describe("chartSpecJsonSchema drift guard", () => {
       params: [
         { name: "Threshold", value: 100, description: "Min revenue" },
         { name: "Region", cellRef: "=B1" },
+        { name: "Picked", select: "point", on: "category" },
       ],
     };
 

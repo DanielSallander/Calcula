@@ -23,6 +23,7 @@ import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractB
 import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
+import { clearPointSelection } from "../handlers/chartPointSelection";
 import { hitTestGeometry } from "./chartHitTesting";
 import { formatTickValue } from "./chartPainterUtils";
 import type {
@@ -87,6 +88,7 @@ export function removeChartFromCache(chartId: string): void {
   chartVersions.delete(chartId);
   pendingRenders.delete(chartId);
   chartDataCache.delete(chartId);
+  clearPointSelection(chartId);
 }
 
 // ============================================================================
@@ -555,8 +557,9 @@ async function renderChartAsync(
     // a chart for an inactive sheet would produce wrong data.
     if (chart.sheetIndex !== getActiveSheetIndex()) return;
 
-    // Fetch data from the grid and resolve cell references
-    const resolved = await readChartDataResolved(chart.spec);
+    // Fetch data from the grid and resolve cell references. Pass chartId so the
+    // chart's live point-selection (ephemeral) is attached to the parsed data.
+    const resolved = await readChartDataResolved(chart.spec, 0, chartId);
     const data = resolved.data;
     const spec = resolved.spec;
     const unfilteredData = resolved.unfilteredData;

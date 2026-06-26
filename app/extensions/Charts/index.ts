@@ -82,7 +82,16 @@ import {
   getActivePopup,
   type QuickAccessButtonType,
 } from "./rendering/quickAccessButtons";
-import { hitTestBarChart } from "./rendering/chartHitTesting";
+import { hitTestBarChart, hitTestGeometry } from "./rendering/chartHitTesting";
+import {
+  setPointSelection,
+  clearPointSelection,
+  clearAllPointSelections,
+  pointSelectionKey,
+  buildPointSelection,
+  isDataHit,
+  SELECTION_SUPPORTED_MARKS,
+} from "./handlers/chartPointSelection";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource } from "./types";
 import type { PivotChartFieldButton } from "./types";
@@ -698,6 +707,28 @@ function activate(context: ExtensionContext): void {
       }
     }
 
+    // Interactive point-selection (C5): if this chart declares a select:'point'
+    // param AND its mark highlights via data.selection, a click sets/clears the
+    // ephemeral selection (highlight via the chart's conditional encoding)
+    // instead of advancing the editor sub-selection. Gated so other charts keep
+    // the existing behavior byte-identical.
+    const clickedChart = getChartById(click.chartId);
+    const selectParam = clickedChart?.spec.params?.find((p) => p.select === "point");
+    if (selectParam && clickedChart && SELECTION_SUPPORTED_MARKS.has(clickedChart.spec.mark)) {
+      const on = selectParam.on ?? "category";
+      const hit = hitTestGeometry(local.localX, local.localY, cachedData.hitGeometry, cachedData.layout);
+      // hitTestGeometry always returns an object — only a real datum sets a
+      // selection; a background/axis click clears it (back to all-highlighted).
+      if (isDataHit(hit)) {
+        setPointSelection(click.chartId, buildPointSelection(selectParam.name, on, pointSelectionKey(hit, on)));
+      } else {
+        clearPointSelection(click.chartId);
+      }
+      invalidateChartCache(click.chartId);
+      context.events.emit(AppEvents.GRID_REFRESH);
+      return;
+    }
+
     const hitResult = hitTestBarChart(local.localX, local.localY, cachedData.barRects, cachedData.layout);
     advanceSelection(click.chartId, hitResult);
     emitChartSelectionEvent();
@@ -707,6 +738,8 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
   });
+  // Drop ephemeral point-selection state on deactivation (no leak across reloads).
+  cleanupFunctions.push(() => clearAllPointSelections());
 
   // -----------------------------------------------------------------------
   // Right-click context menu for chart elements (axes)
@@ -808,6 +841,9 @@ function activate(context: ExtensionContext): void {
       setActiveSheetIndex(idx);
       deselectChart();
       emitChartSelectionEvent();
+      // Drop ephemeral point-selections on file open/new so they don't survive
+      // into a freshly loaded workbook (kept across plain cell edits).
+      clearAllPointSelections();
       invalidateAllChartCaches();
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);

@@ -22,6 +22,7 @@ import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransforms } from "./chartTransforms";
 import { resolveParams } from "./chartParams";
+import { getPointSelection } from "../handlers/chartPointSelection";
 import type { FormulaValue } from "./chartFormula";
 import { readPivotChartData } from "./pivotChartDataReader";
 import { applyChartFilters } from "./chartFilters";
@@ -51,7 +52,7 @@ export async function readChartData(spec: ChartSpec): Promise<ParsedChartData> {
  * Use this when you need the resolved spec for rendering (e.g., "=A1" in title
  * resolves to the cell value).
  */
-export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise<{
+export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?: string): Promise<{
   spec: ChartSpec;
   data: ParsedChartData;
   /** Data before chart filters applied (for filter dropdown to show all options). */
@@ -81,6 +82,11 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
   // filter/calculate expression scopes below. Empty map when none are declared.
   const params = await resolveParams(resolvedSpec);
 
+  // Live point-selection (ephemeral) for THIS chart, attached to the returned
+  // data so conditional encoding's `inSelection` can highlight. Only the top-
+  // level grid chart has a chartId; previews/export/concat children get none.
+  const selection = chartId ? getPointSelection(chartId) : undefined;
+
   // Handle pivot data source: read directly from pivot view
   if (isPivotDataSource(resolvedSpec.data)) {
     let parsedData = await readPivotChartData(resolvedSpec.data);
@@ -97,7 +103,13 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
     // Apply chart filters (hide series/categories)
     parsedData = applyChartFilters(parsedData, resolvedSpec.filters);
 
-    return { spec: resolvedSpec, data: withCategoryField(parsedData), unfilteredData, diagnostics };
+    const pivotData = withCategoryField(parsedData);
+    return {
+      spec: resolvedSpec,
+      data: selection ? { ...pivotData, selection } : pivotData,
+      unfilteredData,
+      diagnostics,
+    };
   }
 
   // Standard cell range data source
@@ -166,10 +178,12 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0): Promise
     ? partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params)
     : undefined;
 
-  const finalData = withCategoryField(parsedData);
+  let finalData = withCategoryField(parsedData);
+  if (facets) finalData = { ...finalData, facets };
+  if (selection) finalData = { ...finalData, selection };
   return {
     spec: lowered,
-    data: facets ? { ...finalData, facets } : finalData,
+    data: finalData,
     unfilteredData,
     diagnostics,
   };

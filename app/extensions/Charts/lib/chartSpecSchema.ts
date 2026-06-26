@@ -297,6 +297,10 @@ export const chartSpecJsonSchema: object = {
           items: { oneOf: [{ type: "string" }, { type: "number" }] },
           description: "Match if value/category is one of these values.",
         },
+        inSelection: {
+          type: "string",
+          description: "True when the datum is in the named point-selection param (an empty selection counts as all-in). When set, other comparisons are ignored.",
+        },
       },
       additionalProperties: false,
     },
@@ -1029,6 +1033,8 @@ export const chartSpecJsonSchema: object = {
         value: { type: ["number", "string", "boolean"], description: "Literal default value (used when there is no cellRef or the cell is empty)." },
         cellRef: { type: "string", description: "Single same-sheet cell reference (e.g. \"=B1\") read live for the value." },
         description: { type: "string", description: "Optional human description." },
+        select: { type: "string", enum: ["point"], description: "Makes this an interactive selection param: 'point' = clicking a datum sets it. Reference via a condition's inSelection to highlight." },
+        on: { type: "string", enum: ["category", "series"], description: "What a click selects on: the datum's category label (default) or series." },
       },
       additionalProperties: false,
     },
@@ -1580,6 +1586,7 @@ export function generateSpecReference(): string {
   lines.push("| gte | number | Greater than or equal |");
   lines.push("| lte | number | Less than or equal |");
   lines.push("| oneOf | array | Match if value/category is in list |");
+  lines.push("| inSelection | string | True when the datum is in the named point-selection param (empty selection = all-in); other comparisons ignored |");
   lines.push("");
   lines.push("Example: Color bars red for negative values, blue for positive:");
   lines.push("```json");

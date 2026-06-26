@@ -561,7 +561,21 @@ export interface ValueCondition {
   lte?: number;
   /** Value is one of these. */
   oneOf?: (string | number)[];
+  /**
+   * True when the datum is in the named point-selection param (see
+   * {@link ParamSpec.select}). An empty/absent selection counts as "all in"
+   * (Vega-Lite empty:true) so the chart looks normal before the first click and
+   * dims only after. When set, the other comparison fields are ignored.
+   */
+  inSelection?: string;
 }
+
+/**
+ * The live point-selection state for a chart, keyed by the select-param name:
+ * which category/series labels the user has clicked. Ephemeral — carried on
+ * {@link ParsedChartData}, never persisted to the spec.
+ */
+export type ChartSelectionMap = Record<string, { on: "category" | "series"; values: string[] }>;
 
 // ============================================================================
 // Axis & Legend
@@ -1120,6 +1134,15 @@ export interface ParamSpec {
   cellRef?: string;
   /** Optional human description (for the editor / documentation). */
   description?: string;
+  /**
+   * Makes this an interactive selection param: "point" = clicking a datum sets
+   * the selection. Reference it from a conditional encoding via
+   * {@link ValueCondition.inSelection} to highlight the clicked datum. The
+   * selection's live value is ephemeral (not persisted); only this definition is.
+   */
+  select?: "point";
+  /** What a click selects on: the datum's "category" label (default) or "series". */
+  on?: "category" | "series";
 }
 
 export interface EncodingSpec {
@@ -1293,6 +1316,13 @@ export interface ParsedChartData {
    * charts by chartDispatch. Present only when `spec.concat` has children.
    */
   concat?: Array<{ spec: ChartSpec; data: ParsedChartData }>;
+  /**
+   * Live point-selection state (which categories/series the user has clicked),
+   * keyed by select-param name. Read by conditional encoding's `inSelection`.
+   * Populated from the ephemeral selection store at read time for the grid chart;
+   * absent for previews/export. Never persisted.
+   */
+  selection?: ChartSelectionMap;
 }
 
 /**
