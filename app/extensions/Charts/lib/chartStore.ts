@@ -12,6 +12,7 @@ import {
 import { invokeBackend } from "@api/backend";
 
 import type { ChartDefinition, ChartSpec } from "../types";
+import { validateChartSpec } from "./chartSpecValidate";
 
 // ============================================================================
 // Backend Types
@@ -150,6 +151,20 @@ export async function loadChartsFromBackend(): Promise<void> {
     charts = entries.map(fromEntry);
     // Set the display-name counter past the number of existing charts
     nextChartNumber = charts.length + 1;
+    // Advisory schema check: a persisted chart authored by an older app build (or
+    // by a script/AI before the broker write-path gate landed) may carry keys the
+    // schema no longer accepts. We WARN rather than drop — dropping a chart that
+    // still renders fine would be a worse regression than a stale key. The broker
+    // write path (validateChartSpec) gates new writes; this is a load-time canary.
+    for (const chart of charts) {
+      const violations = validateChartSpec(chart.spec);
+      if (violations.length > 0) {
+        console.warn(
+          `[Charts] Chart "${chart.name}" (${chart.chartId}) has ${violations.length} schema violation(s); ` +
+            `rendering anyway. First: ${violations[0]}`,
+        );
+      }
+    }
   } catch {
     // If backend call fails (e.g., fresh app), start with empty store
     charts = [];

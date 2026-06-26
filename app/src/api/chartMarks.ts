@@ -38,6 +38,13 @@ export interface ChartMarkMeta {
    * canvas/DOM access. Built-in + in-process custom marks leave this unset.
    */
   sandboxed?: boolean;
+  /**
+   * Optional explicit Y domain `[min, max]` a sandboxed cartesian mark declares so
+   * the HOST-drawn Y axis (ticks/labels) aligns with the values the worker maps
+   * into the plot. Absent → the host uses the data's extent. Ignored for radial
+   * marks. (Feature 2: full host-drawn chrome for sandboxed marks.)
+   */
+  yDomain?: [number, number];
 }
 
 /**

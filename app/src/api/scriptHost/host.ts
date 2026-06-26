@@ -37,6 +37,7 @@ import {
   getBitmap,
   invalidateBitmap,
   invalidateSlicerBitmaps,
+  sanitizeSandboxGeometry,
 } from "./renderCache";
 import { ALLOWLIST } from "./allowlist";
 import {
@@ -153,7 +154,7 @@ interface MountedWorker {
   /** Pending render-cell batches. */
   pendingRenderCells: Map<number, { resolve: (styles: (StyleOverride | null)[] | null) => void; timer: number }>;
   /** Pending bitmap draws, keyed by reqId. */
-  pendingRenderDraws: Map<number, { key: string; timer: number }>;
+  pendingRenderDraws: Map<number, { key: string; timer: number; w: number; h: number }>;
   /** In-flight bitmap request keys (single-flight per key). */
   drawsInFlight: Set<string>;
   /** Pending relayed methodCalls. */
@@ -397,7 +398,16 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
           mw.drawsInFlight.delete(pending.key);
           if (msg.bitmap) {
             const [kind, key] = pending.key.split("|", 2) as ["shape" | "slicerItem" | "chartMark", string];
-            storeBitmap(kind, key, { bitmap: msg.bitmap, w: msg.bitmap.width, h: msg.bitmap.height, dpr: 1 });
+            // chartMark renderers may return per-datum hit geometry in LOGICAL plot
+            // coords. It is UNTRUSTED — sanitize (finite, clamp to the LOGICAL plot
+            // size, cap count) before caching it for the Charts shim's hit-testing.
+            // Clamp to pending.w/h (logical), NOT msg.bitmap.width/height (physical =
+            // dpr-inflated) — else the out-of-plot clamp breaks on HiDPI displays.
+            const geometry =
+              kind === "chartMark" && msg.hitGeometry
+                ? sanitizeSandboxGeometry(msg.hitGeometry, pending.w, pending.h)
+                : undefined;
+            storeBitmap(kind, key, { bitmap: msg.bitmap, w: msg.bitmap.width, h: msg.bitmap.height, dpr: 1, geometry });
           }
         }
         break;
@@ -1920,6 +1930,9 @@ function requestDraw(mw: MountedWorker, target: RenderDrawTarget, w: number, h: 
     mw.pendingRenderDraws.delete(reqId);
     mw.drawsInFlight.delete(flightKey);
   }, RENDER_TIMEOUT_MS) as unknown as number;
-  mw.pendingRenderDraws.set(reqId, { key: flightKey, timer });
+  // Remember the LOGICAL request size — the worker renders at w*dpr physical px but
+  // returns hit geometry in LOGICAL plot coords, so geometry must be clamped to the
+  // logical size (NOT msg.bitmap.width/height, which is physical and dpr-inflated).
+  mw.pendingRenderDraws.set(reqId, { key: flightKey, timer, w, h });
   post(mw, { t: "renderDraw", reqId, target, w, h, dpr });
 }

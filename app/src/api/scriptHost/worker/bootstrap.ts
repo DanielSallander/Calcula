@@ -7,7 +7,7 @@
 //          an RPC the host's broker checks; the CSP pins its network reach.
 /// <reference lib="webworker" />
 
-import type { H2W, W2H, MountSpec, RenderCellRequest, RenderDrawTarget } from "../protocol";
+import { MAX_SANDBOX_HIT_RECTS, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
 import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, type WorkerRuntime } from "./contextShims";
 import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
 
@@ -148,6 +148,7 @@ function handleRenderDraw(reqId: number, target: RenderDrawTarget, w: number, h:
       return;
     }
     ctx.scale(dpr, dpr);
+    let hitGeometry: SandboxHitGeometry | null = null;
     if (target.kind === "shape") {
       // Unchanged user signature: (ctx, bounds). Bounds are local — the
       // host blits inside its own save/translate/clip, so scripts can never
@@ -157,13 +158,23 @@ function handleRenderDraw(reqId: number, target: RenderDrawTarget, w: number, h:
       // Chart mark renderer — signature (ctx, paintContext, bounds). Bounds are
       // LOCAL (origin 0,0, sized to the plot area); the host clips+blits into the
       // chart's plot rectangle, so the mark can only paint its own plot pixels.
-      (renderer as (c: unknown, p: unknown, b: unknown) => void)(ctx, target.item, { x: 0, y: 0, width: w, height: h });
+      // It MAY return { rects: [...] } hit geometry (local coords) — the host
+      // sanitizes it before trusting it. safeClone strips functions/cycles.
+      const ret = (renderer as (c: unknown, p: unknown, b: unknown) => unknown)(ctx, target.item, { x: 0, y: 0, width: w, height: h });
+      if (ret && typeof ret === "object" && Array.isArray((ret as { rects?: unknown }).rects)) {
+        // Cap BEFORE safeClone (structuredClone) + postMessage so a hostile/buggy
+        // mark returning a giant array can't force a multi-hundred-MB clone or pin
+        // the host scanning it — the host caps OUTPUT, but only after the payload
+        // crossed; this caps the INPUT in the sandbox container itself.
+        const rects = (ret as { rects: unknown[] }).rects.slice(0, MAX_SANDBOX_HIT_RECTS);
+        hitGeometry = safeClone({ rects }) as SandboxHitGeometry;
+      }
     } else {
       // Slicer item renderer — unchanged user signature: (item, ctx, bounds).
       (renderer as (i: unknown, c: unknown, b: unknown) => void)(target.item, ctx, { x: 0, y: 0, width: w, height: h });
     }
     const bitmap = canvas.transferToImageBitmap();
-    post({ t: "renderDrawResult", reqId, bitmap }, [bitmap]);
+    post({ t: "renderDrawResult", reqId, bitmap, hitGeometry }, [bitmap]);
   } catch (err) {
     post({ t: "error", hook, message: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
     post({ t: "renderDrawResult", reqId, bitmap: null });

@@ -12,11 +12,14 @@ import {
   registerChartStoreService,
   loadAndInstallChartMarks,
   uninstallChartMarks,
+  loadAndInstallChartTransforms,
+  uninstallChartTransforms,
   registerMenuItem,
   DialogExtensions,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 import { ChartMarksDialog } from "./components/ChartMarksDialog";
+import { ChartTransformsDialog } from "./components/ChartTransformsDialog";
 import { getActiveSheet } from "@api/lib";
 import {
   removeGridRegionsByType,
@@ -271,6 +274,20 @@ function activate(context: ExtensionContext): void {
     id: "insert:chartMarks",
     label: "Custom Chart Marks...",
     action: () => DialogExtensions.openDialog(CHART_MARKS_DIALOG_ID, {}),
+  });
+
+  // Chart Transforms manager (Feature 1): author sandboxed custom data transforms.
+  const CHART_TRANSFORMS_DIALOG_ID = "chart:transformsManager";
+  context.ui.dialogs.register({
+    id: CHART_TRANSFORMS_DIALOG_ID,
+    component: ChartTransformsDialog,
+    priority: 110,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CHART_TRANSFORMS_DIALOG_ID));
+  registerMenuItem("insert", {
+    id: "insert:chartTransforms",
+    label: "Custom Chart Transforms...",
+    action: () => DialogExtensions.openDialog(CHART_TRANSFORMS_DIALOG_ID, {}),
   });
 
   // Register axis context menu overlay
@@ -1098,6 +1115,24 @@ function activate(context: ExtensionContext): void {
     context.events.on(AppEvents.AFTER_OPEN, () => { void loadChartMarks(); }),
   );
 
+  // Sandboxed authored chart transforms (Feature 1): load + mount the persisted
+  // transform library so the data reader can route spec.transform[] of a mounted
+  // sandbox type through the worker. Re-run on open (a freshly opened .cala may
+  // carry its own library); invalidate so charts re-read through the new transforms.
+  const loadChartTransforms = async () => {
+    try {
+      await loadAndInstallChartTransforms();
+      invalidateAllChartCaches();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    } catch {
+      // Ignore — a bad transform library must not break activation/open.
+    }
+  };
+  void loadChartTransforms();
+  cleanupFunctions.push(
+    context.events.on(AppEvents.AFTER_OPEN, () => { void loadChartTransforms(); }),
+  );
+
   cleanupFunctions.push(
     context.events.on(AppEvents.AFTER_OPEN, reloadCharts),
   );
@@ -1352,6 +1387,8 @@ function deactivate(): void {
 
   // Tear down authored sandboxed marks (unregister shims + unmount workers).
   uninstallChartMarks();
+  // Tear down authored sandboxed transforms (unmount the transform-library worker).
+  uninstallChartTransforms();
 
   // Cleanup event listeners
   cleanupFunctions.forEach((fn) => fn());

@@ -4,7 +4,7 @@
 //          data range, then organizes it into categories and numeric series.
 
 import { getViewportCells } from "@api/lib";
-import { indexToCol } from "@api";
+import { indexToCol, isSandboxTransformMounted, runSandboxTransform } from "@api";
 
 import type {
   ChartSpec,
@@ -20,7 +20,7 @@ import type {
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
-import { applyTransforms } from "./chartTransforms";
+import { applyTransforms, applyTransformsAsync, type SandboxTransformRunner } from "./chartTransforms";
 import { resolveParams, selectionFilterCategories, applyAxisParamBindings } from "./chartParams";
 import { getPointSelection } from "../handlers/chartPointSelection";
 import type { FormulaValue } from "./chartFormula";
@@ -28,6 +28,24 @@ import { readPivotChartData } from "./pivotChartDataReader";
 import { applyChartFilters, applySelectionKeep } from "./chartFilters";
 import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
 import { lowerEncoding } from "./lowerEncoding";
+
+// ============================================================================
+// Sandboxed-transform routing
+// ============================================================================
+
+/**
+ * Routes a transform step to a mounted SANDBOXED transform (Feature 1), or returns
+ * null so the (sync) pipeline handles it. The named-params Map is converted to a
+ * plain object so it structured-clones cleanly into the worker; the result is
+ * validated by applyTransformsAsync before it flows on. Stateless — one shared
+ * instance is reused across reads.
+ */
+const sandboxTransformRunner: SandboxTransformRunner = (type, data, transform, params) => {
+  if (!isSandboxTransformMounted(type)) return null;
+  const paramsObj: Record<string, unknown> = {};
+  if (params) for (const [k, v] of params) paramsObj[k] = v;
+  return runSandboxTransform(type, data, transform, paramsObj) as Promise<ParsedChartData>;
+};
 
 // ============================================================================
 // Public API
@@ -98,9 +116,10 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
-      // Pre-resolve lookup sources (async) so the sync pipeline can join by index.
+      // Pre-resolve lookup sources (async) so the pipeline can join by index.
       const lookupData = await resolveLookupSources(resolvedSpec.transform);
-      parsedData = applyTransforms(parsedData, resolvedSpec.transform, diagnostics, lookupData, undefined, params);
+      // Async pipeline: sandboxed transforms await IN ORDER; built-ins/in-process run sync.
+      parsedData = await applyTransformsAsync(parsedData, resolvedSpec.transform, sandboxTransformRunner, diagnostics, lookupData, undefined, params);
     }
 
     const unfilteredData = parsedData;
@@ -173,8 +192,9 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
 
   // Apply data transforms if specified. Lookups are resolved against the lowered
   // transforms so encoding (which may prepend a pivot) keeps indices aligned.
+  // Async pipeline: sandboxed transforms await IN ORDER; built-ins/in-process run sync.
   if (lowered.transform && lowered.transform.length > 0) {
-    parsedData = applyTransforms(parsedData, lowered.transform, diagnostics, lookupData, tidyData, params);
+    parsedData = await applyTransformsAsync(parsedData, lowered.transform, sandboxTransformRunner, diagnostics, lookupData, tidyData, params);
   }
 
   const unfilteredData = parsedData;
@@ -366,6 +386,10 @@ export function partitionByFacet(
     let parsed = parseColumnOriented(subGrid, subRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
     if (lowered.transform && lowered.transform.length > 0) {
       const subTidy = buildTidyData(subGrid, subRows, numCols, hasHeaders, orientation);
+      // SYNC pipeline per panel: built-ins + in-process custom transforms only.
+      // SANDBOXED transforms can't run here (panel partitioning is sync); a faceted
+      // spec that references one degrades to an "Unknown transform" diagnostic in
+      // this throwaway sink rather than blocking every panel (v1 limit).
       parsed = applyTransforms(parsed, lowered.transform, sink, lookupData, subTidy, params);
     }
     // NOTE: chart filters (hiddenCategories/hiddenSeries) are POSITIONAL indices

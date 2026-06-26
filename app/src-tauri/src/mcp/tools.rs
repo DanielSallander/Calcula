@@ -187,7 +187,28 @@ pub fn get_sheet_summary(
         }
     }
 
-    Ok(serialize_for_ai(&sheet_inputs, &options))
+    let mut summary = serialize_for_ai(&sheet_inputs, &options);
+    // Release the sheet-data locks before touching the (unrelated) charts lock.
+    drop(sheet_inputs);
+    drop(active_grid);
+    drop(grids);
+    drop(styles);
+    drop(sheet_names);
+
+    // Fold in a chart inventory so the AI knows what charts exist (mirrors how
+    // list_charts renders them). Appended at the MCP host layer — the pure
+    // calcula-format crate stays chart-blind. Guard the char budget: the crate's
+    // budget stops at its boundary, so a host append must not blow past max_chars.
+    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    if !charts.is_empty() {
+        let section = format!("\n\n## Charts\n{}", format_chart_inventory(&charts));
+        let limit = max_chars as usize;
+        if limit == 0 || summary.len() + section.len() <= limit {
+            summary.push_str(&section);
+        }
+    }
+
+    Ok(summary)
 }
 
 /// Apply formatting to a range of cells.
@@ -289,16 +310,11 @@ fn compact_chart_data(data: &serde_json::Value) -> String {
     }
 }
 
-/// List every chart in the workbook with its id, name, sheet, mark, and data
-/// range — so an AI client can discover charts before reading or editing one.
-/// Read-only: no script-security gate (MCP transport auth already applies).
-pub fn list_charts(handle: &AppHandle) -> Result<String, String> {
-    let state = handle.state::<AppState>();
-    let charts = state.charts.lock().map_err(|e| e.to_string())?;
-    if charts.is_empty() {
-        return Ok("(no charts in this workbook)".to_string());
-    }
-    let mut out = String::from("Charts in this workbook:\n");
+/// One inventory line per chart (id, name, sheet, mark, data range), defensively
+/// parsed from the opaque spec_json. Shared by list_charts AND the AI workbook
+/// summary so the two surfaces can never drift. Returns the lines (no header).
+fn format_chart_inventory(charts: &[ChartEntry]) -> String {
+    let mut out = String::new();
     for entry in charts.iter() {
         let def: serde_json::Value =
             serde_json::from_str(&entry.spec_json).unwrap_or(serde_json::Value::Null);
@@ -317,6 +333,20 @@ pub fn list_charts(handle: &AppHandle) -> Result<String, String> {
             entry.id, name, entry.sheet_index, mark, data
         ));
     }
+    out
+}
+
+/// List every chart in the workbook with its id, name, sheet, mark, and data
+/// range — so an AI client can discover charts before reading or editing one.
+/// Read-only: no script-security gate (MCP transport auth already applies).
+pub fn list_charts(handle: &AppHandle) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    if charts.is_empty() {
+        return Ok("(no charts in this workbook)".to_string());
+    }
+    let mut out = String::from("Charts in this workbook:\n");
+    out.push_str(&format_chart_inventory(&charts));
     out.push_str("\nUse get_chart(chartId) for a chart's full spec.");
     Ok(out)
 }
@@ -569,5 +599,37 @@ mod tests {
         let rendered = compact_chart_data(&obj);
         assert!(rendered.contains("sheetIndex"));
         assert!(rendered.starts_with('{'));
+    }
+
+    fn entry(spec_json: &str, sheet: usize) -> ChartEntry {
+        ChartEntry {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            sheet_index: sheet,
+            spec_json: spec_json.to_string(),
+        }
+    }
+
+    #[test]
+    fn chart_inventory_renders_each_entry_and_tolerates_malformed_json() {
+        let charts = vec![
+            entry(r#"{"name":"Revenue","spec":{"mark":"bar","data":"Sheet1!A1:D13"}}"#, 0),
+            entry("{ not valid json", 2),
+        ];
+        let out = format_chart_inventory(&charts);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("name=\"Revenue\""));
+        assert!(lines[0].contains("mark=bar"));
+        assert!(lines[0].contains("data=Sheet1!A1:D13"));
+        assert!(lines[0].contains("sheet=0"));
+        // Malformed spec_json -> defensive fallbacks, no panic.
+        assert!(lines[1].contains("name=\"(unnamed)\""));
+        assert!(lines[1].contains("mark=?"));
+        assert!(lines[1].contains("sheet=2"));
+    }
+
+    #[test]
+    fn chart_inventory_is_empty_for_no_charts() {
+        assert_eq!(format_chart_inventory(&[]), "");
     }
 }

@@ -71,13 +71,40 @@ export type H2W =
 /** Style override returned by cell onRender (subset the renderer consumes). */
 export type StyleOverride = Record<string, unknown>;
 
+/**
+ * One hit-testable rectangle a SANDBOXED chart mark optionally returns from its
+ * markRenderer, in LOCAL plot coordinates (origin 0,0, sized to the plot area the
+ * worker painted). Structural by design — protocol.ts must not import Charts types
+ * (Alien Rule). The host SANITIZES these (finite-check, clamp to the bitmap, cap
+ * count) before trusting them, then the Charts shim offsets them into chart space.
+ */
+export interface SandboxHitRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  seriesIndex?: number;
+  categoryIndex?: number;
+  value?: number;
+  seriesName?: string;
+  categoryName?: string;
+}
+
+/** Optional per-datum hit geometry a sandboxed mark returns alongside its bitmap. */
+export interface SandboxHitGeometry {
+  rects: SandboxHitRect[];
+}
+
+/** Hard cap on returned rects (a hostile mark can't bloat host memory/hit-tests). */
+export const MAX_SANDBOX_HIT_RECTS = 5_000;
+
 export type W2H =
   | { t: "mounted"; ok: boolean; error?: string }
   | { t: "validated"; valid: boolean; error?: string }
   | { t: "call"; callId: number; method: string; args: unknown[] }
   | { t: "hookRegistered"; hook: string }
   | { t: "renderCellsResult"; reqId: number; styles: (StyleOverride | null)[] }
-  | { t: "renderDrawResult"; reqId: number; bitmap: ImageBitmap | null }
+  | { t: "renderDrawResult"; reqId: number; bitmap: ImageBitmap | null; hitGeometry?: SandboxHitGeometry | null }
   | { t: "methodResult"; callId: number; ok: boolean; value?: unknown; error?: RpcErrorShape }
   | { t: "console"; level: "log" | "warn" | "error"; args: unknown[] }
   | { t: "error"; hook?: string; message: string; stack?: string }

@@ -12,7 +12,7 @@
 
 import { registerStyleInterceptor, type IStyleOverride } from "../styleInterceptors";
 import { AppEvents, onAppEvent } from "../events";
-import type { RenderCellRequest } from "./protocol";
+import { MAX_SANDBOX_HIT_RECTS, type RenderCellRequest, type SandboxHitGeometry, type SandboxHitRect } from "./protocol";
 
 // ============================================================================
 // Cell style cache (SWR)
@@ -231,6 +231,10 @@ interface BitmapEntry {
   w: number;
   h: number;
   dpr: number;
+  /** Sanitized per-datum hit geometry (chartMark only) in LOCAL plot coords. The
+   *  Charts shim offsets these into chart space for tooltips/selection. Absent for
+   *  shapes/slicers and for marks that return no geometry. */
+  geometry?: SandboxHitGeometry;
 }
 
 const bitmapCaches: Record<BitmapKind, Map<string, BitmapEntry>> = {
@@ -271,6 +275,58 @@ export function storeBitmap(kind: BitmapKind, key: string, entry: BitmapEntry): 
 
 export function getBitmap(kind: BitmapKind, key: string): BitmapEntry | undefined {
   return bitmapCaches[kind].get(key);
+}
+
+/** A sandboxed chart mark's cached hit geometry (local plot coords), or undefined.
+ *  Keyed by the same composite cache key the shim uses for the bitmap. */
+export function getChartMarkGeometry(key: string): SandboxHitGeometry | undefined {
+  return bitmapCaches.chartMark.get(key)?.geometry;
+}
+
+/**
+ * Sanitize hit geometry returned by a SANDBOXED (untrusted) chart mark. The mark
+ * paints in local plot coords [0..w]×[0..h]; a hostile/buggy mark could return
+ * non-finite numbers, out-of-bounds rects, or a huge array. We drop any rect with a
+ * non-finite x/y/w/h, clamp it to the bitmap bounds (so a tooltip can never hit-test
+ * outside the plot), drop zero/negative-area rects, sanitize the optional
+ * label/index/value fields, and cap the total at MAX_SANDBOX_HIT_RECTS. Pure;
+ * returns undefined when nothing survives. Lives here (not host.ts) so it is unit-
+ * testable without loading the broker/Tauri surface.
+ */
+export function sanitizeSandboxGeometry(geo: SandboxHitGeometry, w: number, h: number): SandboxHitGeometry | undefined {
+  const rectsIn = Array.isArray(geo?.rects) ? geo.rects : [];
+  const out: SandboxHitRect[] = [];
+  // Bound the INPUT scan too (not just output): the output cap alone wouldn't fire
+  // for an all-invalid array, so an array of millions of zero-area/NaN rects would
+  // pin this main-thread loop. The worker already slices to MAX before sending, so
+  // capping the scan at MAX never drops a legitimate rect — it's defense in depth.
+  const scanLimit = Math.min(rectsIn.length, MAX_SANDBOX_HIT_RECTS);
+  for (let i = 0; i < scanLimit; i++) {
+    if (out.length >= MAX_SANDBOX_HIT_RECTS) break;
+    const r = rectsIn[i];
+    if (!r || typeof r !== "object") continue;
+    const { x, y, w: rw, h: rh } = r as SandboxHitRect;
+    if (![x, y, rw, rh].every((n) => typeof n === "number" && Number.isFinite(n))) continue;
+    // Clamp to the bitmap rectangle [0..w]×[0..h].
+    const x0 = Math.min(Math.max(x, 0), w);
+    const y0 = Math.min(Math.max(y, 0), h);
+    const x1 = Math.min(Math.max(x + rw, 0), w);
+    const y1 = Math.min(Math.max(y + rh, 0), h);
+    const cw = x1 - x0;
+    const ch = y1 - y0;
+    if (cw <= 0 || ch <= 0) continue;
+    const clean: SandboxHitRect = { x: x0, y: y0, w: cw, h: ch };
+    const si = (r as SandboxHitRect).seriesIndex;
+    const ci = (r as SandboxHitRect).categoryIndex;
+    const val = (r as SandboxHitRect).value;
+    if (typeof si === "number" && Number.isFinite(si)) clean.seriesIndex = si;
+    if (typeof ci === "number" && Number.isFinite(ci)) clean.categoryIndex = ci;
+    if (typeof val === "number" && Number.isFinite(val)) clean.value = val;
+    if (typeof (r as SandboxHitRect).seriesName === "string") clean.seriesName = String((r as SandboxHitRect).seriesName).slice(0, 256);
+    if (typeof (r as SandboxHitRect).categoryName === "string") clean.categoryName = String((r as SandboxHitRect).categoryName).slice(0, 256);
+    out.push(clean);
+  }
+  return out.length > 0 ? { rects: out } : undefined;
 }
 
 /** Drop a shape's bitmap (property change, watched-cell change, resize, invalidate). */

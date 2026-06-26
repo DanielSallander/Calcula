@@ -52,6 +52,78 @@ export function applyTransforms(
   return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData, tidyData, params), data);
 }
 
+/**
+ * Deep shape guard: `out` is usable ParsedChartData — `categories[]` AND every
+ * series element `{ name:string, values[] }`. A downstream built-in/painter indexes
+ * `s.values` directly, so a malformed return must be rejected BEFORE it flows on
+ * (the throw would otherwise land OUTSIDE this pipeline step and crash the render).
+ */
+export function isValidParsedChartData(out: unknown): out is ParsedChartData {
+  const o = out as ParsedChartData | null;
+  return (
+    o != null &&
+    Array.isArray(o.categories) &&
+    Array.isArray(o.series) &&
+    o.series.every((s) => s != null && typeof s.name === "string" && Array.isArray(s.values))
+  );
+}
+
+/**
+ * Runs a SANDBOXED transform whose body lives in a worker realm, returning a
+ * Promise of the transformed data — or `null` when `type` is not a mounted sandbox
+ * transform (the pipeline then handles that step synchronously). Supplied by the
+ * reader so chartTransforms.ts stays free of the @api script-host surface.
+ */
+export type SandboxTransformRunner = (
+  type: string,
+  data: ParsedChartData,
+  transform: TransformSpec,
+  params: ReadonlyMap<string, FormulaValue> | undefined,
+) => Promise<ParsedChartData> | null;
+
+/**
+ * Async variant of {@link applyTransforms} that awaits SANDBOXED custom transforms
+ * IN PIPELINE ORDER. For each step the `runner` is consulted first: a returned
+ * Promise means the step is a sandbox transform (awaited, validated, its output
+ * flows on); `null` means the step runs synchronously via the same applyOne
+ * dispatch as {@link applyTransforms} (built-ins + the in-process custom registry).
+ * A sandbox throw or malformed return degrades to a diagnostic + the UNCHANGED
+ * input data (never crashes the render) — and crucially, awaiting in order means a
+ * `[builtin, sandbox]` pipeline feeds the builtin's OUTPUT to the sandbox step
+ * (pre-resolving against raw data would silently discard the earlier step).
+ */
+export async function applyTransformsAsync(
+  data: ParsedChartData,
+  transforms: TransformSpec[],
+  runner: SandboxTransformRunner,
+  diagnostics?: TransformDiagnostic[],
+  lookupData?: Map<number, ParsedChartData>,
+  tidyData?: TidyData,
+  params?: ReadonlyMap<string, FormulaValue>,
+): Promise<ParsedChartData> {
+  let d = data;
+  for (let i = 0; i < transforms.length; i++) {
+    const t = transforms[i];
+    const type = (t as { type?: string }).type ?? "unknown";
+    const pending = runner(type, d, t, params);
+    if (!pending) {
+      d = applyOne(d, t, i, diagnostics, lookupData, tidyData, params);
+      continue;
+    }
+    try {
+      const out = await pending;
+      if (isValidParsedChartData(out)) {
+        d = out;
+      } else {
+        report(diagnostics, i, type as TransformSpec["type"], "error", `Sandbox transform "${type}" returned invalid chart data.`);
+      }
+    } catch (e) {
+      report(diagnostics, i, type as TransformSpec["type"], "error", `Sandbox transform "${type}" failed: ${errMessage(e)}`);
+    }
+  }
+  return d;
+}
+
 // ============================================================================
 // Dispatcher
 // ============================================================================
@@ -92,16 +164,10 @@ function applyOne(
       if (custom) {
         try {
           const out = custom.apply(data, transform, { params }) as ParsedChartData;
-          // Deep shape guard: categories[] AND every series element {name, values[]}
-          // — a downstream built-in/painter indexes s.values directly, and that
-          // throw would be OUTSIDE this try/catch (next pipeline step), crashing
-          // the whole render. Reject a malformed return here instead.
-          const validShape =
-            out != null &&
-            Array.isArray(out.categories) &&
-            Array.isArray(out.series) &&
-            out.series.every((s) => s != null && typeof s.name === "string" && Array.isArray(s.values));
-          if (validShape) {
+          // Deep shape guard (see isValidParsedChartData) — a malformed return must
+          // be rejected here, else a downstream s.values index would throw OUTSIDE
+          // this try/catch and crash the whole render.
+          if (isValidParsedChartData(out)) {
             return out;
           }
           diagnostics?.push({

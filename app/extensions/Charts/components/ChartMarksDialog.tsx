@@ -40,6 +40,16 @@ function blankMark(n: number): ChartMarkScript {
   return { markId: `${MARK_ID_PREFIX}mark${n}`, label: `My Mark ${n}`, layoutFamily: "cartesian", body: SCAFFOLD_BODY, description: "" };
 }
 
+/** Build a yDomain [min,max] from the two inputs, or undefined when either side is
+ *  blank/non-finite (auto domain). Accepts string | number for each side so either
+ *  input's onChange can pass the freshly-typed value alongside the stored one. */
+function parseYDomain(min: string | number | undefined, max: string | number | undefined): [number, number] | undefined {
+  const lo = typeof min === "string" ? (min.trim() === "" ? NaN : Number(min)) : min;
+  const hi = typeof max === "string" ? (max.trim() === "" ? NaN : Number(max)) : max;
+  if (lo == null || hi == null || !Number.isFinite(lo) || !Number.isFinite(hi)) return undefined;
+  return [lo, hi];
+}
+
 function listItemStyle(active: boolean): React.CSSProperties {
   return {
     padding: "6px 8px", borderRadius: 4, cursor: "pointer", fontFamily: "monospace",
@@ -183,11 +193,31 @@ export function ChartMarksDialog(props: DialogProps): React.ReactElement | null 
                     </select>
                   </div>
                 </div>
+                {current.layoutFamily === "cartesian" && (
+                  <div style={s.row}>
+                    <label style={s.label}>Y axis domain (optional — aligns the host-drawn axis with your bars)</label>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input
+                        style={{ ...s.input, width: 110 }} type="number" placeholder="min (auto)"
+                        value={current.yDomain ? current.yDomain[0] : ""}
+                        onChange={(e) => patch({ yDomain: parseYDomain(e.target.value, current.yDomain?.[1]) })}
+                      />
+                      <span style={s.hint}>to</span>
+                      <input
+                        style={{ ...s.input, width: 110 }} type="number" placeholder="max (auto)"
+                        value={current.yDomain ? current.yDomain[1] : ""}
+                        onChange={(e) => patch({ yDomain: parseYDomain(current.yDomain?.[0], e.target.value) })}
+                      />
+                    </div>
+                    <span style={s.hint}>Leave blank to use the data extent.</span>
+                  </div>
+                )}
                 <div style={s.row}>
                   <label style={s.label}>Paint body (JavaScript — runs sandboxed, paint only)</label>
                   <textarea style={s.code} value={current.body} spellCheck={false} onChange={(e) => patch({ body: e.target.value })} />
                   <span style={s.hint}>
                     Available: <code>ctx</code> (2D context), <code>paint</code> ({"{ spec, data, layout, theme }"}), <code>b</code> ({"{ x, y, width, height }"}).
+                    Optionally <code>return {"{ rects: [{ x, y, w, h, seriesIndex, categoryIndex, value }] }"}</code> (plot-local coords) for tooltips/selection.
                   </span>
                 </div>
                 <div style={s.row}>

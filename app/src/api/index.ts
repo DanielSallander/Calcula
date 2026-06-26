@@ -854,6 +854,23 @@ export {
   MARK_ID_PREFIX,
 } from "./chartMarkScripts";
 export type { ChartMarkScript, ChartMarkLibrary, MarkLayoutFamily, SandboxMarkRegistrar } from "./chartMarkScripts";
+// Sandboxed chart transforms (Feature 1): author/persist/mount a transform library
+// + the reader-side routing (isSandboxTransformMounted / runSandboxTransform).
+export {
+  installChartTransformLibrary,
+  uninstallChartTransforms,
+  chartTransformsInstalled,
+  loadPersistedTransformLibrary,
+  savePersistedTransformLibrary,
+  loadAndInstallChartTransforms,
+  validateTransformType,
+  generateTransformSource,
+  isSandboxTransformMounted,
+  runSandboxTransform,
+  TRANSFORM_TYPE_PREFIX,
+  CHART_TRANSFORMS_SCRIPT_ID,
+} from "./chartTransformScripts";
+export type { ChartTransformScript, ChartTransformLibrary } from "./chartTransformScripts";
 // UDF evaluation bridge (Wave 3 / C1): makes registered custom functions
 // actually evaluate in worksheet formulas (broker-mediated, pre-fetched).
 export {
@@ -1559,7 +1576,8 @@ export {
   getChartMarkBitmap,
   hasChartMarkBitmapRenderer,
 } from "./scriptHost/host";
-export { getCellRenderStats } from "./scriptHost/renderCache";
+export { getCellRenderStats, getChartMarkGeometry } from "./scriptHost/renderCache";
+export type { SandboxHitGeometry, SandboxHitRect } from "./scriptHost/protocol";
 export { resolveCapabilityRequest, getGrantedOrigins, getScriptGrants, revokeCapability, recordCapabilityGrant, describeCapability } from "./scriptHost/capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./scriptHost/capabilities";
 export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./scriptHost/capabilities";

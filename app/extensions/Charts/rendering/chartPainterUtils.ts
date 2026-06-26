@@ -8,7 +8,7 @@ import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { seriesPaletteIndex } from "../lib/encodingResolver";
 import type { LinearScale, BandScale } from "./scales";
-import { createScaleFromSpec, createPointScale } from "./scales";
+import { createScaleFromSpec, createPointScale, createBandScale } from "./scales";
 import { applyFillStyle } from "./gradientFill";
 import { timeTicks } from "../lib/chartFieldTypes";
 
@@ -651,6 +651,119 @@ export function drawPlotBackground(
 ): void {
   applyFillStyle(ctx, theme.plotBackground, theme.plotBackgroundGradient, plotArea.x, plotArea.y, plotArea.width, plotArea.height);
   ctx.fillRect(plotArea.x, plotArea.y, plotArea.width, plotArea.height);
+}
+
+// ============================================================================
+// Drawing: Full Chrome (for host-drawn sandboxed marks)
+// ============================================================================
+
+/**
+ * Estimate the Y domain for a cartesian chart drawn by a SANDBOXED mark whose
+ * value→pixel mapping the host doesn't control. Honors an explicit `yDomain` hint
+ * the mark declares, then `spec.yAxis.min/max`, else the data's grouped extent
+ * (`[min(0,minVal), max(0,maxVal)]` — createScaleFromSpec injects zero for auto
+ * domains, matching the built-in bar default so a naive mark's bars line up).
+ */
+function estimateCartesianYDomain(
+  data: ParsedChartData,
+  spec: ChartSpec,
+  yDomain?: [number, number],
+): [number, number] {
+  if (yDomain && yDomain.length === 2 && Number.isFinite(yDomain[0]) && Number.isFinite(yDomain[1])) {
+    return [yDomain[0], yDomain[1]];
+  }
+  const allValues = data.series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
+  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
+  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
+  return [spec.yAxis.min ?? dataMin, spec.yAxis.max ?? dataMax];
+}
+
+/**
+ * Build the Y scale for host-drawn cartesian chrome. When the mark declares a
+ * `yDomain` hint (or the user pinned `yAxis.min/max`), the domain is honored
+ * VERBATIM — zero-injection + nice-rounding are OFF — so the host axis ticks line
+ * up with the values the worker mapped into the plot (the whole point of the hint).
+ * Without an explicit domain the data extent is used with the engine's default
+ * zero+nice (axis anchored at 0, rounded ticks), matching the built-in marks.
+ * Exported for unit testing the alignment guarantee.
+ */
+export function buildChromeYScale(
+  spec: ChartSpec,
+  data: ParsedChartData,
+  range: [number, number],
+  yDomain?: [number, number],
+): LinearScale {
+  const [yMin, yMax] = estimateCartesianYDomain(data, spec, yDomain);
+  const explicit = yDomain != null || spec.yAxis.min != null || spec.yAxis.max != null;
+  // Folding the domain into the ScaleSpec makes createScaleFromSpec treat it as an
+  // explicit domain (hasExplicitDomain) -> zero/nice default OFF, drawn verbatim.
+  return explicit
+    ? createScaleFromSpec({ ...spec.yAxis.scale, domain: [yMin, yMax] }, [yMin, yMax], range)
+    : createScaleFromSpec(spec.yAxis.scale, [yMin, yMax], range);
+}
+
+/**
+ * Draw the COMPLETE cartesian chrome (background, plot background, grid lines,
+ * axes with ticks/labels/titles, chart title, and legend) around a plot area into
+ * which a sandboxed mark's worker bitmap is later blitted. Used by the sandbox mark
+ * shim so an untrusted, opaque-bitmap mark still gets a host-owned, themed frame
+ * the user can trust — the worker only ever supplies the plot-area pixels.
+ *
+ * The X axis is the category band scale (the universal cartesian default, matching
+ * the built-in bar/column marks). `yDomain` lets the mark align its data with the
+ * host-drawn Y ticks; without it the data extent is used.
+ */
+export function drawCartesianChrome(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: ChartLayout,
+  theme: ChartRenderTheme,
+  yDomain?: [number, number],
+): void {
+  const { plotArea } = layout;
+  // Inverted range: larger values go up. Honors an explicit yDomain/min/max verbatim.
+  const yScale = buildChromeYScale(spec, data, [plotArea.y + plotArea.height, plotArea.y], yDomain);
+  const xScale = createBandScale(
+    data.categories,
+    [plotArea.x, plotArea.x + plotArea.width],
+    0.3,
+  );
+
+  drawChartBackground(ctx, layout, theme);
+  drawPlotBackground(ctx, plotArea, theme);
+  if (spec.yAxis.gridLines) {
+    drawHorizontalGridLines(ctx, yScale, plotArea, theme);
+  }
+  drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
+  if (spec.title) {
+    drawTitle(ctx, spec.title, layout, theme);
+  }
+  if (spec.legend.visible && data.series.length > 0) {
+    drawLegend(ctx, data, spec, layout, theme);
+  }
+}
+
+/**
+ * Draw the chrome for a RADIAL sandboxed mark: background, plot background, title,
+ * and a category-keyed legend. No axes (radial marks have none); the worker bitmap
+ * supplies the circular plot pixels.
+ */
+export function drawRadialChrome(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: ChartLayout,
+  theme: ChartRenderTheme,
+): void {
+  drawChartBackground(ctx, layout, theme);
+  drawPlotBackground(ctx, layout.plotArea, theme);
+  if (spec.title) {
+    drawTitle(ctx, spec.title, layout, theme);
+  }
+  if (spec.legend.visible && data.categories.length > 0) {
+    drawRadialLegend(ctx, data, spec, layout, theme);
+  }
 }
 
 // ============================================================================

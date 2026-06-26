@@ -30,9 +30,13 @@ export interface ChartMarkScript {
   /** Axis family (drives axis classification). */
   layoutFamily: MarkLayoutFamily;
   /** JS body. Has `ctx` (OffscreenCanvas 2D), `paint` ({spec,data,layout,theme}),
-   *  and `b` ({x:0,y:0,width,height} local plot bounds). */
+   *  and `b` ({x:0,y:0,width,height} local plot bounds). May `return { rects:[...] }`
+   *  (local-coord hit geometry) for per-datum tooltips/selection. */
   body: string;
   description?: string;
+  /** Optional explicit Y domain `[min,max]` so the host-drawn Y axis aligns with
+   *  the values the mark maps into the plot (cartesian only). */
+  yDomain?: [number, number];
 }
 
 /** A library of sandboxed marks, persisted with the workbook. */
@@ -46,7 +50,7 @@ export interface ChartMarkLibrary {
 export type SandboxMarkRegistrar = (
   scriptId: string,
   markId: string,
-  meta: { label: string; layoutFamily: MarkLayoutFamily },
+  meta: { label: string; layoutFamily: MarkLayoutFamily; yDomain?: [number, number] },
 ) => void;
 
 const PERSIST_SCRIPT_ID = "__calcula_chart_marks__";
@@ -149,7 +153,7 @@ async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar
     // hostMountScript resolves AFTER the worker ran setup() (which called
     // render.markRenderer -> hookRegistered), so the markRenderer hook is declared
     // and findWorkerForInstance("chartMark", scriptId) will match.
-    registrar(scriptId, markId, { label: m.label?.trim() || markId, layoutFamily: m.layoutFamily });
+    registrar(scriptId, markId, { label: m.label?.trim() || markId, layoutFamily: m.layoutFamily, yDomain: m.yDomain });
     installed.push({ markId, scriptId });
   }
 }
