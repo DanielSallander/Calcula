@@ -121,6 +121,24 @@ pub struct RunScriptParams {
     pub code: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetChartParams {
+    #[schemars(description = "The chart id (UUID) from list_charts")]
+    pub chart_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreateChartParams {
+    #[schemars(description = "The ChartSpec as a JSON object. Required: mark (e.g. \"bar\", \"line\", \"pie\"), data (a range string like \"Sheet1!A1:D13\" or a DataRangeRef {sheetIndex,startRow,startCol,endRow,endCol}), series (array; each {name, sourceIndex, color}). Common: hasHeaders, seriesOrientation (\"columns\"|\"rows\"), categoryIndex, title, xAxis/yAxis {title,gridLines,showLabels,labelAngle,min,max}, legend {visible,position}, palette. Call get_chart on an existing chart to see a full example, and get_sheet_summary for the data layout.")]
+    pub spec: serde_json::Value,
+    #[schemars(description = "Sheet index to place the chart on (0-based). Defaults to the active sheet.")]
+    #[serde(default)]
+    pub sheet_index: Option<u32>,
+    #[schemars(description = "Display name for the chart. Defaults to 'AI Chart'.")]
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -279,6 +297,54 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: run_script: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "List every chart in the workbook (id, name, sheet, mark, data range). Use this to discover charts before reading or editing one with get_chart.")]
+    async fn list_charts(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_charts");
+        match tools::list_charts(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_charts: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Get a single chart's full definition (chartId, name, placement, and ChartSpec) as JSON. Pass a chart id from list_charts. Use this to read or diff-edit a chart's spec.")]
+    async fn get_chart(
+        &self,
+        params: Parameters<GetChartParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: get_chart {}", log_summary(&p.chart_id, 80));
+        match tools::get_chart(&self.app_handle, &p.chart_id) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: get_chart: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Create a NEW chart from a ChartSpec JSON object you author. The spec is validated and the chart is persisted (and appears in the app). Requires the Script Security setting to allow execution. Tip: call list_charts/get_chart for spec examples and get_sheet_summary for the data layout before authoring.")]
+    async fn create_chart_from_spec(
+        &self,
+        params: Parameters<CreateChartParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: create_chart_from_spec (sheet={:?} name={:?})",
+            p.sheet_index, p.name
+        );
+        match tools::create_chart_from_spec(&self.app_handle, &p.spec, p.sheet_index, p.name.as_deref()) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: create_chart_from_spec: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }

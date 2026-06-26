@@ -342,6 +342,18 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
           React.createElement("strong", null, "run_script"),
           " - Execute JavaScript automation"
         ),
+        React.createElement("li", null,
+          React.createElement("strong", null, "list_charts"),
+          " - Discover charts (id, name, mark, range)"
+        ),
+        React.createElement("li", null,
+          React.createElement("strong", null, "get_chart"),
+          " - Read a chart's full spec"
+        ),
+        React.createElement("li", null,
+          React.createElement("strong", null, "create_chart_from_spec"),
+          " - Create a chart from a spec"
+        ),
       ),
     ),
   );

@@ -2,8 +2,9 @@
 //! Tool helper functions that operate on AppState via the Tauri AppHandle.
 //! Each function reads/writes the spreadsheet state and returns a text result.
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use crate::AppState;
+use crate::api_types::ChartEntry;
 use crate::format_cell_value;
 use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use super::server::ApplyFormattingParams;
@@ -275,6 +276,150 @@ pub fn apply_cell_formatting(
     ))
 }
 
+// ============================================================================
+// Charts (B8 slices B + C)
+// ============================================================================
+
+/// Render a chart's `data` field compactly for the listing (a range string like
+/// "Sheet1!A1:D13", or compact JSON for a DataRangeRef / pivot source).
+fn compact_chart_data(data: &serde_json::Value) -> String {
+    match data {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// List every chart in the workbook with its id, name, sheet, mark, and data
+/// range — so an AI client can discover charts before reading or editing one.
+/// Read-only: no script-security gate (MCP transport auth already applies).
+pub fn list_charts(handle: &AppHandle) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    if charts.is_empty() {
+        return Ok("(no charts in this workbook)".to_string());
+    }
+    let mut out = String::from("Charts in this workbook:\n");
+    for entry in charts.iter() {
+        let def: serde_json::Value =
+            serde_json::from_str(&entry.spec_json).unwrap_or(serde_json::Value::Null);
+        let name = def.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
+        let spec = def.get("spec");
+        let mark = spec
+            .and_then(|s| s.get("mark"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let data = spec
+            .and_then(|s| s.get("data"))
+            .map(compact_chart_data)
+            .unwrap_or_else(|| "?".to_string());
+        out.push_str(&format!(
+            "- id={} name=\"{}\" sheet={} mark={} data={}\n",
+            entry.id, name, entry.sheet_index, mark, data
+        ));
+    }
+    out.push_str("\nUse get_chart(chartId) for a chart's full spec.");
+    Ok(out)
+}
+
+/// Return a single chart's full stored definition (chartId, name, placement, and
+/// the ChartSpec) as pretty JSON, so an AI client can reason about or diff-edit
+/// it. Read-only.
+pub fn get_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    let entry = charts
+        .iter()
+        .find(|c| c.id.to_string() == chart_id)
+        .ok_or_else(|| format!("No chart with id '{}'. Use list_charts to see available ids.", chart_id))?;
+    let def: serde_json::Value =
+        serde_json::from_str(&entry.spec_json).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&def).map_err(|e| e.to_string())
+}
+
+/// Structural backstop for an AI-authored ChartSpec. The authoritative draft-07
+/// schema lives in the TypeScript Charts extension (Rust can't import it); the AI
+/// is grounded by the tool description + get_chart examples, and this rejects the
+/// obvious garbage (non-object, missing mark/data/series, oversized).
+fn validate_chart_spec_core(spec: &serde_json::Value) -> Result<(), String> {
+    let obj = spec.as_object().ok_or("spec must be a JSON object")?;
+    match obj.get("mark").and_then(|v| v.as_str()) {
+        Some(m) if !m.trim().is_empty() => {}
+        _ => return Err("spec.mark must be a non-empty string (e.g. \"bar\", \"line\", \"pie\")".to_string()),
+    }
+    match obj.get("data") {
+        Some(v) if !v.is_null() => {}
+        _ => return Err("spec.data is required (a range string like \"Sheet1!A1:D13\" or a DataRangeRef object)".to_string()),
+    }
+    match obj.get("series") {
+        Some(v) if v.is_array() => {}
+        _ => return Err("spec.series must be an array (one entry per data series)".to_string()),
+    }
+    if spec.to_string().len() > 2_000_000 {
+        return Err("spec too large (max 2 MB)".to_string());
+    }
+    Ok(())
+}
+
+/// Create a NEW chart from an AI-authored ChartSpec. Validates the spec's core
+/// shape, gates on the same script-security setting as run_script (a mutation;
+/// refuses headless when the setting is 'disabled' or 'prompt'), persists it with
+/// an undo snapshot, and asks the frontend to reload charts so it appears live.
+pub fn create_chart_from_spec(
+    handle: &AppHandle,
+    spec: &serde_json::Value,
+    sheet_index: Option<u32>,
+    name: Option<&str>,
+) -> Result<String, String> {
+    // Mutation -> same gate as run_script (headless 'prompt'/'disabled' refuses).
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_script_security(&script_state)?;
+
+    validate_chart_spec_core(spec)?;
+
+    let state = handle.state::<AppState>();
+    let sheet = match sheet_index {
+        Some(s) => s as usize,
+        None => *state.active_sheet.lock().map_err(|e| e.to_string())?,
+    };
+    let chart_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+    let display_name = name.unwrap_or("AI Chart");
+
+    // The store persists the full ChartDefinition as spec_json (chartId, name,
+    // placement, spec). Default placement matches a freshly-inserted chart.
+    let definition = serde_json::json!({
+        "chartId": chart_id.to_string(),
+        "name": display_name,
+        "sheetIndex": sheet,
+        "x": 100,
+        "y": 100,
+        "width": 480,
+        "height": 320,
+        "spec": spec,
+    });
+    let spec_json = serde_json::to_string(&definition).map_err(|e| e.to_string())?;
+    let entry = ChartEntry { id: chart_id, sheet_index: sheet, spec_json };
+
+    {
+        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        charts.push(entry);
+    }
+    // Undo snapshot (previous = None: this is a fresh insert), mirroring save_chart.
+    crate::undo_commands::record_chart_undo(&state, chart_id, None, "Insert chart (AI)");
+
+    // Best-effort: prompt the frontend to reload charts so the new one renders
+    // without a file reopen (the Charts extension bridges this Tauri event to its
+    // window "charts:refresh" handler).
+    let _ = handle.emit("charts:refresh", ());
+
+    Ok(format!(
+        "Created chart id={} name=\"{}\" on sheet {} ({} mark)",
+        chart_id,
+        display_name,
+        sheet,
+        spec.get("mark").and_then(|v| v.as_str()).unwrap_or("?")
+    ))
+}
+
 /// Execute a JavaScript script via the script engine.
 pub fn execute_script(
     handle: &AppHandle,
@@ -352,5 +497,77 @@ pub fn execute_script(
                 }
             ))
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_a_well_formed_spec_core() {
+        let spec = json!({
+            "mark": "bar",
+            "data": "Sheet1!A1:D13",
+            "series": [{ "name": "Revenue", "sourceIndex": 1, "color": null }]
+        });
+        assert!(validate_chart_spec_core(&spec).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_datarangeref_object_for_data() {
+        let spec = json!({
+            "mark": "line",
+            "data": { "sheetIndex": 0, "startRow": 0, "startCol": 0, "endRow": 9, "endCol": 3 },
+            "series": []
+        });
+        assert!(validate_chart_spec_core(&spec).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_object() {
+        assert!(validate_chart_spec_core(&json!("nope")).is_err());
+        assert!(validate_chart_spec_core(&json!(42)).is_err());
+        assert!(validate_chart_spec_core(&json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_empty_mark() {
+        assert!(validate_chart_spec_core(&json!({ "data": "A1:B2", "series": [] })).is_err());
+        assert!(validate_chart_spec_core(&json!({ "mark": "", "data": "A1:B2", "series": [] })).is_err());
+        assert!(validate_chart_spec_core(&json!({ "mark": 5, "data": "A1:B2", "series": [] })).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_null_data() {
+        assert!(validate_chart_spec_core(&json!({ "mark": "bar", "series": [] })).is_err());
+        assert!(validate_chart_spec_core(&json!({ "mark": "bar", "data": null, "series": [] })).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_non_array_series() {
+        assert!(validate_chart_spec_core(&json!({ "mark": "bar", "data": "A1:B2" })).is_err());
+        assert!(validate_chart_spec_core(&json!({ "mark": "bar", "data": "A1:B2", "series": {} })).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_spec() {
+        let big = "x".repeat(2_100_000);
+        let spec = json!({ "mark": "bar", "data": "A1:B2", "series": [], "title": big });
+        assert!(validate_chart_spec_core(&spec).is_err());
+    }
+
+    #[test]
+    fn compact_data_renders_string_verbatim_and_object_as_json() {
+        assert_eq!(compact_chart_data(&json!("Sheet1!A1:D13")), "Sheet1!A1:D13");
+        let obj = json!({ "sheetIndex": 0, "startRow": 1 });
+        let rendered = compact_chart_data(&obj);
+        assert!(rendered.contains("sheetIndex"));
+        assert!(rendered.starts_with('{'));
     }
 }

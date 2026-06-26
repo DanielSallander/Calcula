@@ -107,6 +107,7 @@ import { chartIntersectsChanges } from "./lib/chartInvalidation";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
 import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
+import { listenTauriEvent } from "@api/backend";
 import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource } from "./types";
@@ -1072,6 +1073,14 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("charts:refresh", handleChartsRefresh);
   });
+  // Bridge the backend "charts:refresh" Tauri event (emitted after an MCP
+  // create_chart_from_spec, B8.C) to the window handler above, so an AI-created
+  // chart appears live without a file reopen.
+  let unlistenBackendCharts: (() => void) | undefined;
+  void listenTauriEvent("charts:refresh", () => {
+    window.dispatchEvent(new Event("charts:refresh"));
+  }).then((un) => { unlistenBackendCharts = un; });
+  cleanupFunctions.push(() => { unlistenBackendCharts?.(); });
 
   // Dynamic data ranges: re-render charts when table definitions change
   // (e.g., table auto-expands when new rows are added)
