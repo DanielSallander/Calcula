@@ -141,6 +141,18 @@ export interface CellValuesChangedPayload {
   source: "user" | "undo" | "redo" | "paste" | "fill" | "clear" | "script" | "api";
 }
 
+/**
+ * OPTIONAL payload on the CELLS_UPDATED event. CELLS_UPDATED remains a fire-on-
+ * every-change signal that may be emitted bare; when the changed cells are known
+ * (the canonical cellEvents path) they ride along here so subscribers can scope
+ * their work (e.g. invalidate only charts whose range intersects a change). Uses
+ * the `changes` key only (never top-level row/col) — handlers must treat it as
+ * possibly-absent and fall back to a full refresh.
+ */
+export interface CellsUpdatedPayload {
+  changes: CellValueChange[];
+}
+
 /** Payload emitted with FILL_COMPLETED event. */
 export interface FillCompletedPayload {
   sourceRange: { startRow: number; startCol: number; endRow: number; endCol: number };

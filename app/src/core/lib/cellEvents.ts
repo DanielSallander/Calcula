@@ -123,10 +123,11 @@ class CellEventEmitter {
       requestAnimationFrame(() => {
         this.cellsUpdatedPending = false;
 
-        // Flush accumulated changes as CELL_VALUES_CHANGED
-        if (this.pendingChanges.length > 0) {
+        // Flush accumulated changes as CELL_VALUES_CHANGED.
+        const changes = this.pendingChanges;
+        if (changes.length > 0) {
           const payload: CellValuesChangedPayload = {
-            changes: this.pendingChanges,
+            changes,
             source: this.pendingSource,
           };
           this.pendingChanges = [];
@@ -134,7 +135,9 @@ class CellEventEmitter {
           emitAppEvent(AppEvents.CELL_VALUES_CHANGED, payload);
         }
 
-        emitAppEvent(AppEvents.CELLS_UPDATED);
+        // CELLS_UPDATED stays a fire-on-every-change signal, but carries the same
+        // changes when known so subscribers can scope their work (else bare).
+        emitAppEvent(AppEvents.CELLS_UPDATED, changes.length > 0 ? { changes } : undefined);
       });
     }
   }

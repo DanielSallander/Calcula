@@ -97,6 +97,7 @@ import {
   brushKeysFromHits,
 } from "./handlers/chartPointSelection";
 import { parseParamCellTarget } from "./lib/dataSourceResolver";
+import { chartIntersectsChanges } from "./lib/chartInvalidation";
 import { clearAllWidgetValues, getWidgetValue, setWidgetValue, nextWidgetValue } from "./handlers/chartWidgetValues";
 import { hitTestWidgetControls, isInWidgetArea } from "./rendering/paramWidgets";
 import { onAppEvent } from "@api/events";
@@ -481,17 +482,30 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener(ChartEvents.CHART_DELETED, handleChartChanged);
   });
 
-  // Listen for data changes to invalidate chart caches
+  // Listen for data changes to invalidate chart caches (S7d: scoped). When the
+  // event carries the changed cells, invalidate only charts whose read-set
+  // intersects them (conservative — unbounded-dependency charts always invalidate);
+  // a bare signal (no payload) falls back to the prior invalidate-all behavior.
   cleanupFunctions.push(
-    context.events.on(AppEvents.CELLS_UPDATED, () => {
-      // For simplicity, invalidate all chart caches when any cell changes.
-      // A future optimization could check if changed cells overlap chart data ranges.
+    context.events.on(AppEvents.CELLS_UPDATED, (detail) => {
       const charts = getAllCharts();
-      if (charts.length > 0) {
+      if (charts.length === 0) return;
+      const changes = (detail as { changes?: Array<{ row: number; col: number }> } | undefined)?.changes;
+      if (!changes || changes.length === 0) {
         invalidateAllChartCaches();
         resetSubSelection();
         context.events.emit(AppEvents.GRID_REFRESH);
+        return;
       }
+      let any = false;
+      for (const chart of charts) {
+        if (chartIntersectsChanges(chart.spec, changes)) {
+          invalidateChartCache(chart.chartId);
+          any = true;
+        }
+      }
+      resetSubSelection();
+      if (any) context.events.emit(AppEvents.GRID_REFRESH);
     }),
   );
 

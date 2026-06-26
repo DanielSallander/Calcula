@@ -969,7 +969,12 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+        cellEvents.emitBatch(
+          updatedCells
+            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+          "fill",
+        );
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Down failed:", error);
@@ -999,7 +1004,12 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+        cellEvents.emitBatch(
+          updatedCells
+            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+          "fill",
+        );
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Right failed:", error);
@@ -1029,7 +1039,12 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+        cellEvents.emitBatch(
+          updatedCells
+            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+          "fill",
+        );
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Up failed:", error);
@@ -1059,7 +1074,12 @@ export function useSpreadsheetSelection({
       );
 
       if (updatedCells.length > 0) {
-        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+        cellEvents.emitBatch(
+          updatedCells
+            .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+            .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+          "fill",
+        );
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Left failed:", error);

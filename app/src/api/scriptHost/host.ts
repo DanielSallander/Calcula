@@ -1156,17 +1156,17 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     }
     case "sheet.onDataChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes: unknown[] };
-        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, changes: d.changes });
+        const d = detail as { changes?: unknown[] };
+        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, changes: d.changes ?? [] });
       }));
       break;
 
     // ---- cell ----
     case "cell.onEdit":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes: Array<{ row: number; col: number; oldValue?: string; newValue: string; formula?: string | null }> };
+        const d = detail as { changes?: Array<{ row: number; col: number; oldValue?: string; newValue: string; formula?: string | null }> };
         forwardEvent(mw, hook, {
-          changes: d.changes.map((change) => ({
+          changes: (d.changes ?? []).map((change) => ({
             row: change.row,
             col: change.col,
             sheetIndex: activeSheetIndexForEvents,
@@ -1412,9 +1412,9 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       break;
     case "shape.onCellChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes: unknown[] };
+        const d = detail as { changes?: unknown[] };
         invalidateBitmap("shape", instanceId);
-        forwardEvent(mw, hook, { changes: d.changes });
+        forwardEvent(mw, hook, { changes: d.changes ?? [] });
       }));
       break;
     case "shape.onMessage":

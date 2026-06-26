@@ -74,6 +74,7 @@ import {
   fillRange as backendFillRange,
 } from "../core/lib/tauri-api";
 import { emitAppEvent, AppEvents } from "./events";
+import { cellEvents } from "../core/lib/cellEvents";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 import { dispatchGridAction } from "./gridDispatch";
 import { invokeBackend } from "./backend";
@@ -252,7 +253,12 @@ export async function fillDown(
     startRow, startCol, startRow, endCol,       // source: first row
     startRow + 1, startCol, endRow, endCol,     // target: rows below
   );
-  emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+  cellEvents.emitBatch(
+    updatedCells
+      .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+      .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+    "fill",
+  );
 }
 
 /**
@@ -274,7 +280,12 @@ export async function fillRight(
     startRow, startCol, endRow, startCol,       // source: first column
     startRow, startCol + 1, endRow, endCol,     // target: columns to the right
   );
-  emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+  cellEvents.emitBatch(
+    updatedCells
+      .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+      .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+    "fill",
+  );
 }
 
 /**
@@ -295,7 +306,12 @@ export async function fillUp(
     endRow, startCol, endRow, endCol,           // source: last row
     startRow, startCol, endRow - 1, endCol,     // target: rows above
   );
-  emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+  cellEvents.emitBatch(
+    updatedCells
+      .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+      .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+    "fill",
+  );
 }
 
 /**
@@ -316,7 +332,12 @@ export async function fillLeft(
     startRow, endCol, endRow, endCol,           // source: last column
     startRow, startCol, endRow, endCol - 1,     // target: columns to the left
   );
-  emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
+  cellEvents.emitBatch(
+    updatedCells
+      .filter((c) => c.sheetIndex === undefined) // only active-sheet cells (events carry no sheet index)
+      .map((c) => ({ row: c.row, col: c.col, newValue: c.display, formula: c.formula })),
+    "fill",
+  );
 }
 
 // ============================================================================

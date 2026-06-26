@@ -154,20 +154,12 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
-  // Listen for cell updates to handle auto-expansion and header enforcement
-  cleanupFunctions.push(
-    context.events.on<{ row: number; col: number; value?: string }>(
-      AppEvents.CELLS_UPDATED,
-      (detail) => {
-        // CELLS_UPDATED may carry a single cell or batch info
-        if (detail && typeof detail === "object" && "row" in detail && "col" in detail) {
-          handleCellEdited(detail.row, detail.col, detail.value ?? "");
-        }
-      },
-    ),
-  );
+  // Auto-expansion + header enforcement are driven by EDIT_ENDED below.
+  // (A former CELLS_UPDATED handler here was dead code: it expected a top-level
+  // {row,col} payload that CELLS_UPDATED never carries — it is a payload-less /
+  // {changes} signal — so it never fired.)
 
-  // Also listen for EDIT_ENDED which fires when an edit ends (commit or cancel).
+  // Listen for EDIT_ENDED which fires when an edit ends (commit or cancel).
   // Only committed edits should trigger auto-expansion.
   cleanupFunctions.push(
     context.events.on<{ row: number; col: number; value?: string; committed?: boolean }>(
