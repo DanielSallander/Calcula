@@ -302,6 +302,7 @@ pub fn build_workbook_for_save_with_slicers(
     workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
+    workbook.extension_data = state.extension_data.lock().unwrap().clone();
     Ok(workbook)
 }
 
@@ -324,6 +325,7 @@ pub fn build_workbook_snapshot(state: &State<AppState>) -> Result<Workbook, Stri
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
     workbook.theme = state.theme.lock().unwrap().clone();
+    workbook.extension_data = state.extension_data.lock().unwrap().clone();
 
     // Workbook properties
     {
@@ -1232,6 +1234,7 @@ pub fn save_file(
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
+    workbook.extension_data = state.extension_data.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
 
@@ -1697,6 +1700,7 @@ pub fn open_file(
 
     // Restore object scripts (scriptable objects) from workbook
     *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();
+    *state.extension_data.lock().unwrap() = workbook.extension_data.clone();
 
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state, &workbook);
@@ -2067,6 +2071,7 @@ pub fn new_file(
     // (including distributed ones) leak into the new workbook and get saved
     // with it. Same family as the writeback-index leak fixed in Wave 0.
     state.object_scripts.lock().unwrap().clear();
+    state.extension_data.lock().unwrap().clear();
     state.pivot_layouts.lock().unwrap().clear();
 
     // Clear subscription metadata
@@ -2691,6 +2696,7 @@ pub fn auto_recover_save(
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
+    workbook.extension_data = state.extension_data.lock().unwrap().clone();
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state, &sheet_ids_ar);
@@ -2752,4 +2758,40 @@ fn restore_notebooks(
             },
         );
     }
+}
+
+// ============================================================================
+// GENERIC PER-EXTENSION PERSISTENCE
+// ============================================================================
+// Any extension (built-in or third-party) can persist arbitrary JSON state in
+// the workbook, keyed by its extension id, without a new typed file-format
+// field. The value round-trips through the .cala `extension-data` part.
+
+/// Read an extension's persisted state. Returns null if it has none.
+#[tauri::command]
+pub fn get_extension_data(
+    extension_id: String,
+    state: State<AppState>,
+) -> Result<Option<serde_json::Value>, String> {
+    let data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    Ok(data.get(&extension_id).cloned())
+}
+
+/// Persist an extension's state. A null value clears it.
+#[tauri::command]
+pub fn set_extension_data(
+    extension_id: String,
+    value: Option<serde_json::Value>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    match value {
+        Some(v) => {
+            data.insert(extension_id, v);
+        }
+        None => {
+            data.remove(&extension_id);
+        }
+    }
+    Ok(())
 }

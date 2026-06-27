@@ -78,6 +78,9 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if !workbook.bi_connection_caches.is_empty() {
         manifest.features.push("bi_connection_caches".to_string());
     }
+    if !workbook.extension_data.is_empty() {
+        manifest.features.push("extension_data".to_string());
+    }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
     }
@@ -269,6 +272,13 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         let charts_json = serde_json::to_string_pretty(&workbook.charts)?;
         zip.start_file("charts.json", options.clone())?;
         zip.write_all(charts_json.as_bytes())?;
+    }
+
+    // Write generic per-extension state as a single extension-data.json object
+    if !workbook.extension_data.is_empty() {
+        let extension_data_json = serde_json::to_string_pretty(&workbook.extension_data)?;
+        zip.start_file("extension-data.json", options.clone())?;
+        zip.write_all(extension_data_json.as_bytes())?;
     }
 
     // Write sparklines as a single sparklines.json array
@@ -699,6 +709,13 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let properties = read_optional_json::<WorkbookProperties>(&mut archive, "properties.json")?
         .unwrap_or_default();
 
+    // Read generic per-extension persisted state (opaque per-extension JSON blobs).
+    let extension_data = read_optional_json::<std::collections::HashMap<String, serde_json::Value>>(
+        &mut archive,
+        "extension-data.json",
+    )?
+    .unwrap_or_default();
+
     Ok(Workbook {
         sheets,
         active_sheet: manifest.active_sheet,
@@ -722,6 +739,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         bi_connection_roles,
         bi_connections,
         bi_connection_caches,
+        extension_data,
     })
 }
 
@@ -868,6 +886,7 @@ mod tests {
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
             bi_connection_caches: std::collections::HashMap::new(),
+            extension_data: Default::default(),
         }
     }
 
@@ -1060,6 +1079,36 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_extension_data() {
+        let mut workbook = make_test_workbook();
+        workbook.extension_data.insert(
+            "calcula.my-extension".to_string(),
+            serde_json::json!({ "enabled": true, "items": [1, 2, 3], "label": "héllo" }),
+        );
+        workbook.extension_data.insert(
+            "third.party.ext".to_string(),
+            serde_json::json!("a bare string value"),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_extension_data.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.extension_data.len(), 2);
+        assert_eq!(loaded.extension_data["calcula.my-extension"]["items"][1], 2);
+        assert_eq!(loaded.extension_data["calcula.my-extension"]["label"], "héllo");
+        assert_eq!(loaded.extension_data["third.party.ext"], "a bare string value");
+
+        // Empty extension_data must NOT write the part, and still round-trips empty.
+        let empty = make_test_workbook();
+        let path2 = dir.path().join("test_extension_data_empty.cala");
+        write_calcula(&empty, &path2).unwrap();
+        let loaded2 = read_calcula(&path2).unwrap();
+        assert!(loaded2.extension_data.is_empty());
+    }
+
+    #[test]
     fn test_roundtrip_with_bi_connections() {
         let mut workbook = make_test_workbook();
         workbook.bi_connections.push(persistence::SavedBiConnection {
@@ -1077,6 +1126,7 @@ mod tests {
                 schema: "public".to_string(),
                 source_table: "sales".to_string(),
             }],
+            calculated_measures: Vec::new(),
         });
 
         let dir = tempfile::tempdir().unwrap();

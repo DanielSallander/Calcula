@@ -312,6 +312,11 @@ pub struct AppState {
     pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
     /// Object scripts for scriptable objects (primitive + component scripts)
     pub object_scripts: Mutex<Vec<::persistence::SavedObjectScript>>,
+    /// Generic per-extension persisted state (extension id -> arbitrary JSON).
+    /// Round-trips through the .cala extension-data part. Any extension
+    /// (built-in or third-party) can persist workbook state here without a new
+    /// typed file-format field — see persistence::Workbook::extension_data.
+    pub extension_data: Mutex<std::collections::HashMap<String, serde_json::Value>>,
     /// Stable sheet identifiers, one per sheet (parallel to sheet_names / grids)
     pub sheet_ids: Mutex<Vec<identity::SheetId>>,
     /// Subscription metadata for .calp packages linked to this workbook
@@ -456,6 +461,7 @@ pub fn create_app_state() -> AppState {
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: Mutex::new(Vec::new()),
         object_scripts: Mutex::new(Vec::new()),
+        extension_data: Mutex::new(std::collections::HashMap::new()),
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: Mutex::new(calp::manifest::SubscriptionManifest::default()),
         override_layer: Mutex::new(calp::OverrideLayer::new()),
@@ -3831,6 +3837,8 @@ pub fn run() {
             formula::evaluate_expressions,
             // File commands
             persistence::save_file,
+            persistence::get_extension_data,
+            persistence::set_extension_data,
             persistence::open_file,
             persistence::new_file,
             persistence::get_current_file_path,

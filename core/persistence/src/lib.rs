@@ -91,6 +91,13 @@ pub struct Workbook {
     /// Only locally-authored connections are embedded. Stored as raw zip entries
     /// (not JSON) so binary Arrow data isn't base64-bloated.
     pub bi_connection_caches: HashMap<String, HashMap<String, Vec<u8>>>,
+    /// Generic per-extension persisted state (extension id -> arbitrary JSON).
+    /// The persistence layer treats each value as an opaque blob — the owning
+    /// extension defines its own shape. This is the sanctioned way for ANY
+    /// extension (built-in or third-party) to persist workbook state, so the
+    /// file format does not need a new typed field per feature
+    /// (Primitives-not-Features / No-First-Class-Citizens).
+    pub extension_data: HashMap<String, serde_json::Value>,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -329,6 +336,7 @@ impl Workbook {
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
             bi_connection_caches: HashMap::new(),
+            extension_data: HashMap::new(),
         }
     }
 
@@ -356,6 +364,7 @@ impl Workbook {
             bi_connection_roles: Vec::new(),
             bi_connections: Vec::new(),
             bi_connection_caches: HashMap::new(),
+            extension_data: HashMap::new(),
         }
     }
 }
@@ -659,12 +668,10 @@ pub struct SavedTableStyleOptions {
 
 /// Serializable slicer source type
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SavedSlicerSourceType {
-    #[serde(rename = "table")]
     Table,
-    #[serde(rename = "pivot")]
     Pivot,
-    #[serde(rename = "biConnection")]
     BiConnection,
 }
 
@@ -677,12 +684,10 @@ pub struct SavedSlicerConnection {
 
 /// Serializable slicer selection mode
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SavedSlicerSelectionMode {
-    #[serde(rename = "standard")]
     Standard,
-    #[serde(rename = "single")]
     Single,
-    #[serde(rename = "multi")]
     Multi,
 }
 
@@ -694,12 +699,10 @@ impl Default for SavedSlicerSelectionMode {
 
 /// Serializable slicer arrangement
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SavedSlicerArrangement {
-    #[serde(rename = "grid")]
     Grid,
-    #[serde(rename = "horizontal")]
     Horizontal,
-    #[serde(rename = "vertical")]
     Vertical,
 }
 
@@ -791,10 +794,9 @@ fn default_button_columns() -> u32 {
 
 /// Serializable ribbon filter scope
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SavedRibbonFilterScope {
-    #[serde(rename = "workbook")]
     Workbook,
-    #[serde(rename = "sheet")]
     Sheet,
 }
 
@@ -806,12 +808,10 @@ impl Default for SavedRibbonFilterScope {
 
 /// Serializable ribbon filter display mode
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SavedRibbonFilterDisplayMode {
-    #[serde(rename = "checklist")]
     Checklist,
-    #[serde(rename = "buttons")]
     Buttons,
-    #[serde(rename = "dropdown")]
     Dropdown,
 }
 
@@ -823,12 +823,10 @@ impl Default for SavedRibbonFilterDisplayMode {
 
 /// How a ribbon filter determines its connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SavedConnectionMode {
-    #[serde(rename = "manual")]
     Manual,
-    #[serde(rename = "bySheet")]
     BySheet,
-    #[serde(rename = "workbook")]
     Workbook,
 }
 

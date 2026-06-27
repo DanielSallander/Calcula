@@ -1687,6 +1687,13 @@ export type {
   NotebookDocumentData,
   NotebookCellData,
 } from "./notebookBackend";
+// Generic per-extension workbook persistence (any extension can persist JSON
+// state into the .cala without a new typed file-format field).
+export {
+  getExtensionData,
+  setExtensionData,
+  clearExtensionData,
+} from "./extensionData";
 export {
   listModuleScripts,
   getModuleScript,
