@@ -25,6 +25,14 @@ Calcula/
 ## The "Alien" Rule
 The Core (`src/core`) must treat all extensions as foreign objects. Hard imports from `core` to `extensions` are strictly forbidden. If a feature is needed, it must be requested via the API.
 
+## Boundary Enforcement
+These boundaries are not aspirational — they are linted. `npm run lint:boundaries` (config in `app/eslint.boundaries.js`, run in CI) fails the build on:
+- **Alien:** Core importing Shell or Extensions.
+- **Facade:** an extension importing `src/core`/`src/shell`, or another extension's internals (extensions share only through `@api` or `extensions/_shared`).
+- **API neutrality:** `src/api` importing a specific extension (the facade stays feature-agnostic).
+
+Note: the microkernel boundary is enforced on the **frontend** (`app/src` + `app/extensions`). The Rust backend (`app/src-tauri`) is currently a feature-monolith without an analogous extension boundary — see the architecture remediation notes.
+
 ## Naming Conventions
 - **TypeScript:** camelCase (e.g., `textColor`)
 - **Rust:** snake_case (e.g., `text_color`)

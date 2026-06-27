@@ -56,13 +56,20 @@ Calcula/
 │   │   └── api/            # The "Sandpit"
 │   │                       # The ONLY interfaces extensions are allowed to touch
 │   │
-│   └── extensions/         # MOVED OUTSIDE 'src'
-│       ├── _standard/      # Base extensions
-│       │   ├── formatting/ # Font, Color, Borders
-│       │   ├── sorting/    # Sort & Filter logic
-│       │   └── charts/     # Charting engine
-│       │
-│       └── _3rdparty/      # User installed extensions (gitignored)
+│   └── extensions/         # MOVED OUTSIDE 'src'. ~58 feature extensions, flat:
+│       ├── Charts/          #   Charts, Pivot, Sorting, Slicer, Table, ... (one dir each)
+│       ├── Pivot/
+│       ├── ...              #   (full list registered in extensions/manifest.ts)
+│       ├── BuiltIn/         # Built-in dialogs/menus (FindReplace, FormatCells, HomeTab, ...)
+│       ├── _shared/         # Shared widgets + libs reusable across extensions
+│       │                    #   (the ONLY sanctioned cross-extension code; NOT @api)
+│       ├── _standard/       # (legacy bucket; currently only conditional-formatting)
+│       ├── _template/       # Scaffold for authoring a new extension
+│       ├── manifest.ts      # Static list of built-in extensions (load order)
+│       └── index.ts
+│
+│   # 3rd-party extensions are NOT in the repo: scanned at runtime from
+│   # %APPDATA%/com.calcula.app/extensions/.
 ```
 
 ### What Lives Where
@@ -101,12 +108,12 @@ Extensions interact with Core exclusively through the API Facade:
 
 ### Architecture & Import Boundaries
 
-1. **The "Alien" Rule:** The Core (`src/core`) must NEVER import from `src/extensions` or `src/shell`
-2. **The Facade Rule:** Extensions (`src/extensions`) must ONLY import from `src/api`. Deep imports into `src/core` are strictly forbidden
+1. **The "Alien" Rule:** The Core (`src/core`) must NEVER import from `app/extensions` or `src/shell`
+2. **The Facade Rule:** Extensions (`app/extensions`) must ONLY import from `src/api` (`@api`); they must not import another extension's internals — share via `@api` or `extensions/_shared`. Deep imports into `src/core`/`src/shell` are strictly forbidden. (Enforced: `npm run lint:boundaries` / `app/eslint.boundaries.js`.)
 3. **Dogfooding:** Built-in features (Formatting, Charts) must be built using the public Extension API. If the API cannot support a feature, improve the API rather than hacking the feature into Core
 4. **Inversion of Control:** The Core does not call Extensions. The Core emits events/hooks (via the API), and Extensions respond
 5. **Primitive vs. Logic:** If a feature requires new logic (e.g., Sorting), implement generic primitives in Core (e.g., read/write range) and specific business logic in an Extension
-6. **Feature Location:** Default to building features as Extensions (`src/extensions/builtin/`) unless they are foundational primitives (like Rendering or Undo/Redo)
+6. **Feature Location:** Default to building features as Extensions (`app/extensions/`; built-in dialogs/menus live under `app/extensions/BuiltIn/`) unless they are foundational primitives (like Rendering or Undo/Redo)
 
 ### Naming Conventions (Rust <-> TypeScript API Boundary)
 
