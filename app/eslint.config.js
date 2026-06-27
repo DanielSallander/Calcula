@@ -4,6 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
+import { boundaryConfigs } from './eslint.boundaries.js'
 
 export default defineConfig([
   globalIgnores(['dist', '.tmp', 'src-tauri']),
@@ -84,44 +85,10 @@ export default defineConfig([
 
   // =========================================================================
   // ARCHITECTURE BOUNDARY ENFORCEMENT
-  // Uses no-restricted-imports (built-in, no resolver needed)
+  // Defined once in ./eslint.boundaries.js (single source of truth) and reused
+  // by the dedicated gate config ./eslint.config.boundaries.js (run in CI via
+  // `npm run lint:boundaries`). Spread here too so editors surface boundary
+  // violations inline.
   // =========================================================================
-
-  // FACADE RULE: Extensions must ONLY import from src/api
-  {
-    files: ['extensions/**/*.{ts,tsx}'],
-    rules: {
-      'no-restricted-imports': ['error', {
-        patterns: [
-          {
-            group: ['**/src/core/**', '**/core/types/**', '**/core/types', '**/core/lib/**', '**/core/state/**'],
-            message: 'Extensions must import through src/api only (Facade Rule).',
-          },
-          {
-            group: ['**/src/shell/**', '**/shell/registries/**', '**/shell/Ribbon/**'],
-            message: 'Extensions must import through src/api only (Facade Rule).',
-          },
-        ],
-      }],
-    },
-  },
-
-  // ALIEN RULE: Core cannot import from Shell or Extensions
-  {
-    files: ['src/core/**/*.{ts,tsx}'],
-    rules: {
-      'no-restricted-imports': ['error', {
-        patterns: [
-          {
-            group: ['**/src/shell/**', '**/shell/**'],
-            message: 'Core must not depend on the Shell (Alien Rule).',
-          },
-          {
-            group: ['**/extensions/**'],
-            message: 'Core must not depend on Extensions (Alien Rule).',
-          },
-        ],
-      }],
-    },
-  },
+  ...boundaryConfigs,
 ])

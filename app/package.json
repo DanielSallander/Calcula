@@ -10,6 +10,7 @@
     "check-types": "tsc --noEmit -p tsconfig.check.json",
     "check-types:watch": "tsc --noEmit -p tsconfig.check.json --watch",
     "lint": "eslint .",
+    "lint:boundaries": "eslint --no-config-lookup -c eslint.config.boundaries.js .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
