@@ -1701,6 +1701,16 @@ export {
   evaluateExpression,
 } from "./formulaEval";
 export type { ScopeValue, EvalScope, EvalResultValue } from "./formulaEval";
+// Backend command capability model (A3): the privileged-command surface + the
+// capability check a governed ExtensionContext.invokeBackend will enforce.
+export {
+  PRIVILEGED_BACKEND_COMMANDS,
+  isPrivilegedCommand,
+  commandCapability,
+  assertExtensionMayInvoke,
+  BackendCapabilityError,
+} from "./backendCommands";
+export type { PrivilegedCapability } from "./backendCommands";
 export {
   listModuleScripts,
   getModuleScript,
