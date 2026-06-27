@@ -16,7 +16,9 @@ describe("script-surface taxonomy", () => {
   it("covers exactly the documented surfaces", () => {
     const ids = SCRIPT_SURFACES.map((s) => s.id).sort();
     const expected: ScriptSurfaceId[] = [
+      "chart-mark",
       "chart-transform",
+      "chart-transform-sandbox",
       "formula-udf",
       "mcp-tool",
       "notebook-cell",
@@ -34,9 +36,17 @@ describe("script-surface taxonomy", () => {
     const exec = executableScriptSurfaces()
       .map((s) => s.id)
       .sort();
-    // Object scripts, UDFs, notebooks and one-off scripts run user code;
-    // chart transforms (pure declarative) and MCP (first-party Rust) do not.
-    expect(exec).toEqual(["formula-udf", "notebook-cell", "object-script", "one-off-script"]);
+    // Worker-realm user code runs: object scripts, UDFs, sandboxed chart marks +
+    // transforms, notebooks, one-off scripts. The built-in chart-transform pipeline
+    // (pure declarative) and MCP (first-party Rust) do not.
+    expect(exec).toEqual([
+      "chart-mark",
+      "chart-transform-sandbox",
+      "formula-udf",
+      "notebook-cell",
+      "object-script",
+      "one-off-script",
+    ]);
   });
 
   it("only the worker-realm surfaces carry grantable capabilities", () => {

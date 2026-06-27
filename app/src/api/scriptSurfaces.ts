@@ -23,6 +23,8 @@ export type ScriptSurfaceId =
   | "notebook-cell"
   | "one-off-script"
   | "chart-transform"
+  | "chart-transform-sandbox"
+  | "chart-mark"
   | "mcp-tool";
 
 export interface ScriptSurface {
@@ -83,13 +85,33 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
   },
   {
     id: "chart-transform",
-    label: "Chart transforms",
+    label: "Chart transforms (built-in pipeline)",
     runtime: "main-thread",
     containment:
       "Pure data pipeline; calculate/filter expressions via chartFormula (recursive-descent parser, no eval/new Function)",
     capabilities: [],
     gate: "n/a (pure declarative, not an execution surface)",
     executesUserCode: false,
+  },
+  {
+    id: "chart-transform-sandbox",
+    label: "Sandboxed chart transforms",
+    runtime: "worker-realm",
+    containment:
+      "Per-library hardened worker; user-authored data->data transforms, broker-mediated capabilities (e.g. bi.query for cube.*)",
+    capabilities: ["net.fetch", "bi.query", "bi.sql", "storage"],
+    gate: "Broker + R19 ceiling + per-package consent (distributed)",
+    executesUserCode: true,
+  },
+  {
+    id: "chart-mark",
+    label: "Sandboxed chart marks",
+    runtime: "worker-realm",
+    containment:
+      "Per-mark hardened worker; paint-only into the chart's clipped plot rect — no network/disk/BI, returns only an ImageBitmap + hit geometry",
+    capabilities: [],
+    gate: "Broker (paint-only) + per-package consent (distributed)",
+    executesUserCode: true,
   },
   {
     id: "mcp-tool",

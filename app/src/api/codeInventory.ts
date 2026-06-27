@@ -39,6 +39,8 @@ import {
 import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
 import { loadPersistedLibrary, CUSTOM_FUNCTIONS_SCRIPT_ID } from "./customFunctions";
+import { loadPersistedTransformLibraryWithProvenance, CHART_TRANSFORMS_SCRIPT_ID } from "./chartTransformScripts";
+import { loadPersistedMarkLibraryWithProvenance, markScriptId } from "./chartMarkScripts";
 
 /** One normalized code unit residing in the open workbook. */
 export interface CodeUnit {
@@ -258,6 +260,68 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
     }
   }
 
+  // ---- Sandboxed chart transforms (worker-realm; may declare a real ceiling) --
+  // The whole library shares ONE mount under CHART_TRANSFORMS_SCRIPT_ID; each
+  // user-authored transform body runs in that worker under the library's declared
+  // capabilities (e.g. bi.query for cube.*). Provenance is the .calp it came from.
+  const transformLib = await safely("chart transforms", async () => {
+    const res = await loadPersistedTransformLibraryWithProvenance();
+    return res ? [res] : [];
+  });
+  const transformHandle = handleById.get(CHART_TRANSFORMS_SCRIPT_ID);
+  for (const { lib, sourcePackage } of transformLib) {
+    const declared = (lib.capabilities ?? []) as CapabilityId[];
+    for (const t of lib.transforms) {
+      const type = t.type.trim();
+      if (!type) continue;
+      const source = t.body;
+      units.push({
+        surfaceId: "chart-transform-sandbox",
+        id: `${CHART_TRANSFORMS_SCRIPT_ID}::${type}`,
+        name: t.label?.trim() || type,
+        residence: "Chart transform — worker-realm sandbox",
+        provenance: sourcePackage ? "distributed" : "local",
+        sourcePackage,
+        declaredCapabilities: declared,
+        liveGrants: transformHandle ? ([...transformHandle.grants] as CapabilityId[]) : null,
+        tier: transformHandle ? transformHandle.tier : "restricted",
+        mounted: !!transformHandle,
+        source,
+        lineCount: lineCount(source),
+      });
+    }
+  }
+
+  // ---- Sandboxed chart marks (worker-realm; paint-only, no capabilities) ------
+  // Each mark mounts as its OWN worker (instanceId = markScriptId), so the live
+  // mount/grant join is per-mark. Marks declare nothing (clipped paint surface).
+  const markLib = await safely("chart marks", async () => {
+    const res = await loadPersistedMarkLibraryWithProvenance();
+    return res ? [res] : [];
+  });
+  for (const { lib, sourcePackage } of markLib) {
+    for (const m of lib.marks) {
+      const markId = m.markId.trim();
+      if (!markId) continue;
+      const handle = handleById.get(markScriptId(markId));
+      const source = m.body;
+      units.push({
+        surfaceId: "chart-mark",
+        id: markScriptId(markId),
+        name: m.label?.trim() || markId,
+        residence: "Chart mark — worker-realm sandbox (paint-only)",
+        provenance: sourcePackage ? "distributed" : "local",
+        sourcePackage,
+        declaredCapabilities: [], // paint-only surface
+        liveGrants: handle ? ([...handle.grants] as CapabilityId[]) : null,
+        tier: handle ? handle.tier : "restricted",
+        mounted: !!handle,
+        source,
+        lineCount: lineCount(source),
+      });
+    }
+  }
+
   return units;
 }
 
@@ -266,6 +330,8 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
 const SURFACE_ORDER: ScriptSurfaceId[] = [
   "object-script",
   "formula-udf",
+  "chart-transform-sandbox",
+  "chart-mark",
   "one-off-script",
   "notebook-cell",
   "chart-transform",

@@ -1121,6 +1121,17 @@ function activate(context: ExtensionContext): void {
   // "script" in the SHARED distributed-consent store (@api/distributedConsent),
   // keyed under a NAMESPACED package id so it never collides with object-script
   // consent. Transforms can carry bi.query; marks are paint-only (no capability).
+  //
+  // INTENTIONAL BOUNDARY: chart-library consent is a SEPARATE prompt from the
+  // ScriptableObjects object-script consent, even for a .calp that ships both. The
+  // two are distinct security domains (object scripts get broad object reach; chart
+  // code is paint/transform-only or BI-scoped), use distinct store keys + mount
+  // semantics, and each prompt is self-accurate. Merging them into one dialog would
+  // mean refactoring the mature, security-critical object-script consent flow — not
+  // worth the regression risk for an uncommon dual-artifact package. Both surfaces
+  // DO share one consent STORE (@api/distributedConsent), which is the unification
+  // that matters (one durable record set, consistent re-prompt-on-change rules).
+  //
   // pendingLibraryGates holds the descriptor the user is being prompted for, WITH
   // the load-generation (epoch) it was produced under. resetLibraryGateState() bumps
   // the epoch; any async load/grant carrying a stale epoch bails — so a workbook

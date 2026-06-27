@@ -24,11 +24,21 @@ vi.mock("./notebookBackend", () => ({
 vi.mock("./scriptHost/broker", () => ({
   listMountedHandles: vi.fn(),
 }));
+vi.mock("./chartTransformScripts", () => ({
+  loadPersistedTransformLibraryWithProvenance: vi.fn(),
+  CHART_TRANSFORMS_SCRIPT_ID: "__calcula_chart_transforms__",
+}));
+vi.mock("./chartMarkScripts", () => ({
+  loadPersistedMarkLibraryWithProvenance: vi.fn(),
+  markScriptId: (id: string) => `__chartmark__:${id}`,
+}));
 
 import { loadAllObjectScripts } from "./objectScriptBackend";
 import { listModuleScripts, getModuleScript } from "./moduleScriptBackend";
 import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
+import { loadPersistedTransformLibraryWithProvenance } from "./chartTransformScripts";
+import { loadPersistedMarkLibraryWithProvenance } from "./chartMarkScripts";
 import {
   getWorkbookCodeUnits,
   summarizeCodeInventory,
@@ -43,6 +53,8 @@ beforeEach(() => {
   (listNotebooks as any).mockResolvedValue([]);
   (loadNotebook as any).mockResolvedValue(null);
   (listMountedHandles as any).mockReturnValue([]);
+  (loadPersistedTransformLibraryWithProvenance as any).mockResolvedValue(null);
+  (loadPersistedMarkLibraryWithProvenance as any).mockResolvedValue(null);
 });
 
 describe("getWorkbookCodeUnits — object scripts", () => {
@@ -165,6 +177,57 @@ describe("getWorkbookCodeUnits — grid-only Rust-QuickJS surfaces", () => {
     expect(u.source).toContain("first");
     expect(u.source).toContain("second");
     expect(u.residence).toContain("2 cells");
+  });
+});
+
+describe("getWorkbookCodeUnits — sandboxed chart libraries", () => {
+  it("enumerates each sandboxed transform under its library's declared ceiling + provenance", async () => {
+    (loadPersistedTransformLibraryWithProvenance as any).mockResolvedValue({
+      lib: {
+        transforms: [
+          { type: "sandbox:topN", label: "Top N", body: "return data;" },
+          { type: "sandbox:smooth", label: "", body: "return data;" },
+        ],
+        capabilities: ["bi.query"],
+      },
+      sourcePackage: "acme-report",
+    });
+    (listMountedHandles as any).mockReturnValue([
+      { scriptId: "__calcula_chart_transforms__", tier: "restricted", grants: new Set(["bi.query"]) },
+    ]);
+
+    const units = (await getWorkbookCodeUnits()).filter((u) => u.surfaceId === "chart-transform-sandbox");
+    expect(units).toHaveLength(2);
+    const topN = units.find((u) => u.id === "__calcula_chart_transforms__::sandbox:topN")!;
+    expect(topN.name).toBe("Top N");
+    expect(topN.declaredCapabilities).toEqual(["bi.query"]);
+    expect(topN.provenance).toBe("distributed");
+    expect(topN.sourcePackage).toBe("acme-report");
+    expect(topN.mounted).toBe(true);
+    expect(topN.liveGrants).toEqual(["bi.query"]);
+    expect(codeUnitReachesBeyondGrid(topN)).toBe(true);
+    // Falls back to the type when label is blank.
+    expect(units.find((u) => u.id.endsWith("sandbox:smooth"))!.name).toBe("sandbox:smooth");
+  });
+
+  it("enumerates each sandboxed mark as paint-only (no ceiling) with a per-mark mount join", async () => {
+    (loadPersistedMarkLibraryWithProvenance as any).mockResolvedValue({
+      lib: { marks: [{ markId: "sandbox:radial", label: "Radial", layoutFamily: "radial", body: "ctx.fillRect(0,0,1,1);" }] },
+      sourcePackage: null, // locally authored
+    });
+    (listMountedHandles as any).mockReturnValue([
+      { scriptId: "__chartmark__:sandbox:radial", tier: "restricted", grants: new Set() },
+    ]);
+
+    const units = (await getWorkbookCodeUnits()).filter((u) => u.surfaceId === "chart-mark");
+    expect(units).toHaveLength(1);
+    const u = units[0];
+    expect(u.id).toBe("__chartmark__:sandbox:radial");
+    expect(u.name).toBe("Radial");
+    expect(u.declaredCapabilities).toEqual([]); // paint-only
+    expect(u.provenance).toBe("local");
+    expect(u.mounted).toBe(true);
+    expect(codeUnitReachesBeyondGrid(u)).toBe(false);
   });
 });
 
