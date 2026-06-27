@@ -211,3 +211,139 @@ fn eval_result_to_display(result: &EvalResult) -> String {
         EvalResult::Lambda { .. } => "#LAMBDA".to_string(),
     }
 }
+
+// ============================================================================
+// Scope-injected expression evaluation
+// ============================================================================
+// Dogfooding: extensions can evaluate Excel-like expressions over per-row
+// variable scopes through the REAL engine (parser + evaluator), instead of
+// shipping a hand-rolled TS parser/evaluator (e.g. Charts' chartFormula.ts).
+// Bare identifiers resolve to the injected scope, exactly like LET/LAMBDA.
+
+/// Convert a JSON scope value into an engine value (scalars only).
+fn scope_value_to_eval(value: &serde_json::Value) -> EvalResult {
+    match value {
+        serde_json::Value::Number(n) => EvalResult::Number(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => EvalResult::Text(s.clone()),
+        serde_json::Value::Bool(b) => EvalResult::Boolean(*b),
+        serde_json::Value::Null => EvalResult::Text(String::new()),
+        other => EvalResult::Text(other.to_string()),
+    }
+}
+
+/// Convert an engine result into a JSON value for the frontend.
+fn eval_result_to_json(result: &EvalResult) -> serde_json::Value {
+    match result {
+        EvalResult::Number(n) => serde_json::Number::from_f64(*n)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        EvalResult::Text(s) => serde_json::Value::String(s.clone()),
+        EvalResult::Boolean(b) => serde_json::Value::Bool(*b),
+        EvalResult::Error(e) => {
+            serde_json::Value::String(format!("#{}", format!("{:?}", e).to_uppercase()))
+        }
+        EvalResult::Array(items) | EvalResult::List(items) => {
+            serde_json::Value::Array(items.iter().map(eval_result_to_json).collect())
+        }
+        EvalResult::Dict(_) | EvalResult::Lambda { .. } => serde_json::Value::Null,
+    }
+}
+
+/// Parse `expression` once, then evaluate it against each scope (name -> value).
+/// Cell references are not resolved (no grid) and yield errors.
+fn evaluate_scoped_impl(
+    expression: &str,
+    scopes: &[std::collections::HashMap<String, serde_json::Value>],
+) -> Result<Vec<serde_json::Value>, String> {
+    let formula = expression.trim();
+    let formula = if let Some(rest) = formula.strip_prefix('=') { rest } else { formula };
+
+    let parsed = match parse_formula(formula) {
+        Ok(ast) => crate::convert_expr(&ast),
+        Err(_) => return Err("Syntax error in expression".to_string()),
+    };
+
+    let grid = engine::Grid::new();
+    let results = scopes
+        .iter()
+        .map(|scope| {
+            let evaluator = Evaluator::new(&grid);
+            for (name, value) in scope {
+                evaluator.bind_name(name, scope_value_to_eval(value));
+            }
+            eval_result_to_json(&evaluator.evaluate(&parsed))
+        })
+        .collect();
+    Ok(results)
+}
+
+/// Evaluate one Excel-like expression repeatedly against a list of variable
+/// scopes. Parsed once, evaluated per scope (efficient for per-row chart
+/// `calculate`/`filter`). Bare identifiers resolve to the scope; `=` prefix
+/// optional. Errors surface as Excel-style strings (e.g. "#DIV/0!").
+#[tauri::command]
+pub fn evaluate_scoped(
+    expression: String,
+    scopes: Vec<std::collections::HashMap<String, serde_json::Value>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    evaluate_scoped_impl(&expression, &scopes)
+}
+
+#[cfg(test)]
+mod scoped_eval_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn scope(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn arithmetic_over_scopes() {
+        let scopes = vec![
+            scope(&[("Revenue", serde_json::json!(100)), ("Cost", serde_json::json!(40))]),
+            scope(&[("Revenue", serde_json::json!(50)), ("Cost", serde_json::json!(50))]),
+        ];
+        let out = evaluate_scoped_impl("Revenue - Cost", &scopes).unwrap();
+        assert_eq!(out, vec![serde_json::json!(60.0), serde_json::json!(0.0)]);
+    }
+
+    #[test]
+    fn functions_and_comparison() {
+        let scopes = vec![scope(&[("x", serde_json::json!(9))])];
+        assert_eq!(
+            evaluate_scoped_impl("IF(x > 5, \"big\", \"small\")", &scopes).unwrap(),
+            vec![serde_json::json!("big")]
+        );
+        assert_eq!(
+            evaluate_scoped_impl("ROUND(SQRT(x), 2)", &scopes).unwrap(),
+            vec![serde_json::json!(3.0)]
+        );
+    }
+
+    #[test]
+    fn names_are_case_insensitive() {
+        let scopes = vec![scope(&[("Total", serde_json::json!(10))])];
+        assert_eq!(
+            evaluate_scoped_impl("total * 2", &scopes).unwrap(),
+            vec![serde_json::json!(20.0)]
+        );
+    }
+
+    #[test]
+    fn string_concat() {
+        let scopes = vec![scope(&[
+            ("first", serde_json::json!("Ann")),
+            ("last", serde_json::json!("Lee")),
+        ])];
+        assert_eq!(
+            evaluate_scoped_impl("first & \" \" & last", &scopes).unwrap(),
+            vec![serde_json::json!("Ann Lee")]
+        );
+    }
+
+    #[test]
+    fn syntax_error_is_reported() {
+        assert!(evaluate_scoped_impl("1 +", &[scope(&[])]).is_err());
+    }
+}

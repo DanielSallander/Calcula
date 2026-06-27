@@ -1694,6 +1694,13 @@ export {
   setExtensionData,
   clearExtensionData,
 } from "./extensionData";
+// Scope-injected expression evaluation via the real engine (the sanctioned
+// replacement for hand-rolled in-extension formula evaluators).
+export {
+  evaluateScoped,
+  evaluateExpression,
+} from "./formulaEval";
+export type { ScopeValue, EvalScope, EvalResultValue } from "./formulaEval";
 export {
   listModuleScripts,
   getModuleScript,

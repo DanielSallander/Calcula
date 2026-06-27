@@ -3835,6 +3835,7 @@ pub fn run() {
             formula::get_all_functions,
             formula::get_function_template,
             formula::evaluate_expressions,
+            formula::evaluate_scoped,
             // File commands
             persistence::save_file,
             persistence::get_extension_data,

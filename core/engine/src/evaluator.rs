@@ -500,6 +500,15 @@ impl<'a> Evaluator<'a> {
         self.context.cube_prefetch = Some(prefetch);
     }
 
+    /// Binds a name to a value in the evaluation scope, so a bare identifier
+    /// (`NamedRef`) in the expression resolves to it — the same mechanism
+    /// LET/LAMBDA use. Enables scope-injected expression evaluation (e.g. a
+    /// chart `calculate`/`filter` over per-row fields) through the real engine
+    /// instead of a hand-rolled evaluator. Keys are matched case-insensitively.
+    pub fn bind_name(&self, name: &str, value: EvalResult) {
+        self.scope.borrow_mut().insert(name.to_uppercase(), value);
+    }
+
     /// Gets the grid for a given sheet name, or the current grid if None.
     fn get_grid_for_sheet(&self, sheet: &Option<String>) -> &'a Grid {
         match (sheet, &self.multi_sheet) {

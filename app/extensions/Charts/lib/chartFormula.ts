@@ -1,6 +1,12 @@
 //! FILENAME: app/extensions/Charts/lib/chartFormula.ts
 // PURPOSE: A small, safe (no eval / no new Function) formula evaluator for chart
 //          data transforms — the `calculate` expression and `filter` predicate.
+// MIGRATION (Wave B / A6): @api now exposes a Rust-engine-backed scope evaluator
+//   — `evaluateScoped(expr, scopes)` in @api/formulaEval — the sanctioned
+//   replacement for this in-extension evaluator (computation belongs in Rust).
+//   Adopting it requires (a) bracketed-name parity for series names with spaces
+//   and (b) making this transform pipeline async (the engine call is IPC).
+//   Tracked as a follow-on; until then this local evaluator stays.
 // CONTEXT: Replaces the old arithmetic-only string-substitution evaluator. It is
 //          a recursive-descent parser over an Excel-like expression grammar with
 //          comparisons, string concatenation, logical/math/text functions, and
