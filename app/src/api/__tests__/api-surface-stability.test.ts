@@ -233,15 +233,25 @@ describe("api/lib.ts surface stability", () => {
     }
   });
 
-  it("exports pivot API functions", async () => {
-    const mod = await import("../lib");
-    const pivotOps = [
-      "createPivotTable", "updatePivotFields", "togglePivotGroup",
-      "getPivotView", "deletePivotTable", "refreshPivotCache",
-    ];
-    for (const fn of pivotOps) {
-      expect(typeof (mod as Record<string, unknown>)[fn]).toBe("function");
-    }
+  it("exposes the pivot facade via IoC (registerPivotApi + delegating proxy)", async () => {
+    // Pivot OPERATIONS are no longer individual @api/lib exports — the Pivot
+    // extension registers an implementation and consumers use the `pivot`
+    // object (the API facade imports no extension; see @api/pivot).
+    const mod = await import("../pivot");
+    expect(typeof mod.registerPivotApi).toBe("function");
+    expect(mod.pivot).toBeDefined();
+    // Layout persistence stays a direct (backend-backed) export.
+    expect(typeof mod.savePivotLayout).toBe("function");
+    // The proxy delegates to whatever the Pivot extension registers.
+    let called = false;
+    mod.registerPivotApi({
+      getView: async () => {
+        called = true;
+        return undefined as never;
+      },
+    } as unknown as import("../pivotTypes").PivotApi);
+    await (mod.pivot as unknown as { getView: () => Promise<unknown> }).getView();
+    expect(called).toBe(true);
   });
 
   it("exports conditional formatting functions", async () => {

@@ -29,7 +29,7 @@ import boundaries from 'eslint-plugin-boundaries'
 export const BOUNDARY_SEVERITY = {
   alien: 'error',
   facade: 'error',
-  apiNeutrality: 'warn', // -> 'error' after A2 (relocate @api->Pivot contract)
+  apiNeutrality: 'error', // A2 done: @api->Pivot relocated, api->shell inverted
   sibling: 'warn', // -> 'error' after A1 triage (cross-extension leaks)
 }
 

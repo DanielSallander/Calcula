@@ -434,44 +434,9 @@ export type { SummaryPosition } from "./backend";
 // ============================================================================
 // Pivot API - Pivot table operations
 // ============================================================================
-
-export {
-  // Core pivot operations
-  createPivotTable,
-  updatePivotFields,
-  togglePivotGroup,
-  getPivotView,
-  deletePivotTable,
-  refreshPivotCache,
-
-  // Query operations
-  getPivotSourceData,
-  getPivotAtCell,
-  getPivotDataFormula,
-  getPivotRegionsForSheet,
-  getPivotFieldUniqueValues,
-
-  // Utility functions
-  getCellNumericValue,
-  getCellDisplayValue,
-  isHeaderCell,
-  isTotalCell,
-  isFilterCell,
-  isDataRow,
-  isFilterRow,
-  createFieldConfig,
-  createValueFieldConfig,
-  createLayoutConfig,
-
-  // Expand/Collapse and Grouping
-  setPivotItemExpanded,
-  expandCollapseLevel,
-  expandCollapseAll,
-  groupPivotField,
-  createManualGroup,
-  ungroupPivotField,
-  drillThroughToSheet,
-} from "../../extensions/Pivot/lib/pivot-api";
+// The pivot OPERATIONS are exposed via the `pivot` object in @api/pivot (an
+// IoC facade the Pivot extension registers into). The API facade no longer
+// imports the Pivot extension's pivot-api directly. Contract TYPES are below.
 
 // ============================================================================
 // Grid Renderer - Pivot interactive bounds
@@ -479,7 +444,7 @@ export {
 
 export type {
   PivotInteractiveBounds,
-} from "../../extensions/Pivot/rendering/pivot";
+} from "./pivotTypes";
 
 // Type exports from pivot-api
 export type {
@@ -526,7 +491,7 @@ export type {
   UngroupFieldRequest,
   DrillThroughRequest,
   DrillThroughResponse,
-} from "../../extensions/Pivot/lib/pivot-api";
+} from "./pivotTypes";
 
 // ============================================================================
 // Conditional Formatting API

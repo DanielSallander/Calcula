@@ -10,6 +10,7 @@ import {
   calculateColumnXWithFreeze,
   calculateRowYWithFreeze,
 } from '@api/dimensions';
+import type { PivotInteractiveBounds } from '@api/pivotTypes';
 
 // =============================================================================
 // TYPES
@@ -136,36 +137,9 @@ export interface PivotCellDrawResult {
   } | null;
 }
 
-export interface PivotInteractiveBounds {
-  expandCollapseIcons: Map<string, {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    row: number;
-    col: number;
-    isExpanded: boolean;
-    isRow: boolean;
-  }>;
-  filterButtons: Map<string, {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    fieldIndex: number;
-    row: number;
-    col: number;
-  }>;
-  headerFilterButtons: Map<string, {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    zone: 'row' | 'column';
-    row: number;
-    col: number;
-  }>;
-}
+// PivotInteractiveBounds is part of the pivot contract — defined once in
+// @api/pivotTypes (imported above). Re-exported here for existing importers.
+export type { PivotInteractiveBounds };
 
 export interface PivotRenderOptions {
   startRow: number;

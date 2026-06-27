@@ -3,6 +3,7 @@
 // CONTEXT: Manages a queue of toast messages displayed at the bottom-right of the app.
 
 import { create } from "zustand";
+import { registerToastSink } from "@api/notifications";
 
 export interface ToastItem {
   id: string;
@@ -40,3 +41,8 @@ export const useToastStore = create<ToastState>((set) => ({
       toasts: state.toasts.filter((t) => t.id !== id),
     })),
 }));
+
+// Provide the implementation for the API's showToast() — the Shell owns the
+// renderer, the API owns the contract (registerToastSink). Registered at module
+// load (the ToastContainer in Layout imports this store at app startup).
+registerToastSink((toast) => useToastStore.getState().addToast(toast));

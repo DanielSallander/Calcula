@@ -1,16 +1,22 @@
 //! FILENAME: app/src/api/pivot.ts
 // PURPOSE: Pivot Table API Facade for extensions.
-// CONTEXT: The ONLY entry point for the Pivot Extension to talk to the engine.
-// Extensions import from this module instead of core/lib/pivot-api directly.
+// CONTEXT: The cross-extension entry point for pivot operations. The contract
+//   types live in ./pivotTypes; the implementation is provided by the Pivot
+//   extension via registerPivotApi (IoC). This facade imports NO extension —
+//   it is a feature-agnostic contract (No First-Class Citizens).
 
-// Import Tauri backend functions for pivot layout persistence
 import {
   savePivotLayout as backendSavePivotLayout,
   getPivotLayouts as backendGetPivotLayouts,
   deletePivotLayout as backendDeletePivotLayout,
 } from './backend';
+import type { PivotApi } from './pivotTypes';
 
-// Re-export layout persistence types and functions
+// Re-export the full pivot contract (all types + the PivotApi shape) so
+// extensions can import them from @api/pivot.
+export type * from './pivotTypes';
+
+// Layout persistence is backend-backed (not extension-backed) — kept here.
 export type {
   SavePivotLayoutRequest,
   PivotLayoutResponse,
@@ -19,372 +25,37 @@ export const savePivotLayout = backendSavePivotLayout;
 export const getPivotLayouts = backendGetPivotLayouts;
 export const deletePivotLayout = backendDeletePivotLayout;
 
-// Import from extension-local pivot-api (API layer bridges to extension code)
-import {
-  // Core operations
-  createPivotTable,
-  updatePivotFields,
-  togglePivotGroup,
-  getPivotView,
-  deletePivotTable,
-  refreshPivotCache,
+// ---------------------------------------------------------------------------
+// Inversion of Control: the Pivot extension registers its implementation at
+// load; consumers (including the Pivot UI) use the `pivot` proxy below.
+// ---------------------------------------------------------------------------
 
-  // Query operations
-  getPivotSourceData,
-  getPivotAtCell,
-  getPivotDataFormula,
-  getPivotRegionsForSheet,
-  getPivotFieldUniqueValues,
-
-  // Utility functions
-  getCellNumericValue,
-  getCellDisplayValue,
-  isHeaderCell,
-  isTotalCell,
-  isFilterCell,
-  isDataRow,
-  isFilterRow,
-  createFieldConfig,
-  createValueFieldConfig,
-  createLayoutConfig,
-
-  // New Excel-compatible operations
-  getPivotTableInfo,
-  updatePivotProperties,
-  getPivotLayoutRanges,
-  updatePivotLayout,
-  getPivotHierarchies,
-  addPivotHierarchy,
-  removePivotHierarchy,
-  movePivotField,
-  setPivotAggregation,
-  setPivotNumberFormat,
-  applyPivotFilter,
-  clearPivotFilter,
-  sortPivotField,
-  getPivotFieldInfo,
-  setPivotItemVisibility,
-  getAllPivotTables,
-  refreshAllPivotTables,
-
-  // Expand/Collapse and Grouping
-  setPivotItemExpanded,
-  expandCollapseLevel,
-  expandCollapseAll,
-  groupPivotField,
-  createManualGroup,
-  ungroupPivotField,
-  drillThroughToSheet,
-  // BI Pivot operations
-  createFromBiModel,
-  updateBiFields,
-  setBiLookupColumns,
-
-  // Calculated Fields / Items
-  addCalculatedField,
-  updateCalculatedField,
-  removeCalculatedField,
-  addCalculatedItem,
-  removeCalculatedItem,
-  showReportFilterPages,
-
-  // DSL API
-  getPivotDsl,
-  validatePivotDsl,
-  applyPivotDsl,
-} from '../../extensions/Pivot/lib/pivot-api';
-
-// Re-export types so extensions can import them from this module
-export type {
-  PivotId,
-  SortOrder,
-  AggregationType,
-  ShowValuesAs,
-  ShowAsCalculation,
-  ShowAsRule,
-  ReportLayout,
-  ValuesPosition,
-  CreatePivotRequest,
-  PivotFieldConfig,
-  ValueFieldConfig,
-  LayoutConfig,
-  UpdatePivotFieldsRequest,
-  ToggleGroupRequest,
-  PivotCellValue,
-  PivotCellType,
-  BackgroundStyle,
-  PivotRowType,
-  PivotColumnType,
-  PivotCellData,
-  PivotRowData,
-  PivotColumnData,
-  FilterRowData,
-  HeaderFieldSummary,
-  PivotViewResponse,
-  SourceDataResponse,
-  GroupPath,
-  SourceFieldInfo,
-  ZoneFieldInfo,
-  PivotFieldConfiguration,
-  FilterZoneInfo,
-  PivotRegionInfo,
-  PivotRegionData,
-  FieldUniqueValuesResponse,
-  // New Excel-compatible types
-  PivotLayoutType,
-  SubtotalLocationType,
-  AggregationFunction,
-  PivotFilterType,
-  SortBy,
-  PivotAxis,
-  LabelFilterCondition,
-  ValueFilterCondition,
-  PivotLabelFilter,
-  PivotValueFilter,
-  PivotManualFilter,
-  PivotFilters,
-  Subtotals,
-  ExtendedLayoutConfig,
-  PivotTableInfo,
-  RangeInfo,
-  PivotLayoutRanges,
-  PivotFieldInfoResponse,
-  PivotItemInfo,
-  DataHierarchyInfo,
-  RowColumnHierarchyInfo,
-  PivotHierarchiesInfo,
-  UpdatePivotPropertiesRequest,
-  UpdatePivotLayoutRequest,
-  AddHierarchyRequest,
-  RemoveHierarchyRequest,
-  MoveFieldRequest,
-  SetAggregationRequest,
-  SetNumberFormatRequest,
-  ApplyPivotFilterRequest,
-  ClearPivotFilterRequest,
-  SortPivotFieldRequest,
-  SetItemVisibilityRequest,
-  // Expand/Collapse and Grouping types
-  SetItemExpandedRequest,
-  ExpandCollapseLevelRequest,
-  ExpandCollapseAllRequest,
-  DateGroupLevel,
-  ManualGroupConfig,
-  FieldGroupingConfig,
-  GroupFieldRequest,
-  CreateManualGroupRequest,
-  UngroupFieldRequest,
-  DrillThroughRequest,
-  DrillThroughResponse,
-  // BI Pivot types
-  BiPivotModelInfo,
-  BiModelTable,
-  BiModelColumn,
-  BiMeasureFieldInfo,
-  BiFieldRef,
-  BiValueFieldRef,
-  CreatePivotFromBiModelRequest,
-  UpdateBiPivotFieldsRequest,
-  // DSL types
-  ValidatePivotDslResult,
-  ApplyPivotDslResult,
-} from '../../extensions/Pivot/lib/pivot-api';
-
-export type {
-  PivotInteractiveBounds,
-} from '../../extensions/Pivot/rendering/pivot';
+let registered: PivotApi | null = null;
 
 /**
- * Pivot Table API Facade.
- * The ONLY entry point for the Pivot Extension to talk to the engine.
+ * Provide the Pivot implementation. Called once by the Pivot extension when it
+ * loads (before any runtime pivot.* call). Inverts the dependency so the API
+ * facade never imports the Pivot extension.
  */
-export const pivot = {
-  // ---------------------------------------------------------------------------
-  // Core operations
-  // ---------------------------------------------------------------------------
+export function registerPivotApi(impl: PivotApi): void {
+  registered = impl;
+}
 
-  /** Creates a new pivot table from the specified source range. */
-  create: createPivotTable,
-
-  /** Updates the field configuration of an existing pivot table. */
-  updateFields: updatePivotFields,
-
-  /** Toggles the expand/collapse state of a pivot group. */
-  toggleGroup: togglePivotGroup,
-
-  /** Gets the current view of a pivot table. */
-  getView: getPivotView,
-
-  /** Deletes a pivot table. */
-  delete: deletePivotTable,
-
-  /** Refreshes the pivot cache from current grid data. */
-  refreshCache: refreshPivotCache,
-
-  // ---------------------------------------------------------------------------
-  // Query operations
-  // ---------------------------------------------------------------------------
-
-  /** Gets source data for drill-down (detail view). */
-  getSourceData: getPivotSourceData,
-
-  /** Checks if a cell is within a pivot table region. */
-  getAtCell: getPivotAtCell,
-
-  /** Resolves a pivot cell into GETPIVOTDATA formula arguments. */
-  getDataFormula: getPivotDataFormula,
-
-  /** Gets all pivot regions for the current sheet. */
-  getRegionsForSheet: getPivotRegionsForSheet,
-
-  /** Gets unique values for a specific field (used for filter dropdowns). */
-  getFieldUniqueValues: getPivotFieldUniqueValues,
-
-  // ---------------------------------------------------------------------------
-  // Cell utility functions
-  // ---------------------------------------------------------------------------
-
-  /** Extracts the numeric value from a PivotCellValue. */
-  getCellNumericValue,
-
-  /** Extracts the display string from a PivotCellValue. */
-  getCellDisplayValue,
-
-  /** Checks if a cell is a header cell (row or column). */
-  isHeaderCell,
-
-  /** Checks if a cell is a total cell (subtotal or grand total). */
-  isTotalCell,
-
-  /** Checks if a cell is a filter cell. */
-  isFilterCell,
-
-  /** Checks if a row is a data row (not header or total). */
-  isDataRow,
-
-  /** Checks if a row is a filter row. */
-  isFilterRow,
-
-  // ---------------------------------------------------------------------------
-  // Configuration builders
-  // ---------------------------------------------------------------------------
-
-  /** Creates a default field configuration for row/column areas. */
-  createFieldConfig,
-
-  /** Creates a default value field configuration. */
-  createValueFieldConfig,
-
-  /** Creates a default layout configuration. */
-  createLayoutConfig,
-
-  // ---------------------------------------------------------------------------
-  // Excel-compatible API operations
-  // ---------------------------------------------------------------------------
-
-  /** Gets pivot table properties and info. */
-  getInfo: getPivotTableInfo,
-
-  /** Updates pivot table properties. */
-  updateProperties: updatePivotProperties,
-
-  /** Gets pivot layout ranges (data body, row labels, column labels, filter axis). */
-  getLayoutRanges: getPivotLayoutRanges,
-
-  /** Updates pivot layout properties. */
-  updateLayout: updatePivotLayout,
-
-  /** Gets all hierarchies info for a pivot table. */
-  getHierarchies: getPivotHierarchies,
-
-  /** Adds a field to a hierarchy. */
-  addHierarchy: addPivotHierarchy,
-
-  /** Removes a field from a hierarchy. */
-  removeHierarchy: removePivotHierarchy,
-
-  /** Moves a field between hierarchies. */
-  moveField: movePivotField,
-
-  /** Sets the aggregation function for a value field. */
-  setAggregation: setPivotAggregation,
-
-  /** Sets the number format for a value field. */
-  setNumberFormat: setPivotNumberFormat,
-
-  /** Applies a filter to a pivot field. */
-  applyFilter: applyPivotFilter,
-
-  /** Clears filters from a pivot field. */
-  clearFilter: clearPivotFilter,
-
-  /** Sorts a pivot field by labels. */
-  sortField: sortPivotField,
-
-  /** Gets pivot field info including items and filters. */
-  getFieldInfo: getPivotFieldInfo,
-
-  /** Sets a pivot item's visibility. */
-  setItemVisibility: setPivotItemVisibility,
-
-  /** Gets a list of all pivot tables in the workbook. */
-  getAll: getAllPivotTables,
-
-  /** Refreshes all pivot tables in the workbook. */
-  refreshAll: refreshAllPivotTables,
-
-  // ---------------------------------------------------------------------------
-  // Expand/Collapse and Grouping
-  // ---------------------------------------------------------------------------
-
-  /** Sets the expand/collapse state of a specific pivot item. */
-  setItemExpanded: setPivotItemExpanded,
-
-  /** Expands or collapses all items at a specific field level. */
-  expandCollapseLevel,
-
-  /** Expands or collapses all fields in the entire pivot table. */
-  expandCollapseAll,
-
-  /** Applies grouping (date, number binning, or manual) to a pivot field. */
-  groupPivotField,
-
-  /** Creates a manual group on a pivot field. */
-  createManualGroup,
-
-  /** Removes all grouping from a pivot field. */
-  ungroupPivotField,
-
-  // ---------------------------------------------------------------------------
-  // Drill-Through
-  // ---------------------------------------------------------------------------
-
-  /** Drill through a data cell to a new sheet with matching source rows. */
-  drillThroughToSheet,
-
-  // ---------------------------------------------------------------------------
-  // BI Pivot operations
-  // ---------------------------------------------------------------------------
-
-  /** Creates a new BI pivot from the full model (all tables + measures). */
-  createFromBiModel,
-
-  /** Updates field assignments on a BI-backed pivot (triggers BI engine re-query). */
-  updateBiFields,
-
-  /** Persists LOOKUP column set without re-querying (lightweight metadata update). */
-  setBiLookupColumns,
-
-  // ---------------------------------------------------------------------------
-  // DSL (Design View Language) API
-  // ---------------------------------------------------------------------------
-
-  /** Serialize the current pivot layout to DSL text. */
-  getDsl: getPivotDsl,
-
-  /** Validate DSL text against a pivot's fields without applying it. */
-  validateDsl: validatePivotDsl,
-
-  /** Parse, compile, and apply DSL text to a pivot table. */
-  applyDsl: applyPivotDsl,
-};
+/**
+ * Pivot Table API Facade. Delegates to the implementation the Pivot extension
+ * registered. Throws a clear error if accessed before the Pivot extension has
+ * loaded (which should not happen in normal startup ordering).
+ */
+export const pivot: PivotApi = new Proxy({} as PivotApi, {
+  get(_target, prop) {
+    if (!registered) {
+      throw new Error(
+        `@api/pivot: the Pivot extension is not loaded (accessed "${String(prop)}").`,
+      );
+    }
+    const value = registered[prop as keyof PivotApi];
+    return typeof value === 'function'
+      ? (value as (...args: unknown[]) => unknown).bind(registered)
+      : value;
+  },
+});
