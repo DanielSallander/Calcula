@@ -33,7 +33,7 @@ import type {
   BiInsertRequest,
   BiInsertResponse,
   BiRegionInfo,
-} from "../types";
+} from "@api/backend";
 
 // ---------------------------------------------------------------------------
 // Cached state

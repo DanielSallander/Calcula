@@ -29,12 +29,15 @@ import {
   type VirtualFileEntry,
 } from "@api/backend";
 import { FILE_VIEWER_PANE_ID } from "./constants";
-import { getSettings } from "../Settings/SettingsView";
+import { getSettings } from "../_shared/lib/appSettings";
 import { MarkdownView, getViewMode } from "./FileRenderer";
-import { listNotebooks, deleteNotebook as deleteNotebookApi } from "../ScriptNotebook/lib/notebookApi";
+import {
+  listNotebooks,
+  deleteNotebook as deleteNotebookApi,
+  requestOpenNotebook,
+  type NotebookSummaryData,
+} from "@api/notebookBackend";
 import { openActivityView } from "@api";
-import { useNotebookStore } from "../ScriptNotebook/lib/useNotebookStore";
-import type { NotebookSummary } from "../ScriptNotebook/types";
 
 // ============================================================================
 // SVG Icons (minimalistic, 14x14)
@@ -319,7 +322,7 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
   const [tables, setTables] = useState<Table[]>([]);
   const [namedRanges, setNamedRanges] = useState<NamedRange[]>([]);
   const [virtualFiles, setVirtualFiles] = useState<VirtualFileEntry[]>([]);
-  const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
+  const [notebooks, setNotebooks] = useState<NotebookSummaryData[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(
     new Set(["sheets", "files"])
   );
@@ -367,7 +370,7 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
         getAllTables().catch(() => [] as Table[]),
         getAllNamedRanges().catch(() => [] as NamedRange[]),
         listVirtualFiles().catch(() => [] as VirtualFileEntry[]),
-        listNotebooks().catch(() => [] as NotebookSummary[]),
+        listNotebooks().catch(() => [] as NotebookSummaryData[]),
       ]);
       setSheets(sheetsResult.sheets);
       setActiveSheet(sheetsResult.activeIndex);
@@ -637,7 +640,7 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
   // ---------- Notebook Handlers ----------
   const handleOpenNotebook = useCallback((notebookId: string) => {
     // Open the notebook in the Notebook activity view
-    useNotebookStore.getState().openNotebook(notebookId);
+    requestOpenNotebook(notebookId);
     openActivityView("script-notebook");
   }, []);
 

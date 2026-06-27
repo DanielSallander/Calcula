@@ -43,7 +43,6 @@ import {
   updatePivotProperties,
 } from "../lib/pivot-api";
 
-import { CHART_DIALOG_ID } from "../../Charts/manifest";
 
 import { deleteCachedPivotView } from "../lib/pivotViewStore";
 
@@ -150,7 +149,8 @@ export function registerPivotContextMenuItems(): () => void {
         const pivotId = getPivotIdFromContext(ctx);
         if (pivotId === null) return;
 
-        showDialog(CHART_DIALOG_ID, { pivotId });
+        showDialog("chart:createDialog", // Charts' public dialog id (string contract, not a code import)
+           { pivotId });
       },
     },
 

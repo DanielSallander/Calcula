@@ -14,7 +14,7 @@ import {
   refreshConnection,
   setActiveRole,
   getActiveRole,
-} from "../lib/bi-api";
+} from "../../_shared/lib/bi-api";
 import type {
   ConnectionInfo,
   BiQueryResult,

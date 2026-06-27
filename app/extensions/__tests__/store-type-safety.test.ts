@@ -129,7 +129,7 @@ vi.mock("@api/backend", () => ({
 // ============================================================================
 
 import { useSortStore } from "../Sorting/hooks/useSortState";
-import { useFindStore } from "../BuiltIn/FindReplaceDialog/useFindStore";
+import { useFindStore } from "../_shared/lib/useFindStore";
 import {
   getValidationState,
   getValidationRanges,

@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { css } from '@emotion/css';
 import { onAppEvent, emitAppEvent } from '@api';
-import { PivotEvents } from '../lib/pivotEvents';
+import { PivotEvents } from '../../_shared/lib/pivotEvents';
 import { getActivePivotId } from '../handlers/selectionHandler';
 import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import type { LayoutConfig, ReportLayout, ValuesPosition, PivotId } from './types';

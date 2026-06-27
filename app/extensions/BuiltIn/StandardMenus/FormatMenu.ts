@@ -8,8 +8,8 @@ import { registerMenu } from '@api/ui';
 import type { MenuDefinition } from '@api/ui';
 import { applyFormatting } from '@api/lib';
 import { cellEvents, useGridState, IconFormatCells, IconCellStyles } from '@api';
-import { CellStylesGallery } from '../HomeTab/components/CellStylesGallery';
-import type { CellStyleDefinition } from '../HomeTab/components/CellStylesGallery';
+import { CellStylesGallery } from '../../_shared/components/CellStylesGallery';
+import type { CellStyleDefinition } from '../../_shared/components/CellStylesGallery';
 
 /**
  * Wrapper component for the Cell Styles gallery inside the Format menu.

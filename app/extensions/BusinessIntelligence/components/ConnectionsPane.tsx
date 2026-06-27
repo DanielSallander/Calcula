@@ -21,7 +21,7 @@ import {
   refreshConnection,
   getModelInfo,
   updateConnection,
-} from "../lib/bi-api";
+} from "../../_shared/lib/bi-api";
 import type { ConnectionInfo, BiModelInfo } from "../types";
 
 const MODEL_DIALOG_ID = "bi:modelDialog";

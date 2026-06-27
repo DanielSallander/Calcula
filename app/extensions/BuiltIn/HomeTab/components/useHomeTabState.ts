@@ -20,7 +20,7 @@ import {
   ITEMS_BY_ID,
   type HomeTabItem,
 } from "../homeTabConfig";
-import type { CellStyleDefinition } from "./CellStylesGallery";
+import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
 
 export function useHomeTabState() {
   const gridState = useGridState();

@@ -137,7 +137,7 @@ import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource } from "./types";
 import type { PivotChartFieldButton } from "./types";
-import { PivotEvents } from "../Pivot/lib/pivotEvents";
+import { PivotEvents } from "../_shared/lib/pivotEvents";
 
 // ============================================================================
 // Module State

@@ -17,7 +17,7 @@ import type {
 } from './types';
 import { getDefaultAggregation, getValueFieldDisplayName } from './types';
 import { emitAppEvent, onAppEvent } from '@api';
-import { PivotEvents } from '../lib/pivotEvents';
+import { PivotEvents } from '../../_shared/lib/pivotEvents';
 import { registerDragOutRemoval } from '../../_shared/components/useDragDrop';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
 

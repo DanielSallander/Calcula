@@ -47,3 +47,20 @@ export async function listNotebooks(): Promise<NotebookSummaryData[]> {
 export async function loadNotebook(id: string): Promise<NotebookDocumentData> {
   return invoke<NotebookDocumentData>("notebook_load", { id });
 }
+
+/** Delete a notebook by id. */
+export async function deleteNotebook(id: string): Promise<void> {
+  return invoke<void>("notebook_delete", { id });
+}
+
+/**
+ * App-event channel for asking the ScriptNotebook extension to open a notebook.
+ * Lets other extensions (e.g. FileExplorer) trigger an open without importing
+ * the ScriptNotebook UI store. ScriptNotebook listens; emitters dispatch.
+ */
+export const NOTEBOOK_OPEN_EVENT = "calcula:notebook-open";
+
+/** Ask the ScriptNotebook extension to open a notebook by id. */
+export function requestOpenNotebook(id: string): void {
+  window.dispatchEvent(new CustomEvent(NOTEBOOK_OPEN_EVENT, { detail: { id } }));
+}

@@ -22,7 +22,7 @@ import {
 } from "@api";
 import type { DialogProps } from "@api/uiTypes";
 // Extension-local state management
-import { useFindStore } from "./useFindStore";
+import { useFindStore } from "../../_shared/lib/useFindStore";
 import * as S from "./FindReplaceDialog.styles";
 
 export function FindReplaceDialog(props: DialogProps): React.ReactElement | null {

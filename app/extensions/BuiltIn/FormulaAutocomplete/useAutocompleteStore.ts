@@ -13,8 +13,8 @@ import type { AutocompleteInputPayload } from "@api/formulaAutocomplete";
 import { isFormulaExpectingReference } from "@api/types";
 import { parseTokenAtCursor } from "./tokenParser";
 import type { TokenContext } from "./tokenParser";
-import { filterSuggestions, loadFunctionCatalog, loadNamedRanges, getFunctionByName } from "./functionCatalog";
-import type { ScoredSuggestion } from "./functionCatalog";
+import { filterSuggestions, loadFunctionCatalog, loadNamedRanges, getFunctionByName } from "../../_shared/lib/functionCatalog";
+import type { ScoredSuggestion } from "../../_shared/lib/functionCatalog";
 import type { FunctionInfo } from "@api/types";
 
 // ============================================================================

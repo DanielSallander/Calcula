@@ -15,7 +15,7 @@ import {
   columnToLetter,
 } from "@api";
 import type { ActivityViewProps } from "@api/uiTypes";
-import { useFindStore } from "../BuiltIn/FindReplaceDialog/useFindStore";
+import { useFindStore } from "../_shared/lib/useFindStore";
 
 // SVG micro-icons for the search panel
 const ChevronUp = () => (

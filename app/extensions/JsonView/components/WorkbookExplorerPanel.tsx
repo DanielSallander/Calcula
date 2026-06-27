@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { getWorkbookTree, getObjectJson } from "@api/jsonView";
 import type { TreeNode as TreeNodeData } from "@api/jsonView";
-import { MonacoJsonEditor } from "./MonacoJsonEditor";
+import { MonacoJsonEditor } from "../../_shared/components/jsonToggle/MonacoJsonEditor";
 
 // ============================================================================
 // Styles

@@ -29,9 +29,7 @@ import type {
   CalculatedFieldDef,
   AppliedCalcGroup,
 } from './types';
-import { useJsonToggle } from '../../JsonView/lib/useJsonToggle';
-import { JsonToggleButton } from '../../JsonView/components/JsonToggleButton';
-import { JsonToggleEditor } from '../../JsonView/components/JsonToggleEditor';
+import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 
 type EditorTab = 'fields' | 'design';
 

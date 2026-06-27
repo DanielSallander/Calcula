@@ -6,7 +6,7 @@ import type { DialogProps } from "@api";
 import { pullPackage, emitAppEvent, AppEvents } from "@api";
 import { inspectPackage, browseRegistry, type PackageInspection, type PackageInfo } from "@api/distribution";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getConnections, connect, updateConnection } from "../../BusinessIntelligence/lib/bi-api";
+import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-api";
 import { pivot } from "@api/pivot";
 
 /** Short human phrase for a declared capability id (R19), for the review box. */

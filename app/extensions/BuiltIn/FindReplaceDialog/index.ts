@@ -9,7 +9,7 @@ import { CoreCommands } from "@api/commands";
 // FIX: Import from API layer, not directly from Shell
 import { DialogExtensions } from "@api/ui";
 import { FindReplaceDialog } from "./FindReplaceDialog";
-import { useFindStore } from "./useFindStore";
+import { useFindStore } from "../../_shared/lib/useFindStore";
 
 // ============================================================================
 // Extension State

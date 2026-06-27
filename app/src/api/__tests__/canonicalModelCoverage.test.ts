@@ -26,7 +26,7 @@ const DTS_PATH = path.resolve(
 // The notebook/QuickJS IntelliSense surface (C3 step 5) — synchronous model.
 const NOTEBOOK_DTS_PATH = path.resolve(
   __dirname,
-  "../../../extensions/ScriptEditor/calcula.d.ts",
+  "../../../extensions/_shared/lib/calcula.d.ts",
 );
 
 /** Remove block + line comments so doc text can't mask a missing member or skew

@@ -23,8 +23,8 @@ import {
   type HomeTabLayout,
   type HomeTabItem,
 } from "../homeTabConfig";
-import { CellStylesGallery } from "./CellStylesGallery";
-import type { CellStyleDefinition } from "./CellStylesGallery";
+import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
+import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 
 // ============================================================================

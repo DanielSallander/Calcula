@@ -37,12 +37,12 @@ vi.mock("@api/backend", () => ({
 }));
 
 describe("BI API caching layer", () => {
-  let biApi: typeof import("../bi-api");
+  let biApi: typeof import("../../../_shared/lib/bi-api");
 
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
-    biApi = await import("../bi-api");
+    biApi = await import("../../../_shared/lib/bi-api");
   });
 
   // =========================================================================

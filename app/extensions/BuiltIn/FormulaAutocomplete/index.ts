@@ -21,7 +21,7 @@ import type {
 import { installUdfEvaluation, uninstallUdfEvaluation } from "@api/formulaUdf";
 import { FormulaAutocompleteOverlay } from "./FormulaAutocompleteOverlay";
 import { useAutocompleteStore } from "./useAutocompleteStore";
-import { reloadNamedRanges, subscribeToCustomFunctionChanges } from "./functionCatalog";
+import { reloadNamedRanges, subscribeToCustomFunctionChanges } from "../../_shared/lib/functionCatalog";
 
 const OVERLAY_ID = "formula-autocomplete";
 

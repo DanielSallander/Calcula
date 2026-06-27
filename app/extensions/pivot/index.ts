@@ -23,8 +23,8 @@ import { emitAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
 import { hasObjectScript, drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 
-import { PivotEvents } from "./lib/pivotEvents";
-import type { PivotProgressEvent } from "./lib/pivotEvents";
+import { PivotEvents } from "../_shared/lib/pivotEvents";
+import type { PivotProgressEvent } from "../_shared/lib/pivotEvents";
 import { listenTauriEvent } from "@api/backend";
 
 import {

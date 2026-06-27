@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { getObjectJson, setObjectJson, listObjects } from "@api/jsonView";
 import type { ObjectEntry } from "@api/jsonView";
-import { MonacoJsonEditor } from "./MonacoJsonEditor";
+import { MonacoJsonEditor } from "../../_shared/components/jsonToggle/MonacoJsonEditor";
 import { getObjectTypeName } from "../lib/objectTypes";
 
 // ============================================================================

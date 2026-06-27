@@ -15,7 +15,7 @@ import {
 } from "@api";
 import { pivot } from "@api/pivot";
 import type { BiPivotModelInfo } from "@api/pivot";
-import { createConnection, connect, getModelInfo } from "../lib/bi-api";
+import { createConnection, connect, getModelInfo } from "../../_shared/lib/bi-api";
 import { CONNECTIONS_PANE_ID } from "../manifest";
 import type { BiModelInfo, ConnectionInfo } from "../types";
 

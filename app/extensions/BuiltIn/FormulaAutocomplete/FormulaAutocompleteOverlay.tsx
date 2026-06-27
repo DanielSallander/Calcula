@@ -6,7 +6,7 @@ import React, { useRef, useEffect } from "react";
 import type { OverlayProps } from "@api/uiTypes";
 import { getCachedLocale } from "@api/locale";
 import { useAutocompleteStore } from "./useAutocompleteStore";
-import type { ScoredSuggestion } from "./functionCatalog";
+import type { ScoredSuggestion } from "../../_shared/lib/functionCatalog";
 import type { FunctionInfo } from "@api/types";
 import * as S from "./FormulaAutocompleteOverlay.styles";
 

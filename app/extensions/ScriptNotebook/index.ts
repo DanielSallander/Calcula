@@ -9,6 +9,8 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { scrollToCell, setSelection } from "@api/grid";
 import { dispatchGridAction } from "@api/gridDispatch";
 import { NotebookPanel } from "./components/NotebookPanel";
+import { NOTEBOOK_OPEN_EVENT } from "@api/notebookBackend";
+import { useNotebookStore } from "./lib/useNotebookStore";
 import type { DeferredAction } from "./types";
 
 // ============================================================================
@@ -134,6 +136,16 @@ function activate(context: ExtensionContext): void {
   };
   window.addEventListener("script:deferred-actions", handleDeferredActions);
   cleanupFns.push(() => window.removeEventListener("script:deferred-actions", handleDeferredActions));
+
+  // 5. Open a notebook on request from other extensions (e.g. FileExplorer),
+  //    which dispatch via @api requestOpenNotebook() instead of importing our store.
+  const handleOpenNotebook = (e: Event) => {
+    const id = (e as CustomEvent).detail?.id;
+    if (typeof id !== "string") return;
+    void useNotebookStore.getState().openNotebook(id);
+  };
+  window.addEventListener(NOTEBOOK_OPEN_EVENT, handleOpenNotebook);
+  cleanupFns.push(() => window.removeEventListener(NOTEBOOK_OPEN_EVENT, handleOpenNotebook));
 
   isActivated = true;
   console.log("[ScriptNotebook] Activated successfully.");

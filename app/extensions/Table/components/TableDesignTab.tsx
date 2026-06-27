@@ -18,9 +18,7 @@ import {
 import type { RibbonContext } from "@api/extensions";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 import { TableStylesGallery, DEFAULT_TABLE_STYLE_ID } from "./TableStylesGallery";
-import { useJsonToggle } from "../../JsonView/lib/useJsonToggle";
-import { JsonToggleButton } from "../../JsonView/components/JsonToggleButton";
-import { JsonToggleEditor } from "../../JsonView/components/JsonToggleEditor";
+import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 
 // ============================================================================
 // Styles

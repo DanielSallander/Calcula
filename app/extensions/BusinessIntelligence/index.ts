@@ -21,7 +21,7 @@ import {
   ConnectionsPaneDefinition,
   CONNECTIONS_PANE_ID,
 } from "./manifest";
-import { getRegionAtCell, getConnections, connect, updateConnection } from "./lib/bi-api";
+import { getRegionAtCell, getConnections, connect, updateConnection } from "../_shared/lib/bi-api";
 import { ModelDialog } from "./components/ModelDialog";
 
 const MODEL_DIALOG_ID = "bi:modelDialog";

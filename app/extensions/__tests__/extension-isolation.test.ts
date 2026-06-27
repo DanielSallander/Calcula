@@ -148,7 +148,7 @@ import {
   getValidationState,
 } from "../DataValidation/lib/validationStore";
 
-import { useFindStore } from "../BuiltIn/FindReplaceDialog/useFindStore";
+import { useFindStore } from "../_shared/lib/useFindStore";
 
 import {
   clearCache as clearFilterPaneCache,

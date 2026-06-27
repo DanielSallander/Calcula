@@ -7,7 +7,7 @@ import { pivot } from "@api/pivot";
 import { OverlayExtensions, emitAppEvent } from "@api";
 import { PIVOT_FILTER_OVERLAY_ID } from "../manifest";
 import { getCachedPivotView } from "../lib/pivotViewStore";
-import { PivotEvents } from "../lib/pivotEvents";
+import { PivotEvents } from "../../_shared/lib/pivotEvents";
 
 /**
  * State for tracking the current filter menu.

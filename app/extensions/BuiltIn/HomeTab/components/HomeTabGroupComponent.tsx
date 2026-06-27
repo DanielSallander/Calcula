@@ -8,7 +8,7 @@ import { css } from "@emotion/css";
 import { DialogExtensions } from "@api/ui";
 import type { RibbonContext } from "@api/extensions";
 import { ITEMS_BY_ID, type HomeTabItem } from "../homeTabConfig";
-import { CellStylesGallery } from "./CellStylesGallery";
+import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
 import { useHomeTabState } from "./useHomeTabState";
 
 // ============================================================================

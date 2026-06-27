@@ -17,7 +17,7 @@ import {
   getControlMetadata,
   setControlProperty,
 } from "../lib/controlApi";
-import { listScripts } from "../../ScriptEditor/lib/scriptApi";
+import { listWorkbookScripts } from "@api/workbookScripts";
 import { getShapeDefinition } from "../Shape/shapeCatalog";
 import { getShapeHtmlContent, shapeHasScript } from "../Shape/shapeRenderer";
 import { getTemplateCategories, type ShapeTemplate } from "../Shape/shapeTemplateCatalog";
@@ -338,7 +338,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           row >= 0 && col >= 0
             ? getControlMetadata(sheetIndex, row, col)
             : Promise.resolve(null),
-          listScripts(),
+          listWorkbookScripts(),
         ]);
         if (!mountedRef.current) return;
         setMetadata(meta);

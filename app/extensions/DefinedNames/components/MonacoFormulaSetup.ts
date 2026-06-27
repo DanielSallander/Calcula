@@ -8,7 +8,7 @@ import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import {
   loadFunctionCatalog,
   getFunctionCatalog,
-} from "../../BuiltIn/FormulaAutocomplete/functionCatalog";
+} from "../../_shared/lib/functionCatalog";
 
 // ============================================================================
 // Monaco Worker Setup (local, no CDN)

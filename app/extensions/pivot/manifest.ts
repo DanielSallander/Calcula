@@ -22,7 +22,7 @@ import { PivotHeaderFilterDropdown } from "./components/PivotHeaderFilterDropdow
 import type { HeaderFieldSummary } from "./lib/pivot-api";
 import type { DialogProps, OverlayProps } from "@api";
 import React from "react";
-import { PivotEvents } from "./lib/pivotEvents";
+import { PivotEvents } from "../_shared/lib/pivotEvents";
 
 // ============================================================================
 // Extension Manifest

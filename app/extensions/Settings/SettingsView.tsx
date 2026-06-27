@@ -22,38 +22,15 @@ type SettingsTab = "general" | "appearance" | "keybindings";
 // Settings Storage
 // ============================================================================
 
-const STORAGE_KEY = "calcula.settings";
-
-export type FileOpenMode = "preview" | "taskpane";
-
-interface CalcuaSettings {
-  fileClickAction: FileOpenMode; // "preview" = side panel, "taskpane" = right task pane
-}
-
-const defaultSettings: CalcuaSettings = {
-  fileClickAction: "preview",
-};
-
-/** Read settings from localStorage */
-export function getSettings(): CalcuaSettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return { ...defaultSettings, ...parsed };
-    }
-  } catch {
-    // ignore
-  }
-  return { ...defaultSettings };
-}
-
-/** Write settings to localStorage */
-function saveSettings(settings: CalcuaSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  // Notify listeners
-  window.dispatchEvent(new CustomEvent("calcula:settings-changed", { detail: settings }));
-}
+// App settings live in _shared/lib/appSettings (shared with FileExplorer);
+// re-exported here so existing importers of "./SettingsView" keep working.
+import {
+  getSettings,
+  saveSettings,
+  type CalcuaSettings,
+  type FileOpenMode,
+} from "../_shared/lib/appSettings";
+export { getSettings, type FileOpenMode };
 
 // ============================================================================
 // Settings View Component

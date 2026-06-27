@@ -12,7 +12,7 @@ const monacoTs = (monaco.languages as any).typescript;
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 // Vite ?raw import: loads .d.ts as a plain string for Monaco type registration
-import calculaDts from "../../ScriptEditor/calcula.d.ts?raw";
+import calculaDts from "../../_shared/lib/calcula.d.ts?raw";
 
 // ============================================================================
 // Monaco Worker Setup (local, no CDN)

@@ -3,7 +3,7 @@
 //          replace scenarios, navigation edge cases, and special characters.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { useFindStore } from "../../BuiltIn/FindReplaceDialog/useFindStore";
+import { useFindStore } from "../../_shared/lib/useFindStore";
 
 // ============================================================================
 // Helper

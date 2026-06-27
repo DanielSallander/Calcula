@@ -2,7 +2,7 @@
 // PURPOSE: Tests for the Find & Replace store (shared between Search panel and FindReplaceDialog).
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { useFindStore } from "../../BuiltIn/FindReplaceDialog/useFindStore";
+import { useFindStore } from "../../_shared/lib/useFindStore";
 
 // ============================================================================
 // Helper

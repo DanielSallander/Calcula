@@ -9,9 +9,7 @@ import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
-import { useJsonToggle } from "../../JsonView/lib/useJsonToggle";
-import { JsonToggleButton } from "../../JsonView/components/JsonToggleButton";
-import { JsonToggleEditor } from "../../JsonView/components/JsonToggleEditor";
+import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 
 // ============================================================================
 // Toggle Switch Component

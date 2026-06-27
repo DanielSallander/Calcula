@@ -22,7 +22,7 @@ import {
 import { useModuleStore } from "../lib/useModuleStore";
 import { ModuleNavigationPane } from "./ModuleNavigationPane";
 // Vite ?raw import: loads the .d.ts file content as a plain string
-import calculaDts from "../calcula.d.ts?raw";
+import calculaDts from "../../_shared/lib/calcula.d.ts?raw";
 
 // ============================================================================
 // Monaco Worker Setup (local, no CDN)

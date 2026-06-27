@@ -2,7 +2,7 @@
 // PURPOSE: Heavily parameterized tests for query matching, navigation, and replace logic.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { useFindStore } from "../../BuiltIn/FindReplaceDialog/useFindStore";
+import { useFindStore } from "../../_shared/lib/useFindStore";
 
 // ============================================================================
 // Setup

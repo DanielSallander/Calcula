@@ -30,7 +30,7 @@ export const BOUNDARY_SEVERITY = {
   alien: 'error',
   facade: 'error',
   apiNeutrality: 'error', // A2 done: @api->Pivot relocated, api->shell inverted
-  sibling: 'warn', // -> 'error' after A1 triage (cross-extension leaks)
+  sibling: 'error', // A1 done: the 24 cross-extension leaks are resolved
 }
 
 export const boundaryConfigs = [
@@ -138,10 +138,12 @@ export const boundaryConfigs = [
           // API facade: core + lib only. Never an extension (No First-Class
           // Citizens) and never the Shell (layering: shell->api->core).
           { from: ['api'], allow: ['api', 'core', 'lib'] },
-          // Shell: orchestrates core + api and loads extensions via the
-          // manifest/index aggregators. Importing a specific extension's
-          // internals directly (e.g. a component) is still flagged (A4).
-          { from: ['shell'], allow: ['shell', 'core', 'api', 'lib', 'ext-manifest', 'ext-index'] },
+          // Shell: the extension HOST — orchestrates core + api and loads/mounts
+          // extensions. shell->extension is its job (distinct from the Alien Rule,
+          // which forbids core->extension). The A4 nuance (Layout importing a
+          // specific built-in's component directly, bypassing the manifest) is a
+          // finer concern tracked separately, not expressible via element-types.
+          { from: ['shell'], allow: ['shell', 'core', 'api', 'lib', 'ext-manifest', 'ext-index', 'extension', 'builtin', 'standard'] },
           // Extensions: api + _shared + their OWN subtree only. No siblings, no core/shell.
           { from: ['extension'], allow: ['api', 'ext-shared', ['extension', { name: '${from.name}' }]] },
           { from: ['builtin'], allow: ['api', 'ext-shared', ['builtin', { name: '${from.name}' }]] },

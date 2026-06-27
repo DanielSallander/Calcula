@@ -11,7 +11,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 const OPS_DIR = path.resolve(__dirname, "../../../../core/script-engine/src/ops");
-const DTS_PATH = path.resolve(__dirname, "../calcula.d.ts");
+const DTS_PATH = path.resolve(__dirname, "../../_shared/lib/calcula.d.ts");
 
 /** Extract op names from `calcula.set("opName", ...)` registrations. */
 function rustOpNames(file: string): string[] {

@@ -22,7 +22,7 @@ import {
   PIVOT_ANALYZE_TAB_ID,
 } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
-import { PivotEvents } from "../lib/pivotEvents";
+import { PivotEvents } from "../../_shared/lib/pivotEvents";
 
 // ---------------------------------------------------------------------------
 // Module-level state (owned by the pivot extension, not by the shell)
