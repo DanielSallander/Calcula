@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -49,6 +49,10 @@ pub struct PullResult {
     /// from the package's sheet id to the new LOCAL sheet id so it materializes
     /// on the right sheet. Empty for packages published before charts were carried.
     pub charts: Vec<SavedChart>,
+    /// Sparklines carried by the package (C2a), each with its `sheet_id` already
+    /// remapped to the new LOCAL sheet id. Empty for packages published before
+    /// sparklines were carried.
+    pub sparklines: Vec<SavedSparkline>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
@@ -242,6 +246,30 @@ pub fn pull(
         }
     };
 
+    // Read sparklines (C2a) — same package->local sheet-id remap as charts; an
+    // entry whose sheet wasn't pulled is dropped. Absent in older packages.
+    let pulled_sparklines: Vec<SavedSparkline> = {
+        match registry.read_artifact(pkg, ver, "sparklines.json")? {
+            Some(bytes) => {
+                let package_sparklines: Vec<SavedSparkline> = serde_json::from_slice(&bytes)?;
+                let id_map: HashMap<SheetId, SheetId> = pulled_sheets
+                    .iter()
+                    .map(|p| (p.package_sheet_id, p.sheet.id))
+                    .collect();
+                package_sparklines
+                    .into_iter()
+                    .filter_map(|mut sp| {
+                        id_map.get(&sp.sheet_id).map(|&local| {
+                            sp.sheet_id = local;
+                            sp
+                        })
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        }
+    };
+
     // Read tables
     let mut pulled_tables = Vec::new();
     for table_id in &ver_manifest.tables {
@@ -413,6 +441,7 @@ pub fn pull(
         pivot_definitions: pulled_pivot_defs,
         bi_pivot_metadata,
         charts: pulled_charts,
+        sparklines: pulled_sparklines,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -596,6 +625,60 @@ mod tests {
         let local_sheet_id = result.sheets[0].sheet.id;
         assert_eq!(chart.sheet_id, local_sheet_id);
         assert_ne!(chart.sheet_id, pkg_sheet_id);
+    }
+
+    #[test]
+    fn pull_restores_sparklines_with_remapped_sheet_id() {
+        // C2a: a sparkline must survive publish -> pull with its sheet_id remapped
+        // from the package id to the new LOCAL sheet id (same contract as charts).
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut sheet = Sheet::new("Sparked".to_string());
+        sheet
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(1.0)));
+        let pkg_sheet_id = sheet.id;
+        let groups = "[{\"dataRange\":\"A1:A5\",\"location\":\"B1\"}]".to_string();
+        let mut wb = persistence::Workbook::default();
+        wb.sparklines.push(SavedSparkline {
+            sheet_id: pkg_sheet_id,
+            groups_json: groups.clone(),
+        });
+        wb.sheets = vec![sheet];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "sparked-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0],
+            now: "2026-06-28T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish::publish(&reg, &publish_req, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "sparked-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-06-28T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.sparklines.len(), 1, "the sparkline round-trips");
+        let sp = &result.sparklines[0];
+        assert_eq!(sp.groups_json, groups, "opaque groups_json is byte-preserved");
+        let local_sheet_id = result.sheets[0].sheet.id;
+        assert_eq!(sp.sheet_id, local_sheet_id, "remapped to the new local sheet");
+        assert_ne!(sp.sheet_id, pkg_sheet_id, "no longer the package sheet id");
     }
 
     #[test]

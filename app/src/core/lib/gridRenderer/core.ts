@@ -24,6 +24,7 @@ import { DEFAULT_THEME } from "./types";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
 import { drawCellText } from "./rendering/cells";
+import { buildMergeSlaveIndex } from "./rendering/mergeIndex";
 import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
 import { drawSpillBorders } from "./rendering/spillBorder";
 import { drawFormulaReferences } from "./rendering/references";
@@ -100,34 +101,6 @@ export interface OverlayRegistration {
 // ============================================================================
 // Helper Functions (unchanged)
 // ============================================================================
-
-function getMasterCellKey(
-  row: number,
-  col: number,
-  cells: Map<string, { rowSpan?: number; colSpan?: number }>
-): string | null {
-  for (const [key, cell] of cells.entries()) {
-    const rowSpan = cell.rowSpan ?? 1;
-    const colSpan = cell.colSpan ?? 1;
-    
-    if (rowSpan > 1 || colSpan > 1) {
-      const parts = key.split(",");
-      const masterRow = parseInt(parts[0], 10);
-      const masterCol = parseInt(parts[1], 10);
-      
-      if (
-        row >= masterRow &&
-        row < masterRow + rowSpan &&
-        col >= masterCol &&
-        col < masterCol + colSpan &&
-        !(row === masterRow && col === masterCol)
-      ) {
-        return key;
-      }
-    }
-  }
-  return null;
-}
 
 function getMergedCellWidth(
   startCol: number,
@@ -370,7 +343,11 @@ function drawCellTextZone(
   const zoneBottom = clipY + clipHeight;
   
   const drawnCells = new Set<string>();
-  
+
+  // C3b: precompute slave->master once (O(cache)) for this zone's draw, instead
+  // of re-scanning the whole cache per visible cell (O(visible x cache), x zones).
+  const mergeIndex = buildMergeSlaveIndex(cells as Map<string, { rowSpan?: number; colSpan?: number }>);
+
   let baseY = clipY + range.offsetY;
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
     const rowHeight = getRowHeight(row, config, dimensions);
@@ -385,7 +362,7 @@ function drawCellTextZone(
         continue;
       }
       
-      const masterKey = getMasterCellKey(row, col, cells as Map<string, { rowSpan?: number; colSpan?: number }>);
+      const masterKey = mergeIndex.get(key) ?? null;
       if (masterKey) {
         drawnCells.add(key);
         baseX += colWidth;

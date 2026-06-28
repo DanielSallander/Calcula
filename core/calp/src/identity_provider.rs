@@ -51,6 +51,17 @@ pub fn load_or_create(profile_dir: &Path) -> Result<SubmitterIdentity, String> {
             .map_err(|e| format!("Failed to read identity file: {}", e))?;
         let file: IdentityFile = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse identity file: {}", e))?;
+        // PRIVACY FAIL-CLOSED (C2b): a blank id is not a valid principal. serde
+        // happily accepts {"id":""}, but a blank id would defeat the own_only /
+        // own_plus_aggregate writeback filters (which key on id equality). Refuse
+        // to load it: every get_subscriber_identity call then errors (callers
+        // degrade fail-closed) rather than running with a privacy-defeating empty
+        // principal. NOTE: this does NOT overwrite/re-mint the corrupt file — the
+        // user must remove it to get a fresh identity (deliberately not silently
+        // rewriting a file we did not author).
+        if file.identity.id.trim().is_empty() {
+            return Err("Identity file has a blank id; refusing to load.".to_string());
+        }
         return Ok(file.identity);
     }
 
@@ -145,6 +156,29 @@ mod tests {
         let json = serde_json::to_string(&identity).unwrap();
         let roundtripped: SubmitterIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped, identity);
+    }
+
+    // C2b: a hand-written / corrupt identity file with a blank id must be
+    // rejected (fail-closed) rather than loaded as a privacy-defeating principal.
+    #[test]
+    fn blank_id_identity_file_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file = IdentityFile {
+            format_version: 1,
+            identity: SubmitterIdentity {
+                display_name: "Ghost".to_string(),
+                id: "".to_string(),
+                extra: HashMap::new(),
+            },
+        };
+        std::fs::write(
+            identity_file_path(dir.path()),
+            serde_json::to_string_pretty(&file).unwrap(),
+        )
+        .unwrap();
+
+        let result = load_or_create(dir.path());
+        assert!(result.is_err(), "a blank-id identity file must be refused");
     }
 
     #[test]

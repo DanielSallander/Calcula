@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use identity::EntityId;
-use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, Workbook};
+use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, Workbook};
 
 use crate::error::CalpError;
 use crate::manifest::*;
@@ -361,6 +361,24 @@ pub fn publish(
             pkg, ver,
             "charts.json",
             serde_json::to_string_pretty(&published_charts)?.as_bytes(),
+        )?;
+    }
+
+    // Write sparklines on the published sheets (C2a) — same shape as charts:
+    // sheet-keyed, opaque groups_json with only in-sheet coords, so pull remaps
+    // each entry's sheet id to the new local sheet. Written before the manifest
+    // so the integrity walk checksums it and the signature seals it.
+    let published_sparklines: Vec<&SavedSparkline> = request
+        .workbook
+        .sparklines
+        .iter()
+        .filter(|s| published_sheet_ids.contains(&s.sheet_id))
+        .collect();
+    if !published_sparklines.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "sparklines.json",
+            serde_json::to_string_pretty(&published_sparklines)?.as_bytes(),
         )?;
     }
 

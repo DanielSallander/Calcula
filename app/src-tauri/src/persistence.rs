@@ -940,7 +940,7 @@ fn restore_ribbon_filters(
 // ============================================================================
 
 /// Collect charts from AppState into SavedChart format for persistence.
-fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedChart> {
+pub(crate) fn collect_charts_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedChart> {
     let charts = state.charts.lock().unwrap();
     charts
         .iter()
@@ -966,7 +966,7 @@ fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>, wo
 }
 
 /// Collect sparkline entries from AppState for saving to .cala.
-fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedSparkline> {
+pub(crate) fn collect_sparklines_for_save(state: &State<AppState>, sheet_ids: &[SheetId]) -> Vec<persistence::SavedSparkline> {
     let sparklines = state.sparklines.lock().unwrap();
     sparklines
         .iter()

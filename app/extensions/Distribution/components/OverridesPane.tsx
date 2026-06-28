@@ -9,12 +9,15 @@ import {
   acceptUpstream,
   keepOverride,
   calculateNow,
+  getSubscriptions,
+  exportOverrides,
   onAppEvent,
   AppEvents,
   type OverrideLayer,
   type CellOverride,
   type OverrideValue,
 } from "@api";
+import { saveJsonPatch } from "../lib/reportExport";
 
 type TabId = "overrides" | "conflicts" | "pending";
 
@@ -165,6 +168,33 @@ export function OverridesPane() {
     refresh();
   };
 
+  // C2c: export this subscriber's override layer as a shareable .json patch so
+  // another subscriber of the same package can import it. Single-package-first;
+  // a multi-package workbook prompts for which one.
+  const handleExportOverrides = async () => {
+    try {
+      const subs = (await getSubscriptions()).subscriptions;
+      if (subs.length === 0) {
+        window.alert("No active subscription to export overrides for.");
+        return;
+      }
+      let pkg = subs[0].packageName;
+      if (subs.length > 1) {
+        const choice = window.prompt(
+          `Export overrides for which package?\n\n${subs.map((s) => s.packageName).join("\n")}`,
+          pkg,
+        );
+        if (choice === null) return;
+        pkg = choice.trim();
+      }
+      const patch = await exportOverrides(pkg);
+      await saveJsonPatch(JSON.stringify(patch, null, 2), `${pkg}-overrides.json`);
+    } catch (err) {
+      console.error("[Distribution] Export overrides failed:", err);
+      window.alert(`Export overrides failed: ${err}`);
+    }
+  };
+
   const renderList = (items: CellOverride[]) => {
     if (items.length === 0) {
       return (
@@ -235,11 +265,30 @@ export function OverridesPane() {
         justifyContent: "space-between",
       }}>
         <span>{allOverrides.length} override(s)</span>
-        {conflicts.length > 0 && (
-          <span style={{ color: "var(--conflict-text, #856404)" }}>
-            {conflicts.length} conflict(s)
-          </span>
-        )}
+        <span style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          {conflicts.length > 0 && (
+            <span style={{ color: "var(--conflict-text, #856404)" }}>
+              {conflicts.length} conflict(s)
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={handleExportOverrides}
+            disabled={allOverrides.length === 0}
+            title="Save this workbook's overrides as a .json patch to share with another subscriber"
+            style={{
+              border: "1px solid var(--border-color, #e0e0e0)",
+              background: "none",
+              borderRadius: "3px",
+              padding: "1px 6px",
+              fontSize: "11px",
+              cursor: allOverrides.length === 0 ? "default" : "pointer",
+              opacity: allOverrides.length === 0 ? 0.5 : 1,
+            }}
+          >
+            Export overrides…
+          </button>
+        </span>
       </div>
     </div>
   );

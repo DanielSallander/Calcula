@@ -161,6 +161,115 @@ pub fn grant_script_session_approval(
     Ok(())
 }
 
+/// Apply a script engine's `modified_grids` back into live AppState the
+/// undoable, recalc-tracked, event-visible way (C1a). Shared by the in-app
+/// `run_script` and the MCP `execute_script` so AI writes inherit the exact
+/// same edit-pipeline behavior the in-app twin gets — instead of the wholesale
+/// grid swap MCP used to do (which skipped undo + recalc + events).
+///
+/// The active sheet is diffed before->after and replayed through
+/// `update_cells_batch` (single undo entry + dependency recalc). Non-active
+/// sheets are applied wholesale as a documented v1 limit (not undoable / not
+/// recalc-tracked). No-ops when nothing changed.
+///
+/// LOCK DISCIPLINE: the AppState grid locks are held only to compute the diff /
+/// do the wholesale writes, then DROPPED before calling `update_cells_batch`
+/// (which takes its own locks) to avoid a deadlock.
+pub(crate) fn apply_script_modified_grids(
+    state: &State<AppState>,
+    file_state: &State<FileState>,
+    user_files_state: &State<UserFilesState>,
+    pivot_state: &State<'_, crate::pivot::PivotState>,
+    modified_grids: &[Grid],
+    active_sheet: usize,
+    cells_modified: u32,
+) -> Result<(), String> {
+    if cells_modified == 0 || modified_grids.is_empty() {
+        return Ok(());
+    }
+
+    // Audit (B4): record that a sandboxed script mutated the grid, so the
+    // Rust QuickJS surface is not invisible to the activity log.
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::ScriptExecuted,
+                &format!("A script modified {} cell(s)", cells_modified),
+                "local",
+                &now,
+            );
+        }
+    }
+
+    // Build the active-sheet diff WITHOUT mutating AppState. Hold the AppState
+    // grid locks only long enough to compute the diff, then drop them.
+    let updates: Vec<CellUpdateInput> = {
+        let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let empty_grid = Grid::new();
+        let before_active = app_grids.get(active_sheet).unwrap_or(&empty_grid);
+        match modified_grids.get(active_sheet) {
+            Some(after_active) => diff_grids_to_updates(before_active, after_active),
+            None => Vec::new(),
+        }
+    };
+
+    // Apply non-active-sheet writes wholesale (documented v1 limit: not undoable
+    // / not recalc-tracked). Only touch sheets that actually differ.
+    {
+        let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut wholesale_sheets = 0usize;
+        let empty_grid = Grid::new();
+        for (idx, after_grid) in modified_grids.iter().enumerate() {
+            if idx == active_sheet {
+                continue;
+            }
+            // `Cell` has no PartialEq, so compare via the input-string diff: a
+            // non-empty diff means this sheet changed. Scope the immutable borrow
+            // so the mutable write below is allowed.
+            let differs = {
+                let before_grid = app_grids.get(idx).unwrap_or(&empty_grid);
+                !diff_grids_to_updates(before_grid, after_grid).is_empty()
+            };
+            if differs {
+                if idx < app_grids.len() {
+                    app_grids[idx] = after_grid.clone();
+                }
+                wholesale_sheets += 1;
+            }
+        }
+        drop(app_grids);
+        if wholesale_sheets > 0 {
+            log_warn!(
+                "SCRIPT",
+                "script wrote {} non-active sheet(s) wholesale: these writes are NOT undoable or recalc-tracked yet (v1 limit)",
+                wholesale_sheets
+            );
+        }
+    }
+
+    // Replay the active-sheet diff through the edit pipeline. All AppState locks
+    // acquired above are now dropped.
+    if !updates.is_empty() {
+        let cell_count = updates.len();
+        crate::commands::data::update_cells_batch(
+            state.clone(),
+            file_state.clone(),
+            user_files_state.clone(),
+            pivot_state.clone(),
+            updates,
+            None,
+        )?;
+        log_info!(
+            "SCRIPT",
+            "applied {} active-sheet cell change(s) via edit pipeline (parsed + recalc + undoable)",
+            cell_count
+        );
+    }
+
+    Ok(())
+}
+
 /// Execute a script against the current spreadsheet state.
 ///
 /// 1. Clones the relevant AppState data (grids, styles, sheet names)
@@ -229,88 +338,15 @@ pub fn run_script(
     //    to non-active sheets are applied wholesale as a documented v1 limit
     //    (no per-sheet undo/recalc for off-screen sheets yet).
     if let script_engine::ScriptResult::Success { cells_modified, .. } = &result {
-        if *cells_modified > 0 && !modified_grids.is_empty() {
-            // Audit (B4): record that a sandboxed script mutated the grid, so the
-            // Rust QuickJS surface is not invisible to the activity log.
-            {
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Ok(mut audit) = state.audit_log.lock() {
-                    audit.record(
-                        calp::audit::AuditEvent::ScriptExecuted,
-                        &format!("A script modified {} cell(s)", cells_modified),
-                        "local",
-                        &now,
-                    );
-                }
-            }
-            // Build the active-sheet diff WITHOUT mutating AppState. Hold the
-            // AppState grid locks only long enough to compute the diff, then
-            // drop them BEFORE calling update_cells_batch (which takes its own
-            // locks) to avoid a deadlock.
-            let updates: Vec<CellUpdateInput> = {
-                let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
-                let empty_grid = Grid::new();
-                let before_active = app_grids.get(active_sheet).unwrap_or(&empty_grid);
-                match modified_grids.get(active_sheet) {
-                    Some(after_active) => diff_grids_to_updates(before_active, after_active),
-                    None => Vec::new(),
-                }
-            };
-
-            // Apply non-active-sheet writes wholesale (documented v1 limit:
-            // not undoable / not recalc-tracked). Only touch sheets that
-            // actually differ; leave the active sheet for the batch path.
-            {
-                let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
-                let mut wholesale_sheets = 0usize;
-                let empty_grid = Grid::new();
-                for (idx, after_grid) in modified_grids.iter().enumerate() {
-                    if idx == active_sheet {
-                        continue;
-                    }
-                    // `Cell` has no PartialEq, so compare via the input-string
-                    // diff: a non-empty diff means this sheet changed. Scope the
-                    // immutable borrow so the mutable write below is allowed.
-                    let differs = {
-                        let before_grid = app_grids.get(idx).unwrap_or(&empty_grid);
-                        !diff_grids_to_updates(before_grid, after_grid).is_empty()
-                    };
-                    if differs {
-                        if idx < app_grids.len() {
-                            app_grids[idx] = after_grid.clone();
-                        }
-                        wholesale_sheets += 1;
-                    }
-                }
-                drop(app_grids);
-                if wholesale_sheets > 0 {
-                    log_warn!(
-                        "SCRIPT",
-                        "run_script wrote {} non-active sheet(s) wholesale: these writes are NOT undoable or recalc-tracked yet (v1 limit)",
-                        wholesale_sheets
-                    );
-                }
-            }
-
-            // Replay the active-sheet diff through the edit pipeline. All
-            // AppState locks acquired above are now dropped.
-            if !updates.is_empty() {
-                let cell_count = updates.len();
-                crate::commands::data::update_cells_batch(
-                    state.clone(),
-                    file_state.clone(),
-                    user_files_state.clone(),
-                    pivot_state.clone(),
-                    updates,
-                    None,
-                )?;
-                log_info!(
-                    "SCRIPT",
-                    "run_script applied {} active-sheet cell change(s) via edit pipeline (parsed + recalc + undoable)",
-                    cell_count
-                );
-            }
-        }
+        apply_script_modified_grids(
+            &state,
+            &file_state,
+            &user_files_state,
+            &pivot_state,
+            &modified_grids,
+            active_sheet,
+            *cells_modified,
+        )?;
     }
 
     // 4. Convert to response type

@@ -314,6 +314,18 @@ impl CalculaMcpServer {
         }
     }
 
+    #[tool(description = "List every named range in the workbook (name, scope, refersTo formula, comment). Use this to discover workbook-defined names like TaxRate or SalesData before reading or writing the cells they point to.")]
+    async fn list_named_ranges(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_named_ranges");
+        match tools::list_named_ranges(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_named_ranges: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
     #[tool(description = "Get a single chart's full definition (chartId, name, placement, and ChartSpec) as JSON. Pass a chart id from list_charts. Use this to read or diff-edit a chart's spec.")]
     async fn get_chart(
         &self,

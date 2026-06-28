@@ -21,6 +21,7 @@ import {
   applyCellDecorations,
 } from "../../../../api/cellDecorations";
 import { drawCellFill } from "../styles/fillRenderer";
+import { buildMergeSlaveIndex } from "./mergeIndex";
 
 /**
  * Draw text with ellipsis truncation if it exceeds the available width.
@@ -314,41 +315,6 @@ function getMergedCellHeight(
 }
 
 /**
- * Check if a cell is a "slave" cell (part of a merge but not the master).
- * Returns the master cell's key if it is, null otherwise.
- */
-function getMasterCellKey(
-  row: number,
-  col: number,
-  cells: Map<string, { rowSpan?: number; colSpan?: number }>
-): string | null {
-  // Check all cells to see if any merge region covers this cell
-  for (const [key, cell] of cells.entries()) {
-    const rowSpan = cell.rowSpan ?? 1;
-    const colSpan = cell.colSpan ?? 1;
-
-    if (rowSpan > 1 || colSpan > 1) {
-      // This is a master cell - parse its position
-      const parts = key.split(",");
-      const masterRow = parseInt(parts[0], 10);
-      const masterCol = parseInt(parts[1], 10);
-
-      // Check if the target cell is within this merge region (but not the master itself)
-      if (
-        row >= masterRow &&
-        row < masterRow + rowSpan &&
-        col >= masterCol &&
-        col < masterCol + colSpan &&
-        !(row === masterRow && col === masterCol)
-      ) {
-        return key;
-      }
-    }
-  }
-  return null;
-}
-
-/**
  * Break text into lines that fit within maxWidth.
  * Uses word-boundary wrapping with fallback to character wrapping for long words.
  */
@@ -530,6 +496,10 @@ export function drawCellText(state: RenderState): void {
   // Track which cells we've already drawn (to avoid drawing slave cells)
   const drawnCells = new Set<string>();
 
+  // C3b: precompute slave->master once (O(cache)) instead of re-scanning the
+  // whole cache for every visible cell (O(visible x cache)).
+  const mergeIndex = buildMergeSlaveIndex(cells as Map<string, { rowSpan?: number; colSpan?: number }>);
+
   // Iterate through visible cells
   let baseY = colHeaderHeight + range.offsetY;
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
@@ -554,7 +524,7 @@ export function drawCellText(state: RenderState): void {
       }
 
       // Check if this cell is a slave (part of another cell's merge)
-      const masterKey = getMasterCellKey(row, col, cells as Map<string, { rowSpan?: number; colSpan?: number }>);
+      const masterKey = mergeIndex.get(key) ?? null;
       if (masterKey) {
         // This is a slave cell - skip rendering
         drawnCells.add(key);

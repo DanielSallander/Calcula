@@ -5,6 +5,7 @@
 use tauri::{AppHandle, Emitter, Manager};
 use crate::AppState;
 use crate::api_types::ChartEntry;
+use crate::NamedRange;
 use crate::format_cell_value;
 use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use super::server::ApplyFormattingParams;
@@ -207,6 +208,21 @@ pub fn get_sheet_summary(
             summary.push_str(&section);
         }
     }
+    drop(charts);
+
+    // Fold in a named-range inventory (C1b) — workbook-global names like
+    // "TaxRate = 0.25" the AI would otherwise have to guess. Same host-layer
+    // pattern + char-budget guard as charts; the pure calcula-format crate stays
+    // subsystem-blind.
+    let named = state.named_ranges.lock().map_err(|e| e.to_string())?;
+    if !named.is_empty() {
+        let list: Vec<NamedRange> = named.values().cloned().collect();
+        let section = format!("\n\n## Named Ranges\n{}", format_named_range_inventory(&list));
+        let limit = max_chars as usize;
+        if limit == 0 || summary.len() + section.len() <= limit {
+            summary.push_str(&section);
+        }
+    }
 
     Ok(summary)
 }
@@ -351,6 +367,42 @@ pub fn list_charts(handle: &AppHandle) -> Result<String, String> {
     Ok(out)
 }
 
+/// Render a named-range inventory as one line per range, sorted by name for
+/// deterministic output. Empty string for no ranges. Pure (no locks) so it is
+/// unit-testable without an AppHandle (mirrors format_chart_inventory).
+fn format_named_range_inventory(ranges: &[NamedRange]) -> String {
+    let mut sorted: Vec<&NamedRange> = ranges.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = String::new();
+    for nr in sorted {
+        let scope = match nr.sheet_index {
+            Some(i) => format!("sheet {}", i),
+            None => "workbook".to_string(),
+        };
+        out.push_str(&format!("- {} = {} [{}]", nr.name, nr.refers_to, scope));
+        if let Some(c) = nr.comment.as_ref().filter(|c| !c.is_empty()) {
+            out.push_str(&format!(" # {}", c));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// List every named range in the workbook (name, scope, refersTo, comment) — a
+/// first-class subsystem the AI could not discover via tools/list before (C1c).
+/// Read-only: no script-security gate (MCP transport auth already applies).
+pub fn list_named_ranges(handle: &AppHandle) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let ranges = state.named_ranges.lock().map_err(|e| e.to_string())?;
+    if ranges.is_empty() {
+        return Ok("(no named ranges in this workbook)".to_string());
+    }
+    let list: Vec<NamedRange> = ranges.values().cloned().collect();
+    let mut out = String::from("Named ranges in this workbook:\n");
+    out.push_str(&format_named_range_inventory(&list));
+    Ok(out)
+}
+
 /// Return a single chart's full stored definition (chartId, name, placement, and
 /// the ChartSpec) as pretty JSON, so an AI client can reason about or diff-edit
 /// it. Read-only.
@@ -485,19 +537,25 @@ pub fn execute_script(
             duration_ms,
             ..
         } => {
-            // Apply modified grids back to state
-            if *cells_modified > 0 && !modified_grids.is_empty() {
-                let active_grid_clone = modified_grids.get(active_sheet).cloned();
-
-                let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
-                *app_grids = modified_grids;
-                drop(app_grids);
-
-                if let Some(new_active_grid) = active_grid_clone {
-                    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-                    *grid = new_active_grid;
-                }
-            }
+            // Route the script's writes through the SHARED edit pipeline (C1a)
+            // so an AI/MCP write is UNDOABLE + dependency-recalc-tracked, exactly
+            // like the in-app run_script — instead of the old wholesale grid swap
+            // that bypassed undo, recalc, and frontend events.
+            let file_state = handle.state::<crate::persistence::FileState>();
+            let user_files_state = handle.state::<crate::persistence::UserFilesState>();
+            let pivot_state = handle.state::<crate::pivot::PivotState>();
+            crate::scripting::commands::apply_script_modified_grids(
+                &state,
+                &file_state,
+                &user_files_state,
+                &pivot_state,
+                &modified_grids,
+                active_sheet,
+                *cells_modified,
+            )?;
+            // Notify the (out-of-band) frontend so the open grid refreshes — the
+            // same Tauri-event bridge create_chart_from_spec uses for charts.
+            let _ = handle.emit("grid:refresh", ());
 
             let output_text = output.join("\n");
             Ok(format!(
@@ -631,5 +689,40 @@ mod tests {
     #[test]
     fn chart_inventory_is_empty_for_no_charts() {
         assert_eq!(format_chart_inventory(&[]), "");
+    }
+
+    fn named(name: &str, sheet_index: Option<usize>, refers_to: &str, comment: Option<&str>) -> NamedRange {
+        NamedRange {
+            name: name.to_string(),
+            sheet_index,
+            refers_to: refers_to.to_string(),
+            comment: comment.map(|c| c.to_string()),
+            folder: None,
+        }
+    }
+
+    #[test]
+    fn named_range_inventory_renders_scope_refers_to_and_comment() {
+        // Pass in reverse-name order to prove the helper sorts deterministically.
+        let ranges = vec![
+            named("TaxRate", None, "=0.25", Some("vat")),
+            named("SalesData", Some(0), "=Sheet1!$A$1:$B$10", None),
+        ];
+        let out = format_named_range_inventory(&ranges);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Sorted by name: SalesData before TaxRate.
+        assert!(lines[0].contains("SalesData"));
+        assert!(lines[0].contains("=Sheet1!$A$1:$B$10"));
+        assert!(lines[0].contains("[sheet 0]"), "sheet-scoped marker");
+        assert!(lines[1].contains("TaxRate"));
+        assert!(lines[1].contains("=0.25"));
+        assert!(lines[1].contains("[workbook]"), "workbook-scoped marker");
+        assert!(lines[1].contains("# vat"), "comment rendered");
+    }
+
+    #[test]
+    fn named_range_inventory_is_empty_for_none() {
+        assert_eq!(format_named_range_inventory(&[]), "");
     }
 }

@@ -61,6 +61,24 @@ export async function saveParquetReport(
 }
 
 /**
+ * Save an override patch (C2c) as a user-chosen `.json` file, so a subscriber
+ * can share their override layer with another subscriber of the same package.
+ * Returns the path written, or null if the user cancelled.
+ */
+export async function saveJsonPatch(
+  json: string,
+  suggestedName: string,
+): Promise<string | null> {
+  const filePath = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "Override Patch", extensions: ["json"] }],
+  });
+  if (!filePath) return null;
+  await writeBinaryFile(filePath, Array.from(new TextEncoder().encode(json)));
+  return filePath;
+}
+
+/**
  * Open a rendered (print-ready) HTML report in a new window and trigger the
  * browser print dialog — from which the recipient picks "Save as PDF" (B).
  * Mirrors the Print extension's window.open + print pattern (no new deps).

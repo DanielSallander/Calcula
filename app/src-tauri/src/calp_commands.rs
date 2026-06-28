@@ -133,6 +133,17 @@ pub fn calp_publish(
     workbook.scripts = crate::persistence::collect_scripts_for_save(&script_state);
     workbook.notebooks = crate::persistence::collect_notebooks_for_save(&script_state);
 
+    // build_workbook_snapshot omits charts + sparklines (unlike the .cala save
+    // path), so an in-app publish would ship them empty — subscribers lose every
+    // chart and sparkline (C2a). Populate them here from AppState using the same
+    // sheet-id mapping the snapshot used; publish/pull then filter + remap by
+    // sheet id exactly like tables.
+    {
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        workbook.charts = crate::persistence::collect_charts_for_save(&state, &sheet_ids);
+        workbook.sparklines = crate::persistence::collect_sparklines_for_save(&state, &sheet_ids);
+    }
+
     // Ship pivot definitions + BI pivot metadata so subscribers can rebuild
     // live pivots; per-pivot data source routing reads the dataSourceId
     // carried in that metadata. Without this, in-app publishes shipped no
@@ -507,6 +518,26 @@ pub fn calp_pull(
                         id: chart.id,
                         sheet_index,
                         spec_json: chart.spec_json,
+                    });
+                }
+            }
+        }
+    }
+
+    // Materialize pulled sparklines onto their (remapped) sheet index (C2a).
+    // Sparklines carry no id, so dedupe by (sheet_index, groups_json) to avoid
+    // duplicating one the subscriber already has.
+    if !result.sparklines.is_empty() {
+        let mut sparklines = state.sparklines.lock().map_err(|e| e.to_string())?;
+        for sp in result.sparklines {
+            if let Some(&sheet_index) = chart_sheet_index.get(&sp.sheet_id) {
+                let already = sparklines
+                    .iter()
+                    .any(|e| e.sheet_index == sheet_index && e.groups_json == sp.groups_json);
+                if !already {
+                    sparklines.push(crate::api_types::SparklineEntry {
+                        sheet_index,
+                        groups_json: sp.groups_json,
                     });
                 }
             }
@@ -3547,6 +3578,22 @@ fn apply_gather_governance(
     region: &calp::WritebackRegionDeclaration,
     own_identity: Option<&calp::SubmitterIdentity>,
 ) -> Vec<calp::writeback::WritebackSubmission> {
+    // PRIVACY FAIL-CLOSED (C2b): "is this submission the reader's own?" must
+    // treat a BLANK/whitespace reader id as NO identity. A corrupt or
+    // hand-written subscriber-identity.json with "id":"" would otherwise make
+    // own.id == "" match every anonymized record (OwnPlusAggregate itself clears
+    // ids to "") — leaking other people's values under own_only. With a blank
+    // reader id this returns false everywhere, so own_only reveals nothing and
+    // own_plus_aggregate anonymizes EVERYONE (the safe direction). A real minted
+    // identity always carries a non-blank UUID, so legitimate views are
+    // unaffected. See also the load-time guard in calp::identity_provider.
+    fn is_own(own: Option<&calp::SubmitterIdentity>, submission_id: &str) -> bool {
+        match own {
+            Some(o) if !o.id.trim().is_empty() => o.id == submission_id,
+            _ => false,
+        }
+    }
+
     // Approval gating: rejected submissions never count; under
     // on_approval only Approved submissions join the aggregate.
     let require_approval = matches!(
@@ -3604,11 +3651,7 @@ fn apply_gather_governance(
     // every gatherer is a subscriber, so the policy applies to all.
     match region.visibility {
         Some(calp::writeback::VisibilityPolicy::OwnOnly) => {
-            submissions.retain(|s| {
-                own_identity
-                    .map(|own| s.submitter.id == own.id)
-                    .unwrap_or(false)
-            });
+            submissions.retain(|s| is_own(own_identity, &s.submitter.id));
         }
         Some(calp::writeback::VisibilityPolicy::OwnPlusAggregate) => {
             // Values flow (aggregates need them) but other submitters'
@@ -3620,19 +3663,13 @@ fn apply_gather_governance(
                 std::collections::HashMap::new();
             let mut next: usize = 1;
             for s in submissions.iter() {
-                let is_own = own_identity
-                    .map(|own| s.submitter.id == own.id)
-                    .unwrap_or(false);
-                if !is_own && !token_for.contains_key(&s.submitter.id) {
+                if !is_own(own_identity, &s.submitter.id) && !token_for.contains_key(&s.submitter.id) {
                     token_for.insert(s.submitter.id.clone(), format!("Submitter {next}"));
                     next += 1;
                 }
             }
             for s in submissions.iter_mut() {
-                let is_own = own_identity
-                    .map(|own| s.submitter.id == own.id)
-                    .unwrap_or(false);
-                if !is_own {
+                if !is_own(own_identity, &s.submitter.id) {
                     s.submitter.display_name = token_for
                         .get(&s.submitter.id)
                         .cloned()
@@ -4074,6 +4111,53 @@ mod gather_governance_tests {
             out.is_empty(),
             "without an own identity, own_only fails closed and reveals nothing"
         );
+    }
+
+    // 8b. (C2b) A BLANK own id must fail closed exactly like None: a corrupt
+    //     subscriber-identity.json with "id":"" would otherwise match every
+    //     anonymized/empty-id record and leak it under own_only.
+    #[test]
+    fn own_only_with_blank_id_fails_closed() {
+        let region = make_region(Some(VisibilityPolicy::OwnOnly), None);
+        let ghost = make_identity("", "Ghost"); // blank principal
+        let subs = vec![
+            make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
+            // A planted record with an empty submitter id (what OwnPlusAggregate
+            // itself produces) — must NOT be revealed to a blank reader.
+            make_submission("", "(anonymized)", SubmissionState::Submitted, num(99.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, Some(&ghost));
+        assert!(
+            out.is_empty(),
+            "a blank reader id reveals nothing, even the empty-id record"
+        );
+    }
+
+    // 8c. (C2b) OwnPlusAggregate with a blank own id anonymizes EVERYONE — even
+    //     the empty-id records OwnPlusAggregate itself produces. We PLANT a
+    //     submission with a blank id: under the OLD un-trimmed predicate
+    //     own.id("") == submitter.id("") it would be claimed as "own" and keep
+    //     its real name; the trim fix anonymizes it like everyone else. (This
+    //     planted blank-id row is what makes the test turn RED on the pre-fix
+    //     code — a whitespace-only own id alone would have passed on both.)
+    #[test]
+    fn own_plus_aggregate_with_blank_id_anonymizes_all() {
+        let region = make_region(Some(VisibilityPolicy::OwnPlusAggregate), None);
+        let ghost = make_identity("", "Ghost"); // blank principal
+        let subs = vec![
+            make_submission("id-alice", "Alice", SubmissionState::Submitted, num(10.0)),
+            make_submission("", "Planted", SubmissionState::Submitted, num(99.0)),
+        ];
+        let out = apply_gather_governance(subs, &region, Some(&ghost));
+        assert_eq!(out.len(), 2, "values still flow for the aggregate");
+        for s in &out {
+            assert_eq!(s.submitter.id, "", "every id is cleared under a blank reader");
+            assert!(
+                s.submitter.display_name != "Alice" && s.submitter.display_name != "Planted",
+                "no real submitter name survives for a blank reader (got {:?})",
+                s.submitter.display_name
+            );
+        }
     }
 
     // --- Read-side integrity (P0): schema + deadline filtering ---

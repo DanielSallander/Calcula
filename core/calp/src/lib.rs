@@ -5,9 +5,7 @@
 //! and the publish/pull workflows.
 
 pub mod audit;
-pub mod channels;
 pub mod compat;
-pub mod cross_package;
 pub mod dev_mode;
 pub mod error;
 pub mod html_export;

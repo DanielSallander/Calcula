@@ -776,6 +776,52 @@ impl<'a> Evaluator<'a> {
         let min_col = start_col_idx.min(end_col_idx);
         let max_col = start_col_idx.max(end_col_idx);
 
+        // FAST PATH (C3a): a single whole-column reference (the dominant shape,
+        // e.g. SUM(A:A) / INDEX(A:A,k) / MATCH(x,A:A,0)) needs only the populated
+        // rows of that ONE column, in row-ascending order — never the column-
+        // major-then-row sort the general path does. Both strategies below yield
+        // the SAME cells in the SAME order (provably identical, including for the
+        // order-sensitive INDEX/MATCH/SUMIF consumers); we pick the cheaper:
+        //   - row-walk O(max_row): one get_cell probe per row. Best for a DENSE
+        //     column (max_row near the populated-cell count) and avoids the sort.
+        //   - filtered collect + row-sort O(populated + M log M): used when
+        //     max_row greatly exceeds the populated-cell count (a SPARSE column in
+        //     a tall grid, e.g. SUM(Z:Z) when another column reaches row 1e6),
+        //     where a 0..=max_row walk would be a needless O(max_row) cliff.
+        // The multi-column branch below still sorts column-major then row-major
+        // (that order IS consumed positionally and must be preserved).
+        if min_col == max_col {
+            if (grid.max_row as usize) <= grid.cells.len() {
+                // Dense enough: the walk costs <= populated-cell count probes.
+                let mut values = Vec::new();
+                for row in 0..=grid.max_row {
+                    if let Some(cell) = grid.get_cell(row, min_col) {
+                        values.push(self.cell_value_to_result(&cell.value));
+                    }
+                }
+                return EvalResult::Array(values);
+            }
+            // Sparse/tall: iterate only the populated cells of this column + sort
+            // by row, avoiding the O(max_row) walk.
+            let mut col_cells: Vec<(u32, &crate::cell::Cell)> = grid
+                .cells
+                .iter()
+                .filter_map(|((row, col), cell)| {
+                    if *col == min_col {
+                        Some((*row, cell))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            col_cells.sort_by_key(|(row, _)| *row);
+            let values = col_cells
+                .into_iter()
+                .map(|(_, cell)| self.cell_value_to_result(&cell.value))
+                .collect();
+            return EvalResult::Array(values);
+        }
+
         // OPTIMIZED: Collect cells from the HashMap that fall within the column range
         // This avoids iterating over potentially thousands of empty rows
         let mut cell_list: Vec<(u32, u32, &crate::cell::Cell)> = grid
@@ -13063,6 +13109,61 @@ mod tests {
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_column_ref_single_column_row_order_preserved_c3a() {
+        // C3a fast path: a single whole-column reference must return its populated
+        // cells in ROW-ASCENDING order regardless of insertion order (HashMap
+        // iteration is nondeterministic, so this is the property INDEX/MATCH/SUMIF
+        // depend on). This grid is SPARSE/TALL (max_row 5 > cells.len 4), so it
+        // exercises the collect-and-sort branch.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0)); // A1
+        grid.set_cell(2, 0, Cell::new_number(30.0)); // A3
+        grid.set_cell(5, 0, Cell::new_number(60.0)); // A6
+        grid.set_cell(1, 0, Cell::new_number(20.0)); // A2
+        let eval = Evaluator::new(&grid);
+
+        let col_a = || Expression::ColumnRef {
+            sheet: None,
+            start_col: "A".to_string(),
+            end_col: "A".to_string(),
+            start_absolute: false,
+            end_absolute: false,
+            ref_site_id: Default::default(),
+        };
+
+        match eval.evaluate(&col_a()) {
+            EvalResult::Array(vals) => {
+                let nums: Vec<f64> = vals.iter().map(|v| v.as_number().unwrap_or(f64::NAN)).collect();
+                assert_eq!(nums, vec![10.0, 20.0, 30.0, 60.0], "single-column ref must be row-ascending (sparse branch)");
+            }
+            other => panic!("expected Array, got {:?}", other),
+        }
+
+        // DENSE branch (max_row 2 <= cells.len 3 -> row-walk): contiguous A1:A3
+        // inserted out of order must still come back row-ascending.
+        let mut dense = Grid::new();
+        dense.set_cell(1, 0, Cell::new_number(2.0)); // A2
+        dense.set_cell(0, 0, Cell::new_number(1.0)); // A1
+        dense.set_cell(2, 0, Cell::new_number(3.0)); // A3
+        let eval_dense = Evaluator::new(&dense);
+        match eval_dense.evaluate(&col_a()) {
+            EvalResult::Array(vals) => {
+                let nums: Vec<f64> = vals.iter().map(|v| v.as_number().unwrap_or(f64::NAN)).collect();
+                assert_eq!(nums, vec![1.0, 2.0, 3.0], "single-column ref must be row-ascending (dense branch)");
+            }
+            other => panic!("expected Array, got {:?}", other),
+        }
+
+        // SUM over the sparse ref is order-independent but must still total 120.
+        let sum = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![col_a()],
+            ref_site_id: Default::default(),
+        };
+        assert_eq!(eval.evaluate(&sum), EvalResult::Number(120.0));
     }
 
     #[test]

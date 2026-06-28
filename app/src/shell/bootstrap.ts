@@ -22,6 +22,7 @@ import {
 
 import { initKeybindings } from "../api/keybindings";
 import { getLocaleSettings } from "../api/locale";
+import { listenTauriEvent } from "../api/backend";
 
 import {
   registerExtensionRegistryService,
@@ -425,6 +426,19 @@ export function bootstrapShell(): void {
   // Eagerly load locale settings so getCachedLocale() is available
   // for formula autocomplete hints and other synchronous locale consumers.
   getLocaleSettings();
+
+  // C1a: bridge the backend "grid:refresh" Tauri event (emitted after an
+  // OUT-OF-BAND cell write — e.g. an MCP/AI set_cell_value or run_script that
+  // routed through the undoable edit pipeline) to the window "grid:refresh"
+  // event the grid + extensions already re-fetch on. Registered once here at the
+  // shell layer (not in any extension) so a single re-fetch fires; mirrors the
+  // Charts extension's "charts:refresh" bridge.
+  void listenTauriEvent("grid:refresh", () => {
+    window.dispatchEvent(new Event("grid:refresh"));
+  }).catch(() => {
+    // No Tauri runtime (e.g. a non-webview/test context) — the bridge is a
+    // no-op there; in-app writes still refresh through their return values.
+  });
 
   isBootstrapped = true;
   console.log("[Shell] Bootstrap complete.");
