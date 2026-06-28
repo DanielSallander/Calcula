@@ -345,6 +345,7 @@ pub fn set_script_security_level(
     level: String,
     window: tauri::Window,
 ) -> Result<(), String> {
+    use tauri::Manager;
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let valid_levels = ["disabled", "prompt", "enabled"];
     if !valid_levels.contains(&level.as_str()) {
@@ -356,8 +357,113 @@ pub fn set_script_security_level(
     *script_state
         .security_level
         .lock()
-        .map_err(|e| e.to_string())? = level;
+        .map_err(|e| e.to_string())? = level.clone();
+    // Persist (per-app, not per-workbook) so the choice survives relaunch (B5).
+    persist_security_level(window.app_handle(), &level);
     Ok(())
+}
+
+/// Path of the per-app Script Security config file.
+fn security_config_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("script-security.json"))
+}
+
+/// Persist the Script Security level so it survives relaunch. Best-effort.
+fn persist_security_level(app: &tauri::AppHandle, level: &str) {
+    if let Some(path) = security_config_path(app) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json = serde_json::json!({ "securityLevel": level });
+        if let Ok(bytes) = serde_json::to_vec_pretty(&json) {
+            let _ = std::fs::write(&path, bytes);
+        }
+    }
+}
+
+/// Parse + validate a persisted security level from config bytes. Returns None
+/// for malformed JSON, a missing field, or an unrecognized level — so a corrupt
+/// or tampered config can never apply an invalid (or downgraded-to-garbage)
+/// level; the in-memory default is kept instead.
+fn parse_persisted_level(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let level = value.get("securityLevel")?.as_str()?;
+    ["disabled", "prompt", "enabled"]
+        .contains(&level)
+        .then(|| level.to_string())
+}
+
+/// Read the persisted Script Security level (if any) and apply it to ScriptState
+/// at startup. Falls back to the in-memory default ("prompt") when the file is
+/// absent or invalid. Called once after the app is built.
+pub fn hydrate_security_level(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(path) = security_config_path(app) else { return };
+    let Ok(bytes) = std::fs::read(&path) else { return };
+    if let Some(level) = parse_persisted_level(&bytes) {
+        if let Some(state) = app.try_state::<ScriptState>() {
+            if let Ok(mut lvl) = state.security_level.lock() {
+                *lvl = level;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod security_level_tests {
+    use super::parse_persisted_level;
+
+    #[test]
+    fn accepts_valid_levels() {
+        for lvl in ["disabled", "prompt", "enabled"] {
+            let bytes = format!("{{\"securityLevel\":\"{}\"}}", lvl);
+            assert_eq!(parse_persisted_level(bytes.as_bytes()), Some(lvl.to_string()));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_corrupt() {
+        assert_eq!(parse_persisted_level(br#"{"securityLevel":"bogus"}"#), None);
+        assert_eq!(parse_persisted_level(br#"{"securityLevel":42}"#), None);
+        assert_eq!(parse_persisted_level(br#"{}"#), None);
+        assert_eq!(parse_persisted_level(b"not json at all"), None);
+        assert_eq!(parse_persisted_level(b""), None);
+    }
+}
+
+/// Returns the current script-execution gate state, for a caller to consult
+/// BEFORE mounting/running scripts (e.g. object scripts at workbook load):
+/// `"allowed"`, `"disabled"`, or `"needsApproval"`. This is the non-throwing
+/// counterpart of `check_script_security` — it lets the UI gate quietly instead
+/// of catching a sentinel error, so the global Script Security setting governs
+/// the object-script surface too, not only the run_script / notebook paths.
+#[tauri::command]
+pub fn script_execution_status(script_state: State<ScriptState>) -> Result<String, String> {
+    let level = script_state
+        .security_level
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let status = match level.as_str() {
+        "enabled" => "allowed",
+        "disabled" => "disabled",
+        _ => {
+            let grants = script_state
+                .permission_grants
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let approved = grants
+                .get(SESSION_APPROVAL_KEY)
+                .map(|perms| perms.iter().any(|p| p == "execute"))
+                .unwrap_or(false);
+            if approved { "allowed" } else { "needsApproval" }
+        }
+    };
+    Ok(status.to_string())
 }
 
 // ============================================================================

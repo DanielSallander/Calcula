@@ -5,6 +5,7 @@
 //          the "Edit Script" context menu and the Code Tab dialog.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ensureScriptsAllowed } from "@api/scriptSecurity";
 import {
   AppEvents,
   DialogExtensions,
@@ -186,6 +187,17 @@ function computePackageCapabilities(
  * upstream script changes re-prompt).
  */
 async function loadAndMountScripts(): Promise<void> {
+  // Honor the global Script Security setting: object scripts (button/shape/
+  // slicer behaviors) are user-authored code, so a "disabled" — or an
+  // unconfirmed "prompt" — setting must keep them inert. This is the primary
+  // automation surface; it previously consulted nothing.
+  const allowed = await ensureScriptsAllowed(
+    "This workbook contains object scripts (e.g. button and shape behaviors). Allow them to run?",
+  );
+  if (!allowed) {
+    return;
+  }
+
   const scripts = await loadAllObjectScripts();
   const localScripts = scripts.filter((s) => !s.provenance || s.provenance === "local");
   const distributedScripts = scripts.filter((s) => s.provenance === "distributed");

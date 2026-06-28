@@ -3727,7 +3727,7 @@ pub fn run() {
         &crate::calp_commands::calcula_profile_dir(),
     );
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -4180,6 +4180,7 @@ pub fn run() {
             scripting::run_script,
             scripting::get_script_security_level,
             scripting::set_script_security_level,
+            scripting::script_execution_status,
             scripting::grant_script_session_approval,
             scripting::list_scripts,
             scripting::get_script,
@@ -4377,8 +4378,13 @@ pub fn run() {
             managed_policy::publish_skin_pack,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .expect("error while building tauri application");
+
+    // Apply the persisted Script Security level (B5) before the app runs, so the
+    // user's choice survives relaunch instead of resetting to "prompt".
+    scripting::hydrate_security_level(app.handle());
+
+    app.run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 // Shut down the MCP server gracefully if running
                 if let Some(state) = app_handle.try_state::<mcp::McpState>() {

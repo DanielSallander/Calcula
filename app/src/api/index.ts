@@ -1711,6 +1711,14 @@ export {
   BackendCapabilityError,
 } from "./backendCommands";
 export type { PrivilegedCapability } from "./backendCommands";
+// Shared script-security gate (honors the global Script Security setting before
+// mounting/executing user scripts — used by the object-script surface too).
+export {
+  getScriptExecutionStatus,
+  grantScriptSessionApproval,
+  ensureScriptsAllowed,
+} from "./scriptSecurity";
+export type { ScriptExecutionStatus } from "./scriptSecurity";
 export {
   listModuleScripts,
   getModuleScript,
