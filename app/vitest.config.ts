@@ -23,7 +23,10 @@ export default defineConfig({
     ],
   },
   test: {
-    include: ["src/**/*.test.ts", "extensions/**/*.test.ts"],
+    // Match .test/.spec in both .ts and .tsx so component/spec unit tests are
+    // actually gated. E2E Playwright specs live under app/e2e (outside src/ and
+    // extensions/), so they are not picked up here.
+    include: ["src/**/*.{test,spec}.{ts,tsx}", "extensions/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     // The api/lib barrel pulls in every extension; a cold dynamic import of it

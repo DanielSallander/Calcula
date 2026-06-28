@@ -1,0 +1,68 @@
+# Core CI: type-check, unit tests, and Rust tests + bench compile.
+#
+# Complements architecture-boundaries.yml (the focused boundary gate, kept
+# separate so unrelated debt can't mask a boundary regression). All jobs run on
+# Linux on purpose: it sidesteps the dev-box-only hazards (Git's link.exe
+# shadowing MSVC, the ARM64-only core/setup-rust-env.ps1, and the in-Dropbox
+# target/ lock) — none apply to a clean Linux checkout.
+#
+# The app/src-tauri crate (the heavy Tauri backend: ~5.5k tests + webkit/gtk
+# system deps) is intentionally NOT gated here yet — a follow-up job. The core
+# workspace already covers the engine + calp + parser crates (incl. the column-
+# ref fast path, the grid bench, and the .calp publish/identity changes).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run check-types
+
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  rust-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      # The full core workspace test suite (engine / calp / parser / identity /
+      # pivot-engine / script-engine). pivot-bench is excluded from the workspace
+      # (out-of-repo path dep), so --workspace skips it.
+      - run: cargo test --workspace
+      # Compile-only gate for the grid-scale criterion bench (no run, no linker
+      # env needed): keeps grid_engine.rs + its engine API in sync.
+      - run: cargo check -p engine --benches

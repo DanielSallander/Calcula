@@ -18,6 +18,7 @@ import {
   type OverrideValue,
 } from "@api";
 import { saveJsonPatch } from "../lib/reportExport";
+import { runOverrideExport } from "../lib/overrideExport";
 
 type TabId = "overrides" | "conflicts" | "pending";
 
@@ -173,22 +174,13 @@ export function OverridesPane() {
   // a multi-package workbook prompts for which one.
   const handleExportOverrides = async () => {
     try {
-      const subs = (await getSubscriptions()).subscriptions;
-      if (subs.length === 0) {
-        window.alert("No active subscription to export overrides for.");
-        return;
-      }
-      let pkg = subs[0].packageName;
-      if (subs.length > 1) {
-        const choice = window.prompt(
-          `Export overrides for which package?\n\n${subs.map((s) => s.packageName).join("\n")}`,
-          pkg,
-        );
-        if (choice === null) return;
-        pkg = choice.trim();
-      }
-      const patch = await exportOverrides(pkg);
-      await saveJsonPatch(JSON.stringify(patch, null, 2), `${pkg}-overrides.json`);
+      await runOverrideExport({
+        getSubscriptions,
+        exportOverrides,
+        saveJsonPatch,
+        prompt: (message, def) => window.prompt(message, def),
+        alert: (message) => window.alert(message),
+      });
     } catch (err) {
       console.error("[Distribution] Export overrides failed:", err);
       window.alert(`Export overrides failed: ${err}`);
