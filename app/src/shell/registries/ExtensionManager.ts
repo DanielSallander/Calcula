@@ -92,9 +92,17 @@ import {
 } from "../../api/scriptHost/broker";
 import {
   computeExtensionCeiling,
+  mayActivateOnMainThread,
   type ExtensionTrust,
 } from "./extensionTrust";
 import { loadDisabledIds, persistDisabledIds } from "./extensionDisabledStore";
+import {
+  type ConsentMap,
+  loadConsents,
+  recordConsent,
+  isConsentCurrent,
+  extensionConsentHash,
+} from "./extensionConsentStore";
 // Phase B: sandboxed worker-realm execution for opted-in distributed extensions.
 import {
   mountWorkerExtension,
@@ -141,6 +149,10 @@ export interface LoadedExtension {
    *  "ext-dir/index.js"). Lets the manager UNINSTALL (delete the bundle +
    *  sidecars) without re-deriving the path. Undefined for built-ins. */
   fileName?: string;
+  /** B3: true while this disk-scanned distributed extension is listed but NOT
+   *  activated because the user has not yet consented to its current code. The
+   *  manager surfaces an "Allow" action that calls grantConsentAndActivate. */
+  needsConsent?: boolean;
 }
 
 type ChangeListener = () => void;
@@ -351,6 +363,14 @@ class ExtensionManagerImpl {
   /** Ids the user has disabled (persisted). Distributed extensions in this set
    *  are skipped during load and torn down immediately when disabled at runtime. */
   private disabledIds: Set<string> = loadDisabledIds();
+  /** B3: persisted first-use consent (extId -> the content/trust hash the user
+   *  approved). A disk-scanned distributed extension whose current hash is not
+   *  in here is listed but NOT activated until consent is granted. */
+  private consents: ConsentMap = loadConsents();
+  /** B3: extensions awaiting a consent decision this launch, keyed by the same
+   *  id used in the manager list. Holds the scan entry + hash so the extension
+   *  can be mounted as-is once consent is granted (no re-scan). */
+  private pendingConsent: Map<string, { entry: ExtensionFileEntry; hash: string }> = new Map();
 
   /**
    * The context passed to all extensions during activation.
@@ -558,6 +578,14 @@ class ExtensionManagerImpl {
           );
         }
       }
+
+      // Consent gate (B3): any extension the gate held back is now LISTED but
+      // un-mounted. Prompt for them WITHOUT awaiting — startup completes (the
+      // shell becomes ready) and consents are resolved afterward, so a TOFU
+      // prompt can never hang launch. Granting mounts the extension live.
+      if (this.pendingConsent.size > 0) {
+        void this.processPendingConsents();
+      }
     } catch (error) {
       console.error("[ExtensionManager] Failed to scan for third-party extensions:", error);
     }
@@ -576,16 +604,31 @@ class ExtensionManagerImpl {
    */
   private async loadExtension(entry: ExtensionFileEntry): Promise<void> {
     const parsed = this.parseSidecarManifest(entry.manifestJson);
-    if (!parsed) {
-      await this.loadExtensionFromSourceLegacy(entry.content, entry.fileName);
-      return;
-    }
 
     // Disabled (C7): the user turned this extension off. Don't mount/activate —
     // just list it as inactive so it can be re-enabled. Persisted-disable works
     // for sidecar-manifest extensions because the id is known before loading.
-    if (this.disabledIds.has(parsed.id)) {
+    if (parsed && this.disabledIds.has(parsed.id)) {
       this.recordDisabledExtension(parsed, entry.trustStatus, entry.fileName);
+      return;
+    }
+
+    // Consent gate (B3): a disk-scanned distributed extension must NOT auto-
+    // activate on first sight — the exact VBA failure mode the project was
+    // founded to fix. Consent is keyed by a stable pre-load id (the sidecar id,
+    // or the file name when there is no sidecar) + a content/trust hash, so a
+    // code swap, a capability change, OR a signature-status change re-prompts.
+    // Un-consented bundles are LISTED (so the user sees them in the manager) but
+    // their code is never imported until consent is granted.
+    const consentId = parsed?.id ?? entry.fileName;
+    const consentHash = await extensionConsentHash(entry.content, entry.trustStatus);
+    if (!isConsentCurrent(this.consents, consentId, consentHash)) {
+      this.recordPendingConsent(consentId, consentHash, entry, parsed);
+      return;
+    }
+
+    if (!parsed) {
+      await this.loadExtensionFromSourceLegacy(entry.content, entry.fileName);
       return;
     }
 
@@ -685,23 +728,149 @@ class ExtensionManagerImpl {
     await this.activateMainThreadExtension(source, name, undefined, name);
   }
 
-  /** Import + activate an extension on the MAIN thread (Phase A governance). */
-  private async activateMainThreadExtension(source: string, name: string, trustStatus?: string, fileName?: string): Promise<void> {
-    const blob = new Blob([source], { type: "application/javascript" });
-    const blobUrl = URL.createObjectURL(blob);
-    try {
-      const imported = await import(/* @vite-ignore */ blobUrl);
-      const module: ExtensionModule = imported.default ?? imported;
-      if (!module.manifest) {
-        throw new Error(`Extension '${name}' does not export a 'manifest' object.`);
+  /**
+   * SECURITY (B2): distributed (third-party) extensions are REFUSED on the main
+   * thread. This path is reached ONLY by distributed bundles — built-ins activate
+   * via activateExtension(module,"trusted") and never get here. Untrusted code on
+   * the main thread would have full ambient window/Tauri/@api authority that the
+   * broker/capability ceiling cannot bound (the founding vision: "never with full
+   * machine access like VBA macros"). Such an extension must declare
+   * workerSupport:true to run sandboxed. The bundle is NOT imported/executed; it
+   * is listed (status:error) so the user can see it — and why — in the manager.
+   */
+  private async activateMainThreadExtension(_source: string, name: string, trustStatus?: string, fileName?: string): Promise<void> {
+    if (!mayActivateOnMainThread("distributed")) {
+      const reason =
+        `Extension "${name}" was blocked: third-party extensions must run sandboxed ` +
+        `(declare workerSupport:true) — they are not allowed full main-thread access.`;
+      console.warn(`[ExtensionManager] ${reason}`);
+      showToast(reason, { variant: "warning" });
+      this.recordBlockedExtension(name, reason, trustStatus, fileName);
+      return;
+    }
+    // No main-thread activation path exists for distributed code by design.
+  }
+
+  /** List a distributed extension that was BLOCKED (refused main-thread
+   *  activation, B2) so the user sees it + the reason in the manager, WITHOUT
+   *  importing/executing its code. Mirrors recordDisabledExtension. */
+  private recordBlockedExtension(name: string, reason: string, trustStatus?: string, fileName?: string): void {
+    const id = fileName ?? name;
+    if (this.extensions.has(id)) return;
+    const entry: LoadedExtension = {
+      id,
+      name,
+      version: "0.0.0",
+      status: "error",
+      error: new Error(reason),
+      // Synthetic module: the real code was never imported (it's blocked).
+      module: { manifest: { id, name, version: "0.0.0" }, activate: () => {} },
+      trust: "distributed",
+      declaredCapabilities: [],
+      trustStatus,
+      worker: false,
+      fileName,
+    };
+    this.extensions.set(id, entry);
+    this.updateCachedArray();
+    this.notifyChange();
+    console.log(`[ExtensionManager] Blocked extension '${id}' listed (not loaded).`);
+  }
+
+  /** List a disk-scanned distributed extension that is awaiting first-use
+   *  consent (B3): the bundle is NOT imported; it is recorded as inactive +
+   *  needsConsent so the manager shows it and offers an "Allow" action. The scan
+   *  entry + hash are stashed so grantConsentAndActivate can mount it as-is. */
+  private recordPendingConsent(
+    id: string,
+    hash: string,
+    entry: ExtensionFileEntry,
+    parsed: SidecarManifest | null,
+  ): void {
+    this.pendingConsent.set(id, { entry, hash });
+    if (!this.extensions.has(id)) {
+      const displayName = parsed?.name || entry.fileName;
+      const version = parsed?.version ?? "0.0.0";
+      // The ceiling shown is what it WOULD get once trusted + consented.
+      const declaredCapabilities = parsed
+        ? computeExtensionCeiling(
+            (parsed.capabilities ?? []).filter((c): c is CapabilityId => CAPABILITY_ID_SET.has(c as CapabilityId)),
+            "distributed",
+          )
+        : [];
+      this.extensions.set(id, {
+        id,
+        name: displayName,
+        version,
+        status: "inactive",
+        // Synthetic module: the real code was never imported (consent pending).
+        module: { manifest: { id, name: displayName, version }, activate: () => {} },
+        trust: "distributed",
+        declaredCapabilities,
+        trustStatus: entry.trustStatus,
+        worker: parsed?.workerSupport === true,
+        fileName: entry.fileName,
+        needsConsent: true,
+      });
+      this.updateCachedArray();
+      this.notifyChange();
+    }
+    console.log(`[ExtensionManager] Extension '${id}' awaiting consent (not loaded).`);
+  }
+
+  /** Grant first-use consent for a pending extension and mount it (B3). Records
+   *  consent at the hash seen at scan time (so it survives restarts), drops the
+   *  synthetic needs-consent entry, then re-runs loadExtension — which now passes
+   *  the consent gate and mounts via the normal worker/main path. */
+  async grantConsentAndActivate(id: string): Promise<void> {
+    const pending = this.pendingConsent.get(id);
+    if (!pending) {
+      console.warn(`[ExtensionManager] grantConsentAndActivate: '${id}' is not awaiting consent.`);
+      return;
+    }
+    recordConsent(id, pending.hash);
+    this.consents.set(id, pending.hash);
+    this.pendingConsent.delete(id);
+    // Remove the synthetic placeholder so loadExtension can record the real one.
+    this.extensions.delete(id);
+    this.updateCachedArray();
+    this.notifyChange();
+    await this.loadExtension(pending.entry);
+  }
+
+  /** True when a listed extension is awaiting a first-use consent decision. */
+  isAwaitingConsent(id: string): boolean {
+    return this.pendingConsent.has(id);
+  }
+
+  /** Prompt for every extension awaiting first-use consent (B3). Run
+   *  fire-and-forget AFTER the scan loop so startup is never blocked: each
+   *  prompt is a once-per-machine TOFU accept (mirrors the .calp pull + the
+   *  object-script consent gate). Declining leaves the extension listed but
+   *  un-mounted; the manager's "Allow" action can grant it later. */
+  private async processPendingConsents(): Promise<void> {
+    for (const [id] of [...this.pendingConsent]) {
+      const ext = this.extensions.get(id);
+      const name = ext?.name ?? id;
+      const caps = ext?.declaredCapabilities ?? [];
+      const signed = ext?.trustStatus === "verified" || ext?.trustStatus === "firstUse";
+      let allow = false;
+      try {
+        allow = window.confirm(
+          `Calcula found a third-party extension that was not installed by Calcula:\n\n` +
+            `    "${name}"\n\n` +
+            `Signature: ${signed ? (ext?.trustStatus ?? "signed") : "unsigned / unverified"}\n` +
+            `Capabilities it can use: ${caps.length ? caps.join(", ") : "none"}\n\n` +
+            `Custom code can read and change your data. Only allow extensions you trust.\n\n` +
+            `Allow "${name}" to load? (You can change this later in Extensions.)`,
+        );
+      } catch {
+        // No confirm available (headless/test) -> fail closed: leave un-mounted.
+        allow = false;
       }
-      if (!module.activate) {
-        throw new Error(`Extension '${name}' does not export an 'activate' function.`);
+      if (allow) {
+        await this.grantConsentAndActivate(id);
       }
-      // Third-party bundles are DISTRIBUTED: ceiling-bounded + transparency-tracked.
-      await this.activateExtension(module, "distributed", trustStatus, fileName);
-    } finally {
-      URL.revokeObjectURL(blobUrl);
     }
   }
 

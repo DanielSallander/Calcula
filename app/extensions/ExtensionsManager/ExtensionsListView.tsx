@@ -93,8 +93,10 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
 
   const isBuiltIn = extension.trust === "trusted";
   const isDisabled = extension.disabled === true;
+  // B3: scanned but held back pending first-use consent (code never imported).
+  const needsConsent = extension.needsConsent === true;
   // Enabled at the persisted level but not running yet -> awaiting a reload.
-  const pendingReload = !isBuiltIn && !isDisabled && extension.status === "inactive";
+  const pendingReload = !isBuiltIn && !isDisabled && !needsConsent && extension.status === "inactive";
   const signature = extension.trustStatus ? SIGNATURE_BADGES[extension.trustStatus] : undefined;
   const caps = extension.declaredCapabilities ?? [];
   const canUninstall = !isBuiltIn && !!extension.fileName;
@@ -107,6 +109,16 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
       setBusy(false);
     }
   }, [extension.id, isDisabled]);
+
+  const grant = useCallback(async () => {
+    setBusy(true);
+    try {
+      await ExtensionManager.grantConsentAndActivate(extension.id);
+      // On success the entry is replaced by the live (active) extension.
+    } finally {
+      setBusy(false);
+    }
+  }, [extension.id]);
 
   const uninstall = useCallback(async () => {
     setBusy(true);
@@ -138,7 +150,7 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
           backgroundColor: statusColor.bg,
           color: statusColor.text,
         }}>
-          {isDisabled ? "disabled" : extension.status}
+          {isDisabled ? "disabled" : needsConsent ? "needs consent" : extension.status}
         </span>
       </div>
 
@@ -215,6 +227,30 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
               >
                 Remove
               </button>
+            </>
+          ) : needsConsent ? (
+            <>
+              <span style={styles.confirmHint}>Not yet allowed to run</span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={grant}
+                style={{ ...styles.actionButton, ...styles.enableButton }}
+                title="Allow this third-party extension to load and run"
+              >
+                Allow
+              </button>
+              {canUninstall && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => { setUninstallError(null); setConfirmingUninstall(true); }}
+                  style={{ ...styles.actionButton, ...styles.disableButton }}
+                  title="Delete this extension's files from disk"
+                >
+                  Uninstall
+                </button>
+              )}
             </>
           ) : (
             <>

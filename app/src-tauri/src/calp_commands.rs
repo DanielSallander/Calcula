@@ -250,6 +250,23 @@ pub fn calp_publish(
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
+    // Audit (B4)
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let user = audit_user(&state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::Published,
+                &format!(
+                    "Published {} v{} ({} sheets)",
+                    result.package_name, result.version, result.sheets_published
+                ),
+                &user,
+                &now,
+            );
+        }
+    }
+
     Ok(PublishResponse {
         package_name: result.package_name,
         version: result.version,
@@ -529,6 +546,23 @@ pub fn calp_pull(
             sheet_offset,
             &embedded_connection_ids,
         );
+    }
+
+    // Audit (B4)
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let user = audit_user(&state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::Subscribe,
+                &format!(
+                    "Subscribed to {} v{} ({} sheets, {} scripts)",
+                    result.package_name, result.resolved_version, sheets_pulled, scripts_pulled
+                ),
+                &user,
+                &now,
+            );
+        }
     }
 
     Ok(PullResponse {
@@ -1591,7 +1625,32 @@ pub fn calp_refresh_apply(
         }
     }
 
+    // Audit (B4)
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let user = audit_user(&state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::Refresh,
+                "Refreshed subscriptions from registry",
+                &user,
+                &now,
+            );
+        }
+    }
+
     Ok(result)
+}
+
+/// The display name of the current subscriber identity, for an audit `user`
+/// field (best-effort; empty when no identity is established).
+fn audit_user(state: &AppState) -> String {
+    state
+        .subscriber_identity
+        .lock()
+        .ok()
+        .and_then(|id| id.as_ref().map(|i| i.display_name.clone()))
+        .unwrap_or_default()
 }
 
 /// Strip all subscriptions and overrides, converting the workbook to a
@@ -1602,6 +1661,7 @@ pub fn calp_detach(state: State<AppState>, window: tauri::Window) -> Result<(), 
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
 
+    let detached_count = subs.subscriptions.len();
     calp::refresh::detach(&mut subs.subscriptions, &mut layer);
 
     // Clear writeback index (no subscriptions remain)
@@ -1611,6 +1671,20 @@ pub fn calp_detach(state: State<AppState>, window: tauri::Window) -> Result<(), 
         *idx = calp::WritebackIndex::default();
     }
     invalidate_gather_cache(&state);
+
+    // Audit (B4)
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let user = audit_user(&state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::Detach,
+                &format!("Detached from {} subscription(s)", detached_count),
+                &user,
+                &now,
+            );
+        }
+    }
 
     Ok(())
 }

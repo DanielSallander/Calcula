@@ -12,11 +12,24 @@ import { CAPABILITY_ID_SET, type CapabilityId } from "../../api/scriptHost/capab
  *    authority — not ceiling-bound.
  *  - "distributed": third-party bundle from the user's extensions directory.
  *    Bounded by a declared-capability CEILING (deny-by-default), and surfaced in
- *    the transparency panel. Runtime isolation of its direct Tauri access is
- *    Phase B (worker realm); browser-fetch exfiltration is already contained by
- *    the app CSP connect-src allowlist.
+ *    the transparency panel. Untrusted code must run SANDBOXED in a worker realm
+ *    (workerSupport:true); it is refused on the main thread, where it would get
+ *    full ambient window/Tauri/@api authority that the broker/ceiling cannot
+ *    bound (see mayActivateOnMainThread). Browser-fetch exfiltration is also
+ *    contained by the app CSP connect-src allowlist.
  */
 export type ExtensionTrust = "trusted" | "distributed";
+
+/**
+ * May an extension run on the MAIN thread (full ambient window/Tauri/@api
+ * authority)? Only trusted built-ins. Distributed (untrusted) code that lacks
+ * worker isolation is refused — a consent dialog must NOT be able to authorize
+ * full machine access (the founding vision: "never with full machine access
+ * like VBA macros"). Such an extension simply does not activate.
+ */
+export function mayActivateOnMainThread(trust: ExtensionTrust): boolean {
+  return trust === "trusted";
+}
 
 /**
  * The R19 declared-capability ceiling for an extension.

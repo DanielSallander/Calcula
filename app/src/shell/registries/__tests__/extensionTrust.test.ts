@@ -3,7 +3,7 @@
 // (third-party) extensions and the full-authority posture for trusted built-ins.
 
 import { describe, it, expect } from "vitest";
-import { computeExtensionCeiling } from "../extensionTrust";
+import { computeExtensionCeiling, mayActivateOnMainThread } from "../extensionTrust";
 import type { CapabilityId } from "../../../api/scriptHost/capabilityIds";
 
 describe("computeExtensionCeiling", () => {
@@ -27,5 +27,15 @@ describe("computeExtensionCeiling", () => {
   it("drops unrecognized capability ids from a distributed manifest", () => {
     const declared = ["net.fetch", "filesystem", "storage"] as CapabilityId[];
     expect(computeExtensionCeiling(declared, "distributed")).toEqual(["net.fetch", "storage"]);
+  });
+});
+
+describe("mayActivateOnMainThread (B2)", () => {
+  it("only trusted built-ins may run on the main thread", () => {
+    expect(mayActivateOnMainThread("trusted")).toBe(true);
+  });
+
+  it("distributed (untrusted) extensions are refused the main thread", () => {
+    expect(mayActivateOnMainThread("distributed")).toBe(false);
   });
 });

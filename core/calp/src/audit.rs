@@ -71,6 +71,8 @@ pub enum AuditEvent {
     WritebackInvalidated,
     /// Publisher approved or rejected a submitted writeback value.
     WritebackReviewed,
+    /// A sandboxed script (run_script or a notebook cell) mutated grid cells.
+    ScriptExecuted,
 }
 
 impl AuditLog {
@@ -200,5 +202,15 @@ mod tests {
         log.record(AuditEvent::Detach, "detached", "", "2026-01-01T00:00:00Z");
         log.clear();
         assert_eq!(log.entry_count(), 0);
+    }
+
+    #[test]
+    fn script_executed_variant_roundtrips() {
+        let mut log = AuditLog::new_enabled(0);
+        log.record(AuditEvent::ScriptExecuted, "A script modified 3 cell(s)", "local", "2026-06-28T00:00:00Z");
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(json.contains("\"script_executed\""));
+        let back: AuditLog = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.entries[0].event, AuditEvent::ScriptExecuted));
     }
 }

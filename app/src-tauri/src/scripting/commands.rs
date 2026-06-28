@@ -230,6 +230,19 @@ pub fn run_script(
     //    (no per-sheet undo/recalc for off-screen sheets yet).
     if let script_engine::ScriptResult::Success { cells_modified, .. } = &result {
         if *cells_modified > 0 && !modified_grids.is_empty() {
+            // Audit (B4): record that a sandboxed script mutated the grid, so the
+            // Rust QuickJS surface is not invisible to the activity log.
+            {
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Ok(mut audit) = state.audit_log.lock() {
+                    audit.record(
+                        calp::audit::AuditEvent::ScriptExecuted,
+                        &format!("A script modified {} cell(s)", cells_modified),
+                        "local",
+                        &now,
+                    );
+                }
+            }
             // Build the active-sheet diff WITHOUT mutating AppState. Hold the
             // AppState grid locks only long enough to compute the diff, then
             // drop them BEFORE calling update_cells_batch (which takes its own
