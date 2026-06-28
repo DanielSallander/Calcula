@@ -87,26 +87,18 @@ pub fn write_cell(
 ) -> Result<String, String> {
     // Delegate to the script engine for simplicity - it handles parsing,
     // formula evaluation, and dependency recalculation correctly.
-    let script = if value.starts_with('=') {
-        // For formulas, we need to set the formula string
-        format!(
-            "Calcula.setCellValue({}, {}, \"{}\");",
-            row,
-            col,
-            value.replace('\\', "\\\\").replace('"', "\\\"")
-        )
-    } else {
-        // For plain values, try numeric first
-        match value.parse::<f64>() {
-            Ok(_) => format!("Calcula.setCellValue({}, {}, {});", row, col, value),
-            Err(_) => format!(
-                "Calcula.setCellValue({}, {}, \"{}\");",
-                row,
-                col,
-                value.replace('\\', "\\\\").replace('"', "\\\"")
-            ),
-        }
-    };
+    //
+    // ALWAYS pass the value as a quoted STRING: Calcula.setCellValue expects a
+    // string argument (an unquoted number throws "Error converting from js 'int'
+    // into type 'string'"), and the cell-input pipeline parses a numeric string
+    // like "42" back into a number — so formulas, numbers, and text all flow
+    // through the same quoted form.
+    let script = format!(
+        "Calcula.setCellValue({}, {}, \"{}\");",
+        row,
+        col,
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    );
 
     execute_script(handle, &script)?;
     Ok(format!("Set {}{} = {}", col_letter(col), row + 1, value))
@@ -117,33 +109,17 @@ pub fn write_cell_range(
     handle: &AppHandle,
     cells: &[super::server::CellInput],
 ) -> Result<String, String> {
+    // Always pass each value as a quoted STRING (see write_cell: an unquoted
+    // number throws in the script engine; the cell-input pipeline parses a
+    // numeric string back into a number).
     let mut script = String::new();
     for cell in cells {
-        if cell.value.starts_with('=') {
-            script.push_str(&format!(
-                "Calcula.setCellValue({}, {}, \"{}\");\n",
-                cell.row,
-                cell.col,
-                cell.value.replace('\\', "\\\\").replace('"', "\\\"")
-            ));
-        } else {
-            match cell.value.parse::<f64>() {
-                Ok(_) => {
-                    script.push_str(&format!(
-                        "Calcula.setCellValue({}, {}, {});\n",
-                        cell.row, cell.col, cell.value
-                    ));
-                }
-                Err(_) => {
-                    script.push_str(&format!(
-                        "Calcula.setCellValue({}, {}, \"{}\");\n",
-                        cell.row,
-                        cell.col,
-                        cell.value.replace('\\', "\\\\").replace('"', "\\\"")
-                    ));
-                }
-            }
-        }
+        script.push_str(&format!(
+            "Calcula.setCellValue({}, {}, \"{}\");\n",
+            cell.row,
+            cell.col,
+            cell.value.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
     }
 
     execute_script(handle, &script)?;
