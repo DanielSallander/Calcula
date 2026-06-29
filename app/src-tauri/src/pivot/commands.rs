@@ -111,12 +111,69 @@ fn find_toggle_row(view: &PivotView, request: &ToggleGroupRequest) -> Option<usi
 // TAURI COMMANDS
 // ============================================================================
 
-/// Creates a new pivot table from the specified source range
+/// Resolve pivot field NAMES to their 0-based source-column indices against the
+/// available column names. Errors (listing the available names) if any name is
+/// not found. Pure — unit-tested.
+pub(crate) fn resolve_field_indices(
+    names: &[String],
+    available: &[String],
+) -> Result<Vec<usize>, String> {
+    names
+        .iter()
+        .map(|name| {
+            available
+                .iter()
+                .position(|n| n == name)
+                .ok_or_else(|| {
+                    format!(
+                        "Pivot field '{}' not found. Available columns: [{}]",
+                        name,
+                        available.join(", ")
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Human label for an aggregation, used to build a value-field display name
+/// like "Sum of Revenue".
+fn agg_label(agg: AggregationType) -> &'static str {
+    match agg {
+        AggregationType::Sum => "Sum",
+        AggregationType::Count => "Count",
+        AggregationType::Average => "Average",
+        AggregationType::Min => "Min",
+        AggregationType::Max => "Max",
+        AggregationType::CountNumbers => "CountNumbers",
+        AggregationType::StdDev => "StdDev",
+        AggregationType::StdDevP => "StdDevP",
+        AggregationType::Var => "Var",
+        AggregationType::VarP => "VarP",
+        AggregationType::Product => "Product",
+    }
+}
+
+/// Creates a new pivot table from the specified source range (UI path: starts
+/// EMPTY, fields are configured later via update_pivot_fields).
 #[tauri::command]
 pub fn create_pivot_table(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     request: CreatePivotRequest,
+) -> Result<PivotViewResponse, String> {
+    create_pivot_inner(state, pivot_state, request, Vec::new(), Vec::new())
+}
+
+/// Core pivot creation, optionally with row/value fields configured UP FRONT so
+/// the whole creation is a SINGLE undoable step (used by the MCP create_pivot
+/// tool; create_pivot_table passes empty field lists). Field NAMES are resolved
+/// to source-column indices against the freshly built cache.
+pub fn create_pivot_inner(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: CreatePivotRequest,
+    row_field_names: Vec<String>,
+    value_specs: Vec<(String, AggregationType)>,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
         "PIVOT",
@@ -197,7 +254,35 @@ pub fn create_pivot_table(
         }
     }
 
-    // Calculate initial view (will be empty since no fields are configured)
+    // C1: resolve requested field NAMES -> source indices and configure the
+    // definition BEFORE the first calc, so an MCP-created pivot is a SINGLE
+    // undoable step (no empty-then-update). Empty for the UI create path.
+    if !row_field_names.is_empty() || !value_specs.is_empty() {
+        let available: Vec<String> = (0..cache.field_count())
+            .filter_map(|i| cache.field_name(i))
+            .collect();
+        let row_idx = resolve_field_indices(&row_field_names, &available)?;
+        for (name, idx) in row_field_names.iter().zip(row_idx) {
+            definition.row_fields.push(PivotField::new(idx, name.clone()));
+        }
+        for (field, agg) in &value_specs {
+            let idx = resolve_field_indices(std::slice::from_ref(field), &available)?[0];
+            definition.value_fields.push(ValueField::new(
+                idx,
+                format!("{} of {}", agg_label(*agg), field),
+                *agg,
+            ));
+        }
+    }
+
+    // The undo snapshot stores the CLEAN (pre-calc) cache: a CONFIGURED pivot's
+    // post-calc cache contains computed maps serde_json cannot serialize
+    // (non-string keys), which would make the undo snapshot empty and break
+    // delete-on-undo. The clean source cache serializes, and redo recomputes the
+    // view from it (apply_pivot_delete_restore re-runs safe_calculate_pivot).
+    let undo_cache = cache.clone();
+
+    // Calculate initial view (empty only if no fields were configured)
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
     store_view(&pivot_state, pivot_id, &view);
@@ -272,11 +357,11 @@ pub fn create_pivot_table(
             definition: PivotDefinition,
             cache: PivotCache,
         }
-        let (def, cache) = pivot_tables.get(&pivot_id).unwrap();
+        let (def, _post_calc_cache) = pivot_tables.get(&pivot_id).unwrap();
         let snapshot = PivotFullSnapshot {
             pivot_id,
             definition: def.clone(),
-            cache: cache.clone(),
+            cache: undo_cache, // clean pre-calc cache (serializable; redo recomputes)
         };
         let data = serde_json::to_vec(&snapshot).unwrap_or_default();
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -4209,6 +4294,26 @@ fn expand_bi_value_fields(
 mod calc_group_expand_tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn resolve_field_indices_maps_names_and_errors_on_missing() {
+        let available = vec![
+            "Region".to_string(),
+            "Revenue".to_string(),
+            "Quarter".to_string(),
+        ];
+        // Names resolve to their 0-based positions, preserving order.
+        assert_eq!(
+            resolve_field_indices(&["Revenue".to_string(), "Region".to_string()], &available).unwrap(),
+            vec![1, 0]
+        );
+        // A missing name errors and lists the available columns.
+        let err = resolve_field_indices(&["Nope".to_string()], &available).unwrap_err();
+        assert!(err.contains("Nope"));
+        assert!(err.contains("Region"), "error lists available columns");
+        // Empty input -> empty output.
+        assert!(resolve_field_indices(&[], &available).unwrap().is_empty());
+    }
 
     fn vf(name: &str) -> crate::pivot::types::BiValueFieldRef {
         crate::pivot::types::BiValueFieldRef {

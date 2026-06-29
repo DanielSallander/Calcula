@@ -14,7 +14,9 @@
 //! - Every tool invocation is logged under the "MCP" category.
 
 mod server;
-mod tools;
+// pub(crate) so the in-app AI chat (ai_chat.rs) can reuse the same tool helpers
+// the MCP server exposes (read/write workbook), keeping one tool surface.
+pub(crate) mod tools;
 
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};

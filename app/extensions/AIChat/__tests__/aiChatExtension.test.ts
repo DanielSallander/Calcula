@@ -64,11 +64,19 @@ describe("AIChat Extension Module", () => {
     const ctx = createMockContext();
     extension.activate(ctx);
 
-    expect(mockRegisterTaskPane).toHaveBeenCalledOnce();
+    // Two panes: the MCP Server control panel + the real AI Chat (C1).
+    expect(mockRegisterTaskPane).toHaveBeenCalledTimes(2);
     expect(mockRegisterTaskPane).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "ai-chat",
         title: "MCP Server",
+        closable: true,
+      }),
+    );
+    expect(mockRegisterTaskPane).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "ai-chat-llm",
+        title: "AI Chat",
         closable: true,
       }),
     );
@@ -92,8 +100,8 @@ describe("AIChat Extension Module", () => {
     extension.activate(ctx);
     extension.activate(ctx);
 
-    // Should only register once
-    expect(mockRegisterTaskPane).toHaveBeenCalledOnce();
+    // Should register its two panes once (second activate is a no-op).
+    expect(mockRegisterTaskPane).toHaveBeenCalledTimes(2);
   });
 
   it("cleans up on deactivate", () => {
@@ -116,6 +124,7 @@ describe("AIChat Extension Module", () => {
     extension.deactivate();
     extension.activate(ctx);
 
-    expect(mockRegisterTaskPane).toHaveBeenCalledTimes(2);
+    // Two panes per activation, across two activations.
+    expect(mockRegisterTaskPane).toHaveBeenCalledTimes(4);
   });
 });

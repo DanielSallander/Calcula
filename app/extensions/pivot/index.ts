@@ -1771,6 +1771,15 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("pivot:refresh", handlePivotRefresh);
   cleanupFunctions.push(() => window.removeEventListener("pivot:refresh", handlePivotRefresh));
 
+  // Bridge the backend "pivots:refresh" Tauri event (emitted after an OUT-OF-BAND
+  // MCP create_pivot) to the window "pivot:refresh" event, so an AI-created pivot
+  // appears live without a reload — mirroring the Charts charts:refresh bridge.
+  listenTauriEvent("pivots:refresh", () => {
+    window.dispatchEvent(new CustomEvent("pivot:refresh"));
+  }).then((unlisten) => {
+    cleanupFunctions.push(unlisten);
+  });
+
   // Listen for external loading events (from filter/slicer bridges)
   const handleSetLoading = (e: Event) => {
     const { pivotId, stage } = (e as CustomEvent).detail ?? {};

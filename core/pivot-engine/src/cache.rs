@@ -23,6 +23,46 @@ use crate::definition::{AggregationType, FieldIndex, PivotId};
 /// without heap allocation.
 pub type GroupKeyVec = SmallVec<[ValueId; 6]>;
 
+// serde helpers: serialize maps whose KEY is not a string/integer (CacheValue is
+// an enum, GroupKey is a struct) as SEQUENCES of (key, value) pairs. serde_json
+// cannot serialize such maps as JSON objects, so a populated PivotCache would
+// otherwise fail to serialize entirely (which silently broke pivot undo — the
+// snapshot serialized to empty bytes). Storing them as JSON arrays round-trips
+// losslessly. PivotCache is only serialized for undo snapshots (never persisted
+// to .cala), so this format change has no on-disk compatibility impact.
+mod value_to_id_pairs {
+    use super::{CacheValue, ValueId};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer>(m: &HashMap<CacheValue, ValueId>, s: S) -> Result<S::Ok, S::Error> {
+        m.iter().collect::<Vec<(&CacheValue, &ValueId)>>().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<CacheValue, ValueId>, D::Error> {
+        Ok(Vec::<(CacheValue, ValueId)>::deserialize(d)?.into_iter().collect())
+    }
+}
+
+mod aggregates_pairs {
+    use super::{AggregateAccumulator, GroupKey};
+    use rustc_hash::FxHashMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        m: &FxHashMap<GroupKey, Vec<AggregateAccumulator>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        m.iter().collect::<Vec<(&GroupKey, &Vec<AggregateAccumulator>)>>().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<FxHashMap<GroupKey, Vec<AggregateAccumulator>>, D::Error> {
+        Ok(Vec::<(GroupKey, Vec<AggregateAccumulator>)>::deserialize(d)?
+            .into_iter()
+            .collect())
+    }
+}
+
 // ============================================================================
 // VALUE INTERNING
 // ============================================================================
@@ -108,6 +148,7 @@ pub struct FieldCache {
     pub name: String,
 
     /// Map from value to its unique ID (for deduplication during build).
+    #[serde(with = "value_to_id_pairs")]
     value_to_id: HashMap<CacheValue, ValueId>,
 
     /// Ordered list of unique values (indexed by ValueId).
@@ -565,6 +606,7 @@ pub struct PivotCache {
     /// Each entry is a flat array of accumulators:
     ///   slot[col_index * value_count + value_field_idx]
     /// where col_index is computed via ColumnLayout.
+    #[serde(with = "aggregates_pairs")]
     aggregates: FxHashMap<GroupKey, Vec<AggregateAccumulator>>,
 
     /// Column layout for computing flat column indices.

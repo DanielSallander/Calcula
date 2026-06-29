@@ -721,6 +721,85 @@ pub fn create_table(
     ))
 }
 
+/// Map an aggregation string from the AI to the engine's AggregationType (v1 set).
+fn parse_aggregation(s: &str) -> Result<pivot_engine::AggregationType, String> {
+    use pivot_engine::AggregationType as A;
+    match s.trim().to_lowercase().as_str() {
+        "sum" => Ok(A::Sum),
+        "count" => Ok(A::Count),
+        "average" | "avg" | "mean" => Ok(A::Average),
+        "min" => Ok(A::Min),
+        "max" => Ok(A::Max),
+        other => Err(format!(
+            "Unknown aggregation '{}'. Use one of: sum, count, average, min, max.",
+            other
+        )),
+    }
+}
+
+/// Create a NEW pivot table configured with row + value fields in ONE undoable
+/// step (AI). Reuses create_pivot_inner (the same create path the UI uses) so the
+/// single "Create pivot table" undo reverts it; then emits "pivots:refresh" (the
+/// Pivot extension bridges that to a live refresh). v1 = row + value fields only.
+#[allow(clippy::too_many_arguments)]
+pub fn create_pivot(
+    handle: &AppHandle,
+    source_range: &str,
+    destination_cell: &str,
+    row_fields: Vec<String>,
+    value_fields: Vec<(String, String)>,
+    source_sheet: Option<usize>,
+    destination_sheet: Option<usize>,
+    has_headers: bool,
+    name: Option<&str>,
+) -> Result<String, String> {
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_script_security(&script_state)?;
+
+    if value_fields.is_empty() {
+        return Err("create_pivot requires at least one value field (e.g. {field:\"Revenue\", aggregation:\"sum\"}).".to_string());
+    }
+    let row_field_count = row_fields.len();
+    let value_field_count = value_fields.len();
+
+    // Map aggregation strings -> AggregationType.
+    let mut value_specs: Vec<(String, pivot_engine::AggregationType)> = Vec::new();
+    for (field, agg_str) in &value_fields {
+        value_specs.push((field.clone(), parse_aggregation(agg_str)?));
+    }
+
+    let request = crate::pivot::types::CreatePivotRequest {
+        source_range: source_range.to_string(),
+        destination_cell: destination_cell.to_string(),
+        source_sheet,
+        destination_sheet,
+        has_headers: Some(has_headers),
+        name: name.map(|s| s.to_string()),
+        source_table_name: None,
+    };
+
+    let response = crate::pivot::commands::create_pivot_inner(
+        handle.state::<AppState>(),
+        handle.state::<crate::pivot::PivotState>(),
+        request,
+        row_fields,
+        value_specs,
+    )?;
+
+    // Live-refresh the pivot view for this out-of-band create; the Pivot
+    // extension bridges this Tauri event to its window "pivot:refresh".
+    let _ = handle.emit("pivots:refresh", ());
+
+    Ok(format!(
+        "Created pivot \"{}\" at {} ({} output rows): {} row field(s), {} value field(s)",
+        name.unwrap_or("PivotTable"),
+        destination_cell,
+        response.row_count,
+        row_field_count,
+        value_field_count,
+    ))
+}
+
 /// Execute a JavaScript script via the script engine.
 pub fn execute_script(
     handle: &AppHandle,

@@ -171,6 +171,39 @@ pub struct McpCreateTableParams {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PivotValueFieldParam {
+    #[schemars(description = "Source column name (from the header row) to aggregate.")]
+    pub field: String,
+    #[schemars(description = "Aggregation: sum, count, average, min, or max.")]
+    pub aggregation: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreatePivotParams {
+    #[schemars(description = "Source data range in A1, e.g. \"A1:D100\".")]
+    pub source_range: String,
+    #[schemars(description = "Top-left destination cell in A1, e.g. \"F1\".")]
+    pub destination_cell: String,
+    #[schemars(description = "Value fields to aggregate (>=1). Each {field: source column name, aggregation: sum|count|average|min|max}.")]
+    pub value_fields: Vec<PivotValueFieldParam>,
+    #[schemars(description = "Row field column names to group rows by (optional).")]
+    #[serde(default)]
+    pub row_fields: Vec<String>,
+    #[schemars(description = "Source sheet index (0-based). Defaults to the active sheet.")]
+    #[serde(default)]
+    pub source_sheet: Option<usize>,
+    #[schemars(description = "Destination sheet index (0-based). Defaults to the active sheet.")]
+    #[serde(default)]
+    pub destination_sheet: Option<usize>,
+    #[schemars(description = "Whether the source's first row is a header row (default true).")]
+    #[serde(default)]
+    pub has_headers: Option<bool>,
+    #[schemars(description = "Optional pivot table name.")]
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -453,6 +486,39 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: create_table: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Create a NEW pivot table configured with row + value fields in one step. source_range (A1, e.g. \"A1:D100\"), destination_cell (A1, e.g. \"F1\"), value_fields (>=1; each {field: source column name, aggregation: sum|count|average|min|max}), optional row_fields (column names), source_sheet/destination_sheet (0-based), has_headers (default true), name. Field names come from the source header row — call get_sheet_summary first to see the data. Undoable, appears live. Requires the Script Security setting to allow execution.")]
+    async fn create_pivot(
+        &self,
+        params: Parameters<CreatePivotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: create_pivot source={} dest={}",
+            log_summary(&p.source_range, 40),
+            log_summary(&p.destination_cell, 20)
+        );
+        let value_fields: Vec<(String, String)> =
+            p.value_fields.into_iter().map(|v| (v.field, v.aggregation)).collect();
+        match tools::create_pivot(
+            &self.app_handle,
+            &p.source_range,
+            &p.destination_cell,
+            p.row_fields,
+            value_fields,
+            p.source_sheet,
+            p.destination_sheet,
+            p.has_headers.unwrap_or(true),
+            p.name.as_deref(),
+        ) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: create_pivot: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }
