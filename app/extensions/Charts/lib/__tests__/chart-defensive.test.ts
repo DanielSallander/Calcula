@@ -72,34 +72,34 @@ describe("transforms never throw for valid ParsedChartData", () => {
     ["huge values", hugeData],
   ];
 
-  it("applyTransforms with empty transform list returns data", () => {
+  it("applyTransforms with empty transform list returns data", async () => {
     for (const [label, data] of inputs) {
-      expect(() => applyTransforms(data, [])).not.toThrow();
+      await expect(applyTransforms(data, [])).resolves.not.toThrow();
     }
   });
 
-  it("applyTransforms with sort transform does not throw", () => {
+  it("applyTransforms with sort transform does not throw", async () => {
     const sort: TransformSpec = { type: "sort", field: "x", order: "ascending" };
     for (const [label, data] of inputs) {
-      expect(() => applyTransforms(data, [sort])).not.toThrow();
+      await expect(applyTransforms(data, [sort])).resolves.not.toThrow();
     }
   });
 
-  it("applyTransforms with filter transform does not throw", () => {
+  it("applyTransforms with filter transform does not throw", async () => {
     const filter: TransformSpec = {
       type: "filter",
       field: "$category",
       predicate: "= A",
     };
     for (const [label, data] of inputs) {
-      expect(() => applyTransforms(data, [filter])).not.toThrow();
+      await expect(applyTransforms(data, [filter])).resolves.not.toThrow();
     }
   });
 
-  it("applyTransforms does not mutate input", () => {
+  it("applyTransforms does not mutate input", async () => {
     const data = makeData(["A", "B"], [[1, 2]]);
     const frozen = JSON.parse(JSON.stringify(data));
-    applyTransforms(data, []);
+    await applyTransforms(data, []);
     expect(data).toEqual(frozen);
   });
 });

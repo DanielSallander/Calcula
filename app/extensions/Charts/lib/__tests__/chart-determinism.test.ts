@@ -72,28 +72,38 @@ function assertDeterministic<T>(fn: () => T, n = ITERATIONS): T {
   return first;
 }
 
+/** Async variant: run fn N times (awaiting each) and assert outputs are identical. */
+async function assertDeterministicAsync<T>(fn: () => Promise<T>, n = ITERATIONS): Promise<T> {
+  const first = await fn();
+  const firstJson = JSON.stringify(first);
+  for (let i = 1; i < n; i++) {
+    expect(JSON.stringify(await fn())).toBe(firstJson);
+  }
+  return first;
+}
+
 // ===========================================================================
 // applyTransforms
 // ===========================================================================
 
 describe("determinism: applyTransforms", () => {
-  it("sort transform produces same output 50 times", () => {
+  it("sort transform produces same output 50 times", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Sales", direction: "ascending" },
     ];
-    assertDeterministic(() => applyTransforms(data, transforms));
+    await assertDeterministicAsync(() => applyTransforms(data, transforms));
   });
 
-  it("filter transform produces same output 50 times", () => {
+  it("filter transform produces same output 50 times", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 100" },
     ];
-    assertDeterministic(() => applyTransforms(data, transforms));
+    await assertDeterministicAsync(() => applyTransforms(data, transforms));
   });
 
-  it("multiple chained transforms are deterministic", () => {
+  it("multiple chained transforms are deterministic", async () => {
     const data = makeData(
       ["D", "B", "A", "C", "E"],
       { Revenue: [500, 100, 300, 200, 400] },
@@ -102,7 +112,7 @@ describe("determinism: applyTransforms", () => {
       { type: "filter", field: "Revenue", predicate: "> 150" },
       { type: "sort", field: "Revenue", direction: "descending" },
     ];
-    assertDeterministic(() => applyTransforms(data, transforms));
+    await assertDeterministicAsync(() => applyTransforms(data, transforms));
   });
 });
 

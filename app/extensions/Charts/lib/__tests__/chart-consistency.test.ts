@@ -61,7 +61,7 @@ function makeLayout(): ChartLayout {
 // ===========================================================================
 
 describe("filter then sort = sort then filter for independent operations", () => {
-  it("numeric filter on series + category sort commute", () => {
+  it("numeric filter on series + category sort commute", async () => {
     const data = makeData(
       ["C", "A", "B", "D"],
       { Sales: [30, 10, 20, 40] },
@@ -70,14 +70,14 @@ describe("filter then sort = sort then filter for independent operations", () =>
     const filter: TransformSpec = { type: "filter", field: "Sales", predicate: "> 15" };
     const sort: TransformSpec = { type: "sort", field: "$category", order: "asc" };
 
-    const filterThenSort = applyTransforms(data, [filter, sort]);
-    const sortThenFilter = applyTransforms(data, [sort, filter]);
+    const filterThenSort = await applyTransforms(data, [filter, sort]);
+    const sortThenFilter = await applyTransforms(data, [sort, filter]);
 
     expect(filterThenSort.categories).toEqual(sortThenFilter.categories);
     expect(filterThenSort.series[0].values).toEqual(sortThenFilter.series[0].values);
   });
 
-  it("equality filter on category + series sort commute", () => {
+  it("equality filter on category + series sort commute", async () => {
     const data = makeData(
       ["X", "Y", "Z", "W"],
       { Revenue: [100, 400, 200, 300] },
@@ -86,8 +86,8 @@ describe("filter then sort = sort then filter for independent operations", () =>
     const filter: TransformSpec = { type: "filter", field: "$category", predicate: "!= W" };
     const sort: TransformSpec = { type: "sort", field: "Revenue", order: "desc" };
 
-    const filterThenSort = applyTransforms(data, [filter, sort]);
-    const sortThenFilter = applyTransforms(data, [sort, filter]);
+    const filterThenSort = await applyTransforms(data, [filter, sort]);
+    const sortThenFilter = await applyTransforms(data, [sort, filter]);
 
     expect(filterThenSort.categories).toEqual(sortThenFilter.categories);
     expect(filterThenSort.series[0].values).toEqual(sortThenFilter.series[0].values);
@@ -99,13 +99,13 @@ describe("filter then sort = sort then filter for independent operations", () =>
 // ===========================================================================
 
 describe("aggregate sum of parts = aggregate of whole", () => {
-  it("summing two halves matches summing the whole", () => {
+  it("summing two halves matches summing the whole", async () => {
     const data = makeData(
       ["A", "A", "B", "B"],
       { Sales: [10, 20, 30, 40] },
     );
 
-    const aggregated = applyTransforms(data, [{
+    const aggregated = await applyTransforms(data, [{
       type: "aggregate",
       groupBy: ["$category"],
       op: "sum",
@@ -119,13 +119,13 @@ describe("aggregate sum of parts = aggregate of whole", () => {
     expect(aggregatedSum).toBe(rawSum);
   });
 
-  it("count aggregate parts sum to total count", () => {
+  it("count aggregate parts sum to total count", async () => {
     const data = makeData(
       ["X", "X", "X", "Y", "Y"],
       { Val: [1, 2, 3, 4, 5] },
     );
 
-    const aggregated = applyTransforms(data, [{
+    const aggregated = await applyTransforms(data, [{
       type: "aggregate",
       groupBy: ["$category"],
       op: "count",

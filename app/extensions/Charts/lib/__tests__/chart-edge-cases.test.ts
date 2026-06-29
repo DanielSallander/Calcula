@@ -67,68 +67,68 @@ const defaultTheme: ChartRenderTheme = {
 // ============================================================================
 
 describe("Charts with 0 data points", () => {
-  it("applyTransforms handles empty categories", () => {
+  it("applyTransforms handles empty categories", async () => {
     const data = makeData({ categories: [], series: [{ name: "S1", values: [], color: null }] });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.categories).toHaveLength(0);
     expect(result.series[0].values).toHaveLength(0);
   });
 
-  it("applyTransforms handles empty series array", () => {
+  it("applyTransforms handles empty series array", async () => {
     const data = makeData({ categories: [], series: [] });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series).toHaveLength(0);
   });
 
-  it("filter on empty data returns empty", () => {
+  it("filter on empty data returns empty", async () => {
     const data = makeData({ categories: [], series: [{ name: "S1", values: [], color: null }] });
     const transforms: TransformSpec[] = [{ type: "filter", field: "S1", predicate: "> 0" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
   });
 
-  it("sort on empty data returns empty", () => {
+  it("sort on empty data returns empty", async () => {
     const data = makeData({ categories: [], series: [{ name: "S1", values: [], color: null }] });
     const transforms: TransformSpec[] = [{ type: "sort", field: "S1", order: "asc" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
   });
 });
 
 describe("Charts with 1 data point", () => {
-  it("single point data passes through transforms", () => {
+  it("single point data passes through transforms", async () => {
     const data = makeData({
       categories: ["Only"],
       series: [{ name: "S1", values: [42], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.categories).toEqual(["Only"]);
     expect(result.series[0].values).toEqual([42]);
   });
 
-  it("filter keeps single point that matches", () => {
+  it("filter keeps single point that matches", async () => {
     const data = makeData({
       categories: ["A"],
       series: [{ name: "S1", values: [100], color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "filter", field: "S1", predicate: "> 50" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(1);
   });
 
-  it("filter removes single point that does not match", () => {
+  it("filter removes single point that does not match", async () => {
     const data = makeData({
       categories: ["A"],
       series: [{ name: "S1", values: [10], color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "filter", field: "S1", predicate: "> 50" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
   });
 });
 
 describe("Charts with 10000 data points", () => {
-  it("handles large dataset without crashing", () => {
+  it("handles large dataset without crashing", async () => {
     const n = 10000;
     const categories = Array.from({ length: n }, (_, i) => `Cat${i}`);
     const values = Array.from({ length: n }, (_, i) => Math.sin(i) * 1000);
@@ -136,12 +136,12 @@ describe("Charts with 10000 data points", () => {
       categories,
       series: [{ name: "Big", values, color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.categories).toHaveLength(n);
     expect(result.series[0].values).toHaveLength(n);
   });
 
-  it("sort on large dataset completes", () => {
+  it("sort on large dataset completes", async () => {
     const n = 10000;
     const categories = Array.from({ length: n }, (_, i) => `Cat${i}`);
     const values = Array.from({ length: n }, () => Math.random() * 1000);
@@ -150,7 +150,7 @@ describe("Charts with 10000 data points", () => {
       series: [{ name: "Big", values, color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "sort", field: "Big", order: "desc" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(n);
     // Verify sorted descending
     for (let i = 1; i < result.series[0].values.length; i++) {
@@ -158,7 +158,7 @@ describe("Charts with 10000 data points", () => {
     }
   });
 
-  it("filter on large dataset produces subset", () => {
+  it("filter on large dataset produces subset", async () => {
     const n = 10000;
     const categories = Array.from({ length: n }, (_, i) => `Cat${i}`);
     const values = Array.from({ length: n }, (_, i) => i);
@@ -167,7 +167,7 @@ describe("Charts with 10000 data points", () => {
       series: [{ name: "S", values, color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "filter", field: "S", predicate: ">= 9000" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(1000);
   });
 });
@@ -177,31 +177,31 @@ describe("Charts with 10000 data points", () => {
 // ============================================================================
 
 describe("All-identical values", () => {
-  it("flat line: all values the same", () => {
+  it("flat line: all values the same", async () => {
     const data = makeData({
       categories: ["A", "B", "C", "D", "E"],
       series: [{ name: "Flat", values: [50, 50, 50, 50, 50], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values.every((v) => v === 50)).toBe(true);
   });
 
-  it("all zeros", () => {
+  it("all zeros", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "Zero", values: [0, 0, 0], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values).toEqual([0, 0, 0]);
   });
 
-  it("sort on identical values preserves order", () => {
+  it("sort on identical values preserves order", async () => {
     const data = makeData({
       categories: ["X", "Y", "Z"],
       series: [{ name: "S", values: [5, 5, 5], color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "sort", field: "S", order: "asc" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([5, 5, 5]);
   });
 });
@@ -211,48 +211,48 @@ describe("All-identical values", () => {
 // ============================================================================
 
 describe("Extreme numeric values", () => {
-  it("handles very large numbers (1e308)", () => {
+  it("handles very large numbers (1e308)", async () => {
     const data = makeData({
       categories: ["Big"],
       series: [{ name: "S", values: [1e308], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values[0]).toBe(1e308);
   });
 
-  it("handles very small numbers (1e-308)", () => {
+  it("handles very small numbers (1e-308)", async () => {
     const data = makeData({
       categories: ["Tiny"],
       series: [{ name: "S", values: [1e-308], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values[0]).toBe(1e-308);
   });
 
-  it("handles Infinity", () => {
+  it("handles Infinity", async () => {
     const data = makeData({
       categories: ["Inf"],
       series: [{ name: "S", values: [Infinity], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values[0]).toBe(Infinity);
   });
 
-  it("handles NaN values", () => {
+  it("handles NaN values", async () => {
     const data = makeData({
       categories: ["NaN"],
       series: [{ name: "S", values: [NaN], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(Number.isNaN(result.series[0].values[0])).toBe(true);
   });
 
-  it("handles negative Infinity", () => {
+  it("handles negative Infinity", async () => {
     const data = makeData({
       categories: ["NegInf"],
       series: [{ name: "S", values: [-Infinity], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values[0]).toBe(-Infinity);
   });
 
@@ -279,7 +279,7 @@ describe("Extreme numeric values", () => {
 // ============================================================================
 
 describe("Mixed positive/negative values", () => {
-  it("data with mixed signs passes through", () => {
+  it("data with mixed signs passes through", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [
@@ -287,29 +287,29 @@ describe("Mixed positive/negative values", () => {
         { name: "Neg", values: [-30, 80, -100], color: null },
       ],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].values).toEqual([100, -50, 200]);
     expect(result.series[1].values).toEqual([-30, 80, -100]);
   });
 
-  it("filter with negative threshold", () => {
+  it("filter with negative threshold", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "S", values: [-10, 5, -20], color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "filter", field: "S", predicate: "< 0" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(2);
     expect(result.series[0].values.every((v) => v < 0)).toBe(true);
   });
 
-  it("sort with mixed signs sorts correctly", () => {
+  it("sort with mixed signs sorts correctly", async () => {
     const data = makeData({
       categories: ["A", "B", "C", "D"],
       series: [{ name: "S", values: [10, -5, 3, -8], color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "sort", field: "S", order: "asc" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([-8, -5, 3, 10]);
   });
 });
@@ -319,16 +319,16 @@ describe("Mixed positive/negative values", () => {
 // ============================================================================
 
 describe("Empty and duplicate series names", () => {
-  it("handles empty series name", () => {
+  it("handles empty series name", async () => {
     const data = makeData({
       categories: ["A", "B"],
       series: [{ name: "", values: [1, 2], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series[0].name).toBe("");
   });
 
-  it("handles duplicate series names", () => {
+  it("handles duplicate series names", async () => {
     const data = makeData({
       categories: ["A", "B"],
       series: [
@@ -336,7 +336,7 @@ describe("Empty and duplicate series names", () => {
         { name: "Sales", values: [30, 40], color: null },
       ],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.series).toHaveLength(2);
     expect(result.series[0].name).toBe("Sales");
     expect(result.series[1].name).toBe("Sales");
@@ -356,12 +356,12 @@ describe("Empty and duplicate series names", () => {
 // ============================================================================
 
 describe("Category name edge cases", () => {
-  it("handles empty category names", () => {
+  it("handles empty category names", async () => {
     const data = makeData({
       categories: ["", "", ""],
       series: [{ name: "S", values: [1, 2, 3], color: null }],
     });
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result.categories).toEqual(["", "", ""]);
   });
 
@@ -390,13 +390,13 @@ describe("Category name edge cases", () => {
     expect(data.categories).toHaveLength(2);
   });
 
-  it("handles duplicate category names", () => {
+  it("handles duplicate category names", async () => {
     const data = makeData({
       categories: ["Jan", "Jan", "Jan"],
       series: [{ name: "S", values: [10, 20, 30], color: null }],
     });
     const transforms: TransformSpec[] = [{ type: "sort", field: "S", order: "desc" }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values[0]).toBe(30);
   });
 });

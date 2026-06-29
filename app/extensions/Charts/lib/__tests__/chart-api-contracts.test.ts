@@ -53,8 +53,8 @@ describe("chart transforms structural contract", () => {
   ];
 
   for (const transform of transformTypes) {
-    it(`"${transform.type}" returns ParsedChartData with categories and series arrays`, () => {
-      const result = applyTransforms(baseData, [transform]);
+    it(`"${transform.type}" returns ParsedChartData with categories and series arrays`, async () => {
+      const result = await applyTransforms(baseData, [transform]);
       expect(Array.isArray(result.categories)).toBe(true);
       expect(Array.isArray(result.series)).toBe(true);
       for (const s of result.series) {
@@ -64,8 +64,8 @@ describe("chart transforms structural contract", () => {
     });
   }
 
-  it("empty transforms returns data unchanged", () => {
-    const result = applyTransforms(baseData, []);
+  it("empty transforms returns data unchanged", async () => {
+    const result = await applyTransforms(baseData, []);
     expect(result).toBe(baseData);
   });
 });

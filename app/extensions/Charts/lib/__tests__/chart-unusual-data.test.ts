@@ -73,8 +73,8 @@ describe("Very wide data (1 category, 100 series)", () => {
     })),
   });
 
-  it("applyTransforms preserves all 100 series", () => {
-    const result = applyTransforms(wideData, []);
+  it("applyTransforms preserves all 100 series", async () => {
+    const result = await applyTransforms(wideData, []);
     expect(result.series).toHaveLength(100);
     expect(result.categories).toHaveLength(1);
   });
@@ -97,14 +97,14 @@ describe("Very tall data (100 categories, 1 series)", () => {
     series: [{ name: "S1", values: Array.from({ length: 100 }, (_, i) => i), color: null }],
   });
 
-  it("applyTransforms preserves all 100 categories", () => {
-    const result = applyTransforms(tallData, []);
+  it("applyTransforms preserves all 100 categories", async () => {
+    const result = await applyTransforms(tallData, []);
     expect(result.categories).toHaveLength(100);
     expect(result.series[0].values).toHaveLength(100);
   });
 
-  it("sort transform works across 100 categories", () => {
-    const result = applyTransforms(tallData, [{ type: "sort", field: "S1", order: "desc" }]);
+  it("sort transform works across 100 categories", async () => {
+    const result = await applyTransforms(tallData, [{ type: "sort", field: "S1", order: "desc" }]);
     expect(result.series[0].values[0]).toBe(99);
     expect(result.series[0].values[99]).toBe(0);
   });
@@ -124,13 +124,13 @@ describe("Series with alternating null/value pattern", () => {
     }],
   });
 
-  it("applyTransforms does not drop NaN entries", () => {
-    const result = applyTransforms(alternatingData, []);
+  it("applyTransforms does not drop NaN entries", async () => {
+    const result = await applyTransforms(alternatingData, []);
     expect(result.series[0].values).toHaveLength(10);
   });
 
-  it("sort transform handles NaN values without crashing", () => {
-    const result = applyTransforms(alternatingData, [{ type: "sort", field: "Alternating", order: "asc" }]);
+  it("sort transform handles NaN values without crashing", async () => {
+    const result = await applyTransforms(alternatingData, [{ type: "sort", field: "Alternating", order: "asc" }]);
     expect(result.series[0].values).toHaveLength(10);
   });
 });
@@ -145,13 +145,13 @@ describe("Series where all values are the same number", () => {
     series: [{ name: "Flat", values: [42, 42, 42, 42, 42], color: null }],
   });
 
-  it("applyTransforms preserves identical values", () => {
-    const result = applyTransforms(flatData, []);
+  it("applyTransforms preserves identical values", async () => {
+    const result = await applyTransforms(flatData, []);
     expect(result.series[0].values.every((v) => v === 42)).toBe(true);
   });
 
-  it("sort on identical values keeps stable category order", () => {
-    const result = applyTransforms(flatData, [{ type: "sort", field: "Flat", order: "asc" }]);
+  it("sort on identical values keeps stable category order", async () => {
+    const result = await applyTransforms(flatData, [{ type: "sort", field: "Flat", order: "asc" }]);
     // All values same, categories should remain in some deterministic order
     expect(result.categories).toHaveLength(5);
   });
@@ -168,8 +168,8 @@ describe("Values spanning 20 orders of magnitude", () => {
     series: [{ name: "Extreme", values: magnitudes.map((m) => Math.pow(10, m)), color: null }],
   });
 
-  it("applyTransforms handles extreme ranges", () => {
-    const result = applyTransforms(extremeData, []);
+  it("applyTransforms handles extreme ranges", async () => {
+    const result = await applyTransforms(extremeData, []);
     expect(result.series[0].values[0]).toBeCloseTo(1e-10, 15);
     expect(result.series[0].values[10]).toBeCloseTo(1e10);
   });
@@ -198,8 +198,8 @@ describe("Categories that are all empty strings", () => {
     series: [{ name: "S1", values: [1, 2, 3, 4], color: null }],
   });
 
-  it("applyTransforms preserves empty category strings", () => {
-    const result = applyTransforms(emptyCategories, []);
+  it("applyTransforms preserves empty category strings", async () => {
+    const result = await applyTransforms(emptyCategories, []);
     expect(result.categories).toEqual(["", "", "", ""]);
   });
 
@@ -221,8 +221,8 @@ describe("Categories with very long names (500+ chars)", () => {
     series: [{ name: "S1", values: [1, 2, 3], color: null }],
   });
 
-  it("applyTransforms preserves long category names", () => {
-    const result = applyTransforms(longData, []);
+  it("applyTransforms preserves long category names", async () => {
+    const result = await applyTransforms(longData, []);
     expect(result.categories[0].length).toBe(500);
   });
 
@@ -243,14 +243,14 @@ describe("Duplicate category names", () => {
     series: [{ name: "S1", values: [10, 20, 30, 40], color: null }],
   });
 
-  it("applyTransforms keeps all duplicates (does not deduplicate)", () => {
-    const result = applyTransforms(dupData, []);
+  it("applyTransforms keeps all duplicates (does not deduplicate)", async () => {
+    const result = await applyTransforms(dupData, []);
     expect(result.categories).toEqual(["Dup", "Dup", "Dup", "Unique"]);
     expect(result.series[0].values).toHaveLength(4);
   });
 
-  it("sort transform handles duplicate categories correctly", () => {
-    const result = applyTransforms(dupData, [{ type: "sort", field: "S1", order: "desc" }]);
+  it("sort transform handles duplicate categories correctly", async () => {
+    const result = await applyTransforms(dupData, [{ type: "sort", field: "S1", order: "desc" }]);
     expect(result.series[0].values[0]).toBe(40);
   });
 });
@@ -265,8 +265,8 @@ describe("Series with only 2 values", () => {
     series: [{ name: "S1", values: [0, 100], color: null }],
   });
 
-  it("applyTransforms works with 2-element series", () => {
-    const result = applyTransforms(minData, []);
+  it("applyTransforms works with 2-element series", async () => {
+    const result = await applyTransforms(minData, []);
     expect(result.series[0].values).toEqual([0, 100]);
   });
 
@@ -288,8 +288,8 @@ describe("Data where every value is 0", () => {
     series: [{ name: "Zeroes", values: [0, 0, 0, 0], color: null }],
   });
 
-  it("applyTransforms preserves zero values", () => {
-    const result = applyTransforms(zeroData, []);
+  it("applyTransforms preserves zero values", async () => {
+    const result = await applyTransforms(zeroData, []);
     expect(result.series[0].values.every((v) => v === 0)).toBe(true);
   });
 
@@ -317,13 +317,13 @@ describe("Data where every value is negative", () => {
     series: [{ name: "Neg", values: [-100, -200, -50], color: null }],
   });
 
-  it("applyTransforms preserves negative values", () => {
-    const result = applyTransforms(negData, []);
+  it("applyTransforms preserves negative values", async () => {
+    const result = await applyTransforms(negData, []);
     expect(result.series[0].values).toEqual([-100, -200, -50]);
   });
 
-  it("sort transform orders negatives correctly", () => {
-    const result = applyTransforms(negData, [{ type: "sort", field: "Neg", order: "asc" }]);
+  it("sort transform orders negatives correctly", async () => {
+    const result = await applyTransforms(negData, [{ type: "sort", field: "Neg", order: "asc" }]);
     expect(result.series[0].values[0]).toBe(-200);
     expect(result.series[0].values[2]).toBe(-50);
   });
@@ -349,8 +349,8 @@ describe("Data with MAX_SAFE_INTEGER values", () => {
     }],
   });
 
-  it("applyTransforms preserves MAX_SAFE_INTEGER values", () => {
-    const result = applyTransforms(maxIntData, []);
+  it("applyTransforms preserves MAX_SAFE_INTEGER values", async () => {
+    const result = await applyTransforms(maxIntData, []);
     expect(result.series[0].values[0]).toBe(Number.MAX_SAFE_INTEGER);
     expect(result.series[0].values[1]).toBe(-Number.MAX_SAFE_INTEGER);
   });

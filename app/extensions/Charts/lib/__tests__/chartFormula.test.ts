@@ -1,261 +1,179 @@
 //! FILENAME: app/extensions/Charts/lib/__tests__/chartFormula.test.ts
-// PURPOSE: Tests for the chart formula evaluator (chartFormula.ts).
+// PURPOSE: Unit tests for the chart-expression → engine translator + value
+//          coercion (chartFormula.ts after A6). The hand-rolled EVALUATOR was
+//          retired — chart expressions now evaluate via the real Rust engine
+//          (@api evaluateScoped), whose semantics are covered by the engine's
+//          own Rust tests. These tests cover the TS adapter logic only: lexing/
+//          translation (variable refs → engine-legal aliases), scope mapping,
+//          result coercion, and the shared coercion helpers.
 
 import { describe, it, expect } from "vitest";
 import {
-  compileFormula,
-  evaluateFormula,
   toNumber,
   toText,
   toBoolean,
   FormulaError,
+  aliasName,
+  translateChartExpr,
+  toEngineScope,
+  isEngineError,
+  resultToBoolean,
+  resultToNumber,
   type FormulaScope,
 } from "../chartFormula";
 
-function scope(entries: Record<string, number | string | boolean> = {}): FormulaScope {
-  return new Map(Object.entries(entries));
-}
-
-const evalIn = (expr: string, vars: Record<string, number | string | boolean> = {}) =>
-  evaluateFormula(expr, scope(vars));
-
 // ============================================================================
-// Arithmetic
+// Coercion helpers (kept from the original evaluator; used by chart params /
+// widget-value formatting too)
 // ============================================================================
 
-describe("chartFormula: arithmetic", () => {
-  it("evaluates numbers and decimals", () => {
-    expect(evalIn("42")).toBe(42);
-    expect(evalIn("1.5")).toBe(1.5);
-    expect(evalIn(".5")).toBe(0.5);
-    expect(evalIn("1.5e-3")).toBe(0.0015);
-  });
-
-  it("respects precedence and parentheses", () => {
-    expect(evalIn("2 + 3 * 4")).toBe(14);
-    expect(evalIn("(2 + 3) * 4")).toBe(20);
-    expect(evalIn("2 * (3 + 4)")).toBe(14);
-  });
-
-  it("handles unary minus/plus", () => {
-    expect(evalIn("-5")).toBe(-5);
-    expect(evalIn("10 * -2")).toBe(-20);
-    expect(evalIn("--5")).toBe(5);
-    expect(evalIn("-(2 + 3)")).toBe(-5);
-  });
-
-  it("supports exponentiation (right-associative)", () => {
-    expect(evalIn("2 ^ 3")).toBe(8);
-    expect(evalIn("2 ^ 3 ^ 2")).toBe(512); // 2^(3^2)
-    expect(evalIn("2 ^ -1")).toBe(0.5);
-    expect(evalIn("-2 ^ 2")).toBe(-4); // -(2^2)
-  });
-
-  it("is left-associative for - and /", () => {
-    expect(evalIn("10 - 3 - 2")).toBe(5);
-    expect(evalIn("16 / 2 / 2")).toBe(4);
-  });
-});
-
-// ============================================================================
-// Comparisons & logical
-// ============================================================================
-
-describe("chartFormula: comparisons and logic", () => {
-  it("numeric comparisons return booleans", () => {
-    expect(evalIn("5 > 3")).toBe(true);
-    expect(evalIn("5 < 3")).toBe(false);
-    expect(evalIn("5 >= 5")).toBe(true);
-    expect(evalIn("5 <= 4")).toBe(false);
-    expect(evalIn("5 = 5")).toBe(true);
-    expect(evalIn("5 <> 5")).toBe(false);
-  });
-
-  it("string comparison is case-insensitive for equality", () => {
-    expect(evalIn('"Mar" = "mar"')).toBe(true);
-    expect(evalIn('"Mar" <> "Apr"')).toBe(true);
-  });
-
-  it("supports != as an alias for <>", () => {
-    expect(evalIn("3 != 4")).toBe(true);
-  });
-
-  it("AND/OR/NOT and boolean literals", () => {
-    expect(evalIn("AND(1 > 0, 2 > 1)")).toBe(true);
-    expect(evalIn("AND(1 > 0, 2 < 1)")).toBe(false);
-    expect(evalIn("OR(1 < 0, 2 > 1)")).toBe(true);
-    expect(evalIn("NOT(1 > 0)")).toBe(false);
-    expect(evalIn("TRUE")).toBe(true);
-    expect(evalIn("FALSE")).toBe(false);
-    expect(evalIn("TRUE()")).toBe(true);
-  });
-});
-
-// ============================================================================
-// IF / IFS / IFERROR (lazy)
-// ============================================================================
-
-describe("chartFormula: conditionals", () => {
-  it("IF returns the taken branch", () => {
-    expect(evalIn("IF(1 > 0, 10, 20)")).toBe(10);
-    expect(evalIn("IF(1 < 0, 10, 20)")).toBe(20);
-    expect(evalIn("IF(1 < 0, 10)")).toBe(false); // omitted else → false
-  });
-
-  it("IF does not evaluate the untaken branch (no div-by-zero error)", () => {
-    expect(evalIn("IF(x = 0, 0, 1 / x)", { x: 0 })).toBe(0);
-  });
-
-  it("IFS picks the first matching pair", () => {
-    expect(evalIn("IFS(FALSE, 1, TRUE, 2)")).toBe(2);
-    expect(() => evalIn("IFS(FALSE, 1, FALSE, 2)")).toThrow(FormulaError);
-  });
-
-  it("IFERROR catches evaluation errors", () => {
-    expect(evalIn("IFERROR(SQRT(-1), -99)")).toBe(-99);
-    expect(evalIn("IFERROR(SQRT(4), -99)")).toBe(2);
-  });
-});
-
-// ============================================================================
-// Math functions
-// ============================================================================
-
-describe("chartFormula: math functions", () => {
-  it("basic math", () => {
-    expect(evalIn("ABS(-7)")).toBe(7);
-    expect(evalIn("SQRT(9)")).toBe(3);
-    expect(evalIn("MIN(3, 1, 2)")).toBe(1);
-    expect(evalIn("MAX(3, 1, 2)")).toBe(3);
-    expect(evalIn("SUM(1, 2, 3, 4)")).toBe(10);
-    expect(evalIn("PRODUCT(2, 3, 4)")).toBe(24);
-    expect(evalIn("AVERAGE(2, 4, 6)")).toBe(4);
-    expect(evalIn("POWER(2, 10)")).toBe(1024);
-    expect(evalIn("INT(3.9)")).toBe(3);
-    expect(evalIn("SIGN(-4)")).toBe(-1);
-  });
-
-  it("ROUND uses round-half-away-from-zero", () => {
-    expect(evalIn("ROUND(2.5, 0)")).toBe(3);
-    expect(evalIn("ROUND(-2.5, 0)")).toBe(-3);
-    expect(evalIn("ROUND(3.14159, 2)")).toBe(3.14);
-    expect(evalIn("ROUNDUP(2.1, 0)")).toBe(3);
-    expect(evalIn("ROUNDDOWN(2.9, 0)")).toBe(2);
-  });
-
-  it("MOD matches Excel (sign of divisor)", () => {
-    expect(evalIn("MOD(10, 3)")).toBe(1);
-    expect(evalIn("MOD(-10, 3)")).toBe(2);
-  });
-
-  it("throws on domain errors", () => {
-    expect(() => evalIn("SQRT(-1)")).toThrow(FormulaError);
-    expect(() => evalIn("LN(0)")).toThrow(FormulaError);
-    expect(() => evalIn("MOD(5, 0)")).toThrow(FormulaError);
-  });
-});
-
-// ============================================================================
-// Text functions & concatenation
-// ============================================================================
-
-describe("chartFormula: text", () => {
-  it("string concatenation with &", () => {
-    expect(evalIn('"a" & "b" & "c"')).toBe("abc");
-    expect(evalIn('"x" & 1')).toBe("x1");
-  });
-
-  it("text functions", () => {
-    expect(evalIn('LEFT("Hello", 2)')).toBe("He");
-    expect(evalIn('RIGHT("Hello", 2)')).toBe("lo");
-    expect(evalIn('MID("Hello", 2, 3)')).toBe("ell");
-    expect(evalIn('LEN("Hello")')).toBe(5);
-    expect(evalIn('UPPER("abc")')).toBe("ABC");
-    expect(evalIn('LOWER("ABC")')).toBe("abc");
-    expect(evalIn('TRIM("  a  b  ")')).toBe("a b");
-    expect(evalIn('CONCAT("a", 1, "b")')).toBe("a1b");
-    expect(evalIn('EXACT("a", "A")')).toBe(false);
-    expect(evalIn('VALUE("12.5")')).toBe(12.5);
-  });
-
-  it('supports escaped quotes ("") in string literals', () => {
-    expect(evalIn('"a""b"')).toBe('a"b');
-  });
-});
-
-// ============================================================================
-// Variables (scope)
-// ============================================================================
-
-describe("chartFormula: variables", () => {
-  it("resolves bare identifiers from scope", () => {
-    expect(evalIn("Revenue - Cost", { Revenue: 100, Cost: 30 })).toBe(70);
-  });
-
-  it("resolves bracketed names with spaces", () => {
-    expect(evalIn("[Revenue Total] * 2", { "Revenue Total": 50 })).toBe(100);
-  });
-
-  it("resolves $category and value", () => {
-    expect(evalIn('$category = "North"', { $category: "North" })).toBe(true);
-    expect(evalIn("value > 100", { value: 150 })).toBe(true);
-  });
-
-  it("throws on unknown names", () => {
-    expect(() => evalIn("Missing + 1")).toThrow(FormulaError);
-  });
-});
-
-// ============================================================================
-// Errors & compile reuse
-// ============================================================================
-
-describe("chartFormula: errors and compilation", () => {
-  it("throws on syntax errors", () => {
-    expect(() => compileFormula("1 +")).toThrow(FormulaError);
-    expect(() => compileFormula("(1 + 2")).toThrow(FormulaError);
-    expect(() => compileFormula("1 2")).toThrow(FormulaError);
-    expect(() => compileFormula('"unterminated')).toThrow(FormulaError);
-    expect(() => compileFormula("alert('x')")).toThrow(FormulaError); // single quotes are invalid
-  });
-
-  it("throws on unknown functions", () => {
-    expect(() => evalIn("BOGUS(1)")).toThrow(FormulaError);
-  });
-
-  it("a compiled formula can be reused across scopes", () => {
-    const fn = compileFormula("a + b");
-    expect(fn(scope({ a: 1, b: 2 }))).toBe(3);
-    expect(fn(scope({ a: 10, b: 20 }))).toBe(30);
-  });
-});
-
-// ============================================================================
-// Coercion helpers
-// ============================================================================
-
-describe("chartFormula: coercion", () => {
-  it("toNumber", () => {
-    expect(toNumber(5)).toBe(5);
+describe("coercion: toNumber", () => {
+  it("passes numbers, parses numeric strings, maps booleans, empty→0", () => {
+    expect(toNumber(42)).toBe(42);
+    expect(toNumber("12.5")).toBe(12.5);
     expect(toNumber(true)).toBe(1);
     expect(toNumber(false)).toBe(0);
-    expect(toNumber("3.5")).toBe(3.5);
     expect(toNumber("")).toBe(0);
+    expect(toNumber("  3 ")).toBe(3);
+  });
+  it("throws on a non-numeric string", () => {
     expect(() => toNumber("abc")).toThrow(FormulaError);
   });
+});
 
-  it("toText", () => {
-    expect(toText(5)).toBe("5");
+describe("coercion: toText / toBoolean", () => {
+  it("toText canonicalizes", () => {
+    expect(toText("a")).toBe("a");
+    expect(toText(1.5)).toBe("1.5");
     expect(toText(true)).toBe("TRUE");
-    expect(toText("x")).toBe("x");
+    expect(toText(false)).toBe("FALSE");
   });
-
-  it("toBoolean", () => {
+  it("toBoolean reads numbers/strings", () => {
     expect(toBoolean(true)).toBe(true);
-    expect(toBoolean(1)).toBe(true);
     expect(toBoolean(0)).toBe(false);
+    expect(toBoolean(3)).toBe(true);
     expect(toBoolean("TRUE")).toBe(true);
     expect(toBoolean("false")).toBe(false);
-    expect(() => toBoolean("maybe")).toThrow(FormulaError);
+    expect(toBoolean("")).toBe(false);
+    expect(() => toBoolean("nope")).toThrow(FormulaError);
+  });
+});
+
+// ============================================================================
+// aliasName — canonical engine-legal identifier
+// ============================================================================
+
+describe("aliasName", () => {
+  it("prefixes and sanitizes", () => {
+    expect(aliasName("value")).toBe("v_value");
+    expect(aliasName("Revenue Total")).toBe("v_Revenue_Total");
+    expect(aliasName("Revenue_Total")).toBe("v_Revenue_Total"); // exact + underscore form collapse
+    expect(aliasName("$category")).toBe("v__category");
+    expect(aliasName("$index")).toBe("v__index");
+  });
+});
+
+// ============================================================================
+// translateChartExpr — rewrite variable refs to engine aliases
+// ============================================================================
+
+describe("translateChartExpr", () => {
+  it("aliases bare variable references", () => {
+    expect(translateChartExpr("value > 100")).toBe("v_value > 100");
+    expect(translateChartExpr("Revenue - Cost")).toBe("v_Revenue - v_Cost");
+  });
+
+  it("aliases $-prefixed built-ins and bracketed names", () => {
+    expect(translateChartExpr('$category = "North"')).toBe('v__category = "North"');
+    expect(translateChartExpr("[Revenue Total] * 2")).toBe("v_Revenue_Total * 2");
+    // bracketed and underscore forms produce the SAME alias
+    expect(translateChartExpr("[Revenue Total]")).toBe(translateChartExpr("Revenue_Total"));
+  });
+
+  it("preserves function names and aliases their arguments", () => {
+    expect(translateChartExpr("SUM(a, b)")).toBe("SUM ( v_a , v_b )");
+    expect(translateChartExpr("IF(value > 0, value, 0)")).toBe("IF ( v_value > 0 , v_value , 0 )");
+  });
+
+  it("preserves TRUE/FALSE literals (not treated as variables)", () => {
+    expect(translateChartExpr("IF(TRUE, 1, 2)")).toBe("IF ( TRUE , 1 , 2 )");
+    expect(translateChartExpr("false")).toBe("FALSE");
+  });
+
+  it("passes through string literals (with escaped quotes) and operators", () => {
+    expect(translateChartExpr('"a""b" & x')).toBe('"a""b" & v_x');
+    expect(translateChartExpr("a <> b")).toBe("v_a <> v_b");
+    expect(translateChartExpr("a != b")).toBe("v_a <> v_b"); // != normalized to <>
+  });
+
+  it("throws FormulaError on a lex failure (caller treats as compile failure)", () => {
+    expect(() => translateChartExpr('"unterminated')).toThrow(FormulaError);
+    expect(() => translateChartExpr("[unterminated")).toThrow(FormulaError);
+    expect(() => translateChartExpr("alert('x')")).toThrow(FormulaError); // single quotes invalid
+  });
+});
+
+// ============================================================================
+// toEngineScope — map a row scope to engine bindings
+// ============================================================================
+
+describe("toEngineScope", () => {
+  it("aliases every key; exact + underscore series forms map to one binding", () => {
+    const scope: FormulaScope = new Map<string, number | string | boolean>([
+      ["Revenue Total", 50],
+      ["Revenue_Total", 50],
+      ["$category", "North"],
+      ["value", 150],
+    ]);
+    expect(toEngineScope(scope)).toEqual({
+      v_Revenue_Total: 50,
+      v__category: "North",
+      v_value: 150,
+    });
+  });
+});
+
+// ============================================================================
+// Result coercion (mirrors the old keep-on-error / 0-fallback semantics)
+// ============================================================================
+
+describe("isEngineError", () => {
+  it("detects #… error strings only", () => {
+    expect(isEngineError("#NAME?")).toBe(true);
+    expect(isEngineError("#DIV/0!")).toBe(true);
+    expect(isEngineError("North")).toBe(false);
+    expect(isEngineError(5)).toBe(false);
+    expect(isEngineError(true)).toBe(false);
+    expect(isEngineError(null)).toBe(false);
+  });
+});
+
+describe("resultToBoolean", () => {
+  it("reads bool/number/string/null", () => {
+    expect(resultToBoolean(true)).toBe(true);
+    expect(resultToBoolean(false)).toBe(false);
+    expect(resultToBoolean(5)).toBe(true);
+    expect(resultToBoolean(0)).toBe(false);
+    expect(resultToBoolean("TRUE")).toBe(true);
+    expect(resultToBoolean(null)).toBe(false);
+  });
+  it("throws on a non-boolean string or array (caller keeps the row)", () => {
+    expect(() => resultToBoolean("North")).toThrow(FormulaError);
+    expect(() => resultToBoolean([1, 2])).toThrow(FormulaError);
+  });
+});
+
+describe("resultToNumber", () => {
+  it("reads number/bool/string/null; non-finite → 0", () => {
+    expect(resultToNumber(42)).toBe(42);
+    expect(resultToNumber(true)).toBe(1);
+    expect(resultToNumber("3.5")).toBe(3.5);
+    expect(resultToNumber(null)).toBe(0);
+    expect(resultToNumber(Infinity)).toBe(0);
+    expect(resultToNumber(NaN)).toBe(0);
+  });
+  it("throws on a non-numeric string or array (caller falls back to 0)", () => {
+    expect(() => resultToNumber("abc")).toThrow(FormulaError);
+    expect(() => resultToNumber([1])).toThrow(FormulaError);
   });
 });

@@ -121,7 +121,7 @@ describe("performance: computeTrendline", () => {
 // ============================================================================
 
 describe("performance: applyTransforms", () => {
-  it("applies filter + sort transforms on 5000 data points under 300ms", () => {
+  it("applies filter + sort transforms on 5000 data points under 300ms", async () => {
     const data = makeLargeData(5_000, 3);
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Series0", predicate: "> 150" },
@@ -129,7 +129,7 @@ describe("performance: applyTransforms", () => {
     ];
 
     const start = performance.now();
-    applyTransforms(data, transforms);
+    await applyTransforms(data, transforms);
     const elapsed = performance.now() - start;
 
     expect(elapsed).toBeLessThan(900); // 3x headroom

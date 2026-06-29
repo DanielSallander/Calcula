@@ -47,14 +47,14 @@ function salesDashboardData(): ParsedChartData {
 // ============================================================================
 
 describe("Sales dashboard workflow", () => {
-  it("calculates gross profit, filters profitable months, adds trendline", () => {
+  it("calculates gross profit, filters profitable months, adds trendline", async () => {
     const data = salesDashboardData();
 
     // Step 1: Calculate gross profit
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Revenue - COGS", as: "GrossProfit" },
     ];
-    const withProfit = applyTransforms(data, transforms);
+    const withProfit = await applyTransforms(data, transforms);
 
     const profit = withProfit.series.find((s) => s.name === "GrossProfit");
     expect(profit).toBeDefined();
@@ -69,7 +69,7 @@ describe("Sales dashboard workflow", () => {
     expect(trendResult!.points[11].value).toBeGreaterThan(trendResult!.points[0].value);
   });
 
-  it("filters out low-revenue months, sorts by profit, ranks top performers", () => {
+  it("filters out low-revenue months, sorts by profit, ranks top performers", async () => {
     const data = salesDashboardData();
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Revenue - COGS", as: "GrossProfit" },
@@ -77,7 +77,7 @@ describe("Sales dashboard workflow", () => {
       { type: "sort", field: "GrossProfit", order: "desc" },
       { type: "window", op: "rank", field: "GrossProfit", as: "ProfitRank" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // Only months with Revenue >= 70000: May(73k), Jul(82k), Aug(79k), Sep(71k), Oct(95k), Nov(110k), Dec(105k)
     expect(result.categories.length).toBeGreaterThanOrEqual(6);
@@ -95,12 +95,12 @@ describe("Sales dashboard workflow", () => {
     expect(ranks!.values[0]).toBe(1);
   });
 
-  it("applies UI filters to hide COGS series and first 6 months", () => {
+  it("applies UI filters to hide COGS series and first 6 months", async () => {
     const data = salesDashboardData();
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Revenue - COGS - Marketing", as: "NetProfit" },
     ];
-    const transformed = applyTransforms(data, transforms);
+    const transformed = await applyTransforms(data, transforms);
 
     // User hides COGS (index 1) and Marketing (index 2)
     const filters: ChartFilters = {
@@ -121,12 +121,12 @@ describe("Sales dashboard workflow", () => {
     expect(filtered.series[0].values).toHaveLength(6);
   });
 
-  it("computes running revenue total and verifies monotonic increase", () => {
+  it("computes running revenue total and verifies monotonic increase", async () => {
     const data = salesDashboardData();
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "Revenue", as: "CumulativeRevenue" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const cumulative = result.series.find((s) => s.name === "CumulativeRevenue");
     expect(cumulative).toBeDefined();
 
@@ -159,7 +159,7 @@ describe("Sales dashboard workflow", () => {
 // ============================================================================
 
 describe("Quarterly comparison workflow", () => {
-  it("aggregates monthly data to quarters, computes running total, and ranks", () => {
+  it("aggregates monthly data to quarters, computes running total, and ranks", async () => {
     const data = makeData(
       ["Q1", "Q1", "Q1", "Q2", "Q2", "Q2", "Q3", "Q3", "Q3", "Q4", "Q4", "Q4"],
       { name: "Revenue", values: [45, 52, 48, 61, 73, 68, 82, 79, 71, 95, 110, 105] },
@@ -170,7 +170,7 @@ describe("Quarterly comparison workflow", () => {
       { type: "window", op: "running_sum", field: "QuarterRevenue", as: "YTDRevenue" },
       { type: "window", op: "rank", field: "QuarterRevenue", as: "QuarterRank" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories).toEqual(["Q1", "Q2", "Q3", "Q4"]);
 
@@ -184,7 +184,7 @@ describe("Quarterly comparison workflow", () => {
     expect(rank!.values[3]).toBe(1); // Q4 is highest
   });
 
-  it("filters to top 2 quarters by revenue", () => {
+  it("filters to top 2 quarters by revenue", async () => {
     const data = makeData(
       ["Q1", "Q2", "Q3", "Q4"],
       { name: "Revenue", values: [145, 202, 232, 310] },
@@ -194,7 +194,7 @@ describe("Quarterly comparison workflow", () => {
       { type: "window", op: "rank", field: "Revenue", as: "Rank" },
       { type: "filter", field: "Rank", predicate: "<= 2" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories).toHaveLength(2);
     expect(result.categories).toContain("Q4");
@@ -209,7 +209,7 @@ describe("Quarterly comparison workflow", () => {
     expect(formatTickValue(0)).toBe("0");
   });
 
-  it("computes quarter-over-quarter growth percentage", () => {
+  it("computes quarter-over-quarter growth percentage", async () => {
     const data = makeData(
       ["Q1", "Q2", "Q3", "Q4"],
       { name: "Revenue", values: [145, 202, 232, 310] },
@@ -218,7 +218,7 @@ describe("Quarterly comparison workflow", () => {
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_mean", field: "Revenue", as: "RunningAvg" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     const avg = result.series.find((s) => s.name === "RunningAvg");
     expect(avg!.values[0]).toBe(145);            // 145/1
@@ -233,7 +233,7 @@ describe("Quarterly comparison workflow", () => {
 // ============================================================================
 
 describe("Pie chart from survey data", () => {
-  it("aggregates survey responses and computes slice arcs summing to 360 degrees", () => {
+  it("aggregates survey responses and computes slice arcs summing to 360 degrees", async () => {
     // Raw survey: multiple responses per category
     const data = makeData(
       ["Excellent", "Good", "Excellent", "Fair", "Good", "Poor", "Good", "Excellent", "Fair", "Good"],
@@ -243,7 +243,7 @@ describe("Pie chart from survey data", () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Count", as: "Responses" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // Excellent: 3, Good: 4, Fair: 2, Poor: 1
     const responses = result.series.find((s) => s.name === "Responses");
@@ -304,7 +304,7 @@ describe("Pie chart from survey data", () => {
     }
   });
 
-  it("aggregates, sorts by response count, then filters to hide small slices", () => {
+  it("aggregates, sorts by response count, then filters to hide small slices", async () => {
     const data = makeData(
       ["A", "A", "A", "A", "A", "B", "B", "B", "C", "D"],
       { name: "Count", values: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] },
@@ -315,7 +315,7 @@ describe("Pie chart from survey data", () => {
       { type: "sort", field: "Total", order: "desc" },
       { type: "filter", field: "Total", predicate: ">= 2" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // A:5, B:3 pass filter. C:1, D:1 filtered out.
     expect(result.categories).toEqual(["A", "B"]);
@@ -341,7 +341,7 @@ describe("Pie chart from survey data", () => {
     expect(arcs90[0].startAngle - arcs0[0].startAngle).toBeCloseTo(shift, 5);
   });
 
-  it("full survey pipeline: raw data -> aggregate -> sort -> arcs -> format labels", () => {
+  it("full survey pipeline: raw data -> aggregate -> sort -> arcs -> format labels", async () => {
     const raw = makeData(
       ["Yes", "No", "Yes", "Maybe", "Yes", "No", "Yes", "Maybe", "Yes", "No"],
       { name: "Vote", values: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] },
@@ -352,7 +352,7 @@ describe("Pie chart from survey data", () => {
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Vote", as: "Votes" },
       { type: "sort", field: "Votes", order: "desc" },
     ];
-    const result = applyTransforms(raw, transforms);
+    const result = await applyTransforms(raw, transforms);
 
     const votes = result.series.find((s) => s.name === "Votes");
     expect(votes).toBeDefined();

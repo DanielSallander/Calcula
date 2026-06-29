@@ -45,7 +45,7 @@ function makeLargeData(categoryCount: number, seriesCount: number): ParsedChartD
 // ============================================================================
 
 describe("stress: transform pipeline with 100K data points", () => {
-  it("processes 100K points (1000 categories x 100 series) without timeout", () => {
+  it("processes 100K points (1000 categories x 100 series) without timeout", async () => {
     const data = makeLargeData(1000, 100);
     // Total data points: 1000 * 100 = 100K
     expect(data.series.length).toBe(100);
@@ -56,7 +56,7 @@ describe("stress: transform pipeline with 100K data points", () => {
     ];
 
     const start = performance.now();
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const elapsed = performance.now() - start;
 
     expect(result.categories.length).toBe(1000);
@@ -65,9 +65,9 @@ describe("stress: transform pipeline with 100K data points", () => {
     expect(elapsed).toBeLessThan(5000);
   });
 
-  it("identity transform on 100K points returns same data", () => {
+  it("identity transform on 100K points returns same data", async () => {
     const data = makeLargeData(1000, 100);
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result).toBe(data);
   });
 });
@@ -77,12 +77,12 @@ describe("stress: transform pipeline with 100K data points", () => {
 // ============================================================================
 
 describe("stress: 50 series x 1000 categories", () => {
-  it("all series maintain correct values after sort transform", () => {
+  it("all series maintain correct values after sort transform", async () => {
     const data = makeLargeData(1000, 50);
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Series0", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // Verify sorted on Series0
     const s0 = result.series[0].values;
@@ -106,7 +106,7 @@ describe("stress: 50 series x 1000 categories", () => {
 // ============================================================================
 
 describe("stress: aggregate 100K points to 100 groups", () => {
-  it("aggregate sum on 10K categories with repeating group names", () => {
+  it("aggregate sum on 10K categories with repeating group names", async () => {
     // Create data with repeating category names to enable aggregation
     const categoryCount = 10_000;
     const groupCount = 100;
@@ -128,7 +128,7 @@ describe("stress: aggregate 100K points to 100 groups", () => {
     ];
 
     const start = performance.now();
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const elapsed = performance.now() - start;
 
     // Aggregation groups duplicate category names
@@ -146,14 +146,14 @@ describe("stress: aggregate 100K points to 100 groups", () => {
 // ============================================================================
 
 describe("stress: running sum on 50K points", () => {
-  it("computes running sum across 50K categories", () => {
+  it("computes running sum across 50K categories", async () => {
     const data = makeLargeData(50_000, 1);
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "Series0" },
     ];
 
     const start = performance.now();
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const elapsed = performance.now() - start;
 
     // Window transform adds a new series for the running sum
@@ -215,7 +215,7 @@ describe("stress: filter removing 99% of data", () => {
     expect(result.categories.length).toBe(100);
   });
 
-  it("filter predicate transform removing 99% via > threshold", () => {
+  it("filter predicate transform removing 99% via > threshold", async () => {
     // Series values are sin*100+200, range ~100-300
     // Filter > 299 should remove almost everything
     const data = makeLargeData(10_000, 1);
@@ -223,7 +223,7 @@ describe("stress: filter removing 99% of data", () => {
       { type: "filter", field: "Series0", predicate: "> 299" },
     ];
 
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // Very few points should survive
     expect(result.categories.length).toBeLessThan(1000);
   });
@@ -296,7 +296,7 @@ describe("stress: 100 chart filters applied simultaneously", () => {
     }
   });
 
-  it("applies filter transform 100 times in sequence", () => {
+  it("applies filter transform 100 times in sequence", async () => {
     // Build a pipeline of 100 filter transforms (each is a no-op if field missing)
     const data = makeLargeData(1000, 1);
     // Use a single real filter that progressively narrows
@@ -310,7 +310,7 @@ describe("stress: 100 chart filters applied simultaneously", () => {
     }
 
     const start = performance.now();
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const elapsed = performance.now() - start;
 
     // All 100 filters should complete

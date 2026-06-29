@@ -120,43 +120,43 @@ describe("param injection into transforms", () => {
     series: [{ name: "v", values: [50, 150, 250], color: null }],
   };
 
-  it("filters using a param referenced in the predicate", () => {
+  it("filters using a param referenced in the predicate", async () => {
     const filter: FilterTransform = { type: "filter", field: "v", predicate: "value > [Threshold]" };
-    const out = applyTransforms(data, [filter], undefined, undefined, undefined, new Map([["Threshold", 100]]));
+    const out = await applyTransforms(data, [filter], undefined, undefined, undefined, new Map([["Threshold", 100]]));
     expect(out.categories).toEqual(["b", "c"]);
     expect(out.series[0].values).toEqual([150, 250]);
   });
 
-  it("keeps all rows (no silent drop) when the referenced param is absent", () => {
+  it("keeps all rows (no silent drop) when the referenced param is absent", async () => {
     const filter: FilterTransform = { type: "filter", field: "v", predicate: "value > [Threshold]" };
-    const out = applyTransforms(data, [filter]); // no params -> #NAME? -> rows kept
+    const out = await applyTransforms(data, [filter]); // no params -> #NAME? -> rows kept
     expect(out.categories).toEqual(["a", "b", "c"]);
   });
 
-  it("computes a calculated series using a param", () => {
+  it("computes a calculated series using a param", async () => {
     const calc: CalculateTransform = { type: "calculate", expr: "v * [Mult]", as: "scaled" };
-    const out = applyTransforms(data, [calc], undefined, undefined, undefined, new Map([["Mult", 2]]));
+    const out = await applyTransforms(data, [calc], undefined, undefined, undefined, new Map([["Mult", 2]]));
     expect(out.series.find((s) => s.name === "scaled")?.values).toEqual([100, 300, 500]);
   });
 
-  it("never lets a param shadow a reserved built-in (value wins)", () => {
+  it("never lets a param shadow a reserved built-in (value wins)", async () => {
     // A rogue param literally named 'value' must not override the field value.
     const filter: FilterTransform = { type: "filter", field: "v", predicate: "value > 100" };
-    const out = applyTransforms(data, [filter], undefined, undefined, undefined, new Map([["value", 9999]]));
+    const out = await applyTransforms(data, [filter], undefined, undefined, undefined, new Map([["value", 9999]]));
     // Built-in 'value' = each row's v, so 150 & 250 pass — not all rows via 9999.
     expect(out.categories).toEqual(["b", "c"]);
   });
 
-  it("never lets a param shadow a real series of the same name (series wins)", () => {
+  it("never lets a param shadow a real series of the same name (series wins)", async () => {
     const calc: CalculateTransform = { type: "calculate", expr: "v + 0", as: "copy" };
-    const out = applyTransforms(data, [calc], undefined, undefined, undefined, new Map([["v", 9999]]));
+    const out = await applyTransforms(data, [calc], undefined, undefined, undefined, new Map([["v", 9999]]));
     // 'v' resolves to the series value per row, not the param's 9999.
     expect(out.series.find((s) => s.name === "copy")?.values).toEqual([50, 150, 250]);
   });
 
-  it("resolves a bracketed param reference written with internal spaces", () => {
+  it("resolves a bracketed param reference written with internal spaces", async () => {
     const filter: FilterTransform = { type: "filter", field: "v", predicate: "value > [ Threshold ]" };
-    const out = applyTransforms(data, [filter], undefined, undefined, undefined, new Map([["Threshold", 100]]));
+    const out = await applyTransforms(data, [filter], undefined, undefined, undefined, new Map([["Threshold", 100]]));
     expect(out.categories).toEqual(["b", "c"]);
   });
 });

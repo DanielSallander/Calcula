@@ -1,51 +1,36 @@
 //! FILENAME: app/extensions/Charts/lib/chartFormula.ts
-// PURPOSE: A small, safe (no eval / no new Function) formula evaluator for chart
-//          data transforms — the `calculate` expression and `filter` predicate.
-// MIGRATION (Wave B / A6): @api now exposes a Rust-engine-backed scope evaluator
-//   — `evaluateScoped(expr, scopes)` in @api/formulaEval — the sanctioned
-//   replacement for this in-extension evaluator (computation belongs in Rust).
-//   Adopting it requires (a) bracketed-name parity for series names with spaces
-//   and (b) making this transform pipeline async (the engine call is IPC).
-//   Tracked as a follow-on; until then this local evaluator stays.
-// CONTEXT: Replaces the old arithmetic-only string-substitution evaluator. It is
-//          a recursive-descent parser over an Excel-like expression grammar with
-//          comparisons, string concatenation, logical/math/text functions, and
-//          variable resolution via a per-row scope (so $category, series names,
-//          and the filter `value` keyword resolve to real values instead of
-//          being string-substituted). Runs under a no-unsafe-eval CSP.
-//
-// Grammar (lowest → highest precedence):
-//   comparison := concat ( ("="|"<>"|"<"|">"|"<="|">=") concat )*
-//   concat     := add ( "&" add )*
-//   add        := mul ( ("+"|"-") mul )*
-//   mul        := unary ( ("*"|"/") unary )*
-//   unary      := ("+"|"-")* power
-//   power      := primary ( "^" unary )?        // right-associative
-//   primary    := number | string | TRUE | FALSE
-//               | ident | "[" name "]" | ident "(" args? ")" | "(" expr ")"
-//
-// Variables: bare identifiers ([A-Za-z_$][A-Za-z0-9_$]*) and bracketed names
-// ([Any Name]) are resolved through the scope. Series names with spaces are
-// registered under both their exact name (use [brackets]) and an underscore
-// form (Revenue_Total).
+// PURPOSE: Translate a chart `calculate`/`filter` expression into the REAL Rust
+//          formula engine's input, and coerce its results. Computation lives in
+//          Rust ("The Bridge, not the Monolith", A6): the former hand-rolled
+//          recursive-descent EVALUATOR + function library was retired — chart
+//          expressions now evaluate via @api `evaluateScoped` (Rust parser +
+//          engine::Evaluator). What remains here is a thin SYNTAX ADAPTER, not a
+//          second engine:
+//            - a lexer (tokenize) used only to rewrite chart-specific variable
+//              references — `$category`/`$index`/`$value`, the filter `value`
+//              keyword, and `[Bracketed Series Names]` (spaces) — into plain
+//              engine-legal identifiers the engine binds by name;
+//            - value coercion (toNumber/toText/toBoolean) shared by chart params
+//              and widget-value formatting;
+//            - scope/result mapping between the chart value model and the engine.
+// CONTEXT: runs under a no-unsafe-eval CSP; no eval / no new Function.
+
+import type { EvalScope, EvalResultValue } from "@api/formulaEval";
 
 // ============================================================================
-// Public types
+// Public value model (shared by chartParams / chartWidgetValues / transforms)
 // ============================================================================
 
 export type FormulaValue = number | string | boolean;
 export type FormulaScope = Map<string, FormulaValue>;
 
-/** Thrown for any tokenize / parse / evaluation error (mirrors Excel #ERROR codes). */
+/** Thrown for a tokenize failure (mirrors Excel #SYNTAX). */
 export class FormulaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "FormulaError";
   }
 }
-
-/** A parsed expression that can be evaluated repeatedly against different scopes. */
-export type CompiledFormula = (scope: FormulaScope) => FormulaValue;
 
 // ============================================================================
 // Coercion helpers
@@ -80,7 +65,7 @@ export function toBoolean(value: FormulaValue): boolean {
 }
 
 // ============================================================================
-// Tokenizer
+// Lexer (used ONLY to rewrite variable references for the engine)
 // ============================================================================
 
 type Token =
@@ -103,13 +88,12 @@ function tokenize(input: string): Token[] {
   while (i < n) {
     const ch = input[i];
 
-    // Whitespace
     if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") {
       i++;
       continue;
     }
 
-    // String literal: "..." with "" as an escaped quote
+    // String literal: "..." with "" as an escaped quote.
     if (ch === '"') {
       i++;
       let str = "";
@@ -128,8 +112,7 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
-    // Bracketed identifier: [Any Name] — trimmed so [ Name ] == [Name] and aligns
-    // with trimmed param/series names.
+    // Bracketed identifier: [Any Name] — trimmed so [ Name ] == [Name].
     if (ch === "[") {
       const end = input.indexOf("]", i + 1);
       if (end === -1) throw new FormulaError("#SYNTAX! unterminated [reference]");
@@ -138,20 +121,16 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
-    // Parens / comma
     if (ch === "(") { tokens.push({ k: "lp" }); i++; continue; }
     if (ch === ")") { tokens.push({ k: "rp" }); i++; continue; }
     if (ch === ",") { tokens.push({ k: "comma" }); i++; continue; }
 
-    // Two-char operators
     const two = input.slice(i, i + 2);
     if (two === "<=" || two === ">=" || two === "<>") { tokens.push({ k: "op", v: two }); i += 2; continue; }
     if (two === "!=") { tokens.push({ k: "op", v: "<>" }); i += 2; continue; }
 
-    // Single-char operators
     if ("+-*/^&=<>".includes(ch)) { tokens.push({ k: "op", v: ch }); i++; continue; }
 
-    // Number
     NUMBER_RE.lastIndex = i;
     const nm = NUMBER_RE.exec(input);
     if (nm && nm.index === i) {
@@ -160,7 +139,6 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
-    // Identifier
     IDENT_RE.lastIndex = i;
     const im = IDENT_RE.exec(input);
     if (im && im.index === i) {
@@ -176,315 +154,91 @@ function tokenize(input: string): Token[] {
 }
 
 // ============================================================================
-// AST
+// Chart-expression → engine-expression translation
 // ============================================================================
 
-type Node =
-  | { t: "num"; v: number }
-  | { t: "str"; v: string }
-  | { t: "bool"; v: boolean }
-  | { t: "var"; name: string }
-  | { t: "neg"; x: Node }
-  | { t: "pos"; x: Node }
-  | { t: "bin"; op: string; l: Node; r: Node }
-  | { t: "call"; name: string; args: Node[] };
-
-// ============================================================================
-// Parser (recursive descent)
-// ============================================================================
-
-function parse(tokens: Token[]): Node {
-  let pos = 0;
-  const peek = (): Token | undefined => tokens[pos];
-  const next = (): Token | undefined => tokens[pos++];
-
-  function parseComparison(): Node {
-    let node = parseConcat();
-    for (;;) {
-      const t = peek();
-      if (t && t.k === "op" && (t.v === "=" || t.v === "<>" || t.v === "<" || t.v === ">" || t.v === "<=" || t.v === ">=")) {
-        next();
-        node = { t: "bin", op: t.v, l: node, r: parseConcat() };
-      } else break;
-    }
-    return node;
-  }
-
-  function parseConcat(): Node {
-    let node = parseAdd();
-    for (;;) {
-      const t = peek();
-      if (t && t.k === "op" && t.v === "&") {
-        next();
-        node = { t: "bin", op: "&", l: node, r: parseAdd() };
-      } else break;
-    }
-    return node;
-  }
-
-  function parseAdd(): Node {
-    let node = parseMul();
-    for (;;) {
-      const t = peek();
-      if (t && t.k === "op" && (t.v === "+" || t.v === "-")) {
-        next();
-        node = { t: "bin", op: t.v, l: node, r: parseMul() };
-      } else break;
-    }
-    return node;
-  }
-
-  function parseMul(): Node {
-    let node = parseUnary();
-    for (;;) {
-      const t = peek();
-      if (t && t.k === "op" && (t.v === "*" || t.v === "/")) {
-        next();
-        node = { t: "bin", op: t.v, l: node, r: parseUnary() };
-      } else break;
-    }
-    return node;
-  }
-
-  function parseUnary(): Node {
-    const t = peek();
-    if (t && t.k === "op" && (t.v === "-" || t.v === "+")) {
-      next();
-      const x = parseUnary();
-      return t.v === "-" ? { t: "neg", x } : { t: "pos", x };
-    }
-    return parsePower();
-  }
-
-  function parsePower(): Node {
-    const base = parsePrimary();
-    const t = peek();
-    if (t && t.k === "op" && t.v === "^") {
-      next();
-      return { t: "bin", op: "^", l: base, r: parseUnary() };
-    }
-    return base;
-  }
-
-  function parsePrimary(): Node {
-    const t = next();
-    if (!t) throw new FormulaError("#SYNTAX! unexpected end of expression");
-
-    if (t.k === "num") return { t: "num", v: t.v };
-    if (t.k === "str") return { t: "str", v: t.v };
-    if (t.k === "lp") {
-      const inner = parseComparison();
-      const close = next();
-      if (!close || close.k !== "rp") throw new FormulaError("#SYNTAX! expected ')'");
-      return inner;
-    }
-    if (t.k === "id") {
-      const after = peek();
-      if (after && after.k === "lp") {
-        next(); // consume '('
-        const args: Node[] = [];
-        if (peek() && peek()!.k !== "rp") {
-          args.push(parseComparison());
-          while (peek() && peek()!.k === "comma") {
-            next();
-            args.push(parseComparison());
-          }
-        }
-        const close = next();
-        if (!close || close.k !== "rp") throw new FormulaError("#SYNTAX! expected ')' in function call");
-        return { t: "call", name: t.v, args };
-      }
-      // Bare TRUE / FALSE literals
-      if (/^true$/i.test(t.v)) return { t: "bool", v: true };
-      if (/^false$/i.test(t.v)) return { t: "bool", v: false };
-      return { t: "var", name: t.v };
-    }
-    throw new FormulaError("#SYNTAX! unexpected token");
-  }
-
-  const ast = parseComparison();
-  if (pos !== tokens.length) throw new FormulaError("#SYNTAX! unexpected trailing input");
-  return ast;
+/**
+ * Canonical engine-legal identifier for a chart scope name. The engine binds
+ * bare identifiers ([A-Za-z_][A-Za-z0-9_]*, case-insensitive) the way LET/LAMBDA
+ * do; `$`, spaces and other chart-name chars are not valid there, so every
+ * variable maps to a `v_`-prefixed sanitized alias. A series' exact name and its
+ * underscore form (e.g. "Revenue Total" / "Revenue_Total") collapse to the same
+ * alias — which is correct, since the scope binds both to the same value.
+ */
+export function aliasName(name: string): string {
+  return "v_" + name.replace(/[^A-Za-z0-9_]/g, "_");
 }
 
-// ============================================================================
-// Evaluator
-// ============================================================================
-
-function compareValues(l: FormulaValue, r: FormulaValue, op: string): boolean {
-  const numeric = (typeof l === "number" || typeof l === "boolean") && (typeof r === "number" || typeof r === "boolean");
-  let cmp: number;
-  if (numeric) {
-    const a = toNumber(l);
-    const b = toNumber(r);
-    cmp = a < b ? -1 : a > b ? 1 : 0;
-    // NaN comparisons: only "<>" is true.
-    if (Number.isNaN(a) || Number.isNaN(b)) return op === "<>";
-  } else {
-    const a = toText(l).toLowerCase();
-    const b = toText(r).toLowerCase();
-    cmp = a < b ? -1 : a > b ? 1 : 0;
-  }
-  switch (op) {
-    case "=": return cmp === 0;
-    case "<>": return cmp !== 0;
-    case "<": return cmp < 0;
-    case ">": return cmp > 0;
-    case "<=": return cmp <= 0;
-    case ">=": return cmp >= 0;
-    default: throw new FormulaError(`#SYNTAX! unknown comparison '${op}'`);
-  }
+function numberToExpr(v: number): string {
+  // Finite engine-parseable literal; tokenizer never produces a signed/NaN num.
+  return Number.isFinite(v) ? String(v) : "0";
 }
 
-function evalNode(node: Node, scope: FormulaScope): FormulaValue {
-  switch (node.t) {
-    case "num": return node.v;
-    case "str": return node.v;
-    case "bool": return node.v;
-    case "var": {
-      if (!scope.has(node.name)) throw new FormulaError(`#NAME? unknown name '${node.name}'`);
-      return scope.get(node.name)!;
-    }
-    case "neg": return -toNumber(evalNode(node.x, scope));
-    case "pos": return +toNumber(evalNode(node.x, scope));
-    case "bin": {
-      const op = node.op;
-      if (op === "&") return toText(evalNode(node.l, scope)) + toText(evalNode(node.r, scope));
-      if (op === "=" || op === "<>" || op === "<" || op === ">" || op === "<=" || op === ">=") {
-        return compareValues(evalNode(node.l, scope), evalNode(node.r, scope), op);
-      }
-      const a = toNumber(evalNode(node.l, scope));
-      const b = toNumber(evalNode(node.r, scope));
-      switch (op) {
-        case "+": return a + b;
-        case "-": return a - b;
-        case "*": return a * b;
-        case "/": return a / b;
-        case "^": return Math.pow(a, b);
-        default: throw new FormulaError(`#SYNTAX! unknown operator '${op}'`);
+/**
+ * Rewrite a chart expression into engine syntax: variable references (bare
+ * identifiers not used as a call, and `[Bracketed]` names) become `v_…` aliases;
+ * function names (identifier immediately followed by `(`) and TRUE/FALSE literals
+ * are preserved; numbers, strings and operators pass through. The result is fed
+ * to the real engine via `evaluateScoped`. Throws FormulaError on a lex failure
+ * (the caller treats that exactly like the old compile failure).
+ */
+export function translateChartExpr(expr: string): string {
+  const tokens = tokenize(expr);
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    switch (t.k) {
+      case "num": out.push(numberToExpr(t.v)); break;
+      case "str": out.push('"' + t.v.replace(/"/g, '""') + '"'); break;
+      case "op": out.push(t.v); break;
+      case "lp": out.push("("); break;
+      case "rp": out.push(")"); break;
+      case "comma": out.push(","); break;
+      case "id": {
+        const next = tokens[i + 1];
+        if (next && next.k === "lp") { out.push(t.v); break; } // function call — keep name
+        if (/^(?:true|false)$/i.test(t.v)) { out.push(t.v.toUpperCase()); break; } // boolean literal
+        out.push(aliasName(t.v)); // variable reference — alias
+        break;
       }
     }
-    case "call": return evalCall(node, scope);
   }
+  return out.join(" ");
 }
 
-function evalCall(node: { name: string; args: Node[] }, scope: FormulaScope): FormulaValue {
-  const name = node.name.toUpperCase();
-  const args = node.args;
-
-  // Functions with lazy / short-circuit argument evaluation.
-  switch (name) {
-    case "IF": {
-      if (args.length < 2 || args.length > 3) throw new FormulaError("#VALUE! IF expects 2-3 args");
-      if (toBoolean(evalNode(args[0], scope))) return evalNode(args[1], scope);
-      return args.length === 3 ? evalNode(args[2], scope) : false;
-    }
-    case "IFS": {
-      if (args.length < 2 || args.length % 2 !== 0) throw new FormulaError("#VALUE! IFS expects condition/value pairs");
-      for (let i = 0; i + 1 < args.length; i += 2) {
-        if (toBoolean(evalNode(args[i], scope))) return evalNode(args[i + 1], scope);
-      }
-      throw new FormulaError("#N/A IFS no match");
-    }
-    case "AND": {
-      if (args.length === 0) throw new FormulaError("#VALUE! AND expects args");
-      for (const a of args) if (!toBoolean(evalNode(a, scope))) return false;
-      return true;
-    }
-    case "OR": {
-      if (args.length === 0) throw new FormulaError("#VALUE! OR expects args");
-      for (const a of args) if (toBoolean(evalNode(a, scope))) return true;
-      return false;
-    }
-    case "NOT": {
-      if (args.length !== 1) throw new FormulaError("#VALUE! NOT expects 1 arg");
-      return !toBoolean(evalNode(args[0], scope));
-    }
-    case "IFERROR": {
-      if (args.length !== 2) throw new FormulaError("#VALUE! IFERROR expects 2 args");
-      try { return evalNode(args[0], scope); }
-      catch { return evalNode(args[1], scope); }
-    }
-    case "TRUE": return true;
-    case "FALSE": return false;
-  }
-
-  // Eager functions: evaluate all args, then apply.
-  const values = args.map((a) => evalNode(a, scope));
-  const fn = FUNCTIONS[name];
-  if (!fn) throw new FormulaError(`#NAME? unknown function '${name}'`);
-  return fn(values);
+/** Map a chart row scope to an engine scope (keys aliased to engine identifiers). */
+export function toEngineScope(scope: FormulaScope): EvalScope {
+  const out: EvalScope = {};
+  for (const [k, v] of scope) out[aliasName(k)] = v;
+  return out;
 }
 
 // ============================================================================
-// Function library
+// Engine-result coercion (mirrors the old evaluator's keep/zero fallbacks)
 // ============================================================================
 
-function nums(values: FormulaValue[]): number[] {
-  return values.map(toNumber);
+/** A result is an engine error when it is a "#…" string (e.g. #NAME?, #DIV/0!). */
+export function isEngineError(r: EvalResultValue): r is string {
+  return typeof r === "string" && r.startsWith("#");
 }
 
-/** Excel-style ROUND: half away from zero. */
-function excelRound(x: number, digits: number): number {
-  const f = Math.pow(10, digits);
-  const y = Math.abs(x) * f;
-  return (Math.sign(x) * Math.round(y)) / f;
+/** Coerce an engine result to boolean (for filter predicates). Throws on a value
+ *  that has no boolean reading — the caller treats that like the old eval error. */
+export function resultToBoolean(r: EvalResultValue): boolean {
+  if (typeof r === "boolean") return r;
+  if (typeof r === "number") return r !== 0;
+  if (typeof r === "string") return toBoolean(r);
+  if (r === null) return false;
+  throw new FormulaError("#VALUE! array result has no boolean value");
 }
 
-const FUNCTIONS: Record<string, (args: FormulaValue[]) => FormulaValue> = {
-  // Math
-  ABS: (a) => Math.abs(toNumber(a[0])),
-  SIGN: (a) => Math.sign(toNumber(a[0])),
-  INT: (a) => Math.floor(toNumber(a[0])),
-  SQRT: (a) => { const x = toNumber(a[0]); if (x < 0) throw new FormulaError("#NUM! SQRT of negative"); return Math.sqrt(x); },
-  EXP: (a) => Math.exp(toNumber(a[0])),
-  LN: (a) => { const x = toNumber(a[0]); if (x <= 0) throw new FormulaError("#NUM! LN domain"); return Math.log(x); },
-  LOG10: (a) => { const x = toNumber(a[0]); if (x <= 0) throw new FormulaError("#NUM! LOG10 domain"); return Math.log10(x); },
-  LOG: (a) => { const x = toNumber(a[0]); const base = a.length > 1 ? toNumber(a[1]) : 10; if (x <= 0 || base <= 0) throw new FormulaError("#NUM! LOG domain"); return Math.log(x) / Math.log(base); },
-  POWER: (a) => Math.pow(toNumber(a[0]), toNumber(a[1])),
-  MOD: (a) => { const x = toNumber(a[0]); const d = toNumber(a[1]); if (d === 0) throw new FormulaError("#DIV/0! MOD"); return x - d * Math.floor(x / d); },
-  TRUNC: (a) => { const x = toNumber(a[0]); const d = a.length > 1 ? toNumber(a[1]) : 0; const f = Math.pow(10, d); return Math.trunc(x * f) / f; },
-  ROUND: (a) => excelRound(toNumber(a[0]), a.length > 1 ? toNumber(a[1]) : 0),
-  ROUNDUP: (a) => { const d = a.length > 1 ? toNumber(a[1]) : 0; const f = Math.pow(10, d); const x = toNumber(a[0]); return (Math.sign(x) * Math.ceil(Math.abs(x) * f)) / f; },
-  ROUNDDOWN: (a) => { const d = a.length > 1 ? toNumber(a[1]) : 0; const f = Math.pow(10, d); const x = toNumber(a[0]); return (Math.sign(x) * Math.floor(Math.abs(x) * f)) / f; },
-  CEILING: (a) => { const x = toNumber(a[0]); const sig = a.length > 1 ? toNumber(a[1]) : 1; if (sig === 0) return 0; return Math.ceil(x / sig) * sig; },
-  FLOOR: (a) => { const x = toNumber(a[0]); const sig = a.length > 1 ? toNumber(a[1]) : 1; if (sig === 0) return 0; return Math.floor(x / sig) * sig; },
-  MIN: (a) => Math.min(...nums(a)),
-  MAX: (a) => Math.max(...nums(a)),
-  SUM: (a) => nums(a).reduce((x, y) => x + y, 0),
-  PRODUCT: (a) => nums(a).reduce((x, y) => x * y, 1),
-  AVERAGE: (a) => { const n = nums(a); if (n.length === 0) throw new FormulaError("#DIV/0! AVERAGE"); return n.reduce((x, y) => x + y, 0) / n.length; },
-  COUNT: (a) => a.filter((v) => typeof v === "number" || (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v)))).length,
-
-  // Logical (value-form)
-  ISNUMBER: (a) => typeof a[0] === "number",
-  ISBLANK: (a) => a[0] === "" || a[0] === undefined,
-
-  // Text
-  CONCAT: (a) => a.map(toText).join(""),
-  CONCATENATE: (a) => a.map(toText).join(""),
-  LEFT: (a) => { const s = toText(a[0]); const n = a.length > 1 ? toNumber(a[1]) : 1; return s.slice(0, Math.max(0, n)); },
-  RIGHT: (a) => { const s = toText(a[0]); const n = a.length > 1 ? toNumber(a[1]) : 1; return n <= 0 ? "" : s.slice(-n); },
-  MID: (a) => { const s = toText(a[0]); const start = toNumber(a[1]); const len = toNumber(a[2]); return s.slice(Math.max(0, start - 1), Math.max(0, start - 1) + Math.max(0, len)); },
-  LEN: (a) => toText(a[0]).length,
-  UPPER: (a) => toText(a[0]).toUpperCase(),
-  LOWER: (a) => toText(a[0]).toLowerCase(),
-  TRIM: (a) => toText(a[0]).trim().replace(/\s+/g, " "),
-  EXACT: (a) => toText(a[0]) === toText(a[1]),
-  VALUE: (a) => toNumber(a[0]),
-};
-
-// ============================================================================
-// Public API
-// ============================================================================
-
-/** Parse an expression into a reusable evaluator. Throws FormulaError on parse failure. */
-export function compileFormula(expr: string): CompiledFormula {
-  const ast = parse(tokenize(expr));
-  return (scope: FormulaScope) => evalNode(ast, scope);
-}
-
-/** Compile and evaluate an expression once against a scope. */
-export function evaluateFormula(expr: string, scope: FormulaScope): FormulaValue {
-  return compileFormula(expr)(scope);
+/** Coerce an engine result to a finite number (for calculate); non-finite → 0. */
+export function resultToNumber(r: EvalResultValue): number {
+  let n: number;
+  if (typeof r === "number") n = r;
+  else if (typeof r === "boolean") n = r ? 1 : 0;
+  else if (typeof r === "string") n = toNumber(r);
+  else if (r === null) n = 0;
+  else throw new FormulaError("#VALUE! array result has no numeric value");
+  return Number.isFinite(n) ? n : 0;
 }

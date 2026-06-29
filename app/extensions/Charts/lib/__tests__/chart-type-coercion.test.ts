@@ -22,19 +22,19 @@ function makeData(
 // ---------------------------------------------------------------------------
 
 describe("filter transform with string/number coercion", () => {
-  it("string '5' compared with > 3 works (parseFloat coerces)", () => {
+  it("string '5' compared with > 3 works (parseFloat coerces)", async () => {
     const data = makeData(["A", "B", "C"], [
       { name: "Sales", values: [1, 5, 3] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 3" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["B"]);
     expect(result.series[0].values).toEqual([5]);
   });
 
-  it("filter on category with numeric-looking strings", () => {
+  it("filter on category with numeric-looking strings", async () => {
     const data = makeData(["10", "2", "30"], [
       { name: "Val", values: [100, 200, 300] },
     ]);
@@ -42,19 +42,19 @@ describe("filter transform with string/number coercion", () => {
     const transforms: TransformSpec[] = [
       { type: "filter", field: "$category", predicate: "= 10" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // "10" is compared numerically since both parse as numbers
     expect(result.categories).toHaveLength(1);
   });
 
-  it("filter with NaN values does not match numeric predicates", () => {
+  it("filter with NaN values does not match numeric predicates", async () => {
     const data = makeData(["A", "B"], [
       { name: "X", values: [NaN, 5] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "filter", field: "X", predicate: "> 0" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // NaN > 0 is false, only B passes
     expect(result.categories).toEqual(["B"]);
   });
@@ -65,37 +65,37 @@ describe("filter transform with string/number coercion", () => {
 // ---------------------------------------------------------------------------
 
 describe("aggregate transform with mixed types", () => {
-  it("sum of numeric values works normally", () => {
+  it("sum of numeric values works normally", async () => {
     const data = makeData(["A", "A", "B"], [
       { name: "Amt", values: [10, 20, 30] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Amt", as: "Total" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toContain(30); // A group
     expect(result.series[0].values).toContain(30); // B group
   });
 
-  it("mean of single-element groups equals the element", () => {
+  it("mean of single-element groups equals the element", async () => {
     const data = makeData(["X"], [
       { name: "V", values: [42] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "mean", field: "V", as: "Avg" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values[0]).toBe(42);
   });
 
-  it("aggregate with NaN in values propagates through sum", () => {
+  it("aggregate with NaN in values propagates through sum", async () => {
     const data = makeData(["A", "A"], [
       { name: "V", values: [10, NaN] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "V", as: "Total" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // 10 + NaN = NaN
     expect(isNaN(result.series[0].values[0])).toBe(true);
   });
@@ -106,32 +106,32 @@ describe("aggregate transform with mixed types", () => {
 // ---------------------------------------------------------------------------
 
 describe("sort transform with mixed-type data", () => {
-  it("sort by category uses localeCompare (string sort, not numeric)", () => {
+  it("sort by category uses localeCompare (string sort, not numeric)", async () => {
     const data = makeData(["10", "2", "1"], [
       { name: "V", values: [100, 200, 300] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "sort", field: "$category", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // localeCompare: "1" < "10" < "2" (string sort)
     expect(result.categories[0]).toBe("1");
     expect(result.categories[1]).toBe("10");
     expect(result.categories[2]).toBe("2");
   });
 
-  it("sort by numeric series uses subtraction (numeric sort)", () => {
+  it("sort by numeric series uses subtraction (numeric sort)", async () => {
     const data = makeData(["A", "B", "C"], [
       { name: "V", values: [30, 10, 20] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "sort", field: "V", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([10, 20, 30]);
   });
 
-  it("sort with NaN values - NaN subtraction yields NaN, sort is unstable", () => {
+  it("sort with NaN values - NaN subtraction yields NaN, sort is unstable", async () => {
     const data = makeData(["A", "B", "C"], [
       { name: "V", values: [NaN, 1, 2] },
     ]);
@@ -139,7 +139,7 @@ describe("sort transform with mixed-type data", () => {
       { type: "sort", field: "V", order: "asc" },
     ];
     // Should not throw
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(3);
   });
 });
@@ -190,7 +190,7 @@ describe("trendline computation with coercion-sensitive data", () => {
 // ---------------------------------------------------------------------------
 
 describe("calculate transform with string-like expressions", () => {
-  it("expression referencing series names resolves correctly", () => {
+  it("expression referencing series names resolves correctly", async () => {
     const data = makeData(["A", "B"], [
       { name: "Revenue", values: [100, 200] },
       { name: "Cost", values: [60, 80] },
@@ -198,20 +198,20 @@ describe("calculate transform with string-like expressions", () => {
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Revenue - Cost", as: "Profit" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const profit = result.series.find((s) => s.name === "Profit");
     expect(profit).toBeDefined();
     expect(profit!.values).toEqual([40, 120]);
   });
 
-  it("expression with invalid chars returns 0 for each row", () => {
+  it("expression with invalid chars returns 0 for each row", async () => {
     const data = makeData(["A"], [
       { name: "V", values: [10] },
     ]);
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "alert('xss')", as: "Bad" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const bad = result.series.find((s) => s.name === "Bad");
     expect(bad!.values[0]).toBe(0);
   });

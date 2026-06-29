@@ -197,40 +197,40 @@ describe("aggregation - hand-calculated values", () => {
     };
   }
 
-  it("SUM: A=30, B=120", () => {
-    const result = applyTransforms(makeGroupedData(), [
+  it("SUM: A=30, B=120", async () => {
+    const result = await applyTransforms(makeGroupedData(), [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Val", as: "Result" },
     ]);
     expect(result.series[0].values[0]).toBe(30);  // 10+20
     expect(result.series[0].values[1]).toBe(120); // 30+40+50
   });
 
-  it("MEAN: A=15, B=40", () => {
-    const result = applyTransforms(makeGroupedData(), [
+  it("MEAN: A=15, B=40", async () => {
+    const result = await applyTransforms(makeGroupedData(), [
       { type: "aggregate", groupBy: ["$category"], op: "mean", field: "Val", as: "Result" },
     ]);
     expect(result.series[0].values[0]).toBe(15);  // (10+20)/2
     expect(result.series[0].values[1]).toBe(40);  // (30+40+50)/3
   });
 
-  it("MEDIAN: A=15, B=40", () => {
-    const result = applyTransforms(makeGroupedData(), [
+  it("MEDIAN: A=15, B=40", async () => {
+    const result = await applyTransforms(makeGroupedData(), [
       { type: "aggregate", groupBy: ["$category"], op: "median", field: "Val", as: "Result" },
     ]);
     expect(result.series[0].values[0]).toBe(15);  // (10+20)/2 even count
     expect(result.series[0].values[1]).toBe(40);  // middle of [30,40,50]
   });
 
-  it("MIN: A=10, B=30", () => {
-    const result = applyTransforms(makeGroupedData(), [
+  it("MIN: A=10, B=30", async () => {
+    const result = await applyTransforms(makeGroupedData(), [
       { type: "aggregate", groupBy: ["$category"], op: "min", field: "Val", as: "Result" },
     ]);
     expect(result.series[0].values[0]).toBe(10);
     expect(result.series[0].values[1]).toBe(30);
   });
 
-  it("MAX: A=20, B=50", () => {
-    const result = applyTransforms(makeGroupedData(), [
+  it("MAX: A=20, B=50", async () => {
+    const result = await applyTransforms(makeGroupedData(), [
       { type: "aggregate", groupBy: ["$category"], op: "max", field: "Val", as: "Result" },
     ]);
     expect(result.series[0].values[0]).toBe(20);
@@ -243,9 +243,9 @@ describe("aggregation - hand-calculated values", () => {
 // ============================================================================
 
 describe("running sum - step by step verification", () => {
-  it("computes cumulative values correctly", () => {
+  it("computes cumulative values correctly", async () => {
     const data = makeData([5, 3, 7, 2, 8], "Val");
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op: "running_sum", field: "Val", as: "CumSum" },
     ]);
     const cumSum = result.series.find((s) => s.name === "CumSum")!;
@@ -259,9 +259,9 @@ describe("running sum - step by step verification", () => {
 // ============================================================================
 
 describe("rank - tied values get correct ranks", () => {
-  it("ranks distinct values highest-first", () => {
+  it("ranks distinct values highest-first", async () => {
     const data = makeData([30, 10, 50, 20, 40], "Val");
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op: "rank", field: "Val", as: "Rank" },
     ]);
     const ranks = result.series.find((s) => s.name === "Rank")!;
@@ -270,10 +270,10 @@ describe("rank - tied values get correct ranks", () => {
     expect(ranks.values).toEqual([3, 5, 1, 4, 2]);
   });
 
-  it("assigns sequential ranks to tied values (competition ranking)", () => {
+  it("assigns sequential ranks to tied values (competition ranking)", async () => {
     // The implementation sorts descending and assigns position-based ranks
     const data = makeData([10, 20, 20, 30], "Val");
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op: "rank", field: "Val", as: "Rank" },
     ]);
     const ranks = result.series.find((s) => s.name === "Rank")!;
@@ -291,7 +291,7 @@ describe("rank - tied values get correct ranks", () => {
 // ============================================================================
 
 describe("bin - boundary correctness", () => {
-  it("creates mathematically correct bin boundaries", () => {
+  it("creates mathematically correct bin boundaries", async () => {
     // values: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     // binCount=5 => range=100, binWidth=20
     // bins: [0-20), [20-40), [40-60), [60-80), [80-100]
@@ -299,7 +299,7 @@ describe("bin - boundary correctness", () => {
       [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
       "Val",
     );
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "bin", field: "Val", binCount: 5, as: "Binned" },
     ]);
     expect(result.categories).toHaveLength(5);
@@ -309,9 +309,9 @@ describe("bin - boundary correctness", () => {
     expect(totalCount).toBe(11);
   });
 
-  it("bin width equals range / binCount", () => {
+  it("bin width equals range / binCount", async () => {
     const data = makeData([0, 50, 100], "Val");
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "bin", field: "Val", binCount: 4, as: "B" },
     ]);
     // range=100, binWidth=25, 4 bins

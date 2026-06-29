@@ -109,38 +109,38 @@ describe("sort transform order correctness", () => {
     { name: "Sales", values: [30, 10, 20] },
   );
 
-  it("ascending sort by category produces A, B, C", () => {
+  it("ascending sort by category produces A, B, C", async () => {
     const transforms: TransformSpec[] = [
       { type: "sort", field: "$category", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["A", "B", "C"]);
     expect(result.series[0].values).toEqual([10, 20, 30]);
   });
 
-  it("descending sort by category produces C, B, A", () => {
+  it("descending sort by category produces C, B, A", async () => {
     const transforms: TransformSpec[] = [
       { type: "sort", field: "$category", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["C", "B", "A"]);
     expect(result.series[0].values).toEqual([30, 20, 10]);
   });
 
-  it("ascending sort by numeric field orders values low to high", () => {
+  it("ascending sort by numeric field orders values low to high", async () => {
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Sales", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([10, 20, 30]);
     expect(result.categories).toEqual(["A", "B", "C"]);
   });
 
-  it("descending sort by numeric field orders values high to low", () => {
+  it("descending sort by numeric field orders values high to low", async () => {
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Sales", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([30, 20, 10]);
     expect(result.categories).toEqual(["C", "B", "A"]);
   });
@@ -157,54 +157,54 @@ describe("aggregate transform correctness", () => {
     { name: "Sales", values: [10, 20, 30, 40, 50] },
   );
 
-  it("sum aggregation produces correct totals", () => {
+  it("sum aggregation produces correct totals", async () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales", as: "Total" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["East", "West"]);
     expect(result.series[0].values).toEqual([30, 120]); // 10+20=30, 30+40+50=120
     expect(result.series[0].name).toBe("Total");
   });
 
-  it("count aggregation produces correct counts", () => {
+  it("count aggregation produces correct counts", async () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "count", field: "Sales", as: "Count" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([2, 3]);
   });
 
-  it("mean aggregation produces correct averages", () => {
+  it("mean aggregation produces correct averages", async () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "mean", field: "Sales", as: "Avg" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values[0]).toBe(15);  // (10+20)/2
     expect(result.series[0].values[1]).toBe(40);   // (30+40+50)/3
   });
 
-  it("min aggregation picks the smallest", () => {
+  it("min aggregation picks the smallest", async () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "min", field: "Sales", as: "Min" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([10, 30]);
   });
 
-  it("max aggregation picks the largest", () => {
+  it("max aggregation picks the largest", async () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "max", field: "Sales", as: "Max" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([20, 50]);
   });
 
-  it("median with even count averages the two middle values", () => {
+  it("median with even count averages the two middle values", async () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "median", field: "Sales", as: "Med" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // East: [10,20] => median = (10+20)/2 = 15
     // West: [30,40,50] => median = 40
     expect(result.series[0].values[0]).toBe(15);
@@ -222,20 +222,20 @@ describe("window transform running_sum step-by-step", () => {
     { name: "Val", values: [5, 3, 7, 2] },
   );
 
-  it("running_sum produces exact cumulative values", () => {
+  it("running_sum produces exact cumulative values", async () => {
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "Val", as: "RunSum" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const runSum = result.series.find((s) => s.name === "RunSum")!;
     expect(runSum.values).toEqual([5, 8, 15, 17]);
   });
 
-  it("running_mean produces exact cumulative means", () => {
+  it("running_mean produces exact cumulative means", async () => {
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_mean", field: "Val", as: "RunMean" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const runMean = result.series.find((s) => s.name === "RunMean")!;
     expect(runMean.values[0]).toBe(5);       // 5/1
     expect(runMean.values[1]).toBe(4);       // 8/2
@@ -243,11 +243,11 @@ describe("window transform running_sum step-by-step", () => {
     expect(runMean.values[3]).toBeCloseTo(4.25);     // 17/4
   });
 
-  it("rank assigns 1 to the highest value", () => {
+  it("rank assigns 1 to the highest value", async () => {
     const transforms: TransformSpec[] = [
       { type: "window", op: "rank", field: "Val", as: "Rank" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const rank = result.series.find((s) => s.name === "Rank")!;
     // Values: [5, 3, 7, 2]. Sorted desc: 7(idx2), 5(idx0), 3(idx1), 2(idx3)
     // Ranks:  idx0=2, idx1=3, idx2=1, idx3=4
@@ -260,7 +260,7 @@ describe("window transform running_sum step-by-step", () => {
 // ---------------------------------------------------------------------------
 
 describe("bin transform boundaries", () => {
-  it("all values land in bins and total count equals input length", () => {
+  it("all values land in bins and total count equals input length", async () => {
     const data = makeData(
       ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
       { name: "X", values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
@@ -268,13 +268,13 @@ describe("bin transform boundaries", () => {
     const transforms: TransformSpec[] = [
       { type: "bin", field: "X", binCount: 5, as: "Hist" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(5);
     const totalCount = result.series[0].values.reduce((a, b) => a + b, 0);
     expect(totalCount).toBe(10); // no values lost or duplicated
   });
 
-  it("max value is included in the last bin (not out of range)", () => {
+  it("max value is included in the last bin (not out of range)", async () => {
     const data = makeData(
       ["a", "b", "c"],
       { name: "X", values: [0, 5, 10] },
@@ -282,7 +282,7 @@ describe("bin transform boundaries", () => {
     const transforms: TransformSpec[] = [
       { type: "bin", field: "X", binCount: 2, as: "Hist" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // 2 bins, total count must be 3
     const totalCount = result.series[0].values.reduce((a, b) => a + b, 0);
     expect(totalCount).toBe(3);
@@ -290,7 +290,7 @@ describe("bin transform boundaries", () => {
     expect(result.series[0].values[1]).toBeGreaterThanOrEqual(1);
   });
 
-  it("min value is included in the first bin", () => {
+  it("min value is included in the first bin", async () => {
     const data = makeData(
       ["a", "b"],
       { name: "X", values: [0, 10] },
@@ -298,11 +298,11 @@ describe("bin transform boundaries", () => {
     const transforms: TransformSpec[] = [
       { type: "bin", field: "X", binCount: 2, as: "Hist" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values[0]).toBeGreaterThanOrEqual(1);
   });
 
-  it("single value input produces all count in one bin", () => {
+  it("single value input produces all count in one bin", async () => {
     const data = makeData(
       ["a", "b", "c"],
       { name: "X", values: [5, 5, 5] },
@@ -310,12 +310,12 @@ describe("bin transform boundaries", () => {
     const transforms: TransformSpec[] = [
       { type: "bin", field: "X", binCount: 3, as: "Hist" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const totalCount = result.series[0].values.reduce((a, b) => a + b, 0);
     expect(totalCount).toBe(3);
   });
 
-  it("produces exactly binCount categories", () => {
+  it("produces exactly binCount categories", async () => {
     const data = makeData(
       Array.from({ length: 20 }, (_, i) => `v${i}`),
       { name: "X", values: Array.from({ length: 20 }, (_, i) => i * 3) },
@@ -323,7 +323,7 @@ describe("bin transform boundaries", () => {
     const transforms: TransformSpec[] = [
       { type: "bin", field: "X", binCount: 7, as: "Hist" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(7);
     expect(result.series[0].values).toHaveLength(7);
   });
@@ -339,45 +339,45 @@ describe("filter transform predicate exactness", () => {
     { name: "Val", values: [10, 20, 30, 40, 50] },
   );
 
-  it("> 30 keeps exactly values 40 and 50", () => {
+  it("> 30 keeps exactly values 40 and 50", async () => {
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Val", predicate: "> 30" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([40, 50]);
     expect(result.categories).toEqual(["D", "E"]);
   });
 
-  it(">= 30 keeps exactly values 30, 40, 50", () => {
+  it(">= 30 keeps exactly values 30, 40, 50", async () => {
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Val", predicate: ">= 30" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([30, 40, 50]);
   });
 
-  it("< 20 keeps exactly value 10", () => {
+  it("< 20 keeps exactly value 10", async () => {
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Val", predicate: "< 20" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([10]);
   });
 
-  it("= 30 keeps exactly the matching value", () => {
+  it("= 30 keeps exactly the matching value", async () => {
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Val", predicate: "= 30" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([30]);
     expect(result.categories).toEqual(["C"]);
   });
 
-  it("!= 30 keeps everything except the matching value", () => {
+  it("!= 30 keeps everything except the matching value", async () => {
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Val", predicate: "!= 30" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([10, 20, 40, 50]);
   });
 });

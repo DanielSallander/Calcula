@@ -44,13 +44,13 @@ function monthlySalesData(): ParsedChartData {
 // ============================================================================
 
 describe("filter then transform pipeline", () => {
-  it("filters out low-value categories then sorts remaining", () => {
+  it("filters out low-value categories then sorts remaining", async () => {
     const data = monthlySalesData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Revenue", predicate: ">= 200" },
       { type: "sort", field: "Revenue", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // Only months with Revenue >= 200: May(200), Jul(220), Aug(210), Oct(250), Nov(300), Dec(280)
     expect(result.categories).toHaveLength(6);
@@ -64,13 +64,13 @@ describe("filter then transform pipeline", () => {
     }
   });
 
-  it("filters categories by name then calculates profit margin", () => {
+  it("filters categories by name then calculates profit margin", async () => {
     const data = monthlySalesData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "$category", predicate: "!= Jan" },
       { type: "calculate", expr: "Revenue - Cost", as: "Profit" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories).not.toContain("Jan");
     expect(result.categories).toHaveLength(11);
@@ -81,12 +81,12 @@ describe("filter then transform pipeline", () => {
     expect(profitSeries!.values[0]).toBe(50);
   });
 
-  it("applies chart filters after transforms", () => {
+  it("applies chart filters after transforms", async () => {
     const data = monthlySalesData();
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Revenue", order: "asc" },
     ];
-    const transformed = applyTransforms(data, transforms);
+    const transformed = await applyTransforms(data, transforms);
 
     // Hide the first series (Revenue) and first 3 categories
     const filters: ChartFilters = {
@@ -108,14 +108,14 @@ describe("filter then transform pipeline", () => {
 // ============================================================================
 
 describe("multi-step transform chains", () => {
-  it("calculate -> filter -> sort pipeline", () => {
+  it("calculate -> filter -> sort pipeline", async () => {
     const data = monthlySalesData();
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Revenue - Cost", as: "Profit" },
       { type: "filter", field: "Profit", predicate: "> 100" },
       { type: "sort", field: "Profit", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     const profit = result.series.find((s) => s.name === "Profit");
     expect(profit).toBeDefined();
@@ -129,7 +129,7 @@ describe("multi-step transform chains", () => {
     }
   });
 
-  it("aggregate -> window (running sum) pipeline", () => {
+  it("aggregate -> window (running sum) pipeline", async () => {
     const data = makeData(
       ["East", "East", "West", "West", "North"],
       { name: "Sales", values: [10, 20, 30, 40, 50] },
@@ -149,7 +149,7 @@ describe("multi-step transform chains", () => {
         as: "CumulativeSales",
       },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories).toEqual(["East", "West", "North"]);
     const totals = result.series.find((s) => s.name === "TotalSales");
@@ -159,7 +159,7 @@ describe("multi-step transform chains", () => {
     expect(cumulative!.values).toEqual([30, 100, 150]);
   });
 
-  it("sort -> bin pipeline", () => {
+  it("sort -> bin pipeline", async () => {
     const data = makeData(
       ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
       { name: "Score", values: [10, 25, 35, 45, 55, 65, 75, 85, 90, 100] },
@@ -168,7 +168,7 @@ describe("multi-step transform chains", () => {
       { type: "sort", field: "Score", order: "asc" },
       { type: "bin", field: "Score", binCount: 5, as: "ScoreBin" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories).toHaveLength(5);
     const bins = result.series.find((s) => s.name === "ScoreBin");
@@ -177,7 +177,7 @@ describe("multi-step transform chains", () => {
     expect(bins!.values.reduce((a, b) => a + b, 0)).toBe(10);
   });
 
-  it("window rank -> filter top 3 pipeline", () => {
+  it("window rank -> filter top 3 pipeline", async () => {
     const data = makeData(
       ["Alice", "Bob", "Carol", "Dave", "Eve"],
       { name: "Sales", values: [300, 100, 500, 200, 400] },
@@ -186,7 +186,7 @@ describe("multi-step transform chains", () => {
       { type: "window", op: "rank", field: "Sales", as: "Rank" },
       { type: "filter", field: "Rank", predicate: "<= 3" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // Top 3 by Sales: Carol(500,rank1), Eve(400,rank2), Alice(300,rank3)
     expect(result.categories).toHaveLength(3);
@@ -256,7 +256,7 @@ describe("chart filters edge cases", () => {
 // ============================================================================
 
 describe("full realistic pipeline scenarios", () => {
-  it("sales dashboard: calculate profit, filter profitable months, sort, then apply UI filters", () => {
+  it("sales dashboard: calculate profit, filter profitable months, sort, then apply UI filters", async () => {
     const data = monthlySalesData();
 
     // Step 1: Transform pipeline
@@ -266,7 +266,7 @@ describe("full realistic pipeline scenarios", () => {
       { type: "sort", field: "Revenue", order: "desc" },
       { type: "window", op: "running_sum", field: "Revenue", as: "CumulativeRevenue" },
     ];
-    const transformed = applyTransforms(data, transforms);
+    const transformed = await applyTransforms(data, transforms);
 
     // Step 2: User hides some series via UI
     const filters: ChartFilters = {
@@ -289,7 +289,7 @@ describe("full realistic pipeline scenarios", () => {
     }
   });
 
-  it("aggregate duplicate categories then compute running mean", () => {
+  it("aggregate duplicate categories then compute running mean", async () => {
     const data = makeData(
       ["Q1", "Q1", "Q2", "Q2", "Q3", "Q3", "Q4", "Q4"],
       { name: "Revenue", values: [100, 150, 200, 250, 300, 350, 400, 450] },
@@ -309,7 +309,7 @@ describe("full realistic pipeline scenarios", () => {
         as: "RunningAvgRevenue",
       },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories).toEqual(["Q1", "Q2", "Q3", "Q4"]);
     const quarterly = result.series.find((s) => s.name === "QuarterlyRevenue");
@@ -321,36 +321,36 @@ describe("full realistic pipeline scenarios", () => {
     expect(runningAvg!.values[2]).toBeCloseTo(450); // (250+450+650)/3
   });
 
-  it("empty data passes through transform pipeline safely", () => {
+  it("empty data passes through transform pipeline safely", async () => {
     const data = makeData([], { name: "Sales", values: [] });
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 0" },
       { type: "sort", field: "Sales", order: "asc" },
       { type: "calculate", expr: "Sales * 2", as: "Double" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
   });
 
-  it("unknown transform type is ignored gracefully", () => {
+  it("unknown transform type is ignored gracefully", async () => {
     const data = makeData(["A"], { name: "X", values: [1] });
     const transforms = [
       { type: "nonexistent" as any, field: "X" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["A"]);
   });
 
-  it("filter with nonexistent field returns data unchanged", () => {
+  it("filter with nonexistent field returns data unchanged", async () => {
     const data = makeData(["A", "B"], { name: "X", values: [1, 2] });
     const transforms: TransformSpec[] = [
       { type: "filter", field: "NoSuchField", predicate: "> 0" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["A", "B"]);
   });
 
-  it("calculate with multiple series references", () => {
+  it("calculate with multiple series references", async () => {
     const data = makeData(
       ["Jan", "Feb", "Mar"],
       { name: "Revenue", values: [100, 200, 300] },
@@ -360,12 +360,12 @@ describe("full realistic pipeline scenarios", () => {
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Revenue - Cost - Tax", as: "NetProfit" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const net = result.series.find((s) => s.name === "NetProfit");
     expect(net!.values).toEqual([50, 100, 150]);
   });
 
-  it("median aggregation works correctly", () => {
+  it("median aggregation works correctly", async () => {
     const data = makeData(
       ["A", "A", "A", "B", "B"],
       { name: "Score", values: [10, 30, 20, 40, 50] },
@@ -379,13 +379,13 @@ describe("full realistic pipeline scenarios", () => {
         as: "MedianScore",
       },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const median = result.series.find((s) => s.name === "MedianScore");
     expect(median!.values[0]).toBe(20); // median of [10,30,20] = 20
     expect(median!.values[1]).toBe(45); // median of [40,50] = 45
   });
 
-  it("calculate replaces existing series with same name", () => {
+  it("calculate replaces existing series with same name", async () => {
     const data = makeData(
       ["A", "B"],
       { name: "X", values: [10, 20] },
@@ -393,7 +393,7 @@ describe("full realistic pipeline scenarios", () => {
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "X * 2", as: "X" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // Should still have 1 series, not 2
     expect(result.series).toHaveLength(1);
     expect(result.series[0].values).toEqual([20, 40]);

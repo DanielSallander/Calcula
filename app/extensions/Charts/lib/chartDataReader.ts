@@ -20,7 +20,7 @@ import type {
 } from "../types";
 import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
-import { applyTransforms, applyTransformsAsync, type SandboxTransformRunner } from "./chartTransforms";
+import { applyTransformsAsync, type SandboxTransformRunner } from "./chartTransforms";
 import { resolveParams, selectionFilterCategories, applyAxisParamBindings } from "./chartParams";
 import { getPointSelection } from "../handlers/chartPointSelection";
 import type { FormulaValue } from "./chartFormula";
@@ -215,7 +215,7 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // re-running transforms per panel). Unsupported specs return undefined → the
   // top-level data renders as a single chart.
   const facets = lowered.facet?.field
-    ? partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params)
+    ? await partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params)
     : undefined;
 
   let finalData = withCategoryField(parsedData);
@@ -338,7 +338,7 @@ export async function assembleConcat(
  *
  * Pure given its inputs (no IO) — unit-tested directly.
  */
-export function partitionByFacet(
+export async function partitionByFacet(
   grid: string[][],
   numRows: number,
   numCols: number,
@@ -348,7 +348,7 @@ export function partitionByFacet(
   lowered: ChartSpec,
   lookupData: Map<number, ParsedChartData>,
   params?: ReadonlyMap<string, FormulaValue>,
-): Array<{ value: string; data: ParsedChartData }> | undefined {
+): Promise<Array<{ value: string; data: ParsedChartData }> | undefined> {
   // v1: needs a header row in columns orientation to reference the field by name.
   if (orientation !== "columns" || !hasHeaders) return undefined;
 
@@ -375,7 +375,7 @@ export function partitionByFacet(
   // a throwaway sink here so the same warnings aren't reported once per panel.
   const sink: TransformDiagnostic[] = [];
 
-  return order.map((value) => {
+  return Promise.all(order.map(async (value) => {
     // Header row + only the rows whose facet cell matches this value.
     const subGrid: string[][] = [header];
     for (let r = 1; r < numRows; r++) {
@@ -386,17 +386,19 @@ export function partitionByFacet(
     let parsed = parseColumnOriented(subGrid, subRows, numCols, hasHeaders, lowered.categoryIndex, lowered.series);
     if (lowered.transform && lowered.transform.length > 0) {
       const subTidy = buildTidyData(subGrid, subRows, numCols, hasHeaders, orientation);
-      // SYNC pipeline per panel: built-ins + in-process custom transforms only.
-      // SANDBOXED transforms can't run here (panel partitioning is sync); a faceted
-      // spec that references one degrades to an "Unknown transform" diagnostic in
-      // this throwaway sink rather than blocking every panel (v1 limit).
-      parsed = applyTransforms(parsed, lowered.transform, sink, lookupData, subTidy, params);
+      // Per-panel pipeline: built-ins + in-process custom transforms only.
+      // SANDBOXED transforms still don't run per panel (v1 limit) — a no-op runner
+      // routes every step through the built-in path, so a faceted spec referencing
+      // a sandbox transform degrades to an "Unknown transform" diagnostic in this
+      // throwaway sink rather than blocking the panel. filter/calculate evaluate
+      // via the real engine (async) just like the single-chart path.
+      parsed = await applyTransformsAsync(parsed, lowered.transform, () => null, sink, lookupData, subTidy, params);
     }
     // NOTE: chart filters (hiddenCategories/hiddenSeries) are POSITIONAL indices
     // into the top-level chart's arrays — they don't map onto each panel's own
     // category/series set, so they are intentionally not applied per panel (v1).
     return { value: value || "(blank)", data: withCategoryField(parsed) };
-  });
+  }));
 }
 
 /**

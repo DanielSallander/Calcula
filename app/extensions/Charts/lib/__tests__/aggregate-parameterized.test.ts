@@ -22,19 +22,19 @@ function makeData(categories: string[], values: number[], seriesName = "Sales"):
   };
 }
 
-function aggregate(data: ParsedChartData, op: AggregateOp, field = "Sales", groupBy = ["$category"]): ParsedChartData {
+async function aggregate(data: ParsedChartData, op: AggregateOp, field = "Sales", groupBy = ["$category"]): Promise<ParsedChartData> {
   const t: AggregateTransform = { type: "aggregate", groupBy, op, field, as: `${op}_result` };
-  return applyTransforms(data, [t]);
+  return await applyTransforms(data, [t]);
 }
 
-function window(data: ParsedChartData, op: "running_sum" | "running_mean" | "rank", field = "Sales"): ParsedChartData {
+async function window(data: ParsedChartData, op: "running_sum" | "running_mean" | "rank", field = "Sales"): Promise<ParsedChartData> {
   const t: WindowTransform = { type: "window", op, field, as: `${op}_result` };
-  return applyTransforms(data, [t]);
+  return await applyTransforms(data, [t]);
 }
 
-function bin(data: ParsedChartData, binCount: number, field = "Sales"): ParsedChartData {
+async function bin(data: ParsedChartData, binCount: number, field = "Sales"): Promise<ParsedChartData> {
   const t: BinTransform = { type: "bin", field, binCount, as: "bin_result" };
-  return applyTransforms(data, [t]);
+  return await applyTransforms(data, [t]);
 }
 
 // ============================================================================
@@ -180,11 +180,11 @@ describe("aggregate operations - parameterized", () => {
   const ops: AggregateOp[] = ["sum", "count", "mean", "median", "min", "max"];
 
   for (const op of ops) {
-    it.each(dataGroups)(`${op}: %s`, (_label, _cats, values, expected) => {
+    it.each(dataGroups)(`${op}: %s`, async (_label, _cats, values, expected) => {
       // Use same category for all to get a single aggregated group
       const cats = values.map(() => "All");
       const data = makeData(cats, values);
-      const result = aggregate(data, op);
+      const result = await aggregate(data, op);
       expect(result.series).toHaveLength(1);
       expect(result.series[0].values).toHaveLength(1);
       const actual = result.series[0].values[0];
@@ -475,10 +475,10 @@ describe("window operations - parameterized", () => {
   ];
 
   // running_sum x 30
-  it.each(windowCases)("running_sum: %s", (_label, values, expected) => {
+  it.each(windowCases)("running_sum: %s", async (_label, values, expected) => {
     const cats = values.map((_, i) => `C${i}`);
     const data = makeData(cats, values);
-    const result = window(data, "running_sum");
+    const result = await window(data, "running_sum");
     const resultSeries = result.series.find((s) => s.name === "running_sum_result");
     expect(resultSeries).toBeDefined();
     expect(resultSeries!.values).toHaveLength(expected.runSum.length);
@@ -488,10 +488,10 @@ describe("window operations - parameterized", () => {
   });
 
   // running_mean x 30
-  it.each(windowCases)("running_mean: %s", (_label, values, expected) => {
+  it.each(windowCases)("running_mean: %s", async (_label, values, expected) => {
     const cats = values.map((_, i) => `C${i}`);
     const data = makeData(cats, values);
-    const result = window(data, "running_mean");
+    const result = await window(data, "running_mean");
     const resultSeries = result.series.find((s) => s.name === "running_mean_result");
     expect(resultSeries).toBeDefined();
     expect(resultSeries!.values).toHaveLength(expected.runMean.length);
@@ -501,10 +501,10 @@ describe("window operations - parameterized", () => {
   });
 
   // rank x 30
-  it.each(windowCases)("rank: %s", (_label, values, expected) => {
+  it.each(windowCases)("rank: %s", async (_label, values, expected) => {
     const cats = values.map((_, i) => `C${i}`);
     const data = makeData(cats, values);
-    const result = window(data, "rank");
+    const result = await window(data, "rank");
     const resultSeries = result.series.find((s) => s.name === "rank_result");
     expect(resultSeries).toBeDefined();
     expect(resultSeries!.values).toHaveLength(expected.rank.length);
@@ -545,10 +545,10 @@ describe("bin transform - parameterized", () => {
   const binCounts = [3, 5, 10] as const;
 
   for (const bc of binCounts) {
-    it.each(binCases)(`binCount=${bc}, %s: produces ${bc} bins`, (_label, values, _defaultBins, totalItems) => {
+    it.each(binCases)(`binCount=${bc}, %s: produces ${bc} bins`, async (_label, values, _defaultBins, totalItems) => {
       const cats = values.map((_, i) => `C${i}`);
       const data = makeData(cats, values);
-      const result = bin(data, bc);
+      const result = await bin(data, bc);
       // Should have exactly binCount categories (bins)
       expect(result.categories).toHaveLength(bc);
       expect(result.series).toHaveLength(1);
@@ -563,18 +563,18 @@ describe("bin transform - parameterized", () => {
     });
   }
 
-  it("bin categories contain range labels", () => {
+  it("bin categories contain range labels", async () => {
     const data = makeData(["A", "B", "C"], [0, 5, 10]);
-    const result = bin(data, 2);
+    const result = await bin(data, 2);
     // Each category should be a range like "0-5" or "0.0-5.0"
     for (const cat of result.categories) {
       expect(cat).toContain("\u2013"); // en-dash used in formatBinEdge
     }
   });
 
-  it("all-same-value data: all items in one bin", () => {
+  it("all-same-value data: all items in one bin", async () => {
     const data = makeData(["A", "B", "C", "D"], [5, 5, 5, 5]);
-    const result = bin(data, 3);
+    const result = await bin(data, 3);
     const sum = result.series[0].values.reduce((a, b) => a + b, 0);
     expect(sum).toBe(4);
     // At least one bin has all 4

@@ -163,35 +163,35 @@ describe("transform types with varied data shapes", () => {
 
   // Filter
   describe.each(shapes)("filter on $name data", ({ data }) => {
-    it("applies filter transform without crash", () => {
-      const result = applyTransforms(data, [{ type: "filter", field: "Sales", predicate: "> 100" }]);
+    it("applies filter transform without crash", async () => {
+      const result = await applyTransforms(data, [{ type: "filter", field: "Sales", predicate: "> 100" }]);
       expect(result).toBeDefined();
       expect(result.categories.length).toBeLessThanOrEqual(data.categories.length);
     });
 
-    it("filter on $category works", () => {
-      const result = applyTransforms(data, [{ type: "filter", field: "$category", predicate: "= A" }]);
+    it("filter on $category works", async () => {
+      const result = await applyTransforms(data, [{ type: "filter", field: "$category", predicate: "= A" }]);
       expect(result).toBeDefined();
     });
   });
 
   // Sort
   describe.each(shapes)("sort on $name data", ({ data }) => {
-    it("applies sort asc", () => {
-      const result = applyTransforms(data, [{ type: "sort", field: "$category", order: "asc" }]);
+    it("applies sort asc", async () => {
+      const result = await applyTransforms(data, [{ type: "sort", field: "$category", order: "asc" }]);
       expect(result.categories.length).toBe(data.categories.length);
     });
 
-    it("applies sort desc", () => {
-      const result = applyTransforms(data, [{ type: "sort", field: "$category", order: "desc" }]);
+    it("applies sort desc", async () => {
+      const result = await applyTransforms(data, [{ type: "sort", field: "$category", order: "desc" }]);
       expect(result.categories.length).toBe(data.categories.length);
     });
   });
 
   // Aggregate
   describe.each(shapes)("aggregate on $name data", ({ data }) => {
-    it("sum aggregation", () => {
-      const result = applyTransforms(data, [
+    it("sum aggregation", async () => {
+      const result = await applyTransforms(data, [
         { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales", as: "Total" },
       ]);
       expect(result).toBeDefined();
@@ -200,8 +200,8 @@ describe("transform types with varied data shapes", () => {
 
   // Calculate
   describe.each(shapes)("calculate on $name data", ({ data }) => {
-    it("simple expression", () => {
-      const result = applyTransforms(data, [
+    it("simple expression", async () => {
+      const result = await applyTransforms(data, [
         { type: "calculate", expr: "Sales * 2", as: "Double" },
       ]);
       expect(result).toBeDefined();
@@ -210,8 +210,8 @@ describe("transform types with varied data shapes", () => {
 
   // Window
   describe.each(shapes)("window on $name data", ({ data }) => {
-    it("running_sum", () => {
-      const result = applyTransforms(data, [
+    it("running_sum", async () => {
+      const result = await applyTransforms(data, [
         { type: "window", op: "running_sum", field: "Sales", as: "RunSum" },
       ]);
       expect(result).toBeDefined();
@@ -220,8 +220,8 @@ describe("transform types with varied data shapes", () => {
 
   // Bin
   describe.each(shapes)("bin on $name data", ({ data }) => {
-    it("bin with default count", () => {
-      const result = applyTransforms(data, [
+    it("bin with default count", async () => {
+      const result = await applyTransforms(data, [
         { type: "bin", field: "Sales", as: "Binned" },
       ]);
       expect(result).toBeDefined();
@@ -244,8 +244,8 @@ describe("all aggregate operations produce correct results", () => {
     { op: "count", expected: 5 },
   ];
 
-  it.each(ops)("$op produces correct value", ({ op, expected }) => {
-    const result = applyTransforms(data, [
+  it.each(ops)("$op produces correct value", async ({ op, expected }) => {
+    const result = await applyTransforms(data, [
       { type: "aggregate", groupBy: [], op, field: "Sales", as: "Result" },
     ]);
     expect(result.series[0].values[0]).toBeCloseTo(expected, 5);
@@ -259,16 +259,16 @@ describe("all aggregate operations produce correct results", () => {
 describe("all window operations", () => {
   const data = makeData();
 
-  it("running_sum is cumulative", () => {
-    const result = applyTransforms(data, [
+  it("running_sum is cumulative", async () => {
+    const result = await applyTransforms(data, [
       { type: "window", op: "running_sum", field: "Sales", as: "RS" },
     ]);
     const rs = result.series.find((s) => s.name === "RS")!;
     expect(rs.values).toEqual([100, 300, 600, 750, 1000]);
   });
 
-  it("running_mean is cumulative average", () => {
-    const result = applyTransforms(data, [
+  it("running_mean is cumulative average", async () => {
+    const result = await applyTransforms(data, [
       { type: "window", op: "running_mean", field: "Sales", as: "RM" },
     ]);
     const rm = result.series.find((s) => s.name === "RM")!;
@@ -277,8 +277,8 @@ describe("all window operations", () => {
     expect(rm.values[4]).toBeCloseTo(200, 5);
   });
 
-  it("rank assigns rank 1 to highest value", () => {
-    const result = applyTransforms(data, [
+  it("rank assigns rank 1 to highest value", async () => {
+    const result = await applyTransforms(data, [
       { type: "window", op: "rank", field: "Sales", as: "R" },
     ]);
     const r = result.series.find((s) => s.name === "R")!;
@@ -470,8 +470,8 @@ describe("filter predicate operators", () => {
     { pred: "!= 200", expectedCount: 4 },   // 100, 300, 150, 250
   ];
 
-  it.each(predicates)("filter Sales $pred keeps $expectedCount items", ({ pred, expectedCount }) => {
-    const result = applyTransforms(data, [{ type: "filter", field: "Sales", predicate: pred }]);
+  it.each(predicates)("filter Sales $pred keeps $expectedCount items", async ({ pred, expectedCount }) => {
+    const result = await applyTransforms(data, [{ type: "filter", field: "Sales", predicate: pred }]);
     expect(result.categories.length).toBe(expectedCount);
   });
 });
@@ -483,29 +483,29 @@ describe("filter predicate operators", () => {
 describe("sort directions", () => {
   const data = makeData();
 
-  it("sort by Sales asc orders correctly", () => {
-    const result = applyTransforms(data, [{ type: "sort", field: "Sales", order: "asc" }]);
+  it("sort by Sales asc orders correctly", async () => {
+    const result = await applyTransforms(data, [{ type: "sort", field: "Sales", order: "asc" }]);
     for (let i = 1; i < result.series[0].values.length; i++) {
       expect(result.series[0].values[i]).toBeGreaterThanOrEqual(result.series[0].values[i - 1]);
     }
   });
 
-  it("sort by Sales desc orders correctly", () => {
-    const result = applyTransforms(data, [{ type: "sort", field: "Sales", order: "desc" }]);
+  it("sort by Sales desc orders correctly", async () => {
+    const result = await applyTransforms(data, [{ type: "sort", field: "Sales", order: "desc" }]);
     for (let i = 1; i < result.series[0].values.length; i++) {
       expect(result.series[0].values[i]).toBeLessThanOrEqual(result.series[0].values[i - 1]);
     }
   });
 
-  it("sort by $category asc is alphabetical", () => {
-    const result = applyTransforms(data, [{ type: "sort", field: "$category", order: "asc" }]);
+  it("sort by $category asc is alphabetical", async () => {
+    const result = await applyTransforms(data, [{ type: "sort", field: "$category", order: "asc" }]);
     for (let i = 1; i < result.categories.length; i++) {
       expect(result.categories[i] >= result.categories[i - 1]).toBe(true);
     }
   });
 
-  it("sort by unknown field returns data unchanged", () => {
-    const result = applyTransforms(data, [{ type: "sort", field: "NoSuchField" }]);
+  it("sort by unknown field returns data unchanged", async () => {
+    const result = await applyTransforms(data, [{ type: "sort", field: "NoSuchField" }]);
     expect(result).toEqual(data);
   });
 });
@@ -517,26 +517,26 @@ describe("sort directions", () => {
 describe("calculate expression evaluation", () => {
   const data = makeData();
 
-  it("multiplies series by constant", () => {
-    const result = applyTransforms(data, [{ type: "calculate", expr: "Sales * 2", as: "Double" }]);
+  it("multiplies series by constant", async () => {
+    const result = await applyTransforms(data, [{ type: "calculate", expr: "Sales * 2", as: "Double" }]);
     const d = result.series.find((s) => s.name === "Double")!;
     expect(d.values).toEqual([200, 400, 600, 300, 500]);
   });
 
-  it("subtracts two series", () => {
-    const result = applyTransforms(data, [{ type: "calculate", expr: "Sales - Cost", as: "Profit" }]);
+  it("subtracts two series", async () => {
+    const result = await applyTransforms(data, [{ type: "calculate", expr: "Sales - Cost", as: "Profit" }]);
     const p = result.series.find((s) => s.name === "Profit")!;
     expect(p.values).toEqual([20, 80, 120, 60, 100]);
   });
 
-  it("invalid expression returns zeros", () => {
-    const result = applyTransforms(data, [{ type: "calculate", expr: "alert('xss')", as: "Bad" }]);
+  it("invalid expression returns zeros", async () => {
+    const result = await applyTransforms(data, [{ type: "calculate", expr: "alert('xss')", as: "Bad" }]);
     const b = result.series.find((s) => s.name === "Bad")!;
     expect(b.values.every((v) => v === 0)).toBe(true);
   });
 
-  it("replaces existing series with same name", () => {
-    const result = applyTransforms(data, [{ type: "calculate", expr: "Sales + 1", as: "Sales" }]);
+  it("replaces existing series with same name", async () => {
+    const result = await applyTransforms(data, [{ type: "calculate", expr: "Sales + 1", as: "Sales" }]);
     expect(result.series.filter((s) => s.name === "Sales")).toHaveLength(1);
     expect(result.series.find((s) => s.name === "Sales")!.values[0]).toBe(101);
   });
@@ -547,24 +547,24 @@ describe("calculate expression evaluation", () => {
 // ============================================================================
 
 describe("bin transform", () => {
-  it("creates correct number of bins", () => {
+  it("creates correct number of bins", async () => {
     const data = makeData();
-    const result = applyTransforms(data, [{ type: "bin", field: "Sales", binCount: 5, as: "Bins" }]);
+    const result = await applyTransforms(data, [{ type: "bin", field: "Sales", binCount: 5, as: "Bins" }]);
     expect(result.categories.length).toBe(5);
   });
 
-  it("default bin count is 10", () => {
+  it("default bin count is 10", async () => {
     const data: ParsedChartData = {
       categories: Array.from({ length: 100 }, (_, i) => `C${i}`),
       series: [{ name: "V", values: Array.from({ length: 100 }, (_, i) => i), color: null }],
     };
-    const result = applyTransforms(data, [{ type: "bin", field: "V", as: "Bins" }]);
+    const result = await applyTransforms(data, [{ type: "bin", field: "V", as: "Bins" }]);
     expect(result.categories.length).toBe(10);
   });
 
-  it("sum of bin counts equals original data length", () => {
+  it("sum of bin counts equals original data length", async () => {
     const data = makeData();
-    const result = applyTransforms(data, [{ type: "bin", field: "Sales", binCount: 3, as: "Bins" }]);
+    const result = await applyTransforms(data, [{ type: "bin", field: "Sales", binCount: 3, as: "Bins" }]);
     const total = result.series[0].values.reduce((a, b) => a + b, 0);
     expect(total).toBe(data.categories.length);
   });
@@ -575,9 +575,9 @@ describe("bin transform", () => {
 // ============================================================================
 
 describe("transform pipeline composition", () => {
-  it("filter then sort", () => {
+  it("filter then sort", async () => {
     const data = makeData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "filter", field: "Sales", predicate: "> 100" },
       { type: "sort", field: "Sales", order: "asc" },
     ]);
@@ -587,9 +587,9 @@ describe("transform pipeline composition", () => {
     }
   });
 
-  it("calculate then window", () => {
+  it("calculate then window", async () => {
     const data = makeData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "calculate", expr: "Sales - Cost", as: "Profit" },
       { type: "window", op: "running_sum", field: "Profit", as: "CumProfit" },
     ]);
@@ -598,9 +598,9 @@ describe("transform pipeline composition", () => {
     expect(cp.values.length).toBe(5);
   });
 
-  it("empty transform array returns same reference", () => {
+  it("empty transform array returns same reference", async () => {
     const data = makeData();
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result).toBe(data);
   });
 });

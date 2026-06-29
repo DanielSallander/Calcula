@@ -57,9 +57,9 @@ function applyFilter(data: ParsedChartData, filters: ChartFilters): ParsedChartD
 // ============================================================================
 
 describe("chart transforms - empty/identity idempotency", () => {
-  it("empty transform array returns same data reference", () => {
+  it("empty transform array returns same data reference", async () => {
     const data = makeData();
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result).toBe(data);
   });
 
@@ -72,23 +72,23 @@ describe("chart transforms - empty/identity idempotency", () => {
     expect(result.series[0].values).toEqual(data.series[0].values);
   });
 
-  it("filter that matches all rows produces same categories", () => {
+  it("filter that matches all rows produces same categories", async () => {
     const data = makeData();
     // Filter predicate that keeps everything: Sales > 0 (all values are positive)
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 0" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(data.categories);
     expect(result.series[0].values).toEqual(data.series[0].values);
   });
 
-  it("filter with non-existent field leaves data unchanged", () => {
+  it("filter with non-existent field leaves data unchanged", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "NonExistent", predicate: "> 0" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // Non-existent field filter should not crash and should keep data
     expect(result.categories.length).toBeGreaterThan(0);
   });
@@ -99,17 +99,17 @@ describe("chart transforms - empty/identity idempotency", () => {
 // ============================================================================
 
 describe("chart transforms - sort idempotency", () => {
-  it("sorting already-sorted ascending data by same field produces same order", () => {
+  it("sorting already-sorted ascending data by same field produces same order", async () => {
     const data = makeSortedData(); // Already sorted asc by Val
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Val", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(data.categories);
     expect(result.series[0].values).toEqual(data.series[0].values);
   });
 
-  it("double sort by same field and order produces same result as single sort", () => {
+  it("double sort by same field and order produces same result as single sort", async () => {
     const data = makeData();
     const singleSort: TransformSpec[] = [
       { type: "sort", field: "Sales", order: "desc" },
@@ -118,13 +118,13 @@ describe("chart transforms - sort idempotency", () => {
       { type: "sort", field: "Sales", order: "desc" },
       { type: "sort", field: "Sales", order: "desc" },
     ];
-    const single = applyTransforms(data, singleSort);
-    const double = applyTransforms(data, doubleSort);
+    const single = await applyTransforms(data, singleSort);
+    const double = await applyTransforms(data, doubleSort);
     expect(double.categories).toEqual(single.categories);
     expect(double.series[0].values).toEqual(single.series[0].values);
   });
 
-  it("sort on single-value data is a no-op", () => {
+  it("sort on single-value data is a no-op", async () => {
     const data: ParsedChartData = {
       categories: ["Only"],
       series: [{ name: "X", values: [42], color: null }],
@@ -132,12 +132,12 @@ describe("chart transforms - sort idempotency", () => {
     const transforms: TransformSpec[] = [
       { type: "sort", field: "X", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["Only"]);
     expect(result.series[0].values).toEqual([42]);
   });
 
-  it("sort on uniform values preserves original order", () => {
+  it("sort on uniform values preserves original order", async () => {
     const data: ParsedChartData = {
       categories: ["A", "B", "C"],
       series: [{ name: "X", values: [5, 5, 5], color: null }],
@@ -145,7 +145,7 @@ describe("chart transforms - sort idempotency", () => {
     const transforms: TransformSpec[] = [
       { type: "sort", field: "X", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.series[0].values).toEqual([5, 5, 5]);
   });
 });
@@ -155,13 +155,13 @@ describe("chart transforms - sort idempotency", () => {
 // ============================================================================
 
 describe("chart transforms - aggregate idempotency", () => {
-  it("aggregating already-unique categories produces same result twice", () => {
+  it("aggregating already-unique categories produces same result twice", async () => {
     const data = makeData(); // Each category is unique
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales", as: "TotalSales" },
     ];
-    const first = applyTransforms(data, transforms);
-    const second = applyTransforms(first, transforms);
+    const first = await applyTransforms(data, transforms);
+    const second = await applyTransforms(first, transforms);
     // After first aggregate, categories are unique. Second aggregate should produce same totals.
     expect(second.categories).toEqual(first.categories);
     const firstTotals = second.series.find((s) => s.name === "TotalSales");
@@ -169,7 +169,7 @@ describe("chart transforms - aggregate idempotency", () => {
     expect(firstTotals?.values).toEqual(origTotals?.values);
   });
 
-  it("aggregating with duplicate categories merges, then second aggregate is stable", () => {
+  it("aggregating with duplicate categories merges, then second aggregate is stable", async () => {
     const data: ParsedChartData = {
       categories: ["A", "A", "B", "B"],
       series: [{ name: "Val", values: [10, 20, 30, 40], color: null }],
@@ -177,8 +177,8 @@ describe("chart transforms - aggregate idempotency", () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Val", as: "Total" },
     ];
-    const first = applyTransforms(data, transforms);
-    const second = applyTransforms(first, transforms);
+    const first = await applyTransforms(data, transforms);
+    const second = await applyTransforms(first, transforms);
     // After first: A=30, B=70. After second: should still be A=30, B=70
     const firstTotal = first.series.find((s) => s.name === "Total");
     const secondTotal = second.series.find((s) => s.name === "Total");
@@ -186,7 +186,7 @@ describe("chart transforms - aggregate idempotency", () => {
     expect(second.categories).toEqual(first.categories);
   });
 
-  it("mean aggregate on uniform values returns same values", () => {
+  it("mean aggregate on uniform values returns same values", async () => {
     const data: ParsedChartData = {
       categories: ["A", "A", "A"],
       series: [{ name: "Val", values: [5, 5, 5], color: null }],
@@ -194,7 +194,7 @@ describe("chart transforms - aggregate idempotency", () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "mean", field: "Val", as: "AvgVal" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const avg = result.series.find((s) => s.name === "AvgVal");
     expect(avg?.values).toEqual([5]);
   });
@@ -205,29 +205,29 @@ describe("chart transforms - aggregate idempotency", () => {
 // ============================================================================
 
 describe("chart transforms - identity transforms", () => {
-  it("calculate with identity expression (multiply by 1) preserves values", () => {
+  it("calculate with identity expression (multiply by 1) preserves values", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Sales * 1", as: "SalesCopy" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const copy = result.series.find((s) => s.name === "SalesCopy");
     const original = result.series.find((s) => s.name === "Sales");
     expect(copy?.values).toEqual(original?.values);
   });
 
-  it("calculate with add zero preserves values", () => {
+  it("calculate with add zero preserves values", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "calculate", expr: "Sales + 0", as: "SalesZero" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const copy = result.series.find((s) => s.name === "SalesZero");
     const original = result.series.find((s) => s.name === "Sales");
     expect(copy?.values).toEqual(original?.values);
   });
 
-  it("window running_sum on single-element data equals the element", () => {
+  it("window running_sum on single-element data equals the element", async () => {
     const data: ParsedChartData = {
       categories: ["Only"],
       series: [{ name: "X", values: [42], color: null }],
@@ -235,19 +235,19 @@ describe("chart transforms - identity transforms", () => {
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "X", as: "RunSum" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const runSum = result.series.find((s) => s.name === "RunSum");
     expect(runSum?.values).toEqual([42]);
   });
 
-  it("applying same transform pipeline twice on same input gives equal results", () => {
+  it("applying same transform pipeline twice on same input gives equal results", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 100" },
       { type: "sort", field: "Sales", order: "asc" },
     ];
-    const result1 = applyTransforms(data, transforms);
-    const result2 = applyTransforms(data, transforms);
+    const result1 = await applyTransforms(data, transforms);
+    const result2 = await applyTransforms(data, transforms);
     expect(result1.categories).toEqual(result2.categories);
     expect(result1.series[0].values).toEqual(result2.series[0].values);
   });

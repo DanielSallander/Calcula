@@ -40,24 +40,24 @@ function sampleData(): ParsedChartData {
 // ============================================================================
 
 describe("applyTransforms - wrong field types", () => {
-  it("sort with numeric field name where string expected", () => {
+  it("sort with numeric field name where string expected", async () => {
     const data = sampleData();
     const t: SortTransform = { type: "sort", field: 999 as any, order: "asc" };
     // Should not crash even though field is a number
-    expect(() => applyTransforms(data, [t])).not.toThrow();
+    await expect(applyTransforms(data, [t])).resolves.not.toThrow();
   });
 
-  it("filter with numeric predicate throws TypeError", () => {
+  it("filter with numeric predicate throws TypeError", async () => {
     const data = sampleData();
     const t: FilterTransform = {
       type: "filter",
       field: "Sales",
       predicate: 42 as any,
     };
-    expect(() => applyTransforms(data, [t])).toThrow(TypeError);
+    await expect(applyTransforms(data, [t])).rejects.toThrow(TypeError);
   });
 
-  it("aggregate with null groupBy throws TypeError", () => {
+  it("aggregate with null groupBy throws TypeError", async () => {
     const data = sampleData();
     const t: AggregateTransform = {
       type: "aggregate",
@@ -65,18 +65,18 @@ describe("applyTransforms - wrong field types", () => {
       op: "sum",
       field: "Sales",
     };
-    expect(() => applyTransforms(data, [t])).toThrow(TypeError);
+    await expect(applyTransforms(data, [t])).rejects.toThrow(TypeError);
   });
 
-  it("calculate with undefined expression is handled gracefully (zeros)", () => {
+  it("calculate with undefined expression is handled gracefully (zeros)", async () => {
     const data = sampleData();
     const t: CalculateTransform = {
       type: "calculate",
       as: "NewField",
       expr: undefined as any,
     };
-    let result!: ReturnType<typeof applyTransforms>;
-    expect(() => { result = applyTransforms(data, [t]); }).not.toThrow();
+    let result!: Awaited<ReturnType<typeof applyTransforms>>;
+    await expect((async () => { result = await applyTransforms(data, [t]); })()).resolves.not.toThrow();
     const field = result.series.find((s) => s.name === "NewField");
     expect(field).toBeDefined();
     expect(field!.values).toEqual([0, 0, 0, 0, 0]);
@@ -88,28 +88,28 @@ describe("applyTransforms - wrong field types", () => {
 // ============================================================================
 
 describe("applyTransforms - circular/self-referencing calculate", () => {
-  it("calculate referencing its own output reads the pre-transform value", () => {
+  it("calculate referencing its own output reads the pre-transform value", async () => {
     const data = sampleData();
     const t: CalculateTransform = {
       type: "calculate",
       as: "Sales",
       expr: "Sales * 2",
     };
-    let result!: ReturnType<typeof applyTransforms>;
-    expect(() => { result = applyTransforms(data, [t]); }).not.toThrow();
+    let result!: Awaited<ReturnType<typeof applyTransforms>>;
+    await expect((async () => { result = await applyTransforms(data, [t]); })()).resolves.not.toThrow();
     // Reads the input Sales (10..50) and doubles it, replacing the series.
     expect(result.series.find((s) => s.name === "Sales")!.values).toEqual([20, 40, 60, 80, 100]);
   });
 
-  it("two calculate transforms referencing each other resolve to zeros, not a crash", () => {
+  it("two calculate transforms referencing each other resolve to zeros, not a crash", async () => {
     const data = sampleData();
     const transforms: TransformSpec[] = [
       { type: "calculate", as: "X", expr: "Y * 2" } as CalculateTransform,
       { type: "calculate", as: "Y", expr: "X * 2" } as CalculateTransform,
     ];
     // Y is unknown when X is computed (-> 0); X is then 0 when Y is computed (-> 0).
-    let result!: ReturnType<typeof applyTransforms>;
-    expect(() => { result = applyTransforms(data, transforms); }).not.toThrow();
+    let result!: Awaited<ReturnType<typeof applyTransforms>>;
+    await expect((async () => { result = await applyTransforms(data, transforms); })()).resolves.not.toThrow();
     expect(result.series.find((s) => s.name === "X")!.values.every((v) => v === 0)).toBe(true);
     expect(result.series.find((s) => s.name === "Y")!.values.every((v) => v === 0)).toBe(true);
   });

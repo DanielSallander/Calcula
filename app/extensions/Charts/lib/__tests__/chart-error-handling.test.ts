@@ -49,139 +49,139 @@ function sampleData(): ParsedChartData {
 // ============================================================================
 
 describe("applyTransforms error handling", () => {
-  it("returns data unchanged for empty transforms array", () => {
+  it("returns data unchanged for empty transforms array", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, []);
+    const result = await applyTransforms(data, []);
     expect(result).toEqual(data);
   });
 
-  it("handles empty data with transforms", () => {
+  it("handles empty data with transforms", async () => {
     const data = emptyData();
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Sales", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual([]);
   });
 
-  it("handles unknown transform type gracefully", () => {
+  it("handles unknown transform type gracefully", async () => {
     const data = sampleData();
     const transforms = [{ type: "nonexistent" as any }];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result).toEqual(data);
   });
 
   describe("filter transform", () => {
-    it("returns data unchanged for invalid predicate", () => {
+    it("returns data unchanged for invalid predicate", async () => {
       const data = sampleData();
       const t: FilterTransform = { type: "filter", field: "Sales", predicate: "INVALID" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("returns data unchanged for non-existent field", () => {
+    it("returns data unchanged for non-existent field", async () => {
       const data = sampleData();
       const t: FilterTransform = { type: "filter", field: "NonExistent", predicate: "> 5" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("handles empty predicate string", () => {
+    it("handles empty predicate string", async () => {
       const data = sampleData();
       const t: FilterTransform = { type: "filter", field: "Sales", predicate: "" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("handles $category field filter", () => {
+    it("handles $category field filter", async () => {
       const data = sampleData();
       const t: FilterTransform = { type: "filter", field: "$category", predicate: '= A' };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result.categories.length).toBeLessThanOrEqual(data.categories.length);
     });
 
-    it("handles all comparison operators", () => {
+    it("handles all comparison operators", async () => {
       const data = sampleData();
       for (const op of [">", "<", ">=", "<=", "=", "!="]) {
         const t: FilterTransform = { type: "filter", field: "Sales", predicate: `${op} 15` };
-        const result = applyTransforms(data, [t]);
+        const result = await applyTransforms(data, [t]);
         expect(Array.isArray(result.categories)).toBe(true);
       }
     });
 
-    it("handles NaN comparison values", () => {
+    it("handles NaN comparison values", async () => {
       const data = sampleData();
       const t: FilterTransform = { type: "filter", field: "Sales", predicate: "> abc" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       // NaN comparisons should result in filtering out everything
       expect(Array.isArray(result.categories)).toBe(true);
     });
   });
 
   describe("sort transform", () => {
-    it("handles empty data", () => {
+    it("handles empty data", async () => {
       const data = emptyData();
       const t: SortTransform = { type: "sort", field: "Sales", order: "asc" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result.categories).toEqual([]);
     });
 
-    it("handles non-existent field", () => {
+    it("handles non-existent field", async () => {
       const data = sampleData();
       const t: SortTransform = { type: "sort", field: "Ghost", order: "desc" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("handles $category sort", () => {
+    it("handles $category sort", async () => {
       const data = sampleData();
       const t: SortTransform = { type: "sort", field: "$category", order: "desc" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result.categories[0]).toBe("C");
     });
 
-    it("defaults order to asc when omitted", () => {
+    it("defaults order to asc when omitted", async () => {
       const data = sampleData();
       const t = { type: "sort", field: "Sales" } as SortTransform;
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result.series[0].values[0]).toBe(10);
     });
   });
 
   describe("aggregate transform", () => {
-    it("handles non-existent field", () => {
+    it("handles non-existent field", async () => {
       const data = sampleData();
       const t: AggregateTransform = {
         type: "aggregate", groupBy: ["$category"], op: "sum", field: "Ghost", as: "Total",
       };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("handles all aggregate operations", () => {
+    it("handles all aggregate operations", async () => {
       const data = sampleData();
       for (const op of ["sum", "mean", "median", "min", "max", "count"] as const) {
         const t: AggregateTransform = {
           type: "aggregate", groupBy: ["$category"], op, field: "Sales", as: "Result",
         };
-        const result = applyTransforms(data, [t]);
+        const result = await applyTransforms(data, [t]);
         expect(result.series.length).toBeGreaterThan(0);
       }
     });
 
-    it("handles unknown aggregate op", () => {
+    it("handles unknown aggregate op", async () => {
       const data = sampleData();
       const t: AggregateTransform = {
         type: "aggregate", groupBy: ["$category"], op: "bogus" as any, field: "Sales", as: "X",
       };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       // Unknown op returns 0 for each group
       for (const v of result.series[0]?.values ?? []) {
         expect(v).toBe(0);
       }
     });
 
-    it("handles data with NaN values in aggregate", () => {
+    it("handles data with NaN values in aggregate", async () => {
       const data: ParsedChartData = {
         categories: ["A", "B"],
         series: [{ name: "S", values: [NaN, Infinity], color: null }],
@@ -189,94 +189,94 @@ describe("applyTransforms error handling", () => {
       const t: AggregateTransform = {
         type: "aggregate", groupBy: ["$category"], op: "sum", field: "S", as: "R",
       };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(Array.isArray(result.series)).toBe(true);
     });
   });
 
   describe("calculate transform", () => {
-    it("returns 0 for invalid expression", () => {
+    it("returns 0 for invalid expression", async () => {
       const data = sampleData();
       const t: CalculateTransform = { type: "calculate", expr: "!!invalid!!", as: "Bad" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       const calcSeries = result.series.find(s => s.name === "Bad");
       expect(calcSeries).toBeDefined();
       expect(calcSeries!.values.every(v => v === 0)).toBe(true);
     });
 
-    it("returns 0 for expressions with code injection attempts", () => {
+    it("returns 0 for expressions with code injection attempts", async () => {
       const data = sampleData();
       const t: CalculateTransform = { type: "calculate", expr: "process.exit(1)", as: "Hack" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       const calcSeries = result.series.find(s => s.name === "Hack");
       expect(calcSeries).toBeDefined();
       expect(calcSeries!.values.every(v => v === 0)).toBe(true);
     });
 
-    it("handles empty expression", () => {
+    it("handles empty expression", async () => {
       const data = sampleData();
       const t: CalculateTransform = { type: "calculate", expr: "", as: "Empty" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result.series.find(s => s.name === "Empty")).toBeDefined();
     });
   });
 
   describe("window transform", () => {
-    it("handles non-existent field", () => {
+    it("handles non-existent field", async () => {
       const data = sampleData();
       const t: WindowTransform = { type: "window", op: "running_sum", field: "Ghost", as: "RS" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("computes running_sum correctly", () => {
+    it("computes running_sum correctly", async () => {
       const data = sampleData();
       const t: WindowTransform = { type: "window", op: "running_sum", field: "Sales", as: "RS" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       const rs = result.series.find(s => s.name === "RS");
       expect(rs).toBeDefined();
       expect(rs!.values).toEqual([10, 30, 60]);
     });
 
-    it("computes rank correctly", () => {
+    it("computes rank correctly", async () => {
       const data = sampleData();
       const t: WindowTransform = { type: "window", op: "rank", field: "Sales", as: "R" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       const r = result.series.find(s => s.name === "R");
       expect(r).toBeDefined();
     });
   });
 
   describe("bin transform", () => {
-    it("handles non-existent field", () => {
+    it("handles non-existent field", async () => {
       const data = sampleData();
       const t: BinTransform = { type: "bin", field: "Ghost", as: "Bins" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("handles empty data", () => {
+    it("handles empty data", async () => {
       const data = emptyData();
       const t: BinTransform = { type: "bin", field: "Sales", as: "Bins" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result).toEqual(data);
     });
 
-    it("handles single-value series", () => {
+    it("handles single-value series", async () => {
       const data: ParsedChartData = {
         categories: ["A", "B", "C"],
         series: [{ name: "S", values: [5, 5, 5], color: null }],
       };
       const t: BinTransform = { type: "bin", field: "S", binCount: 5, as: "Bins" };
-      const result = applyTransforms(data, [t]);
+      const result = await applyTransforms(data, [t]);
       expect(result.categories.length).toBe(5);
     });
 
-    it("crashes on negative binCount (no guard)", () => {
+    it("crashes on negative binCount (no guard)", async () => {
       const data = sampleData();
       const t: BinTransform = { type: "bin", field: "Sales", binCount: -1, as: "Bins" };
       // Negative binCount creates empty bins array, causing crash
-      expect(() => applyTransforms(data, [t])).toThrow();
+      await expect(applyTransforms(data, [t])).rejects.toThrow();
     });
   });
 });

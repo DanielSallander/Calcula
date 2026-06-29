@@ -69,7 +69,7 @@ describe("aggregate ops x sort directions (18 combos)", () => {
       const label = `${op} + sort=${sortLabel}`;
       const idx = comboIndex++;
 
-      it(`[${idx}] ${label}`, () => {
+      it(`[${idx}] ${label}`, async () => {
         // Use duplicated categories so aggregate has something to group
         const data: ParsedChartData = {
           categories: ["X", "X", "Y", "Y", "Z"],
@@ -85,7 +85,7 @@ describe("aggregate ops x sort directions (18 combos)", () => {
           transforms.push({ type: "sort", field: "Result", order });
         }
 
-        const result = applyTransforms(data, transforms);
+        const result = await applyTransforms(data, transforms);
         // After aggregation, should have 3 categories: X, Y, Z
         expect(result.categories).toHaveLength(3);
         // Result series should exist
@@ -197,7 +197,7 @@ describe("filter operators x value types (18 combos)", () => {
       const label = `filter "${pred}" on ${vs.label} values`;
       const idx = comboIndex++;
 
-      it(`[${idx}] ${label}`, () => {
+      it(`[${idx}] ${label}`, async () => {
         const data: ParsedChartData = {
           categories: ["A", "B", "C", "D", "E"],
           series: [{ name: "Val", values: [...vs.values], color: null }],
@@ -207,7 +207,7 @@ describe("filter operators x value types (18 combos)", () => {
           { type: "filter", field: "Val", predicate: pred },
         ];
 
-        const result = applyTransforms(data, transforms);
+        const result = await applyTransforms(data, transforms);
 
         // Result should have fewer or equal categories
         expect(result.categories.length).toBeLessThanOrEqual(5);

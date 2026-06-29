@@ -26,7 +26,7 @@ function makeData(): ParsedChartData {
 // ============================================================================
 
 describe("transform input immutability", () => {
-  it("filter transform does not mutate input data", () => {
+  it("filter transform does not mutate input data", async () => {
     const data = makeData();
     const snapshot = JSON.parse(JSON.stringify(data));
 
@@ -34,7 +34,7 @@ describe("transform input immutability", () => {
       { type: "filter", field: "Sales", predicate: "> 15" },
     ];
 
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     // Input unchanged
     expect(data).toEqual(snapshot);
@@ -42,7 +42,7 @@ describe("transform input immutability", () => {
     expect(result.categories.length).toBeLessThan(data.categories.length);
   });
 
-  it("sort transform does not mutate input data", () => {
+  it("sort transform does not mutate input data", async () => {
     const data = makeData();
     const snapshot = JSON.parse(JSON.stringify(data));
 
@@ -50,11 +50,11 @@ describe("transform input immutability", () => {
       { type: "sort", field: "Sales", order: "desc" },
     ];
 
-    applyTransforms(data, transforms);
+    await applyTransforms(data, transforms);
     expect(data).toEqual(snapshot);
   });
 
-  it("aggregate transform does not mutate input data", () => {
+  it("aggregate transform does not mutate input data", async () => {
     const data: ParsedChartData = {
       categories: ["X", "X", "Y", "Y"],
       series: [{ name: "Val", values: [1, 2, 3, 4], color: null }],
@@ -65,11 +65,11 @@ describe("transform input immutability", () => {
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Val", as: "Total" },
     ];
 
-    applyTransforms(data, transforms);
+    await applyTransforms(data, transforms);
     expect(data).toEqual(snapshot);
   });
 
-  it("window transform does not mutate input data", () => {
+  it("window transform does not mutate input data", async () => {
     const data = makeData();
     const snapshot = JSON.parse(JSON.stringify(data));
 
@@ -77,11 +77,11 @@ describe("transform input immutability", () => {
       { type: "window", op: "running_sum", field: "Sales", as: "RunningTotal" },
     ];
 
-    applyTransforms(data, transforms);
+    await applyTransforms(data, transforms);
     expect(data).toEqual(snapshot);
   });
 
-  it("calculate transform does not mutate input data", () => {
+  it("calculate transform does not mutate input data", async () => {
     const data = makeData();
     const snapshot = JSON.parse(JSON.stringify(data));
 
@@ -89,11 +89,11 @@ describe("transform input immutability", () => {
       { type: "calculate", expr: "Sales - Cost", as: "Profit" },
     ];
 
-    applyTransforms(data, transforms);
+    await applyTransforms(data, transforms);
     expect(data).toEqual(snapshot);
   });
 
-  it("frozen input data does not cause errors", () => {
+  it("frozen input data does not cause errors", async () => {
     const data: ParsedChartData = Object.freeze({
       categories: Object.freeze(["A", "B", "C"]),
       series: Object.freeze([
@@ -105,7 +105,7 @@ describe("transform input immutability", () => {
       { type: "filter", field: "S1", predicate: "> 1" },
     ];
 
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toEqual(["B", "C"]);
   });
 });

@@ -19,27 +19,30 @@ import type {
   AggregateOp,
 } from "../types";
 import {
-  compileFormula,
-  toNumber,
-  toBoolean,
-  type CompiledFormula,
+  translateChartExpr,
+  toEngineScope,
+  isEngineError,
+  resultToBoolean,
+  resultToNumber,
   type FormulaScope,
   type FormulaValue,
 } from "./chartFormula";
 import { parseDisplayNumber } from "./chartFieldTypes";
 import { getChartTransform } from "@api/chartTransforms";
+import { evaluateScoped, type EvalScope, type EvalResultValue } from "@api/formulaEval";
 
 // ============================================================================
 // Public API
 // ============================================================================
 
 /**
- * Apply a sequence of transforms to parsed chart data.
- * Each transform is pure — returns a new ParsedChartData without mutating the input.
- *
- * Pass `diagnostics` to collect non-fatal issues (unknown fields, un-evaluable
- * expressions). Transforms still produce best-effort data either way; the array
- * is purely for surfacing problems in the editor (roadmap A5).
+ * Apply a sequence of transforms to parsed chart data. Async because "filter"
+ * and "calculate" evaluate their expressions via the real Rust engine
+ * (evaluate_scoped, A6). This is a convenience wrapper over
+ * {@link applyTransformsAsync} with a no-op sandbox runner (so it does NOT run
+ * sandboxed custom transforms — the same limit the old synchronous variant had).
+ * The two live render paths call applyTransformsAsync directly with the real
+ * runner; this wrapper is for callers that don't supply one.
  */
 export function applyTransforms(
   data: ParsedChartData,
@@ -48,8 +51,8 @@ export function applyTransforms(
   lookupData?: Map<number, ParsedChartData>,
   tidyData?: TidyData,
   params?: ReadonlyMap<string, FormulaValue>,
-): ParsedChartData {
-  return transforms.reduce((d, t, i) => applyOne(d, t, i, diagnostics, lookupData, tidyData, params), data);
+): Promise<ParsedChartData> {
+  return applyTransformsAsync(data, transforms, () => null, diagnostics, lookupData, tidyData, params);
 }
 
 /**
@@ -107,7 +110,16 @@ export async function applyTransformsAsync(
     const type = (t as { type?: string }).type ?? "unknown";
     const pending = runner(type, d, t, params);
     if (!pending) {
-      d = applyOne(d, t, i, diagnostics, lookupData, tidyData, params);
+      // filter/calculate evaluate expressions via the real Rust engine (async
+      // IPC, A6); the remaining built-ins + the in-process custom registry are
+      // synchronous and go through applyOne.
+      if (t.type === "filter") {
+        d = await applyFilter(d, t, i, diagnostics, params);
+      } else if (t.type === "calculate") {
+        d = await applyCalculate(d, t, i, diagnostics, params);
+      } else {
+        d = applyOne(d, t, i, diagnostics, lookupData, tidyData, params);
+      }
       continue;
     }
     try {
@@ -138,14 +150,12 @@ function applyOne(
   params?: ReadonlyMap<string, FormulaValue>,
 ): ParsedChartData {
   switch (transform.type) {
-    case "filter":
-      return applyFilter(data, transform, index, diagnostics, params);
+    // NOTE: "filter" and "calculate" evaluate expressions via the real engine
+    // (async) and are handled in applyTransformsAsync, never here.
     case "sort":
       return applySort(data, transform, index, diagnostics);
     case "aggregate":
       return applyAggregate(data, transform, index, diagnostics);
-    case "calculate":
-      return applyCalculate(data, transform, index, diagnostics, params);
     case "window":
       return applyWindow(data, transform, index, diagnostics);
     case "bin":
@@ -218,13 +228,13 @@ function errMessage(err: unknown): string {
 // Filter
 // ============================================================================
 
-function applyFilter(
+async function applyFilter(
   data: ParsedChartData,
   t: FilterTransform,
   index: number,
   diagnostics?: TransformDiagnostic[],
   params?: ReadonlyMap<string, FormulaValue>,
-): ParsedChartData {
+): Promise<ParsedChartData> {
   const { field, predicate } = t;
 
   const seriesIdx = field === "$category" ? -1 : findSeriesIndex(data, field);
@@ -235,29 +245,50 @@ function applyFilter(
 
   const exprSrc = predicateToExpr(predicate);
   if (exprSrc === null) return data; // Empty predicate: intentional no-op.
+  if (data.categories.length === 0) return data;
 
-  let compiled: CompiledFormula;
+  // Translate the chart predicate into engine syntax (variable refs → aliases).
+  let engineExpr: string;
   try {
-    compiled = compileFormula(exprSrc);
+    engineExpr = translateChartExpr(exprSrc);
   } catch (err) {
     // Unparseable predicate — leave the data untouched rather than dropping rows.
     report(diagnostics, index, "filter", "warning", `Filter: invalid predicate ${JSON.stringify(predicate)} — ${errMessage(err)}. No rows removed.`);
     return data;
   }
 
+  // ONE engine call: parse-once, evaluate per row (scope) in the real engine.
   const sanitized = sanitizeNames(data);
-  let errorCount = 0;
-  let firstError = "";
-  const keep: boolean[] = data.categories.map((cat, ci) => {
+  const scopes: EvalScope[] = data.categories.map((cat, ci) => {
     const fieldVal: FormulaValue = field === "$category"
       ? cat
       : (data.series[seriesIdx].values[ci] ?? 0);
-    const scope = buildRowScope(data, sanitized, ci, fieldVal, params);
+    return toEngineScope(buildRowScope(data, sanitized, ci, fieldVal, params));
+  });
+
+  let results: EvalResultValue[];
+  try {
+    results = await evaluateScoped(engineExpr, scopes);
+  } catch (err) {
+    // Whole-expression (syntax) failure — leave the data untouched.
+    report(diagnostics, index, "filter", "warning", `Filter: invalid predicate ${JSON.stringify(predicate)} — ${errMessage(err)}. No rows removed.`);
+    return data;
+  }
+
+  let errorCount = 0;
+  let firstError = "";
+  const keep: boolean[] = data.categories.map((_, ci) => {
+    const r = results[ci];
+    // A row whose predicate errors (unknown name, bad coercion, missing result)
+    // is KEPT — filtering must never silently drop data on a broken expression.
+    if (r === undefined || isEngineError(r)) {
+      errorCount++;
+      if (!firstError) firstError = r === undefined ? "no result" : String(r);
+      return true;
+    }
     try {
-      return toBoolean(compiled(scope));
+      return resultToBoolean(r);
     } catch (err) {
-      // A row whose predicate errors (e.g. an unknown name) is kept — filtering
-      // must never silently drop data on a broken expression.
       errorCount++;
       if (!firstError) firstError = errMessage(err);
       return true;
@@ -452,47 +483,73 @@ function computeAggregate(op: AggregateOp, values: number[]): number {
 // Calculate
 // ============================================================================
 
-function applyCalculate(
+async function applyCalculate(
   data: ParsedChartData,
   t: CalculateTransform,
   index: number,
   diagnostics?: TransformDiagnostic[],
   params?: ReadonlyMap<string, FormulaValue>,
-): ParsedChartData {
+): Promise<ParsedChartData> {
   const { expr, as } = t;
 
-  // Compile once, evaluate per row against that row's scope.
-  let compiled: CompiledFormula | null = null;
+  // Translate to engine syntax (variable refs → aliases).
+  let engineExpr: string | null = null;
   try {
-    compiled = compileFormula(expr);
+    engineExpr = translateChartExpr(expr);
   } catch (err) {
     report(diagnostics, index, "calculate", "error", `Calculate "${as}": invalid expression — ${errMessage(err)}. Values set to 0.`);
-    compiled = null;
+    engineExpr = null;
   }
 
-  const sanitized = sanitizeNames(data);
-  let errorCount = 0;
-  let firstError = "";
-  const newValues: number[] = data.categories.map((_, ci) => {
-    if (!compiled) return 0;
-    const scope = buildRowScope(data, sanitized, ci, undefined, params);
+  let newValues: number[];
+  if (engineExpr === null || data.categories.length === 0) {
+    // Invalid expression (or no rows): every value falls back to 0 (matching the
+    // old compiled===null behavior); an empty data set yields an empty series.
+    newValues = data.categories.map(() => 0);
+  } else {
+    const sanitized = sanitizeNames(data);
+    const scopes: EvalScope[] = data.categories.map((_, ci) =>
+      toEngineScope(buildRowScope(data, sanitized, ci, undefined, params)),
+    );
+    let results: EvalResultValue[] | null = null;
     try {
-      const num = toNumber(compiled(scope));
-      return Number.isFinite(num) ? num : 0;
+      results = await evaluateScoped(engineExpr, scopes); // ONE engine call, parse-once
     } catch (err) {
-      // Non-numeric result or evaluation error — fall back to 0.
-      errorCount++;
-      if (!firstError) firstError = errMessage(err);
-      return 0;
+      report(diagnostics, index, "calculate", "error", `Calculate "${as}": invalid expression — ${errMessage(err)}. Values set to 0.`);
+      results = null;
     }
-  });
-
-  if (errorCount > 0) {
-    report(diagnostics, index, "calculate", "warning",
-      `Calculate "${as}": ${errorCount} of ${newValues.length} rows could not be evaluated (set to 0) — ${firstError}.`);
+    if (results === null) {
+      newValues = data.categories.map(() => 0);
+    } else {
+      let errorCount = 0;
+      let firstError = "";
+      newValues = data.categories.map((_, ci) => {
+        const r = results![ci];
+        if (r === undefined || isEngineError(r)) {
+          errorCount++;
+          if (!firstError) firstError = r === undefined ? "no result" : String(r);
+          return 0;
+        }
+        try {
+          return resultToNumber(r); // non-finite → 0, like the old toNumber path
+        } catch (err) {
+          errorCount++;
+          if (!firstError) firstError = errMessage(err);
+          return 0;
+        }
+      });
+      if (errorCount > 0) {
+        report(diagnostics, index, "calculate", "warning",
+          `Calculate "${as}": ${errorCount} of ${newValues.length} rows could not be evaluated (set to 0) — ${firstError}.`);
+      }
+    }
   }
 
-  // Check if a series with this name already exists — replace it
+  return replaceOrAppendSeries(data, as, newValues);
+}
+
+/** Replace the same-named series in place, or append a new one. */
+function replaceOrAppendSeries(data: ParsedChartData, as: string, newValues: number[]): ParsedChartData {
   const existingIdx = data.series.findIndex((s) => s.name === as);
   if (existingIdx >= 0) {
     const series = data.series.map((s, i) =>
@@ -500,13 +557,9 @@ function applyCalculate(
     );
     return { categories: data.categories, series };
   }
-
   return {
     categories: data.categories,
-    series: [
-      ...data.series,
-      { name: as, values: newValues, color: null },
-    ],
+    series: [...data.series, { name: as, values: newValues, color: null }],
   };
 }
 

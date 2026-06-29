@@ -82,10 +82,10 @@ describe("trendline + data labels interaction", () => {
     expect(result!.rSquared).toBeLessThanOrEqual(1);
   });
 
-  it("trendline on filtered data matches expected reduced point count", () => {
+  it("trendline on filtered data matches expected reduced point count", async () => {
     const data = makeData();
     // Filter to only values > 150, then compute trendline
-    const filtered = applyTransforms(data, [
+    const filtered = await applyTransforms(data, [
       { type: "filter", field: "Sales", predicate: "> 150" },
     ]);
     // Should have Feb(200), Mar(300), May(250)
@@ -102,7 +102,7 @@ describe("trendline + data labels interaction", () => {
 // ============================================================================
 
 describe("filter -> sort -> aggregate -> trendline pipeline", () => {
-  it("applies full transform pipeline then computes trendline", () => {
+  it("applies full transform pipeline then computes trendline", async () => {
     const data: ParsedChartData = {
       categories: ["A", "B", "A", "B", "A", "C", "C"],
       series: [
@@ -114,7 +114,7 @@ describe("filter -> sort -> aggregate -> trendline pipeline", () => {
       { type: "filter", field: "Revenue", predicate: "> 10" },
       { type: "sort", field: "Revenue", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // Filtered out 10, sorted ascending: 20, 50, 100, 150, 200, 300
     expect(result.series[0].values[0]).toBeLessThanOrEqual(result.series[0].values[1]);
 
@@ -123,7 +123,7 @@ describe("filter -> sort -> aggregate -> trendline pipeline", () => {
     expect(trend!.rSquared).toBeGreaterThan(0);
   });
 
-  it("aggregate then trendline on grouped data", () => {
+  it("aggregate then trendline on grouped data", async () => {
     const data: ParsedChartData = {
       categories: ["A", "B", "A", "B", "C"],
       series: [
@@ -134,7 +134,7 @@ describe("filter -> sort -> aggregate -> trendline pipeline", () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales", as: "TotalSales" },
     ];
-    const aggregated = applyTransforms(data, transforms);
+    const aggregated = await applyTransforms(data, transforms);
     // A=250, B=450, C=300
     expect(aggregated.categories).toHaveLength(3);
 
@@ -143,7 +143,7 @@ describe("filter -> sort -> aggregate -> trendline pipeline", () => {
     expect(trend!.points).toHaveLength(3);
   });
 
-  it("filter + sort + aggregate composes correctly", () => {
+  it("filter + sort + aggregate composes correctly", async () => {
     const data: ParsedChartData = {
       categories: ["X", "Y", "X", "Y", "Z", "Z"],
       series: [
@@ -156,7 +156,7 @@ describe("filter -> sort -> aggregate -> trendline pipeline", () => {
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Val", as: "Sum" },
       { type: "sort", field: "Sum", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // Filter removes 1,2 -> X:5,15 Y:10,20. Aggregate: X=20, Y=30. Sort desc: Y=30, X=20
     expect(result.categories[0]).toBe("Y");
     expect(result.series[0].values[0]).toBe(30);
@@ -354,14 +354,14 @@ describe("data point overrides + series color cycling", () => {
 // ============================================================================
 
 describe("large dataset through full pipeline", () => {
-  it("filter -> sort -> window on 1000 points", () => {
+  it("filter -> sort -> window on 1000 points", async () => {
     const data = makeLargeData(1000);
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Series1", predicate: "> 150" },
       { type: "sort", field: "Series1", order: "asc" },
       { type: "window", op: "running_sum", field: "Series1", as: "RunSum" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
 
     expect(result.categories.length).toBeLessThan(1000);
     expect(result.categories.length).toBeGreaterThan(0);
@@ -374,13 +374,13 @@ describe("large dataset through full pipeline", () => {
     }
   });
 
-  it("filter -> sort -> aggregate -> window -> bin on 500 points", () => {
+  it("filter -> sort -> aggregate -> window -> bin on 500 points", async () => {
     const data = makeLargeData(500);
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Series1", predicate: "> 100" },
       { type: "sort", field: "Series1", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories.length).toBeGreaterThan(0);
 
     // Verify sorted desc
@@ -406,12 +406,12 @@ describe("large dataset through full pipeline", () => {
 // ============================================================================
 
 describe("empty results at pipeline stages", () => {
-  it("filter removes all data points", () => {
+  it("filter removes all data points", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 9999" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
     expect(result.series[0].values).toHaveLength(0);
   });
@@ -425,7 +425,7 @@ describe("empty results at pipeline stages", () => {
     expect(result).toBeNull();
   });
 
-  it("aggregate on empty data returns empty", () => {
+  it("aggregate on empty data returns empty", async () => {
     const data: ParsedChartData = {
       categories: [],
       series: [{ name: "Sales", values: [], color: null }],
@@ -433,11 +433,11 @@ describe("empty results at pipeline stages", () => {
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Sales", as: "Total" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
   });
 
-  it("window transform on empty data returns empty", () => {
+  it("window transform on empty data returns empty", async () => {
     const data: ParsedChartData = {
       categories: [],
       series: [{ name: "Sales", values: [], color: null }],
@@ -445,19 +445,19 @@ describe("empty results at pipeline stages", () => {
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "Sales", as: "RunSum" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const runSum = result.series.find((s) => s.name === "RunSum");
     expect(runSum).toBeDefined();
     expect(runSum!.values).toHaveLength(0);
   });
 
-  it("filter removing all then sort on empty is safe", () => {
+  it("filter removing all then sort on empty is safe", async () => {
     const data = makeData();
     const transforms: TransformSpec[] = [
       { type: "filter", field: "Sales", predicate: "> 9999" },
       { type: "sort", field: "Sales", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     expect(result.categories).toHaveLength(0);
   });
 
@@ -475,20 +475,20 @@ describe("empty results at pipeline stages", () => {
 // ============================================================================
 
 describe("transform type switching", () => {
-  it("switching from aggregate to window changes output structure", () => {
+  it("switching from aggregate to window changes output structure", async () => {
     const data: ParsedChartData = {
       categories: ["A", "A", "B", "B"],
       series: [{ name: "Val", values: [10, 20, 30, 40], color: null }],
     };
 
     // Aggregate groups by category
-    const aggResult = applyTransforms(data, [
+    const aggResult = await applyTransforms(data, [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "Val", as: "Sum" },
     ]);
     expect(aggResult.categories).toHaveLength(2); // A, B
 
     // Window preserves all points
-    const winResult = applyTransforms(data, [
+    const winResult = await applyTransforms(data, [
       { type: "window", op: "running_sum", field: "Val", as: "RunSum" },
     ]);
     expect(winResult.categories).toHaveLength(4); // all original points
@@ -496,15 +496,15 @@ describe("transform type switching", () => {
     expect(runSum.values).toEqual([10, 30, 60, 100]);
   });
 
-  it("switching from filter to calculate yields different series count", () => {
+  it("switching from filter to calculate yields different series count", async () => {
     const data = makeData();
 
-    const filterResult = applyTransforms(data, [
+    const filterResult = await applyTransforms(data, [
       { type: "filter", field: "Sales", predicate: "> 200" },
     ]);
     expect(filterResult.series).toHaveLength(2); // same series, fewer points
 
-    const calcResult = applyTransforms(data, [
+    const calcResult = await applyTransforms(data, [
       { type: "calculate", expr: "Sales - Cost", as: "Profit" },
     ]);
     expect(calcResult.series).toHaveLength(3); // added Profit series

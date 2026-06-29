@@ -136,9 +136,9 @@ describe("Palette consistency", () => {
 // ============================================================================
 
 describe("Aggregation operations exhaustiveness", () => {
-  it.each(ALL_AGGREGATE_OPS)("aggregate op '%s' produces a numeric result", (op) => {
+  it.each(ALL_AGGREGATE_OPS)("aggregate op '%s' produces a numeric result", async (op) => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       {
         type: "aggregate",
         groupBy: ["$category"],
@@ -155,35 +155,35 @@ describe("Aggregation operations exhaustiveness", () => {
     }
   });
 
-  it("sum aggregation produces correct total", () => {
+  it("sum aggregation produces correct total", async () => {
     const data: ParsedChartData = {
       categories: ["A", "A", "B"],
       series: [{ name: "V", values: [10, 20, 30], color: null }],
     };
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "aggregate", groupBy: ["$category"], op: "sum", field: "V", as: "R" },
     ]);
     expect(result.categories).toEqual(["A", "B"]);
     expect(result.series[0].values).toEqual([30, 30]);
   });
 
-  it("count aggregation counts rows", () => {
+  it("count aggregation counts rows", async () => {
     const data: ParsedChartData = {
       categories: ["A", "A", "B"],
       series: [{ name: "V", values: [10, 20, 30], color: null }],
     };
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "aggregate", groupBy: ["$category"], op: "count", field: "V", as: "R" },
     ]);
     expect(result.series[0].values).toEqual([2, 1]);
   });
 
-  it("median aggregation computes correctly for even/odd counts", () => {
+  it("median aggregation computes correctly for even/odd counts", async () => {
     const data: ParsedChartData = {
       categories: ["A", "A", "A", "A"],
       series: [{ name: "V", values: [1, 3, 5, 7], color: null }],
     };
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "aggregate", groupBy: ["$category"], op: "median", field: "V", as: "R" },
     ]);
     expect(result.series[0].values[0]).toBe(4); // (3+5)/2
@@ -225,9 +225,9 @@ describe("Trendline type exhaustiveness", () => {
 // ============================================================================
 
 describe("Filter operator exhaustiveness", () => {
-  it.each(ALL_FILTER_OPERATORS)("filter operator '%s' is handled", (op) => {
+  it.each(ALL_FILTER_OPERATORS)("filter operator '%s' is handled", async (op) => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "filter", field: "Sales", predicate: `${op} 15` },
     ]);
     // Should return valid data (maybe fewer rows)
@@ -235,29 +235,29 @@ describe("Filter operator exhaustiveness", () => {
     expect(result.series.length).toBe(data.series.length);
   });
 
-  it("filter '> 15' keeps only values above 15", () => {
+  it("filter '> 15' keeps only values above 15", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "filter", field: "Sales", predicate: "> 15" },
     ]);
     // Sales: [10, 20, 15, 30, 25] -> keep 20, 30, 25
     expect(result.categories).toEqual(["B", "D", "E"]);
   });
 
-  it("filter '= someText' works on category field", () => {
+  it("filter '= someText' works on category field", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "filter", field: "$category", predicate: "= A" },
     ]);
     expect(result.categories).toEqual(["A"]);
   });
 
-  it("filter '!= 0' keeps non-zero values", () => {
+  it("filter '!= 0' keeps non-zero values", async () => {
     const data: ParsedChartData = {
       categories: ["X", "Y", "Z"],
       series: [{ name: "V", values: [0, 5, 0], color: null }],
     };
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "filter", field: "V", predicate: "!= 0" },
     ]);
     expect(result.categories).toEqual(["Y"]);
@@ -269,9 +269,9 @@ describe("Filter operator exhaustiveness", () => {
 // ============================================================================
 
 describe("Window operation exhaustiveness", () => {
-  it.each(ALL_WINDOW_OPS)("window op '%s' produces correct-length output", (op) => {
+  it.each(ALL_WINDOW_OPS)("window op '%s' produces correct-length output", async (op) => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op, field: "Sales", as: "Result" },
     ]);
     const resultSeries = result.series.find((s) => s.name === "Result");
@@ -279,18 +279,18 @@ describe("Window operation exhaustiveness", () => {
     expect(resultSeries!.values.length).toBe(data.categories.length);
   });
 
-  it("running_sum computes cumulative sum", () => {
+  it("running_sum computes cumulative sum", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op: "running_sum", field: "Sales", as: "RS" },
     ]);
     const rs = result.series.find((s) => s.name === "RS")!;
     expect(rs.values).toEqual([10, 30, 45, 75, 100]);
   });
 
-  it("running_mean computes cumulative average", () => {
+  it("running_mean computes cumulative average", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op: "running_mean", field: "Sales", as: "RM" },
     ]);
     const rm = result.series.find((s) => s.name === "RM")!;
@@ -298,9 +298,9 @@ describe("Window operation exhaustiveness", () => {
     expect(rm.values[1]).toBe(15); // (10+20)/2
   });
 
-  it("rank assigns rank 1 to highest value", () => {
+  it("rank assigns rank 1 to highest value", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "window", op: "rank", field: "Sales", as: "Rank" },
     ]);
     const rank = result.series.find((s) => s.name === "Rank")!;
@@ -318,7 +318,7 @@ describe("Transform type dispatch completeness", () => {
     "filter", "sort", "aggregate", "calculate", "window", "bin",
   ];
 
-  it("all transform types are dispatched without errors", () => {
+  it("all transform types are dispatched without errors", async () => {
     const data = sampleData();
     for (const type of TRANSFORM_TYPES) {
       let transform: TransformSpec;
@@ -342,14 +342,14 @@ describe("Transform type dispatch completeness", () => {
           transform = { type: "bin", field: "Sales", binCount: 3, as: "Bins" };
           break;
       }
-      const result = applyTransforms(data, [transform]);
+      const result = await applyTransforms(data, [transform]);
       expect(result.categories.length).toBeGreaterThan(0);
     }
   });
 
-  it("unknown transform type returns data unchanged", () => {
+  it("unknown transform type returns data unchanged", async () => {
     const data = sampleData();
-    const result = applyTransforms(data, [
+    const result = await applyTransforms(data, [
       { type: "unknown" as any, field: "Sales" },
     ]);
     expect(result).toEqual(data);

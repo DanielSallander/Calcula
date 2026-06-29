@@ -24,7 +24,7 @@ function makeData(
 // ============================================================================
 
 describe("REGRESSION: applyBin with all-NaN data", () => {
-  it("does not throw when all values are NaN", () => {
+  it("does not throw when all values are NaN", async () => {
     const data = makeData(["a", "b", "c"], [
       { name: "vals", values: [NaN, NaN, NaN], color: null },
     ]);
@@ -35,10 +35,10 @@ describe("REGRESSION: applyBin with all-NaN data", () => {
     // Math.min/max of NaN produces NaN, leading to NaN bin width and
     // NaN bin index, which crashes on array access.
     // This test documents the crash so it can be fixed later.
-    expect(() => applyTransforms(data, transforms)).toThrow();
+    await expect(applyTransforms(data, transforms)).rejects.toThrow();
   });
 
-  it("crashes with NaN input - documents known bug for future fix", () => {
+  it("crashes with NaN input - documents known bug for future fix", async () => {
     const data = makeData(["a", "b", "c"], [
       { name: "vals", values: [NaN, NaN, NaN], color: null },
     ]);
@@ -46,7 +46,7 @@ describe("REGRESSION: applyBin with all-NaN data", () => {
       { type: "bin", field: "vals", binCount: 3, as: "binned" },
     ];
     // When this test starts failing (not throwing), the bug has been fixed
-    expect(() => applyTransforms(data, transforms)).toThrow();
+    await expect(applyTransforms(data, transforms)).rejects.toThrow();
   });
 });
 
@@ -132,26 +132,26 @@ describe("REGRESSION: hiddenSeries index correctness", () => {
 // ============================================================================
 
 describe("REGRESSION: sort stability on tied values", () => {
-  it("descending sort on ties preserves original category order", () => {
+  it("descending sort on ties preserves original category order", async () => {
     const data = makeData(["Alpha", "Beta", "Gamma", "Delta"], [
       { name: "Score", values: [10, 10, 10, 10], color: null },
     ]);
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Score", order: "desc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // All values are equal, so original order should be preserved (stable sort)
     expect(result.categories).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
   });
 
-  it("ascending sort on partial ties preserves order within tie groups", () => {
+  it("ascending sort on partial ties preserves order within tie groups", async () => {
     const data = makeData(["A", "B", "C", "D"], [
       { name: "Score", values: [20, 10, 10, 30], color: null },
     ]);
     const transforms: TransformSpec[] = [
       { type: "sort", field: "Score", order: "asc" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // B and C are tied at 10, should appear in original relative order
     expect(result.categories[0]).toBe("B");
     expect(result.categories[1]).toBe("C");
@@ -165,14 +165,14 @@ describe("REGRESSION: sort stability on tied values", () => {
 // ============================================================================
 
 describe("REGRESSION: aggregate count includes duplicates", () => {
-  it("count returns total number of items, not unique count", () => {
+  it("count returns total number of items, not unique count", async () => {
     const data = makeData(["X", "X", "X", "Y", "Y"], [
       { name: "Val", values: [10, 10, 10, 20, 20], color: null },
     ]);
     const transforms: TransformSpec[] = [
       { type: "aggregate", groupBy: ["$category"], op: "count", field: "Val", as: "Count" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     // X appears 3 times, Y appears 2 times
     const xIdx = result.categories.indexOf("X");
     const yIdx = result.categories.indexOf("Y");
@@ -186,14 +186,14 @@ describe("REGRESSION: aggregate count includes duplicates", () => {
 // ============================================================================
 
 describe("REGRESSION: running_sum with NaN values", () => {
-  it("NaN in running_sum propagates NaN forward (sum + NaN = NaN)", () => {
+  it("NaN in running_sum propagates NaN forward (sum + NaN = NaN)", async () => {
     const data = makeData(["a", "b", "c", "d"], [
       { name: "Val", values: [10, NaN, 20, 30], color: null },
     ]);
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "Val", as: "RunSum" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const runSum = result.series.find((s) => s.name === "RunSum");
     expect(runSum).toBeDefined();
     // First value is correct
@@ -202,14 +202,14 @@ describe("REGRESSION: running_sum with NaN values", () => {
     expect(runSum!.values[1]).toBeNaN();
   });
 
-  it("running_sum with all finite values accumulates correctly", () => {
+  it("running_sum with all finite values accumulates correctly", async () => {
     const data = makeData(["a", "b", "c"], [
       { name: "Val", values: [5, 10, 15], color: null },
     ]);
     const transforms: TransformSpec[] = [
       { type: "window", op: "running_sum", field: "Val", as: "RunSum" },
     ];
-    const result = applyTransforms(data, transforms);
+    const result = await applyTransforms(data, transforms);
     const runSum = result.series.find((s) => s.name === "RunSum");
     expect(runSum!.values).toEqual([5, 15, 30]);
   });

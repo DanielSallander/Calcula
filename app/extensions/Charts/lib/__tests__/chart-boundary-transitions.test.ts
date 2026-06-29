@@ -25,41 +25,41 @@ function makeData(overrides: Partial<ParsedChartData> = {}): ParsedChartData {
 // ============================================================================
 
 describe("Filter at exact threshold value", () => {
-  it(">= keeps value exactly at threshold", () => {
+  it(">= keeps value exactly at threshold", async () => {
     const data = makeData();
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: ">= 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toContain(30);
     expect(result.series[0].values).toEqual([30, 40, 50]);
   });
 
-  it("> excludes value exactly at threshold", () => {
+  it("> excludes value exactly at threshold", async () => {
     const data = makeData();
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "> 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).not.toContain(30);
     expect(result.series[0].values).toEqual([40, 50]);
   });
 
-  it("= keeps only value exactly at threshold", () => {
+  it("= keeps only value exactly at threshold", async () => {
     const data = makeData();
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "= 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([30]);
     expect(result.categories).toEqual(["C"]);
   });
 
-  it("<= keeps value exactly at threshold", () => {
+  it("<= keeps value exactly at threshold", async () => {
     const data = makeData();
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "<= 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([10, 20, 30]);
   });
 
-  it("< excludes value exactly at threshold", () => {
+  it("< excludes value exactly at threshold", async () => {
     const data = makeData();
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "< 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([10, 20]);
   });
 });
@@ -69,7 +69,7 @@ describe("Filter at exact threshold value", () => {
 // ============================================================================
 
 describe("Aggregate with varying group sizes", () => {
-  it("mean of single-item group equals the item itself", () => {
+  it("mean of single-item group equals the item itself", async () => {
     // Each category is unique => each group has exactly 1 item
     const data = makeData({
       categories: ["A", "B", "C"],
@@ -78,11 +78,11 @@ describe("Aggregate with varying group sizes", () => {
     const agg: AggregateTransform = {
       type: "aggregate", groupBy: ["$category"], op: "mean", field: "S1", as: "Avg",
     };
-    const result = applyTransforms(data, [agg]);
+    const result = await applyTransforms(data, [agg]);
     expect(result.series[0].values).toEqual([10, 20, 30]);
   });
 
-  it("mean of two-item group is their average", () => {
+  it("mean of two-item group is their average", async () => {
     const data = makeData({
       categories: ["A", "A", "B"],
       series: [{ name: "S1", values: [10, 20, 30], color: null }],
@@ -90,12 +90,12 @@ describe("Aggregate with varying group sizes", () => {
     const agg: AggregateTransform = {
       type: "aggregate", groupBy: ["$category"], op: "mean", field: "S1", as: "Avg",
     };
-    const result = applyTransforms(data, [agg]);
+    const result = await applyTransforms(data, [agg]);
     // Group A: (10+20)/2 = 15, Group B: 30
     expect(result.series[0].values).toEqual([15, 30]);
   });
 
-  it("count returns 1 for single-item groups", () => {
+  it("count returns 1 for single-item groups", async () => {
     const data = makeData({
       categories: ["X", "Y", "Z"],
       series: [{ name: "S1", values: [5, 10, 15], color: null }],
@@ -103,11 +103,11 @@ describe("Aggregate with varying group sizes", () => {
     const agg: AggregateTransform = {
       type: "aggregate", groupBy: ["$category"], op: "count", field: "S1", as: "N",
     };
-    const result = applyTransforms(data, [agg]);
+    const result = await applyTransforms(data, [agg]);
     expect(result.series[0].values).toEqual([1, 1, 1]);
   });
 
-  it("median of 2 items is their average", () => {
+  it("median of 2 items is their average", async () => {
     const data = makeData({
       categories: ["A", "A"],
       series: [{ name: "S1", values: [10, 30], color: null }],
@@ -115,7 +115,7 @@ describe("Aggregate with varying group sizes", () => {
     const agg: AggregateTransform = {
       type: "aggregate", groupBy: ["$category"], op: "median", field: "S1", as: "Med",
     };
-    const result = applyTransforms(data, [agg]);
+    const result = await applyTransforms(data, [agg]);
     expect(result.series[0].values).toEqual([20]);
   });
 });
@@ -125,7 +125,7 @@ describe("Aggregate with varying group sizes", () => {
 // ============================================================================
 
 describe("Bin transform at exact bin edges", () => {
-  it("value at exact max goes into last bin (clamped)", () => {
+  it("value at exact max goes into last bin (clamped)", async () => {
     // Values: [0, 10]. Range=10, binCount=2, binWidth=5.
     // Value 10: binIdx = floor((10-0)/5) = 2, clamped to 1 (last bin)
     const data = makeData({
@@ -133,12 +133,12 @@ describe("Bin transform at exact bin edges", () => {
       series: [{ name: "S1", values: [0, 10], color: null }],
     });
     const bin: BinTransform = { type: "bin", field: "S1", binCount: 2, as: "Binned" };
-    const result = applyTransforms(data, [bin]);
+    const result = await applyTransforms(data, [bin]);
     // Bin 0: [0, 5) has value 0; Bin 1: [5, 10] has value 10
     expect(result.series[0].values).toEqual([1, 1]);
   });
 
-  it("value at exact internal bin boundary goes into higher bin", () => {
+  it("value at exact internal bin boundary goes into higher bin", async () => {
     // Values: [0, 5, 10]. Range=10, binCount=2, binWidth=5.
     // Value 5: binIdx = floor((5-0)/5) = 1 => bin 1
     const data = makeData({
@@ -146,18 +146,18 @@ describe("Bin transform at exact bin edges", () => {
       series: [{ name: "S1", values: [0, 5, 10], color: null }],
     });
     const bin: BinTransform = { type: "bin", field: "S1", binCount: 2, as: "Binned" };
-    const result = applyTransforms(data, [bin]);
+    const result = await applyTransforms(data, [bin]);
     // Bin 0: value 0 (count 1), Bin 1: values 5,10 (count 2)
     expect(result.series[0].values).toEqual([1, 2]);
   });
 
-  it("all identical values: range is 0, all in one bin", () => {
+  it("all identical values: range is 0, all in one bin", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "S1", values: [7, 7, 7], color: null }],
     });
     const bin: BinTransform = { type: "bin", field: "S1", binCount: 3, as: "Binned" };
-    const result = applyTransforms(data, [bin]);
+    const result = await applyTransforms(data, [bin]);
     // range = 0, binWidth = 0/3 but code uses range || 1 = 1
     // All values: binIdx = floor((7-7)/0.333) = 0
     const total = result.series[0].values.reduce((a, b) => a + b, 0);
@@ -243,43 +243,43 @@ describe("Trendline minimum data points", () => {
 // ============================================================================
 
 describe("Scale domain boundaries via filter", () => {
-  it("filter at exact min keeps only the minimum value", () => {
+  it("filter at exact min keeps only the minimum value", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "S1", values: [10, 20, 30], color: null }],
     });
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "= 10" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([10]);
   });
 
-  it("filter at exact max keeps only the maximum value", () => {
+  it("filter at exact max keeps only the maximum value", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "S1", values: [10, 20, 30], color: null }],
     });
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "= 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([30]);
   });
 
-  it(">= min keeps all values", () => {
+  it(">= min keeps all values", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "S1", values: [10, 20, 30], color: null }],
     });
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: ">= 10" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([10, 20, 30]);
   });
 
-  it("<= max keeps all values", () => {
+  it("<= max keeps all values", async () => {
     const data = makeData({
       categories: ["A", "B", "C"],
       series: [{ name: "S1", values: [10, 20, 30], color: null }],
     });
     const filter: FilterTransform = { type: "filter", field: "S1", predicate: "<= 30" };
-    const result = applyTransforms(data, [filter]);
+    const result = await applyTransforms(data, [filter]);
     expect(result.series[0].values).toEqual([10, 20, 30]);
   });
 });
