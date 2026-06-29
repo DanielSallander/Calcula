@@ -4213,6 +4213,7 @@ pub fn run() {
             scripting::delete_object_scripts_for_instance,
             // Script network capability commands (Phase 4 — net.fetch egress)
             net_commands::grant_script_net_origin,
+            net_commands::grant_script_bi,
             net_commands::revoke_script_capabilities,
             net_commands::script_http_fetch,
             // Object template commands (scriptable objects templates)

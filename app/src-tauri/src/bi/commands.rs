@@ -1697,11 +1697,24 @@ pub async fn bi_bind_table(
 #[tauri::command]
 pub async fn bi_query(
     bi_state: State<'_, BiState>,
+    cap_store: State<'_, crate::scripting::CapabilityStore>,
     connection_id: ConnectionId,
     request: BiQueryRequest,
+    script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<BiQueryResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // Authoritative capability re-check (A3). A broker-routed call on behalf of a
+    // sandboxed script carries a script_id and MUST have been granted bi.query
+    // (mirrored to the store on consent-grant); a trusted main-window direct
+    // call (a built-in feature) carries no script_id and is allowed. The
+    // renderer can be compromised, so the broker's TS check is not sufficient.
+    if let Some(sid) = script_id.as_deref() {
+        if !cap_store.is_bi_granted(sid, "bi.query") {
+            crate::log_warn!("SECURITY", "bi_query DENIED (bi.query not granted): script={}", sid);
+            return Err("PermissionDenied: bi.query not granted for this script".to_string());
+        }
+    }
     log_info!(
         "BI",
         "bi_query: conn={}, measures={:?}, group_by={:?}",
@@ -1775,11 +1788,23 @@ pub async fn bi_query(
 #[tauri::command]
 pub async fn script_bi_sql(
     bi_state: State<'_, BiState>,
+    cap_store: State<'_, crate::scripting::CapabilityStore>,
     connection_id: ConnectionId,
     sql: String,
+    script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<BiQueryResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // Authoritative capability re-check (A3): a broker-routed sandboxed call
+    // carries a script_id and MUST have been granted the higher-trust bi.sql; a
+    // trusted main-window direct call carries none. Defense in depth above the
+    // TS broker (the renderer may be compromised).
+    if let Some(sid) = script_id.as_deref() {
+        if !cap_store.is_bi_granted(sid, "bi.sql") {
+            crate::log_warn!("SECURITY", "script_bi_sql DENIED (bi.sql not granted): script={}", sid);
+            return Err("PermissionDenied: bi.sql not granted for this script".to_string());
+        }
+    }
     validate_readonly_sql(&sql)?;
 
     auto_connect_bi_connection(&bi_state, connection_id).await?;

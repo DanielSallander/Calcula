@@ -127,6 +127,51 @@ export async function syncNetOriginsToBackend(scriptId: string): Promise<void> {
   }
 }
 
+/** Mirror one granted BI capability to the Rust store (called immediately on
+ *  grant). bi_query / script_bi_sql re-check the store authoritatively. */
+export async function grantBiCapability(
+  scriptId: string,
+  cap: "bi.query" | "bi.sql",
+): Promise<void> {
+  await invokeBackend("grant_script_bi", { scriptId, capability: cap });
+}
+
+/** Re-push a script's session-granted BI capabilities to Rust (mount), so they
+ *  survive an unmount/remount within the session — parallel to net origins. */
+export async function syncBiGrantsToBackend(scriptId: string): Promise<void> {
+  const { caps } = getScriptGrants(scriptId);
+  for (const cap of caps) {
+    if (cap === "bi.query" || cap === "bi.sql") {
+      try {
+        await invokeBackend("grant_script_bi", { scriptId, capability: cap });
+      } catch {
+        /* best-effort; the script JIT-reprompts if Rust lacks the grant */
+      }
+    }
+  }
+}
+
+/** Reconcile the authoritative Rust store to a script's CURRENT live grant set
+ *  (clear, then re-push net origins + BI caps). Used after a single-capability
+ *  revoke so dropping one cap never leaves a sibling stale or accidentally nukes
+ *  it (the coarse revoke_script_capabilities clears the whole entry). */
+export async function reconcileBackendGrants(scriptId: string): Promise<void> {
+  const { caps, origins } = getScriptGrants(scriptId);
+  try {
+    await invokeBackend("revoke_script_capabilities", { scriptId });
+    for (const origin of origins) {
+      await invokeBackend("grant_script_net_origin", { scriptId, origin });
+    }
+    for (const cap of caps) {
+      if (cap === "bi.query" || cap === "bi.sql") {
+        await invokeBackend("grant_script_bi", { scriptId, capability: cap });
+      }
+    }
+  } catch {
+    /* best-effort; the script JIT-reprompts / re-syncs if Rust lacks a grant */
+  }
+}
+
 /** Drop a script's Rust-side grants (called on unmount). */
 export async function revokeBackendCapabilities(scriptId: string): Promise<void> {
   try {
@@ -155,9 +200,13 @@ export async function revokeCapability(scriptId: string, cap: CapabilityId): Pro
   const s = grantState.get(scriptId);
   if (!s) return;
   s.caps.delete(cap);
-  if (cap === "net.fetch") {
-    s.origins.clear();
-    await revokeBackendCapabilities(scriptId);
+  if (cap === "net.fetch") s.origins.clear();
+  // For any capability the Rust store tracks (net origins, bi.query, bi.sql),
+  // reconcile the authoritative store to the now-reduced live grant set rather
+  // than coarse-dropping the whole entry — so revoking one cap leaves the
+  // script's other grants intact in Rust.
+  if (cap === "net.fetch" || cap === "bi.query" || cap === "bi.sql") {
+    await reconcileBackendGrants(scriptId);
   }
 }
 

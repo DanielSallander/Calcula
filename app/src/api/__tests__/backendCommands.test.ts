@@ -24,6 +24,57 @@ function backendCommandNames(): Set<string> {
   return names;
 }
 
+// --- Fail-closed drift heuristics -----------------------------------------
+// The drift guard above catches a denylist entry that goes STALE (removed from
+// the backend). This catches the other direction: a NEW dangerous-looking
+// command someone adds and forgets to classify. A command whose name matches a
+// known-dangerous family must be EITHER in PRIVILEGED_BACKEND_COMMANDS or in the
+// explicit acknowledgement list below — otherwise it is silently "feature-open"
+// to any governed third-party door. The families are high-signal tripwires
+// (deliberately not exhaustive): code execution, script-capability grants, OS
+// credentials, the local MCP server, extension management, host filesystem.
+const DANGEROUS_PREFIXES = [
+  "run_",
+  "notebook_",
+  "script_",
+  "grant_",
+  "keychain_",
+  "mcp_",
+  "scan_extension",
+  "uninstall_",
+] as const;
+const DANGEROUS_EXACT = new Set([
+  "read_text_file",
+  "write_text_file",
+  "write_binary_file",
+  "sort_log_file",
+]);
+function matchesDangerousHeuristic(name: string): boolean {
+  return DANGEROUS_EXACT.has(name) || DANGEROUS_PREFIXES.some((p) => name.startsWith(p));
+}
+
+// Heuristic matches intentionally NOT in the privileged denylist — each with the
+// reason it is feature-open, so a new dangerous-looking command can't quietly
+// join this list without a reviewer seeing it. The code-EXECUTION surface
+// (run_script, notebook_run_*, grant_*, set_script_security_level) is denylisted
+// under codeExecution; the entries below only read/manage notebook documents +
+// runtime state or report status, and never initiate execution. Notebook/script
+// PERSISTENCE is feature-open by the same precedent as the (non-prefixed) script
+// CRUD get_script/save_script/...; revisit that whole code-persistence surface if
+// a distributed extension ever gains a context-backed DIRECT backend path (today
+// it reaches the backend only via the consent-gated broker, which exposes no
+// notebook/script-write capability).
+const KNOWN_SAFE_HEURISTIC_MATCHES: Record<string, string> = {
+  notebook_create: "notebook doc create; execution gated via notebook_run_*",
+  notebook_save: "notebook doc persist; execution gated via notebook_run_*",
+  notebook_load: "notebook doc read",
+  notebook_list: "notebook doc list (read)",
+  notebook_delete: "notebook doc delete (workbook-local data, like delete_chart)",
+  notebook_rewind: "rewinds notebook runtime state; initiates no new execution",
+  notebook_reset_runtime: "tears down notebook runtime; initiates no new execution",
+  script_execution_status: "read-only script execution telemetry",
+};
+
 describe("backend command capability model (A3)", () => {
   it("every privileged command exists in the Tauri surface (drift guard)", () => {
     const real = backendCommandNames();
@@ -35,6 +86,32 @@ describe("backend command capability model (A3)", () => {
       missing,
       `privileged commands not found in generate_handler! (stale registry): ${missing.join(", ")}`,
     ).toEqual([]);
+  });
+
+  it("every dangerous-looking command is denylisted or acknowledged safe (fail-closed)", () => {
+    const real = backendCommandNames();
+    const unclassified = [...real]
+      .filter(matchesDangerousHeuristic)
+      .filter((c) => !isPrivilegedCommand(c) && !(c in KNOWN_SAFE_HEURISTIC_MATCHES));
+    expect(
+      unclassified,
+      `dangerous-looking backend command(s) are neither in PRIVILEGED_BACKEND_COMMANDS nor ` +
+        `KNOWN_SAFE_HEURISTIC_MATCHES. Classify each: add to the denylist if it is a privileged/` +
+        `VBA-escape command, or to the acknowledgement list (with a reason) if it is feature-open: ` +
+        `${unclassified.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("the fail-closed guard actually fires on a new unclassified dangerous command", () => {
+    // Simulate a freshly-added dangerous command nobody classified.
+    const withNew = new Set([...backendCommandNames(), "run_arbitrary_native_code"]);
+    const unclassified = [...withNew]
+      .filter(matchesDangerousHeuristic)
+      .filter((c) => !isPrivilegedCommand(c) && !(c in KNOWN_SAFE_HEURISTIC_MATCHES));
+    expect(unclassified).toContain("run_arbitrary_native_code");
+    // The ACK list is honored: a known-safe match does NOT trip the guard.
+    expect(matchesDangerousHeuristic("notebook_save")).toBe(true);
+    expect("notebook_save" in KNOWN_SAFE_HEURISTIC_MATCHES).toBe(true);
   });
 
   it("classifies privileged vs feature-open commands", () => {

@@ -25,6 +25,7 @@ import { CAPABILITY_ID_SET, type CapabilityId } from "./capabilityIds";
 import { ALLOWLIST } from "./allowlist";
 import {
   fetchOriginOf,
+  grantBiCapability,
   grantNetOrigin,
   hasFetchOrigin,
   recordCapabilityGrant,
@@ -445,7 +446,14 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
     capability: cap,
     origin: null,
   });
-  if (decision !== "deny") recordCapabilityGrant(handle.scriptId, cap);
+  if (decision !== "deny") {
+    recordCapabilityGrant(handle.scriptId, cap);
+    // Mirror BI grants into the authoritative Rust store (bi_query/script_bi_sql
+    // re-check it). net.fetch is mirrored above per-origin via grantNetOrigin.
+    if (cap === "bi.query" || cap === "bi.sql") {
+      await grantBiCapability(handle.scriptId, cap);
+    }
+  }
 }
 
 async function executeExtensionImpl(mw: MountedExtension, method: string, args: unknown[]): Promise<unknown> {
@@ -507,7 +515,7 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
       // Structured, model-scoped query via the cached engine path (no raw SQL).
       const [connectionId, request] = args as [string, unknown];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("bi_query", { connectionId, request });
+      return invokeBackend("bi_query", { connectionId, request, scriptId });
     }
     case "cap.biListConnections": {
       const { invokeBackend } = await import("../backend");
@@ -517,7 +525,7 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
     case "cap.biSql": {
       const [connectionId, sql] = args as [string, string];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_bi_sql", { connectionId, sql });
+      return invokeBackend("script_bi_sql", { connectionId, sql, scriptId });
     }
     default:
       throw new BrokerError("UnknownMethod", `No extension host implementation for ${method}`);

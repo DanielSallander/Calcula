@@ -98,6 +98,31 @@ pub fn grant_script_net_origin(
     Ok(())
 }
 
+/// Mirror a consent-granted BI capability ("bi.query" / "bi.sql") into the
+/// authoritative backend store. The frontend's consent store is the system of
+/// record; this re-establishes the in-memory grant that `bi_query` /
+/// `script_bi_sql` re-check per call. Only the main window may grant.
+#[tauri::command]
+pub fn grant_script_bi(
+    cap_store: State<CapabilityStore>,
+    script_id: String,
+    capability: String,
+    window: Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    if capability != "bi.query" && capability != "bi.sql" {
+        return Err(format!("InvalidCapability: {} (expected bi.query or bi.sql)", capability));
+    }
+    cap_store.grant_bi(&script_id, &capability);
+    log_info!(
+        "SECURITY",
+        "grant_script_bi: script={} capability={}",
+        script_id,
+        capability
+    );
+    Ok(())
+}
+
 /// Drop all backend capability state for a script. Called on unmount / revoke.
 #[tauri::command]
 pub fn revoke_script_capabilities(

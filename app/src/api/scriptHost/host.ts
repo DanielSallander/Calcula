@@ -42,12 +42,14 @@ import {
 import { ALLOWLIST } from "./allowlist";
 import {
   fetchOriginOf,
+  grantBiCapability,
   grantNetOrigin,
   hasFetchOrigin,
   recordCapabilityGrant,
   requestCapabilityGrant,
   resetAllGrants,
   revokeBackendCapabilities,
+  syncBiGrantsToBackend,
   syncNetOriginsToBackend,
   wasDeniedThisSession,
 } from "./capabilities";
@@ -231,6 +233,7 @@ export async function hostMountScript(definition: HostMountDefinition): Promise<
   // Re-establish this script's net.fetch origins in the Rust store (a remount
   // within the session keeps session grants; first mount pushes nothing).
   void syncNetOriginsToBackend(definition.id);
+  void syncBiGrantsToBackend(definition.id);
 
   const snapshot = await buildSnapshot(definition, mw);
   if (snapshot.properties) {
@@ -553,7 +556,14 @@ async function maybeRequestCapabilityGrant(
     capability: cap,
     origin: null,
   });
-  if (decision !== "deny") recordCapabilityGrant(handle.scriptId, cap);
+  if (decision !== "deny") {
+    recordCapabilityGrant(handle.scriptId, cap);
+    // Mirror BI grants to the authoritative Rust store (bi_query/script_bi_sql
+    // re-check it per call).
+    if (cap === "bi.query" || cap === "bi.sql") {
+      await grantBiCapability(handle.scriptId, cap);
+    }
+  }
 }
 
 /** The IMPL table (design §5): today's context-builder bodies, minus closures. */
@@ -776,7 +786,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // is MAIN-window-guarded; the host runs in the main window.
       const [connectionId, request] = args as [string, unknown];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("bi_query", { connectionId, request });
+      return invokeBackend("bi_query", { connectionId, request, scriptId: definition.id });
     }
     case "cap.biListConnections": {
       // Expose ONLY a non-sensitive summary — never connectionString / server /
@@ -792,7 +802,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // executes it against the connection's database.
       const [connectionId, sql] = args as [string, string];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("script_bi_sql", { connectionId, sql });
+      return invokeBackend("script_bi_sql", { connectionId, sql, scriptId: definition.id });
     }
     case "cap.cubeValue": {
       // CUBE convenience over the bi.query trust class: a measure sliced by member

@@ -40,6 +40,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "notebook_run_from",
     "grant_script_session_approval",
     "grant_script_net_origin",
+    "grant_script_bi",
     "set_script_security_level",
     "script_http_fetch",
     "script_bi_sql",

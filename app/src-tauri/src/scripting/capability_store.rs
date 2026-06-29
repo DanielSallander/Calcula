@@ -30,6 +30,10 @@ struct ScriptCaps {
     net_origins: HashSet<String>,
     /// Recent fetch timestamps used for the rolling per-minute rate limit.
     fetch_calls: VecDeque<Instant>,
+    /// Granted BI capability ids ("bi.query" / "bi.sql"), mirrored from the
+    /// broker on consent-grant and re-checked authoritatively in bi_query /
+    /// script_bi_sql (defense in depth: the renderer may be compromised).
+    bi_caps: HashSet<String>,
 }
 
 /// Authoritative in-memory store of per-script network grants and rate state.
@@ -64,6 +68,23 @@ impl CapabilityStore {
         scripts
             .get(script_id)
             .map(|c| c.net_origins.contains(origin))
+            .unwrap_or(false)
+    }
+
+    /// Grant a BI capability ("bi.query" / "bi.sql") to `script_id`. Mirrored
+    /// from the broker on consent-grant. Creates the entry if needed.
+    pub fn grant_bi(&self, script_id: &str, capability: &str) {
+        let mut scripts = self.scripts.lock().unwrap();
+        let caps = scripts.entry(script_id.to_string()).or_default();
+        caps.bi_caps.insert(capability.to_string());
+    }
+
+    /// Whether `script_id` has been granted the BI `capability`.
+    pub fn is_bi_granted(&self, script_id: &str, capability: &str) -> bool {
+        let scripts = self.scripts.lock().unwrap();
+        scripts
+            .get(script_id)
+            .map(|c| c.bi_caps.contains(capability))
             .unwrap_or(false)
     }
 
@@ -205,5 +226,51 @@ pub fn normalize_origin(parsed: &ParsedUrl) -> String {
             format!("{}://{}:{}", parsed.scheme, parsed.host, p)
         }
         _ => format!("{}://{}", parsed.scheme, parsed.host),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bi_grant_is_per_script_and_per_capability() {
+        let store = CapabilityStore::new();
+        // Deny-by-default: nothing granted.
+        assert!(!store.is_bi_granted("s1", "bi.query"));
+        assert!(!store.is_bi_granted("s1", "bi.sql"));
+
+        store.grant_bi("s1", "bi.query");
+        assert!(store.is_bi_granted("s1", "bi.query"));
+        // A grant is capability-specific...
+        assert!(!store.is_bi_granted("s1", "bi.sql"));
+        // ...and script-specific.
+        assert!(!store.is_bi_granted("s2", "bi.query"));
+
+        store.grant_bi("s1", "bi.sql");
+        assert!(store.is_bi_granted("s1", "bi.sql"));
+    }
+
+    #[test]
+    fn revoke_script_clears_bi_grants_and_net_origins() {
+        let store = CapabilityStore::new();
+        store.grant_bi("s1", "bi.query");
+        store.grant_net_origin("s1", "https://example.com");
+        assert!(store.is_bi_granted("s1", "bi.query"));
+        assert!(store.is_net_origin_granted("s1", "https://example.com"));
+
+        store.revoke_script("s1");
+        assert!(!store.is_bi_granted("s1", "bi.query"));
+        assert!(!store.is_net_origin_granted("s1", "https://example.com"));
+    }
+
+    #[test]
+    fn net_and_bi_grants_coexist_independently() {
+        let store = CapabilityStore::new();
+        store.grant_net_origin("s1", "https://example.com");
+        store.grant_bi("s1", "bi.query");
+        // Granting BI must not disturb the net grant, and vice versa.
+        assert!(store.is_net_origin_granted("s1", "https://example.com"));
+        assert!(store.is_bi_granted("s1", "bi.query"));
     }
 }
