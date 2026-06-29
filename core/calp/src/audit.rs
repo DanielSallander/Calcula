@@ -71,16 +71,32 @@ pub enum AuditEvent {
     WritebackInvalidated,
     /// Publisher approved or rejected a submitted writeback value.
     WritebackReviewed,
-    /// A sandboxed script (run_script or a notebook cell) mutated grid cells.
+    /// A sandboxed script (run_script / notebook cell / MCP tool) mutated grid cells.
     ScriptExecuted,
 }
+
+impl AuditEvent {
+    /// Script-activity events are recorded EVEN WHEN the (distribution) audit log
+    /// is disabled. The Transparency pillar requires script grid mutations to be
+    /// visible by default ("you should never wonder what the code touched");
+    /// distribution events (subscribe/refresh/override/writeback/…) remain opt-in
+    /// via the `enabled` flag.
+    pub fn is_always_recorded(&self) -> bool {
+        matches!(self, AuditEvent::ScriptExecuted)
+    }
+}
+
+/// Default rolling cap for the audit log when one is not explicitly set, so the
+/// always-on script-activity trail (and a default-on distribution log) cannot
+/// grow unbounded in the workbook. Mirrors the frontend broker ring capacity.
+pub const DEFAULT_MAX_ENTRIES: usize = 2000;
 
 impl AuditLog {
     pub fn new() -> Self {
         Self {
             format_version: 1,
             enabled: false,
-            max_entries: 0,
+            max_entries: DEFAULT_MAX_ENTRIES,
             entries: Vec::new(),
             extra: HashMap::new(),
         }
@@ -96,9 +112,23 @@ impl AuditLog {
         }
     }
 
-    /// Record an event. No-op if logging is disabled.
+    /// Record an event. No-op if logging is disabled UNLESS the event is
+    /// always-recorded (script activity — see `AuditEvent::is_always_recorded`).
     pub fn record(&mut self, event: AuditEvent, description: &str, user: &str, now: &str) {
-        if !self.enabled {
+        self.record_with_extra(event, description, user, now, HashMap::new());
+    }
+
+    /// Record an event with structured `extra` fields (e.g. a script's surface,
+    /// id, mutated sheet/range). Same enable/always-recorded gating as `record`.
+    pub fn record_with_extra(
+        &mut self,
+        event: AuditEvent,
+        description: &str,
+        user: &str,
+        now: &str,
+        extra: HashMap<String, serde_json::Value>,
+    ) {
+        if !self.enabled && !event.is_always_recorded() {
             return;
         }
 
@@ -107,7 +137,7 @@ impl AuditLog {
             event,
             description: description.to_string(),
             user: user.to_string(),
-            extra: HashMap::new(),
+            extra,
         });
 
         // Trim to max_entries if set
@@ -212,5 +242,40 @@ mod tests {
         assert!(json.contains("\"script_executed\""));
         let back: AuditLog = serde_json::from_str(&json).unwrap();
         assert!(matches!(back.entries[0].event, AuditEvent::ScriptExecuted));
+    }
+
+    #[test]
+    fn script_events_record_even_when_disabled() {
+        // Transparency: a DISABLED (default) log still records script activity,
+        // but NOT opt-in distribution events.
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        log.record(AuditEvent::Subscribe, "distribution event", "user", "2026-01-01T00:00:00Z");
+        assert_eq!(log.entry_count(), 0, "distribution events stay opt-in");
+        log.record(AuditEvent::ScriptExecuted, "a script wrote cells", "local", "2026-01-01T00:00:00Z");
+        assert_eq!(log.entry_count(), 1, "script activity is always recorded");
+    }
+
+    #[test]
+    fn record_with_extra_carries_structured_fields() {
+        let mut log = AuditLog::new(); // disabled by default; script event still records
+        let mut extra = HashMap::new();
+        extra.insert("surface".to_string(), serde_json::json!("run_script"));
+        extra.insert("surfaceId".to_string(), serde_json::json!("hello.js"));
+        extra.insert("sheet".to_string(), serde_json::json!(0));
+        extra.insert("cellsModified".to_string(), serde_json::json!(3));
+        log.record_with_extra(AuditEvent::ScriptExecuted, "run_script modified 3 cell(s)", "local", "2026-06-28T00:00:00Z", extra);
+        let json = serde_json::to_string(&log).unwrap();
+        // `extra` is flattened onto the entry.
+        assert!(json.contains("\"surface\":\"run_script\""));
+        assert!(json.contains("\"surfaceId\":\"hello.js\""));
+        let back: AuditLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries[0].extra.get("cellsModified"), Some(&serde_json::json!(3)));
+    }
+
+    #[test]
+    fn default_log_has_a_rolling_cap() {
+        let log = AuditLog::new();
+        assert_eq!(log.max_entries, DEFAULT_MAX_ENTRIES);
     }
 }

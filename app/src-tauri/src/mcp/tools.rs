@@ -850,6 +850,8 @@ pub fn execute_script(
                 &modified_grids,
                 active_sheet,
                 *cells_modified,
+                "mcp",
+                "",
             )?;
             // Notify the (out-of-band) frontend so the open grid refreshes — the
             // same Tauri-event bridge create_chart_from_spec uses for charts.

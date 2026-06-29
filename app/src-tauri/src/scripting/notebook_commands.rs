@@ -204,21 +204,19 @@ fn run_cell_internal(
     match &result {
         script_engine::ScriptResult::Success { cells_modified, .. } => {
             if *cells_modified > 0 && !modified_grids.is_empty() {
-                // Audit (B4): record that a notebook cell mutated the grid.
-                {
-                    let now = chrono::Utc::now().to_rfc3339();
-                    if let Ok(mut audit) = app_state.audit_log.lock() {
-                        audit.record(
-                            calp::audit::AuditEvent::ScriptExecuted,
-                            &format!(
-                                "Notebook '{}' cell '{}' modified {} cell(s)",
-                                notebook_id, cell_id, cells_modified
-                            ),
-                            "local",
-                            &now,
-                        );
-                    }
-                }
+                // Audit (unified Rust-QuickJS trail): record the notebook cell's
+                // grid mutation through the shared sink so all QuickJS surfaces
+                // produce one consistent, always-on, structured audit entry.
+                // Notebooks apply wholesale (no diff), so no mutated range is
+                // attached — just the surface, notebook:cell id, sheet, and count.
+                crate::scripting::commands::record_script_grid_mutation(
+                    app_state,
+                    "notebook",
+                    &format!("{}:{}", notebook_id, cell_id),
+                    active_sheet,
+                    *cells_modified,
+                    &[],
+                );
                 let active_grid_clone = modified_grids.get(active_sheet).cloned();
 
                 let mut app_grids = app_state.grids.lock().map_err(|e| e.to_string())?;

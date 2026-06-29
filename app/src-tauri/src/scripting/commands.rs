@@ -92,6 +92,77 @@ fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpdateInput> {
     updates
 }
 
+/// Human label for an audited script surface.
+fn surface_label(surface: &str) -> &'static str {
+    match surface {
+        "run_script" => "A script",
+        "mcp" => "An AI tool",
+        "notebook" => "A notebook cell",
+        _ => "A script",
+    }
+}
+
+/// Bounding box (firstRow, lastRow, firstCol, lastCol) of a diff, or None when empty.
+fn updates_bounds(updates: &[CellUpdateInput]) -> Option<(u32, u32, u32, u32)> {
+    let mut it = updates.iter();
+    let first = it.next()?;
+    let (mut r0, mut r1, mut c0, mut c1) = (first.row, first.row, first.col, first.col);
+    for u in it {
+        r0 = r0.min(u.row);
+        r1 = r1.max(u.row);
+        c0 = c0.min(u.col);
+        c1 = c1.max(u.col);
+    }
+    Some((r0, r1, c0, c1))
+}
+
+/// Record a sandboxed script's grid mutation into the per-workbook audit log
+/// (the always-on script-activity trail — `AuditEvent::ScriptExecuted`), with
+/// structured attribution: surface kind, surface id, sheet, cell count, and the
+/// mutated active-sheet bounding box (when a diff is available; wholesale paths
+/// like notebooks pass an empty `range_updates` and omit the range). This is the
+/// single helper both the run_script/MCP path and the notebook path call, so all
+/// Rust QuickJS surfaces produce one consistent audit shape.
+pub(crate) fn record_script_grid_mutation(
+    state: &AppState,
+    surface: &str,
+    surface_id: &str,
+    sheet: usize,
+    cells_modified: u32,
+    range_updates: &[CellUpdateInput],
+) {
+    use serde_json::json;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut extra: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    extra.insert("surface".into(), json!(surface));
+    if !surface_id.is_empty() {
+        extra.insert("surfaceId".into(), json!(surface_id));
+    }
+    extra.insert("sheet".into(), json!(sheet));
+    extra.insert("cellsModified".into(), json!(cells_modified));
+    if let Some((r0, r1, c0, c1)) = updates_bounds(range_updates) {
+        extra.insert("firstRow".into(), json!(r0));
+        extra.insert("lastRow".into(), json!(r1));
+        extra.insert("firstCol".into(), json!(c0));
+        extra.insert("lastCol".into(), json!(c1));
+    }
+    let desc = format!(
+        "{} modified {} cell(s) on sheet {}",
+        surface_label(surface),
+        cells_modified,
+        sheet + 1
+    );
+    if let Ok(mut audit) = state.audit_log.lock() {
+        audit.record_with_extra(
+            calp::audit::AuditEvent::ScriptExecuted,
+            &desc,
+            "local",
+            &now,
+            extra,
+        );
+    }
+}
+
 /// Key under which the once-per-session "prompt" approval is stored in
 /// `ScriptState.permission_grants`.
 const SESSION_APPROVAL_KEY: &str = "__session__";
@@ -183,23 +254,11 @@ pub(crate) fn apply_script_modified_grids(
     modified_grids: &[Grid],
     active_sheet: usize,
     cells_modified: u32,
+    surface: &str,
+    surface_id: &str,
 ) -> Result<(), String> {
     if cells_modified == 0 || modified_grids.is_empty() {
         return Ok(());
-    }
-
-    // Audit (B4): record that a sandboxed script mutated the grid, so the
-    // Rust QuickJS surface is not invisible to the activity log.
-    {
-        let now = chrono::Utc::now().to_rfc3339();
-        if let Ok(mut audit) = state.audit_log.lock() {
-            audit.record(
-                calp::audit::AuditEvent::ScriptExecuted,
-                &format!("A script modified {} cell(s)", cells_modified),
-                "local",
-                &now,
-            );
-        }
     }
 
     // Build the active-sheet diff WITHOUT mutating AppState. Hold the AppState
@@ -213,6 +272,11 @@ pub(crate) fn apply_script_modified_grids(
             None => Vec::new(),
         }
     };
+
+    // Audit (unified Rust-QuickJS trail): record the grid mutation with structured
+    // surface + range attribution. Always recorded (transparency), AFTER the diff
+    // so the entry can name the actual mutated active-sheet range.
+    record_script_grid_mutation(state, surface, surface_id, active_sheet, cells_modified, &updates);
 
     // Apply non-active-sheet writes wholesale (documented v1 limit: not undoable
     // / not recalc-tracked). Only touch sheets that actually differ.
@@ -346,6 +410,8 @@ pub fn run_script(
             &modified_grids,
             active_sheet,
             *cells_modified,
+            "run_script",
+            &request.filename,
         )?;
     }
 

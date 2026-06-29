@@ -18,7 +18,7 @@ import {
   type AuditEntry,
 } from "@api/distribution";
 
-type Category = "subscription" | "override" | "writeback" | "publish" | "other";
+type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "other";
 
 /** Event id (snake_case, mirrors Rust AuditEvent) -> label + category. */
 const EVENT_META: Record<string, { label: string; category: Category }> = {
@@ -35,6 +35,9 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   writeback_invalidated: { label: "Writeback invalidated", category: "writeback" },
   writeback_reviewed: { label: "Writeback reviewed", category: "writeback" },
   published: { label: "Published", category: "publish" },
+  // Sandboxed script grid mutations (run_script / notebook / MCP) — always
+  // recorded (unified Rust-QuickJS audit trail), so scripts are never invisible.
+  script_executed: { label: "Script ran", category: "script" },
 };
 
 const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
@@ -42,6 +45,7 @@ const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
   override: { bg: "#fef7e0", fg: "#b06000" },
   writeback: { bg: "#e6f4ea", fg: "#137333" },
   publish: { bg: "#f3e8fd", fg: "#8430ce" },
+  script: { bg: "#fce8e6", fg: "#c5221f" },
   other: { bg: "#f1f3f4", fg: "#5f6368" },
 };
 
@@ -51,6 +55,7 @@ const FILTERS: { id: Category | "all"; label: string }[] = [
   { id: "override", label: "Overrides" },
   { id: "writeback", label: "Writeback" },
   { id: "publish", label: "Publishing" },
+  { id: "script", label: "Scripts" },
 ];
 
 const DEFAULT_MAX_ENTRIES = 1000;
