@@ -43,6 +43,9 @@ describe("backend command capability model (A3)", () => {
     expect(commandCapability("write_text_file")).toBe("hostFilesystem");
     expect(commandCapability("keychain_get_password")).toBe("credentials");
     expect(commandCapability("mcp_start")).toBe("mcpServer");
+    // Model-scoped BI reads are broker-only for non-trusted code (cap.bi.query).
+    expect(commandCapability("bi_query")).toBe("biData");
+    expect(isPrivilegedCommand("bi_get_connections")).toBe(true);
     // A normal data/feature command is open.
     expect(isPrivilegedCommand("get_charts")).toBe(false);
     expect(commandCapability("delete_columns")).toBeNull(); // grid op, not privileged
@@ -54,6 +57,11 @@ describe("backend command capability model (A3)", () => {
     );
     expect(() => assertExtensionMayInvoke("run_script", { trusted: true })).not.toThrow();
     expect(() => assertExtensionMayInvoke("get_charts", { trusted: false })).not.toThrow();
+    // bi_query is broker-only for non-trusted (no direct backend path).
+    expect(() => assertExtensionMayInvoke("bi_query", { trusted: false })).toThrow(
+      BackendCapabilityError,
+    );
+    expect(() => assertExtensionMayInvoke("bi_query", { trusted: true })).not.toThrow();
   });
 });
 

@@ -21,7 +21,8 @@ export type PrivilegedCapability =
   | "hostFilesystem"
   | "credentials"
   | "extensionManagement"
-  | "mcpServer";
+  | "mcpServer"
+  | "biData";
 
 /**
  * Backend commands that must NEVER be callable by a non-trusted (third-party)
@@ -64,6 +65,14 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   ],
   // Starting the local MCP server (exposes the live workbook to external clients).
   mcpServer: ["mcp_start", "mcp_stop", "mcp_set_port", "mcp_status"],
+  // Model-scoped BI data reads over the workbook's connections. The script/
+  // extension broker routes cap.bi.query -> bi_query / bi_get_connections behind
+  // the declared-capability CEILING + JIT consent (broker.ts checkPolicy). A
+  // non-trusted extension must reach BI data only through that consent-gated
+  // broker path — never by calling these backend commands directly. (Raw-SQL
+  // bi.sql -> script_bi_sql is gated above under codeExecution; this closes the
+  // matching gap for the model-scoped bi.query surface.)
+  biData: ["bi_query", "bi_get_connections"],
 };
 
 /** Flat set of all privileged command names (built once). */
