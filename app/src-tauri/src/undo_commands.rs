@@ -12,8 +12,10 @@ use crate::{
     update_cross_sheet_dependencies, update_dependencies, update_row_dependencies, AppState,
 };
 use engine::{CellChange, GridSnapshot, Transaction, UndoMergeRegion};
+use once_cell::sync::Lazy;
 use pivot_engine::PivotDefinition;
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::State;
 
 /// Result of an undo/redo operation
@@ -427,21 +429,26 @@ fn apply_changes(
                 merge_changed = true;
             }
             CellChange::CustomRestore { kind, data } => {
-                // Pivot/slicer/ribbon_filter/object restores need other state
-                // locks and would risk deadlock while grid locks are held.
-                // Defer them.
-                if kind.starts_with("pivot_")
-                    || kind.starts_with("slicer")
-                    || kind.starts_with("ribbon_filter")
-                    || kind.starts_with("obj_")
-                {
-                    deferred_restores.push((kind.clone(), data.clone()));
-                } else {
-                    // Handle simple metadata restores (comments, notes, hyperlinks, etc.)
-                    apply_custom_restore(
-                        state, pivot_state, slicer_state, ribbon_filter_state,
-                        kind, data, &mut inverse_transaction,
-                    );
+                // Registry-driven dispatch. Deferred kinds (which acquire other
+                // state locks) are queued to run AFTER the grid/style locks drop;
+                // inline kinds run here. Unknown kinds log + no-op (parity with
+                // the prior `_ =>` arm).
+                match restore_spec(kind) {
+                    Some(spec) if spec.defer => {
+                        deferred_restores.push((kind.clone(), data.clone()));
+                    }
+                    Some(spec) => {
+                        (spec.restore)(
+                            state, pivot_state, slicer_state, ribbon_filter_state,
+                            kind, data, &mut inverse_transaction,
+                        );
+                        set_restore_change_flag(
+                            spec.change_class,
+                            &mut pivot_changed, &mut slicer_changed,
+                            &mut ribbon_filter_changed, &mut objects_changed,
+                        );
+                    }
+                    None => eprintln!("[undo] Unknown custom restore kind: {}", kind),
                 }
             }
         }
@@ -467,16 +474,19 @@ fn apply_changes(
 
     // Process deferred pivot/slicer/ribbon_filter restores (now safe to acquire locks)
     for (kind, data) in deferred_restores {
-        let restore_kind = apply_custom_restore(
-            state, pivot_state, slicer_state, ribbon_filter_state,
-            &kind, &data, &mut inverse_transaction,
-        );
-        match restore_kind {
-            CustomRestoreKind::Pivot => pivot_changed = true,
-            CustomRestoreKind::Slicer => slicer_changed = true,
-            CustomRestoreKind::RibbonFilter => ribbon_filter_changed = true,
-            CustomRestoreKind::Objects => objects_changed = true,
-            CustomRestoreKind::Other => {}
+        match restore_spec(&kind) {
+            Some(spec) => {
+                (spec.restore)(
+                    state, pivot_state, slicer_state, ribbon_filter_state,
+                    &kind, &data, &mut inverse_transaction,
+                );
+                set_restore_change_flag(
+                    spec.change_class,
+                    &mut pivot_changed, &mut slicer_changed,
+                    &mut ribbon_filter_changed, &mut objects_changed,
+                );
+            }
+            None => eprintln!("[undo] Unknown deferred custom restore kind: {}", kind),
         }
     }
 
@@ -515,7 +525,9 @@ fn apply_changes(
     }
 }
 
-/// Identifies which subsystem a CustomRestore affected.
+/// Which subsystem a CustomRestore affected — drives the `*_changed` flags the
+/// frontend keys off after an undo/redo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CustomRestoreKind {
     Pivot,
     Slicer,
@@ -524,80 +536,116 @@ enum CustomRestoreKind {
     Other,
 }
 
-/// Handle custom metadata restore for undo/redo.
-/// `kind` identifies the subsystem (e.g., "comment", "note", "hyperlink", "pivot", "slicer").
-/// `data` is the serialized previous state.
-fn apply_custom_restore(
-    state: &AppState,
-    pivot_state: &PivotState,
-    slicer_state: &SlicerState,
-    ribbon_filter_state: &RibbonFilterState,
-    kind: &str,
-    data: &[u8],
-    inverse_transaction: &mut Transaction,
-) -> CustomRestoreKind {
-    match kind {
-        "comment" => {
-            apply_comment_restore(state, data, inverse_transaction);
-            CustomRestoreKind::Other
-        }
-        "note" => {
-            apply_note_restore(state, data, inverse_transaction);
-            CustomRestoreKind::Other
-        }
-        "hyperlink" => {
-            apply_hyperlink_restore(state, data, inverse_transaction);
-            CustomRestoreKind::Other
-        }
-        "default_row_height" | "default_column_width" => {
-            apply_default_dimension_restore(state, kind, data, inverse_transaction);
-            CustomRestoreKind::Other
-        }
-        "pivot_definition" => {
-            apply_pivot_definition_restore(state, pivot_state, data, inverse_transaction);
-            CustomRestoreKind::Pivot
-        }
-        "pivot_create" => {
-            apply_pivot_create_restore(state, pivot_state, data, inverse_transaction);
-            CustomRestoreKind::Pivot
-        }
-        "pivot_delete" => {
-            apply_pivot_delete_restore(state, pivot_state, data, inverse_transaction);
-            CustomRestoreKind::Pivot
-        }
-        "slicer" => {
-            apply_slicer_restore(slicer_state, data, inverse_transaction);
-            CustomRestoreKind::Slicer
-        }
-        "slicer_create" => {
-            apply_slicer_create_restore(slicer_state, data, inverse_transaction);
-            CustomRestoreKind::Slicer
-        }
-        "slicer_delete" => {
-            apply_slicer_delete_restore(slicer_state, data, inverse_transaction);
-            CustomRestoreKind::Slicer
-        }
-        "ribbon_filter" => {
-            apply_ribbon_filter_restore(ribbon_filter_state, data, inverse_transaction);
-            CustomRestoreKind::RibbonFilter
-        }
-        "ribbon_filter_create" => {
-            apply_ribbon_filter_create_restore(ribbon_filter_state, data, inverse_transaction);
-            CustomRestoreKind::RibbonFilter
-        }
-        "ribbon_filter_delete" => {
-            apply_ribbon_filter_delete_restore(ribbon_filter_state, data, inverse_transaction);
-            CustomRestoreKind::RibbonFilter
-        }
-        "obj_chart" | "obj_sparklines" | "obj_table" | "obj_autofilter"
-        | "obj_validation" | "obj_named_range" | "obj_freeze" => {
-            apply_object_swap_restore(state, kind, data, inverse_transaction);
-            CustomRestoreKind::Objects
-        }
-        _ => {
-            eprintln!("[undo] Unknown custom restore kind: {}", kind);
-            CustomRestoreKind::Other
-        }
+// ============================================================================
+// CustomRestore registry (A3.4) — the backend undo/restore extension seam.
+//
+// A CellChange::CustomRestore carries a string `kind` + opaque bytes. This
+// registry maps each kind to { restore_fn, change_class, defer } as DATA,
+// replacing what used to be three hardcoded, drifting things: a `match` over
+// kind, a fragile `kind.starts_with("pivot_"/"slicer"/…)` deferral check, and a
+// hand-maintained kind→change-flag mapping. Adding a built-in feature's undo
+// support is now one registry row + a one-line adapter, and the defer decision
+// is EXPLICIT per kind (not pattern-matched on the name).
+//
+// `defer` is load-bearing for deadlock-avoidance: a deferred restore acquires
+// OTHER state locks (pivot/slicer/ribbon_filter/object) and MUST run only after
+// the grid/style locks are released. Inline (non-deferred) restores touch just
+// AppState sublocks that are safe to take while grid locks are held. Every
+// `defer`/`change_class` value below is transcribed 1:1 from the prior match +
+// prefix logic; see the registry-consistency unit test.
+//
+// Registration is a central data table (trusted, in-tree only — never a surface
+// untrusted code registers into). A future per-module/inventory self-registration
+// (mirroring the frontend chart-mark registry) is possible but deliberately not
+// taken here: there is no third-party consumer and a central table avoids
+// startup-ordering risk.
+// ============================================================================
+
+/// Uniform restore handler. Receives every managed state a restore might need;
+/// each adapter forwards to its concrete `apply_*_restore` using only what it
+/// uses (the rest are ignored). `kind` is passed through for handlers that key
+/// off it (default-dimension, object-swap).
+type RestoreFn = fn(
+    &AppState,
+    &PivotState,
+    &SlicerState,
+    &RibbonFilterState,
+    &str,
+    &[u8],
+    &mut Transaction,
+);
+
+struct RestoreSpec {
+    restore: RestoreFn,
+    change_class: CustomRestoreKind,
+    /// Defer until grid/style locks are released (avoids lock-ordering deadlock).
+    defer: bool,
+}
+
+// --- Adapters: forward the uniform signature to each concrete restore fn. ----
+fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_comment_restore(s, d, inv); }
+fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_note_restore(s, d, inv); }
+fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_hyperlink_restore(s, d, inv); }
+fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, k: &str, d: &[u8], inv: &mut Transaction) { apply_default_dimension_restore(s, k, d, inv); }
+fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_definition_restore(s, p, d, inv); }
+fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_create_restore(s, p, d, inv); }
+fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_delete_restore(s, p, d, inv); }
+fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_restore(sl, d, inv); }
+fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_create_restore(sl, d, inv); }
+fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_delete_restore(sl, d, inv); }
+fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_restore(rf, d, inv); }
+fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_create_restore(rf, d, inv); }
+fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_delete_restore(rf, d, inv); }
+fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
+
+/// The kind → spec table, built once.
+static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
+    use CustomRestoreKind::*;
+    let mut m: HashMap<&'static str, RestoreSpec> = HashMap::new();
+    // Inline (defer: false) — simple metadata restores, no cross-state lock, no change-flag.
+    m.insert("comment", RestoreSpec { restore: r_comment, change_class: Other, defer: false });
+    m.insert("note", RestoreSpec { restore: r_note, change_class: Other, defer: false });
+    m.insert("hyperlink", RestoreSpec { restore: r_hyperlink, change_class: Other, defer: false });
+    m.insert("default_row_height", RestoreSpec { restore: r_default_dim, change_class: Other, defer: false });
+    m.insert("default_column_width", RestoreSpec { restore: r_default_dim, change_class: Other, defer: false });
+    // Deferred (defer: true) — acquire other state locks; run after grid locks drop.
+    m.insert("pivot_definition", RestoreSpec { restore: r_pivot_definition, change_class: Pivot, defer: true });
+    m.insert("pivot_create", RestoreSpec { restore: r_pivot_create, change_class: Pivot, defer: true });
+    m.insert("pivot_delete", RestoreSpec { restore: r_pivot_delete, change_class: Pivot, defer: true });
+    m.insert("slicer", RestoreSpec { restore: r_slicer, change_class: Slicer, defer: true });
+    m.insert("slicer_create", RestoreSpec { restore: r_slicer_create, change_class: Slicer, defer: true });
+    m.insert("slicer_delete", RestoreSpec { restore: r_slicer_delete, change_class: Slicer, defer: true });
+    m.insert("ribbon_filter", RestoreSpec { restore: r_ribbon_filter, change_class: RibbonFilter, defer: true });
+    m.insert("ribbon_filter_create", RestoreSpec { restore: r_ribbon_filter_create, change_class: RibbonFilter, defer: true });
+    m.insert("ribbon_filter_delete", RestoreSpec { restore: r_ribbon_filter_delete, change_class: RibbonFilter, defer: true });
+    for k in [
+        "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
+        "obj_validation", "obj_named_range", "obj_freeze",
+    ] {
+        m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
+    }
+    m
+});
+
+/// Look up the restore spec for a custom-restore `kind` (None ⇒ unknown kind).
+fn restore_spec(kind: &str) -> Option<&'static RestoreSpec> {
+    RESTORE_REGISTRY.get(kind)
+}
+
+/// Set the matching `*_changed` flag for a restore's change class (Other ⇒ none).
+fn set_restore_change_flag(
+    class: CustomRestoreKind,
+    pivot_changed: &mut bool,
+    slicer_changed: &mut bool,
+    ribbon_filter_changed: &mut bool,
+    objects_changed: &mut bool,
+) {
+    match class {
+        CustomRestoreKind::Pivot => *pivot_changed = true,
+        CustomRestoreKind::Slicer => *slicer_changed = true,
+        CustomRestoreKind::RibbonFilter => *ribbon_filter_changed = true,
+        CustomRestoreKind::Objects => *objects_changed = true,
+        CustomRestoreKind::Other => {}
     }
 }
 
@@ -1581,4 +1629,67 @@ pub(crate) fn record_freeze_undo(
 ) {
     let snap = FreezeObjSnapshot { sheet_index, previous };
     record_object_undo(state, "obj_freeze", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+#[cfg(test)]
+mod restore_registry_tests {
+    use super::*;
+
+    /// The registry must reproduce the historical (kind -> defer, change_class)
+    /// mapping EXACTLY. A diff here is a deliberate behavior change to undo.
+    #[test]
+    fn registry_matches_historical_mapping() {
+        let expected: &[(&str, bool, CustomRestoreKind)] = &[
+            ("comment", false, CustomRestoreKind::Other),
+            ("note", false, CustomRestoreKind::Other),
+            ("hyperlink", false, CustomRestoreKind::Other),
+            ("default_row_height", false, CustomRestoreKind::Other),
+            ("default_column_width", false, CustomRestoreKind::Other),
+            ("pivot_definition", true, CustomRestoreKind::Pivot),
+            ("pivot_create", true, CustomRestoreKind::Pivot),
+            ("pivot_delete", true, CustomRestoreKind::Pivot),
+            ("slicer", true, CustomRestoreKind::Slicer),
+            ("slicer_create", true, CustomRestoreKind::Slicer),
+            ("slicer_delete", true, CustomRestoreKind::Slicer),
+            ("ribbon_filter", true, CustomRestoreKind::RibbonFilter),
+            ("ribbon_filter_create", true, CustomRestoreKind::RibbonFilter),
+            ("ribbon_filter_delete", true, CustomRestoreKind::RibbonFilter),
+            ("obj_chart", true, CustomRestoreKind::Objects),
+            ("obj_sparklines", true, CustomRestoreKind::Objects),
+            ("obj_table", true, CustomRestoreKind::Objects),
+            ("obj_autofilter", true, CustomRestoreKind::Objects),
+            ("obj_validation", true, CustomRestoreKind::Objects),
+            ("obj_named_range", true, CustomRestoreKind::Objects),
+            ("obj_freeze", true, CustomRestoreKind::Objects),
+        ];
+        for (kind, defer, class) in expected {
+            let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
+            assert_eq!(spec.defer, *defer, "defer mismatch for {kind}");
+            assert_eq!(spec.change_class, *class, "change_class mismatch for {kind}");
+        }
+        // No extra kind slipped in unclassified.
+        assert_eq!(RESTORE_REGISTRY.len(), expected.len(), "registry size drifted from expected");
+    }
+
+    /// The deadlock-critical `defer` flag must agree with the legacy
+    /// `kind.starts_with("pivot_"/"slicer"/"ribbon_filter"/"obj_")` deferral for
+    /// EVERY registered kind — this is what guarantees lock-ordering is preserved.
+    #[test]
+    fn defer_agrees_with_legacy_prefix_logic() {
+        for (kind, spec) in RESTORE_REGISTRY.iter() {
+            let legacy_deferred = kind.starts_with("pivot_")
+                || kind.starts_with("slicer")
+                || kind.starts_with("ribbon_filter")
+                || kind.starts_with("obj_");
+            assert_eq!(
+                spec.defer, legacy_deferred,
+                "defer for '{kind}' disagrees with the legacy prefix deferral"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_kind_has_no_spec() {
+        assert!(restore_spec("totally_unknown_kind").is_none());
+    }
 }
