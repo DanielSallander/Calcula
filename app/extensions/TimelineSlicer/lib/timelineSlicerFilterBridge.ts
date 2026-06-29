@@ -5,7 +5,11 @@
 //          applies them as a pivot slicer filter.
 
 import type { TimelineSlicer } from "./timelineSlicerTypes";
-import { invokeBackend } from "@api/backend";
+import {
+  clearPivotFilter,
+  applyPivotFilter,
+  getPivotHierarchies,
+} from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
 import { getTimelineSelectedItems } from "./timeline-slicer-api";
 
@@ -27,7 +31,7 @@ export async function applyTimelineFilter(
     const selectedItems = await getTimelineSelectedItems(timeline.id);
 
     for (const pivotId of pivotIds) {
-      await applyPivotFilter(pivotId, timeline.fieldName, selectedItems);
+      await applyTimelinePivotFilter(pivotId, timeline.fieldName, selectedItems);
     }
 
     // Trigger grid refresh
@@ -41,9 +45,10 @@ export async function applyTimelineFilter(
 }
 
 /**
- * Apply a filter on a specific pivot table's date field.
+ * Apply a filter on a specific pivot table's date field. (Named distinctly from
+ * the imported `applyPivotFilter` backend wrapper it delegates to.)
  */
-async function applyPivotFilter(
+async function applyTimelinePivotFilter(
   pivotId: string,
   fieldName: string,
   selectedItems: string[] | null,
@@ -59,21 +64,17 @@ async function applyPivotFilter(
 
   if (selectedItems === null) {
     // No selection = clear filter
-    await invokeBackend("clear_pivot_filter", {
-      request: {
-        pivotId,
-        fieldIndex,
-      },
+    await clearPivotFilter({
+      pivotId,
+      fieldIndex,
     });
   } else {
     // Apply manual filter with selected date items
-    await invokeBackend("apply_pivot_filter", {
-      request: {
-        pivotId,
-        fieldIndex,
-        filters: {
-          manualFilter: { selectedItems },
-        },
+    await applyPivotFilter({
+      pivotId,
+      fieldIndex,
+      filters: {
+        manualFilter: { selectedItems },
       },
     });
   }
@@ -87,9 +88,9 @@ async function resolveFieldIndex(
   fieldName: string,
 ): Promise<number> {
   try {
-    const info = await invokeBackend<{
+    const info = await getPivotHierarchies<{
       hierarchies: Array<{ index: number; name: string }>;
-    }>("get_pivot_hierarchies", { pivotId });
+    }>(pivotId);
     const field = info.hierarchies.find((h) => h.name === fieldName);
     return field ? field.index : -1;
   } catch (err) {

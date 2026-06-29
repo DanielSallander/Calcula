@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/FilterPane/lib/filterPaneApi.ts
 // PURPOSE: Tauri command wrappers for ribbon filter backend operations.
 
-import { invokeBackend } from "@api/backend";
+import { filterPaneBackend } from "./filterPaneBackend";
 import type {
   RibbonFilter,
   SlicerItem,
@@ -12,18 +12,18 @@ import type {
 export async function createRibbonFilter(
   params: CreateRibbonFilterParams,
 ): Promise<RibbonFilter> {
-  return invokeBackend<RibbonFilter>("create_ribbon_filter", { params });
+  return filterPaneBackend.invoke<RibbonFilter>("create_ribbon_filter", { params });
 }
 
 export async function deleteRibbonFilter(filterId: string): Promise<void> {
-  return invokeBackend<void>("delete_ribbon_filter", { filterId });
+  return filterPaneBackend.invoke<void>("delete_ribbon_filter", { filterId });
 }
 
 export async function updateRibbonFilter(
   filterId: string,
   params: UpdateRibbonFilterParams,
 ): Promise<RibbonFilter> {
-  return invokeBackend<RibbonFilter>("update_ribbon_filter", {
+  return filterPaneBackend.invoke<RibbonFilter>("update_ribbon_filter", {
     filterId,
     params,
   });
@@ -33,30 +33,30 @@ export async function updateRibbonFilterSelection(
   filterId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
-  return invokeBackend<void>("update_ribbon_filter_selection", {
+  return filterPaneBackend.invoke<void>("update_ribbon_filter_selection", {
     filterId,
     selectedItems,
   });
 }
 
 export async function getAllRibbonFilters(): Promise<RibbonFilter[]> {
-  return invokeBackend<RibbonFilter[]>("get_all_ribbon_filters");
+  return filterPaneBackend.invoke<RibbonFilter[]>("get_all_ribbon_filters");
 }
 
 export async function getRibbonFilter(
   filterId: string,
 ): Promise<RibbonFilter> {
-  return invokeBackend<RibbonFilter>("get_ribbon_filter", { filterId });
+  return filterPaneBackend.invoke<RibbonFilter>("get_ribbon_filter", { filterId });
 }
 
 export async function getRibbonFilterItems(
   filterId: string,
 ): Promise<SlicerItem[]> {
-  return invokeBackend<SlicerItem[]>("get_ribbon_filter_items", { filterId });
+  return filterPaneBackend.invoke<SlicerItem[]>("get_ribbon_filter_items", { filterId });
 }
 
 export async function clearRibbonFilter(filterId: string): Promise<void> {
-  return invokeBackend<void>("clear_ribbon_filter", { filterId });
+  return filterPaneBackend.invoke<void>("clear_ribbon_filter", { filterId });
 }
 
 export async function setRibbonFilterItemSelected(
@@ -64,7 +64,7 @@ export async function setRibbonFilterItemSelected(
   value: string,
   selected: boolean,
 ): Promise<void> {
-  return invokeBackend<void>("set_ribbon_filter_item_selected", {
+  return filterPaneBackend.invoke<void>("set_ribbon_filter_item_selected", {
     filterId,
     value,
     selected,
@@ -82,7 +82,7 @@ export interface SlicerInfo {
 }
 
 export async function getAllSlicers(): Promise<SlicerInfo[]> {
-  return invokeBackend<SlicerInfo[]>("get_all_slicers");
+  return filterPaneBackend.invoke<SlicerInfo[]>("get_all_slicers");
 }
 
 // ============================================================================
@@ -113,13 +113,13 @@ export interface BiModelInfo {
 }
 
 export async function getBiConnections(): Promise<BiConnectionInfo[]> {
-  return invokeBackend<BiConnectionInfo[]>("bi_get_connections");
+  return filterPaneBackend.invoke<BiConnectionInfo[]>("bi_get_connections");
 }
 
 export async function getBiModelInfo(
   connectionId: string,
 ): Promise<BiModelInfo> {
-  return invokeBackend<BiModelInfo>("bi_get_model_info", { connectionId });
+  return filterPaneBackend.invoke<BiModelInfo>("bi_get_model_info", { connectionId });
 }
 
 export async function getBiColumnValues(
@@ -127,7 +127,7 @@ export async function getBiColumnValues(
   table: string,
   column: string,
 ): Promise<string[]> {
-  return invokeBackend<string[]>("bi_get_column_values", {
+  return filterPaneBackend.invoke<string[]>("bi_get_column_values", {
     connectionId,
     table,
     column,
@@ -146,7 +146,7 @@ export async function getBiColumnAvailableValues(
   column: string,
   crossFilters: BiCrossFilter[],
 ): Promise<string[]> {
-  return invokeBackend<string[]>("bi_get_column_available_values", {
+  return filterPaneBackend.invoke<string[]>("bi_get_column_available_values", {
     connectionId,
     table,
     column,

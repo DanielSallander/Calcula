@@ -2,8 +2,9 @@
 // PURPOSE: Bridges ribbon filter selection changes to table/pivot filters.
 
 import type { RibbonFilter, SlicerConnection } from "./filterPaneTypes";
-import { invokeBackend, updateBiPivotFields, getAllPivotTables } from "@api/backend";
+import { updateBiPivotFields, getAllPivotTables } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
+import { filterPaneBackend } from "./filterPaneBackend";
 import { getAllFilters } from "./filterPaneStore";
 
 // ============================================================================
@@ -82,7 +83,7 @@ async function ensureBiFieldsInPivotCache(
   if (biFields.length === 0) return true;
 
   try {
-    const info = await invokeBackend<HierarchiesInfo>(
+    const info = await filterPaneBackend.invoke<HierarchiesInfo>(
       "get_pivot_hierarchies",
       { pivotId },
     );
@@ -176,7 +177,7 @@ async function resolveConnections(
       const sheetSet = new Set(filter.connectedSheets ?? []);
       for (const pv of pivots) {
         try {
-          const biMeta = await invokeBackend<{
+          const biMeta = await filterPaneBackend.invoke<{
             connectionId: string;
             sheetIndex: number;
           } | null>("get_pivot_bi_metadata", { pivotId: pv.id });
@@ -195,7 +196,7 @@ async function resolveConnections(
 
   // Get all tables
   try {
-    const tables = await invokeBackend<
+    const tables = await filterPaneBackend.invoke<
       Array<{ id: string; name: string; sheetIndex: number }>
     >("get_all_tables", {});
 
@@ -288,7 +289,7 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
       for (const f of filtersForPivot) {
         const fieldIndex = await resolveFieldIndex(pivotId, f.fieldName);
         if (fieldIndex < 0) continue;
-        await invokeBackend("apply_pivot_filter", {
+        await filterPaneBackend.invoke("apply_pivot_filter", {
           request: {
             pivotId,
             fieldIndex,
@@ -396,7 +397,7 @@ async function applyTableFilterForSource(
   // Try sheets 0..20 (reasonable upper bound)
   for (let si = 0; si < 20; si++) {
     try {
-      const tables = await invokeBackend<
+      const tables = await filterPaneBackend.invoke<
         Array<{
           id: string;
           sheetIndex: number;
@@ -418,9 +419,9 @@ async function applyTableFilterForSource(
   if (colIndex < 0) return;
 
   if (selectedItems === null) {
-    await invokeBackend("clear_column_filter", { columnIndex: colIndex });
+    await filterPaneBackend.invoke("clear_column_filter", { columnIndex: colIndex });
   } else {
-    await invokeBackend("set_column_filter_values", {
+    await filterPaneBackend.invoke("set_column_filter_values", {
       columnIndex: colIndex,
       values: selectedItems,
     });
@@ -432,7 +433,7 @@ async function resolveFieldIndex(
   fieldName: string,
 ): Promise<number> {
   try {
-    const info = await invokeBackend<{
+    const info = await filterPaneBackend.invoke<{
       hierarchies: Array<{ index: number; name: string }>;
     }>("get_pivot_hierarchies", { pivotId });
     let field = info.hierarchies.find((h) => h.name === fieldName);
@@ -464,11 +465,11 @@ async function applyPivotFilterForSource(
   if (fieldIndex < 0) return;
 
   if (selectedItems === null) {
-    await invokeBackend("clear_pivot_filter", {
+    await filterPaneBackend.invoke("clear_pivot_filter", {
       request: { pivotId, fieldIndex },
     });
   } else {
-    await invokeBackend("apply_pivot_filter", {
+    await filterPaneBackend.invoke("apply_pivot_filter", {
       request: {
         pivotId,
         fieldIndex,

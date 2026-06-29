@@ -69,6 +69,7 @@ import {
 } from "./rendering/slicerRenderer";
 import { applySlicerFilter } from "./lib/slicerFilterBridge";
 import { SlicerEvents } from "./lib/slicerEvents";
+import { slicerBackend } from "./lib/slicerBackend";
 
 // ============================================================================
 // Module State
@@ -98,6 +99,10 @@ let dragStartPositions: Map<string, { x: number; y: number }> | null = null;
 
 function activate(context: ExtensionContext): void {
   console.log("[Slicer Extension] Registering...");
+
+  // Bind the capability-scoped backend channel before any code can trigger a
+  // backend call (lib-api/store/components route through this door) (A3).
+  slicerBackend.set(context.invokeBackend);
 
   // Register slicer store service for scriptable objects
   registerSlicerStoreService({

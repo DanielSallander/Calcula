@@ -78,6 +78,9 @@ import { saveBookmarks, loadBookmarks } from "./lib/bookmarkPersistence";
 // Internal modules — Script integration
 import { processBookmarkMutations } from "./lib/scriptMutationHandler";
 
+// Internal modules — Capability-scoped backend door
+import { bookmarksBackend } from "./lib/bookmarksBackend";
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -108,6 +111,9 @@ function activate(context: ExtensionContext): void {
   }
 
   console.log("[CellBookmarks] Activating...");
+
+  // ---- 0. Bind the capability-scoped backend door (A3) ----
+  bookmarksBackend.set(context.invokeBackend);
 
   // ---- 1. Cell Decoration (colored dot in bookmarked cells) ----
   const unregDecoration = registerCellDecoration(DECORATION_ID, drawBookmarkDot, 20);
@@ -396,13 +402,12 @@ function activate(context: ExtensionContext): void {
 
   // ---- 13. Script runner for view bookmark onActivate ----
   setScriptRunner(async (scriptId: string) => {
-    const { invokeBackend } = await import("@api/backend");
-    const script = await invokeBackend<{ id: string; name: string; source: string }>(
+    const script = await context.invokeBackend<{ id: string; name: string; source: string }>(
       "get_script",
       { id: scriptId }
     );
     if (script) {
-      const result = await invokeBackend<{ success: boolean; error?: string }>(
+      const result = await context.invokeBackend<{ success: boolean; error?: string }>(
         "run_script",
         { request: { source: script.source, filename: script.name || "bookmark-script.js" } }
       );

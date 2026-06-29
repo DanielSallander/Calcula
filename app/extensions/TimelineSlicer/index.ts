@@ -62,6 +62,7 @@ import {
   resetScrollOffsets,
 } from "./rendering/timelineSlicerRenderer";
 import { applyTimelineFilter } from "./lib/timelineSlicerFilterBridge";
+import { timelineBackend } from "./lib/timelineBackend";
 import { TimelineSlicerEvents } from "./lib/timelineSlicerEvents";
 import type { TimelineLevel } from "./lib/timelineSlicerTypes";
 
@@ -88,6 +89,10 @@ let periodDragState: {
 
 function activate(context: ExtensionContext): void {
   console.log("[TimelineSlicer Extension] Registering...");
+
+  // Bind the capability-scoped backend door for lib/store/component code that
+  // runs outside ExtensionContext (A3). Must happen before any backend call.
+  timelineBackend.set(context.invokeBackend);
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(TimelineSlicerManifest);

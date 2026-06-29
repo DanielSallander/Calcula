@@ -1709,8 +1709,14 @@ export {
   commandCapability,
   assertExtensionMayInvoke,
   BackendCapabilityError,
+  createBackendChannel,
 } from "./backendCommands";
-export type { PrivilegedCapability } from "./backendCommands";
+export type {
+  PrivilegedCapability,
+  BackendChannel,
+  BackendInvokeArgs,
+  RawBackendInvoke,
+} from "./backendCommands";
 // Shared script-security gate (honors the global Script Security setting before
 // mounting/executing user scripts — used by the object-script surface too).
 export {

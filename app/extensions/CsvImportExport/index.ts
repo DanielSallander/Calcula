@@ -8,6 +8,7 @@ import { DialogExtensions } from "@api";
 import { CsvImportDialog } from "./components/CsvImportDialog";
 import { CsvExportDialog } from "./components/CsvExportDialog";
 import { registerCsvMenuItems } from "./handlers/dataMenuBuilder";
+import { csvBackend } from "./lib/csvBackend";
 
 // ============================================================================
 // Cleanup tracking
@@ -19,8 +20,11 @@ const cleanupFns: (() => void)[] = [];
 // Lifecycle
 // ============================================================================
 
-function activate(_context: ExtensionContext): void {
+function activate(context: ExtensionContext): void {
   console.log("[CsvImportExport] Activating...");
+
+  // Bind the capability-scoped backend door before anything can call it (A3).
+  csvBackend.set(context.invokeBackend);
 
   // 1. Register dialogs
   DialogExtensions.registerDialog({

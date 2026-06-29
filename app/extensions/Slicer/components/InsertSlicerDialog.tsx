@@ -6,9 +6,10 @@ import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
 import { getSheets } from "@api";
 import {
-  invokeBackend,
   type Table,
   getAllPivotTables,
+  getPivotHierarchies,
+  getAllTables,
   updateBiPivotFields,
 } from "@api/backend";
 import { createSlicerAsync } from "../lib/slicerStore";
@@ -115,10 +116,7 @@ async function ensureBiFieldsInPivot(
   biModel: BiModelInfo,
 ): Promise<void> {
   // Get current pivot state
-  const result = await invokeBackend<HierarchiesResult>(
-    "get_pivot_hierarchies",
-    { pivotId },
-  );
+  const result = await getPivotHierarchies<HierarchiesResult>(pivotId);
 
   // Cache field names (just column names from Arrow schema)
   const cacheFieldNames = new Set(result.hierarchies.map((h) => h.name));
@@ -246,7 +244,7 @@ export function InsertSlicerDialog({
 
       // Fetch tables for the current sheet
       try {
-        const tables = await invokeBackend<Table[]>("get_all_tables", {});
+        const tables = await getAllTables();
         for (const table of tables) {
           if (table.sheetIndex === currentSheetIndex) {
             allSources.push({
@@ -273,10 +271,10 @@ export function InsertSlicerDialog({
         >();
         for (const pv of pivots) {
           try {
-            const result = await invokeBackend<{
+            const result = await getPivotHierarchies<{
               hierarchies: Array<{ index: number; name: string }>;
               biModel?: BiModelInfo;
-            }>("get_pivot_hierarchies", { pivotId: pv.id });
+            }>(pv.id);
 
             if (result.biModel) {
               // BI pivot: use all dimension columns from the model, exclude measures

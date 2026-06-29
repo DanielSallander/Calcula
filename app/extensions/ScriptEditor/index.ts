@@ -8,6 +8,7 @@ import { dispatchGridAction } from "@api/gridDispatch";
 import { ScriptEditorPane } from "./components/ScriptEditorPane";
 import { openAdvancedEditor } from "./lib/openEditorWindow";
 import { onGridNeedsRefresh, onDeferredActions } from "./lib/crossWindowEvents";
+import { scriptEditorBackend } from "./lib/scriptEditorBackend";
 import type { DeferredAction } from "./types";
 
 // ============================================================================
@@ -34,6 +35,10 @@ function activate(context: ExtensionContext): void {
   }
 
   console.log("[ScriptEditor] Activating...");
+
+  // 0. Bind the capability-scoped backend channel (A3) BEFORE any code that
+  //    could trigger a backend call (scriptApi.ts routes through this channel).
+  scriptEditorBackend.set(context.invokeBackend);
 
   // 1. Register task pane
   context.ui.taskPanes.register({

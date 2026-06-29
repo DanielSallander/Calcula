@@ -11,6 +11,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChatView } from "./components/ChatView";
+import { aiChatBackend } from "./lib/aiChatBackend";
 
 const AI_CHAT_PANE_ID = "ai-chat";
 const AI_CHAT_LLM_PANE_ID = "ai-chat-llm";
@@ -33,6 +34,10 @@ function activate(context: ExtensionContext): void {
   }
 
   console.log("[AIChat] Activating...");
+
+  // Bind the capability-gated backend channel BEFORE anything that could
+  // trigger a backend call (both panes render later, post-bind) (A3).
+  aiChatBackend.set(context.invokeBackend);
 
   // Register the task pane
   context.ui.taskPanes.register({

@@ -82,6 +82,7 @@ import {
   replaceChartSpec as storeReplaceChartSpec,
   mergeSpecPreview,
 } from "./lib/chartStore";
+import { chartsBackend } from "./lib/chartsBackend";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
@@ -227,6 +228,10 @@ async function emitChartSelectionEvent(): Promise<void> {
 // ============================================================================
 
 function activate(context: ExtensionContext): void {
+  // Bind the capability-gated backend channel BEFORE any chart loading (A3),
+  // so the get_charts call at activate time flows through the scoped door.
+  chartsBackend.set(context.invokeBackend);
+
   console.log("[Chart Extension] Registering...");
 
   // Register chart store service for scriptable objects

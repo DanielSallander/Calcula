@@ -2,7 +2,7 @@
 // PURPOSE: TypeScript bindings for the Tauri control metadata commands.
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
-import { invokeBackend } from "@api/backend";
+import { controlsBackend } from "./controlsBackend";
 import type { ControlMetadata, ControlEntry } from "./types";
 
 // ============================================================================
@@ -15,7 +15,7 @@ export async function getControlMetadata(
   row: number,
   col: number,
 ): Promise<ControlMetadata | null> {
-  return invokeBackend<ControlMetadata | null>("get_control_metadata", {
+  return controlsBackend.invoke<ControlMetadata | null>("get_control_metadata", {
     sheetIndex,
     row,
     col,
@@ -32,7 +32,7 @@ export async function setControlProperty(
   valueType: string,
   value: string,
 ): Promise<ControlMetadata> {
-  return invokeBackend<ControlMetadata>("set_control_property", {
+  return controlsBackend.invoke<ControlMetadata>("set_control_property", {
     sheetIndex,
     row,
     col,
@@ -50,7 +50,7 @@ export async function setControlMetadata(
   col: number,
   metadata: ControlMetadata,
 ): Promise<ControlMetadata> {
-  return invokeBackend<ControlMetadata>("set_control_metadata", {
+  return controlsBackend.invoke<ControlMetadata>("set_control_metadata", {
     sheetIndex,
     row,
     col,
@@ -64,7 +64,7 @@ export async function removeControlMetadata(
   row: number,
   col: number,
 ): Promise<boolean> {
-  return invokeBackend<boolean>("remove_control_metadata", {
+  return controlsBackend.invoke<boolean>("remove_control_metadata", {
     sheetIndex,
     row,
     col,
@@ -75,7 +75,7 @@ export async function removeControlMetadata(
 export async function getAllControls(
   sheetIndex: number,
 ): Promise<ControlEntry[]> {
-  return invokeBackend<ControlEntry[]>("get_all_controls", { sheetIndex });
+  return controlsBackend.invoke<ControlEntry[]>("get_all_controls", { sheetIndex });
 }
 
 /**
@@ -88,7 +88,7 @@ export async function resolveControlProperties(
   row: number,
   col: number,
 ): Promise<Record<string, string>> {
-  return invokeBackend<Record<string, string>>("resolve_control_properties", {
+  return controlsBackend.invoke<Record<string, string>>("resolve_control_properties", {
     sheetIndex,
     row,
     col,

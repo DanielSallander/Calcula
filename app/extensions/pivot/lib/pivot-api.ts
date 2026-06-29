@@ -138,8 +138,8 @@ import {
   addCalculatedItem as apiAddCalculatedItem,
   removeCalculatedItem as apiRemoveCalculatedItem,
   showReportFilterPages as apiShowReportFilterPages,
-  invokeBackend,
 } from "@api/backend";
+import { pivotBackend } from "./pivotBackend";
 
 // ============================================================================
 // API Functions
@@ -911,14 +911,14 @@ export async function setPivotDrillBehavior(
   pivotId: PivotId,
   behavior: DrillThroughBehavior | null,
 ): Promise<void> {
-  return invokeBackend<void>("set_pivot_drill_behavior", { pivotId, behavior });
+  return pivotBackend.invoke<void>("set_pivot_drill_behavior", { pivotId, behavior });
 }
 
 /** Get a BI pivot's current drill-through behavior (`null` = default builtin). */
 export async function getPivotDrillBehavior(
   pivotId: PivotId,
 ): Promise<DrillThroughBehavior | null> {
-  return invokeBackend<DrillThroughBehavior | null>("get_pivot_drill_behavior", { pivotId });
+  return pivotBackend.invoke<DrillThroughBehavior | null>("get_pivot_drill_behavior", { pivotId });
 }
 
 /**
@@ -928,7 +928,7 @@ export async function getPivotDrillBehavior(
 export async function getPivotBiMetadata(
   pivotId: PivotId,
 ): Promise<BiPivotModelInfo | null> {
-  return invokeBackend<BiPivotModelInfo | null>("get_pivot_bi_metadata", { pivotId });
+  return pivotBackend.invoke<BiPivotModelInfo | null>("get_pivot_bi_metadata", { pivotId });
 }
 
 // ============================================================================

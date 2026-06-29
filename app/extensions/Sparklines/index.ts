@@ -28,6 +28,7 @@ import { handleFillCompleted } from "./handlers/fillHandler";
 import { emitAppEvent } from "@api/events";
 import type { FillCompletedPayload } from "@api/events";
 import type { SparklineType } from "./types";
+import { sparklinesBackend } from "./lib/sparklinesBackend";
 
 // ============================================================================
 // Constants
@@ -79,6 +80,9 @@ function activate(context: ExtensionContext): void {
   }
 
   console.log("[Sparklines] Activating...");
+
+  // 0a. Bind the capability-gated backend channel before any backend call (A3).
+  sparklinesBackend.set(context.invokeBackend);
 
   // 0. Set up persistence callback
   setOnMutationCallback(scheduleSave);

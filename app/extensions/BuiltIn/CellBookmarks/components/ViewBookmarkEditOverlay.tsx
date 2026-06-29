@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import type { OverlayProps } from "@api";
-import { invokeBackend } from "@api/backend";
+import { bookmarksBackend } from "../lib/bookmarksBackend";
 import { BOOKMARK_DOT_COLORS, BOOKMARK_COLORS } from "../lib/bookmarkTypes";
 import type { BookmarkColor } from "../lib/bookmarkTypes";
 import { DIMENSION_LABELS } from "../lib/viewBookmarkTypes";
@@ -197,7 +197,7 @@ export const ViewBookmarkEditOverlay: React.FC<OverlayProps> = ({ onClose, data,
   }, []);
 
   useEffect(() => {
-    invokeBackend<ScriptSummary[]>("list_scripts")
+    bookmarksBackend.invoke<ScriptSummary[]>("list_scripts")
       .then(setScripts)
       .catch(() => setScripts([]));
   }, []);

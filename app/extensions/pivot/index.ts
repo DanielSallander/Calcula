@@ -82,6 +82,7 @@ import {
 } from "./handlers/selectionHandler";
 import type { PivotRegionData, PivotEditorViewData, BiPivotModelInfo } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot, getPivotHierarchies, drillThroughToSheet, isTotalCell, getPivotDrillBehavior } from "./lib/pivot-api";
+import { pivotBackend } from "./lib/pivotBackend";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -1066,6 +1067,7 @@ import { getLocaleSettings } from "@api/locale";
 // ============================================================================
 
 function activate(context: ExtensionContext): void {
+  pivotBackend.set(context.invokeBackend);
   console.log("[Pivot Extension] Registering...");
 
   // Register pivot store service for scriptable objects

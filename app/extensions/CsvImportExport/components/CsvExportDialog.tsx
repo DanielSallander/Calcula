@@ -10,8 +10,8 @@ import {
   restoreFocusToGrid,
 } from "@api";
 import { getGridBounds } from "@api/lib";
-import { invokeBackend } from "@api/backend";
 import { save } from "@tauri-apps/plugin-dialog";
+import { csvBackend } from "../lib/csvBackend";
 import { exportToCsv, createDefaultExportOptions } from "../lib/csvExporter";
 
 // ============================================================================
@@ -209,7 +209,7 @@ export const CsvExportDialog: React.FC<DialogProps> = ({ onClose }) => {
       });
 
       if (path) {
-        await invokeBackend("write_text_file", {
+        await csvBackend.invoke("write_text_file", {
           path,
           content: csvText,
           encoding: encoding || null,

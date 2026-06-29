@@ -142,3 +142,51 @@ export function createScopedInvokeBackend(
     return rawInvoke<T>(command, args);
   };
 }
+
+/**
+ * A deferred backend door for extension code that runs OUTSIDE the
+ * ExtensionContext and therefore cannot reach `ctx.invokeBackend` directly —
+ * lib-api wrapper modules, zustand stores, and React components (none of which
+ * receive `ctx`). The extension binds the channel once in `activate()`
+ * (`channel.set(ctx.invokeBackend)`); the module's functions then call
+ * `channel.invoke(cmd, args)`, so every call flows through the SAME
+ * capability-gated door as `ctx.invokeBackend` (A3) instead of the raw
+ * `@api/backend` passthrough.
+ *
+ * Until bound, `invoke()` REJECTS with a clear message (a call ran before
+ * `activate()` bound the channel) rather than silently no-op'ing. For
+ * surfaces that run in a separate window/realm where the extension's
+ * `activate()` does not execute (e.g. the standalone script-editor window),
+ * that window's own entry point binds the channel with its own scoped invoker.
+ */
+export interface BackendChannel {
+  /** Bind the channel to a scoped invoker. Call once, in activate() (or a window entry). */
+  set(invoke: RawBackendInvoke): void;
+  /** Invoke a backend command through the bound scoped door. */
+  invoke: RawBackendInvoke;
+  /** True once `set()` has bound an invoker. */
+  readonly bound: boolean;
+}
+
+export function createBackendChannel(label = "extension"): BackendChannel {
+  let invoker: RawBackendInvoke | null = null;
+  return {
+    set(invoke: RawBackendInvoke) {
+      invoker = invoke;
+    },
+    invoke: <T>(command: string, args?: BackendInvokeArgs): Promise<T> => {
+      if (!invoker) {
+        return Promise.reject(
+          new Error(
+            `Backend channel for "${label}" was used before activate() bound it. ` +
+              `Call <channel>.set(ctx.invokeBackend) at the top of the extension's activate().`,
+          ),
+        );
+      }
+      return invoker<T>(command, args);
+    },
+    get bound() {
+      return invoker !== null;
+    },
+  };
+}

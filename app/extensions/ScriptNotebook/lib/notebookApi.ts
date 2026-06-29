@@ -2,7 +2,7 @@
 // PURPOSE: TypeScript bindings for the Tauri notebook commands.
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
-import { invokeBackend } from "@api/backend";
+import { notebookBackend } from "./notebookBackend";
 import type {
   NotebookDocument,
   NotebookSummary,
@@ -20,29 +20,29 @@ export async function createNotebook(
   id: string,
   name: string,
 ): Promise<NotebookDocument> {
-  return invokeBackend<NotebookDocument>("notebook_create", { id, name });
+  return notebookBackend.invoke<NotebookDocument>("notebook_create", { id, name });
 }
 
 /** Save (create or update) a notebook document. */
 export async function saveNotebook(
   notebook: NotebookDocument,
 ): Promise<void> {
-  return invokeBackend<void>("notebook_save", { notebook });
+  return notebookBackend.invoke<void>("notebook_save", { notebook });
 }
 
 /** Load a notebook by ID. */
 export async function loadNotebook(id: string): Promise<NotebookDocument> {
-  return invokeBackend<NotebookDocument>("notebook_load", { id });
+  return notebookBackend.invoke<NotebookDocument>("notebook_load", { id });
 }
 
 /** List all notebooks (lightweight summaries). */
 export async function listNotebooks(): Promise<NotebookSummary[]> {
-  return invokeBackend<NotebookSummary[]>("notebook_list");
+  return notebookBackend.invoke<NotebookSummary[]>("notebook_list");
 }
 
 /** Delete a notebook by ID. */
 export async function deleteNotebook(id: string): Promise<void> {
-  return invokeBackend<void>("notebook_delete", { id });
+  return notebookBackend.invoke<void>("notebook_delete", { id });
 }
 
 // ============================================================================
@@ -67,7 +67,7 @@ async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
         "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",
       );
       if (ok) {
-        await invokeBackend<void>("grant_script_session_approval");
+        await notebookBackend.invoke<void>("grant_script_session_approval");
         return run();
       }
     }
@@ -80,7 +80,7 @@ export async function runNotebookCell(
   request: RunNotebookCellRequest,
 ): Promise<NotebookCellResponse> {
   return withScriptSecurityPrompt(() =>
-    invokeBackend<NotebookCellResponse>("notebook_run_cell", { request }),
+    notebookBackend.invoke<NotebookCellResponse>("notebook_run_cell", { request }),
   );
 }
 
@@ -89,7 +89,7 @@ export async function runAllCells(
   notebookId: string,
 ): Promise<NotebookCellResponse[]> {
   return withScriptSecurityPrompt(() =>
-    invokeBackend<NotebookCellResponse[]>("notebook_run_all", {
+    notebookBackend.invoke<NotebookCellResponse[]>("notebook_run_all", {
       notebookId,
     }),
   );
@@ -99,7 +99,7 @@ export async function runAllCells(
 export async function rewindNotebook(
   request: RewindNotebookRequest,
 ): Promise<NotebookCellResponse[]> {
-  return invokeBackend<NotebookCellResponse[]>("notebook_rewind", { request });
+  return notebookBackend.invoke<NotebookCellResponse[]>("notebook_rewind", { request });
 }
 
 /** Rewind to a cell and run from it onwards. */
@@ -107,7 +107,7 @@ export async function runFromCell(
   request: RewindNotebookRequest,
 ): Promise<NotebookCellResponse[]> {
   return withScriptSecurityPrompt(() =>
-    invokeBackend<NotebookCellResponse[]>("notebook_run_from", {
+    notebookBackend.invoke<NotebookCellResponse[]>("notebook_run_from", {
       request,
     }),
   );
@@ -115,5 +115,5 @@ export async function runFromCell(
 
 /** Reset the notebook runtime (destroy session and checkpoints). */
 export async function resetNotebookRuntime(): Promise<void> {
-  return invokeBackend<void>("notebook_reset_runtime");
+  return notebookBackend.invoke<void>("notebook_reset_runtime");
 }

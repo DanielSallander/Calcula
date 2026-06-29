@@ -10,6 +10,7 @@ import { scrollToCell, setSelection } from "@api/grid";
 import { dispatchGridAction } from "@api/gridDispatch";
 import { NotebookPanel } from "./components/NotebookPanel";
 import { NOTEBOOK_OPEN_EVENT } from "@api/notebookBackend";
+import { notebookBackend } from "./lib/notebookBackend";
 import { useNotebookStore } from "./lib/useNotebookStore";
 import type { DeferredAction } from "./types";
 
@@ -71,6 +72,10 @@ function activate(context: ExtensionContext): void {
   }
 
   console.log("[ScriptNotebook] Activating...");
+
+  // Bind the capability-scoped backend door before any code can trigger a
+  // backend call (lib-api/store/components route through this channel) (A3).
+  notebookBackend.set(context.invokeBackend);
 
   // 1. Register activity sidebar view
   context.ui.activityBar.register({

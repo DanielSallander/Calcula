@@ -9,10 +9,9 @@ import {
   addGridRegions,
   type GridRegion,
 } from "@api/gridOverlays";
-import { invokeBackend } from "@api/backend";
-
 import type { ChartDefinition, ChartSpec } from "../types";
 import { validateChartSpec } from "./chartSpecValidate";
+import { chartsBackend } from "./chartsBackend";
 
 // ============================================================================
 // Backend Types
@@ -119,7 +118,7 @@ async function flushDirtyCharts(): Promise<void> {
   for (const id of ids) {
     const chart = getChartById(id);
     if (chart) {
-      await invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
+      await chartsBackend.invoke("update_chart", { entry: toEntry(chart) }).catch(() => {});
     }
   }
 }
@@ -147,7 +146,7 @@ export function flushPendingChartSaves(): Promise<void> {
  */
 export async function loadChartsFromBackend(): Promise<void> {
   try {
-    const entries = await invokeBackend<ChartEntry[]>("get_charts");
+    const entries = await chartsBackend.invoke<ChartEntry[]>("get_charts");
     charts = entries.map(fromEntry);
     // Set the display-name counter past the number of existing charts
     nextChartNumber = charts.length + 1;
@@ -203,7 +202,7 @@ export function createChart(
   };
   charts.push(chart);
   // Persist to backend (fire-and-forget)
-  invokeBackend("save_chart", { entry: toEntry(chart) }).catch(() => {});
+  chartsBackend.invoke("save_chart", { entry: toEntry(chart) }).catch(() => {});
   return chart;
 }
 
@@ -279,7 +278,7 @@ export function deleteChart(chartId: string): void {
   }
   charts = charts.filter((c) => c.chartId !== chartId);
   // Persist to backend
-  invokeBackend("delete_chart", { id: chartId }).catch(() => {});
+  chartsBackend.invoke("delete_chart", { id: chartId }).catch(() => {});
 }
 
 /**

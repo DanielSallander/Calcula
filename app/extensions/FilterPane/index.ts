@@ -11,6 +11,7 @@ import {
 } from "./manifest";
 import { refreshCache, clearCache } from "./lib/filterPaneStore";
 import { registerFilterBadge } from "./lib/filterBadge";
+import { filterPaneBackend } from "./lib/filterPaneBackend";
 
 let unregisterBadge: (() => void) | null = null;
 
@@ -19,6 +20,9 @@ let unregisterBadge: (() => void) | null = null;
 // ============================================================================
 
 function activate(context: ExtensionContext): void {
+  // Bind the capability-scoped backend door before any code can trigger a backend call.
+  filterPaneBackend.set(context.invokeBackend);
+
   console.log("[FilterPane Extension] Registering...");
 
   // Register add-in manifest

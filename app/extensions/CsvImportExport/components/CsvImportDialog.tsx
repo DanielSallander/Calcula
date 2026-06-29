@@ -15,8 +15,8 @@ import {
   getSheets,
 } from "@api";
 import type { CellUpdateInput } from "@api";
-import { invokeBackend } from "@api/backend";
 import { open } from "@tauri-apps/plugin-dialog";
+import { csvBackend } from "../lib/csvBackend";
 import {
   parseCsv,
   parseCsvPreview,
@@ -287,7 +287,7 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
     if (path && typeof path === "string") {
       setFilePath(path);
       try {
-        const text = await invokeBackend<string>("read_text_file", {
+        const text = await csvBackend.invoke<string>("read_text_file", {
           path,
           encoding: encoding || null,
         });
@@ -301,7 +301,7 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
   // Re-read file when encoding changes
   useEffect(() => {
     if (!filePath) return;
-    invokeBackend<string>("read_text_file", {
+    csvBackend.invoke<string>("read_text_file", {
       path: filePath,
       encoding: encoding || null,
     })

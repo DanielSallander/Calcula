@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { TaskPaneViewProps } from "@api";
-import { invokeBackend } from "@api/backend";
+import { aiChatBackend } from "../lib/aiChatBackend";
 
 // ---------------------------------------------------------------------------
 // AI tool surface (Anthropic wire schema) — mirrors the ai_chat_run_tool
@@ -128,7 +128,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    invokeBackend<boolean>("ai_chat_has_api_key").then(setHasKey).catch(() => setHasKey(false));
+    aiChatBackend.invoke<boolean>("ai_chat_has_api_key").then(setHasKey).catch(() => setHasKey(false));
   }, []);
 
   useEffect(() => {
@@ -139,7 +139,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
 
   const saveKey = useCallback(async () => {
     try {
-      await invokeBackend("ai_chat_set_api_key", { key: keyInput.trim() });
+      await aiChatBackend.invoke("ai_chat_set_api_key", { key: keyInput.trim() });
       setKeyInput("");
       setHasKey(true);
     } catch (e) {
@@ -157,7 +157,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     let raw: RawMsg[] = [...rawRef.current, { role: "user", content: text }];
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-        const resp = await invokeBackend<any>("ai_chat_complete", {
+        const resp = await aiChatBackend.invoke<any>("ai_chat_complete", {
           messages: raw,
           tools: TOOLS,
           system: SYSTEM_PROMPT,
@@ -176,7 +176,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
           addBubble({ kind: "tool", text: `${tu.name}(${JSON.stringify(tu.input ?? {})})` });
           let result: string;
           try {
-            result = await invokeBackend<string>("ai_chat_run_tool", { name: tu.name, input: tu.input ?? {} });
+            result = await aiChatBackend.invoke<string>("ai_chat_run_tool", { name: tu.name, input: tu.input ?? {} });
           } catch (e) {
             result = `Error: ${e}`;
           }

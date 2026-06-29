@@ -8,6 +8,7 @@ import {
   assertExtensionMayInvoke,
   BackendCapabilityError,
   createScopedInvokeBackend,
+  createBackendChannel,
 } from "../backendCommands";
 
 /** Parse the actual Tauri command names from the generate_handler! macro. */
@@ -92,5 +93,41 @@ describe("scoped backend door (A3 — ExtensionContext.invokeBackend wiring)", (
       result = door("write_text_file", { path: "/etc/passwd" });
     }).not.toThrow();
     return expect(result).rejects.toBeInstanceOf(BackendCapabilityError);
+  });
+});
+
+describe("backend channel (A3 — deferred door for ctx-less extension code)", () => {
+  it("rejects before activate() binds it (never silently no-ops)", async () => {
+    const channel = createBackendChannel("Slicer");
+    expect(channel.bound).toBe(false);
+    await expect(channel.invoke("get_all_slicers")).rejects.toThrow(/before activate/i);
+  });
+
+  it("delegates to the bound invoker once set(), preserving args + result", async () => {
+    const channel = createBackendChannel("Slicer");
+    const scoped = vi.fn().mockResolvedValue([{ id: "s1" }]);
+    channel.set(scoped);
+    expect(channel.bound).toBe(true);
+    await expect(channel.invoke("get_all_slicers")).resolves.toEqual([{ id: "s1" }]);
+    await channel.invoke("update_slicer", { slicerId: "s1", params: { x: 1 } });
+    expect(scoped).toHaveBeenNthCalledWith(1, "get_all_slicers", undefined);
+    expect(scoped).toHaveBeenNthCalledWith(2, "update_slicer", { slicerId: "s1", params: { x: 1 } });
+  });
+
+  it("late re-binding swaps the invoker (e.g. re-activate)", async () => {
+    const channel = createBackendChannel();
+    channel.set(vi.fn().mockResolvedValue("a"));
+    channel.set(vi.fn().mockResolvedValue("b"));
+    await expect(channel.invoke("x")).resolves.toBe("b");
+  });
+
+  it("composes with the scoped door: a distributed-bound channel still gates", async () => {
+    // A channel bound to a DISTRIBUTED scoped door denies privileged commands.
+    const channel = createBackendChannel("ThirdParty");
+    channel.set(createScopedInvokeBackend(false, vi.fn().mockResolvedValue("ran")));
+    await expect(channel.invoke("run_script", { code: "x" })).rejects.toBeInstanceOf(
+      BackendCapabilityError,
+    );
+    await expect(channel.invoke("get_charts")).resolves.toBe("ran");
   });
 });

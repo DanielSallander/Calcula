@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { TaskPaneViewProps } from "@api";
-import { invokeBackend } from "@api/backend";
+import { aiChatBackend } from "../lib/aiChatBackend";
 
 // ============================================================================
 // Styles
@@ -136,7 +136,7 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
   // Poll server status
   const refreshStatus = useCallback(async () => {
     try {
-      const result = await invokeBackend<McpStatus>("mcp_status");
+      const result = await aiChatBackend.invoke<McpStatus>("mcp_status");
       setStatus(result);
       if (!loading) {
         setPortInput(String(result.port));
@@ -159,9 +159,9 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
       // Set port first if changed
       const port = parseInt(portInput, 10);
       if (port && port !== status.port && !status.running) {
-        await invokeBackend("mcp_set_port", { port });
+        await aiChatBackend.invoke("mcp_set_port", { port });
       }
-      await invokeBackend("mcp_start");
+      await aiChatBackend.invoke("mcp_start");
       // Give server a moment to bind
       setTimeout(refreshStatus, 500);
     } catch (err: unknown) {
@@ -175,7 +175,7 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
     setError("");
     setLoading(true);
     try {
-      await invokeBackend("mcp_stop");
+      await aiChatBackend.invoke("mcp_stop");
       setTimeout(refreshStatus, 500);
     } catch (err: unknown) {
       setError(String(err));

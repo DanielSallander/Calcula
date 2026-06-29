@@ -7,11 +7,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Backend is stubbed per-test via this mock; loadChartsFromBackend reads get_charts.
+// chartStore now reaches the backend through the capability-gated channel
+// (chartsBackend, bound to ctx.invokeBackend in activate(); A3). The test binds
+// the channel to a mock so loadChartsFromBackend's get_charts read is stubbed.
 const invokeBackend = vi.fn();
-vi.mock("@api/backend", () => ({ invokeBackend: (...args: unknown[]) => invokeBackend(...args) }));
 
 import { loadChartsFromBackend, getAllCharts, resetChartStore } from "../chartStore";
+import { chartsBackend } from "../chartsBackend";
 
 const validSpec = {
   mark: "bar",
@@ -38,6 +40,7 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   resetChartStore();
   invokeBackend.mockReset();
+  chartsBackend.set(invokeBackend);
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => warnSpy.mockRestore());

@@ -5,8 +5,9 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { getSheets, emitAppEvent, AppEvents } from "@api";
-import { invokeBackend, getAllPivotTables } from "@api/backend";
+import { getAllPivotTables } from "@api/backend";
 import type { SlicerItem, SlicerConnection, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
+import { filterPaneBackend } from "../lib/filterPaneBackend";
 import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters } from "../lib/filterPaneStore";
 import { getAllSlicers as fetchAllSlicers, type SlicerInfo } from "../lib/filterPaneApi";
 
@@ -16,7 +17,7 @@ async function resolveFieldIndex(
   fieldName: string,
 ): Promise<number> {
   try {
-    const info = await invokeBackend<{
+    const info = await filterPaneBackend.invoke<{
       hierarchies: Array<{ index: number; name: string }>;
     }>("get_pivot_hierarchies", { pivotId });
     let field = info.hierarchies.find((h) => h.name === fieldName);
@@ -146,7 +147,7 @@ export function FilterDropdown({
         }
       } catch { /* no pivots */ }
       try {
-        const tables = await invokeBackend<
+        const tables = await filterPaneBackend.invoke<
           Array<{ id: string; name: string; sheetIndex: number }>
         >("get_all_tables", {});
         for (const t of tables) {
@@ -187,13 +188,13 @@ export function FilterDropdown({
             // Clear pivot filter for this field
             const fieldIndex = await resolveFieldIndex(id, fieldName);
             if (fieldIndex >= 0) {
-              await invokeBackend("clear_pivot_filter", {
+              await filterPaneBackend.invoke("clear_pivot_filter", {
                 request: { pivotId: id, fieldIndex },
               });
               window.dispatchEvent(new Event("pivot:refresh"));
             }
           } else if (type === "table") {
-            await invokeBackend("clear_column_filter", { columnIndex: 0 });
+            await filterPaneBackend.invoke("clear_column_filter", { columnIndex: 0 });
           }
         } catch {
           // Best effort

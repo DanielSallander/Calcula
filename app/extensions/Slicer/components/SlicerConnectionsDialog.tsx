@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
-import { invokeBackend, getAllPivotTables } from "@api/backend";
+import { getAllPivotTables, getPivotHierarchies, getAllTables } from "@api/backend";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
 import { syncReportConnections } from "../lib/slicerFilterBridge";
@@ -72,9 +72,9 @@ export function SlicerConnectionsDialog({
         for (const pv of pivots) {
           let hasField = false;
           try {
-            const info = await invokeBackend<{
+            const info = await getPivotHierarchies<{
               hierarchies: Array<{ index: number; name: string }>;
-            }>("get_pivot_hierarchies", { pivotId: pv.id });
+            }>(pv.id);
             hasField = info.hierarchies.some((h) => {
               if (h.name === s.fieldName) return true;
               if (s.fieldName.includes(".")) {
@@ -100,14 +100,7 @@ export function SlicerConnectionsDialog({
 
       // Always load all tables
       try {
-        const tables = await invokeBackend<
-          Array<{
-            id: string;
-            name: string;
-            sheetIndex: number;
-            columns: Array<{ name: string }>;
-          }>
-        >("get_all_tables", {});
+        const tables = await getAllTables();
 
         for (const t of tables) {
           const hasField = t.columns.some((c) => c.name === s.fieldName);

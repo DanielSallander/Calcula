@@ -6,7 +6,9 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { registerMenuItem } from "@api";
-import { invokeBackend } from "@api/backend";
+import { createBackendChannel } from "@api/backendCommands";
+
+const autoRecoverBackend = createBackendChannel("AutoRecover");
 
 // ============================================================================
 // Types
@@ -22,21 +24,26 @@ interface AutoRecoverSettings {
 // ============================================================================
 
 async function getAutoRecoverSettings(): Promise<AutoRecoverSettings> {
-  return invokeBackend<AutoRecoverSettings>("get_auto_recover_settings");
+  return autoRecoverBackend.invoke<AutoRecoverSettings>(
+    "get_auto_recover_settings",
+  );
 }
 
 async function setAutoRecoverSettingsBackend(
   enabled: boolean,
   intervalMs: number,
 ): Promise<AutoRecoverSettings> {
-  return invokeBackend<AutoRecoverSettings>("set_auto_recover_settings", {
-    enabled,
-    intervalMs,
-  });
+  return autoRecoverBackend.invoke<AutoRecoverSettings>(
+    "set_auto_recover_settings",
+    {
+      enabled,
+      intervalMs,
+    },
+  );
 }
 
 async function autoRecoverSave(): Promise<string> {
-  return invokeBackend<string>("auto_recover_save");
+  return autoRecoverBackend.invoke<string>("auto_recover_save");
 }
 
 // ============================================================================
@@ -151,7 +158,8 @@ function registerMenuItems(): void {
 // Lifecycle
 // ============================================================================
 
-async function activate(_context: ExtensionContext): Promise<void> {
+async function activate(context: ExtensionContext): Promise<void> {
+  autoRecoverBackend.set(context.invokeBackend);
   await loadSettings();
   registerMenuItems();
   startTimer();

@@ -5,7 +5,11 @@
 // (see ARCHITECTURE.md + PHILOSOPHY.md "Independence Through Boundaries"):
 //
 //   1. ALIEN RULE      — Core must not import Shell or Extensions.
-//   2. FACADE RULE     — Extensions must import only through src/api.
+//   2. FACADE RULE     — Extensions must import only through src/api, and must
+//                        not reach the raw @api/backend invokeBackend door —
+//                        the ungated passthrough (A3). Typed @api/backend
+//                        wrappers + ctx.invokeBackend / createBackendChannel are
+//                        the sanctioned routes.
 //   3. API NEUTRALITY  — The src/api facade must not import a specific
 //                        extension (No First-Class Citizens).
 //   4. SIBLING ISOLATION — Extensions must not import each other's internals;
@@ -33,22 +37,45 @@ export const BOUNDARY_SEVERITY = {
   sibling: 'error', // A1 done: the 24 cross-extension leaks are resolved
 }
 
+// The Facade Rule's path patterns (deep core/shell imports are forbidden in
+// extensions). Factored so the main FACADE block and the tests/TestRunner
+// relax-block below share one definition (flat-config rules are last-wins per
+// rule id, NOT merged — so a file matched by both blocks gets the LATER block's
+// `no-restricted-imports` in full; the relax-block re-declares these patterns
+// while dropping the raw-backend-door ban).
+const FACADE_IMPORT_PATTERNS = [
+  {
+    group: ['**/src/core/**', '**/core/types/**', '**/core/types', '**/core/lib/**', '**/core/state/**', '@core', '@core/*'],
+    message: 'Extensions must import through src/api only (Facade Rule).',
+  },
+  {
+    group: ['**/src/shell/**', '**/shell/registries/**', '**/shell/Ribbon/**', '@shell', '@shell/*'],
+    message: 'Extensions must import through src/api only (Facade Rule).',
+  },
+]
+
+// A3 BACKEND DOOR: extensions must not import the RAW invokeBackend passthrough
+// from @api/backend — it is ungated. Use the capability-scoped ctx.invokeBackend,
+// a createBackendChannel bound in activate(), or a typed @api/backend wrapper
+// (those named imports stay allowed). importNames keeps this surgical.
+const RAW_BACKEND_INVOKE_PATH = {
+  name: '@api/backend',
+  importNames: ['invokeBackend'],
+  message:
+    'Extensions must not import the raw invokeBackend from @api/backend (ungated passthrough, A3). ' +
+    'Use the capability-gated ctx.invokeBackend, a createBackendChannel(...) bound in activate(), ' +
+    'or a typed @api/backend wrapper. Typed wrappers from @api/backend remain allowed.',
+}
+
 export const boundaryConfigs = [
-  // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell).
+  // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell),
+  // and must NOT reach the raw @api/backend invokeBackend door (A3).
   {
     files: ['extensions/**/*.{ts,tsx}'],
     rules: {
       'no-restricted-imports': [BOUNDARY_SEVERITY.facade, {
-        patterns: [
-          {
-            group: ['**/src/core/**', '**/core/types/**', '**/core/types', '**/core/lib/**', '**/core/state/**', '@core', '@core/*'],
-            message: 'Extensions must import through src/api only (Facade Rule).',
-          },
-          {
-            group: ['**/src/shell/**', '**/shell/registries/**', '**/shell/Ribbon/**', '@shell', '@shell/*'],
-            message: 'Extensions must import through src/api only (Facade Rule).',
-          },
-        ],
+        patterns: FACADE_IMPORT_PATTERNS,
+        paths: [RAW_BACKEND_INVOKE_PATH],
       }],
     },
   },
@@ -153,6 +180,24 @@ export const boundaryConfigs = [
           // Aggregators: allowed to reference every extension.
           { from: ['ext-manifest', 'ext-index'], allow: ['api', 'ext-shared', 'extension', 'builtin', 'standard'] },
         ],
+      }],
+    },
+  },
+
+  // RAW BACKEND DOOR — tests + the dev-only TestRunner harness legitimately reach
+  // the raw invokeBackend (TestRunner) or mock @api/backend (unit tests). This
+  // block comes AFTER the FACADE block and, for these files only, re-declares the
+  // Facade patterns WITHOUT the raw-invoke ban (flat-config is last-wins per rule
+  // id). The core/shell Facade patterns still apply to them.
+  {
+    files: [
+      'extensions/**/__tests__/**/*.{ts,tsx}',
+      'extensions/**/*.{test,spec}.{ts,tsx}',
+      'extensions/TestRunner/**/*.{ts,tsx}',
+    ],
+    rules: {
+      'no-restricted-imports': [BOUNDARY_SEVERITY.facade, {
+        patterns: FACADE_IMPORT_PATTERNS,
       }],
     },
   },

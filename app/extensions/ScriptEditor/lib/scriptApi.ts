@@ -2,7 +2,7 @@
 // PURPOSE: TypeScript bindings for the Tauri script engine commands.
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
-import { invokeBackend } from "@api/backend";
+import { scriptEditorBackend } from "./scriptEditorBackend";
 import type {
   RunScriptRequest,
   RunScriptResponse,
@@ -32,7 +32,7 @@ export async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promis
         "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",
       );
       if (ok) {
-        await invokeBackend<void>("grant_script_session_approval");
+        await scriptEditorBackend.invoke<void>("grant_script_session_approval");
         return run();
       }
     }
@@ -66,7 +66,7 @@ export async function runScript(
     viewBookmarksJson,
   };
   return withScriptSecurityPrompt(() =>
-    invokeBackend<RunScriptResponse>("run_script", { request }),
+    scriptEditorBackend.invoke<RunScriptResponse>("run_script", { request }),
   );
 }
 
@@ -79,7 +79,7 @@ export async function runScript(
  * @returns "disabled" | "prompt" | "enabled"
  */
 export async function getScriptSecurityLevel(): Promise<string> {
-  return invokeBackend<string>("get_script_security_level");
+  return scriptEditorBackend.invoke<string>("get_script_security_level");
 }
 
 /**
@@ -87,7 +87,7 @@ export async function getScriptSecurityLevel(): Promise<string> {
  * @param level - "disabled" | "prompt" | "enabled"
  */
 export async function setScriptSecurityLevel(level: string): Promise<void> {
-  return invokeBackend<void>("set_script_security_level", { level });
+  return scriptEditorBackend.invoke<void>("set_script_security_level", { level });
 }
 
 // ============================================================================
@@ -96,22 +96,22 @@ export async function setScriptSecurityLevel(level: string): Promise<void> {
 
 /** List all saved script modules (id + name only). */
 export async function listScripts(): Promise<ScriptSummary[]> {
-  return invokeBackend<ScriptSummary[]>("list_scripts");
+  return scriptEditorBackend.invoke<ScriptSummary[]>("list_scripts");
 }
 
 /** Get a single script module by ID (includes source code). */
 export async function getScript(id: string): Promise<WorkbookScript> {
-  return invokeBackend<WorkbookScript>("get_script", { id });
+  return scriptEditorBackend.invoke<WorkbookScript>("get_script", { id });
 }
 
 /** Save (create or update) a script module. */
 export async function saveScript(script: WorkbookScript): Promise<void> {
-  return invokeBackend<void>("save_script", { script });
+  return scriptEditorBackend.invoke<void>("save_script", { script });
 }
 
 /** Delete a script module by ID. */
 export async function deleteScript(id: string): Promise<void> {
-  return invokeBackend<void>("delete_script", { id });
+  return scriptEditorBackend.invoke<void>("delete_script", { id });
 }
 
 /** Rename a script module. */
@@ -119,5 +119,5 @@ export async function renameScript(
   id: string,
   newName: string,
 ): Promise<void> {
-  return invokeBackend<void>("rename_script", { id, newName });
+  return scriptEditorBackend.invoke<void>("rename_script", { id, newName });
 }

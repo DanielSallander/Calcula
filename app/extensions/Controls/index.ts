@@ -88,6 +88,7 @@ import {
   onDesignModeChange,
 } from "./lib/designMode";
 import { setControlMetadata, getControlMetadata, getAllControls, setControlProperty } from "./lib/controlApi";
+import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
 import {
@@ -309,6 +310,11 @@ function activate(context: ExtensionContext): void {
     console.warn("[Controls] Already activated, skipping.");
     return;
   }
+
+  // Bind the capability-scoped backend channel BEFORE any code that could
+  // trigger a backend call (A3). All Controls lib/store/component backend
+  // access flows through this scoped door instead of the raw @api/backend.
+  controlsBackend.set(context.invokeBackend);
 
   console.log("[Controls] Activating...");
 

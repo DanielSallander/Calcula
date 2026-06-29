@@ -15,6 +15,7 @@ import type {
   PlotOrder,
 } from "./types";
 import { validateSparklineRanges } from "./types";
+import { sparklinesBackend } from "./lib/sparklinesBackend";
 
 // ============================================================================
 // State
@@ -440,9 +441,8 @@ export function importGroups(imported: SparklineGroup[]): void {
  */
 export async function saveToBackend(sheetIndex: number): Promise<void> {
   try {
-    const { invokeBackend } = await import("../../src/api/backend");
     const groupsJson = JSON.stringify(exportGroups());
-    await invokeBackend("save_sparklines", {
+    await sparklinesBackend.invoke("save_sparklines", {
       entry: { sheetIndex, groupsJson },
     });
   } catch (err) {
@@ -455,8 +455,7 @@ export async function saveToBackend(sheetIndex: number): Promise<void> {
  */
 export async function loadFromBackend(sheetIndex: number): Promise<void> {
   try {
-    const { invokeBackend } = await import("../../src/api/backend");
-    const entries = await invokeBackend<Array<{ sheetIndex: number; groupsJson: string }>>(
+    const entries = await sparklinesBackend.invoke<Array<{ sheetIndex: number; groupsJson: string }>>(
       "get_sparklines",
     );
     const entry = entries.find((e) => e.sheetIndex === sheetIndex);

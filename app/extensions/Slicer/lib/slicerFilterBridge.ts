@@ -2,8 +2,9 @@
 // PURPOSE: Bridges slicer selection changes to table/pivot filters.
 
 import type { Slicer, SlicerConnection } from "./slicerTypes";
-import { invokeBackend, updateBiPivotFields } from "@api/backend";
+import { updateBiPivotFields } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
+import { slicerBackend } from "./slicerBackend";
 
 // ============================================================================
 // BI Pivot Field Helpers
@@ -88,7 +89,7 @@ export async function ensureBiFieldInPivotCache(
   if (!fieldName.includes(".")) return true;
 
   try {
-    const info = await invokeBackend<HierarchiesInfo>(
+    const info = await slicerBackend.invoke<HierarchiesInfo>(
       "get_pivot_hierarchies",
       { pivotId },
     );
@@ -260,7 +261,7 @@ async function applyTableFilterForSource(
   selectedItems: string[] | null,
   sheetIndex: number,
 ): Promise<void> {
-  const tables = await invokeBackend<Array<{
+  const tables = await slicerBackend.invoke<Array<{
     id: string;
     columns: Array<{ name: string }>;
     styleOptions: { headerRow: boolean; showFilterButton: boolean };
@@ -279,9 +280,9 @@ async function applyTableFilterForSource(
   }
 
   if (selectedItems === null) {
-    await invokeBackend("clear_column_filter", { columnIndex: colIndex });
+    await slicerBackend.invoke("clear_column_filter", { columnIndex: colIndex });
   } else {
-    await invokeBackend("set_column_filter_values", {
+    await slicerBackend.invoke("set_column_filter_values", {
       columnIndex: colIndex,
       values: selectedItems,
     });
@@ -296,7 +297,7 @@ async function resolveFieldIndex(
   fieldName: string,
 ): Promise<number> {
   try {
-    const info = await invokeBackend<{
+    const info = await slicerBackend.invoke<{
       hierarchies: Array<{ index: number; name: string }>;
     }>("get_pivot_hierarchies", { pivotId });
     // Try exact match first, then "table.column" -> "column" fallback
@@ -334,11 +335,11 @@ async function applyPivotFilterForSource(
   if (fieldIndex < 0) return;
 
   if (selectedItems === null) {
-    await invokeBackend("clear_pivot_filter", {
+    await slicerBackend.invoke("clear_pivot_filter", {
       request: { pivotId, fieldIndex },
     });
   } else {
-    await invokeBackend("apply_pivot_filter", {
+    await slicerBackend.invoke("apply_pivot_filter", {
       request: {
         pivotId,
         fieldIndex,

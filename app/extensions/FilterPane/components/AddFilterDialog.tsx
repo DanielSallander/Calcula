@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
-import { invokeBackend, type Table, getAllPivotTables } from "@api/backend";
+import { getAllTables, getPivotHierarchies, type Table, getAllPivotTables } from "@api/backend";
 import { createFilterAsync } from "../lib/filterPaneStore";
 import {
   getBiConnections,
@@ -61,7 +61,7 @@ export function AddFilterDialog({
 
       // Fetch all tables
       try {
-        const tables = await invokeBackend<Table[]>("get_all_tables", {});
+        const tables = await getAllTables();
         for (const table of tables) {
           allSources.push({
             type: "table",
@@ -82,10 +82,10 @@ export function AddFilterDialog({
         >();
         for (const pv of pivots) {
           try {
-            const result = await invokeBackend<{
+            const result = await getPivotHierarchies<{
               hierarchies: Array<{ index: number; name: string }>;
               biModel?: { tables: Array<{ name: string; columns: Array<{ name: string }> }> };
-            }>("get_pivot_hierarchies", { pivotId: pv.id });
+            }>(pv.id);
 
             if (result.biModel) {
               const allFields: string[] = [];
