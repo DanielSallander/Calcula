@@ -15,6 +15,7 @@ import { CAPABILITY_ID_SET } from "./capabilityIds";
 import { appendAudit } from "./auditRing";
 import { getGrantSet } from "./capabilities";
 import { USERSCRIPT_EVENT_PREFIX, namespaceUserEvent } from "../events";
+import { invokeBackend } from "../backend";
 
 // ============================================================================
 // Script identity
@@ -179,6 +180,54 @@ function checkPolicy(handle: ScriptHandle, method: string, args: unknown[]): Met
   return policy;
 }
 
+/**
+ * Methods whose backend-reaching Rust gate records the call ITSELF (authoritative
+ * server-side audit: success + the gate's own denial). The broker must NOT also
+ * persist their invoke results, or each call double-records. It DOES still
+ * persist their broker-side POLICY denials (which never reach the gate).
+ */
+const SERVER_AUDITED_METHODS: ReadonlySet<string> = new Set([
+  "cap.fetch", // -> script_http_fetch
+  "cap.biQuery", // -> bi_query
+  "cap.biSql", // -> script_bi_sql
+]);
+
+/** Broker-side policy denial codes — raised by checkPolicy BEFORE any backend gate. */
+const BROKER_POLICY_CODES: ReadonlySet<string> = new Set([
+  "UnknownMethod",
+  "ValidationError",
+  "PermissionDenied",
+  "CapabilityRequired",
+]);
+
+/**
+ * Persist a capability-call outcome into the per-workbook audit log (write-through
+ * from the in-memory ring), so capability use survives reload. Fire-and-forget +
+ * best-effort. Skips the backend-reaching caps' invoke results (recorded
+ * server-side by their Rust gate) to avoid double-recording — but still persists
+ * their broker-side policy denials, which the gate never sees.
+ */
+function persistCapabilityAudit(handle: ScriptHandle, method: string, ok: boolean, error?: string): void {
+  // Only CAPABILITY-bearing methods are persisted (net.fetch / bi.query / bi.sql /
+  // storage / ui.html / formula.udf). Grid reads/writes, log, notify etc. carry no
+  // capability and are NOT persisted here — they would flood the log, and script
+  // grid mutations are already audited server-side as ScriptExecuted.
+  const capability = ALLOWLIST[method]?.capability;
+  if (!capability) return;
+  if (SERVER_AUDITED_METHODS.has(method)) {
+    const isBrokerPolicyDenial = ok === false && error !== undefined && BROKER_POLICY_CODES.has(error);
+    if (!isBrokerPolicyDenial) return; // success + gate-denial are recorded server-side
+  }
+  void invokeBackend("audit_record_capability", {
+    scriptId: handle.scriptId,
+    capability,
+    ok,
+    error,
+  }).catch(() => {
+    /* audit is best-effort; never fail a capability call because persistence failed */
+  });
+}
+
 function audit(
   handle: ScriptHandle,
   method: string,
@@ -195,6 +244,7 @@ function audit(
     ok,
     error,
   });
+  persistCapabilityAudit(handle, method, ok, error);
 }
 
 // ============================================================================

@@ -30,6 +30,7 @@ use tauri::{State, Window};
 
 use crate::scripting::CapabilityStore;
 use crate::scripting::capability_store::{normalize_origin, parse_url};
+use crate::AppState;
 use crate::{log_info, log_warn};
 
 /// Max number of fetches per script per rolling minute.
@@ -123,6 +124,76 @@ pub fn grant_script_bi(
     Ok(())
 }
 
+/// Record a broker-mediated capability call into the per-workbook audit log
+/// (the always-on script-activity trail, `AuditEvent::CapabilityCall`), so
+/// capability use — not just grid mutations — survives reload. `detail` is an
+/// optional NON-SENSITIVE specifier (e.g. a net origin or a SQL prefix); never
+/// the full URL/SQL, which may carry query strings / credentials.
+pub(crate) fn record_capability_call(
+    audit_log: &std::sync::Mutex<calp::audit::AuditLog>,
+    capability: &str,
+    script_id: &str,
+    ok: bool,
+    detail: Option<&str>,
+    error: Option<&str>,
+) {
+    use serde_json::json;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut extra: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    extra.insert("capability".into(), json!(capability));
+    if !script_id.is_empty() {
+        extra.insert("scriptId".into(), json!(script_id));
+    }
+    extra.insert("ok".into(), json!(ok));
+    if let Some(d) = detail {
+        extra.insert("detail".into(), json!(d));
+    }
+    if let Some(e) = error {
+        extra.insert("error".into(), json!(e));
+    }
+    let desc = match (ok, detail) {
+        (true, Some(d)) => format!("{} → {}", capability, d),
+        (true, None) => format!("{} call", capability),
+        (false, _) => format!(
+            "{} DENIED{}",
+            capability,
+            error.map(|e| format!(" ({})", e)).unwrap_or_default()
+        ),
+    };
+    if let Ok(mut audit) = audit_log.lock() {
+        audit.record_with_extra(calp::audit::AuditEvent::CapabilityCall, &desc, "local", &now, extra);
+    }
+}
+
+/// Write-through sink for the frontend broker's audit ring: persists a
+/// capability-call outcome into the per-workbook audit log so it survives reload.
+/// Called fire-and-forget from `broker.ts` for the capabilities NOT recorded
+/// authoritatively server-side (the frontend-only caps — storage / ui.html /
+/// formula.udf — and broker-side policy denials). The backend-reaching caps
+/// (net.fetch / bi.query / bi.sql) record themselves in their Rust gates, so the
+/// broker skips those to avoid double-recording. Main-window only.
+#[tauri::command]
+pub fn audit_record_capability(
+    state: State<AppState>,
+    script_id: String,
+    capability: String,
+    ok: bool,
+    detail: Option<String>,
+    error: Option<String>,
+    window: Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    record_capability_call(
+        &state.audit_log,
+        &capability,
+        &script_id,
+        ok,
+        detail.as_deref(),
+        error.as_deref(),
+    );
+    Ok(())
+}
+
 /// Drop all backend capability state for a script. Called on unmount / revoke.
 #[tauri::command]
 pub fn revoke_script_capabilities(
@@ -149,6 +220,7 @@ fn is_credential_header(name: &str) -> bool {
 #[tauri::command]
 pub async fn script_http_fetch(
     cap_store: State<'_, CapabilityStore>,
+    app_state: State<'_, AppState>,
     request: HttpFetchRequest,
     window: Window,
 ) -> Result<HttpFetchResponse, String> {
@@ -200,6 +272,7 @@ pub async fn script_http_fetch(
             origin,
             request.url
         );
+        record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("origin not granted"));
         return Err(format!("PermissionDenied: net.fetch not granted for {}", origin));
     }
 
@@ -211,6 +284,7 @@ pub async fn script_http_fetch(
             script_id,
             origin
         );
+        record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("rate limited"));
         return Err(e);
     }
 
@@ -331,7 +405,8 @@ pub async fn script_http_fetch(
 
     let body = String::from_utf8_lossy(&buf).into_owned();
 
-    // (k) Audit success.
+    // (k) Audit success — debug log + the persisted per-workbook trail (origin
+    // only, never the full URL/query).
     log_info!(
         "SECURITY",
         "script_http_fetch OK: script={} method={} url={} status={} bytes={}",
@@ -341,6 +416,7 @@ pub async fn script_http_fetch(
         status,
         buf.len()
     );
+    record_capability_call(&app_state.audit_log, "net.fetch", &script_id, true, Some(&origin), None);
 
     Ok(HttpFetchResponse {
         status,

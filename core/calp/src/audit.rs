@@ -73,16 +73,20 @@ pub enum AuditEvent {
     WritebackReviewed,
     /// A sandboxed script (run_script / notebook cell / MCP tool) mutated grid cells.
     ScriptExecuted,
+    /// A sandboxed script/extension used a broker-mediated capability (net.fetch,
+    /// bi.query, bi.sql, storage, ui.html, formula.udf, …) — success or denial.
+    /// The specific capability + outcome live in the entry's `extra`.
+    CapabilityCall,
 }
 
 impl AuditEvent {
     /// Script-activity events are recorded EVEN WHEN the (distribution) audit log
-    /// is disabled. The Transparency pillar requires script grid mutations to be
-    /// visible by default ("you should never wonder what the code touched");
-    /// distribution events (subscribe/refresh/override/writeback/…) remain opt-in
-    /// via the `enabled` flag.
+    /// is disabled. The Transparency pillar requires script grid mutations AND
+    /// capability use to be visible by default ("you should never wonder what the
+    /// code touched"); distribution events (subscribe/refresh/override/writeback/…)
+    /// remain opt-in via the `enabled` flag.
     pub fn is_always_recorded(&self) -> bool {
-        matches!(self, AuditEvent::ScriptExecuted)
+        matches!(self, AuditEvent::ScriptExecuted | AuditEvent::CapabilityCall)
     }
 }
 
@@ -277,5 +281,26 @@ mod tests {
     fn default_log_has_a_rolling_cap() {
         let log = AuditLog::new();
         assert_eq!(log.max_entries, DEFAULT_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn capability_call_records_even_when_disabled_with_detail() {
+        // Capability use is script activity → always recorded (transparency),
+        // even on a disabled (default) log, with structured detail.
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        let mut extra = HashMap::new();
+        extra.insert("capability".to_string(), serde_json::json!("net.fetch"));
+        extra.insert("scriptId".to_string(), serde_json::json!("ext:weather"));
+        extra.insert("ok".to_string(), serde_json::json!(true));
+        extra.insert("detail".to_string(), serde_json::json!("https://api.example.com"));
+        log.record_with_extra(AuditEvent::CapabilityCall, "net.fetch → https://api.example.com", "local", "2026-06-29T00:00:00Z", extra);
+        assert_eq!(log.entry_count(), 1);
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(json.contains("\"capability_call\""));
+        assert!(json.contains("\"net.fetch\""));
+        let back: AuditLog = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.entries[0].event, AuditEvent::CapabilityCall));
+        assert_eq!(back.entries[0].extra.get("scriptId"), Some(&serde_json::json!("ext:weather")));
     }
 }

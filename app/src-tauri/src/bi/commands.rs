@@ -1698,6 +1698,7 @@ pub async fn bi_bind_table(
 pub async fn bi_query(
     bi_state: State<'_, BiState>,
     cap_store: State<'_, crate::scripting::CapabilityStore>,
+    app_state: State<'_, crate::AppState>,
     connection_id: ConnectionId,
     request: BiQueryRequest,
     script_id: Option<String>,
@@ -1712,6 +1713,7 @@ pub async fn bi_query(
     if let Some(sid) = script_id.as_deref() {
         if !cap_store.is_bi_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "bi_query DENIED (bi.query not granted): script={}", sid);
+            crate::net_commands::record_capability_call(&app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"));
             return Err("PermissionDenied: bi.query not granted for this script".to_string());
         }
     }
@@ -1776,6 +1778,20 @@ pub async fn bi_query(
     let result = batches_to_result(&batches);
     log_info!("BI", "Query returned {} rows, {} columns", result.row_count, result.columns.len());
 
+    // Audit (unified trail): persist a script-attributed bi.query call (success).
+    // Trusted built-in callers carry no script_id and are not audited (avoid
+    // flooding the trail with the app's own feature queries).
+    if let Some(sid) = script_id.as_deref() {
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.query",
+            sid,
+            true,
+            Some(&format!("connection {}", connection_id)),
+            None,
+        );
+    }
+
     Ok(result)
 }
 
@@ -1789,6 +1805,7 @@ pub async fn bi_query(
 pub async fn script_bi_sql(
     bi_state: State<'_, BiState>,
     cap_store: State<'_, crate::scripting::CapabilityStore>,
+    app_state: State<'_, crate::AppState>,
     connection_id: ConnectionId,
     sql: String,
     script_id: Option<String>,
@@ -1802,6 +1819,7 @@ pub async fn script_bi_sql(
     if let Some(sid) = script_id.as_deref() {
         if !cap_store.is_bi_granted(sid, "bi.sql") {
             crate::log_warn!("SECURITY", "script_bi_sql DENIED (bi.sql not granted): script={}", sid);
+            crate::net_commands::record_capability_call(&app_state.audit_log, "bi.sql", sid, false, None, Some("bi.sql not granted"));
             return Err("PermissionDenied: bi.sql not granted for this script".to_string());
         }
     }
@@ -1840,6 +1858,21 @@ pub async fn script_bi_sql(
         result.row_count = MAX_ROWS;
     }
     log_info!("BI", "script_bi_sql: conn={}, returned {} rows", connection_id, result.row_count);
+
+    // Audit (unified trail): persist a script-attributed bi.sql call (success).
+    // Record a short SQL PREFIX for forensic context, never the full query.
+    if let Some(sid) = script_id.as_deref() {
+        let sql_prefix: String = sql.trim().chars().take(60).collect();
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.sql",
+            sid,
+            true,
+            Some(&format!("connection {} — {}", connection_id, sql_prefix)),
+            None,
+        );
+    }
+
     Ok(result)
 }
 
