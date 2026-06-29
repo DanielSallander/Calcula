@@ -588,6 +588,43 @@ pub fn create_chart_from_spec(
     ))
 }
 
+/// Create a NEW named range (AI). Creates it via the SAME undoable command the
+/// UI uses, then emits "named-ranges:refresh" so the new name appears live (the
+/// DefinedNames extension bridges that Tauri event to NAMED_RANGES_CHANGED).
+/// Gated on the same script-security setting as other mutations.
+pub fn create_named_range(
+    handle: &AppHandle,
+    name: &str,
+    refers_to: &str,
+    sheet_index: Option<usize>,
+    comment: Option<String>,
+) -> Result<String, String> {
+    // Mutation -> same gate as run_script (headless 'prompt'/'disabled' refuses).
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_script_security(&script_state)?;
+
+    // The command validates the name + range, inserts, and records an undo entry.
+    let result = crate::named_ranges::create_named_range(
+        handle.state::<AppState>(),
+        name.to_string(),
+        sheet_index,
+        refers_to.to_string(),
+        comment,
+        None, // folder
+    );
+    if !result.success {
+        return Err(result
+            .error
+            .unwrap_or_else(|| "Failed to create named range".to_string()));
+    }
+
+    // Live-refresh the NameBox / Name Manager for this out-of-band create; the
+    // DefinedNames extension bridges this Tauri event to NAMED_RANGES_CHANGED.
+    let _ = handle.emit("named-ranges:refresh", ());
+
+    Ok(format!("Created named range '{}' -> {}", name, refers_to))
+}
+
 /// Execute a JavaScript script via the script engine.
 pub fn execute_script(
     handle: &AppHandle,

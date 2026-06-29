@@ -3,6 +3,7 @@
 // CONTEXT: Registers dialogs and menu items for managing named ranges.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { AppEvents, emitAppEvent, listenTauriEvent } from "@api";
 import { NameManagerDialog } from "./components/NameManagerDialog";
 import { NewNameDialog } from "./components/NewNameDialog";
 import { NewFunctionDialog } from "./components/NewFunctionDialog";
@@ -54,6 +55,19 @@ function activate(context: ExtensionContext): void {
   // Register menu items in the Formulas menu
   const cleanupMenus = registerDefinedNamesMenuItems(context);
   cleanupFns.push(cleanupMenus);
+
+  // Bridge the backend "named-ranges:refresh" Tauri event (emitted after an
+  // OUT-OF-BAND MCP create_named_range) to the NAMED_RANGES_CHANGED app event,
+  // so an AI-created name appears live in the Name Manager / NameBox without a
+  // reload — mirroring the Charts charts:refresh bridge. (In-app dialogs emit
+  // NAMED_RANGES_CHANGED themselves, so this only matters for out-of-band writes.)
+  let unlistenNamedRanges: (() => void) | undefined;
+  void listenTauriEvent("named-ranges:refresh", () => {
+    emitAppEvent(AppEvents.NAMED_RANGES_CHANGED);
+  }).then((un) => {
+    unlistenNamedRanges = un;
+  });
+  cleanupFns.push(() => unlistenNamedRanges?.());
 
   isActivated = true;
   console.log("[DefinedNames] Activated successfully.");

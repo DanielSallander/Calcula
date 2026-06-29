@@ -139,6 +139,20 @@ pub struct CreateChartParams {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreateNamedRangeParams {
+    #[schemars(description = "The name. Must start with a letter or underscore; letters, digits, underscore, and period only; cannot be a cell reference like A1.")]
+    pub name: String,
+    #[schemars(description = "What the name refers to, e.g. \"=Sheet1!$A$1:$B$10\" or a constant like \"=0.25\".")]
+    pub refers_to: String,
+    #[schemars(description = "Sheet index (0-based) for a sheet-scoped name; omit for a workbook-scoped name.")]
+    #[serde(default)]
+    pub sheet_index: Option<usize>,
+    #[schemars(description = "Optional comment/description.")]
+    #[serde(default)]
+    pub comment: Option<String>,
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -381,6 +395,22 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: create_chart_from_spec: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Create a NEW named range (a workbook-defined name). Provide name + refers_to (e.g. \"=Sheet1!$A$1:$B$10\" or a constant like \"=0.25\"); optionally sheet_index for a sheet-scoped name and a comment. Undoable, and appears live in the Name Manager. Requires the Script Security setting to allow execution.")]
+    async fn create_named_range(
+        &self,
+        params: Parameters<CreateNamedRangeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: create_named_range {}", log_summary(&p.name, 80));
+        match tools::create_named_range(&self.app_handle, &p.name, &p.refers_to, p.sheet_index, p.comment) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: create_named_range: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }
