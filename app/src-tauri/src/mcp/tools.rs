@@ -6,6 +6,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::AppState;
 use crate::api_types::ChartEntry;
 use crate::NamedRange;
+use crate::tables::Table;
+use crate::pivot::types::PivotTableInfo;
 use crate::format_cell_value;
 use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use super::server::ApplyFormattingParams;
@@ -88,17 +90,16 @@ pub fn write_cell(
     // Delegate to the script engine for simplicity - it handles parsing,
     // formula evaluation, and dependency recalculation correctly.
     //
-    // ALWAYS pass the value as a quoted STRING: Calcula.setCellValue expects a
-    // string argument (an unquoted number throws "Error converting from js 'int'
-    // into type 'string'"), and the cell-input pipeline parses a numeric string
-    // like "42" back into a number — so formulas, numbers, and text all flow
-    // through the same quoted form.
-    let script = format!(
-        "Calcula.setCellValue({}, {}, \"{}\");",
-        row,
-        col,
-        value.replace('\\', "\\\\").replace('"', "\\\"")
-    );
+    // ALWAYS pass the value as a STRING literal built with serde_json so it is
+    // valid JS even when it contains newlines / quotes / backslashes / unicode
+    // line separators (hand-escaping only \\ and \" would leave a literal newline
+    // as an unterminated JS string and fail the write). Calcula.setCellValue
+    // expects a string argument (an unquoted number throws "Error converting from
+    // js 'int' into type 'string'"), and the cell-input pipeline parses a numeric
+    // string like "42" back into a number — so formulas, numbers, and text all
+    // flow through the same quoted form.
+    let value_literal = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    let script = format!("Calcula.setCellValue({}, {}, {});", row, col, value_literal);
 
     execute_script(handle, &script)?;
     Ok(format!("Set {}{} = {}", col_letter(col), row + 1, value))
@@ -109,16 +110,15 @@ pub fn write_cell_range(
     handle: &AppHandle,
     cells: &[super::server::CellInput],
 ) -> Result<String, String> {
-    // Always pass each value as a quoted STRING (see write_cell: an unquoted
-    // number throws in the script engine; the cell-input pipeline parses a
-    // numeric string back into a number).
+    // Always build each value as a serde_json string literal (see write_cell:
+    // valid JS even with newlines/quotes; an unquoted number throws; the
+    // cell-input pipeline parses a numeric string back into a number).
     let mut script = String::new();
     for cell in cells {
+        let value_literal = serde_json::to_string(&cell.value).unwrap_or_else(|_| "\"\"".to_string());
         script.push_str(&format!(
-            "Calcula.setCellValue({}, {}, \"{}\");\n",
-            cell.row,
-            cell.col,
-            cell.value.replace('\\', "\\\\").replace('"', "\\\"")
+            "Calcula.setCellValue({}, {}, {});\n",
+            cell.row, cell.col, value_literal
         ));
     }
 
@@ -194,6 +194,34 @@ pub fn get_sheet_summary(
     if !named.is_empty() {
         let list: Vec<NamedRange> = named.values().cloned().collect();
         let section = format!("\n\n## Named Ranges\n{}", format_named_range_inventory(&list));
+        let limit = max_chars as usize;
+        if limit == 0 || summary.len() + section.len() <= limit {
+            summary.push_str(&section);
+        }
+    }
+    drop(named);
+
+    // Tables (C1): another AppState subsystem the AI should see in context.
+    let tables_guard = state.tables.lock().map_err(|e| e.to_string())?;
+    let all_tables: Vec<&Table> = tables_guard.values().flat_map(|m| m.values()).collect();
+    if !all_tables.is_empty() {
+        let section = format!("\n\n## Tables\n{}", format_table_inventory(&all_tables));
+        let limit = max_chars as usize;
+        if limit == 0 || summary.len() + section.len() <= limit {
+            summary.push_str(&section);
+        }
+    }
+    drop(tables_guard);
+
+    // Pivots (C1) live on the SEPARATE PivotState — read AFTER dropping the
+    // AppState subsystem locks above (get_all_pivot_tables locks only its own
+    // pivot_tables mutex, so no cross-lock is held). Same char-budget guard.
+    let pivots = crate::pivot::commands::get_all_pivot_tables(
+        state.clone(),
+        handle.state::<crate::pivot::PivotState>(),
+    );
+    if !pivots.is_empty() {
+        let section = format!("\n\n## Pivots\n{}", format_pivot_inventory(&pivots));
         let limit = max_chars as usize;
         if limit == 0 || summary.len() + section.len() <= limit {
             summary.push_str(&section);
@@ -376,6 +404,88 @@ pub fn list_named_ranges(handle: &AppHandle) -> Result<String, String> {
     let list: Vec<NamedRange> = ranges.values().cloned().collect();
     let mut out = String::from("Named ranges in this workbook:\n");
     out.push_str(&format_named_range_inventory(&list));
+    Ok(out)
+}
+
+/// Render a table inventory as one line per table, sorted by (sheet, name) for
+/// deterministic output (the nested HashMap iteration order is not stable).
+/// Empty string for no tables. Pure (no locks) so it is unit-testable.
+fn format_table_inventory(tables: &[&Table]) -> String {
+    let mut sorted: Vec<&Table> = tables.to_vec();
+    sorted.sort_by(|a, b| a.sheet_index.cmp(&b.sheet_index).then_with(|| a.name.cmp(&b.name)));
+    let mut out = String::new();
+    for t in sorted {
+        let range = format!(
+            "{}{}:{}{}",
+            col_letter(t.start_col),
+            t.start_row + 1,
+            col_letter(t.end_col),
+            t.end_row + 1,
+        );
+        out.push_str(&format!(
+            "- name=\"{}\" sheet={} range={} cols={} rows={} header={} totals={}\n",
+            t.name,
+            t.sheet_index,
+            range,
+            t.columns.len(),
+            t.row_count(),
+            t.style_options.header_row,
+            t.style_options.total_row,
+        ));
+    }
+    out
+}
+
+/// List every structured table in the workbook (name, sheet, A1 range, column/row
+/// counts, header/totals flags) — a first-class subsystem the AI could not
+/// discover via tools/list before (C1). Read-only.
+pub fn list_tables(handle: &AppHandle) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let all: Vec<&Table> = tables.values().flat_map(|m| m.values()).collect();
+    if all.is_empty() {
+        return Ok("(no tables in this workbook)".to_string());
+    }
+    let mut out = String::from("Tables in this workbook:\n");
+    out.push_str(&format_table_inventory(&all));
+    Ok(out)
+}
+
+/// Render a pivot inventory as one line per pivot, sorted by name. Empty string
+/// for no pivots. Pure (no locks) so it is unit-testable.
+fn format_pivot_inventory(pivots: &[PivotTableInfo]) -> String {
+    let mut sorted: Vec<&PivotTableInfo> = pivots.iter().collect();
+    // Tiebreak on id: pivot names are NOT unique, so name alone is nondeterministic.
+    sorted.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    let mut out = String::new();
+    for p in sorted {
+        out.push_str(&format!(
+            "- id={} name=\"{}\" source={} dest={}",
+            p.id, p.name, p.source_range, p.destination,
+        ));
+        if let Some(t) = p.source_table_name.as_ref().filter(|t| !t.is_empty()) {
+            out.push_str(&format!(" table={}", t));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// List every pivot table in the workbook (id, name, source range, destination,
+/// linked source table) — the Pivot subsystem the AI could not discover before
+/// (C1). Read-only. Pivots live on the separately-managed PivotState.
+pub fn list_pivots(handle: &AppHandle) -> Result<String, String> {
+    // Reuse the existing read command (it locks ONLY PivotState.pivot_tables and
+    // returns display-ready PivotTableInfo), so the AI view matches the UI.
+    let pivots = crate::pivot::commands::get_all_pivot_tables(
+        handle.state::<AppState>(),
+        handle.state::<crate::pivot::PivotState>(),
+    );
+    if pivots.is_empty() {
+        return Ok("(no pivot tables in this workbook)".to_string());
+    }
+    let mut out = String::from("Pivot tables in this workbook:\n");
+    out.push_str(&format_pivot_inventory(&pivots));
     Ok(out)
 }
 
@@ -700,5 +810,109 @@ mod tests {
     #[test]
     fn named_range_inventory_is_empty_for_none() {
         assert_eq!(format_named_range_inventory(&[]), "");
+    }
+
+    // ---- C1: table + pivot inventories ----
+
+    fn make_table(
+        name: &str,
+        sheet: usize,
+        sr: u32,
+        sc: u32,
+        er: u32,
+        ec: u32,
+        cols: usize,
+        header: bool,
+        totals: bool,
+    ) -> crate::tables::Table {
+        crate::tables::Table {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            sheet_index: sheet,
+            start_row: sr,
+            start_col: sc,
+            end_row: er,
+            end_col: ec,
+            columns: (0..cols)
+                .map(|i| {
+                    crate::tables::TableColumn::new(
+                        identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+                        format!("Col{}", i),
+                    )
+                })
+                .collect(),
+            style_options: crate::tables::TableStyleOptions {
+                header_row: header,
+                total_row: totals,
+                ..Default::default()
+            },
+            style_name: "TableStyleMedium2".to_string(),
+            auto_filter_id: None,
+        }
+    }
+
+    #[test]
+    fn table_inventory_renders_range_counts_flags_sorted() {
+        let sales = make_table("Sales", 0, 0, 0, 12, 3, 4, true, false); // A1:D13
+        let inv = make_table("Inventory", 1, 1, 1, 5, 2, 2, true, true); // B2:C6
+        // Pass in reverse order to prove the (sheet, name) sort.
+        let out = format_table_inventory(&[&inv, &sales]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // sheet 0 sorts before sheet 1.
+        assert!(lines[0].contains("Sales"));
+        assert!(lines[0].contains("sheet=0"));
+        assert!(lines[0].contains("range=A1:D13"));
+        assert!(lines[0].contains("cols=4"));
+        assert!(lines[0].contains("header=true"));
+        assert!(lines[1].contains("Inventory"));
+        assert!(lines[1].contains("range=B2:C6"));
+        assert!(lines[1].contains("totals=true"));
+    }
+
+    #[test]
+    fn table_inventory_is_empty_for_none() {
+        assert_eq!(format_table_inventory(&[]), "");
+    }
+
+    fn make_pivot(
+        name: &str,
+        source: &str,
+        dest: &str,
+        table: Option<&str>,
+    ) -> crate::pivot::types::PivotTableInfo {
+        crate::pivot::types::PivotTableInfo {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            source_range: source.to_string(),
+            destination: dest.to_string(),
+            allow_multiple_filters_per_field: false,
+            enable_data_value_editing: false,
+            refresh_on_open: false,
+            use_custom_sort_lists: false,
+            has_headers: true,
+            source_table_name: table.map(|t| t.to_string()),
+        }
+    }
+
+    #[test]
+    fn pivot_inventory_renders_source_dest_table_sorted() {
+        let by_region = make_pivot("Sales by Region", "A1:D100", "F1", Some("SalesTable"));
+        let inventory = make_pivot("Inventory", "Sheet2!A1:C50", "H1", None);
+        let out = format_pivot_inventory(&[by_region, inventory]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // sorted by name: Inventory before Sales by Region.
+        assert!(lines[0].contains("Inventory"));
+        assert!(lines[0].contains("source=Sheet2!A1:C50"));
+        assert!(lines[0].contains("dest=H1"));
+        assert!(!lines[0].contains("table="), "unlinked pivot omits the table tag");
+        assert!(lines[1].contains("Sales by Region"));
+        assert!(lines[1].contains("table=SalesTable"));
+    }
+
+    #[test]
+    fn pivot_inventory_is_empty_for_none() {
+        assert_eq!(format_pivot_inventory(&[]), "");
     }
 }

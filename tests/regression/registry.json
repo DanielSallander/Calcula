@@ -1083,19 +1083,20 @@
     },
     {
       "id": "feat.ai-chat",
-      "name": "AI Chat",
+      "name": "MCP Server",
       "tier": 4,
       "category": "AI",
-      "description": "AI assistant sidebar with Claude API",
+      "description": "Control panel to start/stop the local MCP server, exposing the workbook to external AI clients (Claude Desktop/Code) over the MCP tools. NOT an in-app chat.",
       "coverage": "partial",
       "unitTests": [],
       "e2eTests": [
-        "e2e/tests/ai-chat.spec.ts"
+        "e2e/tests/mcp-write-undoable.spec.ts",
+        "e2e/tests/mcp-discovery-tools.spec.ts"
       ],
       "screenshots": [
         "ai-chat-context-probe"
       ],
-      "notes": "No Claude API key is available in the nightly run, so E2E drives only the parts that make no network call: mcp_status (server lifecycle status), mcp_set_port (port config while stopped), and get_ai_context (the in-process LLM workbook-summary serializer, verified via a probe token and a character-budget differential). Actual Claude API streaming and MCP-over-HTTP tool calls are not covered."
+      "notes": "This panel is an MCP server CONTROL surface, not an in-app chat — no Claude API client exists in the extension. The MCP-over-HTTP tool path is e2e-covered against the live bearer-token server: mcp-write-undoable.spec.ts (an undoable AI cell write that emits grid:refresh) and mcp-discovery-tools.spec.ts (list_tables/list_pivots in tools/list + a get_sheet_summary call exercising the tables/pivots enrichment)."
     },
     {
       "id": "feat.custom-fill-lists",

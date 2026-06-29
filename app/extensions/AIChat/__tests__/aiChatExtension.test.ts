@@ -53,7 +53,10 @@ describe("AIChat Extension Module", () => {
 
   it("has correct manifest metadata", () => {
     expect(extension.manifest.id).toBe("calcula.ai-chat");
-    expect(extension.manifest.name).toBe("AI Chat");
+    // User-facing identity is honestly "MCP Server" (this panel starts/stops the
+    // local MCP server; it is NOT an in-app chat). The internal id keeps the
+    // historical "ai-chat" slug for stability.
+    expect(extension.manifest.name).toBe("MCP Server");
     expect(extension.manifest.version).toBe("1.0.0");
   });
 

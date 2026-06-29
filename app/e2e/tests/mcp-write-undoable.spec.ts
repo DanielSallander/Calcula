@@ -139,6 +139,28 @@ test.describe("MCP/AI writes are undoable + emit grid:refresh (C1a)", () => {
       expect(after.undoDisplay).toBe("");
       // ...and emitted grid:refresh, bridged to the window event.
       expect(after.refreshFired).toBe(true);
+
+      // Newline robustness (serde_json JS-literal escaping): a value with a
+      // literal newline must not produce an unterminated JS string / failed write.
+      const mlRes = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: { name: "set_cell_value", arguments: { row: 2, col: 0, value: "line1\nline2" } },
+        }),
+      });
+      const mlJson = parseMcp(mlRes.headers.get("content-type") ?? "", await mlRes.text());
+      expect(mlRes.ok).toBe(true);
+      expect(mlJson?.result?.isError ?? false, "a newline value must not fail the write").toBe(false);
+      const mlCell = await page.evaluate(async () => {
+        const tauri = (window as any).__TAURI__;
+        const c: any = await tauri.core.invoke("get_cell", { row: 2, col: 0 });
+        return String(c?.display ?? c?.value ?? "");
+      });
+      expect(mlCell).toContain("line1");
     } finally {
       await page.evaluate(async () => {
         const tauri = (window as any).__TAURI__;
@@ -148,6 +170,7 @@ test.describe("MCP/AI writes are undoable + emit grid:refresh (C1a)", () => {
           /* already stopped */
         }
         await tauri.core.invoke("update_cell", { row: 0, col: 0, value: "" });
+        await tauri.core.invoke("update_cell", { row: 2, col: 0, value: "" });
       });
     }
   });

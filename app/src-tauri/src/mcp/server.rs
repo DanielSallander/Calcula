@@ -326,6 +326,30 @@ impl CalculaMcpServer {
         }
     }
 
+    #[tool(description = "List every structured table in the workbook (name, sheet, A1 range, column/row counts, header/totals flags). Use this to discover tables before reading or writing their cells.")]
+    async fn list_tables(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_tables");
+        match tools::list_tables(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_tables: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "List every pivot table in the workbook (id, name, source range, destination cell, linked source table). Use this to discover pivots before reasoning about aggregated data.")]
+    async fn list_pivots(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_pivots");
+        match tools::list_pivots(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_pivots: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
     #[tool(description = "Get a single chart's full definition (chartId, name, placement, and ChartSpec) as JSON. Pass a chart id from list_charts. Use this to read or diff-edit a chart's spec.")]
     async fn get_chart(
         &self,

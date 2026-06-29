@@ -1,6 +1,10 @@
 //! FILENAME: app/extensions/AIChat/index.ts
-// PURPOSE: AI Chat extension entry point (ExtensionModule pattern).
-//          Registers task pane and menu items for MCP Server chat interface.
+// PURPOSE: MCP Server extension entry point (ExtensionModule pattern).
+//          Registers the task pane + menu items for the local MCP server
+//          CONTROL PANEL (start/stop, port, session token) — this is NOT an
+//          in-app chat: it exposes the workbook to EXTERNAL AI clients (Claude
+//          Desktop/Code) over the MCP tools. The folder/id keep the historical
+//          "ai-chat" slug for stability; the user-facing identity is "MCP Server".
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
@@ -80,9 +84,9 @@ function deactivate(): void {
 const extension: ExtensionModule = {
   manifest: {
     id: "calcula.ai-chat",
-    name: "AI Chat",
+    name: "MCP Server",
     version: "1.0.0",
-    description: "MCP Server chat interface for AI-assisted spreadsheet work.",
+    description: "Start/stop the local MCP server so external AI clients (Claude Desktop/Code) can read and write this workbook.",
   },
   activate,
   deactivate,
