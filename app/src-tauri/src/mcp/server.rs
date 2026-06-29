@@ -153,6 +153,24 @@ pub struct CreateNamedRangeParams {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct McpCreateTableParams {
+    #[schemars(description = "Top row of the table range (0-based, inclusive). If has_headers, this row is the header.")]
+    pub start_row: u32,
+    #[schemars(description = "Left column of the table range (0-based, inclusive).")]
+    pub start_col: u32,
+    #[schemars(description = "Bottom row of the table range (0-based, inclusive).")]
+    pub end_row: u32,
+    #[schemars(description = "Right column of the table range (0-based, inclusive).")]
+    pub end_col: u32,
+    #[schemars(description = "Whether the first row is a header row (true: column names come from it; false: generic Column1..N).")]
+    #[serde(default)]
+    pub has_headers: bool,
+    #[schemars(description = "Optional table name (auto-generated like Table1 if omitted). Must be unique in the workbook.")]
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -411,6 +429,30 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: create_named_range: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Create a NEW structured table over a cell range. Provide start/end row+col (0-based, inclusive) and has_headers (true => first row is the header). Optional name (auto-generated if omitted). Created on the ACTIVE sheet. Undoable, appears live. Requires the Script Security setting to allow execution.")]
+    async fn create_table(
+        &self,
+        params: Parameters<McpCreateTableParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: create_table {:?}", p.name);
+        match tools::create_table(
+            &self.app_handle,
+            p.start_row,
+            p.start_col,
+            p.end_row,
+            p.end_col,
+            p.has_headers,
+            p.name.as_deref(),
+        ) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: create_table: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }

@@ -8,6 +8,7 @@ use crate::api_types::ChartEntry;
 use crate::NamedRange;
 use crate::tables::Table;
 use crate::pivot::types::PivotTableInfo;
+use pivot_engine::PivotDefinition;
 use crate::format_cell_value;
 use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use super::server::ApplyFormattingParams;
@@ -221,7 +222,8 @@ pub fn get_sheet_summary(
         handle.state::<crate::pivot::PivotState>(),
     );
     if !pivots.is_empty() {
-        let section = format!("\n\n## Pivots\n{}", format_pivot_inventory(&pivots));
+        let suffixes = pivot_field_suffixes(handle)?;
+        let section = format!("\n\n## Pivots\n{}", format_pivot_inventory(&pivots, &suffixes));
         let limit = max_chars as usize;
         if limit == 0 || summary.len() + section.len() <= limit {
             summary.push_str(&section);
@@ -453,7 +455,10 @@ pub fn list_tables(handle: &AppHandle) -> Result<String, String> {
 
 /// Render a pivot inventory as one line per pivot, sorted by name. Empty string
 /// for no pivots. Pure (no locks) so it is unit-testable.
-fn format_pivot_inventory(pivots: &[PivotTableInfo]) -> String {
+fn format_pivot_inventory(
+    pivots: &[PivotTableInfo],
+    field_suffixes: &std::collections::HashMap<identity::EntityId, String>,
+) -> String {
     let mut sorted: Vec<&PivotTableInfo> = pivots.iter().collect();
     // Tiebreak on id: pivot names are NOT unique, so name alone is nondeterministic.
     sorted.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
@@ -466,9 +471,52 @@ fn format_pivot_inventory(pivots: &[PivotTableInfo]) -> String {
         if let Some(t) = p.source_table_name.as_ref().filter(|t| !t.is_empty()) {
             out.push_str(&format!(" table={}", t));
         }
+        // C1 field detail: rows=[..] cols=[..] values=[..] from the definition.
+        if let Some(suffix) = field_suffixes.get(&p.id) {
+            out.push_str(suffix);
+        }
         out.push('\n');
     }
     out
+}
+
+/// Compact field summary for a pivot definition, e.g.
+/// " rows=[Region,Category] cols=[Quarter] values=[Sum of Sales]". Empty areas
+/// are omitted; empty string when the pivot has no fields. Pure (no locks).
+fn format_pivot_fields(def: &PivotDefinition) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !def.row_fields.is_empty() {
+        let names = def.row_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(",");
+        parts.push(format!("rows=[{}]", names));
+    }
+    if !def.column_fields.is_empty() {
+        let names = def.column_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(",");
+        parts.push(format!("cols=[{}]", names));
+    }
+    if !def.value_fields.is_empty() {
+        let names = def.value_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(",");
+        parts.push(format!("values=[{}]", names));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
+    }
+}
+
+/// Build the id -> field-suffix map for the workbook's pivots by reading each
+/// PivotDefinition. Separate from get_all_pivot_tables (which returns the
+/// display-ready PivotTableInfo lines) so the line formatting stays reused and
+/// only the field detail is added. Locks ONLY PivotState.pivot_tables.
+fn pivot_field_suffixes(
+    handle: &AppHandle,
+) -> Result<std::collections::HashMap<identity::EntityId, String>, String> {
+    let ps = handle.state::<crate::pivot::PivotState>();
+    let tables = ps.pivot_tables.lock().map_err(|e| e.to_string())?;
+    Ok(tables
+        .iter()
+        .map(|(id, (def, _cache))| (*id, format_pivot_fields(def)))
+        .collect())
 }
 
 /// List every pivot table in the workbook (id, name, source range, destination,
@@ -484,8 +532,9 @@ pub fn list_pivots(handle: &AppHandle) -> Result<String, String> {
     if pivots.is_empty() {
         return Ok("(no pivot tables in this workbook)".to_string());
     }
+    let suffixes = pivot_field_suffixes(handle)?;
     let mut out = String::from("Pivot tables in this workbook:\n");
-    out.push_str(&format_pivot_inventory(&pivots));
+    out.push_str(&format_pivot_inventory(&pivots, &suffixes));
     Ok(out)
 }
 
@@ -623,6 +672,53 @@ pub fn create_named_range(
     let _ = handle.emit("named-ranges:refresh", ());
 
     Ok(format!("Created named range '{}' -> {}", name, refers_to))
+}
+
+/// Create a NEW structured table over a cell range (AI). Reuses the SAME
+/// undoable create_table command the UI uses (table + autofilter wrapped in one
+/// undo transaction), gates on the script-security setting, then emits
+/// "tables:refresh" so it appears live (the Table extension bridges that event).
+/// Created on the ACTIVE sheet (header names are read from the grid).
+pub fn create_table(
+    handle: &AppHandle,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    has_headers: bool,
+    name: Option<&str>,
+) -> Result<String, String> {
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_script_security(&script_state)?;
+
+    let params = crate::tables::CreateTableParams {
+        name: name.unwrap_or("").to_string(), // empty => auto-generated "Table1"...
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+        has_headers,
+        style_options: None,
+        style_name: None,
+    };
+    let result = crate::tables::create_table(handle.state::<AppState>(), params);
+    if !result.success {
+        return Err(result
+            .error
+            .unwrap_or_else(|| "Failed to create table".to_string()));
+    }
+
+    let _ = handle.emit("tables:refresh", ());
+
+    let table_name = result.table.map(|t| t.name).unwrap_or_else(|| "table".to_string());
+    Ok(format!(
+        "Created table \"{}\" over {}{}:{}{}",
+        table_name,
+        col_letter(start_col),
+        start_row + 1,
+        col_letter(end_col),
+        end_row + 1,
+    ))
 }
 
 /// Execute a JavaScript script via the script engine.
@@ -934,9 +1030,10 @@ mod tests {
 
     #[test]
     fn pivot_inventory_renders_source_dest_table_sorted() {
+        use std::collections::HashMap;
         let by_region = make_pivot("Sales by Region", "A1:D100", "F1", Some("SalesTable"));
         let inventory = make_pivot("Inventory", "Sheet2!A1:C50", "H1", None);
-        let out = format_pivot_inventory(&[by_region, inventory]);
+        let out = format_pivot_inventory(&[by_region, inventory], &HashMap::new());
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         // sorted by name: Inventory before Sales by Region.
@@ -950,6 +1047,44 @@ mod tests {
 
     #[test]
     fn pivot_inventory_is_empty_for_none() {
-        assert_eq!(format_pivot_inventory(&[]), "");
+        assert_eq!(format_pivot_inventory(&[], &std::collections::HashMap::new()), "");
+    }
+
+    fn make_pivot_def(rows: &[&str], cols: &[&str], values: &[&str]) -> pivot_engine::PivotDefinition {
+        use pivot_engine::{AggregationType, PivotField, ValueField};
+        let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let mut def = pivot_engine::PivotDefinition::new(id, (0, 0), (10, 3));
+        for (i, r) in rows.iter().enumerate() {
+            def.row_fields.push(PivotField::new(i, r.to_string()));
+        }
+        for (i, c) in cols.iter().enumerate() {
+            def.column_fields.push(PivotField::new(i, c.to_string()));
+        }
+        for (i, v) in values.iter().enumerate() {
+            def.value_fields.push(ValueField::new(i, v.to_string(), AggregationType::Sum));
+        }
+        def
+    }
+
+    #[test]
+    fn pivot_fields_renders_rows_cols_values_omitting_empty() {
+        let def = make_pivot_def(&["Region", "Category"], &[], &["Sum of Sales", "Count"]);
+        let s = format_pivot_fields(&def);
+        assert!(s.contains("rows=[Region,Category]"));
+        assert!(s.contains("values=[Sum of Sales,Count]"));
+        assert!(!s.contains("cols="), "empty column area is omitted");
+        // No fields at all -> empty string.
+        assert_eq!(format_pivot_fields(&make_pivot_def(&[], &[], &[])), "");
+    }
+
+    #[test]
+    fn pivot_inventory_appends_field_suffix_by_id() {
+        use std::collections::HashMap;
+        let p = make_pivot("Sales", "A1:D100", "F1", None);
+        let mut suffixes = HashMap::new();
+        suffixes.insert(p.id, " rows=[Region] values=[Sum of Sales]".to_string());
+        let out = format_pivot_inventory(&[p], &suffixes);
+        assert!(out.contains("rows=[Region]"));
+        assert!(out.contains("values=[Sum of Sales]"));
     }
 }
