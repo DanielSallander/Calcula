@@ -37,6 +37,7 @@ import type { CustomFunctionDef } from "./formulaFunctions";
 import type { EditGuardResult } from "./editGuards";
 import type { CellClickEvent } from "./cellClickInterceptors";
 import type { CellDoubleClickEvent } from "./cellDoubleClickInterceptors";
+import type { InvokeArgs } from "./backend";
 
 // ============================================================================
 // Sub-API Interfaces (Services available through ExtensionContext)
@@ -224,6 +225,24 @@ export interface ExtensionContext {
     rangeGuards: IRangeGuardAPI;
     cellClicks: ICellClickAPI;
   };
+
+  /**
+   * Capability-scoped backend door (the "governed door", A3 backend facade).
+   *
+   * Invokes a Tauri backend command on the extension's behalf, but FIRST checks
+   * the command against the extension's trust classification: a trusted
+   * (built-in) extension may invoke anything; a distributed (third-party)
+   * extension is denied privileged commands (code execution, host filesystem,
+   * credentials, extension management, MCP server) and gets a
+   * `BackendCapabilityError`. See `assertExtensionMayInvoke` /
+   * `PRIVILEGED_BACKEND_COMMANDS` in `./backendCommands` and
+   * docs/design/backend-facade.md.
+   *
+   * This is the door extensions SHOULD use. The raw `invokeBackend` from
+   * `@api/backend` is an ungated passthrough that the migration (a later A3
+   * slice) moves callers off of.
+   */
+  invokeBackend<T>(command: string, args?: InvokeArgs): Promise<T>;
 }
 
 // ============================================================================

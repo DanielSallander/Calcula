@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   commandCapability,
   assertExtensionMayInvoke,
   BackendCapabilityError,
+  createScopedInvokeBackend,
 } from "../backendCommands";
 
 /** Parse the actual Tauri command names from the generate_handler! macro. */
@@ -52,5 +53,44 @@ describe("backend command capability model (A3)", () => {
     );
     expect(() => assertExtensionMayInvoke("run_script", { trusted: true })).not.toThrow();
     expect(() => assertExtensionMayInvoke("get_charts", { trusted: false })).not.toThrow();
+  });
+});
+
+describe("scoped backend door (A3 — ExtensionContext.invokeBackend wiring)", () => {
+  // This is the exact factory ExtensionManager wires into each extension's
+  // context (createScopedInvokeBackend(trust === "trusted", invokeBackend)), so
+  // these assertions cover the real production door, not a reconstruction.
+
+  it("distributed extension: privileged command rejects (raw invoke never runs)", async () => {
+    const raw = vi.fn().mockResolvedValue("ok");
+    const door = createScopedInvokeBackend(false, raw);
+    await expect(door("run_script", { code: "x" })).rejects.toBeInstanceOf(
+      BackendCapabilityError,
+    );
+    expect(raw).not.toHaveBeenCalled();
+  });
+
+  it("distributed extension: feature-open command passes through to raw invoke", async () => {
+    const raw = vi.fn().mockResolvedValue(["chart-1"]);
+    const door = createScopedInvokeBackend(false, raw);
+    await expect(door("get_charts")).resolves.toEqual(["chart-1"]);
+    expect(raw).toHaveBeenCalledWith("get_charts", undefined);
+  });
+
+  it("trusted extension: privileged command passes through (built-ins are unrestricted)", async () => {
+    const raw = vi.fn().mockResolvedValue("ran");
+    const door = createScopedInvokeBackend(true, raw);
+    await expect(door("run_script", { code: "x" })).resolves.toBe("ran");
+    expect(raw).toHaveBeenCalledWith("run_script", { code: "x" });
+  });
+
+  it("gate failure surfaces as a rejected promise, never a synchronous throw", () => {
+    const door = createScopedInvokeBackend(false, vi.fn());
+    // Calling must NOT throw synchronously — it returns a promise that rejects.
+    let result: Promise<unknown> | undefined;
+    expect(() => {
+      result = door("write_text_file", { path: "/etc/passwd" });
+    }).not.toThrow();
+    return expect(result).rejects.toBeInstanceOf(BackendCapabilityError);
   });
 });

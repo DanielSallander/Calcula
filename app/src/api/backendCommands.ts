@@ -114,3 +114,31 @@ export function assertExtensionMayInvoke(
   const cap = commandCapability(command);
   if (cap) throw new BackendCapabilityError(command, cap);
 }
+
+/** Args object accepted by a backend invoke (mirrors @api/backend InvokeArgs). */
+export type BackendInvokeArgs = Record<string, unknown>;
+
+/** A raw backend invoker — the ungated passthrough this door wraps. */
+export type RawBackendInvoke = <T>(command: string, args?: BackendInvokeArgs) => Promise<T>;
+
+/**
+ * Build the capability-scoped backend door wired into each extension's
+ * `ExtensionContext.invokeBackend` (A3). It runs the trust gate
+ * (`assertExtensionMayInvoke`) and only then delegates to the raw invoker.
+ * Always returns a Promise (the gate failure surfaces as a REJECTED promise,
+ * never a synchronous throw), so callers can rely on `.catch`/`await` uniformly.
+ *
+ * Kept as a pure factory here, beside the denylist + primitive, so the door's
+ * behavior is unit-testable against the real enforcement logic rather than a
+ * reconstruction. The host (ExtensionManager) supplies `trusted` (from the
+ * extension's trust classification) and the raw invoker.
+ */
+export function createScopedInvokeBackend(
+  trusted: boolean,
+  rawInvoke: RawBackendInvoke,
+): RawBackendInvoke {
+  return async <T>(command: string, args?: BackendInvokeArgs): Promise<T> => {
+    assertExtensionMayInvoke(command, { trusted });
+    return rawInvoke<T>(command, args);
+  };
+}

@@ -7,7 +7,8 @@ import type { ExtensionModule, ExtensionContext } from "../../api/contract";
 import { CommandRegistry } from "../../api/commands";
 import { API_VERSION } from "../../api/version";
 import { builtInExtensions } from "../../../extensions/manifest";
-import { invokeBackend } from "../../api/backend";
+import { invokeBackend, type InvokeArgs } from "../../api/backend";
+import { createScopedInvokeBackend } from "../../api/backendCommands";
 
 // Import free functions from API to wire into the context object
 import {
@@ -345,6 +346,17 @@ function buildContext(): ExtensionContext {
       registerFormat: registerFileFormat,
       getFormats: getFileFormats,
     },
+    // The trust-less base context is never handed to an extension directly —
+    // every extension receives the per-extension override in activateExtension,
+    // which carries the real trust-scoped door. If this stub ever runs, a
+    // context leaked without a trust classification; refuse loudly rather than
+    // invoke ungated (A3 backend facade; see docs/design/backend-facade.md).
+    invokeBackend: <T>(_command: string, _args?: InvokeArgs): Promise<T> =>
+      Promise.reject(
+        new Error(
+          "invokeBackend is unavailable on the base extension context (no trust classification)",
+        ),
+      ),
   };
 }
 
@@ -526,6 +538,12 @@ class ExtensionManagerImpl {
           registerFormat: registerFileFormat,
           getFormats: getFileFormats,
         },
+        // Capability-scoped backend door (A3). `trust` is already classified for
+        // this extension here, so enforcement is a single gate before the raw
+        // invoke: trusted (built-in) callers pass everything; distributed
+        // (third-party) callers are denied privileged commands. The denylist,
+        // gate, and this factory all live in @api/backendCommands.
+        invokeBackend: createScopedInvokeBackend(trust === "trusted", invokeBackend),
       };
       await module.activate(extContext);
 
