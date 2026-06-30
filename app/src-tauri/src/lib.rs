@@ -3847,6 +3847,7 @@ pub fn run() {
             persistence::save_file,
             persistence::get_extension_data,
             persistence::set_extension_data,
+            persistence::set_extension_data_undoable,
             persistence::open_file,
             persistence::new_file,
             persistence::get_current_file_path,

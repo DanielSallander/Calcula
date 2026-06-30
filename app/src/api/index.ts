@@ -1722,6 +1722,7 @@ export type {
 export {
   getExtensionData,
   setExtensionData,
+  setExtensionDataUndoable,
   clearExtensionData,
 } from "./extensionData";
 // Scope-injected expression evaluation via the real engine (the sanctioned

@@ -70,6 +70,13 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(onAppEvent(AppEvents.AFTER_OPEN, () => void loadAnimations()));
   cleanupFns.push(onAppEvent(AppEvents.AFTER_NEW, () => resetAnimations()));
 
+  // Undo/redo of a saved-animation change restores the backend blob and fires
+  // "animation:refresh" (the shell objects-domain fan-out) — re-sync the store so
+  // the panel reflects the restored state without a file reopen.
+  const onAnimationRefresh = (): void => void loadAnimations();
+  window.addEventListener("animation:refresh", onAnimationRefresh);
+  cleanupFns.push(() => window.removeEventListener("animation:refresh", onAnimationRefresh));
+
   // Transient guarantee: never let an animated frame be saved or leak across a
   // sheet/file change — force-stop (which restores the model) on these events.
   const restoreOn = [

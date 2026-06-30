@@ -638,7 +638,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     m.insert("ribbon_filter_delete", RestoreSpec { restore: r_ribbon_filter_delete, change_class: RibbonFilter, defer: true });
     for k in [
         "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
-        "obj_validation", "obj_named_range", "obj_freeze",
+        "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1500,6 +1500,15 @@ struct FreezeObjSnapshot {
     previous: crate::sheets::FreezeConfig,
 }
 
+/// Snapshot for the "obj_extension_data" CustomRestore — the prior JSON value of
+/// one extension's persisted state (None = it had none). Used by the undoable
+/// per-extension persistence path (set_extension_data_undoable).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExtensionDataObjSnapshot {
+    extension_id: String,
+    previous: Option<serde_json::Value>,
+}
+
 fn push_obj_inverse<T: serde::Serialize>(
     inverse_transaction: &mut Transaction,
     kind: &str,
@@ -1641,6 +1650,21 @@ fn apply_object_swap_restore(
             });
             freeze_configs[snap.sheet_index] = snap.previous;
         }
+        "obj_extension_data" => {
+            let snap: ExtensionDataObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_extension_data snapshot: {}", e); return; }
+            };
+            let mut ext_data = state.extension_data.lock().unwrap();
+            let current = ext_data.remove(&snap.extension_id);
+            push_obj_inverse(inverse_transaction, kind, &ExtensionDataObjSnapshot {
+                extension_id: snap.extension_id.clone(),
+                previous: current,
+            });
+            if let Some(prev) = snap.previous {
+                ext_data.insert(snap.extension_id, prev);
+            }
+        }
         _ => {}
     }
 }
@@ -1671,6 +1695,20 @@ pub(crate) fn record_chart_undo(
 ) {
     let snap = ChartObjSnapshot { chart_id, previous };
     record_object_undo(state, "obj_chart", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
+/// Record an undoable change to one extension's persisted state. `previous` is the
+/// value BEFORE the mutation (None = it had none); restore swaps it back. Backs
+/// the dedicated set_extension_data_undoable command (opt-in; the plain
+/// set_extension_data stays non-undoable).
+pub(crate) fn record_extension_data_undo(
+    state: &AppState,
+    extension_id: String,
+    previous: Option<serde_json::Value>,
+    description: &str,
+) {
+    let snap = ExtensionDataObjSnapshot { extension_id, previous };
+    record_object_undo(state, "obj_extension_data", serde_json::to_vec(&snap).unwrap_or_default(), description);
 }
 
 pub(crate) fn record_sparklines_undo(
@@ -1765,6 +1803,7 @@ mod restore_registry_tests {
             ("obj_named_range", true, CustomRestoreKind::Objects),
             ("obj_freeze", true, CustomRestoreKind::Objects),
             ("script_grid_cells", true, CustomRestoreKind::Objects),
+            ("obj_extension_data", true, CustomRestoreKind::Objects),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));

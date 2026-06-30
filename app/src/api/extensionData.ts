@@ -37,3 +37,21 @@ export async function setExtensionData(
 export async function clearExtensionData(extensionId: string): Promise<void> {
   await invokeBackend<void>("set_extension_data", { extensionId, value: null });
 }
+
+/**
+ * Persist this extension's state AND record it on the undo stack under
+ * `description` (a dedicated, opt-in variant of {@link setExtensionData}). Undo/
+ * redo of this entry restores the prior value and fires the workbook's
+ * objects-changed refresh, so a subscribing extension can re-sync its view.
+ *
+ * Use for user-meaningful, low-frequency writes (e.g. saving a named
+ * configuration) — NOT high-frequency or transient writes, which should use the
+ * plain {@link setExtensionData} to stay off the undo stack. A null value clears.
+ */
+export async function setExtensionDataUndoable(
+  extensionId: string,
+  value: unknown,
+  description: string,
+): Promise<void> {
+  await invokeBackend<void>("set_extension_data_undoable", { extensionId, value, description });
+}

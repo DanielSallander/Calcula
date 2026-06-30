@@ -2915,3 +2915,32 @@ pub fn set_extension_data(
     }
     Ok(())
 }
+
+/// Persist an extension's state AND record it on the undo stack under `description`
+/// (a dedicated, opt-in variant of set_extension_data). Use for user-meaningful,
+/// low-frequency writes (e.g. saving a named animation). High-frequency or
+/// transient writes should stay on the plain (non-undoable) set_extension_data.
+#[tauri::command]
+pub fn set_extension_data_undoable(
+    extension_id: String,
+    value: Option<serde_json::Value>,
+    description: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    // Snapshot the prior value (lock released before recording undo / re-locking).
+    let previous = {
+        let data = state.extension_data.lock().map_err(|e| e.to_string())?;
+        data.get(&extension_id).cloned()
+    };
+    crate::undo_commands::record_extension_data_undo(&state, extension_id.clone(), previous, &description);
+    let mut data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    match value {
+        Some(v) => {
+            data.insert(extension_id, v);
+        }
+        None => {
+            data.remove(&extension_id);
+        }
+    }
+    Ok(())
+}
