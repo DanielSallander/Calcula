@@ -449,7 +449,7 @@ pub fn calp_pull(
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
     // the shared registry and remap cell style_index values accordingly.
-    let chart_sheet_index = {
+    let (chart_sheet_index, pkg_to_index) = {
         let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
@@ -461,6 +461,11 @@ pub fn calp_pull(
         // sheet id) remaps to this for ChartEntry.sheet_index.
         let base_index = grids.len();
         let mut chart_index_map: std::collections::HashMap<_, usize> =
+            std::collections::HashMap::new();
+        // package sheet id -> local sheet index. Named ranges + CF/DV carry the
+        // un-remapped PACKAGE sheet id (unlike charts/sparklines, which pull.rs
+        // already remapped to the local sheet id), so they need this map.
+        let mut pkg_to_index: std::collections::HashMap<_, usize> =
             std::collections::HashMap::new();
 
         for (i, pulled) in result.sheets.iter().enumerate() {
@@ -484,8 +489,9 @@ pub fn calp_pull(
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
             chart_index_map.insert(pulled.sheet.id, base_index + i);
+            pkg_to_index.insert(pulled.package_sheet_id, base_index + i);
         }
-        chart_index_map
+        (chart_index_map, pkg_to_index)
     };
 
     // Store subscription
@@ -539,6 +545,73 @@ pub fn calp_pull(
                         sheet_index,
                         groups_json: sp.groups_json,
                     });
+                }
+            }
+        }
+    }
+
+    // Materialize pulled named ranges. Pull is ADDITIVE (unlike .cala load): the
+    // subscriber's own names are kept; a pulled name is added only if absent.
+    // Keyed by the UPPERCASED name (the case-insensitive lookup invariant);
+    // PublishedNamedRange.sheet_id is the PACKAGE id, mapped to the local index.
+    if !result.named_ranges.is_empty() {
+        let mut names = state.named_ranges.lock().map_err(|e| e.to_string())?;
+        for nr in &result.named_ranges {
+            let key = nr.name.to_uppercase();
+            if names.contains_key(&key) {
+                continue; // don't clobber a name the subscriber already defined
+            }
+            names.insert(
+                key,
+                crate::named_ranges::NamedRange {
+                    name: nr.name.clone(),
+                    sheet_index: nr.sheet_id.and_then(|sid| pkg_to_index.get(&sid).copied()),
+                    refers_to: nr.refers_to.clone(),
+                    comment: None,
+                    folder: None,
+                },
+            );
+        }
+    }
+
+    // Materialize pulled conditional formats onto the (remapped) local sheet index.
+    // Pulled sheets are freshly appended, so each lands on an empty per-sheet Vec.
+    // Advance next_cf_rule_id past any pulled CF id to avoid collisions.
+    if !result.conditional_formats.is_empty() {
+        let mut max_id: u64 = 0;
+        {
+            let mut store = state.conditional_formats.lock().map_err(|e| e.to_string())?;
+            for entry in &result.conditional_formats {
+                if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
+                    if let Ok(defs) = serde_json::from_value::<
+                        Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+                    >(entry.rules.clone())
+                    {
+                        for d in &defs {
+                            max_id = max_id.max(d.id);
+                        }
+                        store.entry(idx).or_default().extend(defs);
+                    }
+                }
+            }
+        }
+        if let Ok(mut next_id) = state.next_cf_rule_id.lock() {
+            if *next_id <= max_id {
+                *next_id = max_id + 1;
+            }
+        }
+    }
+
+    // Materialize pulled data validations onto the (remapped) local sheet index.
+    if !result.data_validations.is_empty() {
+        let mut store = state.data_validations.lock().map_err(|e| e.to_string())?;
+        for entry in &result.data_validations {
+            if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
+                if let Ok(ranges) = serde_json::from_value::<
+                    Vec<crate::data_validation::ValidationRange>,
+                >(entry.ranges.clone())
+                {
+                    store.entry(idx).or_default().extend(ranges);
                 }
             }
         }
@@ -1465,6 +1538,116 @@ pub fn calp_refresh_apply(
     // without this sync a refreshed active sheet reverts on the next recalc.
     if let Some(grid) = active_grid_after_materialize {
         *state.grid.lock().map_err(|e| e.to_string())? = grid;
+    }
+
+    // Map each refreshed package sheet id -> its LOCAL sheet index, so named
+    // ranges + CF/DV (which carry un-remapped PACKAGE sheet ids) materialize onto
+    // the right sheet. Updated sheets resolve via the subscription's local_sheet_id
+    // (still the pre-refresh mapping here); new sheets were just appended under
+    // their own fresh local id (pulled.sheet.id). Runs AFTER sheet materialization
+    // and BEFORE apply_refresh moves `payloads`.
+    let cfdv_pkg_to_index: std::collections::HashMap<SheetId, usize> = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        let mut map = std::collections::HashMap::new();
+        for payload in &payloads {
+            let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                continue;
+            };
+            for pulled in &payload.pull_result.sheets {
+                let local_sid = sub
+                    .sheets
+                    .iter()
+                    .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+                    .map(|s| s.local_sheet_id)
+                    .unwrap_or(pulled.sheet.id); // new sheet: its own fresh local id
+                if let Some(idx) = sheet_ids.iter().position(|id| *id == local_sid) {
+                    map.insert(pulled.package_sheet_id, idx);
+                }
+            }
+        }
+        map
+    };
+
+    // Materialize refreshed named ranges + CF/DV — the refresh analog of the
+    // calp_pull materialization. Without this a refresh delivers v2 sheets/scripts
+    // but leaves the subscriber stuck on v1's CF/DV/named ranges. Done before the
+    // payloads move into apply_refresh; the post-refresh recalc resolves names.
+    {
+        // Named ranges: refresh applies the publisher's latest, so UPSERT by the
+        // uppercased key (vs calp_pull's skip-if-present at first subscribe).
+        // (Cannot distinguish a publisher-removed name from a subscriber's own
+        // without provenance, so removals don't propagate — a known limit.)
+        if payloads.iter().any(|p| !p.pull_result.named_ranges.is_empty()) {
+            let mut names = state.named_ranges.lock().map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                for nr in &payload.pull_result.named_ranges {
+                    names.insert(
+                        nr.name.to_uppercase(),
+                        crate::named_ranges::NamedRange {
+                            name: nr.name.clone(),
+                            sheet_index: nr.sheet_id.and_then(|sid| cfdv_pkg_to_index.get(&sid).copied()),
+                            refers_to: nr.refers_to.clone(),
+                            comment: None,
+                            folder: None,
+                        },
+                    );
+                }
+            }
+        }
+
+        // CF/DV: RESET each refreshed sheet's per-sheet entry, then apply v2's, so
+        // rules the publisher added/changed/removed in v2 all land (extend would
+        // duplicate across refreshes since refreshed sheets keep their local id).
+        let refreshed_indices: std::collections::HashSet<usize> =
+            cfdv_pkg_to_index.values().copied().collect();
+
+        let mut max_cf_id: u64 = 0;
+        {
+            let mut store = state.conditional_formats.lock().map_err(|e| e.to_string())?;
+            for idx in &refreshed_indices {
+                store.remove(idx);
+            }
+            for payload in &payloads {
+                for entry in &payload.pull_result.conditional_formats {
+                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                        if let Ok(defs) = serde_json::from_value::<
+                            Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+                        >(entry.rules.clone())
+                        {
+                            for d in &defs {
+                                max_cf_id = max_cf_id.max(d.id);
+                            }
+                            store.insert(idx, defs);
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(mut next_id) = state.next_cf_rule_id.lock() {
+            if *next_id <= max_cf_id {
+                *next_id = max_cf_id + 1;
+            }
+        }
+
+        {
+            let mut store = state.data_validations.lock().map_err(|e| e.to_string())?;
+            for idx in &refreshed_indices {
+                store.remove(idx);
+            }
+            for payload in &payloads {
+                for entry in &payload.pull_result.data_validations {
+                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                        if let Ok(ranges) = serde_json::from_value::<
+                            Vec<crate::data_validation::ValidationRange>,
+                        >(entry.ranges.clone())
+                        {
+                            store.insert(idx, ranges);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Capture the pre-refresh writeback declarations BEFORE the index is

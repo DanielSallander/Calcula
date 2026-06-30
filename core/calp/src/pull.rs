@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -53,6 +53,16 @@ pub struct PullResult {
     /// remapped to the new LOCAL sheet id. Empty for packages published before
     /// sparklines were carried.
     pub sparklines: Vec<SavedSparkline>,
+    /// Named ranges carried by the package (from the version manifest). Their
+    /// `sheet_id` is the PACKAGE sheet id (un-remapped); the Tauri pull maps it to
+    /// the local sheet index. Empty for packages published before names were carried.
+    pub named_ranges: Vec<PublishedNamedRange>,
+    /// Conditional-formatting rules carried by the package, per sheet. `sheet_id`
+    /// is the PACKAGE sheet id (un-remapped); `rules` is the opaque app payload.
+    pub conditional_formats: Vec<SavedSheetConditionalFormats>,
+    /// Data-validation ranges carried by the package, per sheet. `sheet_id` is the
+    /// PACKAGE sheet id (un-remapped); `ranges` is the opaque app payload.
+    pub data_validations: Vec<SavedSheetDataValidations>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
@@ -270,6 +280,20 @@ pub fn pull(
         }
     };
 
+    // Read conditional formats + data validations (per-sheet, opaque payloads).
+    // Sheet ids are left as PACKAGE ids here; the Tauri pull remaps them to local
+    // sheet indices (alongside named ranges). Absent in older packages.
+    let pulled_conditional_formats: Vec<SavedSheetConditionalFormats> =
+        match registry.read_artifact(pkg, ver, "conditional_formats.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+    let pulled_data_validations: Vec<SavedSheetDataValidations> =
+        match registry.read_artifact(pkg, ver, "data_validations.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+
     // Read tables
     let mut pulled_tables = Vec::new();
     for table_id in &ver_manifest.tables {
@@ -442,6 +466,9 @@ pub fn pull(
         bi_pivot_metadata,
         charts: pulled_charts,
         sparklines: pulled_sparklines,
+        named_ranges: ver_manifest.named_ranges.clone(),
+        conditional_formats: pulled_conditional_formats,
+        data_validations: pulled_data_validations,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -568,6 +595,70 @@ mod tests {
         // data.json-serialized 0.
         let styled = &result.sheets[0].sheet;
         assert_eq!(styled.cells.get(&(1, 2)).map(|c| c.style_index), Some(3));
+    }
+
+    #[test]
+    fn pull_carries_named_ranges_and_cf_dv() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut sheet = Sheet::new("Sales".to_string());
+        sheet
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(1.0)));
+        let pkg_sheet_id = sheet.id;
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![sheet];
+        wb.named_ranges.push(persistence::SavedNamedRange {
+            name: "TaxRate".to_string(),
+            refers_to: "=0.25".to_string(),
+            sheet_id: None, // workbook-scoped
+            comment: None,
+            folder: None,
+        });
+        wb.conditional_formats.push(persistence::SavedSheetConditionalFormats {
+            sheet_id: pkg_sheet_id,
+            rules: serde_json::json!([{ "id": 1, "rule": { "type": "cellValue" } }]),
+        });
+        wb.data_validations.push(persistence::SavedSheetDataValidations {
+            sheet_id: pkg_sheet_id,
+            ranges: serde_json::json!([{ "startRow": 0, "startCol": 0, "endRow": 9, "endCol": 0 }]),
+        });
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "fidelity-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        publish::publish(&reg, &publish_req, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "fidelity-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        // Named ranges ride in the manifest; CF/DV are read from their artifacts.
+        // sheet_ids stay as PACKAGE ids here (the Tauri pull remaps to local index).
+        assert_eq!(result.named_ranges.len(), 1, "named range must be carried by .calp");
+        assert_eq!(result.named_ranges[0].name, "TaxRate");
+        assert_eq!(result.conditional_formats.len(), 1, "CF must be carried by .calp");
+        assert_eq!(result.conditional_formats[0].sheet_id, pkg_sheet_id);
+        assert_eq!(result.data_validations.len(), 1, "DV must be carried by .calp");
+        assert_eq!(result.data_validations[0].sheet_id, pkg_sheet_id);
     }
 
     #[test]

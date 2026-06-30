@@ -382,6 +382,37 @@ pub fn publish(
         )?;
     }
 
+    // Write conditional formatting + data validation on the published sheets.
+    // The Workbook carrier (build_workbook_snapshot) already holds them per-sheet,
+    // keyed by SheetId with opaque app payloads; filter to published sheets and
+    // write as artifacts (pull remaps each entry's sheet id to the local sheet).
+    let published_conditional_formats: Vec<_> = request
+        .workbook
+        .conditional_formats
+        .iter()
+        .filter(|c| published_sheet_ids.contains(&c.sheet_id))
+        .collect();
+    if !published_conditional_formats.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "conditional_formats.json",
+            serde_json::to_string_pretty(&published_conditional_formats)?.as_bytes(),
+        )?;
+    }
+    let published_data_validations: Vec<_> = request
+        .workbook
+        .data_validations
+        .iter()
+        .filter(|d| published_sheet_ids.contains(&d.sheet_id))
+        .collect();
+    if !published_data_validations.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "data_validations.json",
+            serde_json::to_string_pretty(&published_data_validations)?.as_bytes(),
+        )?;
+    }
+
     // Write object scripts
     if !scripts_to_publish.is_empty() {
         for script in &scripts_to_publish {
