@@ -5,6 +5,7 @@
 //          and changes cursor on hover.
 
 import type { Selection, StyleData } from "@api";
+import { listWorkbookScripts, getWorkbookScript, runWorkbookScript } from "@api";
 import type {
   IStyleOverride,
   BaseStyleInfo,
@@ -124,20 +125,15 @@ function sanitizeScriptName(name: string): string {
  * Each module's source is wrapped as: function ModuleName() { ...source... }
  */
 async function buildScriptPreamble(): Promise<string> {
-  // DOCUMENTED EXCEPTION (extension->extension): Controls runs workbook scripts via
-  // ScriptEditor's scriptApi. The clean form is a script-runtime surface in @api (or
-  // extensions/_shared) — but that is entangled with the ScriptEditor module being
-  // unregistered in manifest.ts (its activate(), which binds scriptEditorBackend,
-  // does not run in the main window). Tracked as a follow-up pending that decision.
-  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
-  const { listScripts, getScript } = await import("../../ScriptEditor/lib/scriptApi");
-  const summaries = await listScripts();
+  // Script runtime via the @api door (works in the main window regardless of which
+  // extensions are active) — no longer reaches into the ScriptEditor extension.
+  const summaries = await listWorkbookScripts();
   if (summaries.length === 0) return "";
 
   const parts: string[] = [];
   for (const summary of summaries) {
     try {
-      const script = await getScript(summary.id);
+      const script = await getWorkbookScript(summary.id);
       if (script && script.source) {
         const fnName = sanitizeScriptName(script.name);
         parts.push(`function ${fnName}() {\n${script.source}\n}`);
@@ -156,8 +152,6 @@ async function buildScriptPreamble(): Promise<string> {
  */
 async function executeButtonAction(row: number, col: number): Promise<void> {
   const { getControlMetadata } = await import("../lib/controlApi");
-  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
-  const { runScript } = await import("../../ScriptEditor/lib/scriptApi");
 
   // Get the active sheet index
   const { getGridStateSnapshot } = await import("../../../src/api/grid");
@@ -174,7 +168,7 @@ async function executeButtonAction(row: number, col: number): Promise<void> {
     // Prepend script modules as callable functions, then append the OnSelect code
     const preamble = await buildScriptPreamble();
     const fullSource = preamble + onSelect.value;
-    const result = await runScript(fullSource, "button_onSelect.js");
+    const result = await runWorkbookScript(fullSource, "button_onSelect.js");
 
     if (result.type === "success" && result.cellsModified > 0 && result.screenUpdating !== false) {
       // Refresh grid if cells were modified and screenUpdating is on

@@ -226,6 +226,22 @@ export {
   setColumnDynamicFilter,
 } from "./lib";
 
+// Workbook script runtime (list / read / run saved script modules) — the @api
+// surface extensions use instead of importing the ScriptEditor extension internals.
+export {
+  listWorkbookScripts,
+  getWorkbookScript,
+  runWorkbookScript,
+} from "./workbookScripts";
+export type {
+  ScriptScope,
+  ScriptSummary,
+  WorkbookScript,
+  ScriptRunResult,
+  ScriptRunSuccess,
+  ScriptRunError,
+} from "./workbookScripts";
+
 export type {
   AutoFilterInfo,
   AutoFilterResult,

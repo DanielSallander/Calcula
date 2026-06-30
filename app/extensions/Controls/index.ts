@@ -9,6 +9,9 @@ import type { DeclaredProperty } from "@api/scriptableObjects";
 import {
   ExtensionRegistry,
   AppEvents,
+  listWorkbookScripts,
+  getWorkbookScript,
+  runWorkbookScript,
 } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
@@ -1604,15 +1607,14 @@ function sanitizeScriptName(name: string): string {
  * Each module's source is wrapped as: function ModuleName() { ...source... }
  */
 async function buildScriptPreamble(): Promise<string> {
-  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
-  const { listScripts, getScript } = await import("../ScriptEditor/lib/scriptApi");
-  const summaries = await listScripts();
+  // Script runtime via the @api door — no longer reaches into the ScriptEditor extension.
+  const summaries = await listWorkbookScripts();
   if (summaries.length === 0) return "";
 
   const parts: string[] = [];
   for (const summary of summaries) {
     try {
-      const script = await getScript(summary.id);
+      const script = await getWorkbookScript(summary.id);
       if (script && script.source) {
         const fnName = sanitizeScriptName(script.name);
         parts.push(`function ${fnName}() {\n${script.source}\n}`);
@@ -1630,9 +1632,6 @@ async function buildScriptPreamble(): Promise<string> {
  * Custom script modules from the Script Editor are available as callable functions.
  */
 async function executeFloatingButtonAction(sheetIndex: number, row: number, col: number): Promise<void> {
-  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
-  const { runScript } = await import("../ScriptEditor/lib/scriptApi");
-
   const metadata = await getControlMetadata(sheetIndex, row, col);
   if (!metadata) return;
 
@@ -1643,7 +1642,7 @@ async function executeFloatingButtonAction(sheetIndex: number, row: number, col:
     // Prepend script modules as callable functions, then append the OnSelect code
     const preamble = await buildScriptPreamble();
     const fullSource = preamble + onSelect.value;
-    const result = await runScript(fullSource, "button_onSelect.js");
+    const result = await runWorkbookScript(fullSource, "button_onSelect.js");
     if (result.type === "success" && result.cellsModified > 0) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     } else if (result.type === "error") {
