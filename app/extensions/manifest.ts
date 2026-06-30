@@ -70,6 +70,7 @@ import ScriptableObjectsExtension from "./ScriptableObjects";
 
 // Batch 4: Complex extensions (migrated from Path B)
 import ChartExtension from "./Charts";
+import AnimationExtension from "./Animation";
 import PivotExtension from "./Pivot";
 import TableExtension from "./Table";
 import SlicerExtension from "./Slicer";
@@ -182,6 +183,8 @@ export const builtInExtensions: ExtensionModule[] = [
   ScriptableObjectsExtension,
   // Complex extensions
   ChartExtension,
+  // Animation / Simulation playback — integrates with Charts, loads after it
+  AnimationExtension,
   PivotExtension,
   TableExtension,
   SlicerExtension,

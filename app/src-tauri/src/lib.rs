@@ -59,6 +59,7 @@ pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
 pub mod scenario_manager;
+pub mod animation_commands;
 pub mod data_tables;
 pub mod solver;
 pub mod theme_commands;
@@ -286,6 +287,10 @@ pub struct AppState {
     pub theme: Mutex<engine::ThemeDefinition>,
     /// Scenario Manager: per-sheet list of scenarios
     pub scenarios: Mutex<HashMap<usize, Vec<api_types::Scenario>>>,
+    /// Animation playback transient snapshots: token -> saved (cell coord, prior
+    /// Cell). Used by the anim_* commands to apply transient frame writes and
+    /// restore the model on stop WITHOUT touching the undo stack. Never serialized.
+    pub animation_snapshots: Mutex<HashMap<String, Vec<((u32, u32), Option<engine::Cell>)>>>,
     // linked_sheets removed: replaced by .calp distribution system (Phase 2+)
     /// Locale/regional settings (decimal separator, list separator, date format, etc.)
     pub locale: Mutex<engine::LocaleSettings>,
@@ -432,6 +437,7 @@ pub fn create_app_state() -> AppState {
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
         theme: Mutex::new(engine::ThemeDefinition::default()),
         scenarios: Mutex::new(HashMap::new()),
+        animation_snapshots: Mutex::new(HashMap::new()),
         // linked_sheets removed
         locale: Mutex::new({
             let system_locale = sys_locale::get_locale()
@@ -4155,6 +4161,10 @@ pub fn run() {
             scenario_manager::scenario_show,
             scenario_manager::scenario_summary,
             scenario_manager::scenario_merge,
+            // Animation playback (transient frame writes)
+            animation_commands::anim_snapshot,
+            animation_commands::anim_apply_frame,
+            animation_commands::anim_restore,
             // Data Tables commands
             data_tables::data_table_one_var,
             data_tables::data_table_two_var,

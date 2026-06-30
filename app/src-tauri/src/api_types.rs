@@ -1773,6 +1773,75 @@ pub struct ScenarioListResult {
     pub scenarios: Vec<Scenario>,
 }
 
+// ============================================================================
+// Animation playback — transient frame writes (see animation_commands.rs)
+// ============================================================================
+
+/// A single transient cell write applied during one animation frame.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransientCellWrite {
+    /// Row (0-based)
+    pub row: u32,
+    /// Column (0-based)
+    pub col: u32,
+    /// The literal value to write (parsed like a scenario value: number / TRUE /
+    /// FALSE / text). A driver write never installs a formula.
+    pub value: String,
+}
+
+/// Params for `anim_snapshot`: capture the listed cells under a caller-owned token.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimSnapshotParams {
+    /// Token identifying this snapshot buffer (one per driver run).
+    pub token: String,
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// Cells to snapshot, as [row, col] pairs.
+    pub cells: Vec<(u32, u32)>,
+}
+
+/// Params for `anim_apply_frame`: apply this frame's transient writes + recalc.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimApplyFrameParams {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// Transient writes for this frame.
+    pub writes: Vec<TransientCellWrite>,
+}
+
+/// Params for `anim_restore`: restore (and drop) the named snapshot buffer.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimRestoreParams {
+    /// The snapshot token to restore.
+    pub token: String,
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+}
+
+/// Acknowledgement for `anim_snapshot`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimSnapshotResult {
+    /// Whether the snapshot was captured.
+    pub success: bool,
+    /// Error message, if any.
+    pub error: Option<String>,
+}
+
+/// Result of an animation frame apply / restore: the recalculated cells.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationFrameResult {
+    /// Cells changed by this frame (driver cell + recalculated dependents).
+    pub updated_cells: Vec<CellData>,
+    /// Error message, if any.
+    pub error: Option<String>,
+}
+
 /// Generic result for scenario operations.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
