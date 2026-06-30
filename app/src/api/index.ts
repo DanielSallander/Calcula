@@ -1725,6 +1725,18 @@ export {
   setExtensionDataUndoable,
   clearExtensionData,
 } from "./extensionData";
+// Feature-neutral rendering / frame-capture facade (Charts provides the impl via
+// registerChartRenderingApi; capture/export pipelines consume the helpers).
+export {
+  registerChartRenderingApi,
+  getChartRenderingApi,
+  getChartFrameBitmap,
+  isChartRenderPending,
+  isChartRenderCurrent,
+  chartsIdle,
+  awaitRenderSettled,
+} from "./rendering";
+export type { ChartRenderingApi, RenderSettleOptions } from "./rendering";
 // Scope-injected expression evaluation via the real engine (the sanctioned
 // replacement for hand-rolled in-extension formula evaluators).
 export {

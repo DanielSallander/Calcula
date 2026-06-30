@@ -83,6 +83,7 @@ import {
   mergeSpecPreview,
 } from "./lib/chartStore";
 import { chartsBackend } from "./lib/chartsBackend";
+import { registerChartRenderingApi } from "@api/rendering";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
@@ -107,6 +108,10 @@ import {
   getHoverState,
   removeChartFromCache,
   setBrushMarquee,
+  getChartFrameBitmap,
+  isChartRenderPending,
+  isChartRenderCurrent,
+  chartsIdle,
 } from "./rendering/chartRenderer";
 import {
   hitTestQuickAccessButtons,
@@ -231,6 +236,16 @@ function activate(context: ExtensionContext): void {
   // Bind the capability-gated backend channel BEFORE any chart loading (A3),
   // so the get_charts call at activate time flows through the scoped door.
   chartsBackend.set(context.invokeBackend);
+
+  // Provide the feature-neutral chart-render capture surface (IoC) so capture/
+  // export pipelines (e.g. animation GIF/WebM) can grab a settled chart raster
+  // without importing Charts internals.
+  registerChartRenderingApi({
+    getChartFrameBitmap,
+    isChartRenderPending,
+    isChartRenderCurrent,
+    chartsIdle,
+  });
 
   console.log("[Chart Extension] Registering...");
 
@@ -1594,6 +1609,9 @@ function activate(context: ExtensionContext): void {
 
 function deactivate(): void {
   console.log("[Chart Extension] Unregistering...");
+
+  // Withdraw the chart-render capture surface.
+  registerChartRenderingApi(null);
 
   // Tear down authored sandboxed marks (unregister shims + unmount workers).
   uninstallChartMarks();

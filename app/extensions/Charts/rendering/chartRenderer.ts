@@ -89,6 +89,41 @@ export function invalidateAllChartCaches(): void {
   pendingRenders.clear();
 }
 
+// ----------------------------------------------------------------------------
+// Capture surface (consumed via the feature-neutral @api/rendering IoC contract;
+// the Charts extension registers these in activate()). Used by capture/export
+// pipelines (e.g. animation GIF/WebM) to grab a current, settled chart raster.
+// ----------------------------------------------------------------------------
+
+/** A PNG blob of the chart's current cached raster, or null if it has no cache yet. */
+export function getChartFrameBitmap(chartId: string): Promise<Blob | null> {
+  const cached = chartCanvasCache.get(chartId);
+  return cached ? cached.canvas.convertToBlob() : Promise.resolve(null);
+}
+
+/** True while an async render for this chart is in flight. */
+export function isChartRenderPending(chartId: string): boolean {
+  return pendingRenders.has(chartId);
+}
+
+/**
+ * True when the chart's cached raster is at its latest requested version — i.e.
+ * not stale. A chart that was invalidated but not yet re-rendered (cache missing
+ * or behind the requested version) reports NOT current. Per-chart so a capture
+ * barrier can wait for exactly the target chart without being blocked by an
+ * unrelated off-screen chart that won't repaint until scrolled into view.
+ */
+export function isChartRenderCurrent(chartId: string): boolean {
+  const cached = chartCanvasCache.get(chartId);
+  if (!cached) return false;
+  return cached.version === (chartVersions.get(chartId) ?? cached.version);
+}
+
+/** Coarse global signal: no chart render is currently in flight. */
+export function chartsIdle(): boolean {
+  return pendingRenders.size === 0;
+}
+
 /**
  * Remove a chart from the cache entirely.
  */
