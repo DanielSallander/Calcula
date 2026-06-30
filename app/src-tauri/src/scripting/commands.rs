@@ -8,7 +8,7 @@ use tauri::State;
 use crate::AppState;
 use crate::api_types::CellUpdateInput;
 use crate::persistence::{FileState, UserFilesState};
-use crate::{log_info, log_warn};
+use crate::log_info;
 use engine::{Cell, CellValue, Grid};
 use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptResponse, WorkbookScript};
 
@@ -239,13 +239,26 @@ pub fn grant_script_session_approval(
 /// grid swap MCP used to do (which skipped undo + recalc + events).
 ///
 /// The active sheet is diffed before->after and replayed through
-/// `update_cells_batch` (single undo entry + dependency recalc). Non-active
-/// sheets are applied wholesale as a documented v1 limit (not undoable / not
-/// recalc-tracked). No-ops when nothing changed.
+/// `update_cells_batch` (single undo entry + dependency recalc). NON-active sheets
+/// are now first-class too: each changed sheet's BEFORE cells are snapshotted and
+/// recorded as a `script_grid_cells` CustomRestore (joined into the SAME undo
+/// transaction as the active diff), the post-script grid is applied, then the
+/// sheet is recalced (`recalculate_sheet_values`), the workbook is marked dirty,
+/// and a per-sheet audit entry is written. No-ops when nothing changed.
 ///
-/// LOCK DISCIPLINE: the AppState grid locks are held only to compute the diff /
-/// do the wholesale writes, then DROPPED before calling `update_cells_batch`
-/// (which takes its own locks) to avoid a deadlock.
+/// RESIDUAL (v1): `recalculate_sheet_values` re-evaluates PRE-EXISTING parsed
+/// formula cells on the non-active sheet; a formula a script writes AS A STRING to
+/// a non-active sheet (e.g. "=A1+B1") lands as literal text (the script op stores
+/// `ast: None` and only the active diff is re-parsed by `update_cells_batch`).
+/// And a formula on a THIRD sheet (neither written nor active) that references a
+/// written cell refreshes on next recalc/visit — same class as the single-sheet
+/// dependency-map limitation (BUG-0016). Both are pre-existing engine limits, not
+/// regressions of this path.
+///
+/// LOCK DISCIPLINE: the AppState grid locks are held only to compute the diff and
+/// snapshot/apply the non-active writes, then DROPPED before calling
+/// `update_cells_batch` / `recalculate_sheet_values` (which take their own locks)
+/// to avoid a deadlock.
 pub(crate) fn apply_script_modified_grids(
     state: &State<AppState>,
     file_state: &State<FileState>,
@@ -273,61 +286,139 @@ pub(crate) fn apply_script_modified_grids(
         }
     };
 
-    // Audit (unified Rust-QuickJS trail): record the grid mutation with structured
-    // surface + range attribution. Always recorded (transparency), AFTER the diff
-    // so the entry can name the actual mutated active-sheet range.
-    record_script_grid_mutation(state, surface, surface_id, active_sheet, cells_modified, &updates);
-
-    // Apply non-active-sheet writes wholesale (documented v1 limit: not undoable
-    // / not recalc-tracked). Only touch sheets that actually differ.
+    // Apply non-active-sheet writes the undoable + recalc-tracked way (no longer a
+    // silent wholesale swap). For each non-active sheet the script changed, snapshot
+    // its BEFORE cells (the union of populated coords in both grids — each entry
+    // carries the full prior `Cell`, incl. cached value), then apply the post-script
+    // grid. The snapshots drive a single CustomRestore undo entry; recalc + dirty +
+    // audit follow below.
+    struct NonActiveWrite {
+        sheet_index: usize,
+        before_cells: Vec<(u32, u32, Option<Cell>)>,
+        diff: Vec<CellUpdateInput>,
+    }
+    let mut non_active_writes: Vec<NonActiveWrite> = Vec::new();
     {
         let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
-        let mut wholesale_sheets = 0usize;
-        let empty_grid = Grid::new();
         for (idx, after_grid) in modified_grids.iter().enumerate() {
-            if idx == active_sheet {
+            if idx == active_sheet || idx >= app_grids.len() {
                 continue;
             }
-            // `Cell` has no PartialEq, so compare via the input-string diff: a
-            // non-empty diff means this sheet changed. Scope the immutable borrow
-            // so the mutable write below is allowed.
-            let differs = {
-                let before_grid = app_grids.get(idx).unwrap_or(&empty_grid);
-                !diff_grids_to_updates(before_grid, after_grid).is_empty()
-            };
-            if differs {
-                if idx < app_grids.len() {
-                    app_grids[idx] = after_grid.clone();
-                }
-                wholesale_sheets += 1;
+            let diff = diff_grids_to_updates(&app_grids[idx], after_grid);
+            if diff.is_empty() {
+                continue;
             }
+            // Snapshot BEFORE cells for the union of populated coords (a superset of
+            // what changed — over-capturing an unchanged cell restores it to itself,
+            // a no-op). This guarantees undo returns the sheet to EXACT prior state,
+            // including formula cells that `recalculate_sheet_values` re-evaluates.
+            let before_cells: Vec<(u32, u32, Option<Cell>)> = {
+                let before_grid = &app_grids[idx];
+                let mut coords: std::collections::HashSet<(u32, u32)> =
+                    std::collections::HashSet::new();
+                coords.extend(before_grid.cells.keys().copied());
+                coords.extend(after_grid.cells.keys().copied());
+                let mut v: Vec<(u32, u32, Option<Cell>)> = coords
+                    .into_iter()
+                    .map(|(r, c)| (r, c, before_grid.get_cell(r, c).cloned()))
+                    .collect();
+                v.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+                v
+            };
+            app_grids[idx] = after_grid.clone();
+            non_active_writes.push(NonActiveWrite { sheet_index: idx, before_cells, diff });
         }
         drop(app_grids);
-        if wholesale_sheets > 0 {
-            log_warn!(
-                "SCRIPT",
-                "script wrote {} non-active sheet(s) wholesale: these writes are NOT undoable or recalc-tracked yet (v1 limit)",
-                wholesale_sheets
+    }
+    let has_non_active = !non_active_writes.is_empty();
+
+    // Open ONE undo transaction so the non-active CustomRestores and the active-sheet
+    // diff (recorded by `update_cells_batch`, which JOINS an already-open transaction
+    // and won't commit it) land as a SINGLE undoable action.
+    if has_non_active {
+        let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo.begin_transaction(format!("{} edit", surface_label(surface)));
+        for w in &non_active_writes {
+            let snapshot = crate::undo_commands::ScriptGridCellsSnapshot {
+                sheet_index: w.sheet_index,
+                cells: w.before_cells.clone(),
+            };
+            let data = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+            undo.record_custom_restore(
+                "script_grid_cells".to_string(),
+                data,
+                "Script edit (off-sheet)",
             );
         }
     }
 
-    // Replay the active-sheet diff through the edit pipeline. All AppState locks
-    // acquired above are now dropped.
-    if !updates.is_empty() {
+    // Replay the active-sheet diff through the edit pipeline (parse + recalc + undo +
+    // dirty). All AppState grid locks acquired above are now dropped. Capture the
+    // result so the combined transaction is finalized even if the batch errors —
+    // an open transaction left dangling would bleed into the next edit.
+    let active_result: Result<(), String> = if !updates.is_empty() {
         let cell_count = updates.len();
-        crate::commands::data::update_cells_batch(
+        // Active-sheet audit (transparency): accurate sheet + effective-change count
+        // + range. Recorded before the move into update_cells_batch.
+        record_script_grid_mutation(state, surface, surface_id, active_sheet, cell_count as u32, &updates);
+        let r = crate::commands::data::update_cells_batch(
             state.clone(),
             file_state.clone(),
             user_files_state.clone(),
             pivot_state.clone(),
             updates,
             None,
-        )?;
+        );
+        if r.is_ok() {
+            log_info!(
+                "SCRIPT",
+                "applied {} active-sheet cell change(s) via edit pipeline (parsed + recalc + undoable)",
+                cell_count
+            );
+        }
+        r.map(|_| ())
+    } else {
+        Ok(())
+    };
+
+    if !has_non_active {
+        // No outer transaction we own; just propagate any batch error.
+        return active_result.map(|_| ());
+    }
+
+    {
+        // ALWAYS commit the transaction we opened — even if the active batch errored —
+        // so it can never dangle open on the undo stack and bleed into the next edit.
+        let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo.commit_transaction();
+    }
+    // Propagate a batch error now (after committing); skip recalc/audit on failure.
+    active_result?;
+
+    {
+        // Recalc each written non-active sheet (its own formula chains), then the
+        // active sheet (active formulas that READ the written cells — the batch
+        // path's cascade is seeded only from active-sheet writes, so it misses
+        // active -> non-active references). Reuses the .calp refresh pattern.
+        for w in &non_active_writes {
+            crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, w.sheet_index);
+        }
+        crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, active_sheet);
+        // Dirty flag (update_cells_batch sets it only when there was an active diff).
+        if let Ok(mut modified) = file_state.is_modified.lock() {
+            *modified = true;
+        }
+        // Per-sheet audit with correct attribution + range (replaces the prior single
+        // active-sheet entry that mis-attributed off-sheet writes to the active sheet).
+        for w in &non_active_writes {
+            record_script_grid_mutation(
+                state, surface, surface_id, w.sheet_index, w.diff.len() as u32, &w.diff,
+            );
+        }
         log_info!(
             "SCRIPT",
-            "applied {} active-sheet cell change(s) via edit pipeline (parsed + recalc + undoable)",
-            cell_count
+            "applied {} non-active sheet(s) undoably (snapshot undo + per-sheet recalc + dirty + audit)",
+            non_active_writes.len()
         );
     }
 
@@ -398,9 +489,10 @@ pub fn run_script(
     //
     //    The engine ran on a CLONE; AppState still holds the ORIGINAL grids, so
     //    AppState IS the "before". We diff the active sheet before -> after and
-    //    replay it via update_cells_batch (single undo entry + recalc). Writes
-    //    to non-active sheets are applied wholesale as a documented v1 limit
-    //    (no per-sheet undo/recalc for off-screen sheets yet).
+    //    replay it via update_cells_batch (single undo entry + recalc). Writes to
+    //    non-active sheets are snapshot-undoable + per-sheet recalced + audited too
+    //    (one combined transaction); see apply_script_modified_grids for residual
+    //    cross-sheet limits.
     if let script_engine::ScriptResult::Success { cells_modified, .. } = &result {
         apply_script_modified_grids(
             &state,

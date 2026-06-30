@@ -2,7 +2,7 @@
 // PURPOSE: Tauri commands for undo/redo operations.
 
 use crate::api_types::{CellData, MergedRegion};
-use crate::persistence::FileState;
+use crate::persistence::{FileState, UserFilesState};
 use crate::pivot::operations::*;
 use crate::pivot::types::PivotState;
 use crate::ribbon_filter::types::{RibbonFilter, RibbonFilterState};
@@ -225,6 +225,7 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
 fn apply_changes(
     state: &AppState,
     file_state: &FileState,
+    user_files_state: &UserFilesState,
     pivot_state: &PivotState,
     slicer_state: &SlicerState,
     ribbon_filter_state: &RibbonFilterState,
@@ -249,6 +250,9 @@ fn apply_changes(
     let mut slicer_changed = false;
     let mut ribbon_filter_changed = false;
     let mut objects_changed = false;
+    // True when an off-active-sheet script/AI write was undone/redone — drives a
+    // post-restore active-sheet recalc (see the deferred-restore loop below).
+    let mut script_cells_restored = false;
 
     // Deferred custom restores that need to run AFTER grid locks are released
     // (pivot/slicer/ribbon_filter restores acquire their own locks and may need grid access)
@@ -485,9 +489,22 @@ fn apply_changes(
                     &mut pivot_changed, &mut slicer_changed,
                     &mut ribbon_filter_changed, &mut objects_changed,
                 );
+                if kind == "script_grid_cells" {
+                    script_cells_restored = true;
+                }
             }
             None => eprintln!("[undo] Unknown deferred custom restore kind: {}", kind),
         }
+    }
+
+    // Symmetry with the forward apply: when a non-active script/AI write is
+    // undone/redone, the restored off-sheet Cells already carry their cached
+    // values (no recalc needed for them), but ACTIVE-sheet formulas that reference
+    // the restored cells must be re-evaluated — exactly as the forward path recalcs
+    // the active sheet (scripting::commands). Without this, an active formula like
+    // `=Sheet2!A1` would keep its pre-undo (stale) value until the next edit.
+    if script_cells_restored {
+        crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, active_sheet);
     }
 
     // Push inverse transaction to the appropriate stack (re-acquire undo_stack)
@@ -597,6 +614,7 @@ fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &Ribbo
 fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_create_restore(rf, d, inv); }
 fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_delete_restore(rf, d, inv); }
 fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
+fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -624,6 +642,12 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
+    // Off-active-sheet cell writes from a script / AI tool (apply_script_modified_grids).
+    // Deferred: re-acquires the grid/grids/active-sheet locks (released by the time
+    // deferred restores run). Tagged Objects so the frontend fires grid:refresh on
+    // undo/redo (re-fetches the active viewport when the restored sheet IS active;
+    // a non-active restored sheet re-materializes from grids[idx] on sheet switch).
+    m.insert("script_grid_cells", RestoreSpec { restore: r_script_grid_cells, change_class: Objects, defer: true });
     m
 });
 
@@ -647,6 +671,83 @@ fn set_restore_change_flag(
         CustomRestoreKind::Objects => *objects_changed = true,
         CustomRestoreKind::Other => {}
     }
+}
+
+/// Serialized payload for the `"script_grid_cells"` CustomRestore — an
+/// off-active-sheet cell write made by a script / AI tool. Produced by
+/// `scripting::commands::apply_script_modified_grids` and consumed here. Each
+/// entry carries the full prior `Cell` (incl. its cached value), so restoring is
+/// exact and needs NO recalc; `None` means the cell was empty before.
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct ScriptGridCellsSnapshot {
+    pub sheet_index: usize,
+    pub cells: Vec<(u32, u32, Option<engine::Cell>)>,
+}
+
+/// Restore (undo/redo) an off-active-sheet script/AI cell write.
+///
+/// Writes each captured cell back into `grids[sheet_index]` (and the active
+/// mirror when that sheet happens to be active at undo time), capturing the
+/// CURRENT cells as the symmetric inverse so redo re-applies the post-write
+/// state. No recalc is needed: each restored `Cell` already carries its cached
+/// value. Lock order matches `recalculate_sheet_values` (grid → grids →
+/// active_sheet) to stay deadlock-consistent.
+fn apply_script_grid_cells_restore(
+    state: &AppState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: ScriptGridCellsSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize script_grid_cells snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut mirror = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    if snapshot.sheet_index >= grids.len() {
+        return;
+    }
+    let is_active = snapshot.sheet_index == active_sheet;
+
+    let mut inverse_cells: Vec<(u32, u32, Option<engine::Cell>)> =
+        Vec::with_capacity(snapshot.cells.len());
+    for (row, col, restore_to) in &snapshot.cells {
+        // Capture current for the inverse (redo restores the post-write state).
+        let current = grids[snapshot.sheet_index].get_cell(*row, *col).cloned();
+        inverse_cells.push((*row, *col, current));
+
+        match restore_to {
+            Some(cell) => {
+                grids[snapshot.sheet_index].set_cell(*row, *col, cell.clone());
+                if is_active {
+                    mirror.set_cell(*row, *col, cell.clone());
+                }
+            }
+            None => {
+                grids[snapshot.sheet_index].clear_cell(*row, *col);
+                if is_active {
+                    mirror.clear_cell(*row, *col);
+                }
+            }
+        }
+    }
+
+    drop(grids);
+    drop(mirror);
+
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "script_grid_cells".to_string(),
+        data: serde_json::to_vec(&ScriptGridCellsSnapshot {
+            sheet_index: snapshot.sheet_index,
+            cells: inverse_cells,
+        })
+        .unwrap_or_default(),
+    });
 }
 
 /// Restore a comment snapshot for undo/redo.
@@ -836,6 +937,7 @@ fn apply_default_dimension_restore(
 pub fn undo(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
     pivot_state: State<'_, PivotState>,
     slicer_state: State<'_, SlicerState>,
     ribbon_filter_state: State<'_, RibbonFilterState>,
@@ -862,7 +964,7 @@ pub fn undo(
         }
     };
 
-    apply_changes(&state, &file_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, true)
+    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, true)
 }
 
 /// Perform redo operation.
@@ -870,6 +972,7 @@ pub fn undo(
 pub fn redo(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
     pivot_state: State<'_, PivotState>,
     slicer_state: State<'_, SlicerState>,
     ribbon_filter_state: State<'_, RibbonFilterState>,
@@ -896,7 +999,7 @@ pub fn redo(
         }
     };
 
-    apply_changes(&state, &file_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, false)
+    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, false)
 }
 
 /// Clear undo/redo history (e.g., when opening a new file).
@@ -1661,6 +1764,7 @@ mod restore_registry_tests {
             ("obj_validation", true, CustomRestoreKind::Objects),
             ("obj_named_range", true, CustomRestoreKind::Objects),
             ("obj_freeze", true, CustomRestoreKind::Objects),
+            ("script_grid_cells", true, CustomRestoreKind::Objects),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
@@ -1674,13 +1778,17 @@ mod restore_registry_tests {
     /// The deadlock-critical `defer` flag must agree with the legacy
     /// `kind.starts_with("pivot_"/"slicer"/"ribbon_filter"/"obj_")` deferral for
     /// EVERY registered kind — this is what guarantees lock-ordering is preserved.
+    /// `script_grid_cells` is newer than the legacy prefixes but is likewise
+    /// deferred (it re-acquires the grid/grids/active-sheet locks), so it joins the
+    /// deferred set explicitly.
     #[test]
     fn defer_agrees_with_legacy_prefix_logic() {
         for (kind, spec) in RESTORE_REGISTRY.iter() {
             let legacy_deferred = kind.starts_with("pivot_")
                 || kind.starts_with("slicer")
                 || kind.starts_with("ribbon_filter")
-                || kind.starts_with("obj_");
+                || kind.starts_with("obj_")
+                || *kind == "script_grid_cells";
             assert_eq!(
                 spec.defer, legacy_deferred,
                 "defer for '{kind}' disagrees with the legacy prefix deferral"
