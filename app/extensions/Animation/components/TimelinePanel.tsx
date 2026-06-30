@@ -1,25 +1,18 @@
 //! FILENAME: app/extensions/Animation/components/TimelinePanel.tsx
-// PURPOSE: The Animation timeline panel — configure a clock-cell driver and drive
-//          playback (play/pause/stop/step, scrubber, fps, loop). A pure view over
-//          the playbackEngine (subscribes to its ClockState; holds no clock state).
+// PURPOSE: The Animation timeline panel — saved animations (load/edit/delete/new),
+//          an ad-hoc driver quick-config, and the playback transport (play/pause/
+//          stop/step, scrubber, fps, loop). A pure view over the playbackEngine
+//          and animationStore.
 import React, { useCallback, useEffect, useState } from "react";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { getActiveSheet } from "@api/lib";
+import { showDialog } from "@api/ui";
 import { playbackEngine, type EngineState } from "../lib/animationEngine";
+import { listAnimations, subscribeAnimations, deleteAnimation } from "../lib/animationStore";
+import type { AnimationSpec } from "../types";
+import { parseA1 } from "../lib/a1";
+import { ANIMATION_DIALOG_ID } from "./AnimationDialog";
 import { PlayIcon, PauseIcon, StopIcon, StepBackIcon, StepFwdIcon } from "./icons";
-
-/** Parse an A1-style address ("B1", "$AA$10") to 0-based row/col. */
-function parseA1(addr: string): { row: number; col: number } | null {
-  const m = /^\s*\$?([A-Za-z]{1,3})\$?(\d{1,7})\s*$/.exec(addr);
-  if (!m) return null;
-  const letters = m[1].toUpperCase();
-  let col = 0;
-  for (let i = 0; i < letters.length; i++) col = col * 26 + (letters.charCodeAt(i) - 64);
-  col -= 1;
-  const row = parseInt(m[2], 10) - 1;
-  if (row < 0 || col < 0) return null;
-  return { row, col };
-}
 
 const btn: React.CSSProperties = {
   display: "inline-flex",
@@ -33,6 +26,7 @@ const btn: React.CSSProperties = {
   background: "var(--button-bg, #fff)",
   cursor: "pointer",
 };
+const smallBtn: React.CSSProperties = { ...btn, minWidth: 0, height: 22, padding: "0 6px", fontSize: 11 };
 const field: React.CSSProperties = {
   width: "100%",
   height: 24,
@@ -42,10 +36,18 @@ const field: React.CSSProperties = {
   borderRadius: 4,
 };
 const label: React.CSSProperties = { fontSize: 11, opacity: 0.75, marginBottom: 2 };
+const sectionTitle: React.CSSProperties = { fontSize: 11, fontWeight: 600, opacity: 0.7, textTransform: "uppercase" };
 
 export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElement {
   const [state, setState] = useState<EngineState>(() => playbackEngine.getState());
   useEffect(() => playbackEngine.subscribe(setState), []);
+
+  const [specs, setSpecs] = useState<AnimationSpec[]>(() => listAnimations());
+  useEffect(() => {
+    const refresh = () => setSpecs(listAnimations());
+    refresh();
+    return subscribeAnimations(refresh);
+  }, []);
 
   const [cellRef, setCellRef] = useState("B1");
   const [fromStr, setFromStr] = useState("0");
@@ -71,15 +73,14 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
     }
     setFormError(null);
     const sheetIndex = await getActiveSheet();
-    await playbackEngine.setClockCellDriver({
-      sheetIndex,
-      row: parsed.row,
-      col: parsed.col,
-      from,
-      to,
-      step,
-    });
+    await playbackEngine.setClockCellDriver({ sheetIndex, row: parsed.row, col: parsed.col, from, to, step });
   }, [cellRef, fromStr, toStr, stepStr]);
+
+  const openSaveCurrent = useCallback(() => {
+    showDialog(ANIMATION_DIALOG_ID, {
+      prefill: { cellRef, from: fromStr, to: toStr, step: stepStr, fps: state.fps, loop: state.loop },
+    });
+  }, [cellRef, fromStr, toStr, stepStr, state.fps, state.loop]);
 
   const horizontal = placement === "ribbon";
 
@@ -88,14 +89,47 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
       style={{
         display: "flex",
         flexDirection: horizontal ? "row" : "column",
-        gap: 10,
+        gap: 12,
         padding: 8,
         fontSize: 12,
-        alignItems: horizontal ? "center" : "stretch",
+        alignItems: horizontal ? "flex-start" : "stretch",
       }}
     >
-      {/* Driver configuration */}
+      {/* Saved animations */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 200 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={sectionTitle}>Saved animations</span>
+          <button style={smallBtn} onClick={() => showDialog(ANIMATION_DIALOG_ID, {})}>
+            + New
+          </button>
+        </div>
+        {specs.length === 0 ? (
+          <div style={{ opacity: 0.6, fontSize: 11 }}>None yet — configure a driver below and Save, or click New.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {specs.map((s) => (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={s.name}>
+                  {s.name}
+                </span>
+                <button style={smallBtn} title="Load" onClick={() => void playbackEngine.loadSpec(s)}>
+                  Load
+                </button>
+                <button style={smallBtn} title="Edit" onClick={() => showDialog(ANIMATION_DIALOG_ID, { editingId: s.id })}>
+                  Edit
+                </button>
+                <button style={smallBtn} title="Delete" onClick={() => void deleteAnimation(s.id)}>
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Ad-hoc driver quick-config */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 180 }}>
+        <span style={sectionTitle}>Quick driver</span>
         <div>
           <div style={label}>Driver cell</div>
           <input style={field} value={cellRef} onChange={(e) => setCellRef(e.target.value)} placeholder="B1" />
@@ -114,14 +148,20 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
             <input style={field} value={stepStr} onChange={(e) => setStepStr(e.target.value)} />
           </div>
         </div>
-        <button style={{ ...btn, width: "100%" }} onClick={() => void handleSetDriver()}>
-          Set driver
-        </button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button style={{ ...btn, flex: 1 }} onClick={() => void handleSetDriver()}>
+            Set driver
+          </button>
+          <button style={btn} title="Save as a named animation" onClick={openSaveCurrent}>
+            Save…
+          </button>
+        </div>
         {formError && <div style={{ color: "var(--error-color, #c0392b)", fontSize: 11 }}>{formError}</div>}
       </div>
 
       {/* Transport */}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 200 }}>
+        <span style={sectionTitle}>Playback</span>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <button style={btn} title="Step back" disabled={!hasDriver} onClick={() => void playbackEngine.step(-1)}>
             <StepBackIcon />

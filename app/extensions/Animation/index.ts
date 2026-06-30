@@ -11,12 +11,14 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerStatusBarItem, unregisterStatusBarItem } from "@api/ui";
+import { registerStatusBarItem, unregisterStatusBarItem, registerDialog, unregisterDialog } from "@api/ui";
 import { onAppEvent, AppEvents } from "@api/events";
 import { animationBackend } from "./lib/animationBackend";
 import { playbackEngine } from "./lib/animationEngine";
+import { loadAnimations, resetAnimations } from "./lib/animationStore";
 import { TimelinePanel } from "./components/TimelinePanel";
 import { TransportStatusItem } from "./components/TransportStatusItem";
+import { AnimationDialog, ANIMATION_DIALOG_ID } from "./components/AnimationDialog";
 import { FilmIcon } from "./components/icons";
 
 const PANEL_ID = "animation.timeline";
@@ -58,6 +60,15 @@ function activate(context: ExtensionContext): void {
     action: () => context.ui.panels.open(PANEL_ID),
   });
   cleanupFns.push(() => context.ui.menus.unregisterItem("view", MENU_ITEM_ID));
+
+  // Create / edit dialog for saved animations.
+  registerDialog({ id: ANIMATION_DIALOG_ID, title: "Animation", component: AnimationDialog, priority: 100 });
+  cleanupFns.push(() => unregisterDialog(ANIMATION_DIALOG_ID));
+
+  // Load saved animations for the already-open workbook, and on file open/new.
+  void loadAnimations();
+  cleanupFns.push(onAppEvent(AppEvents.AFTER_OPEN, () => void loadAnimations()));
+  cleanupFns.push(onAppEvent(AppEvents.AFTER_NEW, () => resetAnimations()));
 
   // Transient guarantee: never let an animated frame be saved or leak across a
   // sheet/file change — force-stop (which restores the model) on these events.

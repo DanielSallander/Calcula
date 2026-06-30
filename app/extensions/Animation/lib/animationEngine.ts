@@ -7,6 +7,7 @@
 
 import { createPlaybackClock, type ClockState } from "./playbackClock";
 import { createClockCellDriver, type ClockCellConfig } from "../drivers/clockCellDriver";
+import type { AnimationSpec } from "../types";
 
 const clock = createPlaybackClock();
 
@@ -28,6 +29,18 @@ export const playbackEngine = {
   /** Configure (and restore any prior) a clock-cell driver. Leaves playback idle. */
   async setClockCellDriver(cfg: ClockCellConfig): Promise<void> {
     await clock.setDriver(createClockCellDriver(cfg));
+  },
+
+  /** Load a saved AnimationSpec into the engine (restores any prior driver). */
+  async loadSpec(spec: AnimationSpec): Promise<void> {
+    if (spec.driver === "clockCell" && spec.clockCell) {
+      await clock.setDriver(createClockCellDriver({ sheetIndex: spec.sheetIndex, ...spec.clockCell }));
+      clock.setFps(spec.playback.fps);
+      clock.setLoop(spec.playback.loop);
+      if (spec.playback.rangeStart != null && spec.playback.rangeEnd != null) {
+        clock.setRange(spec.playback.rangeStart, spec.playback.rangeEnd);
+      }
+    }
   },
 
   /** Drop the current driver, restoring the model first. */
