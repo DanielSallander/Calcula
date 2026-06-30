@@ -5,7 +5,7 @@
 use identity::EntityId;
 use persistence::{
     SavedRibbonFilter, SavedRibbonFilterDisplayMode, SavedConnectionMode,
-    SavedSlicerSourceType, SavedSlicerConnection,
+    SavedSlicerSourceType, SavedSlicerConnection, SavedAdvancedFilter,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,10 @@ pub struct RibbonFilterDef {
     pub display_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_items: Option<Vec<String>>,
+    /// Advanced (operator/value/logic) filter condition. Persisted in the .cala
+    /// mirror so a Filter-Pane advanced filter survives save/reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced_filter: Option<SavedAdvancedFilter>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_filter_targets: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -115,6 +119,7 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
                 SavedRibbonFilterDisplayMode::Dropdown => "dropdown".to_string(),
             },
             selected_items: f.selected_items.clone(),
+            advanced_filter: f.advanced_filter.clone(),
             cross_filter_targets: f.cross_filter_targets.clone(),
             cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
             hide_no_data: f.hide_no_data,
@@ -133,7 +138,7 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
     fn from(f: &RibbonFilterDef) -> Self {
         SavedRibbonFilter {
             id: f.id,
-            advanced_filter: None,
+            advanced_filter: f.advanced_filter.clone(),
             name: f.name.clone(),
             source_type: match f.source_type.as_str() {
                 "pivot" => SavedSlicerSourceType::Pivot,

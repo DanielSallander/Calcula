@@ -212,6 +212,7 @@ impl From<&SlicerDef> for SavedSlicer {
                 SavedSlicerConnection {
                     source_type: match c.source_type.as_str() {
                         "pivot" => SavedSlicerSourceType::Pivot,
+                        "biConnection" => SavedSlicerSourceType::BiConnection,
                         _ => SavedSlicerSourceType::Table,
                     },
                     source_id: c.source_id,

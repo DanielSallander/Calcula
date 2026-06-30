@@ -242,6 +242,12 @@ pub struct SavedNamedRange {
     pub refers_to: String,
     /// Sheet ID for sheet-scoped names, None for workbook-scoped
     pub sheet_id: Option<SheetId>,
+    /// Optional comment/description (Name Manager).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Optional folder for organizational grouping in the Name Manager.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 /// A note/comment attached to a cell for persistence.

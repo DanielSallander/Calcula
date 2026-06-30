@@ -400,6 +400,8 @@ pub fn build_workbook_snapshot(state: &State<AppState>) -> Result<Workbook, Stri
             name: nr.name.clone(),
             refers_to: nr.refers_to.clone(),
             sheet_id: nr.sheet_index.map(|idx| sheet_index_to_id(&sheet_ids, idx)),
+            comment: nr.comment.clone(),
+            folder: nr.folder.clone(),
         }).collect();
     }
 
@@ -571,6 +573,8 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
                 name: nr.name.clone(),
                 refers_to: nr.refers_to.clone(),
                 sheet_id: nr.sheet_index.map(|idx| sheet_index_to_id(sheet_ids, idx)),
+                comment: nr.comment.clone(),
+                folder: nr.folder.clone(),
             })
             .collect();
     }
@@ -1701,6 +1705,30 @@ pub fn open_file(
     // Restore object scripts (scriptable objects) from workbook
     *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();
     *state.extension_data.lock().unwrap() = workbook.extension_data.clone();
+
+    // Restore named ranges (defined names). The save builders populate
+    // workbook.named_ranges and the format now serializes them, but without this
+    // the parsed names never reach runtime state — so defined names silently
+    // vanished on every reload. Map the persisted SheetId back to this session's
+    // sheet index (workbook-scoped names carry no sheet_id).
+    if let Ok(mut named_ranges) = state.named_ranges.lock() {
+        named_ranges.clear();
+        for nr in &workbook.named_ranges {
+            // The map is keyed by the UPPERCASED name (case-insensitive lookup
+            // invariant shared with create/update/rename/delete + the BI insert);
+            // the struct keeps the original-case name for display.
+            named_ranges.insert(
+                nr.name.to_uppercase(),
+                crate::named_ranges::NamedRange {
+                    name: nr.name.clone(),
+                    sheet_index: nr.sheet_id.map(|id| sheet_id_to_index(&workbook, id)),
+                    refers_to: nr.refers_to.clone(),
+                    comment: nr.comment.clone(),
+                    folder: nr.folder.clone(),
+                },
+            );
+        }
+    }
 
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state, &workbook);

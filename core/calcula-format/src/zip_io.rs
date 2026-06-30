@@ -274,6 +274,15 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.write_all(charts_json.as_bytes())?;
     }
 
+    // Write named ranges (defined names) as a single named_ranges.json array.
+    // Read unconditionally on load (like sparklines), so no manifest feature flag
+    // is needed and older files without the artifact load as an empty set.
+    if !workbook.named_ranges.is_empty() {
+        let named_ranges_json = serde_json::to_string_pretty(&workbook.named_ranges)?;
+        zip.start_file("named_ranges.json", options.clone())?;
+        zip.write_all(named_ranges_json.as_bytes())?;
+    }
+
     // Write generic per-extension state as a single extension-data.json object
     if !workbook.extension_data.is_empty() {
         let extension_data_json = serde_json::to_string_pretty(&workbook.extension_data)?;
@@ -679,6 +688,11 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         read_optional_json::<Vec<SavedSparkline>>(&mut archive, "sparklines.json")?
             .unwrap_or_default();
 
+    // Read named ranges (defined names)
+    let named_ranges: Vec<persistence::SavedNamedRange> =
+        read_optional_json::<Vec<persistence::SavedNamedRange>>(&mut archive, "named_ranges.json")?
+            .unwrap_or_default();
+
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
     if manifest.features.contains(&"files".to_string()) {
@@ -731,7 +745,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         properties,
         charts,
         sparklines,
-        named_ranges: Vec::new(),
+        named_ranges,
         pivot_layouts,
         pivot_definitions,
         bi_pivot_metadata,
@@ -933,6 +947,153 @@ mod tests {
         // Check styles
         assert_eq!(loaded.sheets[0].styles.len(), 3);
         assert!(loaded.sheets[0].styles[1].font.bold);
+    }
+
+    #[test]
+    fn test_roundtrip_named_ranges() {
+        // Regression: named ranges (defined names) were silently dropped on every
+        // .cala save (writer had no branch; reader hardcoded Vec::new()).
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.named_ranges = vec![
+            persistence::SavedNamedRange {
+                name: "TaxRate".to_string(),
+                refers_to: "=0.25".to_string(),
+                sheet_id: None, // workbook-scoped
+                comment: Some("VAT".to_string()),
+                folder: Some("Finance".to_string()),
+            },
+            persistence::SavedNamedRange {
+                name: "SalesData".to_string(),
+                refers_to: "Sales Data!$A$1:$B$10".to_string(),
+                sheet_id: Some(sheet_id), // sheet-scoped
+                comment: None,
+                folder: None,
+            },
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nr.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.named_ranges.len(), 2, "named ranges must survive the .cala round-trip");
+        let tax = loaded.named_ranges.iter().find(|nr| nr.name == "TaxRate").expect("TaxRate present");
+        assert_eq!(tax.refers_to, "=0.25");
+        assert_eq!(tax.sheet_id, None);
+        assert_eq!(tax.comment.as_deref(), Some("VAT"));
+        assert_eq!(tax.folder.as_deref(), Some("Finance"));
+        let sales = loaded.named_ranges.iter().find(|nr| nr.name == "SalesData").expect("SalesData present");
+        assert_eq!(sales.sheet_id, Some(sheet_id), "sheet-scoped SheetId must round-trip");
+    }
+
+    #[test]
+    fn test_roundtrip_slicer_biconnection_report_connection() {
+        // Regression: a slicer Report-Connection to a BI connection deserialized
+        // back to Table (the connected_sources match had no "biConnection" arm).
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        let conn_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        workbook.slicers.push(persistence::SavedSlicer {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Region".to_string(),
+            header_text: None,
+            sheet_id,
+            x: 0.0, y: 0.0, width: 200.0, height: 150.0,
+            source_type: persistence::SavedSlicerSourceType::BiConnection,
+            cache_source_id: conn_id,
+            field_name: "Region".to_string(),
+            selected_items: None,
+            show_header: true,
+            columns: 1,
+            style_preset: "default".to_string(),
+            selection_mode: Default::default(),
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            force_selection: false,
+            show_select_all: false,
+            arrangement: Default::default(),
+            rows: 0,
+            item_gap: 4.0,
+            autogrid: true,
+            item_padding: 0.0,
+            button_radius: 4.0,
+            computed_properties: Vec::new(),
+            connected_sources: vec![persistence::SavedSlicerConnection {
+                source_type: persistence::SavedSlicerSourceType::BiConnection,
+                source_id: conn_id,
+            }],
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slicer.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.slicers.len(), 1);
+        let cs = &loaded.slicers[0].connected_sources;
+        assert_eq!(cs.len(), 1, "the BI connected-source must survive");
+        assert!(
+            matches!(cs[0].source_type, persistence::SavedSlicerSourceType::BiConnection),
+            "slicer Report-Connection to a BI connection must round-trip (regression: downgraded to Table)"
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_ribbon_filter_advanced_filter() {
+        // Regression: a Filter-Pane advanced (operator/value/logic) condition was
+        // dropped by the .cala RibbonFilterDef mirror (no field; reverse forced None).
+        let mut workbook = make_test_workbook();
+        workbook.ribbon_filters.push(persistence::SavedRibbonFilter {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Sales".to_string(),
+            source_type: persistence::SavedSlicerSourceType::Table,
+            cache_source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            field_name: "Amount".to_string(),
+            field_data_type: "number".to_string(),
+            connection_mode: Default::default(),
+            connected_sources: Vec::new(),
+            connected_sheets: Vec::new(),
+            display_mode: Default::default(),
+            selected_items: None,
+            cross_filter_targets: Vec::new(),
+            cross_filter_slicer_targets: Vec::new(),
+            advanced_filter: Some(persistence::SavedAdvancedFilter {
+                condition1: persistence::SavedAdvancedFilterCondition {
+                    operator: "greaterThan".to_string(),
+                    value: "100".to_string(),
+                },
+                condition2: Some(persistence::SavedAdvancedFilterCondition {
+                    operator: "lessThan".to_string(),
+                    value: "500".to_string(),
+                }),
+                logic: "and".to_string(),
+            }),
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            show_select_all: false,
+            single_select: false,
+            order: 0,
+            button_columns: 2,
+            button_rows: 0,
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ribbon.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.ribbon_filters.len(), 1);
+        let af = loaded.ribbon_filters[0]
+            .advanced_filter
+            .as_ref()
+            .expect("ribbon-filter advanced_filter must survive reload (regression: dropped by the .cala mirror)");
+        assert_eq!(af.condition1.operator, "greaterThan");
+        assert_eq!(af.condition1.value, "100");
+        assert_eq!(af.condition2.as_ref().expect("condition2").operator, "lessThan");
+        assert_eq!(af.logic, "and");
     }
 
     #[test]
