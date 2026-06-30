@@ -11,6 +11,9 @@ use crate::pivot::types::PivotTableInfo;
 use pivot_engine::PivotDefinition;
 use crate::format_cell_value;
 use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
+use crate::bi::types::{
+    BiState, BiQueryRequest, BiColumnRef, BiFilter, BiQueryResult, ConnectionInfo, BiModelInfo,
+};
 use super::server::ApplyFormattingParams;
 
 // ============================================================================
@@ -916,6 +919,252 @@ pub fn execute_script(
 }
 
 // ============================================================================
+// BI / Cube (read-only)
+//
+// A read-only BI tool tier for AI clients (MCP + in-app chat). These WRAP the
+// existing BI command internals (bi/commands.rs + bi/cube.rs) — no BI logic is
+// reimplemented. Like a trusted main-window call, the AI carries no script_id,
+// so the structured query replicates bi_query MINUS the per-script bi.query
+// capability re-check (a sandboxed script still goes through the gated cube_udf_*
+// / bi_query paths). Read-only: no grid mutation, no cache writes.
+// ============================================================================
+
+/// Render a BI connection inventory as one line per connection, sorted by
+/// (name, id) for deterministic output. Pure (no locks) so it is unit-testable
+/// without an AppHandle (mirrors format_table_inventory).
+fn format_bi_connection_inventory(infos: &[ConnectionInfo]) -> String {
+    let mut sorted: Vec<&ConnectionInfo> = infos.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    let mut out = String::new();
+    for c in sorted {
+        out.push_str(&format!(
+            "- id={} name=\"{}\" type={} connected={} tables={} measures={} server={} database={}\n",
+            c.id, c.name, c.connection_type, c.is_connected,
+            c.table_count, c.measure_count, c.server, c.database,
+        ));
+    }
+    out
+}
+
+/// List every BI/cube connection in the workbook (id, name, type, connected
+/// state, table/measure counts, server, database) so an AI client can discover
+/// BI models before describe_bi_model / run_bi_query. Read-only.
+pub fn list_bi_connections(handle: &AppHandle) -> Result<String, String> {
+    let bi = handle.state::<BiState>();
+    let infos: Vec<ConnectionInfo> = {
+        let connections = bi.connections.lock().map_err(|e| e.to_string())?;
+        connections.values().map(|c| c.to_info()).collect()
+    };
+    if infos.is_empty() {
+        return Ok("(no BI connections in this workbook)".to_string());
+    }
+    let mut out = String::from("BI connections in this workbook:\n");
+    out.push_str(&format_bi_connection_inventory(&infos));
+    out.push_str("\nUse describe_bi_model(connectionId) for tables/columns/measures, then run_bi_query.");
+    Ok(out)
+}
+
+/// Render a BI model schema compactly for an LLM (tables + columns with data
+/// types, measures, KPIs, relationships). Pure (no locks) so it is unit-testable.
+fn format_bi_model_info(conn_id: &str, m: &BiModelInfo) -> String {
+    let mut out = format!("BI model for connection {}:\n", conn_id);
+    out.push_str("## Tables\n");
+    if m.tables.is_empty() {
+        out.push_str("(none)\n");
+    }
+    for t in &m.tables {
+        let cols = t
+            .columns
+            .iter()
+            .map(|c| {
+                if c.is_context_column {
+                    format!("{} ({}, context)", c.name, c.data_type)
+                } else {
+                    format!("{} ({})", c.name, c.data_type)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("- {} [{}]\n", t.name, cols));
+    }
+    out.push_str("## Measures\n");
+    if m.measures.is_empty() {
+        out.push_str("(none)\n");
+    }
+    for me in &m.measures {
+        out.push_str(&format!("- {} (table {})\n", me.name, me.table));
+    }
+    if !m.kpis.is_empty() {
+        out.push_str("## KPIs\n");
+        for k in &m.kpis {
+            out.push_str(&format!("- {} (base measure {})\n", k.name, k.base_measure));
+        }
+    }
+    if !m.relationships.is_empty() {
+        out.push_str("## Relationships\n");
+        for r in &m.relationships {
+            out.push_str(&format!(
+                "- {}.{} -> {}.{}\n",
+                r.from_table, r.from_column, r.to_table, r.to_column
+            ));
+        }
+    }
+    out.push_str(
+        "\nQuery with run_bi_query(connectionId, measures=[measure names], group_by=[{table,column},...]).",
+    );
+    out
+}
+
+/// Describe a BI/cube model's schema for a connection id from list_bi_connections.
+/// Mirrors bi_get_model_info (clone the engine Arc under the std lock, then await
+/// the engine lock and read the model). Read-only.
+pub async fn describe_bi_model(handle: &AppHandle, connection_id: &str) -> Result<String, String> {
+    let id = identity::EntityId::parse(connection_id).ok_or_else(|| {
+        format!("Invalid connection id '{}'. Use list_bi_connections to see ids.", connection_id)
+    })?;
+    let bi = handle.state::<BiState>();
+    let engine_arc = {
+        let connections = bi.connections.lock().map_err(|e| e.to_string())?;
+        let conn = connections
+            .get(&id)
+            .ok_or_else(|| format!("No BI connection with id '{}'.", connection_id))?;
+        conn.engine.clone()
+    };
+    match engine_arc {
+        Some(arc) => {
+            let engine = arc.lock().await;
+            let info = crate::bi::commands::model_to_info(engine.model());
+            Ok(format_bi_model_info(connection_id, &info))
+        }
+        None => Ok(format!("Connection '{}' has no model loaded.", connection_id)),
+    }
+}
+
+/// Render a BiQueryResult as a compact pipe-table, capping rows for the LLM
+/// context window (row_count still reports the true total). Pure.
+fn format_bi_query_result(r: &BiQueryResult) -> String {
+    if r.columns.is_empty() {
+        return "(query returned no columns)".to_string();
+    }
+    const MAX_ROWS: usize = 200;
+    let mut out = String::new();
+    out.push_str(&format!("| {} |\n", r.columns.join(" | ")));
+    for row in r.rows.iter().take(MAX_ROWS) {
+        let cells: Vec<String> = row.iter().map(|c| c.clone().unwrap_or_default()).collect();
+        out.push_str(&format!("| {} |\n", cells.join(" | ")));
+    }
+    if r.row_count > MAX_ROWS {
+        out.push_str(&format!("... ({} more row(s) not shown)\n", r.row_count - MAX_ROWS));
+    }
+    out.push_str(&format!("\n{} row(s), {} column(s).", r.row_count, r.columns.len()));
+    out
+}
+
+/// Run a READ-ONLY structured BI/cube query: aggregate `measures` grouped by
+/// `group_by` [(table, column)] dimensions, with optional `filters`
+/// [(table, column, operator, value)]. Replicates bi_query's inner logic minus
+/// the script_id capability gate (the AI is a trusted in-process caller). Returns
+/// a pipe-table, capped for the LLM context window.
+pub async fn run_bi_query(
+    handle: &AppHandle,
+    connection_id: &str,
+    measures: Vec<String>,
+    group_by: Vec<(String, String)>,
+    filters: Vec<(String, String, String, String)>,
+) -> Result<String, String> {
+    let id = identity::EntityId::parse(connection_id).ok_or_else(|| {
+        format!("Invalid connection id '{}'. Use list_bi_connections to see ids.", connection_id)
+    })?;
+    if measures.is_empty() && group_by.is_empty() {
+        return Err("run_bi_query needs at least one measure or one group_by column.".to_string());
+    }
+    let bi = handle.state::<BiState>();
+    let request = BiQueryRequest {
+        measures,
+        group_by: group_by
+            .into_iter()
+            .map(|(table, column)| BiColumnRef { table, column })
+            .collect(),
+        filters: filters
+            .into_iter()
+            .map(|(table, column, operator, value)| BiFilter { table, column, operator, value })
+            .collect(),
+    };
+    let query_request = crate::bi::commands::build_engine_query(&request);
+    let engine_arc = crate::bi::commands::get_engine_arc(&bi, id)?;
+    let batches = {
+        let mut engine = engine_arc.lock().await;
+        // Apply this connection's RLS role (or clear a sibling's) before querying.
+        crate::bi::commands::apply_connection_role(&mut engine, &bi, id);
+        let (b, _refreshed) = engine
+            .query_auto_refresh(query_request)
+            .await
+            .map_err(|e| crate::bi::commands::friendly_bi_query_error("Query failed", &e))?;
+        b
+    };
+    let result: BiQueryResult = crate::bi::commands::batches_to_result(&batches);
+    Ok(format_bi_query_result(&result))
+}
+
+/// Resolve a CUBEVALUE for an AI client: a measure expression plus optional
+/// member filters. `connection` is a connection name or id; `members` are CUBE
+/// member-expressions (e.g. "[Sales Amount]", "Product[Category]=Bikes").
+/// Read-only (wraps the bi.query-scoped script_cube_value).
+pub async fn cube_value(
+    handle: &AppHandle,
+    connection: &str,
+    members: &[String],
+) -> Result<String, String> {
+    let bi = handle.state::<BiState>();
+    match crate::bi::cube::script_cube_value(&bi, connection, members)
+        .await
+        .map_err(crate::bi::cube::cube_err_message)?
+    {
+        Some(v) => Ok(v.to_string()),
+        None => Ok("(no value)".to_string()),
+    }
+}
+
+/// Resolve a KPI value (property 1), goal (2), or status (3) for an AI client.
+/// `connection` is a connection name or id. Read-only.
+pub async fn cube_kpi(
+    handle: &AppHandle,
+    connection: &str,
+    kpi: &str,
+    property: i64,
+) -> Result<String, String> {
+    let bi = handle.state::<BiState>();
+    match crate::bi::cube::script_cube_kpi(&bi, connection, kpi, property)
+        .await
+        .map_err(crate::bi::cube::cube_err_message)?
+    {
+        Some(v) => Ok(v.to_string()),
+        None => Ok("(no value)".to_string()),
+    }
+}
+
+/// List the distinct members of a level (a Table[Column] expression) for an AI
+/// client to iterate. `connection` is a connection name or id. Read-only.
+pub async fn cube_members(
+    handle: &AppHandle,
+    connection: &str,
+    level: &str,
+) -> Result<String, String> {
+    let bi = handle.state::<BiState>();
+    let members = crate::bi::cube::script_cube_members(&bi, connection, level)
+        .await
+        .map_err(crate::bi::cube::cube_err_message)?;
+    if members.is_empty() {
+        return Ok("(no members)".to_string());
+    }
+    let mut out = format!("{} member(s):\n", members.len());
+    for m in &members {
+        out.push_str(&format!("- {}\n", m));
+    }
+    Ok(out)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1194,5 +1443,126 @@ mod tests {
         let out = format_pivot_inventory(&[p], &suffixes);
         assert!(out.contains("rows=[Region]"));
         assert!(out.contains("values=[Sum of Sales]"));
+    }
+
+    // ---- BI / cube (read-only) ----
+
+    fn conn_info(id_byte: u8, name: &str, connected: bool, tables: usize, measures: usize) -> ConnectionInfo {
+        ConnectionInfo {
+            id: identity::EntityId::from_bytes([id_byte; 16]),
+            name: name.to_string(),
+            description: String::new(),
+            connection_type: "PostgreSQL".to_string(),
+            connection_string: String::new(),
+            server: "db.example".to_string(),
+            database: "sales".to_string(),
+            preferred_auth: "Integrated".to_string(),
+            model_path: None,
+            last_refreshed: None,
+            is_connected: connected,
+            table_count: tables,
+            measure_count: measures,
+        }
+    }
+
+    #[test]
+    fn bi_connection_inventory_renders_sorted_lines() {
+        // Pass reverse-name order to prove the helper sorts deterministically.
+        let infos = vec![
+            conn_info(2, "Warehouse", false, 3, 1),
+            conn_info(1, "Sales", true, 5, 8),
+        ];
+        let out = format_bi_connection_inventory(&infos);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Sorted by name: Sales before Warehouse.
+        assert!(lines[0].contains("name=\"Sales\""));
+        assert!(lines[0].contains("connected=true"));
+        assert!(lines[0].contains("tables=5"));
+        assert!(lines[0].contains("measures=8"));
+        assert!(lines[0].contains("server=db.example"));
+        assert!(lines[1].contains("name=\"Warehouse\""));
+        assert!(lines[1].contains("connected=false"));
+    }
+
+    #[test]
+    fn bi_connection_inventory_is_empty_for_none() {
+        assert_eq!(format_bi_connection_inventory(&[]), "");
+    }
+
+    #[test]
+    fn bi_model_info_renders_tables_measures_kpis_relationships() {
+        use crate::bi::types::{BiTableInfo, BiColumnInfo, BiMeasureInfo, BiRelationshipInfo};
+        let m = BiModelInfo {
+            tables: vec![BiTableInfo {
+                name: "Sales".to_string(),
+                columns: vec![
+                    BiColumnInfo { name: "Region".to_string(), data_type: "Text".to_string(), is_context_column: false },
+                    BiColumnInfo { name: "Segment".to_string(), data_type: "Text".to_string(), is_context_column: true },
+                ],
+            }],
+            measures: vec![BiMeasureInfo { name: "Revenue".to_string(), table: "Sales".to_string() }],
+            relationships: vec![BiRelationshipInfo {
+                name: "r1".to_string(),
+                from_table: "Sales".to_string(),
+                from_column: "ProductId".to_string(),
+                to_table: "Product".to_string(),
+                to_column: "Id".to_string(),
+            }],
+            hierarchies: vec![],
+            kpis: vec![crate::bi::types::BiKpiInfo {
+                name: "Margin KPI".to_string(),
+                base_measure: "Margin".to_string(),
+                target_kind: "constant".to_string(),
+                target_value: Some(0.3),
+                target_measure: None,
+                status_bands: vec![],
+                description: None,
+            }],
+            security_roles: vec![],
+            calculation_groups: vec![],
+        };
+        let out = format_bi_model_info("conn-1", &m);
+        assert!(out.contains("## Tables"));
+        assert!(out.contains("Region (Text)"));
+        assert!(out.contains("Segment (Text, context)"), "context column flagged");
+        assert!(out.contains("## Measures"));
+        assert!(out.contains("Revenue (table Sales)"));
+        assert!(out.contains("## KPIs"));
+        assert!(out.contains("Margin KPI (base measure Margin)"));
+        assert!(out.contains("## Relationships"));
+        assert!(out.contains("Sales.ProductId -> Product.Id"));
+    }
+
+    #[test]
+    fn bi_query_result_renders_pipe_table_and_caps_rows() {
+        let result = BiQueryResult {
+            columns: vec!["Region".to_string(), "Revenue".to_string()],
+            rows: vec![
+                vec![Some("North".to_string()), Some("100".to_string())],
+                vec![Some("South".to_string()), None],
+            ],
+            row_count: 2,
+        };
+        let out = format_bi_query_result(&result);
+        assert!(out.contains("| Region | Revenue |"));
+        assert!(out.contains("| North | 100 |"));
+        assert!(out.contains("| South |  |"), "None cell renders empty");
+        assert!(out.contains("2 row(s), 2 column(s)."));
+
+        // Cap: >200 rows shows a truncation footer using the true total.
+        let many: Vec<Vec<Option<String>>> = (0..250)
+            .map(|i| vec![Some(format!("R{}", i)), Some(i.to_string())])
+            .collect();
+        let big = BiQueryResult { columns: vec!["A".to_string(), "B".to_string()], rows: many, row_count: 250 };
+        let out_big = format_bi_query_result(&big);
+        assert!(out_big.contains("50 more row(s) not shown"));
+        assert!(out_big.contains("250 row(s), 2 column(s)."));
+    }
+
+    #[test]
+    fn bi_query_result_empty_columns() {
+        let result = BiQueryResult { columns: vec![], rows: vec![], row_count: 0 };
+        assert_eq!(format_bi_query_result(&result), "(query returned no columns)");
     }
 }

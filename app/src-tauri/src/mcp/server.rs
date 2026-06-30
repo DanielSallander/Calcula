@@ -204,6 +204,74 @@ pub struct CreatePivotParams {
     pub name: Option<String>,
 }
 
+// ---- BI / cube (read-only) ----
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DescribeBiModelParams {
+    #[schemars(description = "The BI connection id (UUID) from list_bi_connections")]
+    pub connection_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct BiGroupByParam {
+    #[schemars(description = "Table name")]
+    pub table: String,
+    #[schemars(description = "Column name")]
+    pub column: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct BiFilterParam {
+    #[schemars(description = "Table name")]
+    pub table: String,
+    #[schemars(description = "Column name")]
+    pub column: String,
+    #[schemars(description = "Comparison operator: = != > < >= <=")]
+    pub operator: String,
+    #[schemars(description = "Value to compare against")]
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct RunBiQueryParams {
+    #[schemars(description = "The BI connection id (UUID) from list_bi_connections")]
+    pub connection_id: String,
+    #[schemars(description = "Measure names to aggregate (from describe_bi_model)")]
+    pub measures: Vec<String>,
+    #[schemars(description = "Dimensions to group by, each a {table, column}")]
+    #[serde(default)]
+    pub group_by: Vec<BiGroupByParam>,
+    #[schemars(description = "Optional row filters, each a {table, column, operator, value}")]
+    #[serde(default)]
+    pub filters: Vec<BiFilterParam>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CubeValueParams {
+    #[schemars(description = "BI connection name or id (from list_bi_connections)")]
+    pub connection: String,
+    #[schemars(description = "CUBE member-expressions, e.g. [\"[Sales Amount]\", \"Product[Category]=Bikes\"]. The first measure expression is the value; the rest filter it.")]
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CubeKpiParams {
+    #[schemars(description = "BI connection name or id (from list_bi_connections)")]
+    pub connection: String,
+    #[schemars(description = "KPI name")]
+    pub kpi: String,
+    #[schemars(description = "Which KPI part: 1 = value, 2 = goal, 3 = status")]
+    pub property: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CubeMembersParams {
+    #[schemars(description = "BI connection name or id (from list_bi_connections)")]
+    pub connection: String,
+    #[schemars(description = "A level expression Table[Column], e.g. Product[Category]")]
+    pub level: String,
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -519,6 +587,119 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: create_pivot: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    // ---- BI / cube (read-only) ----
+
+    #[tool(description = "List every BI/cube connection in the workbook (id, name, type, connected state, table/measure counts, server, database). Use this to discover BI models before describe_bi_model or run_bi_query.")]
+    async fn list_bi_connections(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_bi_connections");
+        match tools::list_bi_connections(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_bi_connections: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Describe a BI/cube model's schema (tables + columns with data types, measures, KPIs, relationships) for a connection id from list_bi_connections. Read-only. Call this before run_bi_query to learn valid measure and column names.")]
+    async fn describe_bi_model(
+        &self,
+        params: Parameters<DescribeBiModelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: describe_bi_model {}", log_summary(&p.connection_id, 80));
+        match tools::describe_bi_model(&self.app_handle, &p.connection_id).await {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: describe_bi_model: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Run a READ-ONLY structured BI/cube query: aggregate the given measures grouped by the given [table, column] dimensions, with optional filters. Returns a table of results. Call describe_bi_model first for valid measure/column names.")]
+    async fn run_bi_query(
+        &self,
+        params: Parameters<RunBiQueryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: run_bi_query (conn={} measures={})",
+            log_summary(&p.connection_id, 60),
+            p.measures.len()
+        );
+        let group_by: Vec<(String, String)> =
+            p.group_by.into_iter().map(|g| (g.table, g.column)).collect();
+        let filters: Vec<(String, String, String, String)> =
+            p.filters.into_iter().map(|f| (f.table, f.column, f.operator, f.value)).collect();
+        match tools::run_bi_query(&self.app_handle, &p.connection_id, p.measures, group_by, filters).await {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: run_bi_query: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Resolve a CUBEVALUE against a BI model: a measure expression plus optional member filters. members is a list of CUBE member-expressions like [\"[Sales Amount]\", \"Product[Category]=Bikes\"]. connection is a connection name or id. Read-only.")]
+    async fn cube_value(
+        &self,
+        params: Parameters<CubeValueParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: cube_value (conn={})", log_summary(&p.connection, 60));
+        match tools::cube_value(&self.app_handle, &p.connection, &p.members).await {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: cube_value: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Resolve a KPI value, goal, or status for a BI model. property: 1 = value, 2 = goal, 3 = status. connection is a connection name or id. Read-only.")]
+    async fn cube_kpi(
+        &self,
+        params: Parameters<CubeKpiParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: cube_kpi (conn={} kpi={})",
+            log_summary(&p.connection, 40),
+            log_summary(&p.kpi, 40)
+        );
+        match tools::cube_kpi(&self.app_handle, &p.connection, &p.kpi, p.property).await {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: cube_kpi: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "List the distinct members of a level (a Table[Column] expression, e.g. Product[Category]) in a BI model, so you can iterate dimension values. connection is a connection name or id. Read-only.")]
+    async fn cube_members(
+        &self,
+        params: Parameters<CubeMembersParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: cube_members (conn={} level={})",
+            log_summary(&p.connection, 40),
+            log_summary(&p.level, 60)
+        );
+        match tools::cube_members(&self.app_handle, &p.connection, &p.level).await {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: cube_members: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }

@@ -157,7 +157,7 @@ fn kpi_status_str(s: bi_engine::KpiStatus) -> String {
 }
 
 /// Build a `BiModelInfo` from an Engine's DataModel.
-fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
+pub(crate) fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
     let tables = model
         .tables()
         .iter()
@@ -468,7 +468,7 @@ fn now_iso() -> String {
 }
 
 /// Build an engine QueryRequest from BiQueryRequest.
-fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
+pub(crate) fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
     bi_engine::QueryRequest {
         measures: request.measures.clone(),
         group_by: request
@@ -503,7 +503,7 @@ fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
 
 /// Helper: get the engine Arc from a connection by ID.
 /// Briefly locks the connections mutex, clones the Arc, then releases.
-fn get_engine_arc(
+pub(crate) fn get_engine_arc(
     bi_state: &BiState,
     connection_id: ConnectionId,
 ) -> Result<Arc<TokioMutex<bi_engine::Engine>>, String> {

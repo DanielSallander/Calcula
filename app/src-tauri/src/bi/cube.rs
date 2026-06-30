@@ -92,7 +92,7 @@ pub async fn cube_prefetch_all(
 // are brokered through the `bi.query` capability (model-scoped, read-only).
 // ===========================================================================
 
-fn cube_err_message(e: CubeError) -> String {
+pub(crate) fn cube_err_message(e: CubeError) -> String {
     match e {
         CubeError::Name => "Unknown BI connection".to_string(),
         CubeError::Value => "Invalid member expression".to_string(),

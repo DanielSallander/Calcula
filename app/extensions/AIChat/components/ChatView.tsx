@@ -174,12 +174,88 @@ const TOOLS = [
       required: ["source_range", "destination_cell", "value_fields"],
     },
   },
+  // ---- BI / cube (read-only) ----
+  {
+    name: "list_bi_connections",
+    description: "List every BI/cube connection in the workbook (id, name, type, connected state, table/measure counts). Use this to discover BI models before describe_bi_model or run_bi_query.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "describe_bi_model",
+    description: "Describe a BI/cube model's schema (tables, columns, measures, KPIs, relationships) for a connection_id from list_bi_connections. Call this before run_bi_query to learn valid measure/column names.",
+    input_schema: {
+      type: "object",
+      properties: { connection_id: { type: "string", description: "Connection id from list_bi_connections" } },
+      required: ["connection_id"],
+    },
+  },
+  {
+    name: "run_bi_query",
+    description: "Run a READ-ONLY structured BI/cube query: aggregate measures grouped by [table, column] dimensions, with optional filters. Returns a result table. Call describe_bi_model first for valid names.",
+    input_schema: {
+      type: "object",
+      properties: {
+        connection_id: { type: "string", description: "Connection id from list_bi_connections" },
+        measures: { type: "array", items: { type: "string" }, description: "Measure names to aggregate" },
+        group_by: {
+          type: "array",
+          description: "Dimensions to group by.",
+          items: { type: "object", properties: { table: { type: "string" }, column: { type: "string" } }, required: ["table", "column"] },
+        },
+        filters: {
+          type: "array",
+          description: "Optional row filters.",
+          items: { type: "object", properties: { table: { type: "string" }, column: { type: "string" }, operator: { type: "string", enum: ["=", "!=", ">", "<", ">=", "<="] }, value: { type: "string" } }, required: ["table", "column", "operator", "value"] },
+        },
+      },
+      required: ["connection_id", "measures"],
+    },
+  },
+  {
+    name: "cube_value",
+    description: "Resolve a CUBEVALUE: a measure expression plus optional member filters, against a BI model. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        connection: { type: "string", description: "Connection name or id" },
+        members: { type: "array", items: { type: "string" }, description: "CUBE member-expressions, e.g. [\"[Sales Amount]\", \"Product[Category]=Bikes\"]" },
+      },
+      required: ["connection", "members"],
+    },
+  },
+  {
+    name: "cube_kpi",
+    description: "Resolve a KPI value (1), goal (2), or status (3) for a BI model. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        connection: { type: "string", description: "Connection name or id" },
+        kpi: { type: "string" },
+        property: { type: "integer", enum: [1, 2, 3], description: "1 = value, 2 = goal, 3 = status" },
+      },
+      required: ["connection", "kpi", "property"],
+    },
+  },
+  {
+    name: "cube_members",
+    description: "List the distinct members of a level (a Table[Column] expression) in a BI model. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        connection: { type: "string", description: "Connection name or id" },
+        level: { type: "string", description: "A level expression Table[Column], e.g. Product[Category]" },
+      },
+      required: ["connection", "level"],
+    },
+  },
 ];
 
 const SYSTEM_PROMPT =
   "You are an AI assistant embedded in Calcula, a spreadsheet application. You help the user " +
   "read and edit the open workbook using the provided tools. Prefer get_sheet_summary to orient " +
   "yourself before reading/writing. Cell coordinates are 0-based (row 0 = row 1, col 0 = column A). " +
+  "If the workbook has BI/cube connections (list_bi_connections), you can query them read-only with " +
+  "describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members. " +
   "Keep replies concise. Confirm destructive or large edits before making them.";
 
 const MAX_TOOL_TURNS = 8;

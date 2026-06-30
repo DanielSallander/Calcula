@@ -216,7 +216,7 @@ fn arg_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
 /// back to Claude as a tool_result). Write tools inherit check_script_security +
 /// undo + refresh-event behavior. v1 tool set: read + cell write + named range.
 #[tauri::command]
-pub fn ai_chat_run_tool(
+pub async fn ai_chat_run_tool(
     handle: AppHandle,
     name: String,
     input: Value,
@@ -308,6 +308,36 @@ pub fn ai_chat_run_tool(
                 p.has_headers.unwrap_or(true),
                 p.name.as_deref(),
             )
+        }
+        // Read-only BI / cube tools — async (they await the BI engine lock).
+        "list_bi_connections" => tools::list_bi_connections(&handle),
+        "describe_bi_model" => {
+            let conn = arg_str(&input, "connection_id")?.to_string();
+            tools::describe_bi_model(&handle, &conn).await
+        }
+        "run_bi_query" => {
+            let p: crate::mcp::server::RunBiQueryParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            let group_by: Vec<(String, String)> =
+                p.group_by.into_iter().map(|g| (g.table, g.column)).collect();
+            let filters: Vec<(String, String, String, String)> =
+                p.filters.into_iter().map(|f| (f.table, f.column, f.operator, f.value)).collect();
+            tools::run_bi_query(&handle, &p.connection_id, p.measures, group_by, filters).await
+        }
+        "cube_value" => {
+            let p: crate::mcp::server::CubeValueParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::cube_value(&handle, &p.connection, &p.members).await
+        }
+        "cube_kpi" => {
+            let p: crate::mcp::server::CubeKpiParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::cube_kpi(&handle, &p.connection, &p.kpi, p.property).await
+        }
+        "cube_members" => {
+            let p: crate::mcp::server::CubeMembersParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::cube_members(&handle, &p.connection, &p.level).await
         }
         other => Err(format!("Unknown tool '{}'.", other)),
     }
