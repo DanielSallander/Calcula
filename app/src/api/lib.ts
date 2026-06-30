@@ -359,6 +359,7 @@ export {
   getHiddenRows,
   setAdvancedFilterHiddenRows,
   clearAdvancedFilterHiddenRows,
+  runAdvancedFilter,
   isRowFiltered,
   getFilterUniqueValues,
   setColumnFilterValues,

@@ -9,7 +9,6 @@ import { getHiddenRows } from "@api";
 import {
   executeAdvancedFilter,
   clearAdvancedFilter,
-  parseCriterion,
   parseRangeRef,
   formatRangeRef,
   formatCellRef,
@@ -36,53 +35,11 @@ export const advancedFilterExtensionSuite: TestSuite = {
 
   tests: [
     // ================================================================
-    // Unit tests for pure functions
+    // Unit tests for the pure A1 range helpers. (Criteria parsing + row
+    // matching now run server-side in Rust — see autofilter.rs
+    // `mod advanced_filter_tests` — and are exercised end-to-end by the
+    // executeAdvancedFilter integration tests below against the live command.)
     // ================================================================
-    {
-      name: "parseCriterion - implicit equals",
-      description: "Plain value is treated as '=' operator.",
-      run: async () => {
-        const c = parseCriterion("Apple");
-        assertEqual(c.operator, "=", "operator");
-        assertEqual(c.value, "Apple", "value");
-        assertTrue(!c.hasWildcard, "no wildcard");
-      },
-    },
-    {
-      name: "parseCriterion - comparison operators",
-      description: "Supports >, <, >=, <=, <>, =.",
-      run: async () => {
-        const gt = parseCriterion(">100");
-        assertEqual(gt.operator, ">", "gt operator");
-        assertEqual(gt.value, "100", "gt value");
-
-        const lte = parseCriterion("<=50");
-        assertEqual(lte.operator, "<=", "lte operator");
-        assertEqual(lte.value, "50", "lte value");
-
-        const neq = parseCriterion("<>Done");
-        assertEqual(neq.operator, "<>", "neq operator");
-        assertEqual(neq.value, "Done", "neq value");
-
-        const gte = parseCriterion(">=200");
-        assertEqual(gte.operator, ">=", "gte operator");
-        assertEqual(gte.value, "200", "gte value");
-      },
-    },
-    {
-      name: "parseCriterion - wildcard detection",
-      description: "Detects * and ? wildcards in = and <> operators.",
-      run: async () => {
-        const star = parseCriterion("A*");
-        assertTrue(star.hasWildcard, "star wildcard");
-
-        const question = parseCriterion("=T?st");
-        assertTrue(question.hasWildcard, "question wildcard");
-
-        const noWild = parseCriterion(">100");
-        assertTrue(!noWild.hasWildcard, "no wildcard on >");
-      },
-    },
     {
       name: "parseRangeRef - standard range",
       description: "Parses A1:D10 into 0-based row/col indices.",

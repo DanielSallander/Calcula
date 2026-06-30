@@ -4059,6 +4059,7 @@ pub fn run() {
             autofilter::get_hidden_rows,
             autofilter::set_advanced_filter_hidden_rows,
             autofilter::clear_advanced_filter_hidden_rows,
+            autofilter::run_advanced_filter,
             autofilter::is_row_filtered,
             autofilter::get_filter_unique_values,
             autofilter::set_column_filter_values,

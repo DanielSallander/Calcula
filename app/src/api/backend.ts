@@ -914,6 +914,41 @@ export async function clearAdvancedFilterHiddenRows(): Promise<void> {
   return invoke<void>("clear_advanced_filter_hidden_rows", {});
 }
 
+/** Parameters for the server-side Advanced Filter (mirrors the Rust AdvancedFilterParams). */
+export interface RunAdvancedFilterParams {
+  /** list (data) range incl. headers: [startRow, startCol, endRow, endCol], 0-based inclusive. */
+  listRange: [number, number, number, number];
+  /** criteria range incl. headers: [startRow, startCol, endRow, endCol]. */
+  criteriaRange: [number, number, number, number];
+  /** "filterInPlace" | "copyToLocation". */
+  action: string;
+  /** Destination top-left [row, col] for copyToLocation. */
+  copyTo?: [number, number];
+  uniqueRecordsOnly: boolean;
+}
+
+/** Result of the server-side Advanced Filter (mirrors the Rust AdvancedFilterResult). */
+export interface RunAdvancedFilterResult {
+  success: boolean;
+  matchCount: number;
+  affectedRows: number;
+  /** Absolute data-row indices that matched (used by copyToLocation to copy cells). */
+  matchedRows: number[];
+  /** Row indices hidden by filterInPlace (already stored server-side). */
+  hiddenRows: number[];
+  error?: string;
+}
+
+/**
+ * Run an Excel-style Advanced Filter server-side (Rust owns the matching). For
+ * filterInPlace the hidden-row set is computed AND stored server-side; for
+ * copyToLocation the matched row indices are returned so the caller can copy the
+ * cells through the undoable batch path.
+ */
+export async function runAdvancedFilter(params: RunAdvancedFilterParams): Promise<RunAdvancedFilterResult> {
+  return invoke<RunAdvancedFilterResult>("run_advanced_filter", { params });
+}
+
 /**
  * Check if a specific row is hidden by the AutoFilter.
  * @param row - Row index (0-based)

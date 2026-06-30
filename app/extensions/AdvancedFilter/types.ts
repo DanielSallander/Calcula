@@ -23,26 +23,9 @@ export interface AdvancedFilterParams {
   uniqueRecordsOnly: boolean;
 }
 
-/**
- * A single criterion parsed from one criteria cell.
- */
-export interface ParsedCriterion {
-  /** Comparison operator: =, <>, >, <, >=, <= */
-  operator: "=" | "<>" | ">" | "<" | ">=" | "<=";
-  /** The value to compare against (after removing operator prefix) */
-  value: string;
-  /** Whether the value contains wildcards (* or ?) */
-  hasWildcard: boolean;
-}
-
-/**
- * One row of criteria = AND across columns.
- * Multiple rows = OR between them.
- */
-export interface CriteriaRow {
-  /** Map from column index (relative to list range) to the parsed criterion */
-  conditions: Map<number, ParsedCriterion>;
-}
+// NOTE: criterion parsing + row matching (operator, value, wildcard, AND/OR rows)
+// now live SERVER-SIDE in Rust (autofilter.rs run_advanced_filter; "Rust owns
+// computation"). The former TS `ParsedCriterion` / `CriteriaRow` types are retired.
 
 /**
  * Result of an Advanced Filter operation.

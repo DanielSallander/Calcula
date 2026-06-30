@@ -1541,6 +1541,557 @@ pub fn set_column_top_bottom_filter(
 }
 
 /// Set a dynamic filter for a specific column.
+// ============================================================================
+// ADVANCED FILTER (Excel-style criteria-range matching)
+//
+// Server-side matching engine for the Advanced Filter (dogfooding: "Rust owns
+// computation"). The TS extension previously parsed criteria and matched rows in
+// TypeScript; that engine is retired in favor of this one. The matcher MIRRORS the
+// prior TS semantics EXACTLY (case-insensitive string compares, JS-`parseFloat`
+// numeric coercion, anchored * / ? wildcards) so existing behavior is preserved —
+// it deliberately does NOT reuse AutoFilter's `matches_custom_criterion`, which
+// differs (raw &str ordering, strict numeric parse, `=` is string-only). The
+// recursive `wildcard_match` and `get_cell_filter_value` helpers ARE shared.
+// ============================================================================
+
+/// Parameters for `run_advanced_filter` (mirrors the TS `AdvancedFilterParams`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedFilterParams {
+    /// list (data) range incl. headers: (startRow, startCol, endRow, endCol), 0-based inclusive.
+    pub list_range: (u32, u32, u32, u32),
+    /// criteria range incl. headers: (startRow, startCol, endRow, endCol).
+    pub criteria_range: (u32, u32, u32, u32),
+    /// "filterInPlace" | "copyToLocation".
+    pub action: String,
+    /// Destination top-left (row, col) for copyToLocation.
+    #[serde(default)]
+    pub copy_to: Option<(u32, u32)>,
+    pub unique_records_only: bool,
+}
+
+/// Result of `run_advanced_filter`. `matched_rows` (absolute data-row indices) lets
+/// the TS layer perform the copyToLocation cell writes through the existing
+/// undoable batch path; `hidden_rows` mirrors what was stored for filterInPlace.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedFilterResult {
+    pub success: bool,
+    pub match_count: u32,
+    pub affected_rows: u32,
+    pub matched_rows: Vec<u32>,
+    pub hidden_rows: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A single criterion parsed from one criteria cell (mirrors TS `ParsedCriterion`).
+#[derive(Debug, Clone)]
+struct AdvParsedCriterion {
+    operator: String,
+    value: String,
+    has_wildcard: bool,
+}
+
+/// Replicate JavaScript `parseFloat` leniency: skip leading whitespace, parse an
+/// optional sign + the longest leading numeric prefix (digits, one decimal point,
+/// optional exponent), stopping at the first invalid char. `None` if no digits.
+/// Faithful to the prior TS engine, which used `parseFloat` for numeric coercion
+/// (e.g. "42abc" -> 42, "2025-01-15" -> 2025, "1,234" -> 1, "" -> None).
+fn js_parse_float(s: &str) -> Option<f64> {
+    let s = s.trim_start();
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    if i < n && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let mut has_digits = false;
+    while i < n && b[i].is_ascii_digit() {
+        i += 1;
+        has_digits = true;
+    }
+    if i < n && b[i] == b'.' {
+        i += 1;
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+            has_digits = true;
+        }
+    }
+    if !has_digits {
+        return None;
+    }
+    // Optional exponent — only consumed if it has at least one digit.
+    if i < n && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < n && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        let mut exp_digits = false;
+        while j < n && b[j].is_ascii_digit() {
+            j += 1;
+            exp_digits = true;
+        }
+        if exp_digits {
+            i = j;
+        }
+    }
+    s[..i].parse::<f64>().ok()
+}
+
+/// Parse a criteria cell value into operator + value + wildcard flag (mirrors the
+/// TS `parseCriterion`). Operator order matters: `>=`/`<=`/`<>` before `>`/`<`.
+fn parse_criterion(cell_value: &str) -> AdvParsedCriterion {
+    let trimmed = cell_value.trim();
+    if trimmed.is_empty() {
+        return AdvParsedCriterion { operator: "=".to_string(), value: String::new(), has_wildcard: false };
+    }
+    for op in [">=", "<=", "<>", ">", "<", "="] {
+        if let Some(rest) = trimmed.strip_prefix(op) {
+            let val = rest.trim().to_string();
+            let has_wildcard = (op == "=" || op == "<>") && (val.contains('*') || val.contains('?'));
+            return AdvParsedCriterion { operator: op.to_string(), value: val, has_wildcard };
+        }
+    }
+    let has_wildcard = trimmed.contains('*') || trimmed.contains('?');
+    AdvParsedCriterion { operator: "=".to_string(), value: trimmed.to_string(), has_wildcard }
+}
+
+/// Anchored, case-insensitive wildcard match (`*` = any run, `?` = one char), with
+/// all other chars literal — equivalent to the TS `wildcardToRegex(...).test(...)`.
+/// Reuses the recursive `wildcard_match` helper.
+fn af_wildcard_match(pattern: &str, value: &str) -> bool {
+    wildcard_match(&value.to_lowercase(), &pattern.to_lowercase())
+}
+
+/// Compare a cell value against a parsed criterion (mirrors the TS `matchesCriterion`).
+fn matches_criterion(cell_value: &str, c: &AdvParsedCriterion) -> bool {
+    // Empty criterion matches everything.
+    if c.value.is_empty() && c.operator == "=" {
+        return true;
+    }
+    let cv = cell_value.trim();
+    let cv_lower = cv.to_lowercase();
+    let crit_lower = c.value.to_lowercase();
+    let cell_num = js_parse_float(cv);
+    let crit_num = js_parse_float(&c.value);
+    let both_numeric = cell_num.is_some() && crit_num.is_some() && !cv.is_empty() && !c.value.is_empty();
+
+    match c.operator.as_str() {
+        "=" => {
+            if c.has_wildcard {
+                return af_wildcard_match(&c.value, cv);
+            }
+            if both_numeric {
+                return cell_num.unwrap() == crit_num.unwrap();
+            }
+            cv_lower == crit_lower
+        }
+        "<>" => {
+            if c.has_wildcard {
+                return !af_wildcard_match(&c.value, cv);
+            }
+            if both_numeric {
+                return cell_num.unwrap() != crit_num.unwrap();
+            }
+            cv_lower != crit_lower
+        }
+        ">" => {
+            if both_numeric { cell_num.unwrap() > crit_num.unwrap() } else { cv_lower > crit_lower }
+        }
+        "<" => {
+            if both_numeric { cell_num.unwrap() < crit_num.unwrap() } else { cv_lower < crit_lower }
+        }
+        ">=" => {
+            if both_numeric { cell_num.unwrap() >= crit_num.unwrap() } else { cv_lower >= crit_lower }
+        }
+        "<=" => {
+            if both_numeric { cell_num.unwrap() <= crit_num.unwrap() } else { cv_lower <= crit_lower }
+        }
+        _ => false,
+    }
+}
+
+/// True if `values` (by relative col index) satisfies ALL conditions in a criteria
+/// row (AND across columns).
+fn row_matches_row(values: &[String], conditions: &HashMap<u32, AdvParsedCriterion>) -> bool {
+    for (col_idx, criterion) in conditions {
+        let cell_value = values.get(*col_idx as usize).map(|s| s.as_str()).unwrap_or("");
+        if !matches_criterion(cell_value, criterion) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True if `values` satisfies ANY criteria row (OR between rows). No rows => match all.
+fn row_matches_any(values: &[String], criteria_rows: &[HashMap<u32, AdvParsedCriterion>]) -> bool {
+    if criteria_rows.is_empty() {
+        return true;
+    }
+    criteria_rows.iter().any(|cr| row_matches_row(values, cr))
+}
+
+/// Execute an Excel-style Advanced Filter entirely server-side: read the list +
+/// criteria ranges (display values), match rows, and either store the hidden-row
+/// set (filterInPlace, mirroring `set_advanced_filter_hidden_rows`) or return the
+/// matched absolute row indices (copyToLocation; the TS layer does the cell writes
+/// through the undoable batch path).
+#[tauri::command]
+pub fn run_advanced_filter(
+    state: State<AppState>,
+    params: AdvancedFilterParams,
+) -> AdvancedFilterResult {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let (l_start_row, l_start_col, l_end_row, l_end_col) = params.list_range;
+    let (cr_start_row, cr_start_col, cr_end_row, cr_end_col) = params.criteria_range;
+
+    let err = |msg: &str| AdvancedFilterResult {
+        success: false,
+        match_count: 0,
+        affected_rows: 0,
+        matched_rows: Vec::new(),
+        hidden_rows: Vec::new(),
+        error: Some(msg.to_string()),
+    };
+
+    // Read list + criteria into owned values under the grid/style/locale locks,
+    // then drop them before touching advanced_filter_hidden_rows.
+    let (data_rows, criteria_rows): (Vec<(u32, Vec<String>)>, Vec<HashMap<u32, AdvParsedCriterion>>) = {
+        let grids = state.grids.lock().unwrap();
+        let style_registry = state.style_registry.lock().unwrap();
+        let locale = state.locale.lock().unwrap();
+        if active_sheet >= grids.len() {
+            return err("Invalid sheet index");
+        }
+        let grid = &grids[active_sheet];
+
+        // List headers (lowercased, trimmed) -> relative col index. Last col with a
+        // given header name wins (mirrors the TS Map.set overwrite).
+        let mut list_headers: HashMap<String, u32> = HashMap::new();
+        for col in l_start_col..=l_end_col {
+            let h = get_cell_filter_value(grid, l_start_row, col, &style_registry, &locale)
+                .trim()
+                .to_lowercase();
+            if !h.is_empty() {
+                list_headers.insert(h, col - l_start_col);
+            }
+        }
+        if list_headers.is_empty() {
+            return err("No headers found in list range.");
+        }
+
+        // Map each criteria column (whose header matches a list header) to its list
+        // relative col, in ascending criteria-col order.
+        let mut criteria_header_map: Vec<(u32, u32)> = Vec::new();
+        for col in cr_start_col..=cr_end_col {
+            let h = get_cell_filter_value(grid, cr_start_row, col, &style_registry, &locale)
+                .trim()
+                .to_lowercase();
+            if !h.is_empty() {
+                if let Some(&list_col) = list_headers.get(&h) {
+                    criteria_header_map.push((col, list_col));
+                }
+            }
+        }
+
+        // Criteria rows (below the header). Keyed by list relative col so two
+        // criteria columns mapping to the same list col collapse last-wins (mirrors
+        // the TS `conditions` Map keyed by listColIdx). AND within a row.
+        let mut criteria_rows: Vec<HashMap<u32, AdvParsedCriterion>> = Vec::new();
+        if cr_end_row > cr_start_row {
+            for row in (cr_start_row + 1)..=cr_end_row {
+                let mut conditions: HashMap<u32, AdvParsedCriterion> = HashMap::new();
+                for &(cr_col, list_col) in &criteria_header_map {
+                    let raw = get_cell_filter_value(grid, row, cr_col, &style_registry, &locale);
+                    if !raw.trim().is_empty() {
+                        conditions.insert(list_col, parse_criterion(raw.trim()));
+                    }
+                }
+                if !conditions.is_empty() {
+                    criteria_rows.push(conditions);
+                }
+            }
+        }
+
+        // Data rows (below the list header): owned display values per relative col.
+        let mut data_rows: Vec<(u32, Vec<String>)> = Vec::new();
+        if l_end_row > l_start_row {
+            for row in (l_start_row + 1)..=l_end_row {
+                // saturating_sub: defensive against an inverted column range (the
+                // header loop above already early-returns "no headers" for that
+                // case, but this avoids any u32 underflow in the capacity hint).
+                let mut values: Vec<String> = Vec::with_capacity((l_end_col.saturating_sub(l_start_col) + 1) as usize);
+                for col in l_start_col..=l_end_col {
+                    values.push(get_cell_filter_value(grid, row, col, &style_registry, &locale));
+                }
+                data_rows.push((row, values));
+            }
+        }
+
+        (data_rows, criteria_rows)
+    };
+
+    // Match rows (OR across criteria rows, AND within), with optional unique dedup.
+    let mut matched_rows: Vec<u32> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (abs_row, values) in &data_rows {
+        if !row_matches_any(values, &criteria_rows) {
+            continue;
+        }
+        if params.unique_records_only {
+            let key = values.iter().map(|v| v.to_lowercase()).collect::<Vec<_>>().join("\u{0}");
+            if !seen.insert(key) {
+                continue;
+            }
+        }
+        matched_rows.push(*abs_row);
+    }
+
+    match params.action.as_str() {
+        "filterInPlace" => {
+            let matched_set: HashSet<u32> = matched_rows.iter().copied().collect();
+            let hidden_rows: Vec<u32> = data_rows
+                .iter()
+                .map(|(r, _)| *r)
+                .filter(|r| !matched_set.contains(r))
+                .collect();
+            {
+                let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
+                if hidden_rows.is_empty() {
+                    adv_hidden.remove(&active_sheet);
+                } else {
+                    adv_hidden.insert(active_sheet, hidden_rows.clone());
+                }
+            }
+            AdvancedFilterResult {
+                success: true,
+                match_count: matched_rows.len() as u32,
+                affected_rows: hidden_rows.len() as u32,
+                matched_rows,
+                hidden_rows,
+                error: None,
+            }
+        }
+        "copyToLocation" if params.copy_to.is_some() => AdvancedFilterResult {
+            success: true,
+            match_count: matched_rows.len() as u32,
+            affected_rows: matched_rows.len() as u32,
+            matched_rows,
+            hidden_rows: Vec::new(),
+            error: None,
+        },
+        _ => err("Invalid action or missing copy-to location."),
+    }
+}
+
+#[cfg(test)]
+mod advanced_filter_tests {
+    use super::*;
+
+    /// Parse + match, mirroring the TS `matches(cellValue, criterionStr)` helper.
+    fn matches(cell_value: &str, criterion_str: &str) -> bool {
+        matches_criterion(cell_value, &parse_criterion(criterion_str))
+    }
+
+    #[test]
+    fn parse_criterion_operators_and_wildcards() {
+        let p = parse_criterion("hello");
+        assert_eq!((p.operator.as_str(), p.value.as_str(), p.has_wildcard), ("=", "hello", false));
+        let p = parse_criterion("=100");
+        assert_eq!((p.operator.as_str(), p.value.as_str()), ("=", "100"));
+        assert_eq!(parse_criterion("<>abc").operator, "<>");
+        assert_eq!(parse_criterion(">50").operator, ">");
+        assert_eq!(parse_criterion("<50").operator, "<");
+        let p = parse_criterion(">=50");
+        assert_eq!((p.operator.as_str(), p.value.as_str()), (">=", "50"));
+        let p = parse_criterion("<=50");
+        assert_eq!((p.operator.as_str(), p.value.as_str()), ("<=", "50"));
+        let p = parse_criterion("");
+        assert_eq!((p.operator.as_str(), p.value.as_str(), p.has_wildcard), ("=", "", false));
+        assert!(parse_criterion("=A*").has_wildcard);
+        assert!(parse_criterion("=A?B").has_wildcard);
+        assert!(parse_criterion("<>*test").has_wildcard);
+        assert!(!parse_criterion(">A*").has_wildcard);
+        assert!(!parse_criterion("<A?").has_wildcard);
+        assert!(!parse_criterion(">=X*").has_wildcard);
+        assert!(!parse_criterion("<=Y?").has_wildcard);
+        let p = parse_criterion("  >= 100  ");
+        assert_eq!((p.operator.as_str(), p.value.as_str()), (">=", "100"));
+        let p = parse_criterion("<>=5");
+        assert_eq!((p.operator.as_str(), p.value.as_str()), ("<>", "=5"));
+    }
+
+    #[test]
+    fn equals_matching_all_types() {
+        assert!(matches("Apple", "=Apple"));
+        assert!(matches("apple", "=Apple"));
+        assert!(matches("APPLE", "=apple"));
+        assert!(matches("42", "=42"));
+        assert!(!matches("42", "=43"));
+        assert!(matches("3.14", "=3.14"));
+        assert!(matches("-10", "=-10"));
+        assert!(matches("2025-01-15", "=2025-01-15"));
+        assert!(matches("2025-01-15", "=2025-01-16")); // both parse to 2025
+        assert!(!matches("Jan-15", "=Feb-15"));
+        assert!(matches("", ""));
+        assert!(matches("anything", ""));
+        assert!(matches("test", "="));
+        assert!(matches("TRUE", "=true"));
+        assert!(matches("false", "=FALSE"));
+        assert!(matches("Hello", "Hello"));
+        assert!(matches("Hello", "hello"));
+        assert!(matches("100", "100"));
+        assert!(matches("42abc", "=42")); // parseFloat leniency
+        assert!(matches("007", "=7"));
+    }
+
+    #[test]
+    fn not_equal_matching() {
+        assert!(!matches("Apple", "<>Apple"));
+        assert!(!matches("apple", "<>APPLE"));
+        assert!(matches("Orange", "<>Apple"));
+        assert!(!matches("42", "<>42"));
+        assert!(matches("43", "<>42"));
+        assert!(!matches("2025-01-15", "<>2025-01-16")); // both 2025
+        assert!(!matches("2025-01-15", "<>2025-01-15"));
+        assert!(matches("Jan-15", "<>Feb-15"));
+        assert!(matches("TRUE", "<>FALSE"));
+    }
+
+    #[test]
+    fn ordered_comparisons() {
+        assert!(matches("10", ">5"));
+        assert!(!matches("5", ">5"));
+        assert!(!matches("3", ">5"));
+        assert!(matches("3.15", ">3.14"));
+        assert!(matches("-1", ">-5"));
+        assert!(!matches("-10", ">-5"));
+        assert!(matches("banana", ">apple"));
+        assert!(!matches("apple", ">banana"));
+        assert!(matches("3", "<5"));
+        assert!(!matches("5", "<5"));
+        assert!(matches("-10", "<-5"));
+        assert!(matches("apple", "<banana"));
+        assert!(matches("5", ">=5"));
+        assert!(matches("6", ">=5"));
+        assert!(!matches("4", ">=5"));
+        assert!(matches("banana", ">=banana"));
+        assert!(matches("5", "<=5"));
+        assert!(matches("4", "<=5"));
+        assert!(!matches("6", "<=5"));
+        assert!(matches("banana", "<=banana"));
+        assert!(matches("Banana", ">apple"));
+        assert!(matches("BANANA", ">apple"));
+    }
+
+    #[test]
+    fn wildcard_patterns() {
+        assert!(matches("Apple", "=App*"));
+        assert!(matches("Application", "=App*"));
+        assert!(!matches("Banana", "=App*"));
+        assert!(matches("Pineapple", "=*apple"));
+        assert!(matches("apple", "=*apple"));
+        assert!(!matches("banana", "=*apple"));
+        assert!(matches("Pineapple juice", "=*apple*"));
+        assert!(!matches("banana", "=*apple*"));
+        assert!(matches("abcdef", "=ab*ef"));
+        assert!(matches("abef", "=ab*ef"));
+        assert!(matches("abXYZef", "=ab*ef"));
+        assert!(!matches("abXYZeg", "=ab*ef"));
+        assert!(matches("cat", "=ca?"));
+        assert!(!matches("ca", "=ca?"));
+        assert!(!matches("cats", "=ca?"));
+        assert!(matches("bat", "=?at"));
+        assert!(!matches("at", "=?at"));
+        assert!(matches("cat", "=c?t"));
+        assert!(!matches("ct", "=c?t"));
+        assert!(matches("axxb", "=a??b"));
+        assert!(!matches("axb", "=a??b"));
+        assert!(!matches("axxxb", "=a??b"));
+        assert!(matches("abcXdef", "=a?c*f"));
+        assert!(matches("abcf", "=a?c*f"));
+        assert!(!matches("acXdef", "=a?c*f"));
+        assert!(!matches("Apple", "<>App*"));
+        assert!(matches("Banana", "<>App*"));
+        assert!(matches("APPLE", "=app*"));
+        assert!(matches("apple", "=APP*"));
+        assert!(matches("anything", "=*"));
+        assert!(matches("", "=*"));
+        assert!(matches("a", "=?"));
+        assert!(!matches("ab", "=?"));
+        assert!(!matches("", "=?"));
+        assert!(matches("a.b", "=a.b"));
+        assert!(!matches("axb", "=a.b"));
+    }
+
+    #[test]
+    fn only_operator_no_value() {
+        let gt = parse_criterion(">");
+        assert!(matches_criterion("a", &gt));
+        assert!(!matches_criterion("", &gt));
+        let lt = parse_criterion("<");
+        assert!(!matches_criterion("a", &lt));
+        assert!(!matches_criterion("", &lt));
+        let ne = parse_criterion("<>");
+        assert!(matches_criterion("hello", &ne));
+        assert!(!matches_criterion("", &ne));
+        let ge = parse_criterion(">=");
+        assert!(matches_criterion("a", &ge));
+        assert!(matches_criterion("", &ge));
+        let le = parse_criterion("<=");
+        assert!(matches_criterion("", &le));
+        assert!(!matches_criterion("a", &le));
+    }
+
+    #[test]
+    fn numeric_precision_and_whitespace() {
+        let sum = 0.1_f64 + 0.2_f64;
+        assert!(!matches(&format!("{}", sum), "=0.3"));
+        assert!(matches("0.3", "=0.3"));
+        assert!(matches("1000000000", ">999999999"));
+        assert!(matches("0.0001", "<0.001"));
+        assert!(matches("  hello  ", "=hello"));
+        assert!(matches("hello", "=  hello  "));
+        assert!(!matches("", ">5"));
+        assert!(matches("", "<5")); // "" < "5" lexicographically
+    }
+
+    #[test]
+    fn js_parse_float_semantics() {
+        assert_eq!(js_parse_float("42abc"), Some(42.0));
+        assert_eq!(js_parse_float("2025-01-15"), Some(2025.0));
+        assert_eq!(js_parse_float("007"), Some(7.0));
+        assert_eq!(js_parse_float("-10"), Some(-10.0));
+        assert_eq!(js_parse_float("3.14"), Some(3.14));
+        assert_eq!(js_parse_float("1e3"), Some(1000.0));
+        assert_eq!(js_parse_float(".5"), Some(0.5));
+        assert_eq!(js_parse_float("  12.5 "), Some(12.5));
+        assert_eq!(js_parse_float("abc"), None);
+        assert_eq!(js_parse_float(""), None);
+    }
+
+    #[test]
+    fn row_matching_and_or() {
+        let mut and_row: HashMap<u32, AdvParsedCriterion> = HashMap::new();
+        and_row.insert(0, parse_criterion(">5"));
+        and_row.insert(1, parse_criterion("=Bikes"));
+        let rows = vec![and_row];
+        assert!(row_matches_any(&["10".to_string(), "bikes".to_string()], &rows));
+        assert!(!row_matches_any(&["10".to_string(), "Cars".to_string()], &rows));
+        assert!(!row_matches_any(&["3".to_string(), "Bikes".to_string()], &rows));
+        assert!(row_matches_any(&["x".to_string()], &[]));
+        let mut r1: HashMap<u32, AdvParsedCriterion> = HashMap::new();
+        r1.insert(0, parse_criterion("=Bikes"));
+        let mut r2: HashMap<u32, AdvParsedCriterion> = HashMap::new();
+        r2.insert(0, parse_criterion("=Cars"));
+        let or_rows = vec![r1, r2];
+        assert!(row_matches_any(&["bikes".to_string()], &or_rows));
+        assert!(row_matches_any(&["cars".to_string()], &or_rows));
+        assert!(!row_matches_any(&["planes".to_string()], &or_rows));
+    }
+}
+
 #[tauri::command]
 pub fn set_column_dynamic_filter(
     state: State<AppState>,
