@@ -99,14 +99,6 @@ vi.mock("../FilterPane/lib/filterPaneFilterBridge", () => ({
   clearRibbonFilter: vi.fn(),
 }));
 
-vi.mock("../ScriptEditor/lib/scriptApi", () => ({
-  listScripts: vi.fn().mockResolvedValue([]),
-  getScript: vi.fn(),
-  saveScript: vi.fn(),
-  deleteScript: vi.fn(),
-  renameScript: vi.fn(),
-}));
-
 vi.mock("../ScriptNotebook/lib/notebookApi", () => ({
   listNotebooks: vi.fn().mockResolvedValue([]),
   createNotebook: vi.fn(),
@@ -159,7 +151,6 @@ import {
   setWorkbookProtectedState,
   resetProtectionState,
 } from "../Protection/lib/protectionStore";
-import { useModuleStore } from "../ScriptEditor/lib/useModuleStore";
 import { useNotebookStore } from "../ScriptNotebook/lib/useNotebookStore";
 
 // ============================================================================
@@ -338,42 +329,6 @@ describe("Protection store type safety", () => {
     for (const [key, value] of Object.entries(opts)) {
       expect(typeof value, `protection option "${key}" should be boolean`).toBe("boolean");
     }
-  });
-});
-
-// ============================================================================
-// Module Store - Type Safety
-// ============================================================================
-
-describe("ScriptEditor module store type safety", () => {
-  beforeEach(() => {
-    useModuleStore.setState({
-      modules: [],
-      activeModuleId: null,
-      dirtyModuleIds: [],
-      loaded: false,
-      navPaneVisible: true,
-    });
-  });
-
-  it("getters return correct types", () => {
-    const s = useModuleStore.getState();
-    expect(Array.isArray(s.modules)).toBe(true);
-    expect(s.activeModuleId).toBeNull();
-    expect(Array.isArray(s.dirtyModuleIds)).toBe(true);
-    expect(typeof s.loaded).toBe("boolean");
-    expect(typeof s.navPaneVisible).toBe("boolean");
-  });
-
-  it("selectModule updates activeModuleId to string", () => {
-    useModuleStore.getState().selectModule("test-id");
-    expect(useModuleStore.getState().activeModuleId).toBe("test-id");
-  });
-
-  it("toggleNavPane toggles boolean", () => {
-    expect(useModuleStore.getState().navPaneVisible).toBe(true);
-    useModuleStore.getState().toggleNavPane();
-    expect(useModuleStore.getState().navPaneVisible).toBe(false);
   });
 });
 

@@ -103,15 +103,6 @@ vi.mock("../DataValidation/lib/validationEvents", () => ({
   },
 }));
 
-// Mock ScriptEditor API
-vi.mock("../ScriptEditor/lib/scriptApi", () => ({
-  listScripts: vi.fn().mockResolvedValue([]),
-  getScript: vi.fn(),
-  saveScript: vi.fn(),
-  deleteScript: vi.fn(),
-  renameScript: vi.fn(),
-}));
-
 // Mock ScriptNotebook API
 vi.mock("../ScriptNotebook/lib/notebookApi", () => ({
   listNotebooks: vi.fn().mockResolvedValue([]),
@@ -155,7 +146,6 @@ import {
   isCurrentWorkbookProtected,
   resetProtectionState,
 } from "../Protection/lib/protectionStore";
-import { useModuleStore } from "../ScriptEditor/lib/useModuleStore";
 import { useNotebookStore } from "../ScriptNotebook/lib/useNotebookStore";
 
 // ============================================================================
@@ -402,46 +392,6 @@ describe("Protection store initial state", () => {
     for (const key of expectedKeys) {
       expect(opts, `protection options missing "${key}"`).toHaveProperty(key);
     }
-  });
-});
-
-// ============================================================================
-// Script Module Store Defaults
-// ============================================================================
-
-describe("ScriptEditor module store initial state", () => {
-  beforeEach(() => {
-    useModuleStore.setState({
-      modules: [],
-      activeModuleId: null,
-      dirtyModuleIds: [],
-      loaded: false,
-      navPaneVisible: true,
-    });
-  });
-
-  it("matches snapshot", () => {
-    const { loadModules, createModule, selectModule, markDirty, markClean,
-      saveModule, removeModule, renameModule, duplicateModule, toggleNavPane,
-      ...state } = useModuleStore.getState();
-    expect(state).toMatchInlineSnapshot(`
-      {
-        "activeModuleId": null,
-        "dirtyModuleIds": [],
-        "loaded": false,
-        "modules": [],
-        "navPaneVisible": true,
-      }
-    `);
-  });
-
-  it("has all expected properties", () => {
-    const state = useModuleStore.getState();
-    expect(state).toHaveProperty("modules");
-    expect(state).toHaveProperty("activeModuleId");
-    expect(state).toHaveProperty("dirtyModuleIds");
-    expect(state).toHaveProperty("loaded");
-    expect(state).toHaveProperty("navPaneVisible");
   });
 });
 

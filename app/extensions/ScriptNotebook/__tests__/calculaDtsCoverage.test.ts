@@ -1,10 +1,13 @@
-// PURPOSE: Guard that the shared QuickJS type surface (calcula.d.ts, fed to every
-//          Monaco editor) documents every op the script engine actually exposes.
+// PURPOSE: Guard that the shared QuickJS type surface (_shared/lib/calcula.d.ts,
+//          fed to the Notebook Monaco editor) documents every op the script engine
+//          actually exposes.
 // CONTEXT: C3 increment. Before this, the extended.rs (29) and worksheet_props.rs
 //          (6) ops were registered on the `Calcula` global but missing from
 //          IntelliSense. This test extracts op names from the Rust source and
 //          asserts each is documented, so a future op can't be added without its
 //          type — closing the drift that left ~half the API undocumented.
+//          (Relocated here from the retired ScriptEditor extension; calcula.d.ts
+//          lives in _shared and is consumed by ScriptNotebook's Monaco editor.)
 
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";

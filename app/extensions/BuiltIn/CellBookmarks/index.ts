@@ -383,23 +383,6 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("script:bookmark-mutations", handleScriptMutations);
   cleanupFns.push(() => window.removeEventListener("script:bookmark-mutations", handleScriptMutations));
 
-  // Also listen for cross-window mutations from the Monaco editor
-  // (Tauri events are handled separately via listenTauriEvent)
-  let unlistenTauriBookmarks: (() => void) | null = null;
-  import("@api/backend").then(({ listenTauriEvent }) => {
-    listenTauriEvent<{ mutations: unknown[] }>(
-      "script-editor:bookmark-mutations",
-      (payload) => {
-        if (payload.mutations && Array.isArray(payload.mutations)) {
-          processBookmarkMutations(payload.mutations as Parameters<typeof processBookmarkMutations>[0]);
-        }
-      }
-    ).then((unlisten) => {
-      unlistenTauriBookmarks = unlisten;
-    });
-  });
-  cleanupFns.push(() => unlistenTauriBookmarks?.());
-
   // ---- 13. Script runner for view bookmark onActivate ----
   setScriptRunner(async (scriptId: string) => {
     const script = await context.invokeBackend<{ id: string; name: string; source: string }>(

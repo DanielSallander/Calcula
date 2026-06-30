@@ -73,6 +73,11 @@ const KNOWN_SAFE_HEURISTIC_MATCHES: Record<string, string> = {
   notebook_rewind: "rewinds notebook runtime state; initiates no new execution",
   notebook_reset_runtime: "tears down notebook runtime; initiates no new execution",
   script_execution_status: "read-only script execution telemetry",
+  run_advanced_filter:
+    "matches the 'run_' heuristic but is feature-open: an Excel-style Advanced Filter " +
+    "over the active sheet (reads cell display values, matches criteria, sets the " +
+    "hidden-row set / returns matched rows). Initiates no code execution — the " +
+    "server-side twin of set_advanced_filter_hidden_rows.",
 };
 
 describe("backend command capability model (A3)", () => {

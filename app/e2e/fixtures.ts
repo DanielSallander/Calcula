@@ -112,7 +112,11 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
       await use(page);
     },
-    { scope: "worker" },
+    // Worker-scoped: this setup does a cold-WebView2 waitForSelector of up to 60s
+    // (above). Give the FIXTURE a timeout comfortably beyond that so the inner 60s
+    // is the binding limit — otherwise the 30s test-default timeout aborts the cold
+    // first-render before 60s, flaking the first test after a cargo-tauri-dev launch.
+    { scope: "worker", timeout: 90_000 },
   ],
 
   // ---- Test-scoped: lightweight reset per test ----

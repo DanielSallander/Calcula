@@ -803,7 +803,6 @@
       "description": "Script editor, notebook, object scripts, templates",
       "coverage": "partial",
       "unitTests": [
-        "extensions/ScriptEditor/__tests__/",
         "extensions/ScriptNotebook/__tests__/"
       ],
       "e2eTests": [

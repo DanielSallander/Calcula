@@ -2,8 +2,8 @@
 //! PURPOSE: Window-label guards for dangerous Tauri commands (Wave 2, S4
 //! backend defense-in-depth — docs/design/script-sandbox-architecture.md §7).
 //!
-//! The three Monaco editor windows (script-editor, chart-spec-editor,
-//! object-script-editor) should be as inert as their capability files imply.
+//! The Monaco editor windows (chart-spec-editor, object-script-editor) should be
+//! as inert as their capability files imply.
 //! Without these guards any webview — including a compromised secondary
 //! window — can call every registered command. Guards are data: each
 //! dangerous command states which window labels may call it, so exceptions
@@ -20,13 +20,6 @@ pub const MAIN: &[&str] = &["main"];
 /// Object-script CRUD is also legitimately called from the object-script
 /// editor window (verified: ObjectScriptEditorApp saves from its own window).
 pub const MAIN_AND_OBJECT_SCRIPT_EDITOR: &[&str] = &["main", "object-script-editor"];
-
-/// Script execution is also legitimately called from the advanced script
-/// editor window (verified: MonacoEditorApp.tsx:386 runs scripts via
-/// scriptApi.ts:69 `run_script`, and its security prompt grants session
-/// approval via scriptApi.ts:35 `grant_script_session_approval`; the window
-/// is created with label "script-editor" at openEditorWindow.ts:12).
-pub const MAIN_AND_SCRIPT_EDITOR: &[&str] = &["main", "script-editor"];
 
 /// Reject the call unless the invoking window's label is in `allowed`.
 /// First line of every guarded command:

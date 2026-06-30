@@ -33,8 +33,6 @@ export default defineConfig({
         // eslint-disable-next-line @typescript-eslint/naming-convention
         main: path.resolve(__dirname, 'index.html'),
         // eslint-disable-next-line @typescript-eslint/naming-convention
-        editor: path.resolve(__dirname, 'editor.html'),
-        // eslint-disable-next-line @typescript-eslint/naming-convention
         chartSpecEditor: path.resolve(__dirname, 'chartSpecEditor.html'),
         // eslint-disable-next-line @typescript-eslint/naming-convention
         objectScript: path.resolve(__dirname, 'objectScript.html'),
