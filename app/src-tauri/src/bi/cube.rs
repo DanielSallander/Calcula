@@ -192,41 +192,102 @@ pub async fn script_cube_members(
 #[tauri::command]
 pub async fn cube_udf_value(
     bi_state: tauri::State<'_, BiState>,
+    cap_store: tauri::State<'_, crate::scripting::CapabilityStore>,
+    app_state: tauri::State<'_, crate::AppState>,
     connection: String,
     members: Vec<String>,
+    script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<Option<f64>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    script_cube_value(&bi_state, &connection, &members)
+    // A3.4-S2: authoritative server-side re-check. cube.* maps to the bi.query
+    // capability, so a sandboxed script (carries a script_id) must have been
+    // granted bi.query — a compromised renderer can't bypass the broker check.
+    // A trusted main-window call carries no script_id and passes untouched.
+    if let Some(sid) = script_id.as_deref() {
+        if !cap_store.is_bi_granted(sid, "bi.query") {
+            crate::log_warn!("SECURITY", "cube_udf_value DENIED (bi.query not granted): script={}", sid);
+            crate::net_commands::record_capability_call(
+                &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
+            );
+            return Err("PermissionDenied: bi.query not granted for this script".to_string());
+        }
+    }
+    let result = script_cube_value(&bi_state, &connection, &members)
         .await
-        .map_err(cube_err_message)
+        .map_err(cube_err_message);
+    if let (Some(sid), true) = (script_id.as_deref(), result.is_ok()) {
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log, "bi.query", sid, true,
+            Some(&format!("cube.value connection {}", connection)), None,
+        );
+    }
+    result
 }
 
 #[tauri::command]
 pub async fn cube_udf_kpi(
     bi_state: tauri::State<'_, BiState>,
+    cap_store: tauri::State<'_, crate::scripting::CapabilityStore>,
+    app_state: tauri::State<'_, crate::AppState>,
     connection: String,
     kpi: String,
     property: i64,
+    script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<Option<f64>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    script_cube_kpi(&bi_state, &connection, &kpi, property)
+    if let Some(sid) = script_id.as_deref() {
+        if !cap_store.is_bi_granted(sid, "bi.query") {
+            crate::log_warn!("SECURITY", "cube_udf_kpi DENIED (bi.query not granted): script={}", sid);
+            crate::net_commands::record_capability_call(
+                &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
+            );
+            return Err("PermissionDenied: bi.query not granted for this script".to_string());
+        }
+    }
+    let result = script_cube_kpi(&bi_state, &connection, &kpi, property)
         .await
-        .map_err(cube_err_message)
+        .map_err(cube_err_message);
+    if let (Some(sid), true) = (script_id.as_deref(), result.is_ok()) {
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log, "bi.query", sid, true,
+            Some(&format!("cube.kpi connection {} kpi {}", connection, kpi)), None,
+        );
+    }
+    result
 }
 
 #[tauri::command]
 pub async fn cube_udf_members(
     bi_state: tauri::State<'_, BiState>,
+    cap_store: tauri::State<'_, crate::scripting::CapabilityStore>,
+    app_state: tauri::State<'_, crate::AppState>,
     connection: String,
     level: String,
+    script_id: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<String>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    script_cube_members(&bi_state, &connection, &level)
+    if let Some(sid) = script_id.as_deref() {
+        if !cap_store.is_bi_granted(sid, "bi.query") {
+            crate::log_warn!("SECURITY", "cube_udf_members DENIED (bi.query not granted): script={}", sid);
+            crate::net_commands::record_capability_call(
+                &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
+            );
+            return Err("PermissionDenied: bi.query not granted for this script".to_string());
+        }
+    }
+    let result = script_cube_members(&bi_state, &connection, &level)
         .await
-        .map_err(cube_err_message)
+        .map_err(cube_err_message);
+    if let (Some(sid), true) = (script_id.as_deref(), result.is_ok()) {
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log, "bi.query", sid, true,
+            Some(&format!("cube.members connection {} level {}", connection, level)), None,
+        );
+    }
+    result
 }
 
 // ===========================================================================

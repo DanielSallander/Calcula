@@ -827,17 +827,17 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // filters, resolved via the same model-scoped path as the cube formulas.
       const [connection, members] = args as [string, string[]];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("cube_udf_value", { connection, members });
+      return invokeBackend("cube_udf_value", { connection, members, scriptId: definition.id });
     }
     case "cap.cubeKpi": {
       const [connection, kpi, property] = args as [string, string, number];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("cube_udf_kpi", { connection, kpi, property });
+      return invokeBackend("cube_udf_kpi", { connection, kpi, property, scriptId: definition.id });
     }
     case "cap.cubeMembers": {
       const [connection, level] = args as [string, string];
       const { invokeBackend } = await import("../backend");
-      return invokeBackend("cube_udf_members", { connection, level });
+      return invokeBackend("cube_udf_members", { connection, level, scriptId: definition.id });
     }
 
     default:

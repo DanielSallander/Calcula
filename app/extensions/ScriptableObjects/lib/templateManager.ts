@@ -4,7 +4,12 @@
 //          template, then stamp out independent copies. Templates are stored in
 //          the user's %APPDATA%/Calcula/templates/ directory.
 
-import { invoke } from "@tauri-apps/api/core";
+import {
+  listObjectTemplates,
+  saveObjectTemplate,
+  loadObjectTemplate,
+  deleteObjectTemplate,
+} from "@api/backend";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 
 // ============================================================================
@@ -48,7 +53,7 @@ const TEMPLATES_DIR = "templates";
 
 /** List all saved templates. */
 export async function listTemplates(): Promise<TemplateSummary[]> {
-  const templates = await invoke<ObjectTemplate[]>("list_object_templates");
+  const templates = await listObjectTemplates<ObjectTemplate[]>();
   return templates.map((t) => ({
     id: t.id,
     name: t.name,
@@ -60,17 +65,17 @@ export async function listTemplates(): Promise<TemplateSummary[]> {
 
 /** Save a template. */
 export async function saveTemplate(template: ObjectTemplate): Promise<void> {
-  await invoke<void>("save_object_template", { template });
+  await saveObjectTemplate(template);
 }
 
 /** Load a template by ID. */
 export async function loadTemplate(id: string): Promise<ObjectTemplate | null> {
-  return invoke<ObjectTemplate>("load_object_template", { id });
+  return loadObjectTemplate<ObjectTemplate>(id);
 }
 
 /** Delete a template by ID. */
 export async function deleteTemplate(id: string): Promise<void> {
-  await invoke<void>("delete_object_template", { id });
+  await deleteObjectTemplate(id);
   localStorage.removeItem(`calcula.template.${id}`);
 }
 

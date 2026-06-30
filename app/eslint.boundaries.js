@@ -67,6 +67,19 @@ const RAW_BACKEND_INVOKE_PATH = {
     'or a typed @api/backend wrapper. Typed wrappers from @api/backend remain allowed.',
 }
 
+// A3 BACKEND DOOR (raw Tauri): extensions must not import the raw `invoke` from
+// @tauri-apps/api/core either — it bypasses the @api/backend door entirely. Use a
+// typed @api/backend wrapper or a createBackendChannel(...) bound in activate().
+// importNames-scoped to `invoke` so @tauri-apps/api/event + the legitimate
+// plugin-dialog / webviewWindow / path imports stay allowed.
+const RAW_TAURI_INVOKE_PATH = {
+  name: '@tauri-apps/api/core',
+  importNames: ['invoke'],
+  message:
+    'Extensions must not import the raw `invoke` from @tauri-apps/api/core (bypasses the @api/backend door, A3). ' +
+    'Use a typed @api/backend wrapper, or a createBackendChannel(...) bound in activate().',
+}
+
 export const boundaryConfigs = [
   // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell),
   // and must NOT reach the raw @api/backend invokeBackend door (A3).
@@ -75,7 +88,7 @@ export const boundaryConfigs = [
     rules: {
       'no-restricted-imports': [BOUNDARY_SEVERITY.facade, {
         patterns: FACADE_IMPORT_PATTERNS,
-        paths: [RAW_BACKEND_INVOKE_PATH],
+        paths: [RAW_BACKEND_INVOKE_PATH, RAW_TAURI_INVOKE_PATH],
       }],
     },
   },

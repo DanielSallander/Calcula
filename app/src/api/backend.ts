@@ -39,6 +39,42 @@ export async function invokeBackend<T>(cmd: string, args: InvokeArgs = {}): Prom
 }
 
 // ============================================================================
+// Feature command wrappers — named, command-scoped doors (the sanctioned
+// alternative to importing the raw `invoke`/`invokeBackend` in extensions, A3).
+// Generic over the result so the owning extension keeps its own return types.
+// ============================================================================
+
+/** Error-checking indicators for a viewport range (ErrorChecking extension). */
+export function getErrorIndicators<T = unknown>(range: {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}): Promise<T> {
+  return invokeBackend<T>("get_error_indicators", range);
+}
+
+/** List saved object-script templates (ScriptableObjects extension). */
+export function listObjectTemplates<T = unknown>(): Promise<T> {
+  return invokeBackend<T>("list_object_templates");
+}
+
+/** Save an object-script template. */
+export function saveObjectTemplate(template: unknown): Promise<void> {
+  return invokeBackend<void>("save_object_template", { template });
+}
+
+/** Load an object-script template by id. */
+export function loadObjectTemplate<T = unknown>(id: string): Promise<T> {
+  return invokeBackend<T>("load_object_template", { id });
+}
+
+/** Delete an object-script template by id. */
+export function deleteObjectTemplate(id: string): Promise<void> {
+  return invokeBackend<void>("delete_object_template", { id });
+}
+
+// ============================================================================
 // Cross-Window Event API (Tauri Events)
 // ============================================================================
 

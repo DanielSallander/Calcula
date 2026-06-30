@@ -165,7 +165,7 @@ export function AuditLogPane(): React.ReactElement {
   }, [reload, log]);
 
   const clear = useCallback(async () => {
-    if (!window.confirm("Discard all audit log entries? This cannot be undone.")) return;
+    if (!window.confirm("Discard ALL audit entries, including the always-on script and capability records? This cannot be undone.")) return;
     setBusy(true);
     try {
       await clearAuditLog();
@@ -188,28 +188,6 @@ export function AuditLogPane(): React.ReactElement {
     return <div style={root}><div style={empty}>Loading audit log...</div></div>;
   }
 
-  // Logging is OFF — explain + offer to enable.
-  if (log && !log.enabled) {
-    return (
-      <div style={root}>
-        <div style={intro}>
-          Audit logging records every distribution action in this workbook —
-          subscribe, refresh, overrides, writeback submissions, and publishing —
-          so you have a transparent history of what changed and who changed it.
-        </div>
-        <div style={{ ...empty }}>Audit logging is currently <b>off</b>.</div>
-        <button style={chip(false)} onClick={() => void enable()} disabled={busy}>
-          {busy ? "Enabling..." : "Enable audit logging"}
-        </button>
-        {log.entries.length > 0 && (
-          <div style={{ marginTop: 8, color: "#999", fontSize: 11 }}>
-            {log.entries.length} prior entr{log.entries.length === 1 ? "y" : "ies"} retained.
-          </div>
-        )}
-      </div>
-    );
-  }
-
   const entries: AuditEntry[] = log?.entries ?? [];
   // Newest first; apply the category filter.
   const shown = entries
@@ -220,8 +198,16 @@ export function AuditLogPane(): React.ReactElement {
   return (
     <div style={root}>
       <div style={intro}>
-        Every distribution action recorded in this workbook, newest first.
+        Sandboxed script grid-mutations and capability use are <b>always</b> recorded here.
+        Distribution events (subscribe, refresh, overrides, writeback, publishing) are recorded
+        only while audit logging is enabled. Newest first.
       </div>
+      {log && !log.enabled && (
+        <div style={{ ...empty, color: "#9a6700", textAlign: "left", padding: "6px 8px", marginBottom: 4 }}>
+          Distribution logging is <b>off</b> — distribution events are not being recorded.
+          Script and capability activity below is always recorded.
+        </div>
+      )}
 
       <div style={toolbar}>
         {FILTERS.map((f) => (
@@ -233,7 +219,13 @@ export function AuditLogPane(): React.ReactElement {
         <button style={linkBtn} onClick={() => void reload()} disabled={loading}>
           {loading ? "..." : "Refresh"}
         </button>
-        <button style={linkBtn} onClick={() => void disable()} disabled={busy}>Turn off</button>
+        {log?.enabled ? (
+          <button style={linkBtn} onClick={() => void disable()} disabled={busy}>Turn off</button>
+        ) : (
+          <button style={linkBtn} onClick={() => void enable()} disabled={busy}>
+            {busy ? "..." : "Enable"}
+          </button>
+        )}
         <button style={{ ...linkBtn, color: "#c5221f" }} onClick={() => void clear()} disabled={busy || entries.length === 0}>
           Clear
         </button>
@@ -247,7 +239,9 @@ export function AuditLogPane(): React.ReactElement {
       <div style={{ flex: 1, overflowY: "auto" }}>
         {shown.length === 0 ? (
           <div style={empty}>
-            {entries.length === 0 ? "No actions recorded yet." : "No events match this filter."}
+            {entries.length === 0
+              ? (log?.enabled ? "No actions recorded yet." : "No script or capability activity recorded yet.")
+              : "No events match this filter."}
           </div>
         ) : (
           shown.map((e, i) => {

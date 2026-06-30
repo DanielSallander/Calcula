@@ -4,7 +4,7 @@
 //          per-cell lookup during the render loop (hot path).
 //          Only scans the current VIEWPORT (not the full used range) for performance.
 
-import { invoke } from "@tauri-apps/api/core";
+import { getErrorIndicators } from "@api/backend";
 
 // ============================================================================
 // Types
@@ -127,7 +127,7 @@ async function doFetch(
   endCol: number,
 ): Promise<void> {
   try {
-    const indicators = await invoke<CellErrorIndicator[]>("get_error_indicators", {
+    const indicators = await getErrorIndicators<CellErrorIndicator[]>({
       startRow,
       startCol,
       endRow,
