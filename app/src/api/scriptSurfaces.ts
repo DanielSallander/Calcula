@@ -88,7 +88,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Chart transforms (built-in pipeline)",
     runtime: "main-thread",
     containment:
-      "Pure data pipeline; calculate/filter expressions via chartFormula (recursive-descent parser, no eval/new Function)",
+      "Pure data pipeline; calculate/filter expressions evaluate via the real Rust engine (@api evaluateScoped -> evaluate_scoped), not an in-extension evaluator. chartFormula is only a thin syntax adapter (variable-ref rewriting + coercion); no eval/new Function.",
     capabilities: [],
     gate: "n/a (pure declarative, not an execution surface)",
     executesUserCode: false,
