@@ -36,6 +36,8 @@ import {
   hideDialog,
   registerOverlay,
   unregisterOverlay,
+  registerShellComponent,
+  unregisterShellComponent,
   showOverlay,
   hideOverlay,
   hideAllOverlays,
@@ -289,6 +291,10 @@ function buildContext(): ExtensionContext {
       },
       notifications: {
         showToast,
+      },
+      shellComponents: {
+        register: registerShellComponent,
+        unregister: unregisterShellComponent,
       },
     },
     events: {

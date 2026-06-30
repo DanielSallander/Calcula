@@ -1458,14 +1458,14 @@ export function useEditing(): UseEditingReturn {
         }
       }
 
-      // Refresh style cache if fill colors or other styles were changed by UI formulas
-      if (updateResult.needsStyleRefresh) {
-        window.dispatchEvent(new Event("styles:refresh"));
-      }
-
-      // Refresh slicer overlays if slicer computed properties changed a slicer
-      if (updateResult.slicerChanged) {
-        window.dispatchEvent(new Event("slicers:refresh"));
+      // Report the change domains this commit touched (style cache / slicer
+      // overlays); the Shell translator fans out to styles:refresh / slicers:refresh.
+      // Core names no features (no styles:refresh/slicers:refresh literals here).
+      const domains: ("styles" | "slicer")[] = [];
+      if (updateResult.needsStyleRefresh) domains.push("styles");
+      if (updateResult.slicerChanged) domains.push("slicer");
+      if (domains.length > 0) {
+        emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "commit" });
       }
 
       // Sheet grouping: replicate the cell update to all grouped (non-active) sheets

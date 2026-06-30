@@ -35,6 +35,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "GRID_REFRESH": "app:grid-refresh",
   "LINKED_SHEETS_REFRESHED": "app:linked-sheets-refreshed",
   "LOCALE_CHANGED": "app:locale-changed",
+  "MUTATION_REFRESH": "app:mutation-refresh",
   "NAMEBOX_FOCUS": "app:namebox-focus",
   "NAMED_RANGES_CHANGED": "app:named-ranges-changed",
   "NAVIGATE_TO_CELL": "app:navigate-to-cell",

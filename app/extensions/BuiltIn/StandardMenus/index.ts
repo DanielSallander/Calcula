@@ -4,9 +4,12 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenu, type MenuDefinition } from "@api/ui";
+import { registerMenu, registerShellComponent, unregisterShellComponent, type MenuDefinition } from "@api/ui";
 import { CoreCommands } from "@api/commands";
 import { registerFormatMenu } from "./FormatMenu";
+import { StandardMenus } from "./StandardMenus";
+
+const SHELL_COMPONENT_ID = "standard-menus";
 
 // ============================================================================
 // Extension State
@@ -95,6 +98,10 @@ function activate(context: ExtensionContext): void {
   registerEditMenu(context);
   registerFormatMenu();
 
+  // Contribute the hook-based File/View/Insert menus component to the shell frame
+  // via the @api shell-component registry — the Shell no longer hard-imports it.
+  registerShellComponent({ id: SHELL_COMPONENT_ID, component: StandardMenus });
+
   isActivated = true;
   console.log("[StandardMenusExtension] Activated successfully.");
 }
@@ -109,6 +116,7 @@ function deactivate(): void {
   }
 
   console.log("[StandardMenusExtension] Deactivating...");
+  unregisterShellComponent(SHELL_COMPONENT_ID);
   isActivated = false;
   console.log("[StandardMenusExtension] Deactivated.");
 }

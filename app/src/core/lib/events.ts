@@ -39,6 +39,11 @@ export const AppEvents = {
   GRID_REFRESH: "app:grid-refresh",
   GRID_DATA_REFRESH: "grid:refresh",
 
+  // Generic post-mutation refresh (see api/events.ts). Core emits ONE of these
+  // with a list of change domains; a Shell translator fans it out to the
+  // per-feature refresh events, so Core never names a feature.
+  MUTATION_REFRESH: "app:mutation-refresh",
+
   // Structure events (row/column insert/delete)
   ROWS_INSERTED: "app:rows-inserted",
   COLUMNS_INSERTED: "app:columns-inserted",

@@ -23,6 +23,7 @@ import {
 import { initKeybindings } from "../api/keybindings";
 import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
+import { onAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
 
 import {
   registerExtensionRegistryService,
@@ -438,6 +439,30 @@ export function bootstrapShell(): void {
   }).catch(() => {
     // No Tauri runtime (e.g. a non-webview/test context) — the bridge is a
     // no-op there; in-app writes still refresh through their return values.
+  });
+
+  // Tier-7 core-purity: Core no longer dispatches feature-named refresh events on
+  // undo/redo/commit — it emits ONE generic MUTATION_REFRESH carrying a list of
+  // change DOMAINS. This Shell-side translator (the orchestrator IS allowed to know
+  // features) fans each domain out to the concrete per-feature refresh events the
+  // extensions already listen to, so the extension subscribers are unchanged. Runs
+  // synchronously within the same dispatch, so refresh timing is preserved.
+  const MUTATION_DOMAIN_EVENTS: Record<MutationDomain, string[]> = {
+    styles: ["styles:refresh"],
+    pivot: ["pivot:refresh"],
+    slicer: ["slicers:refresh"],
+    ribbonFilter: ["filterpane:filters-refreshed"],
+    objects: ["charts:refresh", "sparklines:refresh", "app:table-definitions-updated", "grid:refresh"],
+  };
+  onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
+    const fired = new Set<string>();
+    for (const domain of payload?.domains ?? []) {
+      for (const evt of MUTATION_DOMAIN_EVENTS[domain] ?? []) {
+        if (fired.has(evt)) continue; // de-dupe if domains ever share an event
+        fired.add(evt);
+        window.dispatchEvent(new CustomEvent(evt));
+      }
+    }
   });
 
   isBootstrapped = true;

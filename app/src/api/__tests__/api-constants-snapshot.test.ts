@@ -15,7 +15,7 @@ describe('AppEvents', () => {
   });
 
   it('event count stays stable', () => {
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`54`);
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`55`);
   });
 
   it('all values use the app: prefix', () => {

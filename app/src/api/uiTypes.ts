@@ -208,6 +208,18 @@ export interface OverlayDefinition {
 export type StatusBarAlignment = "left" | "right";
 
 /**
+ * A top-level shell-region component an extension contributes to the app frame
+ * (e.g. StandardMenus' hook-driven File/View/Insert menus). Lets an extension
+ * inject a React component into the Layout without the Shell hard-importing it.
+ */
+export interface ShellComponentDefinition {
+  /** Unique identifier for this shell component. */
+  id: string;
+  /** The React component to render in the shell frame. */
+  component: React.ComponentType;
+}
+
+/**
  * Definition of a status bar item that can be registered by extensions.
  */
 export interface StatusBarItemDefinition {

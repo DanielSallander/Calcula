@@ -517,6 +517,11 @@ export {
   TaskPaneExtensions,
   DialogExtensions,
   OverlayExtensions,
+  // Shell Component API (top-level app-frame components)
+  registerShellComponent,
+  unregisterShellComponent,
+  getShellComponents,
+  onShellComponentsChange,
   // Status Bar API
   registerStatusBarItem,
   unregisterStatusBarItem,

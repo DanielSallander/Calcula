@@ -60,6 +60,12 @@ export const AppEvents = {
   COLUMNS_DELETED: "app:columns-deleted",
   STRUCTURAL_UNDO: "app:structural-undo",
 
+  // Generic post-mutation refresh. Core emits ONE of these with a list of change
+  // DOMAINS (not feature/extension names) after undo/redo/commit; a Shell-side
+  // translator fans it out to the per-feature refresh events. This keeps Core
+  // feature-agnostic (it no longer dispatches pivot:refresh/slicers:refresh/etc).
+  MUTATION_REFRESH: "app:mutation-refresh",
+
   // Navigation events
   NAVIGATE_TO_CELL: "app:navigate-to-cell",
 
@@ -125,6 +131,20 @@ export const AppEvents = {
   ROW_RESIZED: "app:row-resized",
   COLUMN_RESIZED: "app:column-resized",
 } as const;
+
+/**
+ * A generic change-domain reported by a MUTATION_REFRESH event. These are
+ * change CLASSES, not feature/extension names — Core knows nothing about which
+ * extension consumes each. The Shell translator maps each domain to the concrete
+ * per-feature refresh event(s).
+ */
+export type MutationDomain = "styles" | "pivot" | "slicer" | "ribbonFilter" | "objects";
+
+/** Payload of AppEvents.MUTATION_REFRESH. */
+export interface MutationRefreshPayload {
+  domains: MutationDomain[];
+  source: "undo" | "redo" | "commit";
+}
 
 /** A single cell value change within a CELL_VALUES_CHANGED event. */
 export interface CellValueChange {

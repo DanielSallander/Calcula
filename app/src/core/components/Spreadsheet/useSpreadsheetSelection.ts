@@ -47,7 +47,7 @@ import { setColumnWidth, setRowHeight, setAllDimensions, updateConfig, setManual
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry, CoreCommands } from "../../../api/commands";
-import { emitAppEvent, AppEvents } from "../../../api/events";
+import { emitAppEvent, AppEvents, type MutationDomain } from "../../../api/events";
 import type { GridCanvasHandle } from "../Grid";
 
 type GridState = ReturnType<typeof useGridState>;
@@ -552,31 +552,21 @@ export function useSpreadsheetSelection({
       }
 
       // Refresh style cache (undo may revert formatting changes)
-      window.dispatchEvent(new CustomEvent("styles:refresh"));
-
       // Notify extensions about structural change so they can update their state
       if (result.structuralRestore) {
         emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
       }
 
-      // Notify pivot/slicer/ribbon filter extensions to refresh after undo
-      if (result.pivotChanged) {
-        window.dispatchEvent(new CustomEvent("pivot:refresh"));
-      }
-      if (result.slicerChanged) {
-        window.dispatchEvent(new Event("slicers:refresh"));
-      }
-      if (result.ribbonFilterChanged) {
-        window.dispatchEvent(new CustomEvent("filterpane:filters-refreshed"));
-      }
-      if (result.objectsChanged) {
-        // Charts, sparklines, tables, autofilters, validation, named ranges
-        // or freeze panes were restored — refresh the affected stores.
-        window.dispatchEvent(new Event("charts:refresh"));
-        window.dispatchEvent(new Event("sparklines:refresh"));
-        window.dispatchEvent(new CustomEvent("app:table-definitions-updated"));
-        window.dispatchEvent(new Event("grid:refresh"));
-      }
+      // Report the change DOMAINS this undo touched and let the Shell translator
+      // fan out to the concrete per-feature refresh events. Core stays
+      // feature-agnostic — no pivot:refresh/slicers:refresh/styles:refresh/...
+      // literals here. ("styles" is always included: undo can re-apply formatting.)
+      const domains: MutationDomain[] = ["styles"];
+      if (result.pivotChanged) domains.push("pivot");
+      if (result.slicerChanged) domains.push("slicer");
+      if (result.ribbonFilterChanged) domains.push("ribbonFilter");
+      if (result.objectsChanged) domains.push("objects");
+      emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
@@ -614,32 +604,19 @@ export function useSpreadsheetSelection({
         canvas.redraw();
       }
 
-      // Refresh style cache (redo may re-apply formatting changes)
-      window.dispatchEvent(new CustomEvent("styles:refresh"));
-
       // Notify extensions about structural change so they can update their state
       if (result.structuralRestore) {
         emitAppEvent(AppEvents.STRUCTURAL_UNDO, { description: result.description });
       }
 
-      // Notify pivot/slicer/ribbon filter extensions to refresh after redo
-      if (result.pivotChanged) {
-        window.dispatchEvent(new CustomEvent("pivot:refresh"));
-      }
-      if (result.slicerChanged) {
-        window.dispatchEvent(new Event("slicers:refresh"));
-      }
-      if (result.ribbonFilterChanged) {
-        window.dispatchEvent(new CustomEvent("filterpane:filters-refreshed"));
-      }
-      if (result.objectsChanged) {
-        // Charts, sparklines, tables, autofilters, validation, named ranges
-        // or freeze panes were restored — refresh the affected stores.
-        window.dispatchEvent(new Event("charts:refresh"));
-        window.dispatchEvent(new Event("sparklines:refresh"));
-        window.dispatchEvent(new CustomEvent("app:table-definitions-updated"));
-        window.dispatchEvent(new Event("grid:refresh"));
-      }
+      // Report the change DOMAINS this redo touched (see handleUndo) — one generic
+      // event, Shell translates to per-feature refreshes. Core names no features.
+      const domains: MutationDomain[] = ["styles"];
+      if (result.pivotChanged) domains.push("pivot");
+      if (result.slicerChanged) domains.push("slicer");
+      if (result.ribbonFilterChanged) domains.push("ribbonFilter");
+      if (result.objectsChanged) domains.push("objects");
+      emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "redo" });
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {

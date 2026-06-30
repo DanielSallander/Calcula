@@ -4,7 +4,7 @@
 // All feature-specific logic lives in extensions; the shell only renders generic zones.
 // REFACTOR: Extensions are now loaded dynamically via ExtensionManager (no hard imports).
 
-import React, { useEffect } from "react";
+import React, { useEffect, useReducer } from "react";
 import { MenuBar } from "./MenuBar";
 import { RibbonContainer } from "./Ribbon/RibbonContainer";
 import { FormulaBar } from "./FormulaBar";
@@ -44,7 +44,26 @@ import type { ViewMode } from "../core/types";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
 // Hook-based menus that need to be rendered inside React tree
-import { StandardMenus } from "../../extensions/BuiltIn/StandardMenus/StandardMenus";
+import { getShellComponents, onShellComponentsChange } from "../api/ui";
+
+/**
+ * Renders every extension-registered shell-region component (e.g. StandardMenus'
+ * hook-driven File/View/Insert menus). Replaces the former hard import of the
+ * StandardMenus extension component — the shell no longer imports app/extensions.
+ * Re-renders when the registry changes so a component that registers after mount
+ * (during extension activation) still appears.
+ */
+function ShellComponentHost(): React.ReactElement {
+  const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => onShellComponentsChange(forceUpdate), []);
+  return (
+    <>
+      {getShellComponents().map(({ id, component: Component }) => (
+        <Component key={id} />
+      ))}
+    </>
+  );
+}
 // DEV ONLY: Mock data loader for testing - remove these imports when done testing
 import { loadMockData, shouldLoadMockData } from "./utils/mockData";
 
@@ -322,8 +341,10 @@ function LayoutInner(): React.ReactElement {
         backgroundColor: "var(--bg-surface)",
       }}
     >
-      {/* Hook-based menus (renders nothing, just activates hooks) */}
-      <StandardMenus />
+      {/* Extension-registered shell-region components (e.g. StandardMenus'
+          hook-based File/View/Insert menus) — registered via ctx.ui.shellComponents,
+          not hard-imported. */}
+      <ShellComponentHost />
 
       {/* Menu Bar */}
       <MenuBar />

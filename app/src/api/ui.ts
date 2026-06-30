@@ -18,6 +18,7 @@ import type {
   PanelDefinition,
   PanelPlacement,
   PanelSection,
+  ShellComponentDefinition,
 } from "./uiTypes";
 
 // Re-export types from the canonical contract layer (api/uiTypes.ts)
@@ -41,7 +42,40 @@ export type {
   PanelPlacement,
   PanelSection,
   PanelSectionProps,
+  ShellComponentDefinition,
 } from "./uiTypes";
+
+// ============================================================================
+// Shell Component Registry (self-contained, like MenuRegistry below) — lets an
+// extension contribute a top-level component to the app frame (Layout) without
+// the Shell hard-importing the extension. A ShellComponentHost in the Shell
+// renders getShellComponents() and re-renders via onShellComponentsChange().
+// ============================================================================
+
+const shellComponents = new Map<string, ShellComponentDefinition>();
+const shellComponentListeners = new Set<() => void>();
+
+function notifyShellComponentChange(): void {
+  shellComponentListeners.forEach((l) => l());
+}
+
+export function registerShellComponent(def: ShellComponentDefinition): void {
+  shellComponents.set(def.id, def);
+  notifyShellComponentChange();
+}
+
+export function unregisterShellComponent(id: string): void {
+  if (shellComponents.delete(id)) notifyShellComponentChange();
+}
+
+export function getShellComponents(): ShellComponentDefinition[] {
+  return Array.from(shellComponents.values());
+}
+
+export function onShellComponentsChange(listener: () => void): () => void {
+  shellComponentListeners.add(listener);
+  return () => shellComponentListeners.delete(listener);
+}
 
 // ============================================================================
 // Service Interfaces (Contracts for Shell to implement)

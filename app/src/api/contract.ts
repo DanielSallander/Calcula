@@ -16,6 +16,7 @@ import type {
   ActivityViewDefinition,
   PanelDefinition,
   PanelPlacement,
+  ShellComponentDefinition,
 } from "./uiTypes";
 import type {
   CellDecorationFn,
@@ -90,6 +91,12 @@ export interface IOverlayAPI {
 export interface IStatusBarAPI {
   register(definition: StatusBarItemDefinition): void;
   unregister(itemId: string): void;
+}
+
+/** Shell-region component registration (top-level app-frame components). */
+export interface IShellComponentAPI {
+  register(definition: ShellComponentDefinition): void;
+  unregister(id: string): void;
 }
 
 /** Activity bar (left sidebar) view registration */
@@ -193,6 +200,7 @@ export interface ExtensionContext {
     activityBar: IActivityBarAPI;
     panels: IPanelAPI;
     notifications: INotificationAPI;
+    shellComponents: IShellComponentAPI;
   };
 
   /** Application event bus */
