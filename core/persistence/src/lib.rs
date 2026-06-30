@@ -98,6 +98,32 @@ pub struct Workbook {
     /// file format does not need a new typed field per feature
     /// (Primitives-not-Features / No-First-Class-Citizens).
     pub extension_data: HashMap<String, serde_json::Value>,
+    /// Conditional-formatting rules per sheet (opaque app-owned JSON payload,
+    /// keyed by SheetId for stability). Stored opaquely — like bi_pivot_metadata —
+    /// so the persistence layer does not depend on the app's CF rule types.
+    pub conditional_formats: Vec<SavedSheetConditionalFormats>,
+    /// Data-validation ranges per sheet (opaque app-owned JSON payload, keyed by
+    /// SheetId). Stored opaquely for the same reason as conditional_formats.
+    pub data_validations: Vec<SavedSheetDataValidations>,
+}
+
+/// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
+/// payload (a serialized `Vec<ConditionalFormatDefinition>`); the persistence
+/// layer never inspects it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetConditionalFormats {
+    pub sheet_id: SheetId,
+    pub rules: serde_json::Value,
+}
+
+/// Data-validation ranges for one sheet. `ranges` is the opaque app-owned payload
+/// (a serialized `Vec<ValidationRange>`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetDataValidations {
+    pub sheet_id: SheetId,
+    pub ranges: serde_json::Value,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -343,6 +369,8 @@ impl Workbook {
             bi_connections: Vec::new(),
             bi_connection_caches: HashMap::new(),
             extension_data: HashMap::new(),
+            conditional_formats: Vec::new(),
+            data_validations: Vec::new(),
         }
     }
 
@@ -371,6 +399,8 @@ impl Workbook {
             bi_connections: Vec::new(),
             bi_connection_caches: HashMap::new(),
             extension_data: HashMap::new(),
+            conditional_formats: Vec::new(),
+            data_validations: Vec::new(),
         }
     }
 }

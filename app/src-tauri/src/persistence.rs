@@ -306,6 +306,49 @@ pub fn build_workbook_for_save_with_slicers(
     Ok(workbook)
 }
 
+/// Collect conditional-formatting + data-validation state into the persisted,
+/// SheetId-keyed, opaque-payload carriers. Iterates the FULL per-sheet stores
+/// (not the active-sheet getters), maps each sheet_index -> SheetId, and skips
+/// empty sheets. CF/DV rule/range types are serialized as opaque JSON so the
+/// persistence layer stays decoupled from the app's CF/DV types.
+fn collect_cf_dv_for_save(
+    state: &AppState,
+    sheet_ids: &[SheetId],
+) -> (
+    Vec<persistence::SavedSheetConditionalFormats>,
+    Vec<persistence::SavedSheetDataValidations>,
+) {
+    let mut conditional_formats = Vec::new();
+    if let Ok(store) = state.conditional_formats.lock() {
+        for (idx, defs) in store.iter() {
+            if defs.is_empty() {
+                continue;
+            }
+            if let Ok(rules) = serde_json::to_value(defs) {
+                conditional_formats.push(persistence::SavedSheetConditionalFormats {
+                    sheet_id: sheet_index_to_id(sheet_ids, *idx),
+                    rules,
+                });
+            }
+        }
+    }
+    let mut data_validations = Vec::new();
+    if let Ok(store) = state.data_validations.lock() {
+        for (idx, ranges) in store.iter() {
+            if ranges.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::to_value(ranges) {
+                data_validations.push(persistence::SavedSheetDataValidations {
+                    sheet_id: sheet_index_to_id(sheet_ids, *idx),
+                    ranges: value,
+                });
+            }
+        }
+    }
+    (conditional_formats, data_validations)
+}
+
 /// Build a multi-sheet Workbook snapshot from the current AppState.
 /// Used by the .calp publish command to access all sheets by index.
 /// Unlike `build_workbook_for_save`, this captures ALL sheets, not just the active one.
@@ -407,6 +450,11 @@ pub fn build_workbook_snapshot(state: &State<AppState>) -> Result<Workbook, Stri
 
     // Tables
     workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
+
+    // Conditional formatting + data validation (per-sheet)
+    let (cf, dv) = collect_cf_dv_for_save(state, &sheet_ids);
+    workbook.conditional_formats = cf;
+    workbook.data_validations = dv;
 
     Ok(workbook)
 }
@@ -578,6 +626,11 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
             })
             .collect();
     }
+
+    // ---- Conditional formatting + data validation (per-sheet) ----
+    let (cf, dv) = collect_cf_dv_for_save(state, sheet_ids);
+    workbook.conditional_formats = cf;
+    workbook.data_validations = dv;
 }
 
 /// Collect slicers from SlicerState into SavedSlicer format.
@@ -1727,6 +1780,45 @@ pub fn open_file(
                     folder: nr.folder.clone(),
                 },
             );
+        }
+    }
+
+    // Restore conditional formatting + data validation (per-sheet). Map the
+    // persisted SheetId back to this session's sheet index, deserialize the
+    // app-owned opaque payloads, and advance next_cf_rule_id past any restored
+    // CF id so a later add_conditional_format can't collide. Like named ranges,
+    // these were silently lost on every reload before this.
+    if let Ok(mut store) = state.conditional_formats.lock() {
+        store.clear();
+        let mut max_id: u64 = 0;
+        for entry in &workbook.conditional_formats {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            if let Ok(defs) = serde_json::from_value::<
+                Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+            >(entry.rules.clone())
+            {
+                for d in &defs {
+                    max_id = max_id.max(d.id);
+                }
+                store.entry(idx).or_default().extend(defs);
+            }
+        }
+        if let Ok(mut next_id) = state.next_cf_rule_id.lock() {
+            if *next_id <= max_id {
+                *next_id = max_id + 1;
+            }
+        }
+    }
+    if let Ok(mut store) = state.data_validations.lock() {
+        store.clear();
+        for entry in &workbook.data_validations {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            if let Ok(ranges) = serde_json::from_value::<
+                Vec<crate::data_validation::ValidationRange>,
+            >(entry.ranges.clone())
+            {
+                store.entry(idx).or_default().extend(ranges);
+            }
         }
     }
 

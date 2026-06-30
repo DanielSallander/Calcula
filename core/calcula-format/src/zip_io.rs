@@ -283,6 +283,19 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.write_all(named_ranges_json.as_bytes())?;
     }
 
+    // Write conditional formats + data validations (per-sheet, opaque payloads).
+    // Same unconditional-read pattern as named_ranges/sparklines.
+    if !workbook.conditional_formats.is_empty() {
+        let cf_json = serde_json::to_string_pretty(&workbook.conditional_formats)?;
+        zip.start_file("conditional_formats.json", options.clone())?;
+        zip.write_all(cf_json.as_bytes())?;
+    }
+    if !workbook.data_validations.is_empty() {
+        let dv_json = serde_json::to_string_pretty(&workbook.data_validations)?;
+        zip.start_file("data_validations.json", options.clone())?;
+        zip.write_all(dv_json.as_bytes())?;
+    }
+
     // Write generic per-extension state as a single extension-data.json object
     if !workbook.extension_data.is_empty() {
         let extension_data_json = serde_json::to_string_pretty(&workbook.extension_data)?;
@@ -693,6 +706,14 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         read_optional_json::<Vec<persistence::SavedNamedRange>>(&mut archive, "named_ranges.json")?
             .unwrap_or_default();
 
+    // Read conditional formats + data validations (per-sheet, opaque payloads)
+    let conditional_formats: Vec<persistence::SavedSheetConditionalFormats> =
+        read_optional_json::<Vec<persistence::SavedSheetConditionalFormats>>(&mut archive, "conditional_formats.json")?
+            .unwrap_or_default();
+    let data_validations: Vec<persistence::SavedSheetDataValidations> =
+        read_optional_json::<Vec<persistence::SavedSheetDataValidations>>(&mut archive, "data_validations.json")?
+            .unwrap_or_default();
+
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
     if manifest.features.contains(&"files".to_string()) {
@@ -754,6 +775,8 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         bi_connections,
         bi_connection_caches,
         extension_data,
+        conditional_formats,
+        data_validations,
     })
 }
 
@@ -901,6 +924,8 @@ mod tests {
             bi_connections: Vec::new(),
             bi_connection_caches: std::collections::HashMap::new(),
             extension_data: Default::default(),
+            conditional_formats: Vec::new(),
+            data_validations: Vec::new(),
         }
     }
 
@@ -1094,6 +1119,42 @@ mod tests {
         assert_eq!(af.condition1.value, "100");
         assert_eq!(af.condition2.as_ref().expect("condition2").operator, "lessThan");
         assert_eq!(af.logic, "and");
+    }
+
+    #[test]
+    fn test_roundtrip_conditional_formats_and_data_validations() {
+        // Regression: CF + DV were not modeled in the file format at all — lost on
+        // every .cala save/reload. The payload is opaque to the format (app-owned
+        // JSON), so this asserts the per-sheet payload + SheetId survive write/read.
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.conditional_formats = vec![persistence::SavedSheetConditionalFormats {
+            sheet_id,
+            rules: serde_json::json!([
+                { "id": 7, "priority": 1, "rule": { "type": "cellValue" },
+                  "ranges": [{ "startRow": 0, "startCol": 0, "endRow": 9, "endCol": 0 }],
+                  "stopIfTrue": false, "enabled": true }
+            ]),
+        }];
+        workbook.data_validations = vec![persistence::SavedSheetDataValidations {
+            sheet_id,
+            ranges: serde_json::json!([
+                { "startRow": 0, "startCol": 1, "endRow": 5, "endCol": 1,
+                  "validation": { "rule": { "type": "list" } } }
+            ]),
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cfdv.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.conditional_formats.len(), 1, "CF must survive the .cala round-trip");
+        assert_eq!(loaded.conditional_formats[0].sheet_id, sheet_id);
+        assert_eq!(loaded.conditional_formats[0].rules, workbook.conditional_formats[0].rules);
+        assert_eq!(loaded.data_validations.len(), 1, "DV must survive the .cala round-trip");
+        assert_eq!(loaded.data_validations[0].sheet_id, sheet_id);
+        assert_eq!(loaded.data_validations[0].ranges, workbook.data_validations[0].ranges);
     }
 
     #[test]
