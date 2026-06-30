@@ -5,9 +5,11 @@
 //          in the full ExtensionManager and its UI-registry dependencies.
 
 import { CAPABILITY_ID_SET, type CapabilityId } from "../../api/scriptHost/capabilityIds";
+import type { ExtensionTrust } from "../../api/extensionManager";
 
 /**
- * Trust class of an extension.
+ * `ExtensionTrust` is defined in @api (extensionManager) and re-exported here for
+ * the shell-internal policy functions below.
  *  - "trusted": built-in / first-party (extensions/manifest.ts). Full host
  *    authority — not ceiling-bound.
  *  - "distributed": third-party bundle from the user's extensions directory.
@@ -18,7 +20,7 @@ import { CAPABILITY_ID_SET, type CapabilityId } from "../../api/scriptHost/capab
  *    bound (see mayActivateOnMainThread). Browser-fetch exfiltration is also
  *    contained by the app CSP connect-src allowlist.
  */
-export type ExtensionTrust = "trusted" | "distributed";
+export type { ExtensionTrust };
 
 /**
  * May an extension run on the MAIN thread (full ambient window/Tauri/@api

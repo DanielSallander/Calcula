@@ -48,6 +48,8 @@ import { TaskPaneExtensions as TaskPaneExtensionsImpl } from "./registries/taskP
 import { DialogExtensions as DialogExtensionsImpl } from "./registries/dialogExtensions";
 import { OverlayExtensions as OverlayExtensionsImpl } from "./registries/overlayExtensions";
 import { ExtensionRegistry as ExtensionRegistryImpl } from "./registries/ExtensionRegistry";
+import { ExtensionManager } from "./registries/ExtensionManager";
+import { registerExtensionManager } from "../api/extensionManager";
 import {
   gridExtensions as gridExtensionsImpl,
   registerCoreGridContextMenu,
@@ -367,6 +369,10 @@ export function bootstrapShell(): void {
     onRegistryChange: (callback) => ExtensionRegistryImpl.onRegistryChange(callback),
   };
   registerExtensionRegistryService(extensionRegistryService);
+
+  // Register the host ExtensionManager behind its @api interface (IoC) so the
+  // ExtensionsManager extension reaches it via getExtensionManager() — no api->shell.
+  registerExtensionManager(ExtensionManager);
 
   // Expose extension registry for E2E invariant testing (mirrors __CALCULA_GRID_STATE__)
   (window as any).__CALCULA_EXTENSION_REGISTRY__ = extensionRegistryService;

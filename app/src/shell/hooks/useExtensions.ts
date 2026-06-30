@@ -4,7 +4,8 @@
 // UPDATED: Now calls bootstrapShell before initializing extensions.
 
 import { useState, useEffect, useSyncExternalStore, useCallback } from "react";
-import { ExtensionManager, type LoadedExtension } from "../registries/ExtensionManager";
+import { ExtensionManager } from "../registries/ExtensionManager";
+import type { LoadedExtension } from "../../api/extensionManager";
 import { bootstrapShell } from "../bootstrap";
 import { loadExtensions, unloadExtensions } from "../../../extensions";
 

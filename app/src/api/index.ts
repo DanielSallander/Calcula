@@ -484,17 +484,16 @@ export { getReferenceStyle, changeReferenceStyle, convertFormulaStyle } from "./
 // Extension Manager
 // ============================================================================
 
-// DOCUMENTED EXCEPTION (api->shell): @api surfaces the host's ExtensionManager so
-// the ExtensionsManager extension can manage the extension host through the facade
-// (its whole purpose). The clean form is an @api ExtensionManagerApi interface +
-// IoC registration by the Shell at boot (matching the chart-mark / shell-component
-// registries) — tracked as a follow-up. Until then this is a deliberate, explicit
-// host-handle surface, NOT silent laundering. The boundaries gate (now covering
-// export-from) would otherwise flag this as api->shell.
-// eslint-disable-next-line boundaries/element-types -- deliberate host-handle surface; see follow-up to relocate behind an @api interface + IoC
-export { ExtensionManager } from "../shell/registries/ExtensionManager";
-// eslint-disable-next-line boundaries/element-types -- type-only host-handle surface; relocates with the ExtensionManager interface follow-up
-export type { LoadedExtension, ExtensionStatus } from "../shell/registries/ExtensionManager";
+// The extension-host surface is an @api INTERFACE (ExtensionManagerApi) + an IoC
+// slot the Shell fills at boot — no api->shell dependency. Consumers reach the
+// host via getExtensionManager().
+export type {
+  ExtensionManagerApi,
+  LoadedExtension,
+  ExtensionStatus,
+  ExtensionTrust,
+} from "./extensionManager";
+export { registerExtensionManager, getExtensionManager } from "./extensionManager";
 export { exposeExtensionRuntimeGlobals, getExtensionReact, REACT_GLOBAL } from "./extensionRuntime";
 
 // ============================================================================

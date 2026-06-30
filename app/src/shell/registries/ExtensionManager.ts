@@ -4,6 +4,7 @@
 // NOTE: Uses vanilla listener pattern instead of RxJS for simplicity.
 
 import type { ExtensionModule, ExtensionContext } from "../../api/contract";
+import type { LoadedExtension, ExtensionManagerApi } from "../../api/extensionManager";
 import { CommandRegistry } from "../../api/commands";
 import { API_VERSION } from "../../api/version";
 import { builtInExtensions } from "../../../extensions/manifest";
@@ -114,50 +115,14 @@ import {
 } from "../../api/scriptHost/extensionWorkerHost";
 import type { WorkerExtensionManifest } from "../../api/scriptHost/extensionProtocol";
 
-export type { ExtensionTrust };
-
 // ============================================================================
 // Types
 // ============================================================================
-
-export type ExtensionStatus = "pending" | "active" | "error" | "inactive";
-
-export interface LoadedExtension {
-  id: string;
-  name: string;
-  version: string;
-  status: ExtensionStatus;
-  module: ExtensionModule;
-  error?: Error;
-  /** Trust classification (built-in vs third-party). */
-  trust: ExtensionTrust;
-  /** The R19 declared-capability ceiling. Empty for trusted built-ins (full
-   *  authority) and for distributed extensions that declared nothing
-   *  (deny-by-default). */
-  declaredCapabilities: CapabilityId[];
-  /** Deregisters this extension's transparency-panel handle (distributed only). */
-  handleCleanup?: () => void;
-  /** True for a distributed extension running SANDBOXED in a worker realm
-   *  (Phase B). Its lifecycle is owned by extensionWorkerHost, not `module`. */
-  worker?: boolean;
-  /** Ed25519 sidecar-signature trust for distributed extensions:
-   *  "unsigned" | "invalid" | "publisherChanged" | "firstUse" | "verified".
-   *  Undefined for built-ins (trusted, never signed). Surfaced in the manager
-   *  UI so the user always sees whether a third-party bundle is signed. */
-  trustStatus?: string;
-  /** True when the user has disabled this extension (persisted). A disabled
-   *  distributed extension is skipped on next launch; the entry stays listed so
-   *  it can be re-enabled. Set by updateCachedArray from the persisted set. */
-  disabled?: boolean;
-  /** The scan-reported file name for a distributed extension ("ext.js" or
-   *  "ext-dir/index.js"). Lets the manager UNINSTALL (delete the bundle +
-   *  sidecars) without re-deriving the path. Undefined for built-ins. */
-  fileName?: string;
-  /** B3: true while this disk-scanned distributed extension is listed but NOT
-   *  activated because the user has not yet consented to its current code. The
-   *  manager surfaces an "Allow" action that calls grantConsentAndActivate. */
-  needsConsent?: boolean;
-}
+//
+// ExtensionStatus + LoadedExtension are the @api extension-host contract
+// (../../api/extensionManager), imported above. This module IMPLEMENTS that
+// contract (ExtensionManagerImpl implements ExtensionManagerApi) and the Shell
+// registers the singleton via registerExtensionManager() at boot.
 
 type ChangeListener = () => void;
 
@@ -371,7 +336,7 @@ function buildContext(): ExtensionContext {
 // ExtensionManager Implementation
 // ============================================================================
 
-class ExtensionManagerImpl {
+class ExtensionManagerImpl implements ExtensionManagerApi {
   private extensions: Map<string, LoadedExtension> = new Map();
   private listeners: Set<ChangeListener> = new Set();
   private initialized = false;

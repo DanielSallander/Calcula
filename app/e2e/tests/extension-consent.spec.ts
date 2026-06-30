@@ -38,8 +38,8 @@ test.describe("Distributed extension consent gate (B3) + main-thread refusal (B2
         const api = await (window as any).__calcImport(
           new URL("/src/api/index.ts", document.baseURI).href,
         );
-        const { ExtensionManager } = api;
-        if (!ExtensionManager) return { error: "missing @api export ExtensionManager" };
+        if (!api.getExtensionManager) return { error: "missing @api export getExtensionManager" };
+        const ExtensionManager = api.getExtensionManager();
 
         // A sidecar-manifest DISTRIBUTED bundle declaring workerSupport:false.
         // The content sets a window marker IF it is ever imported — it must not be.
@@ -89,7 +89,7 @@ test.describe("Distributed extension consent gate (B3) + main-thread refusal (B2
           const api = await (window as any).__calcImport(
             new URL("/src/api/index.ts", document.baseURI).href,
           );
-          const { ExtensionManager } = api;
+          const ExtensionManager = api.getExtensionManager();
 
           // Grant first-use consent (what the manager's "Allow" button does).
           await ExtensionManager.grantConsentAndActivate(a.extId);
@@ -127,7 +127,7 @@ test.describe("Distributed extension consent gate (B3) + main-thread refusal (B2
             const api = await (window as any).__calcImport(
               new URL("/src/api/index.ts", document.baseURI).href,
             );
-            const { ExtensionManager } = api;
+            const ExtensionManager = api.getExtensionManager();
             // The entry may be keyed by id (pending) or fileName (blocked) — drop both.
             (ExtensionManager as any).extensions?.delete(a.extId);
             (ExtensionManager as any).extensions?.delete(a.fileName);

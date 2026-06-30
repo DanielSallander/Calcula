@@ -8,7 +8,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import type { ActivityViewProps } from "@api/uiTypes";
-import { ExtensionManager, describeCapability } from "@api";
+import { getExtensionManager, describeCapability } from "@api";
 import type { LoadedExtension, ExtensionStatus, CapabilityId } from "@api";
 
 /** Status badge colors */
@@ -35,12 +35,12 @@ export function ExtensionsListView(_props: ActivityViewProps): React.ReactElemen
   const [extensions, setExtensions] = useState<LoadedExtension[]>([]);
 
   const refresh = useCallback(() => {
-    setExtensions([...ExtensionManager.getExtensions()]);
+    setExtensions([...getExtensionManager().getExtensions()]);
   }, []);
 
   useEffect(() => {
     refresh();
-    const unsub = ExtensionManager.subscribe(refresh);
+    const unsub = getExtensionManager().subscribe(refresh);
     return unsub;
   }, [refresh]);
 
@@ -104,7 +104,7 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
   const toggle = useCallback(async () => {
     setBusy(true);
     try {
-      await ExtensionManager.setExtensionEnabled(extension.id, isDisabled);
+      await getExtensionManager().setExtensionEnabled(extension.id, isDisabled);
     } finally {
       setBusy(false);
     }
@@ -113,7 +113,7 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
   const grant = useCallback(async () => {
     setBusy(true);
     try {
-      await ExtensionManager.grantConsentAndActivate(extension.id);
+      await getExtensionManager().grantConsentAndActivate(extension.id);
       // On success the entry is replaced by the live (active) extension.
     } finally {
       setBusy(false);
@@ -124,7 +124,7 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
     setBusy(true);
     setUninstallError(null);
     try {
-      await ExtensionManager.uninstallExtension(extension.id);
+      await getExtensionManager().uninstallExtension(extension.id);
       // On success the entry disappears from the list (no further state needed).
     } catch (e) {
       setUninstallError(e instanceof Error ? e.message : String(e));
