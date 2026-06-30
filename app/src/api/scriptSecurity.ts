@@ -1,18 +1,24 @@
 //! FILENAME: app/src/api/scriptSecurity.ts
 // PURPOSE: Shared frontend gate for the global "Script Security" setting.
-// CONTEXT: The setting (disabled/prompt/enabled) governs ALL user-authored
-//   script execution. The run_script / notebook paths gate via a backend
-//   sentinel error; the OBJECT-SCRIPT surface (buttons, shapes, slicers, ...)
-//   gates here instead, at its single mount chokepoint
-//   `ObjectScriptManager.mountScript`. EVERY object-script mount path funnels
-//   through that chokepoint — workbook open, cross-window save-and-apply, the
-//   manual toggle in the Object Scripts pane, code-editor remount, and
-//   component/shape template stamping — so a "disabled" setting now stops them
-//   all and "prompt" asks once per session before any object script runs.
+// CONTEXT: The setting (disabled/prompt/enabled) governs ALL user-authored code
+//   execution, across THREE enforcement points:
+//   1. run_script / notebook / MCP: gate in Rust via a backend sentinel error.
+//   2. Workbook-embedded Worker surfaces (object scripts, custom chart marks,
+//      custom chart transforms, JS UDF libraries): gate at `assertMountAllowed`
+//      (`@api/scriptHost/mountGate`), called by `hostMountScript` BEFORE spawning
+//      any worker — "disabled" stops every mount, "prompt" asks once per session
+//      (the grant is cached and shared across surfaces). Object scripts ALSO gate
+//      earlier at their own layer (a load-time batch gate +
+//      `ObjectScriptManager.mountScript`) for an object-specific prompt + a soft,
+//      no-error refusal; the host gate is the shared floor behind them.
+//   3. Distributed (installed) 3rd-party extensions, which run in their own Worker
+//      realm: gate at `ExtensionManager.loadExtension` — "disabled" blocks + lists
+//      them; "prompt"/"enabled" defer to each extension's own trust + per-extension
+//      consent. So "disabled" is a true lockdown: NO custom code runs anywhere.
 //   This helper lets any surface gate quietly BEFORE mounting/executing, via the
 //   non-throwing `script_execution_status` command. Lives in @api so multiple
-//   extensions (ScriptableObjects, ...) share one gate (Independence Through
-//   Boundaries).
+//   extensions (ScriptableObjects, ...) and the shell share one gate (Independence
+//   Through Boundaries).
 
 import { invokeBackend } from "./backend";
 

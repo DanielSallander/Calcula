@@ -87,6 +87,7 @@ import { registerFunction } from "../../api/formulaFunctions";
 // Wave 3 / S8-C7: reuse the script broker's capability vocabulary, handle model,
 // and transparency registry to classify + record distributed extensions.
 import { CAPABILITY_ID_SET, type CapabilityId } from "../../api/scriptHost/capabilityIds";
+import { getScriptExecutionStatus } from "../../api/scriptSecurity";
 import {
   buildHandleFromDefinition,
   registerMountedHandle,
@@ -628,6 +629,28 @@ class ExtensionManagerImpl {
     // for sidecar-manifest extensions because the id is known before loading.
     if (parsed && this.disabledIds.has(parsed.id)) {
       this.recordDisabledExtension(parsed, entry.trustStatus, entry.fileName);
+      return;
+    }
+
+    // Script Security master switch — LOCKDOWN parity with the worker-realm script
+    // surfaces (object scripts / chart marks / chart transforms / UDFs all gate at
+    // hostMountScript via @api/scriptSecurity). A distributed extension also runs
+    // arbitrary JS in a worker realm (extensionWorkerHost), so "disabled" must
+    // block it too — otherwise the global kill-switch is not honest. We check the
+    // non-throwing status here (the single chokepoint every mount path funnels
+    // through, including the "Allow"-button re-entry via grantConsentAndActivate)
+    // and LIST the extension as blocked so the user still sees it + why. Note:
+    // "prompt"/"enabled" deliberately fall through to the extension's OWN trust +
+    // per-extension consent gate below (which already asks before first run), so we
+    // neither double-prompt nor hang app startup with a master-switch confirm.
+    if ((await getScriptExecutionStatus()) === "disabled") {
+      const blockedName = parsed?.name || entry.fileName;
+      this.recordBlockedExtension(
+        blockedName,
+        `Extension "${blockedName}" was blocked: Script Security is set to "disabled".`,
+        entry.trustStatus,
+        entry.fileName,
+      );
       return;
     }
 

@@ -18,6 +18,7 @@ import {
   scriptSubscribeEventName,
   type ScriptHandle,
 } from "./broker";
+import { assertMountAllowed } from "./mountGate";
 import {
   PROTOCOL_VERSION,
   RENDER_TIMEOUT_MS,
@@ -197,10 +198,25 @@ export function workerRealmAvailable(): boolean {
 }
 
 /**
- * Mount a script in its own worker realm. Resolves when the worker reports
- * mounted (or rejects with the script's setup error).
+ * PUBLIC mount entry — the universal Script-Security chokepoint. EVERY worker-realm
+ * mount goes through here (object scripts, custom chart marks, custom chart
+ * transforms, JS UDF libraries), so the global "Script Security" setting governs
+ * them all: assertMountAllowed throws ScriptSecurityBlockedError BEFORE any worker
+ * is spawned when the setting is "disabled" or a "prompt" is declined. On allow it
+ * delegates to mountWorker. NOTE: the crash-respawn path below calls mountWorker
+ * directly — a respawn re-launches already-consented code and must not re-gate (it
+ * would risk prompting mid-session or blocking automatic crash recovery).
  */
 export async function hostMountScript(definition: HostMountDefinition): Promise<void> {
+  await assertMountAllowed(definition.name);
+  return mountWorker(definition);
+}
+
+/**
+ * Mount a script in its own worker realm (ungated internal). Resolves when the
+ * worker reports mounted (or rejects with the script's setup error).
+ */
+async function mountWorker(definition: HostMountDefinition): Promise<void> {
   wireActiveSheet();
   if (mounted.has(definition.id)) {
     hostUnmountScript(definition.id);
@@ -468,7 +484,9 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
     mw.respawned = true;
     const definition = mw.definition;
     hostUnmountScript(definition.id);
-    void hostMountScript(definition).then(() => {
+    // Respawn already-consented code after a crash — bypass the Script-Security
+    // gate (mountWorker, not hostMountScript) so recovery never re-prompts.
+    void mountWorker(definition).then(() => {
       const remounted = mounted.get(definition.id);
       if (remounted) {
         remounted.lastCrashAt = now;
