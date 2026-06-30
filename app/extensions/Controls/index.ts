@@ -1604,6 +1604,7 @@ function sanitizeScriptName(name: string): string {
  * Each module's source is wrapped as: function ModuleName() { ...source... }
  */
 async function buildScriptPreamble(): Promise<string> {
+  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
   const { listScripts, getScript } = await import("../ScriptEditor/lib/scriptApi");
   const summaries = await listScripts();
   if (summaries.length === 0) return "";
@@ -1629,6 +1630,7 @@ async function buildScriptPreamble(): Promise<string> {
  * Custom script modules from the Script Editor are available as callable functions.
  */
 async function executeFloatingButtonAction(sheetIndex: number, row: number, col: number): Promise<void> {
+  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
   const { runScript } = await import("../ScriptEditor/lib/scriptApi");
 
   const metadata = await getControlMetadata(sheetIndex, row, col);

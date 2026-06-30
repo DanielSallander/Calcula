@@ -124,6 +124,12 @@ function sanitizeScriptName(name: string): string {
  * Each module's source is wrapped as: function ModuleName() { ...source... }
  */
 async function buildScriptPreamble(): Promise<string> {
+  // DOCUMENTED EXCEPTION (extension->extension): Controls runs workbook scripts via
+  // ScriptEditor's scriptApi. The clean form is a script-runtime surface in @api (or
+  // extensions/_shared) — but that is entangled with the ScriptEditor module being
+  // unregistered in manifest.ts (its activate(), which binds scriptEditorBackend,
+  // does not run in the main window). Tracked as a follow-up pending that decision.
+  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
   const { listScripts, getScript } = await import("../../ScriptEditor/lib/scriptApi");
   const summaries = await listScripts();
   if (summaries.length === 0) return "";
@@ -150,6 +156,7 @@ async function buildScriptPreamble(): Promise<string> {
  */
 async function executeButtonAction(row: number, col: number): Promise<void> {
   const { getControlMetadata } = await import("../lib/controlApi");
+  // eslint-disable-next-line boundaries/element-types -- script-runtime coupling; see ScriptEditor-registration follow-up
   const { runScript } = await import("../../ScriptEditor/lib/scriptApi");
 
   // Get the active sheet index

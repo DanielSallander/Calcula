@@ -46,12 +46,16 @@ Calcula follows a strict microkernel design, heavily inspired by VS Code.
    +----------------------------------------------------+
                             |
    +----------------------------------------------------+
-   |               Extension API (Shell)                |
+   |       Shell (host: layout + extension loader)      |
    +----------------------------------------------------+
                             |
    +----------------------------------------------------+
-   |           Core (Rust): cells, formulas,            |
-   |           dependency graph, recalc engine          |
+   |        Extension API (the typed @api facade)       |
+   +----------------------------------------------------+
+                            |
+   +----------------------------------------------------+
+   |   Core: TS Face (grid render, selection, undo) +   |
+   |   Rust Brain (formulas, dependency graph, recalc)  |
    +----------------------------------------------------+
 ```
 
@@ -122,7 +126,7 @@ Pivot tables can be configured through a text-based **domain-specific language**
 
 Where Excel offers COM add-ins bolted onto a monolithic core, Calcula's extension system is the architecture:
 
-- **68 built-in extensions**, each running through the same public API that third-party extensions use
+- **71 built-in extensions** (plus a dev-only Test Runner), each running through the same public API that third-party extensions use
 - No backdoor access: the formatting extension has the same privileges as a plugin you write yourself
 - Extensions can register commands, inject UI, add formula functions, subscribe to events, and intercept rendering
 - Swap out the charting engine, replace the formula evaluator, or add an entirely new data type, all without forking
@@ -204,7 +208,7 @@ Calcula is under active development. Here is an honest summary of where things s
 | Area | Status |
 | --- | --- |
 | Extension host and lifecycle management | Working |
-| 68 built-in extensions loaded through public API | Working |
+| 71 built-in extensions loaded through public API | Working |
 | Command registry, UI injection, event subscriptions | Working |
 | Style interceptors and rendering pipeline hooks | Working |
 | Edit guards and commit guards | Working |

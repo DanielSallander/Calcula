@@ -80,6 +80,18 @@ const RAW_TAURI_INVOKE_PATH = {
     'Use a typed @api/backend wrapper, or a createBackendChannel(...) bound in activate().',
 }
 
+// A3 EVENT DOOR: the analog of the invoke ban for the Tauri EVENT bus. Extensions
+// must not import raw emit/listen from @tauri-apps/api/event — that is an ungated
+// cross-window/back-channel door. Use ctx.events / the @api event channels.
+// importNames-scoped so other @tauri-apps/api/event symbols (if any) stay allowed.
+const RAW_TAURI_EVENT_PATH = {
+  name: '@tauri-apps/api/event',
+  importNames: ['emit', 'listen'],
+  message:
+    'Extensions must not import raw emit/listen from @tauri-apps/api/event (ungated event door, A3). ' +
+    'Use ctx.events or a typed @api event channel.',
+}
+
 export const boundaryConfigs = [
   // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell),
   // and must NOT reach the raw @api/backend invokeBackend door (A3).
@@ -88,7 +100,7 @@ export const boundaryConfigs = [
     rules: {
       'no-restricted-imports': [BOUNDARY_SEVERITY.facade, {
         patterns: FACADE_IMPORT_PATTERNS,
-        paths: [RAW_BACKEND_INVOKE_PATH, RAW_TAURI_INVOKE_PATH],
+        paths: [RAW_BACKEND_INVOKE_PATH, RAW_TAURI_INVOKE_PATH, RAW_TAURI_EVENT_PATH],
       }],
     },
   },
@@ -148,6 +160,12 @@ export const boundaryConfigs = [
       'import/resolver': {
         node: { extensions: ['.ts', '.tsx', '.js', '.jsx', '.json'] },
       },
+      // Govern re-exports and lazy imports too — not just static `import`. The
+      // plugin defaults to ['import'], which let sibling-isolation / api->shell
+      // be laundered via `export … from` and dynamic `import()` (both invisible
+      // to the gate). With these on, those paths are boundary-checked like a
+      // normal import.
+      'boundaries/dependency-nodes': ['import', 'dynamic-import', 'export'],
       'boundaries/include': ['src/**/*', 'extensions/**/*'],
       'boundaries/elements': [
         { type: 'api', pattern: 'src/api', mode: 'folder' },
