@@ -3,11 +3,16 @@
 // CONTEXT: The setting (disabled/prompt/enabled) governs ALL user-authored
 //   script execution. The run_script / notebook paths gate via a backend
 //   sentinel error; the OBJECT-SCRIPT surface (buttons, shapes, slicers, ...)
-//   mounts at workbook load and previously consulted nothing — so a "disabled"
-//   or unconfirmed "prompt" setting did not stop it. This helper lets any
-//   surface gate quietly BEFORE mounting/executing, via the non-throwing
-//   `script_execution_status` command. Lives in @api so multiple extensions
-//   (ScriptableObjects, ...) share one gate (Independence Through Boundaries).
+//   gates here instead, at its single mount chokepoint
+//   `ObjectScriptManager.mountScript`. EVERY object-script mount path funnels
+//   through that chokepoint — workbook open, cross-window save-and-apply, the
+//   manual toggle in the Object Scripts pane, code-editor remount, and
+//   component/shape template stamping — so a "disabled" setting now stops them
+//   all and "prompt" asks once per session before any object script runs.
+//   This helper lets any surface gate quietly BEFORE mounting/executing, via the
+//   non-throwing `script_execution_status` command. Lives in @api so multiple
+//   extensions (ScriptableObjects, ...) share one gate (Independence Through
+//   Boundaries).
 
 import { invokeBackend } from "./backend";
 

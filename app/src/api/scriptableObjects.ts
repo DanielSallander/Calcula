@@ -227,6 +227,7 @@ import {
   hostResetAll,
 } from "./scriptHost/host";
 import { emitAppEvent } from "./events";
+import { ensureScriptsAllowed } from "./scriptSecurity";
 
 /**
  * Call an exposed method on another script from TRUSTED host code
@@ -954,6 +955,24 @@ export const ObjectScriptManager: IObjectScriptAPI = {
     const definition = registeredScripts.get(scriptId);
     if (!definition) {
       console.warn(`[ObjectScriptManager] Script not found: ${scriptId}`);
+      return;
+    }
+
+    // SECURITY GATE (B1): honor the global "Script Security" setting on EVERY
+    // object-script mount, not just workbook-load. This is the single chokepoint
+    // all mount paths funnel through — workbook open, cross-window save-and-apply,
+    // the manual toggle in the Object Scripts pane, code-editor remount, and
+    // component/shape template stamping. Gating here guarantees "disabled" blocks
+    // them all and "prompt" asks once per session before any object script runs.
+    // The workbook-load path already batch-gates, so after that grant this is a
+    // quiet no-op (status === "allowed"); for the other paths it is the gate.
+    const allowed = await ensureScriptsAllowed(
+      `Allow the object script "${definition.name}" to run? It can read and change workbook data.`,
+    );
+    if (!allowed) {
+      console.warn(
+        `[ObjectScriptManager] Mount of "${definition.name}" blocked by the Script Security setting.`,
+      );
       return;
     }
 
