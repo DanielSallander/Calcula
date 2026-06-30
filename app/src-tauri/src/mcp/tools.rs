@@ -238,15 +238,32 @@ pub fn apply_cell_formatting(
     handle: &AppHandle,
     params: &ApplyFormattingParams,
 ) -> Result<String, String> {
+    // External MCP/AI clients are write operations too — gate on Script Security,
+    // exactly like execute_script / create_chart_from_spec ("prompt" without a
+    // session approval refuses; the MCP path is headless).
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_script_security(&script_state)?;
+
     let state = handle.state::<AppState>();
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+
+    // Make the AI/MCP format UNDOABLE in one transaction, like the in-app path.
+    undo_stack.begin_transaction(format!(
+        "Apply formatting ({}{}:{}{}) (AI)",
+        col_letter(params.start_col),
+        params.start_row + 1,
+        col_letter(params.end_col),
+        params.end_row + 1
+    ));
 
     let mut count = 0u32;
     for row in params.start_row..=params.end_row {
         for col in params.start_col..=params.end_col {
+            let previous_cell = grid.get_cell(row, col).cloned();
             let old_style_index = grid
                 .get_cell(row, col)
                 .map(|c| c.style_index)
@@ -305,9 +322,19 @@ pub fn apply_cell_formatting(
                     grids[active_sheet].set_cell(row, col, cell);
                 }
             }
+            undo_stack.record_cell_change(row, col, previous_cell);
             count += 1;
         }
     }
+
+    undo_stack.commit_transaction();
+
+    // Mark dirty + live-refresh the open grid (mirrors execute_script:858) so the
+    // AI/MCP format participates in save state and repaints out-of-band.
+    if let Ok(mut modified) = handle.state::<crate::persistence::FileState>().is_modified.lock() {
+        *modified = true;
+    }
+    let _ = handle.emit("grid:refresh", ());
 
     Ok(format!(
         "Applied formatting to {} cell(s) ({}{}:{}{})",

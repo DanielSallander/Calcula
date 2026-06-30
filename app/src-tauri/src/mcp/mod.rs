@@ -13,7 +13,10 @@
 //!   or loopback, and the Host header must be loopback (DNS-rebinding defense).
 //! - Every tool invocation is logged under the "MCP" category.
 
-mod server;
+// pub(crate) so the in-app AI chat (ai_chat.rs) can reuse the same tool param
+// structs (SetCellRangeParams, ApplyFormattingParams, CreatePivotParams, ...) for
+// MCP↔chat tool parity.
+pub(crate) mod server;
 // pub(crate) so the in-app AI chat (ai_chat.rs) can reuse the same tool helpers
 // the MCP server exposes (read/write workbook), keeping one tool surface.
 pub(crate) mod tools;

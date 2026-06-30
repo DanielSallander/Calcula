@@ -83,6 +83,97 @@ const TOOLS = [
       required: ["start_row", "start_col", "end_row", "end_col"],
     },
   },
+  {
+    name: "set_cell_range",
+    description: "Set values/formulas for multiple cells at once (more efficient than repeated set_cell_value). Undoable.",
+    input_schema: {
+      type: "object",
+      properties: {
+        cells: {
+          type: "array", description: "Cells to set.",
+          items: {
+            type: "object",
+            properties: { row: { type: "number" }, col: { type: "number" }, value: { type: "string" } },
+            required: ["row", "col", "value"],
+          },
+        },
+      },
+      required: ["cells"],
+    },
+  },
+  {
+    name: "apply_formatting",
+    description: "Apply formatting to a cell range (0-based, inclusive): bold, italic, text/background color (hex), number format, text alignment. Undoable. Requires Script Security to allow execution.",
+    input_schema: {
+      type: "object",
+      properties: {
+        start_row: { type: "number" }, start_col: { type: "number" },
+        end_row: { type: "number" }, end_col: { type: "number" },
+        bold: { type: "boolean" }, italic: { type: "boolean" },
+        text_color: { type: "string", description: "hex, e.g. #FF0000" },
+        background_color: { type: "string", description: "hex" },
+        number_format: { type: "string" },
+        text_align: { type: "string", enum: ["left", "center", "right", "general"] },
+      },
+      required: ["start_row", "start_col", "end_row", "end_col"],
+    },
+  },
+  {
+    name: "run_script",
+    description: "Execute a JavaScript script in the script engine (Calcula.getCellValue/setCellValue/getRange/setRange). Undoable + recalc-tracked. Requires Script Security to allow execution.",
+    input_schema: {
+      type: "object",
+      properties: { code: { type: "string" } },
+      required: ["code"],
+    },
+  },
+  {
+    name: "get_chart",
+    description: "Get a single chart's full definition + ChartSpec as JSON. Pass a chart_id from list_charts.",
+    input_schema: {
+      type: "object",
+      properties: { chart_id: { type: "string" } },
+      required: ["chart_id"],
+    },
+  },
+  {
+    name: "create_chart_from_spec",
+    description: "Create a NEW chart from a ChartSpec JSON object. Call list_charts/get_chart for spec examples and get_sheet_summary for the data layout first. Requires Script Security to allow execution.",
+    input_schema: {
+      type: "object",
+      properties: {
+        spec: { type: "object", description: "A ChartSpec JSON object (mark, data range, series)." },
+        sheet_index: { type: "number" }, name: { type: "string" },
+      },
+      required: ["spec"],
+    },
+  },
+  {
+    name: "create_pivot",
+    description: "Create a NEW pivot with row + value fields. Field names come from the source header row (call get_sheet_summary first). Undoable. Requires Script Security to allow execution.",
+    input_schema: {
+      type: "object",
+      properties: {
+        source_range: { type: "string", description: "A1, e.g. A1:D100" },
+        destination_cell: { type: "string", description: "A1, e.g. F1" },
+        value_fields: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string" },
+              aggregation: { type: "string", enum: ["sum", "count", "average", "min", "max"] },
+            },
+            required: ["field", "aggregation"],
+          },
+        },
+        row_fields: { type: "array", items: { type: "string" } },
+        source_sheet: { type: "number" }, destination_sheet: { type: "number" },
+        has_headers: { type: "boolean" }, name: { type: "string" },
+      },
+      required: ["source_range", "destination_cell", "value_fields"],
+    },
+  },
 ];
 
 const SYSTEM_PROMPT =

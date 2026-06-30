@@ -4,8 +4,9 @@
 
 import { useState, useEffect, useCallback } from "react";
 // Assuming this is the correct path for your API
-import { getGridBounds } from "../../lib/tauri-api"; 
-import type { GridConfig, Viewport, ViewportDimensions } from "../../types";
+import { getGridBounds } from "../../lib/tauri-api";
+import { getColumnXPosition, getRowYPosition } from "../../lib/scrollUtils";
+import type { GridConfig, Viewport, ViewportDimensions, DimensionOverrides } from "../../types";
 
 export interface ScrollbarMetrics {
   /** Total scrollable content width in pixels */
@@ -28,6 +29,8 @@ export interface UseScrollbarMetricsOptions {
   config: GridConfig;
   viewport: Viewport;
   viewportDimensions: ViewportDimensions;
+  /** Custom row heights / column widths + hidden rows/cols (for true content extent). */
+  dimensions?: DimensionOverrides;
   /** How often to refresh used range from backend (ms) */
   refreshInterval?: number;
   /** Zoom factor (1.0 = 100%) */
@@ -47,6 +50,7 @@ export function useScrollbarMetrics({
   config,
   viewport,
   viewportDimensions,
+  dimensions,
   refreshInterval = 2000,
   zoom = 1,
 }: UseScrollbarMetricsOptions): ScrollbarMetrics {
@@ -146,9 +150,13 @@ export function useScrollbarMetrics({
   const boundedMaxRow = Math.min(effectiveMaxRow, config.totalRows - 1);
   const boundedMaxCol = Math.min(effectiveMaxCol, config.totalCols - 1);
 
-  // Calculate content size in pixels
-  const contentWidth = (boundedMaxCol + 1) * config.defaultCellWidth;
-  const contentHeight = (boundedMaxRow + 1) * config.defaultCellHeight;
+  // Calculate content size in pixels — honor custom row heights / column widths
+  // (+ hidden rows/cols) via the same delta-based extent the renderer and the
+  // scroll-clamp use, so the thumb sizes correctly and the user can reach the true
+  // bottom/right. getColumnXPosition(N)/getRowYPosition(N) = the left/top edge of
+  // index N = the total pixel extent of indices 0..N-1.
+  const contentWidth = getColumnXPosition(boundedMaxCol + 1, config, dimensions);
+  const contentHeight = getRowYPosition(boundedMaxRow + 1, config, dimensions);
 
   // Maximum scroll positions
   const maxScrollX = Math.max(0, contentWidth - availableWidth);

@@ -32,7 +32,9 @@ const TARGET: &str = "Calcula:aikey|anthropic";
 const DEFAULT_MODEL: &str = "claude-opus-4-8";
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_MAX_TOKENS: u32 = 4096;
+// Raised from 4096: adaptive extended thinking counts toward output, so a tight
+// budget could truncate a reasoning+tool-use turn mid-thought.
+const DEFAULT_MAX_TOKENS: u32 = 16000;
 
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -140,11 +142,23 @@ pub async fn ai_chat_complete(
     let key = get_key()
         .ok_or_else(|| "No Anthropic API key set. Add one in the AI Chat panel.".to_string())?;
 
+    let resolved_model = model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    // Adaptive extended thinking — supported on the Opus 4.x family (budget_tokens /
+    // temperature would 400 on Opus 4.8, so adaptive only). Gated on the model family
+    // so a future non-Opus model picker can't send an unsupported param. ChatView
+    // preserves the full assistant `content` array (incl. thinking blocks) across
+    // tool-use turns, so thinking round-trips correctly through the agentic loop.
+    let supports_adaptive_thinking = resolved_model.starts_with("claude-opus-4");
     let mut body = json!({
-        "model": model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        "model": resolved_model,
         "max_tokens": max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "messages": messages,
     });
+    if supports_adaptive_thinking {
+        body["thinking"] = json!({ "type": "adaptive" });
+    }
     if let Some(sys) = system.filter(|s| !s.trim().is_empty()) {
         body["system"] = json!(sys);
     }
@@ -202,7 +216,17 @@ fn arg_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
 /// back to Claude as a tool_result). Write tools inherit check_script_security +
 /// undo + refresh-event behavior. v1 tool set: read + cell write + named range.
 #[tauri::command]
-pub fn ai_chat_run_tool(handle: AppHandle, name: String, input: Value) -> Result<String, String> {
+pub fn ai_chat_run_tool(
+    handle: AppHandle,
+    name: String,
+    input: Value,
+    window: tauri::Window,
+) -> Result<String, String> {
+    // Privileged tool dispatcher (writes the workbook + runs scripts): restrict to
+    // the MAIN window like every sibling privileged command. ChatView runs in the
+    // main window, so this is non-breaking; it closes the gap that a secondary
+    // webview could call this directly.
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     match name.as_str() {
         "get_sheet_summary" => {
             let max = input.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(8000) as u32;
@@ -241,6 +265,50 @@ pub fn ai_chat_run_tool(handle: AppHandle, name: String, input: Value) -> Result
             input.get("has_headers").and_then(|v| v.as_bool()).unwrap_or(true),
             input.get("name").and_then(|v| v.as_str()),
         ),
+        // Parity with the MCP server's tool set — deserialize into the same param
+        // structs and call the same shared crate::mcp::tools fns (no duplicated logic).
+        "set_cell_range" => {
+            let p: crate::mcp::server::SetCellRangeParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::write_cell_range(&handle, &p.cells)
+        }
+        "apply_formatting" => {
+            let p: crate::mcp::server::ApplyFormattingParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::apply_cell_formatting(&handle, &p)
+        }
+        "run_script" => {
+            let p: crate::mcp::server::RunScriptParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::execute_script(&handle, &p.code)
+        }
+        "get_chart" => {
+            let p: crate::mcp::server::GetChartParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::get_chart(&handle, &p.chart_id)
+        }
+        "create_chart_from_spec" => {
+            let p: crate::mcp::server::CreateChartParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::create_chart_from_spec(&handle, &p.spec, p.sheet_index, p.name.as_deref())
+        }
+        "create_pivot" => {
+            let p: crate::mcp::server::CreatePivotParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            let value_fields: Vec<(String, String)> =
+                p.value_fields.into_iter().map(|v| (v.field, v.aggregation)).collect();
+            tools::create_pivot(
+                &handle,
+                &p.source_range,
+                &p.destination_cell,
+                p.row_fields,
+                value_fields,
+                p.source_sheet,
+                p.destination_sheet,
+                p.has_headers.unwrap_or(true),
+                p.name.as_deref(),
+            )
+        }
         other => Err(format!("Unknown tool '{}'.", other)),
     }
 }

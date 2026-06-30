@@ -966,6 +966,7 @@ function SpreadsheetContent({
     config: gridState.config,
     viewport: gridState.viewport,
     viewportDimensions: gridState.viewportDimensions,
+    dimensions: gridState.dimensions,
     zoom: gridState.zoom,
   });
 

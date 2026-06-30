@@ -35,6 +35,7 @@ export function useSpreadsheet() {
     config: state.config,
     viewport: state.viewport,
     viewportDimensions: state.viewportDimensions,
+    dimensions: state.dimensions,
     refreshInterval: 3000, // Check for new data every 3s
   });
 
