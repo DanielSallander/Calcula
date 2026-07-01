@@ -18,7 +18,7 @@ use tauri::State;
 
 use crate::api_types::{
     AnimApplyFrameParams, AnimRestoreParams, AnimSnapshotParams, AnimSnapshotResult,
-    AnimationFrameResult, CellData, MergedRegion,
+    AnimationFrameResult, CellData, GifExportRequest, GifFrame, MergedRegion,
 };
 use crate::{
     evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
@@ -367,12 +367,86 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
 }
 
 // ============================================================================
+// GIF export
+// ============================================================================
+
+/// Encode a sequence of RGBA frames to an animated GIF (in-memory). Each frame is
+/// quantized to its own 256-colour palette. Pure (no I/O) so it is unit-testable.
+fn encode_gif(width: u16, height: u16, frames: Vec<GifFrame>, repeat: bool) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 {
+        return Err("GIF dimensions must be non-zero".to_string());
+    }
+    if frames.is_empty() {
+        return Err("No frames to encode".to_string());
+    }
+    let expected = width as usize * height as usize * 4;
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut out, width, height, &[])
+            .map_err(|e| format!("GIF encoder init failed: {}", e))?;
+        encoder
+            .set_repeat(if repeat { gif::Repeat::Infinite } else { gif::Repeat::Finite(0) })
+            .map_err(|e| format!("GIF set_repeat failed: {}", e))?;
+        for (i, gf) in frames.into_iter().enumerate() {
+            if gf.rgba.len() != expected {
+                return Err(format!(
+                    "Frame {} has {} bytes, expected {} ({}x{}x4)",
+                    i,
+                    gf.rgba.len(),
+                    expected,
+                    width,
+                    height
+                ));
+            }
+            let mut rgba = gf.rgba;
+            let mut frame = gif::Frame::from_rgba_speed(width, height, &mut rgba, 10);
+            frame.delay = gf.delay_cs.max(2); // browsers clamp <2cs to a default; keep sane
+            encoder
+                .write_frame(&frame)
+                .map_err(|e| format!("GIF write_frame {} failed: {}", i, e))?;
+        }
+    } // encoder dropped here -> writes the GIF trailer into `out`
+    Ok(out)
+}
+
+/// Encode RGBA frames to an animated GIF and write it to `req.path`.
+/// PRIVILEGED (host filesystem write) — reachable only by trusted callers (see
+/// PRIVILEGED_BACKEND_COMMANDS.hostFilesystem in backendCommands.ts).
+#[tauri::command]
+pub fn export_gif(req: GifExportRequest) -> Result<(), String> {
+    let bytes = encode_gif(req.width, req.height, req.frames, req.repeat)?;
+    std::fs::write(&req.path, bytes).map_err(|e| format!("Failed to write {}: {}", req.path, e))?;
+    Ok(())
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_gif_produces_a_valid_header() {
+        let w = 2u16;
+        let h = 2u16;
+        let px = (w as usize) * (h as usize) * 4;
+        let frames = vec![
+            GifFrame { rgba: vec![255u8; px], delay_cs: 5 },
+            GifFrame { rgba: vec![0u8; px], delay_cs: 5 },
+        ];
+        let bytes = encode_gif(w, h, frames, true).expect("encode ok");
+        assert!(bytes.len() > 6);
+        assert_eq!(&bytes[0..6], b"GIF89a");
+    }
+
+    #[test]
+    fn encode_gif_rejects_wrong_frame_size() {
+        assert!(encode_gif(2, 2, vec![GifFrame { rgba: vec![0u8; 3], delay_cs: 5 }], false).is_err());
+        assert!(encode_gif(0, 2, vec![GifFrame { rgba: vec![], delay_cs: 5 }], false).is_err());
+        assert!(encode_gif(2, 2, vec![], false).is_err());
+    }
 
     fn locale() -> engine::LocaleSettings {
         engine::LocaleSettings::from_locale_id("en-US")

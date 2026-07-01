@@ -111,6 +111,7 @@ import {
   removeChartFromCache,
   setBrushMarquee,
   getChartFrameBitmap,
+  getChartFrameImageData,
   isChartRenderPending,
   isChartRenderCurrent,
   chartsIdle,
@@ -244,6 +245,7 @@ function activate(context: ExtensionContext): void {
   // without importing Charts internals.
   registerChartRenderingApi({
     getChartFrameBitmap,
+    getChartFrameImageData,
     isChartRenderPending,
     isChartRenderCurrent,
     chartsIdle,

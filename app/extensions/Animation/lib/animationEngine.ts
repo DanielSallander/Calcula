@@ -12,6 +12,10 @@ import type { AnimationSpec, ChartParamSpec } from "../types";
 
 const clock = createPlaybackClock();
 
+/** What a GIF export should capture for the current driver. */
+export type ExportSourceHint = { kind: "chart"; chartId: string } | { kind: "grid" } | null;
+let exportSource: ExportSourceHint = null;
+
 export type { ClockState } from "./playbackClock";
 
 export const playbackEngine = {
@@ -29,19 +33,23 @@ export const playbackEngine = {
 
   /** Configure (and restore any prior) a clock-cell driver. Leaves playback idle. */
   async setClockCellDriver(cfg: ClockCellConfig): Promise<void> {
+    exportSource = { kind: "grid" };
     await clock.setDriver(createClockCellDriver(cfg));
   },
 
   /** Configure (and restore any prior) a chart-param driver. Leaves playback idle. */
   async setChartParamDriver(cfg: ChartParamSpec): Promise<void> {
+    exportSource = { kind: "chart", chartId: cfg.chartId };
     await clock.setDriver(createChartParamDriver(cfg));
   },
 
   /** Load a saved AnimationSpec into the engine (restores any prior driver). */
   async loadSpec(spec: AnimationSpec): Promise<void> {
     if (spec.driver === "clockCell" && spec.clockCell) {
+      exportSource = { kind: "grid" };
       await clock.setDriver(createClockCellDriver({ sheetIndex: spec.sheetIndex, ...spec.clockCell }));
     } else if (spec.driver === "chartParam" && spec.chartParam) {
+      exportSource = { kind: "chart", chartId: spec.chartParam.chartId };
       await clock.setDriver(createChartParamDriver(spec.chartParam));
     } else {
       return;
@@ -53,8 +61,14 @@ export const playbackEngine = {
     }
   },
 
+  /** What a GIF export should capture for the current driver (null = no driver). */
+  getExportSource(): ExportSourceHint {
+    return exportSource;
+  },
+
   /** Drop the current driver, restoring the model first. */
   async clearDriver(): Promise<void> {
+    exportSource = null;
     await clock.setDriver(null);
   },
 

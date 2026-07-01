@@ -4166,6 +4166,7 @@ pub fn run() {
             animation_commands::anim_snapshot,
             animation_commands::anim_apply_frame,
             animation_commands::anim_restore,
+            animation_commands::export_gif,
             // Data Tables commands
             data_tables::data_table_one_var,
             data_tables::data_table_two_var,

@@ -1842,6 +1842,29 @@ pub struct AnimationFrameResult {
     pub error: Option<String>,
 }
 
+/// One frame of a GIF export: RGBA pixels (width*height*4) + its display delay.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GifFrame {
+    /// Row-major RGBA bytes; length must equal width*height*4.
+    pub rgba: Vec<u8>,
+    /// Frame delay in centiseconds (1/100 s).
+    pub delay_cs: u16,
+}
+
+/// Request to encode a sequence of RGBA frames to an animated GIF on disk.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GifExportRequest {
+    /// Absolute path to write the .gif to (chosen via a save dialog).
+    pub path: String,
+    pub width: u16,
+    pub height: u16,
+    pub frames: Vec<GifFrame>,
+    /// Loop forever when true; play once when false.
+    pub repeat: bool,
+}
+
 /// Generic result for scenario operations.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -11,6 +11,8 @@
 export interface ChartRenderingApi {
   /** A PNG blob of the chart's current cached raster, or null if it has none. */
   getChartFrameBitmap(chartId: string): Promise<Blob | null>;
+  /** The chart's current cached raster as ImageData (RGBA), or null if it has none. */
+  getChartFrameImageData(chartId: string): ImageData | null;
   /** True while an async render for this chart is in flight. */
   isChartRenderPending(chartId: string): boolean;
   /** True when the chart's cached raster is at its latest requested version (not stale). */
@@ -39,6 +41,11 @@ export async function getChartFrameBitmap(chartId: string): Promise<Blob | null>
   return registered ? registered.getChartFrameBitmap(chartId) : null;
 }
 
+/** Capture a chart's current raster as ImageData (null if charts unavailable / not cached). */
+export function getChartFrameImageData(chartId: string): ImageData | null {
+  return registered ? registered.getChartFrameImageData(chartId) : null;
+}
+
 /** True while an async render for this chart is in flight (false if no charts API). */
 export function isChartRenderPending(chartId: string): boolean {
   return registered ? registered.isChartRenderPending(chartId) : false;
@@ -53,6 +60,11 @@ export function isChartRenderCurrent(chartId: string): boolean {
 export function chartsIdle(): boolean {
   return registered ? registered.chartsIdle() : true;
 }
+
+// Generic grid-canvas region capture (implemented by Core; GridCanvas registers
+// the capturer on mount). Used by capture/export to grab a cell range's on-screen
+// pixels as ImageData (e.g. animating a grid selection to GIF).
+export { captureGridRegion, isGridCaptureReady, type CaptureRange } from "../core/lib/gridCapture";
 
 export interface RenderSettleOptions {
   /** Wait for THIS chart to be current + not pending; omit for the coarse global gate. */

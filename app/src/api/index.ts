@@ -1731,12 +1731,15 @@ export {
   registerChartRenderingApi,
   getChartRenderingApi,
   getChartFrameBitmap,
+  getChartFrameImageData,
   isChartRenderPending,
   isChartRenderCurrent,
   chartsIdle,
   awaitRenderSettled,
+  captureGridRegion,
+  isGridCaptureReady,
 } from "./rendering";
-export type { ChartRenderingApi, RenderSettleOptions } from "./rendering";
+export type { ChartRenderingApi, RenderSettleOptions, CaptureRange } from "./rendering";
 // Feature-neutral chart-param control facade (Charts provides the impl via
 // registerChartParamController; drivers/UI enumerate + sweep chart params).
 export {

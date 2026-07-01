@@ -101,6 +101,17 @@ export function getChartFrameBitmap(chartId: string): Promise<Blob | null> {
   return cached ? cached.canvas.convertToBlob() : Promise.resolve(null);
 }
 
+/**
+ * The chart's current cached raster as ImageData (RGBA, device pixels), or null if
+ * it has no cache yet. Direct pixels for capture/export (no PNG round-trip).
+ */
+export function getChartFrameImageData(chartId: string): ImageData | null {
+  const cached = chartCanvasCache.get(chartId);
+  if (!cached) return null;
+  const ctx = cached.canvas.getContext("2d");
+  return ctx ? ctx.getImageData(0, 0, cached.canvas.width, cached.canvas.height) : null;
+}
+
 /** True while an async render for this chart is in flight. */
 export function isChartRenderPending(chartId: string): boolean {
   return pendingRenders.has(chartId);

@@ -7,8 +7,11 @@ import React, { useCallback, useEffect, useState } from "react";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { getActiveSheet } from "@api/lib";
 import { showDialog } from "@api/ui";
+import { ExtensionRegistry } from "@api";
+import type { Selection } from "@api";
 import { playbackEngine, type EngineState } from "../lib/animationEngine";
 import { listAnimations, subscribeAnimations, deleteAnimation } from "../lib/animationStore";
+import { exportAnimationGif } from "../lib/gifExporter";
 import type { AnimationSpec } from "../types";
 import { parseA1 } from "../lib/a1";
 import { ANIMATION_DIALOG_ID } from "./AnimationDialog";
@@ -55,8 +58,47 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
   const [stepStr, setStepStr] = useState("1");
   const [formError, setFormError] = useState<string | null>(null);
 
+  const [selection, setSelection] = useState<Selection | null>(null);
+  useEffect(() => ExtensionRegistry.onSelectionChange(setSelection), []);
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+
   const hasDriver = state.frameCount > 0;
   const isPlaying = state.status === "playing";
+
+  const handleExport = useCallback(async () => {
+    const src = playbackEngine.getExportSource();
+    if (!src) return;
+    setExportMsg(null);
+    if (src.kind === "grid" && !selection) {
+      setExportMsg("Select a range to export first.");
+      return;
+    }
+    setExporting(true);
+    const result =
+      src.kind === "chart"
+        ? await exportAnimationGif({ kind: "chart", chartId: src.chartId }, "chart-animation")
+        : await exportAnimationGif(
+            {
+              kind: "selection",
+              range: {
+                startRow: Math.min(selection!.startRow, selection!.endRow),
+                startCol: Math.min(selection!.startCol, selection!.endCol),
+                endRow: Math.max(selection!.startRow, selection!.endRow),
+                endCol: Math.max(selection!.startCol, selection!.endCol),
+              },
+            },
+            "grid-animation",
+          );
+    setExporting(false);
+    setExportMsg(
+      result.ok
+        ? `Saved ${result.path}`
+        : result.error === "cancelled"
+          ? null
+          : `Export failed: ${result.error}`,
+    );
+  }, [selection]);
 
   const handleSetDriver = useCallback(async () => {
     const parsed = parseA1(cellRef);
@@ -215,6 +257,20 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
             <input type="checkbox" checked={state.loop} onChange={(e) => playbackEngine.setLoop(e.target.checked)} />
             loop
           </label>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button style={btn} disabled={!hasDriver || exporting} onClick={() => void handleExport()}>
+            {exporting ? "Exporting…" : "Export GIF"}
+          </button>
+          {exportMsg && (
+            <span
+              style={{ fontSize: 11, opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              title={exportMsg}
+            >
+              {exportMsg}
+            </span>
+          )}
         </div>
       </div>
     </div>

@@ -13,6 +13,7 @@ import {
 function makeApi(overrides: Partial<ChartRenderingApi> = {}): ChartRenderingApi {
   return {
     getChartFrameBitmap: vi.fn().mockResolvedValue(null),
+    getChartFrameImageData: vi.fn().mockReturnValue(null),
     isChartRenderPending: vi.fn().mockReturnValue(false),
     isChartRenderCurrent: vi.fn().mockReturnValue(true),
     chartsIdle: vi.fn().mockReturnValue(true),

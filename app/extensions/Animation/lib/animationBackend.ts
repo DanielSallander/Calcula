@@ -66,3 +66,26 @@ export function animRestore(token: string, sheetIndex: number): Promise<Animatio
     params: { token, sheetIndex },
   });
 }
+
+/** One GIF frame: flattened RGBA bytes (width*height*4) + delay in centiseconds. */
+export interface GifFrame {
+  rgba: number[];
+  delayCs: number;
+}
+
+export interface GifExportRequest {
+  path: string;
+  width: number;
+  height: number;
+  frames: GifFrame[];
+  repeat: boolean;
+}
+
+/**
+ * Encode RGBA frames to an animated GIF and write it to `req.path` (Rust-side,
+ * via the gif crate). export_gif is hostFilesystem-privileged; the trusted
+ * built-in Animation extension passes the gate.
+ */
+export function exportGif(req: GifExportRequest): Promise<void> {
+  return animationBackend.invoke<void>("export_gif", { req });
+}

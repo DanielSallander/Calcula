@@ -4,6 +4,7 @@ import {
   animSnapshot,
   animApplyFrame,
   animRestore,
+  exportGif,
 } from "../animationBackend";
 
 // These assert the exact IPC payload shape ({ params: {...} } with camelCase
@@ -45,6 +46,20 @@ describe("animationBackend wrappers", () => {
     expect(invoke).toHaveBeenCalledWith("anim_restore", {
       params: { token: "tok-1", sheetIndex: 2 },
     });
+  });
+
+  it("exportGif -> export_gif with a { req } payload", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    animationBackend.set(invoke);
+    const req = {
+      path: "/tmp/a.gif",
+      width: 4,
+      height: 4,
+      frames: [{ rgba: [0, 0, 0, 255], delayCs: 5 }],
+      repeat: true,
+    };
+    await exportGif(req);
+    expect(invoke).toHaveBeenCalledWith("export_gif", { req });
   });
 
   it("rejects before activate() binds the channel", async () => {

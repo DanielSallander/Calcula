@@ -12,6 +12,8 @@ import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, Formula
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG, DEFAULT_SPLIT_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
+import { getColumnX, getRowY } from "../../lib/gridRenderer/layout/dimensions";
+import { setGridCapturer, type CaptureRange } from "../../lib/gridCapture";
 import * as S from "./GridCanvas.styles";
 
 /**
@@ -844,6 +846,44 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       });
       return cleanup;
     }, [draw, insertionAnimation]);
+
+    /**
+     * Register a capturer so out-of-tree consumers (e.g. animation GIF export)
+     * can grab the pixels of a cell range from the live canvas. Re-registers when
+     * the mapping inputs change so it always reflects current scroll/zoom/sizes.
+     */
+    const captureRange = useCallback(
+      (range: CaptureRange): ImageData | null => {
+        const canvas = canvasRef.current;
+        if (!canvas) return null;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        const capDims = dimensions ?? createEmptyDimensionOverrides();
+        const scale = (window.devicePixelRatio || 1) * zoom;
+        const sX = viewport.scrollX || 0;
+        const sY = viewport.scrollY || 0;
+        const left = getColumnX(range.startCol, config, capDims, 0, -sX);
+        const top = getRowY(range.startRow, config, capDims, 0, -sY);
+        const right = getColumnX(range.endCol + 1, config, capDims, 0, -sX);
+        const bottom = getRowY(range.endRow + 1, config, capDims, 0, -sY);
+        const px = Math.max(0, Math.round(left * scale));
+        const py = Math.max(0, Math.round(top * scale));
+        const pw = Math.min(Math.round((right - left) * scale), canvas.width - px);
+        const ph = Math.min(Math.round((bottom - top) * scale), canvas.height - py);
+        if (pw <= 0 || ph <= 0) return null;
+        try {
+          return ctx.getImageData(px, py, pw, ph);
+        } catch {
+          return null;
+        }
+      },
+      [config, dimensions, viewport, zoom],
+    );
+
+    useEffect(() => {
+      setGridCapturer(captureRange);
+      return () => setGridCapturer(null);
+    }, [captureRange]);
 
     /**
      * Expose imperative methods via ref.

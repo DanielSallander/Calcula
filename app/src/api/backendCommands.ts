@@ -51,6 +51,8 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "write_text_file",
     "write_binary_file",
     "sort_log_file",
+    // Encodes RGBA frames to a GIF and writes it to a caller-chosen path.
+    "export_gif",
   ],
   // OS credential store.
   credentials: [
