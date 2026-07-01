@@ -6,7 +6,7 @@
 //          slices (chartParam / scenario / monteCarlo) and added as optional
 //          discriminated fields then.
 
-export type DriverKind = "clockCell"; // future: | "chartParam" | "scenario" | "monteCarlo"
+export type DriverKind = "clockCell" | "chartParam"; // future: | "scenario" | "monteCarlo"
 
 export interface ClockCellSpec {
   /** Driver cell (0-based). */
@@ -16,6 +16,17 @@ export interface ClockCellSpec {
   from: number;
   to: number;
   step: number;
+}
+
+/** The values a chart-param sweep visits: a numeric range or an explicit option list. */
+export type ChartParamSequence =
+  | { kind: "range"; from: number; to: number; step: number }
+  | { kind: "options"; options: (string | number)[] };
+
+export interface ChartParamSpec {
+  chartId: string;
+  paramName: string;
+  sequence: ChartParamSequence;
 }
 
 export interface PlaybackSettings {
@@ -33,4 +44,5 @@ export interface AnimationSpec {
   driver: DriverKind;
   playback: PlaybackSettings;
   clockCell?: ClockCellSpec;
+  chartParam?: ChartParamSpec;
 }

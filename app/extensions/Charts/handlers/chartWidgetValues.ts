@@ -29,6 +29,15 @@ export function clearWidgetValues(chartId: string): boolean {
   return store.delete(chartId);
 }
 
+/** Clear ONE bound param's live value on a chart. Returns true if it existed. */
+export function deleteWidgetValue(chartId: string, paramName: string): boolean {
+  const existing = store.get(chartId);
+  if (!existing || !(paramName in existing)) return false;
+  delete existing[paramName];
+  if (Object.keys(existing).length === 0) store.delete(chartId);
+  return true;
+}
+
 /** Clear every chart's live widget values (file open / deactivation). */
 export function clearAllWidgetValues(): void {
   store.clear();

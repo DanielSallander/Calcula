@@ -84,6 +84,8 @@ import {
 } from "./lib/chartStore";
 import { chartsBackend } from "./lib/chartsBackend";
 import { registerChartRenderingApi } from "@api/rendering";
+import { registerChartParamController } from "@api/chartParams";
+import { chartParamController } from "./lib/chartParamController";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
@@ -246,6 +248,11 @@ function activate(context: ExtensionContext): void {
     isChartRenderCurrent,
     chartsIdle,
   });
+
+  // Provide the chart-param control surface (IoC) so drivers/UI can enumerate +
+  // sweep chart params (e.g. the animation chart-param driver) without importing
+  // Charts internals.
+  registerChartParamController(chartParamController);
 
   console.log("[Chart Extension] Registering...");
 
@@ -1610,8 +1617,9 @@ function activate(context: ExtensionContext): void {
 function deactivate(): void {
   console.log("[Chart Extension] Unregistering...");
 
-  // Withdraw the chart-render capture surface.
+  // Withdraw the chart-render capture + param-control surfaces.
   registerChartRenderingApi(null);
+  registerChartParamController(null);
 
   // Tear down authored sandboxed marks (unregister shims + unmount workers).
   uninstallChartMarks();

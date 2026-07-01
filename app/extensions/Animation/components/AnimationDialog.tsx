@@ -1,18 +1,42 @@
 //! FILENAME: app/extensions/Animation/components/AnimationDialog.tsx
-// PURPOSE: Create / edit a saved AnimationSpec (name + clock-cell driver + fps +
-//          loop). Saving persists it (animationStore) and loads it into the engine
-//          so the user can immediately play it.
+// PURPOSE: Create / edit a saved AnimationSpec. Supports two driver types:
+//          - Clock cell: a driver cell swept from→to by step.
+//          - Chart param: a chart's bindable param swept over its declared range/
+//            options (derived from the param's bind).
+//          Saving persists it (animationStore) and loads it into the engine.
 // DATA: opened via showDialog("animation.editor", { editingId? , prefill? }).
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { DialogProps } from "@api/uiTypes";
 import { getActiveSheet } from "@api/lib";
+import { listAnimatableCharts, listChartParams, type ChartParamBinding } from "@api/chartParams";
 import { parseA1, toA1 } from "../lib/a1";
 import { getAnimation, upsertAnimation, newAnimationId } from "../lib/animationStore";
 import { playbackEngine } from "../lib/animationEngine";
-import type { AnimationSpec } from "../types";
+import type { AnimationSpec, ChartParamSequence, DriverKind } from "../types";
 
 /** Dialog id shared by the registration (index.ts) and the openers (panel). */
 export const ANIMATION_DIALOG_ID = "animation.editor";
+
+/** Derive the sweep sequence a chart param visits from its bind declaration. */
+function deriveSequence(bind?: ChartParamBinding): ChartParamSequence | null {
+  if (!bind) return null;
+  if (bind.input === "stepper") {
+    const from = bind.min ?? 0;
+    const to = bind.max ?? from + 10;
+    const step = bind.step ?? 1;
+    return { kind: "range", from, to, step };
+  }
+  if (bind.options && bind.options.length > 0) return { kind: "options", options: bind.options };
+  return null;
+}
+
+function sequencePreview(seq: ChartParamSequence | null): string {
+  if (!seq) return "this param has no bindable range";
+  if (seq.kind === "options") return `cycles ${seq.options.length} options: ${seq.options.join(", ")}`;
+  const span = Math.abs(seq.to - seq.from);
+  const frames = seq.step === 0 ? 1 : Math.floor(span / Math.abs(seq.step) + 1e-9) + 1;
+  return `sweeps ${seq.from} → ${seq.to} step ${seq.step} (${frames} frames)`;
+}
 
 const backdrop: React.CSSProperties = {
   position: "fixed",
@@ -24,7 +48,7 @@ const backdrop: React.CSSProperties = {
   zIndex: 1000,
 };
 const dialog: React.CSSProperties = {
-  width: 380,
+  width: 400,
   background: "var(--panel-bg, #fff)",
   color: "var(--text-color, #1a1a1a)",
   borderRadius: 8,
@@ -76,20 +100,36 @@ const primary: React.CSSProperties = {
 export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.ReactElement | null {
   const editingId = typeof data?.editingId === "string" ? data.editingId : null;
 
+  const [driverType, setDriverType] = useState<DriverKind>("clockCell");
   const [name, setName] = useState("");
+  const [fpsStr, setFpsStr] = useState("12");
+  const [loop, setLoop] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Clock-cell fields.
   const [cellRef, setCellRef] = useState("B1");
   const [fromStr, setFromStr] = useState("0");
   const [toStr, setToStr] = useState("100");
   const [stepStr, setStepStr] = useState("1");
-  const [fpsStr, setFpsStr] = useState("12");
-  const [loop, setLoop] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  // Chart-param fields.
+  const [chartId, setChartId] = useState("");
+  const [paramName, setParamName] = useState("");
+
+  const charts = useMemo(() => (driverType === "chartParam" ? listAnimatableCharts() : []), [driverType, isOpen]);
+  const params = useMemo(
+    () => (chartId ? listChartParams(chartId).filter((p) => p.bind) : []),
+    [chartId, isOpen, driverType],
+  );
+  const selectedParam = params.find((p) => p.name === paramName);
+  const derivedSeq = selectedParam ? deriveSequence(selectedParam.bind) : null;
 
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
     const existing = editingId ? getAnimation(editingId) : undefined;
-    if (existing?.clockCell) {
+    if (existing?.driver === "clockCell" && existing.clockCell) {
+      setDriverType("clockCell");
       setName(existing.name);
       setCellRef(toA1(existing.clockCell.row, existing.clockCell.col));
       setFromStr(String(existing.clockCell.from));
@@ -99,7 +139,17 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
       setLoop(existing.playback.loop);
       return;
     }
+    if (existing?.driver === "chartParam" && existing.chartParam) {
+      setDriverType("chartParam");
+      setName(existing.name);
+      setChartId(existing.chartParam.chartId);
+      setParamName(existing.chartParam.paramName);
+      setFpsStr(String(existing.playback.fps));
+      setLoop(existing.playback.loop);
+      return;
+    }
     const p = (data?.prefill ?? {}) as Record<string, unknown>;
+    setDriverType("clockCell");
     setName(typeof p.name === "string" ? p.name : "");
     setCellRef(typeof p.cellRef === "string" ? p.cellRef : "B1");
     setFromStr(p.from != null ? String(p.from) : "0");
@@ -109,6 +159,16 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
     setLoop(p.loop === true);
   }, [isOpen, editingId, data]);
 
+  // Auto-select the first chart / param when switching to the chart-param type.
+  useEffect(() => {
+    if (driverType !== "chartParam") return;
+    if (!chartId && charts.length) setChartId(charts[0].chartId);
+  }, [driverType, charts, chartId]);
+  useEffect(() => {
+    if (driverType !== "chartParam") return;
+    if (params.length && !params.some((p) => p.name === paramName)) setParamName(params[0].name);
+  }, [driverType, params, paramName]);
+
   if (!isOpen) return null;
 
   const handleSave = async (): Promise<void> => {
@@ -117,30 +177,59 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
       setError("Name is required");
       return;
     }
-    const parsed = parseA1(cellRef);
-    if (!parsed) {
-      setError("Driver cell must be like B1");
-      return;
-    }
-    const from = Number(fromStr);
-    const to = Number(toStr);
-    const step = Number(stepStr);
     const fps = Number(fpsStr);
-    if (![from, to, step, fps].every(Number.isFinite) || step === 0) {
-      setError("From / To / Step / fps must be numbers and Step ≠ 0");
+    if (!Number.isFinite(fps)) {
+      setError("fps must be a number");
       return;
     }
-    setError(null);
+    const playback = { fps: Math.max(1, Math.min(120, Math.round(fps))), loop };
     const existing = editingId ? getAnimation(editingId) : undefined;
-    const sheetIndex = existing ? existing.sheetIndex : await getActiveSheet();
-    const spec: AnimationSpec = {
-      id: editingId ?? newAnimationId(),
-      name: trimmed,
-      sheetIndex,
-      driver: "clockCell",
-      playback: { fps: Math.max(1, Math.min(120, Math.round(fps))), loop },
-      clockCell: { row: parsed.row, col: parsed.col, from, to, step },
-    };
+
+    let spec: AnimationSpec;
+    if (driverType === "clockCell") {
+      const parsed = parseA1(cellRef);
+      if (!parsed) {
+        setError("Driver cell must be like B1");
+        return;
+      }
+      const from = Number(fromStr);
+      const to = Number(toStr);
+      const step = Number(stepStr);
+      if (![from, to, step].every(Number.isFinite) || step === 0) {
+        setError("From / To / Step must be numbers and Step ≠ 0");
+        return;
+      }
+      const sheetIndex = existing ? existing.sheetIndex : await getActiveSheet();
+      spec = {
+        id: editingId ?? newAnimationId(),
+        name: trimmed,
+        sheetIndex,
+        driver: "clockCell",
+        playback,
+        clockCell: { row: parsed.row, col: parsed.col, from, to, step },
+      };
+    } else {
+      if (!chartId || !selectedParam) {
+        setError("Pick a chart and a bindable param");
+        return;
+      }
+      const sequence = deriveSequence(selectedParam.bind);
+      if (!sequence) {
+        setError("This param has no bindable range to animate");
+        return;
+      }
+      const chart = charts.find((c) => c.chartId === chartId);
+      const sheetIndex = chart ? chart.sheetIndex : existing ? existing.sheetIndex : await getActiveSheet();
+      spec = {
+        id: editingId ?? newAnimationId(),
+        name: trimmed,
+        sheetIndex,
+        driver: "chartParam",
+        playback,
+        chartParam: { chartId, paramName: selectedParam.name, sequence },
+      };
+    }
+
     await upsertAnimation(spec);
     await playbackEngine.loadSpec(spec);
     onClose();
@@ -160,24 +249,75 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
             <div style={labelStyle}>Name</div>
             <input style={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="Revenue ramp" />
           </div>
+
           <div>
-            <div style={labelStyle}>Driver cell</div>
-            <input style={field} value={cellRef} onChange={(e) => setCellRef(e.target.value)} placeholder="B1" />
+            <div style={labelStyle}>Driver type</div>
+            <select style={field} value={driverType} onChange={(e) => setDriverType(e.target.value as DriverKind)}>
+              <option value="clockCell">Clock cell</option>
+              <option value="chartParam">Chart param</option>
+            </select>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}>
-              <div style={labelStyle}>From</div>
-              <input style={field} value={fromStr} onChange={(e) => setFromStr(e.target.value)} />
+
+          {driverType === "clockCell" ? (
+            <>
+              <div>
+                <div style={labelStyle}>Driver cell</div>
+                <input style={field} value={cellRef} onChange={(e) => setCellRef(e.target.value)} placeholder="B1" />
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={labelStyle}>From</div>
+                  <input style={field} value={fromStr} onChange={(e) => setFromStr(e.target.value)} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={labelStyle}>To</div>
+                  <input style={field} value={toStr} onChange={(e) => setToStr(e.target.value)} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={labelStyle}>Step</div>
+                  <input style={field} value={stepStr} onChange={(e) => setStepStr(e.target.value)} />
+                </div>
+              </div>
+            </>
+          ) : charts.length === 0 ? (
+            <div style={{ opacity: 0.7, fontSize: 11 }}>
+              No charts with bindable params. Add a param with a stepper / cycle / segment bind to a chart first.
             </div>
-            <div style={{ flex: 1 }}>
-              <div style={labelStyle}>To</div>
-              <input style={field} value={toStr} onChange={(e) => setToStr(e.target.value)} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={labelStyle}>Step</div>
-              <input style={field} value={stepStr} onChange={(e) => setStepStr(e.target.value)} />
-            </div>
-          </div>
+          ) : (
+            <>
+              <div>
+                <div style={labelStyle}>Chart</div>
+                <select style={field} value={chartId} onChange={(e) => setChartId(e.target.value)}>
+                  {charts.map((c) => (
+                    <option key={c.chartId} value={c.chartId}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div style={labelStyle}>Param</div>
+                <select
+                  style={field}
+                  value={paramName}
+                  onChange={(e) => setParamName(e.target.value)}
+                  disabled={params.length === 0}
+                >
+                  {params.length === 0 ? (
+                    <option value="">— no bindable params —</option>
+                  ) : (
+                    params.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              <div style={{ opacity: 0.75, fontSize: 11 }}>{sequencePreview(derivedSeq)}</div>
+            </>
+          )}
+
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div>
               <div style={labelStyle}>fps</div>

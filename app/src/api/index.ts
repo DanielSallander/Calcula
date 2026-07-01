@@ -1737,6 +1737,24 @@ export {
   awaitRenderSettled,
 } from "./rendering";
 export type { ChartRenderingApi, RenderSettleOptions } from "./rendering";
+// Feature-neutral chart-param control facade (Charts provides the impl via
+// registerChartParamController; drivers/UI enumerate + sweep chart params).
+export {
+  registerChartParamController,
+  getChartParamController,
+  listAnimatableCharts,
+  listChartParams,
+  getChartParamValue,
+  setChartParamValue,
+  clearChartParamValue,
+} from "./chartParams";
+export type {
+  ChartParamController,
+  ChartParamValue,
+  ChartParamBinding,
+  AnimatableChart,
+  ChartParameter,
+} from "./chartParams";
 // Scope-injected expression evaluation via the real engine (the sanctioned
 // replacement for hand-rolled in-extension formula evaluators).
 export {

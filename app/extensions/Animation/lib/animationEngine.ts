@@ -7,7 +7,8 @@
 
 import { createPlaybackClock, type ClockState } from "./playbackClock";
 import { createClockCellDriver, type ClockCellConfig } from "../drivers/clockCellDriver";
-import type { AnimationSpec } from "../types";
+import { createChartParamDriver } from "../drivers/chartParamDriver";
+import type { AnimationSpec, ChartParamSpec } from "../types";
 
 const clock = createPlaybackClock();
 
@@ -31,15 +32,24 @@ export const playbackEngine = {
     await clock.setDriver(createClockCellDriver(cfg));
   },
 
+  /** Configure (and restore any prior) a chart-param driver. Leaves playback idle. */
+  async setChartParamDriver(cfg: ChartParamSpec): Promise<void> {
+    await clock.setDriver(createChartParamDriver(cfg));
+  },
+
   /** Load a saved AnimationSpec into the engine (restores any prior driver). */
   async loadSpec(spec: AnimationSpec): Promise<void> {
     if (spec.driver === "clockCell" && spec.clockCell) {
       await clock.setDriver(createClockCellDriver({ sheetIndex: spec.sheetIndex, ...spec.clockCell }));
-      clock.setFps(spec.playback.fps);
-      clock.setLoop(spec.playback.loop);
-      if (spec.playback.rangeStart != null && spec.playback.rangeEnd != null) {
-        clock.setRange(spec.playback.rangeStart, spec.playback.rangeEnd);
-      }
+    } else if (spec.driver === "chartParam" && spec.chartParam) {
+      await clock.setDriver(createChartParamDriver(spec.chartParam));
+    } else {
+      return;
+    }
+    clock.setFps(spec.playback.fps);
+    clock.setLoop(spec.playback.loop);
+    if (spec.playback.rangeStart != null && spec.playback.rangeEnd != null) {
+      clock.setRange(spec.playback.rangeStart, spec.playback.rangeEnd);
     }
   },
 
