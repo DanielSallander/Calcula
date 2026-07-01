@@ -3,8 +3,9 @@
 //! A `Dialect` owns every place the generated SQL **text** diverges between
 //! execution targets: aggregate spellings, the safe-division cast, percentile
 //! syntax, ordered-set aggregates (`FIRST_VALUE`/`MIN`/`ARRAY_AGG`), scalar
-//! function rewrites, whether host UDF calls are renderable, and the policy for
-//! nodes that must be materialized rather than rendered inline.
+//! function rewrites, date literals (`DATE 'YYYY-MM-DD'` vs an integer→date
+//! cast), whether host UDF calls are renderable, and the policy for nodes that
+//! must be materialized rather than rendered inline.
 //!
 //! Promoting this from a closed enum to a trait is what lets a **new database
 //! vendor** opt into expression pushdown by supplying one `Dialect` impl — with
@@ -164,7 +165,8 @@ impl Dialect for DataFusionDialect {
 
 /// PostgreSQL SQL for source pushdown. Uses `CAST(x AS DOUBLE PRECISION)`,
 /// `PERCENTILE_CONT(k) WITHIN GROUP (ORDER BY x)`, `::NUMERIC` casts for
-/// `ROUND`/`TRUNC`/`LOG`, and PostgreSQL aggregate spellings.
+/// `ROUND`/`TRUNC`/`LOG`, `DATE 'YYYY-MM-DD'` date literals (PostgreSQL rejects
+/// integer→date casts), and PostgreSQL aggregate spellings.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PostgresDialect;
 

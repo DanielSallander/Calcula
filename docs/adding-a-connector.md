@@ -60,8 +60,10 @@ dialect.
    aggregation, context columns). `Dialect` (`engine-core`,
    `crates/engine-core/src/compute/expression/render/dialect.rs`) owns the SQL
    *text* spellings that differ between vendors (aggregates, `CAST` targets,
-   percentile syntax, scalar-function rewrites, ordered-set aggregates, the
-   materialized-node policy). Every method returns `EngineResult`: if your
+   percentile syntax, scalar-function rewrites, ordered-set aggregates,
+   date literals — e.g. `DATE 'YYYY-MM-DD'` where an integer→date cast is
+   rejected — and the materialized-node policy). Every method returns
+   `EngineResult`: if your
    dialect cannot spell a node, return `Err` — the renderer propagates it and
    the planner falls back to local aggregation (**fail-soft; never a
    silently-wrong query**). `ExpressionDialect`
