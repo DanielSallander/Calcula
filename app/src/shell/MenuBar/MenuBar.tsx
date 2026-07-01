@@ -152,6 +152,17 @@ function RecursiveMenuItem({ item, index, executeMenuItem, closeMenu }: Recursiv
 // MenuBar
 // ============================================================================
 
+/**
+ * True if the user has a non-collapsed DOM text selection (e.g. selected text in
+ * a toast, dialog, or side panel). Grid cells are canvas-drawn and never produce
+ * a DOM text selection, so this reliably means the user wants to copy/cut that
+ * text — not the active cell — and native browser behaviour should win.
+ */
+function hasDomTextSelection(): boolean {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  return !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim() !== "";
+}
+
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [menus, setMenus] = useState<UI.MenuDefinition[]>(() => UI.getMenus());
@@ -239,6 +250,15 @@ export function MenuBar(): React.ReactElement {
       for (const menu of menus) {
         const match = findShortcutItem(menu.items, keyCombo);
         if (match) {
+          // Let the browser's native copy/cut handle a real DOM text selection
+          // (e.g. selected text in a toast, dialog, or panel) rather than running
+          // the grid clipboard command over the active cell.
+          if (
+            (match.commandId === "core.clipboard.copy" || match.commandId === "core.clipboard.cut") &&
+            hasDomTextSelection()
+          ) {
+            return;
+          }
           e.preventDefault();
           executeMenuItem(match);
           return;

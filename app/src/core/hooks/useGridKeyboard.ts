@@ -515,6 +515,15 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           case 'c':
             // Ctrl+C - Copy
             if (onCopy) {
+              // If the user has selected real DOM text (e.g. in a toast, dialog,
+              // or side panel), let the browser's native copy handle it. Grid
+              // cells are canvas-drawn and never produce a DOM text selection, so
+              // a non-collapsed selection means the user wants that text, not the cell.
+              const domSel = window.getSelection();
+              if (domSel && domSel.rangeCount > 0 && !domSel.isCollapsed && domSel.toString().trim() !== "") {
+                fnLog.exit('handleKeyDown', 'skipped copy (DOM text selection present)');
+                return;
+              }
               event.preventDefault();
               event.stopPropagation();
               eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+C', ['Ctrl']);

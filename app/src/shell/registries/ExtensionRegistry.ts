@@ -12,6 +12,7 @@ import type {
   CellChangeCallback,
   AddInManifest,
 } from "./types";
+import { emitAppEvent, AppEvents } from "../../api/events";
 
 // Re-export types so they can be consumed by index.ts and other modules
 export type {
@@ -169,6 +170,22 @@ class ExtensionRegistryImpl {
   // Called by shell when selection changes
   notifySelectionChange(selection: import("../../core/types").Selection | null): void {
     this.selectionListeners.forEach((cb) => cb(selection));
+    // Also broadcast on the app-event bus so worker-sandboxed / script extensions
+    // can observe selection — they can't reach this main-thread callback registry.
+    // AppEvents.SELECTION_CHANGED is allowlisted for scripts; this is its emitter.
+    if (selection) {
+      emitAppEvent(AppEvents.SELECTION_CHANGED, {
+        // Active cell (anchor is start; end is the active cell per Selection type).
+        row: selection.endRow,
+        col: selection.endCol,
+        startRow: selection.startRow,
+        startCol: selection.startCol,
+        endRow: selection.endRow,
+        endCol: selection.endCol,
+      });
+    } else {
+      emitAppEvent(AppEvents.SELECTION_CHANGED, null);
+    }
   }
 
   // Called by shell when a cell changes

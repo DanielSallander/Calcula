@@ -124,6 +124,16 @@ function isGridFocused(): boolean {
 }
 
 /**
+ * True if the user has a non-collapsed DOM text selection (toast, dialog, panel).
+ * Grid cells are canvas-drawn and never produce a DOM text selection, so this
+ * means the user wants to copy/cut that text, not the active cell.
+ */
+function hasDomTextSelection(): boolean {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  return !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim() !== "";
+}
+
+/**
  * Command IDs that should only fire when the grid has focus.
  * Mirrors the set in keybindings.ts.
  */
@@ -176,6 +186,15 @@ function installListener(): void {
             `[Keyboard] Skipping grid-scoped command '${b.commandId}' ` +
             `— focus is outside grid (active: ${document.activeElement?.tagName})`
           );
+          return false;
+        }
+
+        // Defer copy/cut to native when the user has a DOM text selection, even
+        // if the grid is focused (e.g. copying text out of a toast or panel).
+        if (
+          (b.commandId === "core.clipboard.copy" || b.commandId === "core.clipboard.cut") &&
+          hasDomTextSelection()
+        ) {
           return false;
         }
 

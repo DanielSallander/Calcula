@@ -274,6 +274,17 @@ function isGridFocused(): boolean {
 }
 
 /**
+ * True if the user has a non-collapsed DOM text selection (e.g. selected text in
+ * a toast, dialog, or side panel). Grid cells are canvas-drawn and never produce
+ * a DOM text selection, so this reliably means the user wants to copy/cut that
+ * text — not the active cell — even while the grid still holds focus.
+ */
+function hasDomTextSelection(): boolean {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  return !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim() !== "";
+}
+
+/**
  * Command IDs that should only fire when the grid has focus.
  * When focus is in a dialog, side pane, or menu, these are skipped
  * so native browser shortcuts (copy, paste, undo, etc.) work normally.
@@ -606,6 +617,16 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
         `[Keybindings] Skipping grid-scoped command '${binding.commandId}' ` +
         `— focus is outside grid (active: ${document.activeElement?.tagName})`
       );
+      return;
+    }
+
+    // Even with the grid focused, defer copy/cut to the browser when the user
+    // has selected real DOM text (toast, dialog, panel) — otherwise Ctrl+C would
+    // copy the active cell instead of the highlighted text.
+    if (
+      (binding.commandId === "core.clipboard.copy" || binding.commandId === "core.clipboard.cut") &&
+      hasDomTextSelection()
+    ) {
       return;
     }
 
