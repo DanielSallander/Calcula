@@ -216,8 +216,19 @@ impl Cell {
 
     /// Returns the formula as a string, rendered from the AST.
     /// Returns `None` for non-formula cells.
+    ///
+    /// Named user-defined (LAMBDA) function calls are shown in their friendly
+    /// `Name(args)` form; the internal `__INVOKE__(...)` marker is collapsed.
     pub fn formula_string(&self) -> Option<String> {
         self.ast.as_ref().map(|ast| crate::ast_render::render_formula(ast))
+    }
+
+    /// Like [`Self::formula_string`] but preserves the raw, fully-resolved
+    /// `__INVOKE__(...)` marker instead of collapsing it to the friendly
+    /// function name. Persistence uses this so the saved formula re-parses to
+    /// the resolved form that dependency extraction and evaluation rely on.
+    pub fn formula_string_raw(&self) -> Option<String> {
+        self.ast.as_ref().map(|ast| crate::ast_render::render_formula_raw(ast))
     }
 
     /// Returns a reference to the formula AST if this is a formula cell.

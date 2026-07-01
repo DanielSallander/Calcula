@@ -1249,7 +1249,7 @@
       "screenshots": [
         "defined-functions-single-param"
       ],
-      "notes": "E2E creates LAMBDA-backed custom functions via create_named_range (in the _Functions folder), invokes them in formulas (single- and multi-parameter), and verifies folder placement. The name resolver rewrites the call into a LAMBDA __INVOKE__."
+      "notes": "E2E creates LAMBDA-backed custom functions via create_named_range (in the _Functions folder), invokes them in formulas (single- and multi-parameter), and verifies folder placement. The name resolver rewrites the call into a LAMBDA __INVOKE__ carrying a leading display-name literal; the formula bar collapses it back to the friendly Name(args) (render_formula) while persistence keeps the raw marker (render_formula_raw)."
     },
     {
       "id": "feat.bookmarks",

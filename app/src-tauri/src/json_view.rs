@@ -117,6 +117,26 @@ pub fn get_object_json(
             let props = state.workbook_properties.lock().unwrap();
             serde_json::to_string_pretty(&*props).map_err(|e| e.to_string())
         }
+        "sheet_layout" => {
+            let idx: usize = object_id.parse().map_err(|_| "Invalid sheet index".to_string())?;
+            // The active sheet's live column/row dimensions live in the primary
+            // maps; other sheets are held in the per-sheet vectors. Read the
+            // freshest source so the inspector never shows stale widths/heights.
+            let active = *state.active_sheet.lock().unwrap();
+            let layout = if idx == active {
+                let cw = state.column_widths.lock().unwrap();
+                let rh = state.row_heights.lock().unwrap();
+                calcula_format::sheet_layout::SheetLayout::from_dimensions(&cw, &rh)
+            } else {
+                let all_cw = state.all_column_widths.lock().unwrap();
+                let all_rh = state.all_row_heights.lock().unwrap();
+                if idx >= all_cw.len() || idx >= all_rh.len() {
+                    return Err(format!("Sheet {} not found", idx));
+                }
+                calcula_format::sheet_layout::SheetLayout::from_dimensions(&all_cw[idx], &all_rh[idx])
+            };
+            serde_json::to_string_pretty(&layout).map_err(|e| e.to_string())
+        }
         _ => Err(format!("Unknown object type: {}", object_type)),
     }
 }
@@ -277,6 +297,29 @@ pub fn set_object_json(
                 .map_err(|e| format!("Invalid properties JSON: {}", e))?;
             let mut props = state.workbook_properties.lock().unwrap();
             *props = new_props;
+            Ok(())
+        }
+        "sheet_layout" => {
+            let idx: usize = object_id.parse().map_err(|_| "Invalid sheet index".to_string())?;
+            let layout: calcula_format::sheet_layout::SheetLayout = serde_json::from_str(&json)
+                .map_err(|e| format!("Invalid sheet layout JSON: {}", e))?;
+            let (col_widths, row_heights) = layout.to_dimensions();
+            // Write into the per-sheet vectors (growing them if needed) so the
+            // change survives a sheet switch, and mirror the active sheet into
+            // the live primary maps.
+            {
+                let mut all_cw = state.all_column_widths.lock().unwrap();
+                let mut all_rh = state.all_row_heights.lock().unwrap();
+                if idx >= all_cw.len() || idx >= all_rh.len() {
+                    return Err(format!("Sheet {} not found", idx));
+                }
+                all_cw[idx] = col_widths.clone();
+                all_rh[idx] = row_heights.clone();
+            }
+            if idx == *state.active_sheet.lock().unwrap() {
+                *state.column_widths.lock().unwrap() = col_widths;
+                *state.row_heights.lock().unwrap() = row_heights;
+            }
             Ok(())
         }
         _ => Err(format!("Unknown object type: {}", object_type)),

@@ -16,6 +16,10 @@ export interface PanelContextMenuProps {
   panelId: string;
   /** The panel display title (for script editor) */
   panelTitle: string;
+  /** Whether the panel may be moved to the opposite surface. When false the
+   *  "Move to …" item is hidden (e.g. a sidebar-only panel like Animation that
+   *  has no valid ribbon layout). Defaults to true. */
+  canMoveToTarget?: boolean;
   /** Called when the user selects a new placement */
   onMove: (placement: PanelPlacement) => void;
   /** Called to close the menu */
@@ -30,6 +34,7 @@ export function PanelContextMenu({
   currentPlacement,
   panelId,
   panelTitle,
+  canMoveToTarget = true,
   onMove,
   onClose,
 }: PanelContextMenuProps): React.ReactElement {
@@ -114,28 +119,32 @@ export function PanelContextMenu({
         minWidth: 160,
       }}
     >
-      <button
-        onClick={handleMoveClick}
-        style={menuItemStyle}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
-      >
-        {targetPlacement === "sidebar" ? (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
-            <rect x="1" y="2" width="14" height="12" rx="1" />
-            <line x1="5" y1="2" x2="5" y2="14" />
-          </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
-            <rect x="1" y="2" width="14" height="12" rx="1" />
-            <line x1="1" y1="5" x2="15" y2="5" />
-          </svg>
-        )}
-        {label}
-      </button>
+      {canMoveToTarget && (
+        <>
+          <button
+            onClick={handleMoveClick}
+            style={menuItemStyle}
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+          >
+            {targetPlacement === "sidebar" ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
+                <rect x="1" y="2" width="14" height="12" rx="1" />
+                <line x1="5" y1="2" x2="5" y2="14" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--text-secondary)" strokeWidth="1.2">
+                <rect x="1" y="2" width="14" height="12" rx="1" />
+                <line x1="1" y1="5" x2="15" y2="5" />
+              </svg>
+            )}
+            {label}
+          </button>
 
-      {/* Separator */}
-      <div style={{ height: 1, backgroundColor: "var(--ctx-menu-separator)", margin: "4px 0" }} />
+          {/* Separator */}
+          <div style={{ height: 1, backgroundColor: "var(--ctx-menu-separator)", margin: "4px 0" }} />
+        </>
+      )}
 
       <button
         onClick={handleEditScript}

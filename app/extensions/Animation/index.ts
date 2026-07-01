@@ -40,13 +40,17 @@ function activate(context: ExtensionContext): void {
   // through the same capability check as ctx.invokeBackend (A3).
   animationBackend.set(context.invokeBackend);
 
-  // Timeline panel (sidebar).
+  // Timeline panel (sidebar). This is a tall, vertical panel (saved-animation
+  // list, driver form, transport scrubber, export) with no sensible 92px ribbon
+  // form, so it is locked to the sidebar — the Shell hides "Move to Ribbon" and
+  // refuses a programmatic move (a ribbon projection would blow up the layout).
   context.ui.panels.register({
     id: PANEL_ID,
     title: "Animation",
     icon: React.createElement(FilmIcon),
     sections: [{ id: `${PANEL_ID}.playback`, label: "Playback", component: TimelinePanel }],
     defaultPlacement: "sidebar",
+    supportedPlacements: ["sidebar"],
     priority: 12,
   });
   cleanupFns.push(() => context.ui.panels.unregister(PANEL_ID));

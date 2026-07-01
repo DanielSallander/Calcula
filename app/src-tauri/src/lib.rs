@@ -1184,8 +1184,16 @@ pub fn resolve_names_in_ast(
                                     &sub_ast, named_ranges, current_sheet_index, visited,
                                 );
                                 visited.remove(&key);
-                                // Build __INVOKE__(resolved_lambda, arg1, arg2, ...)
-                                let mut invoke_args = vec![resolved_callee];
+                                // Build __INVOKE__(displayName, resolved_lambda, arg1, ...).
+                                // The leading string literal records the user-facing
+                                // function name so the formula bar renders `Name(args)`
+                                // instead of the expanded LAMBDA. It is inert for
+                                // evaluation (the evaluator skips it) and re-parses
+                                // cleanly, so persistence round-trips the resolved form.
+                                let mut invoke_args = vec![
+                                    ParserExpr::Literal(ParserValue::String(nr.name.clone())),
+                                    resolved_callee,
+                                ];
                                 for a in args {
                                     invoke_args.push(resolve_names_in_ast(
                                         a, named_ranges, current_sheet_index, visited,
@@ -1345,7 +1353,12 @@ fn resolve_names_in_ast_with_shadows(
                                         &sub_ast, named_ranges, current_sheet_index, visited, shadows,
                                     );
                                     visited.remove(&key);
-                                    let mut invoke_args = vec![resolved_callee];
+                                    // See the non-shadowed branch: a leading display-name
+                                    // literal lets the formula bar render `Name(args)`.
+                                    let mut invoke_args = vec![
+                                        ParserExpr::Literal(ParserValue::String(nr.name.clone())),
+                                        resolved_callee,
+                                    ];
                                     for a in args {
                                         invoke_args.push(resolve_names_in_ast_with_shadows(
                                             a, named_ranges, current_sheet_index, visited, shadows,
@@ -4426,4 +4439,58 @@ pub fn run() {
                 }
             }
         });
+}
+#[cfg(test)]
+mod named_function_display_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn make_fn(name: &str, refers_to: &str) -> named_ranges::NamedRange {
+        named_ranges::NamedRange {
+            name: name.to_string(),
+            sheet_index: None,
+            refers_to: refers_to.to_string(),
+            comment: None,
+            folder: Some("_Functions".to_string()),
+        }
+    }
+
+    /// End-to-end for the reported bug: a named LAMBDA function invoked in a cell
+    /// must show as its friendly `Name(args)` call in the formula bar, while the
+    /// resolved `__INVOKE__(...)` marker (needed for evaluation and persisted so
+    /// dependencies survive reload) lives only behind the raw renderer.
+    #[test]
+    fn named_function_call_displays_friendly_but_persists_raw() {
+        let mut ranges: HashMap<String, named_ranges::NamedRange> = HashMap::new();
+        ranges.insert("TEST".to_string(), make_fn("Test", "=LAMBDA(param1, param1*2)"));
+
+        // The parser turns `Test(D4)` into a Custom("TEST") call; resolution
+        // rewrites it into the named-invoke marker.
+        let parsed = parse_formula("Test(D4)").expect("parse Test(D4)");
+        let mut visited = HashSet::new();
+        let resolved = resolve_names_in_ast(&parsed, &ranges, 0, &mut visited);
+
+        // Raw form keeps the resolved marker + lambda (round-trips through save).
+        let raw = engine::ast_render::render_formula_raw(&resolved);
+        assert!(raw.contains("__INVOKE__"), "raw kept marker: {raw}");
+        assert!(raw.contains("LAMBDA"), "raw kept lambda: {raw}");
+
+        // Display collapses back to the authored call — no `__INVOKE__` leak.
+        let display = engine::ast_render::render_formula(&resolved);
+        assert_eq!(display, "Test(D4)");
+        assert!(!display.contains("__INVOKE__"));
+    }
+
+    /// A multi-parameter named function collapses with all of its arguments.
+    #[test]
+    fn multi_param_named_function_collapses_with_all_args() {
+        let mut ranges: HashMap<String, named_ranges::NamedRange> = HashMap::new();
+        ranges.insert("ADD".to_string(), make_fn("Add", "=LAMBDA(a, b, a+b)"));
+
+        let parsed = parse_formula("Add(A1,B2)").expect("parse Add(A1,B2)");
+        let mut visited = HashSet::new();
+        let resolved = resolve_names_in_ast(&parsed, &ranges, 0, &mut visited);
+
+        assert_eq!(engine::ast_render::render_formula(&resolved), "Add(A1,B2)");
+    }
 }

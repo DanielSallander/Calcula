@@ -1821,16 +1821,28 @@ impl<'a> Evaluator<'a> {
 
             // Unknown/custom functions — check scope for LAMBDA bindings
             BuiltinFunction::Custom(name) => {
-                // __INVOKE__: call-on-expression (e.g., LAMBDA(x, x+1)(10))
-                // args[0] is the callee expression, args[1..] are the invocation arguments
+                // __INVOKE__: call-on-expression. Two shapes:
+                //   - inline: `__INVOKE__(lambdaExpr, arg1, ...)`  e.g. LAMBDA(x, x+1)(10)
+                //   - named:  `__INVOKE__("Name", lambdaExpr, arg1, ...)` — name
+                //     resolution injects a leading display-name string literal for
+                //     named user-defined functions so the formula bar can show
+                //     `Name(args)`. It is inert for evaluation; skip it here.
+                // Disambiguate by args[0]: a String literal marks the named shape.
                 if name == "__INVOKE__" {
                     if args.is_empty() {
                         return EvalResult::Error(CellError::Value);
                     }
-                    let callee = self.evaluate(&args[0]);
+                    let callee_idx = match &args[0] {
+                        Expression::Literal(Value::String(_)) => 1usize,
+                        _ => 0usize,
+                    };
+                    if callee_idx >= args.len() {
+                        return EvalResult::Error(CellError::Value);
+                    }
+                    let callee = self.evaluate(&args[callee_idx]);
                     match callee {
                         EvalResult::Lambda { params, body, captured } => {
-                            let eval_args: Vec<EvalResult> = args[1..].iter().map(|a| self.evaluate(a)).collect();
+                            let eval_args: Vec<EvalResult> = args[callee_idx + 1..].iter().map(|a| self.evaluate(a)).collect();
                             if eval_args.len() != params.len() {
                                 return EvalResult::Error(CellError::Value);
                             }

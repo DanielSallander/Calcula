@@ -34,6 +34,18 @@ function createLetterIcon(title: string): React.ReactElement {
   );
 }
 
+/** All placements, used as the default when a panel doesn't restrict itself. */
+const ALL_PLACEMENTS: PanelPlacement[] = ["sidebar", "ribbon"];
+
+/**
+ * The set of surfaces a panel is allowed to live in. A panel opts into a
+ * subset via `supportedPlacements`; when unset (or empty) it supports both.
+ */
+export function getSupportedPlacements(panel: PanelDefinition): PanelPlacement[] {
+  const declared = panel.supportedPlacements;
+  return declared && declared.length > 0 ? declared : ALL_PLACEMENTS;
+}
+
 // These are set during bootstrap to avoid circular imports.
 // PanelRegistry projects into these downstream registries.
 let activityBarImpl: {
@@ -100,6 +112,13 @@ class PanelRegistryImpl implements PanelService {
 
   registerPanel(definition: PanelDefinition): void {
     this.panels.set(definition.id, definition);
+    // Drop a persisted placement that is no longer valid for this panel (e.g.
+    // it was moved to the ribbon in a previous session but is now declared
+    // sidebar-only). Otherwise getPlacement would keep clamping a stale value.
+    const stored = usePanelPlacementStore.getState().placements[definition.id];
+    if (stored && !getSupportedPlacements(definition).includes(stored)) {
+      usePanelPlacementStore.getState().resetPlacement(definition.id);
+    }
     const placement = this.getPlacement(definition.id);
     this.projectPanel(definition, placement);
     this.notifyChange();
@@ -137,13 +156,39 @@ class PanelRegistryImpl implements PanelService {
   getPlacement(panelId: string): PanelPlacement {
     const panel = this.panels.get(panelId);
     const defaultPlacement = panel?.defaultPlacement ?? "sidebar";
-    return usePanelPlacementStore.getState().getPlacement(panelId, defaultPlacement);
+    const stored = usePanelPlacementStore.getState().getPlacement(panelId, defaultPlacement);
+    if (!panel) return stored;
+    // Never project a panel into a surface it doesn't support (guards stale
+    // persisted overrides and any programmatic placement). Prefer the stored
+    // value, then the default, then whatever the panel does support.
+    const supported = getSupportedPlacements(panel);
+    if (supported.includes(stored)) return stored;
+    if (supported.includes(defaultPlacement)) return defaultPlacement;
+    return supported[0] ?? "sidebar";
+  }
+
+  /** Whether `placement` is a surface this panel is allowed to live in. */
+  canPlace(panelId: string, placement: PanelPlacement): boolean {
+    const panel = this.panels.get(panelId);
+    if (!panel) return false;
+    return getSupportedPlacements(panel).includes(placement);
+  }
+
+  /** Whether the user is allowed to move this panel to `placement` (movable
+   *  AND the target surface is supported). Drives the context-menu affordance. */
+  canMoveTo(panelId: string, placement: PanelPlacement): boolean {
+    const panel = this.panels.get(panelId);
+    if (!panel || panel.movable === false) return false;
+    return this.canPlace(panelId, placement);
   }
 
   setPlacement(panelId: string, placement: PanelPlacement): void {
     const panel = this.panels.get(panelId);
     if (!panel) return;
     if (panel.movable === false) return;
+    // Refuse a move to an unsupported surface (e.g. a sidebar-only panel into
+    // the ribbon) — the panel has no valid layout there.
+    if (!this.canPlace(panelId, placement)) return;
 
     const currentPlacement = this.getPlacement(panelId);
     if (currentPlacement === placement) return;

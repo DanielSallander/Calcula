@@ -145,6 +145,7 @@ export function SidePanel(): React.ReactElement | null {
           currentPlacement="sidebar"
           panelId={contextMenu.panelId}
           panelTitle={contextMenu.panelTitle}
+          canMoveToTarget={panelRegistry.canMoveTo(contextMenu.panelId, "ribbon")}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />

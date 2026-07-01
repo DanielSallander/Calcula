@@ -328,6 +328,13 @@ export interface PanelDefinition {
   sections: PanelSection[];
   /** Where this panel appears by default before any user customization */
   defaultPlacement: PanelPlacement;
+  /** Which surfaces this panel is allowed to live in. When omitted, the panel
+   *  supports BOTH sidebar and ribbon. Declare a subset (e.g. `["sidebar"]`)
+   *  for panels whose content only makes sense in one surface — a tall,
+   *  vertical panel like Animation has no sensible 92px ribbon form. The Shell
+   *  refuses to move a panel to an unsupported surface and hides the move
+   *  affordance for it. `defaultPlacement` must be one of these. */
+  supportedPlacements?: PanelPlacement[];
   /** Sort priority (higher = more prominent). Default: 0 */
   priority?: number;
   /** Whether the user can close this panel. Default: true */

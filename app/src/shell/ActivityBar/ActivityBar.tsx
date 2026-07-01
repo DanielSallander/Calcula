@@ -142,6 +142,7 @@ export function ActivityBar(): React.ReactElement {
           currentPlacement="sidebar"
           panelId={contextMenu.panelId}
           panelTitle={contextMenu.panelTitle}
+          canMoveToTarget={panelRegistry.canMoveTo(contextMenu.panelId, "ribbon")}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />

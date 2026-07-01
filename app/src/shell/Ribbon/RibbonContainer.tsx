@@ -261,6 +261,12 @@ export function RibbonContainer(): React.ReactElement {
           padding: isMinimized && !tempExpanded ? "0 8px" : "6px 8px",
           backgroundColor: "var(--bg-surface)",
           display: isMinimized && !tempExpanded ? "none" : "flex",
+          // Bound any tab content to the fixed-height band. A panel authored
+          // for the sidebar (tall, vertical) that ends up projected here can
+          // never fit 92px — clip it rather than let it spill over the grid.
+          // (The primary defense is refusing such moves via supportedPlacements;
+          // this is defense-in-depth for mis-declared / 3rd-party panels.)
+          overflow: "hidden",
           gap: "0",
           position: isMinimized && tempExpanded ? "absolute" : "relative",
           left: isMinimized && tempExpanded ? 0 : undefined,
@@ -326,6 +332,7 @@ export function RibbonContainer(): React.ReactElement {
           currentPlacement="ribbon"
           panelId={contextMenu.panelId}
           panelTitle={contextMenu.panelTitle}
+          canMoveToTarget={panelRegistry.canMoveTo(contextMenu.panelId, "sidebar")}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />

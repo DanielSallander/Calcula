@@ -554,7 +554,11 @@ impl SavedCell {
     pub fn from_cell(cell: &Cell) -> Self {
         Self {
             value: SavedCellValue::from_value(&cell.value),
-            formula: cell.formula_string(),
+            // Persist the RAW form: the internal `__INVOKE__("Name", lambda, ...)`
+            // marker must round-trip so that on load the re-parsed AST resolves
+            // back to the same form dependency extraction and evaluation expect.
+            // (Display collapses it to `Name(...)` via `formula_string()`.)
+            formula: cell.formula_string_raw(),
             style_index: cell.style_index,
             rich_text: cell.rich_text.clone(),
         }
