@@ -193,24 +193,30 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
         <span style={sectionTitle}>Quick driver</span>
         <div>
           <div style={label}>Driver cell</div>
-          <input style={field} value={cellRef} onChange={(e) => setCellRef(e.target.value)} placeholder="B1" />
+          <input
+            style={field}
+            data-testid="anim-driver-cell"
+            value={cellRef}
+            onChange={(e) => setCellRef(e.target.value)}
+            placeholder="B1"
+          />
         </div>
         <div style={{ display: "flex", gap: 6 }}>
           <div style={{ flex: 1 }}>
             <div style={label}>From</div>
-            <input style={field} value={fromStr} onChange={(e) => setFromStr(e.target.value)} />
+            <input style={field} data-testid="anim-from" value={fromStr} onChange={(e) => setFromStr(e.target.value)} />
           </div>
           <div style={{ flex: 1 }}>
             <div style={label}>To</div>
-            <input style={field} value={toStr} onChange={(e) => setToStr(e.target.value)} />
+            <input style={field} data-testid="anim-to" value={toStr} onChange={(e) => setToStr(e.target.value)} />
           </div>
           <div style={{ flex: 1 }}>
             <div style={label}>Step</div>
-            <input style={field} value={stepStr} onChange={(e) => setStepStr(e.target.value)} />
+            <input style={field} data-testid="anim-step" value={stepStr} onChange={(e) => setStepStr(e.target.value)} />
           </div>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          <button style={{ ...btn, flex: 1 }} onClick={() => void handleSetDriver()}>
+          <button style={{ ...btn, flex: 1 }} data-testid="anim-set-driver" onClick={() => void handleSetDriver()}>
             Set driver
           </button>
           <button style={btn} title="Save as a named animation" onClick={openSaveCurrent}>
@@ -241,7 +247,7 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
           <button style={btn} title="Step forward" disabled={!hasDriver} onClick={() => void playbackEngine.step(1)}>
             <StepFwdIcon />
           </button>
-          <div style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", opacity: 0.85 }}>
+          <div style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", opacity: 0.85 }} data-testid="anim-frame">
             {hasDriver ? `${state.frame + 1} / ${state.frameCount}` : "no driver"}
           </div>
         </div>
