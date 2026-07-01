@@ -20,6 +20,7 @@ import { TimelinePanel } from "./components/TimelinePanel";
 import { TransportStatusItem } from "./components/TransportStatusItem";
 import { AnimationDialog, ANIMATION_DIALOG_ID } from "./components/AnimationDialog";
 import { FilmIcon } from "./components/icons";
+import { installPlayOverlay } from "./overlay/playOverlay";
 
 const PANEL_ID = "animation.timeline";
 const STATUS_BAR_ID = "animation.transport";
@@ -64,6 +65,9 @@ function activate(context: ExtensionContext): void {
   // Create / edit dialog for saved animations.
   registerDialog({ id: ANIMATION_DIALOG_ID, title: "Animation", component: AnimationDialog, priority: 100 });
   cleanupFns.push(() => unregisterDialog(ANIMATION_DIALOG_ID));
+
+  // On-canvas play control (floating pill; appears while a driver is loaded).
+  cleanupFns.push(installPlayOverlay());
 
   // Load saved animations for the already-open workbook, and on file open/new.
   void loadAnimations();
