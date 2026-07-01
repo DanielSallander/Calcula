@@ -8,7 +8,11 @@
 import { createPlaybackClock, type ClockState } from "./playbackClock";
 import { createClockCellDriver, type ClockCellConfig } from "../drivers/clockCellDriver";
 import { createChartParamDriver } from "../drivers/chartParamDriver";
-import type { AnimationSpec, ChartParamSpec } from "../types";
+import { createScenarioDriver } from "../drivers/scenarioDriver";
+import { createMonteCarloDriver } from "../drivers/monteCarloDriver";
+import { mcReset, mcDeactivate } from "./monteCarloStore";
+import { toA1 } from "./a1";
+import type { AnimationSpec, ChartParamSpec, ScenarioSpec, MonteCarloSpec } from "../types";
 
 const clock = createPlaybackClock();
 
@@ -33,24 +37,50 @@ export const playbackEngine = {
 
   /** Configure (and restore any prior) a clock-cell driver. Leaves playback idle. */
   async setClockCellDriver(cfg: ClockCellConfig): Promise<void> {
+    mcDeactivate();
     exportSource = { kind: "grid" };
     await clock.setDriver(createClockCellDriver(cfg));
   },
 
   /** Configure (and restore any prior) a chart-param driver. Leaves playback idle. */
   async setChartParamDriver(cfg: ChartParamSpec): Promise<void> {
+    mcDeactivate();
     exportSource = { kind: "chart", chartId: cfg.chartId };
     await clock.setDriver(createChartParamDriver(cfg));
+  },
+
+  /** Configure a scenario keyframe-tween driver. Leaves playback idle. */
+  async setScenarioDriver(cfg: ScenarioSpec): Promise<void> {
+    mcDeactivate();
+    exportSource = { kind: "grid" };
+    await clock.setDriver(createScenarioDriver(cfg));
+  },
+
+  /** Configure a Monte Carlo driver (activates the histogram). Leaves playback idle. */
+  async setMonteCarloDriver(cfg: MonteCarloSpec): Promise<void> {
+    mcReset(toA1(cfg.outcomeRow, cfg.outcomeCol));
+    exportSource = null;
+    await clock.setDriver(createMonteCarloDriver(cfg));
   },
 
   /** Load a saved AnimationSpec into the engine (restores any prior driver). */
   async loadSpec(spec: AnimationSpec): Promise<void> {
     if (spec.driver === "clockCell" && spec.clockCell) {
+      mcDeactivate();
       exportSource = { kind: "grid" };
       await clock.setDriver(createClockCellDriver({ sheetIndex: spec.sheetIndex, ...spec.clockCell }));
     } else if (spec.driver === "chartParam" && spec.chartParam) {
+      mcDeactivate();
       exportSource = { kind: "chart", chartId: spec.chartParam.chartId };
       await clock.setDriver(createChartParamDriver(spec.chartParam));
+    } else if (spec.driver === "scenario" && spec.scenario) {
+      mcDeactivate();
+      exportSource = { kind: "grid" };
+      await clock.setDriver(createScenarioDriver(spec.scenario));
+    } else if (spec.driver === "monteCarlo" && spec.monteCarlo) {
+      mcReset(toA1(spec.monteCarlo.outcomeRow, spec.monteCarlo.outcomeCol));
+      exportSource = null;
+      await clock.setDriver(createMonteCarloDriver(spec.monteCarlo));
     } else {
       return;
     }
@@ -68,6 +98,7 @@ export const playbackEngine = {
 
   /** Drop the current driver, restoring the model first. */
   async clearDriver(): Promise<void> {
+    mcDeactivate();
     exportSource = null;
     await clock.setDriver(null);
   },

@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use crate::api_types::{
-    AnimApplyFrameParams, AnimRestoreParams, AnimSnapshotParams, AnimSnapshotResult,
-    AnimationFrameResult, CellData, GifExportRequest, GifFrame, MergedRegion,
+    AnimApplyFrameParams, AnimRerollParams, AnimRerollResult, AnimRestoreParams, AnimSnapshotParams,
+    AnimSnapshotResult, AnimationFrameResult, CellData, GifExportRequest, GifFrame, MergedRegion,
 };
 use crate::{
     evaluate_formula_multi_sheet, format_cell_value, get_column_row_dependents,
@@ -364,6 +364,45 @@ pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> Animat
         updated_cells,
         error: None,
     }
+}
+
+// ============================================================================
+// Monte Carlo: re-roll volatiles + read the outcome cell
+// ============================================================================
+
+/// Force a full sheet recalculation (which re-rolls volatile RAND/RANDBETWEEN
+/// cells) and return the outcome cell's numeric value. One call == one trial.
+/// Feature-open; makes no permanent structural change (RAND cells are volatile).
+#[tauri::command]
+pub fn anim_reroll_and_read(
+    state: State<AppState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    params: AnimRerollParams,
+) -> AnimRerollResult {
+    crate::calculation::recalculate_sheet_values(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        params.sheet_index,
+    );
+
+    let grids = state.grids.lock().unwrap();
+    if params.sheet_index >= grids.len() {
+        return AnimRerollResult {
+            value: None,
+            error: Some(format!("Sheet index {} out of range", params.sheet_index)),
+        };
+    }
+    let value = grids[params.sheet_index]
+        .get_cell(params.outcome_row, params.outcome_col)
+        .and_then(|c| match &c.value {
+            CellValue::Number(n) => Some(*n),
+            CellValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+            _ => None,
+        });
+
+    AnimRerollResult { value, error: None }
 }
 
 // ============================================================================

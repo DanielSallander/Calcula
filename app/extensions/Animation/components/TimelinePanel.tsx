@@ -13,6 +13,8 @@ import { playbackEngine, type EngineState } from "../lib/animationEngine";
 import { listAnimations, subscribeAnimations, deleteAnimation } from "../lib/animationStore";
 import { exportAnimationGif } from "../lib/gifExporter";
 import { exportAnimationWebm, isWebmRecordingSupported } from "../lib/webmExporter";
+import { mcActive } from "../lib/monteCarloStore";
+import { MonteCarloView } from "./MonteCarloView";
 import type { AnimationSpec } from "../types";
 import { parseA1 } from "../lib/a1";
 import { ANIMATION_DIALOG_ID } from "./AnimationDialog";
@@ -298,6 +300,8 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
           )}
         </div>
       </div>
+
+      {mcActive() && <MonteCarloView />}
     </div>
   );
 }

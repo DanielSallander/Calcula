@@ -6,7 +6,28 @@
 //          slices (chartParam / scenario / monteCarlo) and added as optional
 //          discriminated fields then.
 
-export type DriverKind = "clockCell" | "chartParam"; // future: | "scenario" | "monteCarlo"
+export type DriverKind = "clockCell" | "chartParam" | "scenario" | "monteCarlo";
+
+/** Tween across named Scenario Manager scenarios as keyframes. */
+export interface ScenarioSpec {
+  sheetIndex: number;
+  /** Scenario names, in visiting order. */
+  keyframes: string[];
+  /** Frames to spend tweening between adjacent keyframes (linear mode). */
+  framesPerSegment: number;
+  /** "step" snaps between scenarios; "linear" lerps numeric changing cells. */
+  interpolate: "step" | "linear";
+}
+
+/** Repeatedly re-roll volatile (RAND) cells and accumulate an outcome distribution. */
+export interface MonteCarloSpec {
+  sheetIndex: number;
+  outcomeRow: number;
+  outcomeCol: number;
+  trials: number;
+  /** Histogram bin count (default 20). */
+  bins?: number;
+}
 
 export interface ClockCellSpec {
   /** Driver cell (0-based). */
@@ -45,4 +66,6 @@ export interface AnimationSpec {
   playback: PlaybackSettings;
   clockCell?: ClockCellSpec;
   chartParam?: ChartParamSpec;
+  scenario?: ScenarioSpec;
+  monteCarlo?: MonteCarloSpec;
 }

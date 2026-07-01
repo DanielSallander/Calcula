@@ -67,6 +67,45 @@ export function animRestore(token: string, sheetIndex: number): Promise<Animatio
   });
 }
 
+/** Result of one Monte Carlo trial (re-roll volatiles + read the outcome cell). */
+export interface AnimRerollResult {
+  value: number | null;
+  error: string | null;
+}
+
+/**
+ * Force a full sheet recalc (re-rolls RAND/RANDBETWEEN) and read the outcome
+ * cell's numeric value. One call == one Monte Carlo trial.
+ */
+export function animRerollAndRead(
+  sheetIndex: number,
+  outcomeRow: number,
+  outcomeCol: number,
+): Promise<AnimRerollResult> {
+  return animationBackend.invoke<AnimRerollResult>("anim_reroll_and_read", {
+    params: { sheetIndex, outcomeRow, outcomeCol },
+  });
+}
+
+/** One scenario's changing cell (as stored by the Scenario Manager). */
+export interface ScenarioChangingCell {
+  row: number;
+  col: number;
+  value: string;
+}
+
+export interface ScenarioData {
+  name: string;
+  changingCells: ScenarioChangingCell[];
+}
+
+/** List the named scenarios on a sheet (from the Scenario Manager). */
+export function listScenarios(sheetIndex: number): Promise<ScenarioData[]> {
+  return animationBackend
+    .invoke<{ scenarios: ScenarioData[] }>("scenario_list", { sheetIndex })
+    .then((r) => r.scenarios ?? []);
+}
+
 /** One GIF frame: flattened RGBA bytes (width*height*4) + delay in centiseconds. */
 export interface GifFrame {
   rgba: number[];

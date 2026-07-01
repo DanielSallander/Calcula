@@ -4,6 +4,8 @@ import {
   animSnapshot,
   animApplyFrame,
   animRestore,
+  animRerollAndRead,
+  listScenarios,
   exportGif,
 } from "../animationBackend";
 
@@ -46,6 +48,24 @@ describe("animationBackend wrappers", () => {
     expect(invoke).toHaveBeenCalledWith("anim_restore", {
       params: { token: "tok-1", sheetIndex: 2 },
     });
+  });
+
+  it("animRerollAndRead -> anim_reroll_and_read", async () => {
+    const invoke = vi.fn().mockResolvedValue({ value: 3.14, error: null });
+    animationBackend.set(invoke);
+    const r = await animRerollAndRead(2, 9, 1);
+    expect(invoke).toHaveBeenCalledWith("anim_reroll_and_read", {
+      params: { sheetIndex: 2, outcomeRow: 9, outcomeCol: 1 },
+    });
+    expect(r).toEqual({ value: 3.14, error: null });
+  });
+
+  it("listScenarios -> scenario_list, returns the scenarios array", async () => {
+    const invoke = vi.fn().mockResolvedValue({ scenarios: [{ name: "A", changingCells: [] }] });
+    animationBackend.set(invoke);
+    const r = await listScenarios(0);
+    expect(invoke).toHaveBeenCalledWith("scenario_list", { sheetIndex: 0 });
+    expect(r).toEqual([{ name: "A", changingCells: [] }]);
   });
 
   it("exportGif -> export_gif with a { req } payload", async () => {

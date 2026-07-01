@@ -1842,6 +1842,26 @@ pub struct AnimationFrameResult {
     pub error: Option<String>,
 }
 
+/// Params for `anim_reroll_and_read` (Monte Carlo): re-roll volatiles + read a cell.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimRerollParams {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// Outcome cell to read after the recalc (0-based).
+    pub outcome_row: u32,
+    pub outcome_col: u32,
+}
+
+/// Result of one Monte Carlo trial: the numeric outcome after a fresh recalc.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimRerollResult {
+    /// The outcome cell's numeric value (None if it is not numeric).
+    pub value: Option<f64>,
+    pub error: Option<String>,
+}
+
 /// One frame of a GIF export: RGBA pixels (width*height*4) + its display delay.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
