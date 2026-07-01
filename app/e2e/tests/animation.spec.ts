@@ -1,5 +1,8 @@
 import { test, expect } from "../fixtures";
 import type { Page } from "@playwright/test";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 /**
  * Read a cell's current DISPLAY value straight from the backend (get_cell), so
@@ -38,6 +41,19 @@ async function openNewAnimationDialog(grid: GridLike): Promise<void> {
   await newBtn.waitFor({ state: "visible", timeout: 8000 });
   await newBtn.click();
   await expect(grid.page.locator('[data-testid="anim-driver-type"]')).toBeVisible({ timeout: 8000 });
+}
+
+/** Open the panel and configure a clock-cell driver via the quick-config. */
+async function configureClockDriver(grid: GridLike, cell: string, from: string, to: string, step: string, expectFrame: string): Promise<void> {
+  await grid.openMenu("View");
+  await grid.clickMenuItem("Animation Timeline");
+  await expect(grid.page.locator('[data-testid="anim-driver-cell"]')).toBeVisible({ timeout: 8000 });
+  await grid.page.locator('[data-testid="anim-driver-cell"]').fill(cell);
+  await grid.page.locator('[data-testid="anim-from"]').fill(from);
+  await grid.page.locator('[data-testid="anim-to"]').fill(to);
+  await grid.page.locator('[data-testid="anim-step"]').fill(step);
+  await grid.page.locator('[data-testid="anim-set-driver"]').click();
+  await expect(grid.page.locator('[data-testid="anim-frame"]')).toHaveText(expectFrame, { timeout: 5000 });
 }
 
 test.describe("Animation extension", () => {
@@ -201,5 +217,60 @@ test.describe("Animation extension", () => {
     await expect.poll(async () => Number(await countEl.textContent()), { timeout: 10000 }).toBeGreaterThan(1);
 
     await page.locator('button[title="Stop (reset)"]').click();
+  });
+
+  test("Export GIF backend encodes and writes a valid GIF to disk", async ({ grid }) => {
+    // The native "Save As" dialog can't be JS-stubbed in a running Tauri app — its
+    // IPC entry point (window.__TAURI_INTERNALS__.invoke) is a locked, non-writable /
+    // non-configurable property (Tauri v2 security). So, exactly like encryption.spec.ts
+    // does for file dialogs, drive the export's backend command directly with an
+    // explicit path. This verifies the real `export_gif` command over IPC end to end:
+    // RGBA frames -> Rust `gif`-crate encode -> a valid animated GIF's bytes on disk.
+    const page = grid.page;
+    const gifPath = path.join(os.tmpdir(), `calcula-e2e-anim-gif-${process.pid}.gif`);
+    try {
+      fs.rmSync(gifPath, { force: true });
+      const W = 4;
+      const H = 4;
+      const solid = (r: number, g: number, b: number): number[] => {
+        const px: number[] = [];
+        for (let i = 0; i < W * H; i++) px.push(r, g, b, 255);
+        return px;
+      };
+      await invoke(page, "export_gif", {
+        req: {
+          path: gifPath,
+          width: W,
+          height: H,
+          frames: [
+            { rgba: solid(220, 30, 30), delayCs: 10 },
+            { rgba: solid(30, 30, 220), delayCs: 10 },
+          ],
+          repeat: true,
+        },
+      });
+
+      expect(fs.existsSync(gifPath)).toBe(true);
+      const buf = fs.readFileSync(gifPath);
+      expect(buf.length).toBeGreaterThan(0);
+      expect(buf.subarray(0, 6).toString("ascii")).toBe("GIF89a"); // animated-GIF magic
+    } finally {
+      fs.rmSync(gifPath, { force: true });
+    }
+  });
+
+  test("Export controls are enabled once an animation is loaded", async ({ grid }) => {
+    // The full click-through export can't run in e2e (the native save dialog blocks and
+    // its IPC can't be stubbed — see the GIF-backend test), so assert the export UI is
+    // correctly wired instead: with a driver loaded, both export buttons are enabled.
+    // The WebM button being enabled also confirms MediaRecorder + canvas.captureStream
+    // are available in WebView2 (isWebmRecordingSupported() is true).
+    const page = grid.page;
+    await grid.setCellValueDirect("A1", "0");
+    await grid.setCellValueDirect("B1", "=A1*2");
+    await configureClockDriver(grid, "A1", "0", "10", "1", "1 / 11");
+
+    await expect(page.getByRole("button", { name: "Export GIF" })).toBeEnabled({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Export WebM" })).toBeEnabled({ timeout: 5000 });
   });
 });
