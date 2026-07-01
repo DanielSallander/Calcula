@@ -72,7 +72,6 @@ import { registerGridOverlay } from "../../api/gridOverlays";
 import { registerEditGuard, registerRangeGuard } from "../../api/editGuards";
 import { registerCellClickInterceptor } from "../../api/cellClickInterceptors";
 import { registerCellDoubleClickInterceptor } from "../../api/cellDoubleClickInterceptors";
-import { registerShortcut, getShortcuts } from "../../api/keyboard";
 import {
   registerKeybinding,
   getAllKeybindings,
@@ -291,11 +290,6 @@ function buildContext(): ExtensionContext {
         registerDoubleClickInterceptor: registerCellDoubleClickInterceptor,
       },
     },
-    keyboard: {
-      registerShortcut: (combo: string, commandId: string, options?: import("../../api/keyboard").RegisterShortcutOptions) =>
-        registerShortcut(combo, commandId, "", options),
-      getShortcuts,
-    },
     keybindings: {
       register: registerKeybinding,
       getAll: getAllKeybindings,
@@ -482,11 +476,6 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
       // Create a per-extension context with extension-scoped APIs
       const extContext: ExtensionContext = {
         ...this.context,
-        keyboard: {
-          registerShortcut: (combo, commandId, options) =>
-            registerShortcut(combo, commandId, id, options),
-          getShortcuts,
-        },
         keybindings: {
           register: (binding) =>
             registerKeybinding({ ...binding, source: "extension", extensionId: id }),

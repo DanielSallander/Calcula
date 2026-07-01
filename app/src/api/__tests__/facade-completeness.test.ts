@@ -384,12 +384,6 @@ describe("API Facade Completeness", () => {
       expect(typeof mod.registerCellClickInterceptor).toBe("function");
     });
 
-    it("keyboard shortcut API is available", async () => {
-      const mod = await import("../keyboard");
-      expect(typeof mod.registerShortcut).toBe("function");
-      expect(typeof mod.getShortcuts).toBe("function");
-    });
-
     it("file format API is available", async () => {
       const mod = await import("../fileFormats");
       expect(typeof mod.registerFileFormat).toBe("function");

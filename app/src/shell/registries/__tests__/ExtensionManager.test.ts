@@ -97,11 +97,6 @@ vi.mock("../../../src/api/cellDoubleClickInterceptors", () => ({
   registerCellDoubleClickInterceptor: vi.fn(),
 }));
 
-vi.mock("../../../src/api/keyboard", () => ({
-  registerShortcut: vi.fn(),
-  getShortcuts: vi.fn(() => []),
-}));
-
 vi.mock("../../../src/api/keybindings", () => ({
   registerKeybinding: vi.fn(() => () => {}),
   getAllKeybindings: vi.fn(() => []),

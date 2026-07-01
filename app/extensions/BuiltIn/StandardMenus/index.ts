@@ -4,18 +4,37 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenu, registerShellComponent, unregisterShellComponent, type MenuDefinition } from "@api/ui";
+import { registerMenu, registerShellComponent, unregisterShellComponent, showDialog, type MenuDefinition } from "@api/ui";
 import { CoreCommands } from "@api/commands";
 import { registerFormatMenu } from "./FormatMenu";
+import { fileNew, fileOpen, fileSave, fileSaveAs } from "./FileMenu";
 import { StandardMenus } from "./StandardMenus";
 
 const SHELL_COMPONENT_ID = "standard-menus";
+
+// Commands for the hook-based File/Insert/View menu items that previously had
+// only an `action` (no commandId) and no keybinding — so they were dispatchable
+// ONLY by the MenuBar accelerator handler. Registering them here makes them
+// reachable by the centralized keybinding dispatcher (see DEFAULT_KEYBINDINGS),
+// which is the prerequisite for removing MenuBar's own keydown handler.
+const MENU_ACTION_COMMANDS = "core.file.new core.file.open core.file.save core.file.saveAs insert.table view.goToSpecial".split(" ");
 
 // ============================================================================
 // Extension State
 // ============================================================================
 
 let isActivated = false;
+let activeContext: ExtensionContext | null = null;
+
+function registerMenuActionCommands(context: ExtensionContext): void {
+  context.commands.register("core.file.new", () => fileNew());
+  context.commands.register("core.file.open", () => fileOpen());
+  context.commands.register("core.file.save", () => fileSave());
+  context.commands.register("core.file.saveAs", () => fileSaveAs());
+  // Stateless dialog openers (same one-liners the menu items' actions use).
+  context.commands.register("insert.table", () => showDialog("table:createDialog"));
+  context.commands.register("view.goToSpecial", () => showDialog("go-to-special"));
+}
 
 // ============================================================================
 // Menu Definitions
@@ -97,6 +116,8 @@ function activate(context: ExtensionContext): void {
   // File, View, Insert are handled by StandardMenus.tsx component (hook-based)
   registerEditMenu(context);
   registerFormatMenu();
+  registerMenuActionCommands(context);
+  activeContext = context;
 
   // Contribute the hook-based File/View/Insert menus component to the shell frame
   // via the @api shell-component registry — the Shell no longer hard-imports it.
@@ -117,6 +138,8 @@ function deactivate(): void {
 
   console.log("[StandardMenusExtension] Deactivating...");
   unregisterShellComponent(SHELL_COMPONENT_ID);
+  for (const id of MENU_ACTION_COMMANDS) activeContext?.commands.unregister(id);
+  activeContext = null;
   isActivated = false;
   console.log("[StandardMenusExtension] Deactivated.");
 }

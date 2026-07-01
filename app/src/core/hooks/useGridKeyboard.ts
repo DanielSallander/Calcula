@@ -30,16 +30,6 @@ interface UseGridKeyboardOptions {
   enabled?: boolean;
   /** Whether editing is active (if true, skip navigation) */
   isEditing?: boolean;
-  /** Callback for cut operation */
-  onCut?: () => Promise<void>;
-  /** Callback for copy operation */
-  onCopy?: () => Promise<void>;
-  /** Callback for paste operation */
-  onPaste?: () => Promise<void>;
-  /** Callback for undo operation */
-  onUndo?: () => Promise<void>;
-  /** Callback for redo operation */
-  onRedo?: () => Promise<void>;
   /** Callback for clearing clipboard (ESC key) */
   onClearClipboard?: () => void;
   /** Whether clipboard has content (for ESC handling) */
@@ -89,11 +79,6 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     onSelectionChange,
     enabled = true,
     isEditing = false,
-    onCut,
-    onCopy,
-    onPaste,
-    onUndo,
-    onRedo,
     onClearClipboard,
     hasClipboardContent = false,
     onDelete,
@@ -509,81 +494,13 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle clipboard shortcuts
+      // Clipboard (Ctrl+C/X/V) and undo/redo (Ctrl+Z/Y) are owned by the
+      // centralized keybinding registry. Its capture-phase handler matches these
+      // grid-scoped commands and stopPropagation()s before this bubble-phase
+      // handler runs whenever the grid is focused, so cases for them here would be
+      // dead. See app/src/api/keybindings.ts.
       if (modKey && !altKey) {
         switch (key.toLowerCase()) {
-          case 'c':
-            // Ctrl+C - Copy
-            if (onCopy) {
-              // If the user has selected real DOM text (e.g. in a toast, dialog,
-              // or side panel), let the browser's native copy handle it. Grid
-              // cells are canvas-drawn and never produce a DOM text selection, so
-              // a non-collapsed selection means the user wants that text, not the cell.
-              const domSel = window.getSelection();
-              if (domSel && domSel.rangeCount > 0 && !domSel.isCollapsed && domSel.toString().trim() !== "") {
-                fnLog.exit('handleKeyDown', 'skipped copy (DOM text selection present)');
-                return;
-              }
-              event.preventDefault();
-              event.stopPropagation();
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+C', ['Ctrl']);
-              onCopy();
-              fnLog.exit('handleKeyDown', 'copy');
-              return;
-            }
-            break;
-          
-          case 'x':
-            // Ctrl+X - Cut
-            if (onCut) {
-              event.preventDefault();
-              event.stopPropagation();
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+X', ['Ctrl']);
-              onCut();
-              fnLog.exit('handleKeyDown', 'cut');
-              return;
-            }
-            break;
-          
-          case 'v':
-            // Ctrl+V - Paste
-            if (onPaste) {
-              event.preventDefault();
-              event.stopPropagation();
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+V', ['Ctrl']);
-              onPaste();
-              fnLog.exit('handleKeyDown', 'paste');
-              return;
-            }
-            break;
-          
-          case 'z':
-            // Ctrl+Z - Undo, Ctrl+Shift+Z - Redo
-            event.preventDefault();
-            event.stopPropagation();
-            if (shiftKey && onRedo) {
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+Z', ['Ctrl', 'Shift']);
-              onRedo();
-              fnLog.exit('handleKeyDown', 'redo');
-            } else if (onUndo) {
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Z', ['Ctrl']);
-              onUndo();
-              fnLog.exit('handleKeyDown', 'undo');
-            }
-            return;
-          
-          case 'y':
-            // Ctrl+Y - Redo (alternative)
-            if (onRedo) {
-              event.preventDefault();
-              event.stopPropagation();
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Y', ['Ctrl']);
-              onRedo();
-              fnLog.exit('handleKeyDown', 'redo');
-              return;
-            }
-            break;
-
           case 'a':
             // Ctrl+A - Select all cells
             event.preventDefault();
@@ -638,29 +555,8 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
             }
             break;
 
-          case 'd':
-            // Ctrl+D - Fill down
-            if (!shiftKey && onCommand) {
-              event.preventDefault();
-              event.stopPropagation();
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+D', ['Ctrl']);
-              onCommand('edit.fillDown');
-              fnLog.exit('handleKeyDown', 'fill down');
-              return;
-            }
-            break;
-
-          case 'r':
-            // Ctrl+R - Fill right
-            if (!shiftKey && onCommand) {
-              event.preventDefault();
-              event.stopPropagation();
-              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+R', ['Ctrl']);
-              onCommand('edit.fillRight');
-              fnLog.exit('handleKeyDown', 'fill right');
-              return;
-            }
-            break;
+          // Fill down/right (Ctrl+D/R) are owned by the keybinding registry
+          // (bridged to gridCommands.fillDown/fillRight); dead here — see above.
         }
       }
 
@@ -1016,7 +912,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation]
   );
 
   /**

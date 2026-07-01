@@ -1274,11 +1274,6 @@ export function useSpreadsheetSelection({
   useGridKeyboard({
     containerRef: focusContainerRef,
     enabled: isFocused,
-    onCut: cut,
-    onCopy: copy,
-    onPaste: paste,
-    onUndo: handleUndo,
-    onRedo: handleRedo,
     onClearClipboard: clearClipboardState,
     hasClipboardContent: clipboardMode !== "none",
     onDelete: handleDeleteContents,

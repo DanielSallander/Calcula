@@ -1,8 +1,23 @@
 //! FILENAME: app/src/api/keybindings.ts
-// PURPOSE: Centralized, user-configurable keybinding registry.
-// CONTEXT: Replaces ad-hoc keyboard shortcut registrations with a single
-//          registry that supports user customization, conflict detection,
-//          and a settings UI.
+// PURPOSE: Centralized, user-configurable keybinding registry AND the single
+//          dispatcher for named-command keyboard shortcuts.
+// CONTEXT: `handleGlobalKeyDown` (installed by initKeybindings at bootstrap) is
+//          the ONE place that turns a keydown into a CommandRegistry.execute for
+//          app shortcuts. Ownership boundary:
+//            - Registry (here): every named-command shortcut — built-in, menu,
+//              and extension. Menu items carry a `shortcut` string for DISPLAY
+//              only; MenuBar no longer dispatches (see MenuBar.tsx).
+//            - Grid (core/hooks/useGridKeyboard.ts): view-state keys that are
+//              meaningless without grid focus — navigation, selection, edit-mode
+//              (F2/Esc/F8), plus grid-only command keys it handles locally
+//              (format toggles, number formats, Ctrl+;, Ctrl+`, F5/F9/F11).
+//          Grid-scoped commands (GRID_SCOPED_COMMANDS) fire only with grid focus
+//          and defer to native otherwise; copy/cut additionally defer when a DOM
+//          text selection exists. Supports user customization, conflict
+//          detection, and a settings UI.
+// NOTE: The grid switch still contains (now-dead) clipboard/undo/fill cases that
+//       the registry pre-empts via capture-phase stopPropagation; removing them
+//       is a tracked, behavior-neutral follow-up (needs clipboard test coverage).
 
 import { CommandRegistry } from "./commands";
 
@@ -76,8 +91,11 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "core.pasteSpecial", combo: "Ctrl+Shift+V", commandId: "core.clipboard.pasteSpecial", label: "Paste Special", category: "Clipboard", source: "built-in" },
 
   // Edit
-  { id: "core.undo", combo: "Ctrl+Z", commandId: "core.edit.undo", label: "Undo", category: "Editing", source: "built-in" },
-  { id: "core.redo", combo: "Ctrl+Y", commandId: "core.edit.redo", label: "Redo", category: "Editing", source: "built-in" },
+  // Undo/redo are app-global (fire even when focus is on a non-grid shell
+  // element) but NOT while editing a text input (so native input undo works).
+  // Hence context:"not-editing" rather than grid-scoped.
+  { id: "core.undo", combo: "Ctrl+Z", commandId: "core.edit.undo", label: "Undo", category: "Editing", context: "not-editing", source: "built-in" },
+  { id: "core.redo", combo: "Ctrl+Y", commandId: "core.edit.redo", label: "Redo", category: "Editing", context: "not-editing", source: "built-in" },
   { id: "core.find", combo: "Ctrl+F", commandId: "core.edit.find", label: "Find", category: "Editing", source: "built-in" },
   { id: "core.replace", combo: "Ctrl+H", commandId: "core.edit.replace", label: "Replace", category: "Editing", source: "built-in" },
   { id: "core.clearContents", combo: "Delete", commandId: "core.edit.clearContents", label: "Clear Contents", category: "Editing", context: "not-editing", source: "built-in" },
@@ -89,6 +107,20 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   // Format
   { id: "core.formatCells", combo: "Ctrl+1", commandId: "core.format.cells", label: "Format Cells", category: "Formatting", source: "built-in" },
   { id: "core.formatPainter", combo: "Ctrl+Shift+C", commandId: "core.format.painter", label: "Format Painter", category: "Formatting", source: "built-in" },
+
+  // File (global — must fire even when focus is outside the grid). Commands are
+  // registered by the StandardMenus extension.
+  { id: "core.file.new", combo: "Ctrl+N", commandId: "core.file.new", label: "New", category: "File", source: "built-in" },
+  { id: "core.file.open", combo: "Ctrl+O", commandId: "core.file.open", label: "Open", category: "File", source: "built-in" },
+  { id: "core.file.save", combo: "Ctrl+S", commandId: "core.file.save", label: "Save", category: "File", source: "built-in" },
+  { id: "core.file.saveAs", combo: "Ctrl+Shift+S", commandId: "core.file.saveAs", label: "Save As", category: "File", source: "built-in" },
+
+  // Insert / navigation (menu-bar shortcuts formerly dispatched only by MenuBar)
+  { id: "core.insertTable", combo: "Ctrl+T", commandId: "insert.table", label: "Insert Table", category: "Insert", source: "built-in" },
+  { id: "core.goToSpecial", combo: "Ctrl+G", commandId: "view.goToSpecial", label: "Go To Special", category: "Navigation", source: "built-in" },
+
+  // Merge (grid-scoped; bridges to gridCommands.mergeCells via CommandRegistry)
+  { id: "core.merge", combo: "Ctrl+M", commandId: "core.grid.merge", label: "Merge Cells", category: "Editing", source: "built-in" },
 
   // Navigation / View
   { id: "ext.search.findReplace", combo: "Ctrl+Shift+H", commandId: "search.openFindReplace", label: "Find and Replace", category: "Navigation", source: "built-in" },
@@ -298,8 +330,6 @@ const GRID_SCOPED_COMMANDS = new Set([
   "core.clipboard.pasteFormulas",
   "core.clipboard.pasteFormatting",
   "core.clipboard.pasteLink",
-  "core.edit.undo",
-  "core.edit.redo",
   "core.edit.clearContents",
   "core.edit.fillDown",
   "core.edit.fillRight",
@@ -307,6 +337,7 @@ const GRID_SCOPED_COMMANDS = new Set([
   "core.edit.fillLeft",
   "core.format.cells",
   "core.format.painter",
+  "core.grid.merge",
 ]);
 
 // ============================================================================

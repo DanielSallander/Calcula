@@ -781,17 +781,6 @@ export type {
 } from "./settings";
 
 // ============================================================================
-// Keyboard Shortcuts API
-// ============================================================================
-
-export { registerShortcut, getShortcuts } from "./keyboard";
-export type {
-  ShortcutBinding,
-  ShortcutModifiers,
-  RegisterShortcutOptions,
-  IKeyboardAPI,
-} from "./keyboard";
-
 // ============================================================================
 // Keybindings API (Centralized, user-configurable)
 // ============================================================================

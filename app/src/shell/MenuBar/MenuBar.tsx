@@ -29,26 +29,6 @@ function BrandingLogo(): React.ReactElement | null {
 export type { MenuItem, Menu } from './MenuBar.types';
 
 // ============================================================================
-// Recursive helper: find shortcut match at any nesting depth
-// ============================================================================
-
-function findShortcutItem(
-  items: UI.MenuItemDefinition[],
-  keyCombo: string
-): UI.MenuItemDefinition | null {
-  for (const item of items) {
-    if (item.shortcut && normalizeShortcut(item.shortcut) === keyCombo && !item.disabled) {
-      return item;
-    }
-    if (item.children) {
-      const found = findShortcutItem(item.children, keyCombo);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-// ============================================================================
 // CustomContentRenderer - isolates custom content in its own component scope
 // so that hooks inside the custom content don't bleed into RecursiveMenuItem.
 // ============================================================================
@@ -152,17 +132,6 @@ function RecursiveMenuItem({ item, index, executeMenuItem, closeMenu }: Recursiv
 // MenuBar
 // ============================================================================
 
-/**
- * True if the user has a non-collapsed DOM text selection (e.g. selected text in
- * a toast, dialog, or side panel). Grid cells are canvas-drawn and never produce
- * a DOM text selection, so this reliably means the user wants to copy/cut that
- * text — not the active cell — and native browser behaviour should win.
- */
-function hasDomTextSelection(): boolean {
-  const sel = typeof window !== "undefined" ? window.getSelection() : null;
-  return !!sel && sel.rangeCount > 0 && !sel.isCollapsed && sel.toString().trim() !== "";
-}
-
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [menus, setMenus] = useState<UI.MenuDefinition[]>(() => UI.getMenus());
@@ -224,51 +193,10 @@ export function MenuBar(): React.ReactElement {
     return () => window.removeEventListener("keydown", handleEscape);
   }, [openMenu, closeMenu]);
 
-  // 3. Dynamic Keyboard Shortcuts (recursive search through all nesting depths)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      const isInputField = target.tagName === 'INPUT' ||
-                           target.tagName === 'TEXTAREA' ||
-                           target.isContentEditable;
-
-      // Don't intercept any keyboard events when focus is inside a Monaco editor
-      // (e.g., notebook cells, chart spec editor). Monaco handles its own shortcuts.
-      if (target.closest?.(".monaco-editor")) return;
-
-      if (isInputField && !e.ctrlKey && !e.metaKey) return;
-
-      // Don't intercept standard text editing shortcuts when focus is in an input/textarea
-      if (isInputField && (e.ctrlKey || e.metaKey)) {
-        const k = e.key.toLowerCase();
-        if (k === 'v' || k === 'c' || k === 'x' || k === 'a' || k === 'z' || k === 'y') return;
-      }
-
-      const keyCombo = parseKeyboardEvent(e);
-      if (!keyCombo) return;
-
-      for (const menu of menus) {
-        const match = findShortcutItem(menu.items, keyCombo);
-        if (match) {
-          // Let the browser's native copy/cut handle a real DOM text selection
-          // (e.g. selected text in a toast, dialog, or panel) rather than running
-          // the grid clipboard command over the active cell.
-          if (
-            (match.commandId === "core.clipboard.copy" || match.commandId === "core.clipboard.cut") &&
-            hasDomTextSelection()
-          ) {
-            return;
-          }
-          e.preventDefault();
-          executeMenuItem(match);
-          return;
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [menus, executeMenuItem]);
+  // Keyboard shortcut DISPATCH is owned solely by the centralized keybinding
+  // registry (app/src/api/keybindings.ts). Menu items keep their `shortcut`
+  // string for DISPLAY only — see RecursiveMenuItem's <S.Shortcut> render. There
+  // is intentionally no keydown listener here anymore.
 
   const handleMenuClick = (menuId: string) => {
     if (openMenu === menuId) {
@@ -316,20 +244,3 @@ export function MenuBar(): React.ReactElement {
   );
 }
 
-function normalizeShortcut(shortcut: string): string {
-  return shortcut.toLowerCase().replace(/\s/g, '');
-}
-
-function parseKeyboardEvent(e: KeyboardEvent): string | null {
-  if (!e.ctrlKey && !e.metaKey) return null;
-
-  const parts = [];
-  if (e.ctrlKey || e.metaKey) parts.push('ctrl');
-  if (e.shiftKey) parts.push('shift');
-  if (e.altKey) parts.push('alt');
-
-  if (['Control', 'Meta', 'Shift', 'Alt'].includes(e.key)) return null;
-
-  parts.push(e.key.toLowerCase());
-  return parts.join('+');
-}
