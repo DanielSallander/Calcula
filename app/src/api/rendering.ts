@@ -64,7 +64,7 @@ export function chartsIdle(): boolean {
 // Generic grid-canvas region capture (implemented by Core; GridCanvas registers
 // the capturer on mount). Used by capture/export to grab a cell range's on-screen
 // pixels as ImageData (e.g. animating a grid selection to GIF).
-export { captureGridRegion, isGridCaptureReady, type CaptureRange } from "../core/lib/gridCapture";
+export { captureGridRegion, isGridCaptureReady, getGridCanvas, type CaptureRange } from "../core/lib/gridCapture";
 
 export interface RenderSettleOptions {
   /** Wait for THIS chart to be current + not pending; omit for the coarse global gate. */

@@ -13,7 +13,7 @@ import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG, DEFAULT_
 import type { GridTheme } from "../../lib/gridRenderer";
 import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
 import { getColumnX, getRowY } from "../../lib/gridRenderer/layout/dimensions";
-import { setGridCapturer, type CaptureRange } from "../../lib/gridCapture";
+import { setGridCapturer, setGridCanvas, type CaptureRange } from "../../lib/gridCapture";
 import * as S from "./GridCanvas.styles";
 
 /**
@@ -884,6 +884,12 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       setGridCapturer(captureRange);
       return () => setGridCapturer(null);
     }, [captureRange]);
+
+    // Register the live canvas element for captureStream-based recording (WebM).
+    useEffect(() => {
+      setGridCanvas(canvasRef.current);
+      return () => setGridCanvas(null);
+    }, []);
 
     /**
      * Expose imperative methods via ref.

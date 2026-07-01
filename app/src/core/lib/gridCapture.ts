@@ -36,3 +36,21 @@ export function isGridCaptureReady(): boolean {
 export function captureGridRegion(range: CaptureRange): ImageData | null {
   return capturer ? capturer(range) : null;
 }
+
+// ---------------------------------------------------------------------------
+// Live canvas element (for captureStream-based recording, e.g. WebM export).
+// GridCanvas registers its element on mount; consumers must not retain it past
+// unmount (it is nulled on unmount).
+// ---------------------------------------------------------------------------
+
+let gridCanvasEl: HTMLCanvasElement | null = null;
+
+/** GridCanvas registers its canvas element on mount, and null on unmount. */
+export function setGridCanvas(el: HTMLCanvasElement | null): void {
+  gridCanvasEl = el;
+}
+
+/** The live main grid canvas element, or null if no grid is mounted. */
+export function getGridCanvas(): HTMLCanvasElement | null {
+  return gridCanvasEl;
+}

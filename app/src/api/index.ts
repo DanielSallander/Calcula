@@ -1738,6 +1738,7 @@ export {
   awaitRenderSettled,
   captureGridRegion,
   isGridCaptureReady,
+  getGridCanvas,
 } from "./rendering";
 export type { ChartRenderingApi, RenderSettleOptions, CaptureRange } from "./rendering";
 // Feature-neutral chart-param control facade (Charts provides the impl via

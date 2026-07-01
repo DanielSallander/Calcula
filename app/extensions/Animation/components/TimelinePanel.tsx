@@ -12,6 +12,7 @@ import type { Selection } from "@api";
 import { playbackEngine, type EngineState } from "../lib/animationEngine";
 import { listAnimations, subscribeAnimations, deleteAnimation } from "../lib/animationStore";
 import { exportAnimationGif } from "../lib/gifExporter";
+import { exportAnimationWebm, isWebmRecordingSupported } from "../lib/webmExporter";
 import type { AnimationSpec } from "../types";
 import { parseA1 } from "../lib/a1";
 import { ANIMATION_DIALOG_ID } from "./AnimationDialog";
@@ -99,6 +100,22 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
           : `Export failed: ${result.error}`,
     );
   }, [selection]);
+
+  const handleExportWebm = useCallback(async () => {
+    setExportMsg(null);
+    setExporting(true);
+    const result = await exportAnimationWebm("animation");
+    setExporting(false);
+    setExportMsg(
+      result.ok
+        ? `Saved ${result.path}`
+        : result.error === "cancelled"
+          ? null
+          : `Export failed: ${result.error}`,
+    );
+  }, []);
+
+  const webmSupported = isWebmRecordingSupported();
 
   const handleSetDriver = useCallback(async () => {
     const parsed = parseA1(cellRef);
@@ -262,6 +279,14 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <button style={btn} disabled={!hasDriver || exporting} onClick={() => void handleExport()}>
             {exporting ? "Exporting…" : "Export GIF"}
+          </button>
+          <button
+            style={btn}
+            disabled={!hasDriver || exporting || !webmSupported}
+            title={webmSupported ? "Record live playback to WebM video" : "Video recording is not available in this runtime"}
+            onClick={() => void handleExportWebm()}
+          >
+            Export WebM
           </button>
           {exportMsg && (
             <span
