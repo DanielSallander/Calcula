@@ -113,7 +113,7 @@ Extensions interact with Core exclusively through the API Facade:
 3. **Dogfooding:** Built-in features (Formatting, Charts) must be built using the public Extension API. If the API cannot support a feature, improve the API rather than hacking the feature into Core
 4. **Inversion of Control:** The Core does not call Extensions. The Core emits events/hooks (via the API), and Extensions respond
 5. **Primitive vs. Logic:** If a feature requires new logic (e.g., Sorting), implement generic primitives in Core (e.g., read/write range) and specific business logic in an Extension
-6. **Feature Location:** Default to building features as Extensions (`app/extensions/`; built-in dialogs/menus live under `app/extensions/BuiltIn/`) unless they are foundational primitives (like Rendering or Undo/Redo)
+6. **Feature Location:** Default to building features as Extensions (`app/extensions/`; built-in dialogs/menus live under `app/extensions/BuiltIn/`) unless they are foundational primitives (like Rendering or Undo/Redo). Features that *preview* or *simulate* without persisting must follow the **transient-write pattern**: snapshot the model, apply writes that never enter the undo stack or dirty the document, and restore on stop/cancel. Animation demonstrates this — each frame advances a driver, recalculates dependents, and repaints without touching the undo graph; stopping restores the original state (backend precedent: `scenario_show`; see `docs/design/animation-simulation.md`)
 
 ### Naming Conventions (Rust <-> TypeScript API Boundary)
 
@@ -167,6 +167,7 @@ export interface CellData {
 - Importing from `extensions/` in core code (core must never depend on extensions)
 - Importing deep into `src/core/...` from extensions (use `src/api` only)
 - Creating backdoor access for built-in extensions (they must use the same API as 3rd party extensions)
+- Importing Core/Shell grid-capture or another extension's internals to drive it — use the feature-neutral facades instead (`@api/rendering` for frame/grid capture, `@api/chartParams` for cross-extension param control); the transient-write discipline lives behind the facade, not in the extension
 
 ## The "Calcula" Decision Matrix
 
@@ -203,6 +204,7 @@ When developing a new feature, ask these three questions:
 - Financial functions (PMT, NPV, IRR)
 - Statistical functions (AVERAGE, STDEV)
 - Pivot Tables
+- Animation / Simulation playback (transient frame playback with no undo entries; four drivers: clock-cell, chart-param, scenario-tween, Monte Carlo)
 
 ## Development environment
 In order for Rust environment to work it must first be set using the script:

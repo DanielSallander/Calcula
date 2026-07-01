@@ -54,7 +54,7 @@ export function MonteCarloView(): React.ReactElement {
               })()}
           </svg>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 12px", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-            <span>trials: <strong>{stats.count}</strong></span>
+            <span>trials: <strong data-testid="anim-mc-trials-count">{stats.count}</strong></span>
             <span>mean: <strong>{fmt(stats.mean)}</strong></span>
             <span>std: <strong>{fmt(stats.std)}</strong></span>
             <span>min / max: <strong>{fmt(stats.min)}</strong> / <strong>{fmt(stats.max)}</strong></span>

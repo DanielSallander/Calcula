@@ -280,7 +280,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
 
           <div>
             <div style={labelStyle}>Driver type</div>
-            <select style={field} value={driverType} onChange={(e) => setDriverType(e.target.value as DriverKind)}>
+            <select style={field} data-testid="anim-driver-type" value={driverType} onChange={(e) => setDriverType(e.target.value as DriverKind)}>
               <option value="clockCell">Clock cell</option>
               <option value="chartParam">Chart param</option>
               <option value="scenario">Scenario tween</option>
@@ -292,7 +292,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
             <>
               <div>
                 <div style={labelStyle}>Driver cell</div>
-                <input style={field} value={cellRef} onChange={(e) => setCellRef(e.target.value)} placeholder="B1" />
+                <input style={field} data-testid="anim-cell-ref" value={cellRef} onChange={(e) => setCellRef(e.target.value)} placeholder="B1" />
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ flex: 1 }}>
@@ -320,7 +320,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
               <>
                 <div>
                   <div style={labelStyle}>Chart</div>
-                  <select style={field} value={chartId} onChange={(e) => setChartId(e.target.value)}>
+                  <select style={field} data-testid="anim-chart" value={chartId} onChange={(e) => setChartId(e.target.value)}>
                     {charts.map((c) => (
                       <option key={c.chartId} value={c.chartId}>
                         {c.name}
@@ -330,7 +330,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
                 </div>
                 <div>
                   <div style={labelStyle}>Param</div>
-                  <select style={field} value={paramName} onChange={(e) => setParamName(e.target.value)} disabled={params.length === 0}>
+                  <select style={field} data-testid="anim-param" value={paramName} onChange={(e) => setParamName(e.target.value)} disabled={params.length === 0}>
                     {params.length === 0 ? (
                       <option value="">— no bindable params —</option>
                     ) : (
@@ -358,7 +358,12 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
                   <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 130, overflowY: "auto", border: "1px solid var(--border-color, #e0e0e0)", borderRadius: 4, padding: 6 }}>
                     {scenarios.map((s) => (
                       <label key={s.name} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <input type="checkbox" checked={selectedScenarios.includes(s.name)} onChange={() => toggleScenario(s.name)} />
+                        <input
+                          type="checkbox"
+                          data-testid="anim-scenario-checkbox"
+                          checked={selectedScenarios.includes(s.name)}
+                          onChange={() => toggleScenario(s.name)}
+                        />
                         {s.name}
                       </label>
                     ))}
@@ -386,16 +391,16 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
             <>
               <div>
                 <div style={labelStyle}>Outcome cell (a RAND-driven formula)</div>
-                <input style={field} value={outcomeCell} onChange={(e) => setOutcomeCell(e.target.value)} placeholder="B10" />
+                <input style={field} data-testid="anim-outcome-cell" value={outcomeCell} onChange={(e) => setOutcomeCell(e.target.value)} placeholder="B10" />
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ flex: 1 }}>
                   <div style={labelStyle}>Trials</div>
-                  <input style={field} value={trialsStr} onChange={(e) => setTrialsStr(e.target.value)} />
+                  <input style={field} data-testid="anim-trials" value={trialsStr} onChange={(e) => setTrialsStr(e.target.value)} />
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={labelStyle}>Histogram bins</div>
-                  <input style={field} value={binsStr} onChange={(e) => setBinsStr(e.target.value)} />
+                  <input style={field} data-testid="anim-bins" value={binsStr} onChange={(e) => setBinsStr(e.target.value)} />
                 </div>
               </div>
               <div style={{ opacity: 0.7, fontSize: 11 }}>Tip: raise fps for faster trials.</div>
@@ -418,7 +423,7 @@ export function AnimationDialog({ isOpen, onClose, data }: DialogProps): React.R
           <button style={button} onClick={onClose}>
             Cancel
           </button>
-          <button style={primary} onClick={() => void handleSave()}>
+          <button style={primary} data-testid="anim-create-btn" onClick={() => void handleSave()}>
             {editingId ? "Save" : "Create"}
           </button>
         </div>

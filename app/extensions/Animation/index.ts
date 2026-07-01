@@ -11,7 +11,14 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerStatusBarItem, unregisterStatusBarItem, registerDialog, unregisterDialog } from "@api/ui";
+import {
+  registerStatusBarItem,
+  unregisterStatusBarItem,
+  registerDialog,
+  unregisterDialog,
+  registerMenuItem,
+  unregisterMenuItem,
+} from "@api/ui";
 import { onAppEvent, AppEvents } from "@api/events";
 import { animationBackend } from "./lib/animationBackend";
 import { playbackEngine } from "./lib/animationEngine";
@@ -54,13 +61,13 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => unregisterStatusBarItem(STATUS_BAR_ID));
 
   // View menu entry to open the panel.
-  context.ui.menus.registerItem("view", {
+  registerMenuItem("view", {
     id: MENU_ITEM_ID,
     label: "Animation Timeline",
     icon: React.createElement(FilmIcon, { size: 14 }),
     action: () => context.ui.panels.open(PANEL_ID),
   });
-  cleanupFns.push(() => context.ui.menus.unregisterItem("view", MENU_ITEM_ID));
+  cleanupFns.push(() => unregisterMenuItem("view", MENU_ITEM_ID));
 
   // Create / edit dialog for saved animations.
   registerDialog({ id: ANIMATION_DIALOG_ID, title: "Animation", component: AnimationDialog, priority: 100 });

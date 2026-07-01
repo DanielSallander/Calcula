@@ -160,7 +160,7 @@ export function TimelinePanel({ placement }: PanelSectionProps): React.ReactElem
       <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 200 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span style={sectionTitle}>Saved animations</span>
-          <button style={smallBtn} onClick={() => showDialog(ANIMATION_DIALOG_ID, {})}>
+          <button style={smallBtn} data-testid="anim-new" onClick={() => showDialog(ANIMATION_DIALOG_ID, {})}>
             + New
           </button>
         </div>

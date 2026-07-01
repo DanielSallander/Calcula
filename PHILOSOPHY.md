@@ -18,7 +18,7 @@ A spreadsheet that can only be shared by emailing copies of itself will always e
 
 ## Independence Through Boundaries
 
-Every layer in Calcula exists in deliberate isolation. The Core knows nothing about what runs on top of it. Extensions know nothing about each other. The API is a narrow, typed contract -- the only door between worlds. This is not defensive programming; it is the architecture itself. If a boundary would need to be violated to build a feature, the boundary is improved instead.
+Every layer in Calcula exists in deliberate isolation. The Core knows nothing about what runs on top of it. Extensions know nothing about each other. The API is a narrow, typed contract -- the only door between worlds. This is not defensive programming; it is the architecture itself. If a boundary would need to be violated to build a feature, the boundary is improved instead. This discipline extends to *time* as well as layers: Animation can temporarily modify model state for preview without polluting the undo stack or persisting across sessions -- stopping playback restores the original state, leaving no trace. The grid's edit history records only committed changes, never intermediate simulation frames.
 
 ## No First-Class Citizens
 
@@ -38,7 +38,7 @@ Rust and TypeScript each do what they do best. Rust owns data, computation, and 
 
 ## Extensibility is the Product
 
-The extension system is not a nice-to-have bolted on after the core is "done." It *is* the product. Every user-facing feature validates that the extension API is rich enough, discoverable enough, and fast enough to build real things. If it isn't, the API is the bug.
+The extension system is not a nice-to-have bolted on after the core is "done." It *is* the product. Every user-facing feature validates that the extension API is rich enough, discoverable enough, and fast enough to build real things. If it isn't, the API is the bug. Capability-gated backend channels (`createBackendChannel("Animation")`) and feature-neutral facades (`@api/chartParams`, so one extension can drive another's params without importing it) show that validation in practice: when an extension needs to reach the backend or steer a sibling, the answer is a capability-constrained, auditable door -- not a thin wire-through and never a backdoor. If that door proves insufficient, the API itself is enriched.
 
 ## AI as a First-Class Collaborator
 
