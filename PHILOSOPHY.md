@@ -6,7 +6,7 @@ A spreadsheet is not a single application -- it is a *platform*. Formatting, cha
 
 ## Never Wait for the Vendor
 
-Excel's greatest gift was that a user with a specific problem could build a specific solution -- with formulas, with VBA, with add-ins -- without asking anyone's permission. The industry's drift toward locked-down BI tools took that away: closed visual galleries, closed data models, and feature requests that wait years on a vendor's roadmap. Calcula's measure of success is the opposite: when a user hits a wall, the platform offers them a way *through* it -- a script, a function, an extension -- today, not in a future release.
+Excel's greatest gift was that a user with a specific problem could build a specific solution -- with formulas, with VBA, with add-ins -- without asking anyone's permission. The industry's drift toward locked-down BI tools took that away: closed visual galleries, closed data models, and feature requests that wait years on a vendor's roadmap. Calcula's measure of success is the opposite: when a user hits a wall, the platform offers them a way *through* it -- a script, a function, an extension -- today, not in a future release. The data model itself is no exception: measures, relationships, hierarchies, KPIs, and security roles are authored inside Calcula (the Model Editor window -- Power Pivot's place in Excel, not a separate vendor tool), so the semantic layer is as user-buildable as the grid on top of it.
 
 ## Power Without Hidden Code
 
@@ -14,7 +14,7 @@ VBA did not fail because it was powerful; it failed because the power was invisi
 
 ## Distribution is Part of the Model
 
-A spreadsheet that can only be shared by emailing copies of itself will always end in twelve versions of the truth. Calcula treats distribution as an engine capability, not an afterthought: workbooks are published as versioned packages, consumers subscribe to updates, local changes live in override layers -- and data flows back upstream through audited writeback. Sharing a model and collecting data are part of the spreadsheet itself, not chores delegated to an inbox.
+A spreadsheet that can only be shared by emailing copies of itself will always end in twelve versions of the truth. Calcula treats distribution as an engine capability, not an afterthought: workbooks are published as versioned packages, consumers subscribe to updates, local changes live in override layers -- and data flows back upstream through audited writeback. Sharing a model and collecting data are part of the spreadsheet itself, not chores delegated to an inbox. This holds for the data model literally: a BI model is published as a signed, versioned `dataset` package -- never a loose file -- and the transparency rule extends to publishing itself: every publish reports exactly what shipped and what could not, because a silent drop is just hidden behavior wearing a different coat.
 
 ## Independence Through Boundaries
 

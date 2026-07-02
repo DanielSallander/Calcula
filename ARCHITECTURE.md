@@ -100,6 +100,38 @@ the broker at a process boundary); threading the per-manifest capability ceiling
 into the backend denylist (declared ≠ granted — the broker is where the ceiling +
 consent belong). Full reasoning + the phased work: `docs/design/backend-facade.md`.
 
+## Secondary Editor Windows
+
+Some editors need more room than a pane — they open as **standalone Tauri
+windows** that still belong to the application (the VBA-in-Excel shape). Three
+exist: `chart-spec-editor`, `object-script-editor`, and `model-editor` (the BI
+Model Editor, `docs/design/model-editor.md`). Each follows one mechanism:
+
+- Its own HTML entry + `src/*Main.tsx` bootstrap (a Vite rollup input), mounting
+  a single extension-owned app component — no Shell, no GridProvider.
+- A capability file (`src-tauri/capabilities/<label>.json`) granting only event
+  permissions. Capabilities do **not** gate app-defined commands, so the real
+  containment is the next line.
+- **Window guards** (`security/window_guard.rs`): dangerous commands declare
+  which window labels may call them as data (`MAIN`,
+  `MAIN_AND_OBJECT_SCRIPT_EDITOR`, `MAIN_AND_MODEL_EDITOR`). A secondary window
+  gets exactly the commands its editor needs — reads included, when they carry
+  sensitive payloads (the model overview includes RLS role definitions) — and a
+  compromised secondary webview gets nothing else. Guards are independent of
+  every frontend check (`docs/design/script-sandbox-architecture.md` §7).
+- Cross-window traffic goes through the sanctioned `@api/backend`
+  `emitTauriEvent`/`listenTauriEvent` door (raw `@tauri-apps/api/event` is
+  lint-banned in extensions), with a ready-handshake for the initial payload
+  and a singleton opener that re-attaches via `getByLabel` after a
+  main-webview reload.
+
+The Model Editor adds one more architectural rule worth stating generally:
+**shared mutable engine state gets one writer serialization point.** Every BI
+model writer (editor mutations, workbook calculated measures, dataset-package
+refresh) acquires the shared engine's lock first and snapshots, edits,
+validates, installs, and mirrors under it — concurrent writers cannot
+interleave between snapshot and install.
+
 ## Naming Conventions
 - **TypeScript:** camelCase (e.g., `textColor`)
 - **Rust:** snake_case (e.g., `text_color`)
