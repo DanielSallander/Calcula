@@ -260,6 +260,26 @@ export function publishPreview(sheetIndices?: number[]): Promise<PublishPreviewR
   });
 }
 
+export interface PublishModelParams {
+  registryPath: string;
+  packageName: string;
+  version: string;
+  publishedBy: string;
+  /** The BI connection whose model to publish (connection id). */
+  connectionId: string;
+}
+
+/**
+ * Publish a single BI model as a MODEL-ONLY package (kind "dataset", zero
+ * sheets): the .calp becomes the distribution unit for models — signed,
+ * versioned, min-app-gated — instead of hand-carried .json files. Subscribing
+ * materializes a live connection (schema only; the subscriber supplies their
+ * own credentials, so row-level security is preserved).
+ */
+export function publishModel(params: PublishModelParams): Promise<PublishResponse> {
+  return invokeBackend("calp_publish_model", { params });
+}
+
 /** One object connected to a package, resolved against the live workbook. */
 export interface PackageObjectInfo {
   kind: string;

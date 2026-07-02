@@ -22,11 +22,13 @@ import {
   AUDIT_LOG_PANE_ID,
   PACKAGE_EXPLORER_PANEL_ID,
   PUBLISH_DIALOG_ID,
+  PUBLISH_MODEL_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
   DESIGNATE_WRITEBACK_DIALOG_ID,
   CONNECTION_DIALOG_ID,
   PublishDialogDefinition,
+  PublishModelDialogDefinition,
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
   DesignateWritebackDialogDefinition,
@@ -163,11 +165,13 @@ function activate(context: ExtensionContext): void {
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
+  context.ui.dialogs.register(PublishModelDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
   context.ui.dialogs.register(RefreshPreviewDialogDefinition);
   context.ui.dialogs.register(DesignateWritebackDialogDefinition);
   context.ui.dialogs.register(ConnectionDialogDefinition);
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_MODEL_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIBE_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(REFRESH_PREVIEW_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
@@ -186,6 +190,12 @@ function activate(context: ExtensionContext): void {
         label: "Publish Package...",
         icon: IconPublishPackage,
         action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
+      },
+      {
+        id: "externalData:distribution:publishModel",
+        label: "Publish Model as Package...",
+        icon: IconPublishPackage,
+        action: () => context.ui.dialogs.show(PUBLISH_MODEL_DIALOG_ID),
       },
       {
         id: "externalData:distribution:subscribe",

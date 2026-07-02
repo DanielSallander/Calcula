@@ -28,7 +28,8 @@ use super::types::{BiState, CalculatedMeasure, ConnectionId};
 /// Parse the measure expressions and produce `base + measures`, validating
 /// syntax and name collisions. The engine reports unknown-column / unknown-
 /// measure references at query time (surfaced to the user as a query error).
-fn build_combined_model(
+/// pub(crate): the .calp refresh path re-applies measures onto an updated model.
+pub(crate) fn build_combined_model(
     base: &bi_engine::DataModel,
     measures: &[CalculatedMeasure],
 ) -> Result<bi_engine::DataModel, String> {

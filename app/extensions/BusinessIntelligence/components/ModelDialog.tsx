@@ -183,6 +183,11 @@ export function ModelDialog({
     "postgresql://postgres:postgres@localhost:5432/Adventureworks",
   );
   const [modelPath, setModelPath] = useState("");
+  // "file": browse to a .json (interchange). "paste": inline model JSON — the
+  // model is embedded from the start; no file identity (models live in the
+  // workbook / in packages, files are import/export).
+  const [modelSource, setModelSource] = useState<"file" | "paste">("file");
+  const [modelJsonText, setModelJsonText] = useState("");
   const [modelInfo, setModelInfo] = useState<BiModelInfo | null>(null);
   const [createdConnection, setCreatedConnection] =
     useState<ConnectionInfo | null>(null);
@@ -212,17 +217,29 @@ export function ModelDialog({
   }, [connectionName]);
 
   const handleCreateConnection = useCallback(async () => {
-    if (!modelPath) return;
+    if (modelSource === "file" && !modelPath) return;
+    if (modelSource === "paste" && !modelJsonText.trim()) return;
 
     try {
       setLoading(true);
       setError("");
 
-      const conn = await createConnection({
-        name: connectionName,
-        connectionString,
-        modelPath,
-      });
+      let modelJson: unknown;
+      if (modelSource === "paste") {
+        try {
+          modelJson = JSON.parse(modelJsonText);
+        } catch (err) {
+          setError(`Model JSON does not parse: ${err}`);
+          setLoading(false);
+          return;
+        }
+      }
+
+      const conn = await createConnection(
+        modelSource === "paste"
+          ? { name: connectionName, connectionString, modelJson }
+          : { name: connectionName, connectionString, modelPath },
+      );
 
       // Establish the database connection immediately so it shows as "Connected"
       const connectedConn = await connect(conn.id);
@@ -236,7 +253,7 @@ export function ModelDialog({
     } finally {
       setLoading(false);
     }
-  }, [connectionName, connectionString, modelPath]);
+  }, [connectionName, connectionString, modelPath, modelSource, modelJsonText]);
 
   const handleInsertPivot = useCallback(async () => {
     if (!createdConnection || !modelInfo) return;
@@ -287,6 +304,12 @@ export function ModelDialog({
   const destCell = `${columnToLetter(destCol)}${destRow + 1}`;
 
   const hasConnection = createdConnection !== null;
+  // One predicate for BOTH the Create button's style and disabled prop —
+  // per-source: file mode needs a path, paste mode needs non-empty JSON.
+  const createDisabled =
+    (modelSource === "file" ? !modelPath : !modelJsonText.trim()) ||
+    !connectionName ||
+    loading;
 
   return (
     <div style={dialogStyles.overlay} onClick={onClose}>
@@ -307,22 +330,59 @@ export function ModelDialog({
             />
           </div>
 
-          {/* Model File */}
+          {/* Model source: file (interchange) or pasted JSON (embedded) */}
           <div style={dialogStyles.section}>
             <span style={dialogStyles.label}>Data Model</span>
-            <button
-              style={
-                loading || hasConnection
-                  ? dialogStyles.buttonDisabled
-                  : dialogStyles.button
-              }
-              onClick={handleBrowseModel}
-              disabled={loading || hasConnection}
-            >
-              {modelPath ? "Change Model..." : "Browse..."}
-            </button>
-            {modelPath && (
-              <div style={dialogStyles.filePath}>{modelPath}</div>
+            <div style={{ display: "flex", gap: "12px", fontSize: "12px", marginBottom: "4px" }}>
+              <label>
+                <input
+                  type="radio"
+                  checked={modelSource === "file"}
+                  onChange={() => setModelSource("file")}
+                  disabled={hasConnection}
+                />{" "}
+                From file
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={modelSource === "paste"}
+                  onChange={() => setModelSource("paste")}
+                  disabled={hasConnection}
+                />{" "}
+                Paste model JSON
+              </label>
+            </div>
+            {modelSource === "file" ? (
+              <>
+                <button
+                  style={
+                    loading || hasConnection
+                      ? dialogStyles.buttonDisabled
+                      : dialogStyles.button
+                  }
+                  onClick={handleBrowseModel}
+                  disabled={loading || hasConnection}
+                >
+                  {modelPath ? "Change Model..." : "Browse..."}
+                </button>
+                {modelPath && (
+                  <div style={dialogStyles.filePath}>{modelPath}</div>
+                )}
+              </>
+            ) : (
+              <textarea
+                style={{
+                  ...dialogStyles.input,
+                  minHeight: "96px",
+                  fontFamily: "monospace",
+                  fontSize: "11px",
+                }}
+                placeholder='{"formatVersion": "1", "model": { ... }} or a raw DataModel'
+                value={modelJsonText}
+                onChange={(e) => setModelJsonText(e.target.value)}
+                disabled={hasConnection}
+              />
             )}
           </div>
 
@@ -381,12 +441,10 @@ export function ModelDialog({
           {!hasConnection ? (
             <button
               style={
-                !modelPath || !connectionName || loading
-                  ? dialogStyles.buttonDisabled
-                  : dialogStyles.buttonPrimary
+                createDisabled ? dialogStyles.buttonDisabled : dialogStyles.buttonPrimary
               }
               onClick={handleCreateConnection}
-              disabled={!modelPath || !connectionName || loading}
+              disabled={createDisabled}
             >
               {loading ? "Creating..." : "Create Connection"}
             </button>

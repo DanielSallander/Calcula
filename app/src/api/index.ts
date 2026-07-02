@@ -1506,6 +1506,7 @@ export type {
 export {
   publishPackage,
   publishPreview,
+  publishModel,
   pullPackage,
   browseRegistry,
   getSubscriptions,
@@ -1531,6 +1532,7 @@ export type {
   PublishReport,
   PublishReportItem,
   PublishPreviewResponse,
+  PublishModelParams,
   PullParams,
   PullResponse,
   PackageInfo,

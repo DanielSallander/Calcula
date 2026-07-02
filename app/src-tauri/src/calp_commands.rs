@@ -496,6 +496,126 @@ pub fn calp_publish(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PublishModelParams {
+    pub registry_path: String,
+    pub package_name: String,
+    pub version: String,
+    pub published_by: String,
+    /// The BI connection whose model to publish (EntityId as UUID string).
+    pub connection_id: String,
+}
+
+/// Publish a single BI model as a MODEL-ONLY package (kind "dataset", zero
+/// sheets). This makes the .calp the distribution unit for models — signed
+/// (Ed25519 + TOFU), versioned (semver pins), min-app-gated — replacing loose
+/// .json file hand-off. Subscribing materializes a live BI connection
+/// (schema only, no data, no credentials; the subscriber connects with their
+/// own credentials, so RLS is preserved).
+#[tauri::command]
+pub fn calp_publish_model(
+    state: State<AppState>,
+    bi_state: State<BiState>,
+    params: PublishModelParams,
+    window: tauri::Window,
+) -> Result<PublishResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
+        .map_err(|e| e.to_string())?;
+    let version = SemVer::parse(&params.version).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Capture ONLY the requested connection as a package data source (the
+    // capture serializes the live engine model, credential-free).
+    let data_sources: Vec<calp::publish::PublishDataSource> =
+        capture_bi_data_sources(&bi_state)?
+            .into_iter()
+            .filter(|ds| ds.id == params.connection_id)
+            .collect();
+    if data_sources.is_empty() {
+        // capture_bi_data_sources silently skips a busy engine — distinguish
+        // that from a genuinely missing connection so the error is actionable.
+        let busy = {
+            let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+            connections.values().any(|c| {
+                c.id.to_string() == params.connection_id
+                    && c.engine.as_ref().is_some_and(|arc| arc.try_lock().is_err())
+            })
+        };
+        return Err(if busy {
+            "The connection's engine is busy (a query or refresh is running) — retry in a moment."
+                .to_string()
+        } else {
+            "Connection not found or its model is not loaded (open Data > Connections)"
+                .to_string()
+        });
+    }
+    let model_name = data_sources[0].name.clone();
+
+    // A minimal carrier: zero sheets, no scripts/tables/names — the package is
+    // the model. Workbook::new()'s default sheet is never published because
+    // sheet_indices is empty.
+    let workbook = persistence::Workbook::new();
+    let request = calp::publish::PublishRequest {
+        workbook: &workbook,
+        package_name: params.package_name,
+        version,
+        kind: "dataset".to_string(),
+        sheet_indices: Vec::new(),
+        now: now.clone(),
+        published_by: params.published_by,
+        writeback_regions: None,
+        object_scripts: None,
+        module_scripts: None,
+        notebooks: None,
+        data_sources,
+        excluded_regions: Vec::new(),
+    };
+    let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
+        .map_err(|e| e.to_string())?;
+
+    // Audit (B4)
+    {
+        let user = audit_user(&state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::Published,
+                &format!(
+                    "Published model '{}' as dataset package {} v{}",
+                    model_name, result.package_name, result.version
+                ),
+                &user,
+                &now,
+            );
+        }
+    }
+
+    let report = PublishReport {
+        included: vec![PublishReportItem {
+            category: "dataSources".to_string(),
+            count: 1,
+            detail: format!(
+                "model '{}' — schema only: no data, no credentials",
+                model_name
+            ),
+        }],
+        excluded: Vec::new(),
+    };
+
+    Ok(PublishResponse {
+        package_name: result.package_name,
+        version: result.version,
+        sheets_published: result.sheets_published,
+        tables_published: result.tables_published,
+        named_ranges_published: result.named_ranges_published,
+        scripts_published: result.scripts_published,
+        modules_published: result.modules_published,
+        notebooks_published: result.notebooks_published,
+        report,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublishPreviewParams {
     /// Sheets to include (workbook indices). None or empty => all sheets.
     #[serde(default)]
@@ -2232,6 +2352,7 @@ pub fn calp_refresh_apply(
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
+    bi_state: State<BiState>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -2651,6 +2772,22 @@ pub fn calp_refresh_apply(
         let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
         for nr in &payload.pull_result.named_ranges {
             entries.push(ledger_entry("namedRange", nr.name.to_uppercase(), nr.name.clone()));
+        }
+    }
+
+    // Re-materialize refreshed package data sources: swap each existing
+    // package connection's engine onto the new version's model (and create
+    // connections for data sources ADDED in this version). Without this, a
+    // dataset (model-only) subscription refresh advanced the version while
+    // silently serving the old model. Existing dataSource ledger entries
+    // carry over in the merge below; only newly-added ones are appended.
+    for payload in &payloads {
+        let added = refresh_embedded_data_sources(&payload.pull_result.data_sources, &bi_state);
+        if !added.is_empty() {
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for (id, name) in added {
+                entries.push(ledger_entry("dataSource", id, name));
+            }
         }
     }
 
@@ -5865,6 +6002,47 @@ pub fn extract_connection_spec_info(model_json: &serde_json::Value) -> Connectio
     }
 }
 
+/// Read + parse a pulled data source's embedded model (ModelBundle wrapper or
+/// raw DataModel), format-version checked. Returns the RAW json (for
+/// connectionSpecs) and the parsed model; logs and returns None on failure.
+fn read_pulled_model(
+    ds: &calp::pull::PulledDataSource,
+) -> Option<(serde_json::Value, bi_engine::DataModel)> {
+    let model_path = ds.model_path.to_string_lossy().to_string();
+    let json_str = match std::fs::read_to_string(&ds.model_path) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_warn!("CALP", "Failed to read embedded model {}: {}", model_path, e);
+            return None;
+        }
+    };
+    let json_value: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log_warn!("CALP", "Failed to parse embedded model JSON {}: {}", model_path, e);
+            return None;
+        }
+    };
+    let model_json =
+        if json_value.get("model").is_some() && json_value.get("formatVersion").is_some() {
+            json_value.get("model").unwrap().clone()
+        } else {
+            json_value.clone()
+        };
+    if let Err(e) = crate::bi::commands::check_model_format_version(&model_json) {
+        crate::log_warn!("CALP", "Skipping data source {}: {}", ds.definition.id, e);
+        return None;
+    }
+    let model: bi_engine::DataModel = match serde_json::from_value(model_json) {
+        Ok(m) => m,
+        Err(e) => {
+            crate::log_warn!("CALP", "Failed to deserialize DataModel {}: {}", model_path, e);
+            return None;
+        }
+    };
+    Some((json_value, model))
+}
+
 /// Load embedded BI model data sources from a pulled package into BiState.
 /// Returns a mapping from package data source ID to the created connection ID.
 fn load_embedded_data_sources(
@@ -5880,44 +6058,14 @@ fn load_embedded_data_sources(
     for ds in data_sources {
         let model_path = ds.model_path.to_string_lossy().to_string();
 
-        // Read the raw JSON to access both ModelBundle wrapper and DataModel
-        let json_str = match std::fs::read_to_string(&ds.model_path) {
-            Ok(s) => s,
-            Err(e) => {
-                crate::log_warn!("CALP", "Failed to read embedded model {}: {}", model_path, e);
-                continue;
-            }
-        };
-        let json_value: serde_json::Value = match serde_json::from_str(&json_str) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::log_warn!("CALP", "Failed to parse embedded model JSON {}: {}", model_path, e);
-                continue;
-            }
+        let Some((json_value, model)) = read_pulled_model(ds) else {
+            continue;
         };
 
         // Extract connection info from connectionSpecs (ModelBundle wrapper level)
         let spec_info = extract_connection_spec_info(&json_value);
         crate::log_info!("CALP-DIAG", "load_embedded_data_sources: ds_id={}, spec_info: server='{}', database='{}', preferred_auth='{}', connector_type='{}'",
             ds.definition.id, spec_info.server, spec_info.database, spec_info.preferred_auth, spec_info.connector_type);
-
-        // Parse the DataModel from the JSON (handles both ModelBundle and raw format)
-        let model_json = if json_value.get("model").is_some() && json_value.get("formatVersion").is_some() {
-            json_value.get("model").unwrap().clone()
-        } else {
-            json_value
-        };
-        if let Err(e) = crate::bi::commands::check_model_format_version(&model_json) {
-            crate::log_warn!("CALP", "Skipping data source {}: {}", ds.definition.id, e);
-            continue;
-        }
-        let model: bi_engine::DataModel = match serde_json::from_value(model_json) {
-            Ok(m) => m,
-            Err(e) => {
-                crate::log_warn!("CALP", "Failed to deserialize DataModel {}: {}", model_path, e);
-                continue;
-            }
-        };
 
         // Keep the base model so calculated measures can be applied later.
         let base_model = model.clone();
@@ -6008,6 +6156,95 @@ fn load_embedded_data_sources(
     }
 
     ds_to_conn
+}
+
+/// Re-materialize refreshed package data sources onto their EXISTING
+/// connections: swap the shared engine's model to the new version's and
+/// update the connection's base_model (workbook calculated measures
+/// re-applied on top). Without this, refreshing a dataset (model-only)
+/// subscription advanced the version while silently serving the OLD model.
+/// Data sources with no existing connection (added in the new version) are
+/// freshly materialized; returns their (id, name) pairs for the ledger.
+fn refresh_embedded_data_sources(
+    data_sources: &[calp::pull::PulledDataSource],
+    bi_state: &BiState,
+) -> Vec<(String, String)> {
+    let mut newly_created: Vec<(String, String)> = Vec::new();
+    for ds in data_sources {
+        let conn_id = {
+            let conns = bi_state.connections.lock().unwrap();
+            conns
+                .iter()
+                .find(|(_, c)| {
+                    c.package_data_source_id.as_deref() == Some(ds.definition.id.as_str())
+                })
+                .map(|(id, _)| *id)
+        };
+        let Some(conn_id) = conn_id else {
+            // Added in this version — materialize like a first pull.
+            let created = load_embedded_data_sources(std::slice::from_ref(ds), bi_state);
+            if created.contains_key(&ds.definition.id) {
+                newly_created.push((ds.definition.id.clone(), ds.definition.name.clone()));
+            }
+            continue;
+        };
+        let Some((_, model)) = read_pulled_model(ds) else {
+            continue;
+        };
+
+        let mut conns = bi_state.connections.lock().unwrap();
+        let Some(conn) = conns.get_mut(&conn_id) else {
+            continue;
+        };
+        let combined = if conn.calculated_measures.is_empty() {
+            model.clone()
+        } else {
+            match crate::bi::measures::build_combined_model(&model, &conn.calculated_measures) {
+                Ok(m) => m,
+                Err(e) => {
+                    crate::log_warn!(
+                        "CALP",
+                        "refresh: measures no longer apply to updated model {} ({}); applying base",
+                        ds.definition.id,
+                        e
+                    );
+                    model.clone()
+                }
+            }
+        };
+        if let Some(engine_arc) = &conn.engine {
+            match engine_arc.try_lock() {
+                Ok(mut engine) => {
+                    if let Err(e) = engine.set_model(combined) {
+                        // Engine kept the old model — leave base_model alone
+                        // too, so the connection never CLAIMS the new version.
+                        crate::log_warn!(
+                            "CALP",
+                            "refresh: set_model failed for data source {}: {}",
+                            ds.definition.id,
+                            e
+                        );
+                        continue;
+                    }
+                }
+                Err(_) => {
+                    crate::log_warn!(
+                        "CALP",
+                        "refresh: engine busy for data source {} — model NOT updated (re-run Refresh)",
+                        ds.definition.id
+                    );
+                    continue;
+                }
+            }
+        }
+        conn.base_model = Some(model);
+        crate::log_info!(
+            "CALP",
+            "refresh: updated embedded model for data source {}",
+            ds.definition.id
+        );
+    }
+    newly_created
 }
 
 /// Restore pivot definitions from a pulled .calp package: deserialize, rebuild
@@ -6189,8 +6426,16 @@ fn capture_bi_data_sources(
             None => continue,
         };
 
-        // Parse server and database from connection string (PostgreSQL key=value format)
-        let (server, database) = parse_pg_connection_info(&conn.connection_string);
+        // The connection's own server/database fields are authoritative (they
+        // survive URL-style connection strings and restored connections whose
+        // connection_string is empty); the key=value parse is the fallback.
+        let (parsed_server, parsed_database) = parse_pg_connection_info(&conn.connection_string);
+        let server = if !conn.server.is_empty() { conn.server.clone() } else { parsed_server };
+        let database = if !conn.database.is_empty() {
+            conn.database.clone()
+        } else {
+            parsed_database
+        };
 
         // The connection's EntityId (canonical UUID string) is the stable data source ID
         let ds_id = conn.id.to_string();

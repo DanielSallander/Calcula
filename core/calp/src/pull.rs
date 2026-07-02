@@ -677,6 +677,67 @@ mod tests {
     }
 
     #[test]
+    fn model_only_dataset_package_round_trip() {
+        // Slice E (model-in-calp): a package of kind "dataset" with ZERO
+        // sheets is the distribution unit for a BI model — publish embeds the
+        // credential-free model JSON as models/{id}/model.json; pull hands
+        // back the data source (the app layer materializes a connection).
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let wb = persistence::Workbook::new();
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "sales-model".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "dataset".to_string(),
+            sheet_indices: Vec::new(), // model-only: no sheets
+            now: "2026-07-02T00:00:00Z".to_string(),
+            published_by: "author".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: vec![publish::PublishDataSource {
+                id: "ds-1".to_string(),
+                name: "Sales".to_string(),
+                connection_type: "PostgreSQL".to_string(),
+                server: "db.example".to_string(),
+                database: "sales".to_string(),
+                model_json: serde_json::json!({
+                    "formatVersion": 1,
+                    "model": { "tables": [] }
+                }),
+                bindings: Vec::new(),
+            }],
+            excluded_regions: Vec::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.sheets_published, 0);
+        assert_eq!(pub_result.data_sources_published, 1);
+
+        let pull_req = PullRequest {
+            package_name: "sales-model".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-02T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        assert_eq!(result.sheets.len(), 0, "a dataset package carries no sheets");
+        assert_eq!(result.data_sources.len(), 1);
+        assert_eq!(result.data_sources[0].definition.name, "Sales");
+        assert_eq!(result.data_sources[0].definition.server, "db.example");
+        // The local transport resolves the embedded model to a readable
+        // on-disk path (blob-fallback after dedup), and the bytes are the
+        // published model JSON.
+        let bytes = fs::read(&result.data_sources[0].model_path)
+            .expect("embedded model resolvable on disk");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.get("formatVersion").is_some());
+    }
+
+    #[test]
     fn pull_carries_named_ranges_and_cf_dv() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();

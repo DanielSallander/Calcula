@@ -256,7 +256,16 @@ pub struct CreateConnectionRequest {
     pub name: String,
     pub description: Option<String>,
     pub connection_string: String,
-    pub model_path: String,
+    /// Path to a model .json file. Optional when `model_json` carries the
+    /// model inline — the loose file is interchange, not identity.
+    #[serde(default)]
+    pub model_path: Option<String>,
+    /// Inline model JSON (a raw DataModel or a Studio ModelBundle wrapper).
+    /// When present the connection is created without touching the
+    /// filesystem; the embedded model is authoritative (path-identity
+    /// removal — models live in workbooks/packages, files are import/export).
+    #[serde(default)]
+    pub model_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

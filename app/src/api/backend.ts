@@ -3317,7 +3317,12 @@ export interface CreateConnectionRequest {
   name: string;
   description?: string;
   connectionString: string;
-  modelPath: string;
+  /** Path to a model .json file. Optional when modelJson carries the model
+   * inline — the loose file is interchange, not identity. */
+  modelPath?: string | null;
+  /** Inline model JSON (raw DataModel or Studio ModelBundle). When present
+   * the connection is created without touching the filesystem. */
+  modelJson?: unknown;
 }
 
 export interface UpdateConnectionRequest {

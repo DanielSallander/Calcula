@@ -4362,6 +4362,7 @@ pub fn run() {
             // .calp distribution commands
             calp_commands::calp_publish,
             calp_commands::calp_publish_preview,
+            calp_commands::calp_publish_model,
             calp_commands::calp_pull,
             calp_commands::calp_browse_registry,
             calp_commands::calp_inspect_package,

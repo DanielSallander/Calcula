@@ -122,7 +122,9 @@ export function AddFilterDialog({
       try {
         const connections = await getBiConnections();
         for (const conn of connections) {
-          if (!conn.modelPath) continue; // No model loaded
+          // NOTE: no modelPath check — connections created from an embedded
+          // model (packages, inline JSON) have no path but a loaded model;
+          // the try below already handles a connection without one.
           try {
             const modelInfo = await getBiModelInfo(conn.id);
             const allFields: string[] = [];

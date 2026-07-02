@@ -598,10 +598,14 @@ pub(crate) fn collect_bi_connection_roles(
         bi_state.pending_roles.lock().unwrap().clone();
     let connections = bi_state.connections.lock().unwrap();
     for conn in connections.values() {
+        // Key precedence: package data source id, model path, else the
+        // synthetic "local:{id}" identity of a path-less embedded-model
+        // connection (stable across restore — the original id is reused).
         let key = conn
             .package_data_source_id
             .clone()
-            .or_else(|| conn.model_path.clone());
+            .or_else(|| conn.model_path.clone())
+            .or_else(|| Some(format!("local:{}", conn.id)));
         if let Some(key) = key {
             match &conn.active_role {
                 Some(role) => {
@@ -638,10 +642,11 @@ pub(crate) fn load_pending_roles(
     for conn in connections.values_mut() {
         let key = conn
             .package_data_source_id
-            .as_deref()
-            .or(conn.model_path.as_deref());
-        if let Some(role) = key.and_then(|k| pending.get(k)) {
-            conn.active_role = Some(role.clone());
+            .clone()
+            .or_else(|| conn.model_path.clone())
+            .or_else(|| Some(format!("local:{}", conn.id)));
+        if let Some(role) = key.and_then(|k| pending.get(&k).cloned()) {
+            conn.active_role = Some(role);
         }
     }
 }
@@ -1245,12 +1250,25 @@ pub async fn bi_create_connection(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     log_info!("BI", "bi_create_connection: name={}", request.name);
 
-    // Load model from file
-    let json_str = std::fs::read_to_string(Path::new(&request.model_path))
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-
-    let json_value: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    // Model source: inline JSON (embedded-model-first — no filesystem
+    // identity) or a .json file path (interchange only).
+    let json_value: serde_json::Value = match (&request.model_json, request.model_path.as_deref())
+    {
+        // Both provided is ambiguous: content would come from the inline JSON
+        // while the engine/cache identity would key by the path — silently
+        // diverging live queries from the persisted model. Reject it.
+        (Some(_), Some(path)) if !path.is_empty() => {
+            return Err("Provide either modelJson or modelPath, not both".to_string())
+        }
+        (Some(value), _) => value.clone(),
+        (None, Some(path)) if !path.is_empty() => {
+            let json_str = std::fs::read_to_string(Path::new(path))
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            serde_json::from_str(&json_str)
+                .map_err(|e| format!("Failed to parse JSON: {}", e))?
+        }
+        _ => return Err("Provide either modelJson or modelPath".to_string()),
+    };
 
     // Extract connectionSpecs from ModelBundle (if present) for server/database info
     let model_conn_spec = crate::calp_commands::extract_connection_spec_info(&json_value);
@@ -1270,7 +1288,18 @@ pub async fn bi_create_connection(
         .map_err(|e| format!("Failed to parse model: {}", e))?;
     model.validate().map_err(|e| format!("Model validation failed: {}", e))?;
 
-    let model_key = ModelKey::from_model_path(&request.model_path);
+    // Generated up front: the path-less cache key derives from it.
+    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+
+    // Cache/engine identity: the model path when created from a file (reuses
+    // that model's prior on-disk cache), otherwise a synthetic per-connection
+    // key — the same "local:{id}" convention the .cala restore path uses for
+    // path-less embedded models.
+    let model_path = request.model_path.clone().filter(|p| !p.is_empty());
+    let model_key = match model_path.as_deref() {
+        Some(path) => ModelKey::from_model_path(path),
+        None => ModelKey::from_model_path(&format!("local:{}", id)),
+    };
 
     // Keep the base model (no workbook-local measures) so calculated measures
     // can be applied later as `base + measures` via engine.set_model.
@@ -1303,9 +1332,6 @@ pub async fn bi_create_connection(
         drop(engine_guard);
     }
 
-    // Generate ID
-    let id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
-
     // Prefer connectionSpecs from model, fall back to parsing the connection string
     let (target, _auth) = parse_connection_string(&request.connection_string);
     let server = if !model_conn_spec.server.is_empty() { model_conn_spec.server } else { target.host.clone() };
@@ -1315,8 +1341,9 @@ pub async fn bi_create_connection(
     // would defeat the not-yet-supported guards at the connect sites.
     let connection_type = ConnectionType::parse_or_default(&model_conn_spec.connector_type);
     // Restore a saved "view as" RLS role for this local connection (keyed by
-    // model path), if one was persisted in the workbook.
-    let active_role = bi_state.pending_role_for(None, Some(&request.model_path));
+    // model path when file-created; path-less connections have no persisted
+    // role yet — their role key is minted at save via the "local:{id}" key).
+    let active_role = bi_state.pending_role_for(None, model_path.as_deref());
     // Calculated measures belong to the MODEL. When reusing a shared engine that
     // already has them baked in, inherit the set from a sibling so this
     // connection knows about them (for the dialog + persistence). No re-apply
@@ -1340,7 +1367,7 @@ pub async fn bi_create_connection(
         server,
         database,
         preferred_auth,
-        model_path: Some(request.model_path),
+        model_path,
         engine: Some(engine_arc),
         model_key: Some(model_key),
         connector_index: None,
@@ -1379,13 +1406,13 @@ pub async fn bi_delete_connection(
 ) -> Result<(), String> {
     log_info!("BI", "bi_delete_connection: id={}", connection_id);
 
-    let (model_key, region_ids) = {
+    let (model_key, is_local, region_ids) = {
         let mut connections = bi_state.connections.lock().unwrap();
         let conn = connections.remove(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
 
         let region_ids: Vec<identity::EntityId> = conn.active_queries.keys().copied().collect();
-        (conn.model_key, region_ids)
+        (conn.model_key, conn.model_path.is_none(), region_ids)
     };
 
     // Remove any protected regions owned by this connection's queries
@@ -1398,7 +1425,15 @@ pub async fn bi_delete_connection(
 
     // Release the shared engine reference (saves cache if last ref)
     if let Some(key) = model_key {
-        bi_state.engine_registry.release(&key);
+        let removed = bi_state.engine_registry.release(&key);
+        if removed && is_local {
+            // A path-less connection's synthetic "local:{id}" key can never
+            // be recreated after deletion — without this, the cache the
+            // release just flushed would sit orphaned on disk forever (and
+            // keep the "deleted" connection's row data around). Restoring an
+            // older .cala that still references the id simply re-fetches.
+            let _ = std::fs::remove_dir_all(EngineRegistry::cache_dir_for(&key));
+        }
     }
 
     Ok(())
