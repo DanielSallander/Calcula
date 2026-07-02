@@ -14,9 +14,11 @@ use crate::model::schema::validate_identifier;
 
 mod builders;
 mod case_when;
+mod format;
 mod functions;
 mod globals;
 mod inspect;
+mod lineage;
 mod measure_refs;
 mod predicates;
 mod render;
@@ -38,11 +40,13 @@ pub use builders::{
     scalar_fn, selected_value, switch, table_ref, text_fn, to_date, traverse, use_relationship,
     using, window_expr, xor,
 };
+pub use format::{expression_to_formula, measure_to_formula};
 pub use functions::{DateTimeFunction, ScalarFunction};
 pub(crate) use functions::{
     DATEADD_INTERVALS, DATEDIFF_INTERVALS, DATE_TRUNC_INTERVALS, LAST_DAY_INTERVALS,
 };
 pub use globals::expand_global_variables;
+pub use lineage::{extract_dependencies, ExpressionDependencies};
 pub use measure_refs::{expand_measure_refs, has_measure_ref, infer_fact_table};
 pub use predicates::{
     ComparisonOp, DynamicValue, FilterPredicate, InPredicate, RelationshipPath,

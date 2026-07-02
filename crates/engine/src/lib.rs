@@ -132,8 +132,9 @@ pub use engine_core::compute::context::{
     ContextResolver, EvaluationContext, FilterSource, ResolvedFilter, ResolvedInFilter,
 };
 pub use engine_core::compute::expression::{
-    self, expand_global_variables, infer_fact_table, ArithmeticOp, ComparisonOp, DateGranularity,
-    Expression, FilterPredicate, InPredicate, RelationshipPath,
+    self, expand_global_variables, expression_to_formula, extract_dependencies, infer_fact_table,
+    measure_to_formula, ArithmeticOp, ComparisonOp, DateGranularity, Expression,
+    ExpressionDependencies, FilterPredicate, InPredicate, RelationshipPath,
 };
 pub use engine_core::compute::measure::{
     average_measure, count_measure, distinct_count_measure, expression_measure, sum_measure,

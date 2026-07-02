@@ -501,6 +501,18 @@ impl DataModel {
         Ok(model)
     }
 
+    /// Returns a copy of the model with its measure list REPLACED — the model
+    /// editing primitive (add/update/delete measures are all list edits on the
+    /// host side). Performs no validation itself: callers are expected to run
+    /// [`DataModel::validate`] on the result before installing it on an engine,
+    /// so they can surface rich errors (duplicate names, dangling references,
+    /// circular measure refs) in their own UI.
+    pub fn with_measures(&self, measures: Vec<Measure>) -> DataModel {
+        let mut model = self.clone();
+        model.measures = measures;
+        model
+    }
+
     /// Returns all hierarchies that belong to a specific table.
     pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
         self.hierarchies
@@ -951,6 +963,59 @@ mod tests {
         // Validation rebuilds via the builder but must not alter the
         // original model's stored version.
         assert_eq!(model.format_version(), 0);
+    }
+
+    // --- Measure list replacement (model editing primitive) ---
+
+    #[test]
+    fn with_measures_replaces_the_list_without_touching_the_original() {
+        use crate::compute::measure::{count_measure, sum_measure};
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        let edited = model.with_measures(vec![
+            count_measure("Orders", "Sales", "id").with_source("COUNT(Sales[id])"),
+        ]);
+        edited.validate().unwrap();
+        assert_eq!(edited.measures().len(), 1);
+        assert_eq!(edited.measures()[0].name(), "Orders");
+        assert_eq!(edited.measures()[0].source(), Some("COUNT(Sales[id])"));
+        // The original is untouched (copy-on-edit).
+        assert_eq!(model.measures().len(), 1);
+        assert_eq!(model.measures()[0].name(), "Revenue");
+    }
+
+    #[test]
+    fn with_measures_result_fails_validate_on_dangling_measure_ref() {
+        use crate::compute::measure::sum_measure;
+        use crate::compute::parser::parse_measure_expression;
+        use crate::compute::measure::Measure;
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .add_measure(Measure::new(
+                "Boosted",
+                parse_measure_expression("[Revenue] + SUM(Sales[amount])").unwrap(),
+            ))
+            .build()
+            .unwrap();
+
+        // Deleting Revenue leaves Boosted's [Revenue] reference dangling —
+        // validate() (the caller's contract) must reject the edited model.
+        let edited = model.with_measures(
+            model
+                .measures()
+                .iter()
+                .filter(|m| m.name() != "Revenue")
+                .cloned()
+                .collect(),
+        );
+        assert!(edited.validate().is_err());
     }
 
     // --- Measure re-parse tests ---
