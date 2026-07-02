@@ -1,7 +1,10 @@
 //! FILENAME: app/extensions/Slicer/components/SlicerStylesGallery.tsx
-// PURPOSE: Slicer Styles gallery for the Slicer Options ribbon tab.
+// PURPOSE: Slicer Styles gallery hosted by the "Slicer Styles" panel section
+//          (see SlicerOptionsSections.tsx).
 // CONTEXT: Provides predefined slicer styles matching Excel's Slicer Styles gallery.
-// Shows a collapsed strip in the ribbon with a dropdown for the full gallery.
+// Shows a thumbnail strip with a dropdown for the full gallery, self-collapsing
+// to a Quick Styles button when narrow. The shell's panel system owns the group
+// label chrome, so this widget renders no label of its own.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom";
@@ -324,13 +327,6 @@ const galleryStyles = {
       background: #e0e0e0;
       color: #333;
     }
-  `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #666;
-    text-align: center;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
   `,
 
   // Full dropdown gallery
@@ -673,7 +669,6 @@ export function SlicerStylesGallery({ selectedStyleId, onStyleSelect, collapsed 
           </button>
         </div>
       )}
-      <div className={galleryStyles.groupLabel}>Slicer Styles</div>
 
       {isOpen && anchorRect && (
         <SlicerStylesDropdown

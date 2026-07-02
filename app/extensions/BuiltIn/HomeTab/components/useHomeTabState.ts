@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/components/useHomeTabState.ts
 // PURPOSE: Shared hook that provides formatting state and actions for Home tab groups.
-// CONTEXT: Extracted from HomeTabComponent so each group can be a separate registered
-// component while sharing the same selection/style state.
+// CONTEXT: Each layout group renders as its own panel section; this hook lets every
+// section component share the same selection/style state and formatting actions.
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useGridState, cellEvents } from "@api";

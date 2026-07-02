@@ -23,7 +23,12 @@ import { onAppEvent, AppEvents } from "@api/events";
 import { animationBackend } from "./lib/animationBackend";
 import { playbackEngine } from "./lib/animationEngine";
 import { loadAnimations, resetAnimations } from "./lib/animationStore";
-import { TimelinePanel } from "./components/TimelinePanel";
+import {
+  SavedAnimationsSection,
+  DriverSection,
+  TransportSection,
+  ExportSection,
+} from "./components/TimelineSections";
 import { TransportStatusItem } from "./components/TransportStatusItem";
 import { AnimationDialog, ANIMATION_DIALOG_ID } from "./components/AnimationDialog";
 import { FilmIcon } from "./components/icons";
@@ -40,17 +45,21 @@ function activate(context: ExtensionContext): void {
   // through the same capability check as ctx.invokeBackend (A3).
   animationBackend.set(context.invokeBackend);
 
-  // Timeline panel (sidebar). This is a tall, vertical panel (saved-animation
-  // list, driver form, transport scrubber, export) with no sensible 92px ribbon
-  // form, so it is locked to the sidebar — the Shell hides "Move to Ribbon" and
-  // refuses a programmatic move (a ribbon projection would blow up the layout).
+  // Timeline panel: four @api/layout sections. In the sidebar they stack
+  // vertically; in the ribbon the driver/transport/export rows render inline
+  // while the saved-animations list and Monte Carlo histogram demote to
+  // launcher flyouts — so the panel is freely movable to either surface.
   context.ui.panels.register({
     id: PANEL_ID,
     title: "Animation",
     icon: React.createElement(FilmIcon),
-    sections: [{ id: `${PANEL_ID}.playback`, label: "Playback", component: TimelinePanel }],
+    sections: [
+      { id: `${PANEL_ID}.saved`, label: "Animations", component: SavedAnimationsSection },
+      { id: `${PANEL_ID}.driver`, label: "Driver", component: DriverSection },
+      { id: `${PANEL_ID}.playback`, label: "Playback", component: TransportSection },
+      { id: `${PANEL_ID}.export`, label: "Export", component: ExportSection },
+    ],
     defaultPlacement: "sidebar",
-    supportedPlacements: ["sidebar"],
     priority: 12,
   });
   cleanupFns.push(() => context.ui.panels.unregister(PANEL_ID));

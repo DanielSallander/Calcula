@@ -284,16 +284,38 @@ export type PanelPlacement = "sidebar" | "ribbon";
 /**
  * Props passed to panel section components.
  * Each section receives its current placement so it can adapt its layout.
+ * Prefer composing section content from @api/layout primitives — they read
+ * the finer-grained SurfaceLayoutContext and need no placement branching.
  */
 export interface PanelSectionProps {
-  /** Current placement — "ribbon" means horizontal 92px, "sidebar" means vertical full-height */
+  /** Current placement — "ribbon" means horizontal 92px, "sidebar" means vertical full-height.
+   *  Launcher-flyout-hosted content receives "sidebar" (it renders at sidebar geometry). */
   placement: PanelPlacement;
+  /** Close callback, forwarded when the panel is hosted in the sidebar. */
+  onClose?: () => void;
+  /** Open-time data, forwarded when the panel is hosted in the sidebar. */
+  data?: Record<string, unknown>;
 }
+
+/**
+ * How a section presents in the ribbon band:
+ * - "auto" (default): the Shell measures the rendered section; if it exceeds
+ *   the ~80px usable band height it demotes to a launcher button whose flyout
+ *   hosts the full content vertically.
+ * - "inline": trusted to fit; never measured or height-demoted (the band's
+ *   overflow clip is the only backstop). Declare on known-compact sections.
+ * - "launcher": never rendered inline in the band; always the launcher button.
+ *   Declare on known-tall/heavy sections (lists, editors, trees) so they skip
+ *   the probe render entirely.
+ */
+export type SectionRibbonPresentation = "auto" | "inline" | "launcher";
 
 /**
  * A named section within a panel.
  * Sections are the universal building block: the Shell renders them
  * horizontally in the ribbon or vertically (collapsible) in the sidebar.
+ * A section that cannot fit the ribbon band is demoted to a launcher button
+ * with a flyout — placement is never refused for layout reasons.
  */
 export interface PanelSection {
   /** Unique section identifier within the panel */
@@ -304,6 +326,13 @@ export interface PanelSection {
   icon?: React.ReactNode;
   /** The component to render as section content */
   component: React.ComponentType<PanelSectionProps>;
+  /** Ribbon hosting mode. Default "auto" (measured). */
+  ribbonPresentation?: SectionRibbonPresentation;
+  /** Width-overflow demotion order: lower collapses to a launcher first when
+   *  the band is too narrow. Default: right-to-left (rightmost first). */
+  collapsePriority?: number;
+  /** Launcher flyout width in px (clamped to 240-480, default 320). */
+  flyoutWidth?: number;
 }
 
 /**
@@ -328,15 +357,18 @@ export interface PanelDefinition {
   sections: PanelSection[];
   /** Where this panel appears by default before any user customization */
   defaultPlacement: PanelPlacement;
-  /** Which surfaces this panel is allowed to live in. When omitted, the panel
-   *  supports BOTH sidebar and ribbon. Declare a subset (e.g. `["sidebar"]`)
-   *  for panels whose content only makes sense in one surface — a tall,
-   *  vertical panel like Animation has no sensible 92px ribbon form. The Shell
-   *  refuses to move a panel to an unsupported surface and hides the move
-   *  affordance for it. `defaultPlacement` must be one of these. */
+  /** SOFT product-intent hint: the surfaces this panel works best in. The user
+   *  may still move the panel anywhere — layout safety is guaranteed by the
+   *  Shell (sections that cannot fit the ribbon band demote to launcher
+   *  flyouts). When a target surface is not listed here, the move affordance
+   *  shows a "works best in …" hint instead of being hidden. Omit for panels
+   *  equally at home on both surfaces. */
   supportedPlacements?: PanelPlacement[];
   /** Sort priority (higher = more prominent). Default: 0 */
   priority?: number;
+  /** If true, the panel is registered but not shown in the Activity Bar icon
+   *  strip / ribbon tab strip. It can still be opened programmatically. */
+  hidden?: boolean;
   /** Whether the user can close this panel. Default: true */
   closable?: boolean;
   /** Whether the user can move this panel between locations. Default: true */

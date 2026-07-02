@@ -1,7 +1,10 @@
 //! FILENAME: app/extensions/Table/components/TableStylesGallery.tsx
-// PURPOSE: Table Styles gallery for the Table Design ribbon tab.
+// PURPOSE: Table Styles gallery for the Table Design panel.
 // CONTEXT: Provides predefined table styles matching Excel's Table Styles gallery.
-// Shows a collapsed strip in the ribbon with a dropdown for the full gallery.
+// Hosted as an "inline" panel section (the shell renders the "Table Styles"
+// group label and chrome). Shows a thumbnail strip with a dropdown for the full
+// gallery, and collapses itself to a compact "Quick Styles" button when its
+// own ResizeObserver reports too little width.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom";
@@ -338,14 +341,6 @@ const galleryStyles = {
       color: #333;
     }
   `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #666;
-    text-align: center;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-  `,
-
   // Full dropdown gallery
   dropdownOverlay: css`
     position: fixed;
@@ -609,8 +604,6 @@ interface GalleryProps {
   selectedStyleId: string;
   onStyleSelect: (styleId: string) => void;
   onStyleClear: () => void;
-  /** When true, collapse to a compact "Quick Styles" button (driven by useRibbonCollapse). */
-  collapsed?: boolean;
 }
 
 // Show Medium Group 0 (styles 1-7) in the collapsed strip by default
@@ -625,7 +618,7 @@ const MIN_STRIP_W = 62 + 18 + 12; // thumb + button + padding
 /** Width threshold below which we collapse to the Quick Styles button */
 const COLLAPSE_THRESHOLD = MIN_STRIP_W;
 
-export function TableStylesGallery({ selectedStyleId, onStyleSelect, onStyleClear, collapsed = false }: GalleryProps) {
+export function TableStylesGallery({ selectedStyleId, onStyleSelect, onStyleClear }: GalleryProps) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
@@ -645,8 +638,8 @@ export function TableStylesGallery({ selectedStyleId, onStyleSelect, onStyleClea
     return () => observer.disconnect();
   }, []);
 
-  // Collapse via prop (from useRibbonCollapse) or when container is too narrow
-  const isCollapsed = collapsed || availableWidth < COLLAPSE_THRESHOLD;
+  // Collapse to the Quick Styles button when the container is too narrow
+  const isCollapsed = availableWidth < COLLAPSE_THRESHOLD;
   const visibleCount = isCollapsed
     ? 0
     : Math.max(1, Math.min(STRIP_STYLES.length, Math.floor((availableWidth - 18 - 12) / THUMB_STRIP_W)));
@@ -705,7 +698,6 @@ export function TableStylesGallery({ selectedStyleId, onStyleSelect, onStyleClea
           </button>
         </div>
       )}
-      <div className={galleryStyles.groupLabel}>Table Styles</div>
 
       {isOpen && anchorRect && (
         <TableStylesDropdown

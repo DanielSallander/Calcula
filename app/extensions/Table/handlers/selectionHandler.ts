@@ -1,20 +1,20 @@
 //! FILENAME: app/extensions/Table/handlers/selectionHandler.ts
 // PURPOSE: Track selection context for the Table extension.
-// CONTEXT: Shows/hides the contextual Table Design ribbon tab based on whether
-//          the current selection is within a table region.
+// CONTEXT: Shows/hides the contextual Table Design panel (ribbon-placed) based
+//          on whether the current selection is within a table region.
 
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
-  ExtensionRegistry,
   emitAppEvent,
   onAppEvent,
   setColumnHeaderOverrideProvider,
   registerColumnHeaderClickInterceptor,
 } from "@api";
 import type { ColumnHeaderOverride, ColumnHeaderClickResult } from "@api";
+import { registerPanel, unregisterPanel } from "@api/ui";
 import { getTableAtCell, getAllTables, type Table } from "../lib/tableStore";
-import { TableDesignTabDefinition, TABLE_DESIGN_TAB_ID } from "../manifest";
+import { TableDesignPanelDefinition, TABLE_DESIGN_TAB_ID } from "../manifest";
 import { TableEvents } from "../lib/tableEvents";
 
 // ============================================================================
@@ -24,7 +24,7 @@ import { TableEvents } from "../lib/tableEvents";
 let currentTableId: string | null = null;
 let lastCheckedSelection: { row: number; col: number } | null = null;
 
-/** Whether the contextual table ribbon tab is currently registered. */
+/** Whether the contextual Table Design panel is currently registered. */
 let designTabRegistered = false;
 
 /** Cleanup function for the TABLE_REQUEST_STATE listener. */
@@ -42,7 +42,7 @@ let clickInterceptorCleanup: (() => void) | null = null;
 
 /**
  * Handle selection changes from the extension registry.
- * Checks if the active cell is within a table and shows/hides the Table Design ribbon tab.
+ * Checks if the active cell is within a table and shows/hides the Table Design panel.
  */
 export function handleSelectionChange(
   selection: { endRow: number; endCol: number } | null,
@@ -68,9 +68,9 @@ export function handleSelectionChange(
     currentTableId = table.id;
     addTaskPaneContextKey("table");
 
-    // Register the contextual ribbon tab if not already registered
+    // Register the contextual panel if not already registered
     if (!designTabRegistered) {
-      ExtensionRegistry.registerRibbonTab(TableDesignTabDefinition);
+      registerPanel(TableDesignPanelDefinition);
       designTabRegistered = true;
     }
 
@@ -78,7 +78,7 @@ export function handleSelectionChange(
     // when the header row scrolls above the viewport
     setTableHeaderOverride(table);
 
-    // Broadcast current table state to the ribbon tab
+    // Broadcast current table state to the panel sections
     emitAppEvent(TableEvents.TABLE_STATE, { table });
   } else {
     // Selection is outside any table
@@ -89,32 +89,32 @@ export function handleSelectionChange(
       // Clear column header overrides
       clearTableHeaderOverride();
 
-      // Unregister the contextual ribbon tab
+      // Unregister the contextual panel
       if (designTabRegistered) {
-        ExtensionRegistry.unregisterRibbonTab(TABLE_DESIGN_TAB_ID);
+        unregisterPanel(TABLE_DESIGN_TAB_ID);
         designTabRegistered = false;
       }
 
-      // Notify the ribbon tab that the table is deselected
+      // Notify the panel sections that the table is deselected
       window.dispatchEvent(new Event("table:deselected"));
     }
   }
 }
 
 /**
- * Ensure the contextual table ribbon tab is registered.
+ * Ensure the contextual Table Design panel is registered.
  * Called after table creation so the tab appears immediately.
  */
 export function ensureDesignTabRegistered(): void {
   if (!designTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(TableDesignTabDefinition);
+    registerPanel(TableDesignPanelDefinition);
     designTabRegistered = true;
   }
 }
 
 /**
  * Initialize the state request listener.
- * The ribbon tab can request the current table state when it mounts
+ * The panel sections can request the current table state when they mount
  * (e.g. user switches tabs and comes back).
  */
 export function initRequestStateListener(): () => void {
@@ -273,7 +273,7 @@ export function resetSelectionHandlerState(): void {
     clickInterceptorCleanup = null;
   }
   if (designTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(TABLE_DESIGN_TAB_ID);
+    unregisterPanel(TABLE_DESIGN_TAB_ID);
     designTabRegistered = false;
   }
   if (requestStateCleanup) {

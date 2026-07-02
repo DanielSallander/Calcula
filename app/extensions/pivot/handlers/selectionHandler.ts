@@ -10,15 +10,16 @@ import {
   getTaskPaneManuallyClosed,
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
-  ExtensionRegistry,
+  registerPanel,
+  unregisterPanel,
   emitAppEvent,
 } from "@api";
 import type { LayoutConfig, AggregationType } from "@api";
 import {
   PIVOT_PANE_ID,
-  PivotDesignTabDefinition,
+  PivotDesignPanelDefinition,
   PIVOT_DESIGN_TAB_ID,
-  PivotAnalyzeTabDefinition,
+  PivotAnalyzePanelDefinition,
   PIVOT_ANALYZE_TAB_ID,
 } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
@@ -32,7 +33,7 @@ import { PivotEvents } from "../../_shared/lib/pivotEvents";
 let cachedRegions: PivotRegionData[] = [];
 
 /** The currently active pivot ID (set when selection is inside a pivot region).
- *  Exported so ribbon tabs can read it directly on mount without waiting for events. */
+ *  Exported so panel sections can read it directly on mount without waiting for events. */
 let activePivotId: string | null = null;
 
 /** Get the currently active pivot ID. */
@@ -52,7 +53,7 @@ let checkInProgress = false;
 /** Debounce timer for selection changes within a pivot region. */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Whether the contextual pivot ribbon tabs are currently registered. */
+/** Whether the contextual pivot ribbon panels are currently registered. */
 let designTabRegistered = false;
 let analyzeTabRegistered = false;
 
@@ -70,18 +71,18 @@ export function updateCachedRegions(regions: PivotRegionData[]): void {
   justCreatedPivot = false;
 
   // When there are no pivot regions on the current sheet (e.g. after
-  // deleting a pivot sheet), unregister the contextual ribbon tabs and
+  // deleting a pivot sheet), unregister the contextual ribbon panels and
   // close the task pane immediately. Without this, the tabs and pane
   // linger because the selection handler's lastCheckedSelection cache
   // may prevent re-evaluation.
   if (cachedRegions.length === 0) {
     lastCheckedSelection = null;
     if (analyzeTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(PIVOT_ANALYZE_TAB_ID);
+      unregisterPanel(PIVOT_ANALYZE_TAB_ID);
       analyzeTabRegistered = false;
     }
     if (designTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
+      unregisterPanel(PIVOT_DESIGN_TAB_ID);
       designTabRegistered = false;
     }
     removeTaskPaneContextKey("pivot");
@@ -98,17 +99,17 @@ export function setJustCreatedPivot(value: boolean): void {
 }
 
 /**
- * Ensure the contextual pivot ribbon tabs are registered.
+ * Ensure the contextual pivot ribbon panels are registered.
  * Called by pivotCreatedHandler so the tabs appear immediately on creation,
  * regardless of whether the selection handler has run yet.
  */
 export function ensureDesignTabRegistered(): void {
   if (!analyzeTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(PivotAnalyzeTabDefinition);
+    registerPanel(PivotAnalyzePanelDefinition);
     analyzeTabRegistered = true;
   }
   if (!designTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
+    registerPanel(PivotDesignPanelDefinition);
     designTabRegistered = true;
   }
 }
@@ -262,14 +263,14 @@ export function handleSelectionChange(
     // Cell is NOT in any pivot region - close pivot pane if open
     // BUT skip if a pivot was just created (regions not yet cached)
     if (justCreatedPivot) {
-      // Register pivot tabs even though regions aren't cached yet —
+      // Register pivot panels even though regions aren't cached yet —
       // we know the user just created a pivot and is inside it.
       if (!analyzeTabRegistered) {
-        ExtensionRegistry.registerRibbonTab(PivotAnalyzeTabDefinition);
+        registerPanel(PivotAnalyzePanelDefinition);
         analyzeTabRegistered = true;
       }
       if (!designTabRegistered) {
-        ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
+        registerPanel(PivotDesignPanelDefinition);
         designTabRegistered = true;
       }
       return;
@@ -278,13 +279,13 @@ export function handleSelectionChange(
     activePivotId = null;
     removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
-    // Hide the contextual pivot ribbon tabs
+    // Hide the contextual pivot ribbon panels
     if (analyzeTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(PIVOT_ANALYZE_TAB_ID);
+      unregisterPanel(PIVOT_ANALYZE_TAB_ID);
       analyzeTabRegistered = false;
     }
     if (designTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
+      unregisterPanel(PIVOT_DESIGN_TAB_ID);
       designTabRegistered = false;
     }
     return;
@@ -293,13 +294,13 @@ export function handleSelectionChange(
   // Cell IS in a pivot region - set context key and active pivot ID
   activePivotId = localPivotRegion.pivotId;
   addTaskPaneContextKey("pivot");
-  // Show the contextual pivot ribbon tabs
+  // Show the contextual pivot ribbon panels
   if (!analyzeTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(PivotAnalyzeTabDefinition);
+    registerPanel(PivotAnalyzePanelDefinition);
     analyzeTabRegistered = true;
   }
   if (!designTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
+    registerPanel(PivotDesignPanelDefinition);
     designTabRegistered = true;
   }
 
@@ -539,11 +540,11 @@ export function resetSelectionHandlerState(): void {
     debounceTimer = null;
   }
   if (analyzeTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(PIVOT_ANALYZE_TAB_ID);
+    unregisterPanel(PIVOT_ANALYZE_TAB_ID);
     analyzeTabRegistered = false;
   }
   if (designTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
+    unregisterPanel(PIVOT_DESIGN_TAB_ID);
     designTabRegistered = false;
   }
 }

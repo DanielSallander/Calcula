@@ -1,16 +1,16 @@
 //! FILENAME: app/extensions/TimelineSlicer/handlers/selectionHandler.ts
-// PURPOSE: Show/hide the contextual Timeline Options ribbon tab based on selection.
+// PURPOSE: Show/hide the contextual Timeline options panel based on selection.
 
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
-  ExtensionRegistry,
 } from "@api";
+import { registerPanel, unregisterPanel } from "@api/ui";
 import { getTimelineById } from "../lib/timelineSlicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import {
   TIMELINE_OPTIONS_TAB_ID,
-  TimelineOptionsTabDefinition,
+  TimelineOptionsPanelDefinition,
 } from "../manifest";
 import { TimelineSlicerEvents } from "../lib/timelineSlicerEvents";
 import type { TimelineSlicer } from "../lib/timelineSlicerTypes";
@@ -49,7 +49,7 @@ export function selectTimeline(timelineId: number, additive = false): void {
     addTaskPaneContextKey("timeline-slicer");
 
     if (!optionsTabRegistered) {
-      ExtensionRegistry.registerRibbonTab(TimelineOptionsTabDefinition);
+      registerPanel(TimelineOptionsPanelDefinition);
       optionsTabRegistered = true;
     }
 
@@ -86,7 +86,7 @@ export function deselectTimeline(): void {
     removeTaskPaneContextKey("timeline-slicer");
 
     if (optionsTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(TIMELINE_OPTIONS_TAB_ID);
+      unregisterPanel(TIMELINE_OPTIONS_TAB_ID);
       optionsTabRegistered = false;
     }
 
@@ -122,7 +122,7 @@ export function handleSelectionChange(
 
 export function resetSelectionHandlerState(): void {
   if (optionsTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(TIMELINE_OPTIONS_TAB_ID);
+    unregisterPanel(TIMELINE_OPTIONS_TAB_ID);
     optionsTabRegistered = false;
   }
   selectedTimelineIds.clear();

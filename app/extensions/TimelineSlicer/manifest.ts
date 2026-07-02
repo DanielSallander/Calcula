@@ -6,10 +6,15 @@ import type {
   DialogDefinition,
   DialogProps,
 } from "@api";
+import type { PanelDefinition } from "@api/ui";
 import React from "react";
 import { InsertTimelineDialog } from "./components/InsertTimelineDialog";
 import { TimelineSlicerSettingsDialog } from "./components/TimelineSlicerSettingsDialog";
-import { TimelineSlicerOptionsTab } from "./components/TimelineSlicerOptionsTab";
+import {
+  TimelineLevelSection,
+  TimelineFilterSection,
+  TimelineActionsSection,
+} from "./components/TimelineSlicerOptionsTab";
 
 // ============================================================================
 // Extension Manifest
@@ -28,18 +33,48 @@ export const TimelineSlicerManifest: AddInManifest = {
 };
 
 // ============================================================================
-// Contextual Ribbon Tab
+// Contextual Timeline Panel (ribbon-placed by default)
 // ============================================================================
 
 const TIMELINE_TAB_COLOR = "#4472C4"; // Blue accent
+const TIMELINE_TAB_ORDER = 500;
 
 export const TIMELINE_OPTIONS_TAB_ID = "timeline-slicer-options";
-export const TimelineOptionsTabDefinition = {
+
+/**
+ * Location-agnostic panel replacing the old monolithic contextual ribbon tab.
+ * One section per former RibbonGroup; collapsePriority carries the old
+ * collapseOrder semantics (lower demotes to a launcher first under width
+ * pressure). The shell owns group chrome and collapse measurement.
+ */
+export const TimelineOptionsPanelDefinition: PanelDefinition = {
   id: TIMELINE_OPTIONS_TAB_ID,
-  label: "Timeline",
-  order: 500,
-  component: TimelineSlicerOptionsTab,
-  color: TIMELINE_TAB_COLOR,
+  title: "Timeline",
+  icon: null,
+  sections: [
+    {
+      id: `${TIMELINE_OPTIONS_TAB_ID}.level`,
+      label: "Level",
+      component: TimelineLevelSection,
+      collapsePriority: 3,
+    },
+    {
+      id: `${TIMELINE_OPTIONS_TAB_ID}.filter`,
+      label: "Filter",
+      component: TimelineFilterSection,
+      collapsePriority: 2,
+    },
+    {
+      id: `${TIMELINE_OPTIONS_TAB_ID}.timeline`,
+      label: "Timeline",
+      component: TimelineActionsSection,
+      collapsePriority: 1,
+    },
+  ],
+  defaultPlacement: "ribbon",
+  ribbonOrder: TIMELINE_TAB_ORDER,
+  ribbonColor: TIMELINE_TAB_COLOR,
+  priority: 1000 - TIMELINE_TAB_ORDER,
 };
 
 // ============================================================================

@@ -1,18 +1,18 @@
 //! FILENAME: app/extensions/Sparklines/handlers/selectionHandler.ts
-// PURPOSE: Handles selection changes to show/hide the contextual Sparkline ribbon tab.
+// PURPOSE: Handles selection changes to show/hide the contextual Sparkline panel.
 // CONTEXT: When the user selects a cell within a sparkline location range, we show the
-//          "Sparkline" Design tab. When they move outside, we hide it.
-//          Follows the same pattern as Pivot's selectionHandler.ts.
+//          "Sparkline" design panel (ribbon-placed by default). When they move outside,
+//          we hide it. Follows the same pattern as Pivot's selectionHandler.ts.
 
-import { ExtensionRegistry } from "@api";
+import { registerPanel, unregisterPanel } from "@api/ui";
 import { hasSparkline } from "../store";
-import { SparklineDesignTabDefinition, SPARKLINE_DESIGN_TAB_ID } from "../manifest";
+import { SparklineDesignPanelDefinition, SPARKLINE_DESIGN_TAB_ID } from "../manifest";
 
 // ---------------------------------------------------------------------------
 // Module-level state
 // ---------------------------------------------------------------------------
 
-/** Whether the Design ribbon tab is currently registered. */
+/** Whether the design panel is currently registered. */
 let designTabRegistered = false;
 
 /** Track last checked selection to avoid redundant checks. */
@@ -23,13 +23,13 @@ let lastCheckedSelection: { row: number; col: number } | null = null;
 // ---------------------------------------------------------------------------
 
 /**
- * Ensure the Design ribbon tab is registered.
- * Can be called externally (e.g., after creating a sparkline) to show the tab
+ * Ensure the design panel is registered.
+ * Can be called externally (e.g., after creating a sparkline) to show the panel
  * immediately without waiting for the selection handler.
  */
 export function ensureDesignTabRegistered(): void {
   if (!designTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(SparklineDesignTabDefinition);
+    registerPanel(SparklineDesignPanelDefinition);
     designTabRegistered = true;
   }
   // Clear cached selection so the handler re-evaluates on next move
@@ -37,7 +37,7 @@ export function ensureDesignTabRegistered(): void {
 }
 
 /**
- * Handle selection change to show/hide the sparkline Design ribbon tab.
+ * Handle selection change to show/hide the sparkline design panel.
  * Called by the ExtensionRegistry.onSelectionChange subscription.
  */
 export function handleSelectionChange(
@@ -62,10 +62,10 @@ export function handleSelectionChange(
   const inSparkline = hasSparkline(row, col);
 
   if (inSparkline && !designTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(SparklineDesignTabDefinition);
+    registerPanel(SparklineDesignPanelDefinition);
     designTabRegistered = true;
   } else if (!inSparkline && designTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(SPARKLINE_DESIGN_TAB_ID);
+    unregisterPanel(SPARKLINE_DESIGN_TAB_ID);
     designTabRegistered = false;
   }
 }
@@ -77,7 +77,7 @@ export function handleSelectionChange(
 export function resetSelectionHandlerState(): void {
   lastCheckedSelection = null;
   if (designTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(SPARKLINE_DESIGN_TAB_ID);
+    unregisterPanel(SPARKLINE_DESIGN_TAB_ID);
     designTabRegistered = false;
   }
 }

@@ -6,7 +6,7 @@
 // based on each panel's effective placement.
 
 import React from "react";
-import type { PanelDefinition, PanelPlacement, PanelSection, ActivityViewDefinition } from "../../api/uiTypes";
+import type { PanelDefinition, PanelPlacement, ActivityViewDefinition } from "../../api/uiTypes";
 import type { RibbonTabDefinition, RibbonContext } from "./types";
 import type { PanelService } from "../../api/ui";
 import { usePanelPlacementStore } from "./usePanelPlacementStore";
@@ -38,8 +38,11 @@ function createLetterIcon(title: string): React.ReactElement {
 const ALL_PLACEMENTS: PanelPlacement[] = ["sidebar", "ribbon"];
 
 /**
- * The set of surfaces a panel is allowed to live in. A panel opts into a
- * subset via `supportedPlacements`; when unset (or empty) it supports both.
+ * The surfaces a panel declares itself best suited for. This is a SOFT
+ * product-intent hint (shown on the move affordance), never a hard lock:
+ * layout safety on any surface is guaranteed by the section renderers
+ * (too-tall ribbon sections demote to launcher flyouts). Unset/empty means
+ * "equally at home on both".
  */
 export function getSupportedPlacements(panel: PanelDefinition): PanelPlacement[] {
   const declared = panel.supportedPlacements;
@@ -112,13 +115,6 @@ class PanelRegistryImpl implements PanelService {
 
   registerPanel(definition: PanelDefinition): void {
     this.panels.set(definition.id, definition);
-    // Drop a persisted placement that is no longer valid for this panel (e.g.
-    // it was moved to the ribbon in a previous session but is now declared
-    // sidebar-only). Otherwise getPlacement would keep clamping a stale value.
-    const stored = usePanelPlacementStore.getState().placements[definition.id];
-    if (stored && !getSupportedPlacements(definition).includes(stored)) {
-      usePanelPlacementStore.getState().resetPlacement(definition.id);
-    }
     const placement = this.getPlacement(definition.id);
     this.projectPanel(definition, placement);
     this.notifyChange();
@@ -156,39 +152,36 @@ class PanelRegistryImpl implements PanelService {
   getPlacement(panelId: string): PanelPlacement {
     const panel = this.panels.get(panelId);
     const defaultPlacement = panel?.defaultPlacement ?? "sidebar";
-    const stored = usePanelPlacementStore.getState().getPlacement(panelId, defaultPlacement);
-    if (!panel) return stored;
-    // Never project a panel into a surface it doesn't support (guards stale
-    // persisted overrides and any programmatic placement). Prefer the stored
-    // value, then the default, then whatever the panel does support.
-    const supported = getSupportedPlacements(panel);
-    if (supported.includes(stored)) return stored;
-    if (supported.includes(defaultPlacement)) return defaultPlacement;
-    return supported[0] ?? "sidebar";
+    return usePanelPlacementStore.getState().getPlacement(panelId, defaultPlacement);
   }
 
-  /** Whether `placement` is a surface this panel is allowed to live in. */
-  canPlace(panelId: string, placement: PanelPlacement): boolean {
-    const panel = this.panels.get(panelId);
-    if (!panel) return false;
-    return getSupportedPlacements(panel).includes(placement);
-  }
-
-  /** Whether the user is allowed to move this panel to `placement` (movable
-   *  AND the target surface is supported). Drives the context-menu affordance. */
+  /** Whether the user is allowed to move this panel to `placement`. Placement
+   *  is TOTAL freedom: only `movable: false` refuses. A panel whose content
+   *  cannot fit the target surface is handled by the section renderers
+   *  (launcher demotion), not by refusing the move. */
   canMoveTo(panelId: string, placement: PanelPlacement): boolean {
+    void placement;
     const panel = this.panels.get(panelId);
-    if (!panel || panel.movable === false) return false;
-    return this.canPlace(panelId, placement);
+    return !!panel && panel.movable !== false;
+  }
+
+  /** Soft product-intent hint for the move affordance: when the target surface
+   *  is outside the panel's declared supportedPlacements, returns a short
+   *  "works best in the …" note; otherwise null. Never blocks the move. */
+  getMoveHint(panelId: string, target: PanelPlacement): string | null {
+    const panel = this.panels.get(panelId);
+    if (!panel || !panel.supportedPlacements || panel.supportedPlacements.length === 0) {
+      return null;
+    }
+    const supported = getSupportedPlacements(panel);
+    if (supported.includes(target)) return null;
+    return `Works best in the ${supported[0]}`;
   }
 
   setPlacement(panelId: string, placement: PanelPlacement): void {
     const panel = this.panels.get(panelId);
     if (!panel) return;
     if (panel.movable === false) return;
-    // Refuse a move to an unsupported surface (e.g. a sidebar-only panel into
-    // the ribbon) — the panel has no valid layout there.
-    if (!this.canPlace(panelId, placement)) return;
 
     const currentPlacement = this.getPlacement(panelId);
     if (currentPlacement === placement) return;
@@ -270,17 +263,12 @@ class PanelRegistryImpl implements PanelService {
 
   private projectToSidebar(panel: PanelDefinition): void {
     const sections = panel.sections;
-    let SidebarComponent: React.ComponentType<{ onClose?: () => void; data?: Record<string, unknown> }>;
-
-    if (sections.length === 1 && panel.defaultPlacement === "sidebar") {
-      // Sidebar-native single section — render directly without wrapper
-      const Section = sections[0].component;
-      SidebarComponent = () => React.createElement(Section, { placement: "sidebar" });
-    } else {
-      // Ribbon-origin panels or multi-section panels — use SectionSidebarRenderer
-      // which provides CSS overrides for transposing horizontal ribbon layout to vertical
-      SidebarComponent = () => React.createElement(SectionSidebarRenderer, { sections });
-    }
+    // SectionSidebarRenderer handles both shapes: a single section fills the
+    // panel directly (no chrome), multiple sections stack collapsibly. It also
+    // provides the vertical SurfaceLayout geometry and forwards the host's
+    // onClose/data into the section components.
+    const SidebarComponent: React.ComponentType<{ onClose?: () => void; data?: Record<string, unknown> }> =
+      ({ onClose, data }) => React.createElement(SectionSidebarRenderer, { sections, onClose, data });
 
     const activityViewDef: ActivityViewDefinition = {
       id: panel.id,
@@ -289,7 +277,7 @@ class PanelRegistryImpl implements PanelService {
       component: SidebarComponent,
       priority: panel.priority ?? 0,
       bottom: panel.sidebarBottom ?? false,
-      hidden: false,
+      hidden: panel.hidden ?? false,
     };
 
     activityBarImpl.registerView(activityViewDef);
@@ -300,18 +288,23 @@ class PanelRegistryImpl implements PanelService {
   // =========================================================================
 
   private projectToRibbon(panel: PanelDefinition): void {
+    // Hidden panels have no tab-strip presence (the ribbon has no notion of a
+    // registered-but-invisible tab); they stay reachable programmatically via
+    // their sidebar projection.
+    if (panel.hidden) return;
+
     const sections = panel.sections;
-
-    let TabComponent: React.ComponentType<{ context: RibbonContext }>;
-
-    if (sections.length === 1) {
-      // Single section — render directly
-      const Section = sections[0].component;
-      TabComponent = () => React.createElement(Section, { placement: "ribbon" });
-    } else {
-      // Multiple sections — use SectionRibbonRenderer
-      TabComponent = () => React.createElement(SectionRibbonRenderer, { sections });
-    }
+    // Always render through SectionRibbonRenderer so every section — including
+    // a single one — is measured and demoted to a launcher if it cannot fit
+    // the band. A fully-demoted single-section panel renders one launcher
+    // carrying the panel's own title/icon (Excel's collapsed-group idiom).
+    const TabComponent: React.ComponentType<{ context: RibbonContext }> = () =>
+      React.createElement(SectionRibbonRenderer, {
+        sections,
+        panelId: panel.id,
+        panelTitle: panel.title,
+        panelIcon: panel.icon,
+      });
 
     const tabDef: RibbonTabDefinition = {
       id: panel.id,

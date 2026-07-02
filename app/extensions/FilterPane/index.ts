@@ -3,9 +3,10 @@
 
 import type { ExtensionContext, ExtensionModule } from "@api/contract";
 import { ExtensionRegistry } from "@api";
+import { registerPanel, unregisterPanel } from "@api/ui";
 import {
   FilterPaneManifest,
-  FilterPaneTabDefinition,
+  FilterPanePanelDefinition,
   AddFilterDialogDefinition,
   FILTER_PANE_TAB_ID,
 } from "./manifest";
@@ -33,8 +34,8 @@ function activate(context: ExtensionContext): void {
     description: FilterPaneManifest.description,
   });
 
-  // Register the permanent ribbon tab (always visible)
-  ExtensionRegistry.registerRibbonTab(FilterPaneTabDefinition);
+  // Register the permanent "Filters" panel (ribbon-placed by default)
+  registerPanel(FilterPanePanelDefinition);
 
   // Register dialogs
   context.ui.dialogs.register(AddFilterDialogDefinition);
@@ -58,7 +59,7 @@ function deactivate(): void {
   console.log("[FilterPane Extension] Deactivating...");
   unregisterBadge?.();
   unregisterBadge = null;
-  ExtensionRegistry.unregisterRibbonTab(FILTER_PANE_TAB_ID);
+  unregisterPanel(FILTER_PANE_TAB_ID);
   clearCache();
 }
 

@@ -14,10 +14,12 @@
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
-  ExtensionRegistry,
+  registerPanel,
+  unregisterPanel,
 } from "@api";
 import type { ChartHitResult, ChartSubSelection, ChartSelectionLevel } from "../types";
-import { CHART_DESIGN_TAB_ID, ChartDesignTabDefinition } from "../manifest";
+import { CHART_DESIGN_TAB_ID, buildChartDesignPanelDefinition } from "../manifest";
+import { ChartEvents } from "../lib/chartEvents";
 
 // ============================================================================
 // State
@@ -27,8 +29,11 @@ let currentChartId: string | null = null;
 
 let subSelection: ChartSubSelection = { level: "none" };
 
-/** Whether the contextual Design ribbon tab is currently registered. */
+/** Whether the contextual Design panel is currently registered. */
 let designTabRegistered = false;
+
+/** Section-id fingerprint of the last-registered Design panel. */
+let designSectionIds = "";
 
 /** Pending click state for deferred click detection. */
 let pendingClick: {
@@ -36,6 +41,39 @@ let pendingClick: {
   canvasX: number;
   canvasY: number;
 } | null = null;
+
+// ============================================================================
+// Contextual Design Panel (sections vary with the selected chart's type)
+// ============================================================================
+
+/** Register (or upsert) the Design panel for the currently selected chart. */
+function registerDesignPanel(): void {
+  const definition = buildChartDesignPanelDefinition();
+  designSectionIds = definition.sections.map((s) => s.id).join("|");
+  registerPanel(definition);
+}
+
+/**
+ * Re-register the Design panel when the applicable section set changes (e.g.
+ * the chart type switches bar -> pie and the Stacking/Trendline groups no
+ * longer apply) — mirroring the former monolithic tab's conditional
+ * RibbonGroup rendering. No-op when the section list is unchanged, so
+ * in-section editing (title typing, etc.) never remounts the panel.
+ */
+function refreshDesignPanelSections(): void {
+  if (!designTabRegistered) return;
+  const definition = buildChartDesignPanelDefinition();
+  const ids = definition.sections.map((s) => s.id).join("|");
+  if (ids !== designSectionIds) {
+    designSectionIds = ids;
+    registerPanel(definition);
+  }
+}
+
+/** Window listener: chart specs changed — the section set may have too. */
+function handleChartUpdatedForDesignPanel(): void {
+  refreshDesignPanelSections();
+}
 
 // ============================================================================
 // Selection Management
@@ -53,10 +91,16 @@ export function selectChart(chartId: string): void {
     subSelection = { level: "chart" };
     addTaskPaneContextKey("chart");
 
-    // Show the contextual Design ribbon tab
+    // Show the contextual Design panel (ribbon-placed by default)
     if (!designTabRegistered) {
-      ExtensionRegistry.registerRibbonTab(ChartDesignTabDefinition);
+      registerDesignPanel();
       designTabRegistered = true;
+      // Keep the section set in sync with chart-type changes while selected.
+      window.addEventListener(ChartEvents.CHART_UPDATED, handleChartUpdatedForDesignPanel);
+    } else {
+      // Switching directly to a different chart: its type may need a
+      // different section set (e.g. bar -> pie drops Stacking/Trendline).
+      refreshDesignPanelSections();
     }
   }
   // If already selected, the pending click mechanism in index.ts
@@ -73,10 +117,12 @@ export function deselectChart(): void {
     pendingClick = null;
     removeTaskPaneContextKey("chart");
 
-    // Hide the contextual Design ribbon tab
+    // Hide the contextual Design panel
     if (designTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(CHART_DESIGN_TAB_ID);
+      window.removeEventListener(ChartEvents.CHART_UPDATED, handleChartUpdatedForDesignPanel);
+      unregisterPanel(CHART_DESIGN_TAB_ID);
       designTabRegistered = false;
+      designSectionIds = "";
     }
   }
 }
@@ -225,7 +271,9 @@ export function resetSelectionHandlerState(): void {
   subSelection = { level: "none" };
   pendingClick = null;
   if (designTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(CHART_DESIGN_TAB_ID);
+    window.removeEventListener(ChartEvents.CHART_UPDATED, handleChartUpdatedForDesignPanel);
+    unregisterPanel(CHART_DESIGN_TAB_ID);
     designTabRegistered = false;
+    designSectionIds = "";
   }
 }

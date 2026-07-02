@@ -16,10 +16,13 @@ export interface PanelContextMenuProps {
   panelId: string;
   /** The panel display title (for script editor) */
   panelTitle: string;
-  /** Whether the panel may be moved to the opposite surface. When false the
-   *  "Move to …" item is hidden (e.g. a sidebar-only panel like Animation that
-   *  has no valid ribbon layout). Defaults to true. */
+  /** Whether the panel may be moved to the opposite surface (movable panels
+   *  only — placement itself is total freedom). Defaults to true. */
   canMoveToTarget?: boolean;
+  /** Soft product hint shown under the move item (e.g. "Works best in the
+   *  sidebar") when the target surface is outside the panel's declared
+   *  supportedPlacements. Never blocks the move. */
+  moveHint?: string | null;
   /** Called when the user selects a new placement */
   onMove: (placement: PanelPlacement) => void;
   /** Called to close the menu */
@@ -35,6 +38,7 @@ export function PanelContextMenu({
   panelId,
   panelTitle,
   canMoveToTarget = true,
+  moveHint,
   onMove,
   onClose,
 }: PanelContextMenuProps): React.ReactElement {
@@ -138,7 +142,12 @@ export function PanelContextMenu({
                 <line x1="1" y1="5" x2="15" y2="5" />
               </svg>
             )}
-            {label}
+            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+              {label}
+              {moveHint && (
+                <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>{moveHint}</span>
+              )}
+            </span>
           </button>
 
           {/* Separator */}

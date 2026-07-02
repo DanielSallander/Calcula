@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/Charts/components/ChartFilterDropdown.tsx
 // PURPOSE: Dropdown for toggling series and category visibility on a chart.
-// CONTEXT: Rendered inline in the ChartDesignTab ribbon. Shows checkboxes for
+// CONTEXT: Rendered inline in the Chart Design panel's Filter section. Shows checkboxes for
 //          each series and category, with Select All / Deselect All controls.
 
 import React, { useState, useRef, useEffect, useCallback } from "react";

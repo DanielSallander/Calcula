@@ -137,6 +137,35 @@ pub fn get_object_json(
             };
             serde_json::to_string_pretty(&layout).map_err(|e| e.to_string())
         }
+        "sheet_data" => {
+            let idx: usize = object_id.parse().map_err(|_| "Invalid sheet index".to_string())?;
+            // Cell values are the sparse, A1-keyed grid contents — a structure
+            // entirely separate from the layout above (which is only column/row
+            // sizes). The active sheet's live cells are in the primary grid;
+            // other sheets are held in the per-sheet grids vector (the active
+            // slot there is stale). Read the freshest source, then reuse the
+            // .cala serializer so the shape matches the on-disk data.json.
+            let active = *state.active_sheet.lock().unwrap();
+            let cells: std::collections::HashMap<(u32, u32), ::persistence::SavedCell> =
+                if idx == active {
+                    let grid = state.grid.lock().unwrap();
+                    grid.cells
+                        .iter()
+                        .map(|(&rc, c)| (rc, ::persistence::SavedCell::from_cell(c)))
+                        .collect()
+                } else {
+                    let grids = state.grids.lock().unwrap();
+                    let grid = grids
+                        .get(idx)
+                        .ok_or_else(|| format!("Sheet {} not found", idx))?;
+                    grid.cells
+                        .iter()
+                        .map(|(&rc, c)| (rc, ::persistence::SavedCell::from_cell(c)))
+                        .collect()
+                };
+            let data = calcula_format::sheet_data::cells_to_sheet_data(&cells);
+            serde_json::to_string_pretty(&data).map_err(|e| e.to_string())
+        }
         _ => Err(format!("Unknown object type: {}", object_type)),
     }
 }
@@ -541,11 +570,27 @@ pub fn get_workbook_tree(
             children: Vec::new(),
         };
         for (idx, name) in sheet_names.iter().enumerate() {
+            // Each sheet is a branch with two inspectable facets: its Layout
+            // (column/row sizes) and its Cells (the sparse grid contents). The
+            // parent row carries no object_type so clicking it only expands.
             sheets_node.children.push(TreeNode {
                 label: format!("{} (Sheet {})", name, idx),
-                object_type: Some("sheet_layout".to_string()),
-                object_id: Some(idx.to_string()),
-                children: Vec::new(),
+                object_type: None,
+                object_id: None,
+                children: vec![
+                    TreeNode {
+                        label: "Layout".to_string(),
+                        object_type: Some("sheet_layout".to_string()),
+                        object_id: Some(idx.to_string()),
+                        children: Vec::new(),
+                    },
+                    TreeNode {
+                        label: "Cells".to_string(),
+                        object_type: Some("sheet_data".to_string()),
+                        object_id: Some(idx.to_string()),
+                        children: Vec::new(),
+                    },
+                ],
             });
         }
         root.children.push(sheets_node);

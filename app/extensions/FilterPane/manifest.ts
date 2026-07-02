@@ -3,7 +3,8 @@
 
 import React from "react";
 import type { AddInManifest, DialogDefinition, DialogProps } from "@api";
-import { FilterPaneTab } from "./components/FilterPaneTab";
+import type { PanelDefinition } from "@api/ui";
+import { FilterPaneSection } from "./components/FilterPaneSection";
 import { AddFilterDialog } from "./components/AddFilterDialog";
 
 export const FILTER_PANE_TAB_ID = "filter-pane";
@@ -19,11 +20,28 @@ export const FilterPaneManifest: AddInManifest = {
   commands: [],
 };
 
-export const FilterPaneTabDefinition = {
+/**
+ * Location-agnostic "Filters" panel (ribbon-placed by default; movable to the
+ * sidebar). Single section: the former tab had no group boundaries — just the
+ * add-filter button plus the dynamic filter-card strip.
+ */
+export const FilterPanePanelDefinition: PanelDefinition = {
   id: FILTER_PANE_TAB_ID,
-  label: "Filters",
-  order: 45,
-  component: FilterPaneTab,
+  title: "Filters",
+  icon: null,
+  sections: [
+    {
+      id: "filter-pane.filters",
+      label: "Filters",
+      component: FilterPaneSection,
+      // The filter cards are a fixed-height (56px) band-designed strip;
+      // trust it inline and skip the shell's height probe.
+      ribbonPresentation: "inline",
+    },
+  ],
+  defaultPlacement: "ribbon",
+  ribbonOrder: 45,
+  priority: 955, // 1000 - ribbonOrder
 };
 
 export const AddFilterDialogDefinition: DialogDefinition = {

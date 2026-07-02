@@ -1,63 +1,22 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/components/HomeTabGroupComponent.tsx
 // PURPOSE: Reusable component that renders a set of Home tab items.
-// CONTEXT: Used by individual registered ribbon group components (Clipboard, Font, etc.)
-// Each group renders its items using the shared useHomeTabState hook.
+// CONTEXT: Hosted as a panel section (one per layout group: Clipboard, Font, etc.),
+// so the same JSX renders in the ribbon band and the sidebar. Generic buttons use
+// the @api/layout primitives; specialized widgets (color pickers, style gallery)
+// keep their own popover implementations. State comes from useHomeTabState.
 
 import React, { useState } from "react";
 import { css } from "@emotion/css";
 import { DialogExtensions } from "@api/ui";
+import { ControlRow, Button, ToggleButton } from "@api/layout";
 import type { RibbonContext } from "@api/extensions";
-import { ITEMS_BY_ID, type HomeTabItem } from "../homeTabConfig";
+import { ITEMS_BY_ID } from "../homeTabConfig";
 import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
 import { useHomeTabState } from "./useHomeTabState";
 
 // ============================================================================
-// Styles (extracted from HomeTabComponent)
+// Styles (color-picker trigger only — generic buttons use @api/layout)
 // ============================================================================
-
-const groupContentStyle = css`
-  display: flex;
-  gap: 3px;
-  align-items: center;
-  flex: 1;
-  flex-wrap: wrap;
-`;
-
-const btnBase = css`
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 26px;
-  height: 26px;
-  padding: 2px 5px;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  background: transparent;
-  cursor: pointer;
-  font-size: 13px;
-  color: #333;
-  font-family: inherit;
-
-  &:hover:not(:disabled) {
-    background: #e5e5e5;
-    border-color: #c0c0c0;
-  }
-
-  &:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-`;
-
-const btnActive = css`
-  background: #cce4f7;
-  border-color: #84b8de;
-
-  &:hover:not(:disabled) {
-    background: #b8d7f0;
-    border-color: #6aadde;
-  }
-`;
 
 const colorBtnStyle = css`
   position: relative;
@@ -84,7 +43,7 @@ const colorBtnStyle = css`
 `;
 
 // ============================================================================
-// Color Dropdown (extracted from HomeTabComponent)
+// Color Dropdown (specialized popover widget — kept as-is)
 // ============================================================================
 
 const QUICK_COLORS = [
@@ -234,14 +193,13 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     if (item.id === "cellStyles") {
       return (
         <div key={item.id} style={{ position: "relative" }}>
-          <button
-            className={btnBase}
+          <Button
             title={item.tooltip}
             onClick={() => setCellStylesOpen(!cellStylesOpen)}
           >
             <span style={{ fontSize: "11px" }}>{item.icon}</span>
             <span style={{ fontSize: "10px", marginLeft: "3px" }}>{"\u25BC"}</span>
-          </button>
+          </Button>
           {cellStylesOpen && (
             <CellStylesGallery
               onApplyStyle={state.handleCellStyleApply}
@@ -252,31 +210,46 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
       );
     }
 
-    const active = item.type === "toggle" && state.isActive(item.id);
+    const itemStyle: React.CSSProperties | undefined =
+      item.id === "bold" ? { fontWeight: 700 } :
+      item.id === "italic" ? { fontStyle: "italic" } :
+      item.id === "underline" ? { textDecoration: "underline" } :
+      item.id === "strikethrough" ? { textDecoration: "line-through" } :
+      undefined;
+
+    if (item.type === "toggle") {
+      const active = state.isActive(item.id);
+      return (
+        <ToggleButton
+          key={item.id}
+          active={active}
+          title={item.tooltip}
+          data-testid={`fmt-${item.id}`}
+          data-active={active || undefined}
+          onClick={() => state.handleItemClick(item)}
+          style={itemStyle}
+        >
+          {item.icon}
+        </ToggleButton>
+      );
+    }
+
     return (
-      <button
+      <Button
         key={item.id}
-        className={`${btnBase} ${active ? btnActive : ""}`}
         title={item.tooltip}
         data-testid={`fmt-${item.id}`}
-        data-active={active || undefined}
         onClick={() => state.handleItemClick(item)}
-        style={
-          item.id === "bold" ? { fontWeight: 700 } :
-          item.id === "italic" ? { fontStyle: "italic" } :
-          item.id === "underline" ? { textDecoration: "underline" } :
-          item.id === "strikethrough" ? { textDecoration: "line-through" } :
-          undefined
-        }
+        style={itemStyle}
       >
         {item.icon}
-      </button>
+      </Button>
     );
   };
 
   return (
-    <div className={groupContentStyle}>
+    <ControlRow gap={3}>
       {itemIds.map((id) => renderItem(id))}
-    </div>
+    </ControlRow>
   );
 }

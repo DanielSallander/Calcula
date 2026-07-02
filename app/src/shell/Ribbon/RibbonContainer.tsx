@@ -10,6 +10,7 @@ import { useGridState } from "../../api/state";
 import { onAppEvent, emitAppEvent, AppEvents } from "../../api/events";
 import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "./PanelContextMenu";
+import { SectionChrome } from "../components/SectionChrome";
 import type { PanelPlacement } from "../../api/uiTypes";
 
 export function RibbonContainer(): React.ReactElement {
@@ -278,33 +279,14 @@ export function RibbonContainer(): React.ReactElement {
       >
         {groups.length > 0 ? (
           groups.map((group, idx) => (
-            <div
+            <SectionChrome
               key={group.id}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                borderRight: idx < groups.length - 1 ? "1px solid var(--border-default)" : "none",
-                paddingLeft: idx === 0 ? "4px" : "10px",
-                paddingRight: "10px",
-              }}
+              label={group.label}
+              isFirst={idx === 0}
+              isLast={idx === groups.length - 1}
             >
-              <div style={{ flex: 1 }}>
-                <group.component context={context} />
-              </div>
-              <div
-                style={{
-                  fontSize: "10px",
-                  color: "var(--text-tertiary)",
-                  textAlign: "center",
-                  marginTop: "2px",
-                  textTransform: "uppercase" as const,
-                  letterSpacing: "0.5px",
-                  fontWeight: 400,
-                }}
-              >
-                {group.label}
-              </div>
-            </div>
+              <group.component context={context} />
+            </SectionChrome>
           ))
         ) : activeTab ? (
           <activeTab.component context={context} />
@@ -333,6 +315,7 @@ export function RibbonContainer(): React.ReactElement {
           panelId={contextMenu.panelId}
           panelTitle={contextMenu.panelTitle}
           canMoveToTarget={panelRegistry.canMoveTo(contextMenu.panelId, "sidebar")}
+          moveHint={panelRegistry.getMoveHint(contextMenu.panelId, "sidebar")}
           onMove={handlePanelMove}
           onClose={() => setContextMenu(null)}
         />

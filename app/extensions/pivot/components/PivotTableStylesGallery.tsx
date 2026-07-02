@@ -1,7 +1,9 @@
 //! FILENAME: app/extensions/pivot/components/PivotTableStylesGallery.tsx
-// PURPOSE: PivotTable Styles gallery for the Design tab ribbon.
+// PURPOSE: PivotTable Styles gallery for the "Pivot Table Design" panel.
 // CONTEXT: Provides predefined pivot table styles matching Excel's PivotTable Styles gallery.
 // Shows a collapsed strip in the ribbon with a dropdown for the full gallery.
+// Hosted by DesignStylesSection; the shell renders the section's group label,
+// so this widget no longer draws its own.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom';
@@ -15,7 +17,7 @@ import {
 } from '../styles/excelPivotStyles';
 
 // ============================================================================
-// Re-exports (consumed by index.ts and PivotDesignTab.tsx)
+// Re-exports (consumed by index.ts and PivotDesignSections.tsx)
 // ============================================================================
 
 export { EXCEL_PIVOT_STYLES as PIVOT_STYLES };
@@ -384,13 +386,6 @@ const galleryStyles = {
       color: #333;
     }
   `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #666;
-    text-align: center;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-  `,
   dropdownOverlay: css`
     position: fixed;
     top: 0;
@@ -745,7 +740,6 @@ export function PivotTableStylesGallery({ selectedStyleId, onStyleSelect, onStyl
           </button>
         </div>
       )}
-      <div className={galleryStyles.groupLabel}>PivotTable Styles</div>
 
       {isOpen && anchorRect && (
         <PivotStylesDropdown

@@ -1,13 +1,16 @@
 //! FILENAME: app/extensions/BuiltIn/HomeTab/index.ts
-// PURPOSE: Home tab extension - always-visible ribbon tab with quick-access formatting.
-// CONTEXT: Registers each formatting group (Clipboard, Font, Alignment, etc.) as a
-// separate ribbon group. This enables the sections-based panel system to transpose
-// groups between horizontal ribbon layout and vertical sidebar layout.
+// PURPOSE: Home tab extension - always-visible ribbon panel with quick-access formatting.
+// CONTEXT: Registers ONE location-agnostic panel ("home") whose sections come from the
+// user-customizable layout config (Clipboard, Font, Alignment, ...). The shell renders
+// the sections horizontally in the ribbon band or vertically in the sidebar; the
+// customize dialog re-registers the panel when the layout changes.
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { ExtensionRegistry } from "@api/extensions";
-import { DialogExtensions } from "@api/ui";
+import type { RibbonContext } from "@api/extensions";
+import { registerPanel, unregisterPanel, DialogExtensions } from "@api/ui";
+import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
+import { useGridState } from "@api/state";
 import { HomeTabGroupComponent } from "./components/HomeTabGroupComponent";
 import { HomeTabCustomizeDialog } from "./components/HomeTabCustomizeDialog";
 import { loadLayout } from "./homeTabConfig";
@@ -17,6 +20,7 @@ import { loadLayout } from "./homeTabConfig";
 // ============================================================================
 
 const HOME_TAB_ID = "home";
+const HOME_TAB_ORDER = 10;
 const HOME_CUSTOMIZE_DIALOG_ID = "home-tab-customize";
 
 // ============================================================================
@@ -24,12 +28,13 @@ const HOME_CUSTOMIZE_DIALOG_ID = "home-tab-customize";
 // ============================================================================
 
 let isActivated = false;
+let layoutChangedHandler: (() => void) | null = null;
 
 // ============================================================================
 // Group Definitions
 // ============================================================================
 
-/** Icons for collapsed ribbon group buttons */
+/** Icons per group (shown on launcher buttons when a section is demoted) */
 const GROUP_ICONS: Record<string, string> = {
   clipboard: "\u2702",
   font: "A",
@@ -39,7 +44,7 @@ const GROUP_ICONS: Record<string, string> = {
   editing: "\u270E",
 };
 
-/** Collapse priority per group (lower = collapses first) */
+/** Collapse priority per group (lower = collapses to a launcher first) */
 const GROUP_ORDER: Record<string, number> = {
   clipboard: 10,
   font: 20,
@@ -48,6 +53,55 @@ const GROUP_ORDER: Record<string, number> = {
   styles: 50,
   editing: 60,
 };
+
+// ============================================================================
+// Section Building
+// ============================================================================
+
+/**
+ * Builds a PanelSection component for one layout group. The adapter constructs
+ * the RibbonContext from grid state (selection/editing) so the inner group
+ * component keeps its existing contract.
+ */
+function makeSectionComponent(itemIds: string[]): React.ComponentType<PanelSectionProps> {
+  const SectionAdapter: React.ComponentType<PanelSectionProps> = () => {
+    const state = useGridState();
+    const context: RibbonContext = {
+      selection: state.selection,
+      isDisabled: state.editing !== null,
+      executeCommand: async () => {},
+      refreshCells: async () => {},
+    };
+    return React.createElement(HomeTabGroupComponent, { context, itemIds });
+  };
+  return SectionAdapter;
+}
+
+/** Builds the panel sections from the current (possibly customized) layout. */
+function buildSections(): PanelSection[] {
+  const layout = loadLayout();
+  return layout.groups.map((group) => ({
+    id: `${HOME_TAB_ID}.${group.id}`,
+    label: group.label,
+    icon: GROUP_ICONS[group.id] ?? "\u2630",
+    component: makeSectionComponent(group.items),
+    ribbonPresentation: "inline" as const,
+    collapsePriority: GROUP_ORDER[group.id] ?? 99,
+  }));
+}
+
+/** Registers (or re-registers) the Home panel from the current layout. */
+function registerHomePanel(): void {
+  registerPanel({
+    id: HOME_TAB_ID,
+    title: "Home",
+    icon: null,
+    sections: buildSections(),
+    defaultPlacement: "ribbon",
+    ribbonOrder: HOME_TAB_ORDER,
+    priority: 1000 - HOME_TAB_ORDER,
+  });
+}
 
 // ============================================================================
 // Activation
@@ -61,28 +115,15 @@ function activate(_context: ExtensionContext): void {
 
   console.log("[HomeTabExtension] Activating...");
 
-  // Register the Home ribbon tab (empty — groups are registered separately)
-  ExtensionRegistry.registerRibbonTab({
-    id: HOME_TAB_ID,
-    label: "Home",
-    order: 10,
-    // Placeholder component — groups render the actual content
-    component: () => null,
-  });
+  // Register the Home panel (one section per layout group)
+  registerHomePanel();
 
-  // Register each group from the layout config
-  const layout = loadLayout();
-  for (const group of layout.groups) {
-    const itemIds = group.items;
-    ExtensionRegistry.registerRibbonGroup({
-      id: `home.${group.id}`,
-      tabId: HOME_TAB_ID,
-      label: group.label,
-      order: GROUP_ORDER[group.id] ?? 99,
-      component: ({ context }) =>
-        React.createElement(HomeTabGroupComponent, { context, itemIds }),
-    });
-  }
+  // Re-register the panel when the customize dialog saves a new layout
+  layoutChangedHandler = () => {
+    unregisterPanel(HOME_TAB_ID);
+    registerHomePanel();
+  };
+  window.addEventListener("homeTab:layoutChanged", layoutChangedHandler);
 
   // Register the customization dialog
   DialogExtensions.registerDialog({
@@ -103,7 +144,11 @@ function deactivate(): void {
   if (!isActivated) return;
 
   console.log("[HomeTabExtension] Deactivating...");
-  ExtensionRegistry.unregisterRibbonTab(HOME_TAB_ID);
+  if (layoutChangedHandler) {
+    window.removeEventListener("homeTab:layoutChanged", layoutChangedHandler);
+    layoutChangedHandler = null;
+  }
+  unregisterPanel(HOME_TAB_ID);
   DialogExtensions.unregisterDialog(HOME_CUSTOMIZE_DIALOG_ID);
   isActivated = false;
   console.log("[HomeTabExtension] Deactivated.");

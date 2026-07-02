@@ -62,16 +62,22 @@ import {
 import { ActivityBarExtensions as ActivityBarExtensionsImpl } from "./registries/activityBarExtensions";
 import { useActivityBarStore } from "./ActivityBar/useActivityBarStore";
 import { panelRegistry, initPanelRegistry } from "./registries/panelRegistry";
-import type { PanelSection, PanelSectionProps } from "../api/uiTypes";
-import type { RibbonGroupDefinition, RibbonTabDefinition as ShellRibbonTabDef } from "./registries/types";
+import type { PanelSectionProps } from "../api/uiTypes";
+import type { ShellPanelSection } from "./components/SectionRenderers";
+import type { RibbonGroupDefinition } from "./registries/types";
 import { useGridState } from "../api/state";
 
 /**
  * Wraps a RibbonGroupDefinition component (expects RibbonContext) into a
  * PanelSection component (expects PanelSectionProps). The wrapper provides
  * the RibbonContext from the grid state hook.
+ *
+ * Synthesized sections are band-native legacy DOM: rendered "inline" in the
+ * ribbon (they were designed for the band — never probe/demote them) and
+ * flagged legacyRibbonDom so the sidebar renderer scopes its transposition
+ * CSS to exactly these until each tab migrates to @api/layout primitives.
  */
-function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): PanelSection {
+function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): ShellPanelSection {
   const GroupComponent = group.component;
   const SectionAdapter: React.ComponentType<PanelSectionProps> = () => {
     const state = useGridState();
@@ -88,13 +94,17 @@ function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): PanelSection {
     id: group.id,
     label: group.label,
     component: SectionAdapter,
+    ribbonPresentation: "inline",
+    collapsePriority: group.order,
+    legacyRibbonDom: true,
   };
 }
 
 /**
  * Wraps an entire ribbon tab component as a single PanelSection.
+ * Same legacy contract as wrapRibbonGroupAsSection.
  */
-function wrapRibbonTabAsSection(tab: { id: string; label: string; component: React.ComponentType<any> }): PanelSection {
+function wrapRibbonTabAsSection(tab: { id: string; label: string; component: React.ComponentType<any> }): ShellPanelSection {
   const TabComponent = tab.component;
   const SectionAdapter: React.ComponentType<PanelSectionProps> = () => {
     const state = useGridState();
@@ -111,6 +121,8 @@ function wrapRibbonTabAsSection(tab: { id: string; label: string; component: Rea
     id: tab.id + ".main",
     label: tab.label,
     component: SectionAdapter,
+    ribbonPresentation: "inline",
+    legacyRibbonDom: true,
   };
 }
 
@@ -200,7 +212,11 @@ export function bootstrapShell(): void {
   // ActivityBar Service - routes registerView through PanelRegistry
   const activityBarService: ActivityBarService = {
     registerView: (definition) => {
-      // Wrap the view component as a single section
+      // Wrap the view component as a single section. Sidebar-origin views are
+      // full-height vertical content (trees, editors, settings) — declared
+      // "launcher" so the ribbon never probe-mounts them: their ribbon
+      // projection is one launcher button opening the view in a flyout at
+      // sidebar geometry. onClose/data/hidden flow through intact.
       const ViewComponent = definition.component;
       panelRegistry.registerPanel({
         id: definition.id,
@@ -209,38 +225,14 @@ export function bootstrapShell(): void {
         sections: [{
           id: definition.id + ".main",
           label: definition.title,
-          component: ({ placement }) => {
-            if (placement === "ribbon") {
-              // Sidebar panels in ribbon: force horizontal flow with CSS overrides
-              return React.createElement("div", {
-                className: "sidebar-panel-in-ribbon",
-                style: { height: "100%", overflow: "hidden" },
-              },
-                React.createElement("style", null, `
-                  .sidebar-panel-in-ribbon > div {
-                    flex-direction: row !important;
-                    height: 100% !important;
-                    overflow-x: auto !important;
-                    overflow-y: hidden !important;
-                    padding: 4px 8px !important;
-                    gap: 16px !important;
-                    flex-wrap: nowrap !important;
-                    align-items: flex-start !important;
-                  }
-                  .sidebar-panel-in-ribbon > div > div {
-                    flex-shrink: 0 !important;
-                    min-width: fit-content !important;
-                  }
-                `),
-                React.createElement(ViewComponent, { onClose: undefined, data: undefined, placement }),
-              );
-            }
-            return React.createElement(ViewComponent, { onClose: undefined, data: undefined, placement });
-          },
+          ribbonPresentation: "launcher",
+          component: ({ placement, onClose, data }) =>
+            React.createElement(ViewComponent, { onClose, data, placement }),
         }],
         defaultPlacement: "sidebar",
         priority: definition.priority,
         sidebarBottom: definition.bottom,
+        hidden: definition.hidden,
         movable: true,
       });
     },
@@ -303,7 +295,7 @@ export function bootstrapShell(): void {
             .sort((a, b) => a.order - b.order);
 
           // Convert each group to a section, or wrap entire tab as single section
-          const sections: PanelSection[] = tabGroups.length > 0
+          const sections: ShellPanelSection[] = tabGroups.length > 0
             ? tabGroups.map(wrapRibbonGroupAsSection)
             : [wrapRibbonTabAsSection(tab)];
 
@@ -376,6 +368,10 @@ export function bootstrapShell(): void {
 
   // Expose extension registry for E2E invariant testing (mirrors __CALCULA_GRID_STATE__)
   (window as any).__CALCULA_EXTENSION_REGISTRY__ = extensionRegistryService;
+
+  // Expose the panel registry for E2E placement setup/teardown (tests reset a
+  // panel's persisted placement deterministically instead of via UI clicks).
+  (window as any).__CALCULA_PANEL_REGISTRY__ = panelRegistry;
 
   // Grid Extensions Service - adapts Shell types to API types
   const gridExtensionsService: GridExtensionsService = {

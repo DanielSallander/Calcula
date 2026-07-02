@@ -7,10 +7,11 @@ import type {
   DialogDefinition,
   DialogProps,
 } from "@api";
+import type { PanelDefinition } from "@api/uiTypes";
 import React from "react";
 import { CreateTableDialog } from "./components/CreateTableDialog";
 import { RemoveDuplicatesDialog } from "./components/RemoveDuplicatesDialog";
-import { TableDesignTab } from "./components/TableDesignTab";
+import { TABLE_DESIGN_SECTIONS } from "./components/TableDesignTab";
 
 // ============================================================================
 // Extension Manifest
@@ -29,19 +30,29 @@ export const TableManifest: AddInManifest = {
 };
 
 // ============================================================================
-// Contextual Ribbon Tab
+// Contextual Table Design Panel
 // ============================================================================
 
 // Accent color for table contextual tab (Excel-style blue)
 const TABLE_TAB_COLOR = "#4472c4";
 
 export const TABLE_DESIGN_TAB_ID = "table-design";
-export const TableDesignTabDefinition = {
+
+/**
+ * Location-agnostic panel definition for the contextual "Table Design" tab.
+ * Registered/unregistered by the selection handler while the selection is
+ * inside a table. One section per former ribbon group; the shell renders
+ * them as ribbon groups (label below content) or sidebar blocks.
+ */
+export const TableDesignPanelDefinition: PanelDefinition = {
   id: TABLE_DESIGN_TAB_ID,
-  label: "Table Design",
-  order: 498,
-  component: TableDesignTab,
-  color: TABLE_TAB_COLOR,
+  title: "Table Design",
+  icon: null,
+  sections: TABLE_DESIGN_SECTIONS,
+  defaultPlacement: "ribbon",
+  ribbonOrder: 498,
+  ribbonColor: TABLE_TAB_COLOR,
+  priority: 502, // 1000 - ribbonOrder
 };
 
 // ============================================================================

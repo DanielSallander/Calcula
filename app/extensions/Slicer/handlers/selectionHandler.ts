@@ -1,15 +1,15 @@
 //! FILENAME: app/extensions/Slicer/handlers/selectionHandler.ts
-// PURPOSE: Show/hide the contextual Slicer Options ribbon tab based on slicer selection.
-//          Supports multi-select via Ctrl+click.
+// PURPOSE: Show/hide the contextual Slicer Options panel (ribbon-placed) based
+//          on slicer selection. Supports multi-select via Ctrl+click.
 
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
-  ExtensionRegistry,
 } from "@api";
+import { registerPanel, unregisterPanel } from "@api/ui";
 import { getSlicerById } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
-import { SLICER_OPTIONS_TAB_ID, SlicerOptionsTabDefinition } from "../manifest";
+import { SLICER_OPTIONS_TAB_ID, SlicerOptionsPanelDefinition } from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";
 
@@ -19,7 +19,7 @@ import type { Slicer } from "../lib/slicerTypes";
 
 /** Set of currently selected slicer IDs (supports multi-select). */
 const selectedSlicerIds = new Set<string>();
-let optionsTabRegistered = false;
+let optionsPanelRegistered = false;
 
 // ============================================================================
 // Public API
@@ -27,7 +27,7 @@ let optionsTabRegistered = false;
 
 /**
  * Called when a slicer is clicked (from the grid overlay hit test).
- * Shows the contextual ribbon tab and broadcasts the slicer state.
+ * Shows the contextual panel and broadcasts the slicer state.
  * @param additive If true (Ctrl+click), toggle the slicer in/out of the selection set.
  */
 export function selectSlicer(slicerId: string, additive = false): void {
@@ -50,12 +50,12 @@ export function selectSlicer(slicerId: string, additive = false): void {
   if (selectedSlicerIds.size > 0) {
     addTaskPaneContextKey("slicer");
 
-    if (!optionsTabRegistered) {
-      ExtensionRegistry.registerRibbonTab(SlicerOptionsTabDefinition);
-      optionsTabRegistered = true;
+    if (!optionsPanelRegistered) {
+      registerPanel(SlicerOptionsPanelDefinition);
+      optionsPanelRegistered = true;
     }
 
-    // Broadcast ALL selected slicers to the ribbon tab
+    // Broadcast ALL selected slicers to the panel sections
     broadcastSelectedSlicers();
   } else {
     deselectSlicer();
@@ -66,8 +66,8 @@ export function selectSlicer(slicerId: string, additive = false): void {
 }
 
 /**
- * Broadcast the current selection to the ribbon tab via a custom event.
- * Sends an array of Slicer objects for the tab to render mixed-value UI.
+ * Broadcast the current selection to the panel sections via a custom event.
+ * Sends an array of Slicer objects for the sections to render mixed-value UI.
  */
 export function broadcastSelectedSlicers(): void {
   const slicers: Slicer[] = [];
@@ -82,16 +82,16 @@ export function broadcastSelectedSlicers(): void {
 
 /**
  * Called when the user clicks away from any slicer (e.g., on a cell).
- * Hides the contextual ribbon tab.
+ * Hides the contextual panel.
  */
 export function deselectSlicer(): void {
   if (selectedSlicerIds.size > 0) {
     selectedSlicerIds.clear();
     removeTaskPaneContextKey("slicer");
 
-    if (optionsTabRegistered) {
-      ExtensionRegistry.unregisterRibbonTab(SLICER_OPTIONS_TAB_ID);
-      optionsTabRegistered = false;
+    if (optionsPanelRegistered) {
+      unregisterPanel(SLICER_OPTIONS_TAB_ID);
+      optionsPanelRegistered = false;
     }
 
     window.dispatchEvent(new Event("slicer:deselected"));
@@ -141,12 +141,12 @@ export function handleSelectionChange(
 }
 
 /**
- * Ensure the tab is registered (used after slicer creation).
+ * Ensure the panel is registered (used after slicer creation).
  */
 export function ensureOptionsTabRegistered(): void {
-  if (selectedSlicerIds.size > 0 && !optionsTabRegistered) {
-    ExtensionRegistry.registerRibbonTab(SlicerOptionsTabDefinition);
-    optionsTabRegistered = true;
+  if (selectedSlicerIds.size > 0 && !optionsPanelRegistered) {
+    registerPanel(SlicerOptionsPanelDefinition);
+    optionsPanelRegistered = true;
   }
 }
 
@@ -154,9 +154,9 @@ export function ensureOptionsTabRegistered(): void {
  * Reset all selection handler state (used during extension cleanup).
  */
 export function resetSelectionHandlerState(): void {
-  if (optionsTabRegistered) {
-    ExtensionRegistry.unregisterRibbonTab(SLICER_OPTIONS_TAB_ID);
-    optionsTabRegistered = false;
+  if (optionsPanelRegistered) {
+    unregisterPanel(SLICER_OPTIONS_TAB_ID);
+    optionsPanelRegistered = false;
   }
   selectedSlicerIds.clear();
 }
