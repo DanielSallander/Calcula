@@ -278,6 +278,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         extension_data: Default::default(),
         conditional_formats: Vec::new(),
         data_validations: Vec::new(),
+        controls: Vec::new(),
     };
 
     // Parse charts from the XLSX archive (separate ZIP pass)

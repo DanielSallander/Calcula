@@ -56,6 +56,123 @@ pub struct ControlEntry {
 }
 
 // ============================================================================
+// Persistence (opaque per-sheet payload, keyed by SheetId)
+// ============================================================================
+
+/// One persisted control inside a sheet's opaque `SavedSheetControls` payload.
+/// In-sheet coordinates only; the sheet association rides on the carrier's
+/// SheetId (like conditional formats / data validations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedControlEntry {
+    pub row: u32,
+    pub col: u32,
+    pub control_type: String,
+    pub properties: HashMap<String, ControlPropertyValue>,
+}
+
+/// Collect the live control store into per-sheet opaque payloads for the
+/// persistence carrier. Sheets without controls produce no entry.
+pub fn collect_controls_for_save(
+    controls: &ControlStorage,
+    sheet_ids: &[identity::SheetId],
+) -> Vec<persistence::SavedSheetControls> {
+    let mut per_sheet: HashMap<usize, Vec<SavedControlEntry>> = HashMap::new();
+    for ((sheet_index, row, col), meta) in controls.iter() {
+        per_sheet
+            .entry(*sheet_index)
+            .or_default()
+            .push(SavedControlEntry {
+                row: *row,
+                col: *col,
+                control_type: meta.control_type.clone(),
+                properties: meta.properties.clone(),
+            });
+    }
+    let mut saved = Vec::new();
+    for (sheet_index, mut entries) in per_sheet {
+        let Some(&sheet_id) = sheet_ids.get(sheet_index) else {
+            continue;
+        };
+        // Deterministic artifact bytes across saves (HashMap iteration order
+        // would otherwise churn checksums/diffs for identical content).
+        entries.sort_by_key(|e| (e.row, e.col));
+        if let Ok(value) = serde_json::to_value(&entries) {
+            saved.push(persistence::SavedSheetControls {
+                sheet_id,
+                controls: value,
+            });
+        }
+    }
+    // Same determinism for the carrier ordering.
+    saved.sort_by_key(|s| s.sheet_id);
+    saved
+}
+
+/// Strip executable wiring from DISTRIBUTED control payloads before
+/// materialization. A control's `onSelect` value is INLINE SCRIPT SOURCE the
+/// Controls extension hands to the workbook-script runner — carrying it live
+/// from a package would execute publisher code under the subscriber's global
+/// script-security gate, bypassing the per-package, hash-keyed consent model
+/// that governs every other distributed script. Packaged buttons therefore
+/// arrive visually intact but DISARMED; publisher-shipped interactivity flows
+/// through consent-gated object scripts instead. (.cala load of the user's own
+/// workbook is NOT sanitized — local wiring is the user's own code.)
+pub fn sanitize_distributed_controls(
+    saved: &[persistence::SavedSheetControls],
+) -> Vec<persistence::SavedSheetControls> {
+    saved
+        .iter()
+        .map(|sheet_controls| {
+            let mut cloned = sheet_controls.clone();
+            if let serde_json::Value::Array(entries) = &mut cloned.controls {
+                for entry in entries {
+                    if let Some(props) = entry
+                        .get_mut("properties")
+                        .and_then(|p| p.as_object_mut())
+                    {
+                        props.remove("onSelect");
+                    }
+                }
+            }
+            cloned
+        })
+        .collect()
+}
+
+/// Materialize persisted per-sheet control payloads into ControlStorage
+/// entries at the sheet indices resolved by `sheet_index_of`. Entries whose
+/// sheet cannot be resolved are skipped. Returns the number of controls added.
+pub fn materialize_saved_controls(
+    saved: &[persistence::SavedSheetControls],
+    controls: &mut ControlStorage,
+    mut sheet_index_of: impl FnMut(identity::SheetId) -> Option<usize>,
+) -> usize {
+    let mut added = 0;
+    for sheet_controls in saved {
+        let Some(idx) = sheet_index_of(sheet_controls.sheet_id) else {
+            continue;
+        };
+        let Ok(entries) =
+            serde_json::from_value::<Vec<SavedControlEntry>>(sheet_controls.controls.clone())
+        else {
+            continue;
+        };
+        for entry in entries {
+            controls.insert(
+                (idx, entry.row, entry.col),
+                ControlMetadata {
+                    control_type: entry.control_type,
+                    properties: entry.properties,
+                },
+            );
+            added += 1;
+        }
+    }
+    added
+}
+
+// ============================================================================
 // Tauri Commands
 // ============================================================================
 
@@ -147,6 +264,67 @@ pub fn get_all_controls(
             metadata: meta.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    fn sample_storage() -> ControlStorage {
+        let mut controls: ControlStorage = HashMap::new();
+        let mut props = HashMap::new();
+        props.insert(
+            "text".to_string(),
+            ControlPropertyValue { value_type: "static".to_string(), value: "Run".to_string() },
+        );
+        props.insert(
+            "onSelect".to_string(),
+            ControlPropertyValue {
+                value_type: "static".to_string(),
+                value: "MyScript();".to_string(),
+            },
+        );
+        controls.insert(
+            (0, 2, 3),
+            ControlMetadata { control_type: "button".to_string(), properties: props },
+        );
+        controls
+    }
+
+    #[test]
+    fn collect_and_materialize_round_trip() {
+        let controls = sample_storage();
+        let sheet_ids = vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())];
+        let saved = collect_controls_for_save(&controls, &sheet_ids);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].sheet_id, sheet_ids[0]);
+
+        let mut restored: ControlStorage = HashMap::new();
+        let added = materialize_saved_controls(&saved, &mut restored, |sid| {
+            if sid == sheet_ids[0] { Some(5) } else { None }
+        });
+        assert_eq!(added, 1);
+        let meta = restored.get(&(5, 2, 3)).expect("control restored at remapped sheet");
+        assert_eq!(meta.control_type, "button");
+        assert_eq!(meta.properties.get("onSelect").map(|p| p.value.as_str()), Some("MyScript();"));
+    }
+
+    #[test]
+    fn sanitize_strips_onselect_but_keeps_presentation() {
+        // Distributed onSelect is inline script source — it must never
+        // materialize from a package (consent-model bypass); the button's
+        // visual properties survive.
+        let controls = sample_storage();
+        let sheet_ids = vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())];
+        let saved = collect_controls_for_save(&controls, &sheet_ids);
+        let sanitized = sanitize_distributed_controls(&saved);
+
+        let mut restored: ControlStorage = HashMap::new();
+        materialize_saved_controls(&sanitized, &mut restored, |_| Some(0));
+        let meta = restored.get(&(0, 2, 3)).expect("control materialized");
+        assert!(meta.properties.get("onSelect").is_none(), "onSelect must be stripped");
+        assert_eq!(meta.properties.get("text").map(|p| p.value.as_str()), Some("Run"));
+    }
 }
 
 /// Resolve formula-type properties for a control.

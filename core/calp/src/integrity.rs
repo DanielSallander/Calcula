@@ -249,9 +249,9 @@ pub fn verify_version_artifacts_via(
     }
     // Content-addressed verification: every artifact named in the (signed)
     // manifest must be readable and hash to its published digest. With blob
-    // storage the artifact set IS the manifest's checksum keys, so there is no
-    // separate dir-walk + unlisted-file check — an unreferenced blob is never
-    // pulled. `read_artifact` resolves rel-path -> blob transparently.
+    // storage the artifact set IS the manifest's checksum keys — an
+    // unreferenced blob is never pulled. `read_artifact` resolves
+    // rel-path -> blob transparently.
     for (rel, expected) in &manifest.artifact_checksums {
         let bytes = t
             .read_artifact(package, version, rel)?
@@ -265,6 +265,21 @@ pub fn verify_version_artifacts_via(
                 package: package.to_string(),
                 version: version.to_string(),
                 file: rel.clone(),
+            });
+        }
+    }
+    // Post-publish injection guard (the transport twin of the fs walk's
+    // UnlistedArtifact check): `read_artifact` resolves DIR-FIRST for the
+    // pre-dedup layout, so a LOOSE file dropped into the version directory
+    // after publish would be served without any checksum coverage. A clean
+    // blob-committed version lists nothing here; anything the manifest does
+    // not name is injected content (or crashed-publish debris) — reject it.
+    for rel in t.list_artifacts(package, version)? {
+        if !manifest.artifact_checksums.contains_key(&rel) {
+            return Err(CalpError::UnlistedArtifact {
+                package: package.to_string(),
+                version: version.to_string(),
+                file: rel,
             });
         }
     }

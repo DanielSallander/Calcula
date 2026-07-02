@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -63,6 +63,10 @@ pub struct PullResult {
     /// Data-validation ranges carried by the package, per sheet. `sheet_id` is the
     /// PACKAGE sheet id (un-remapped); `ranges` is the opaque app payload.
     pub data_validations: Vec<SavedSheetDataValidations>,
+    /// Cell-anchored controls carried by the package, per sheet. `sheet_id` is
+    /// the PACKAGE sheet id (un-remapped); `controls` is the opaque app payload.
+    /// Empty for packages published before controls were carried.
+    pub controls: Vec<SavedSheetControls>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
@@ -293,6 +297,11 @@ pub fn pull(
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Vec::new(),
         };
+    let pulled_controls: Vec<SavedSheetControls> =
+        match registry.read_artifact(pkg, ver, "controls.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
 
     // Read tables
     let mut pulled_tables = Vec::new();
@@ -399,16 +408,22 @@ pub fn pull(
         sheets: subscribed_sheets,
         channel: String::new(), // default/production channel
         data_source_configs: Vec::new(),
+        // Filled by the app layer after materialization (it knows what actually
+        // landed vs was skipped on collision).
+        objects: Vec::new(),
         extra: HashMap::new(),
     };
 
-    // Read pivot definitions. They are not enumerated by id in the manifest, so
-    // discover them from the transport's artifact listing (already gated by the
-    // integrity check above) — every pivot_definitions/*.json EXCEPT the BI
-    // metadata sidecar. This replaces the prior fs::read_dir scan.
+    // Read pivot definitions. They are not enumerated by id in the manifest's
+    // typed fields, so discover them from the SIGNED manifest's checksum keys —
+    // every pivot_definitions/*.json EXCEPT the BI metadata sidecar. (The
+    // previous transport dir-walk returned NOTHING once publish committed
+    // artifacts into the content-addressed blob store, silently dropping every
+    // pivot from real pulls; the checksum map is the authoritative artifact
+    // set and survives dedup.)
     let mut pulled_pivot_defs: Vec<persistence::SavedPivotDefinition> = Vec::new();
     {
-        let rel_paths = registry.list_artifacts(pkg, ver)?;
+        let rel_paths: Vec<String> = ver_manifest.artifact_checksums.keys().cloned().collect();
         for rel in &rel_paths {
             if rel.starts_with("pivot_definitions/")
                 && rel.ends_with(".json")
@@ -469,6 +484,7 @@ pub fn pull(
         named_ranges: ver_manifest.named_ranges.clone(),
         conditional_formats: pulled_conditional_formats,
         data_validations: pulled_data_validations,
+        controls: pulled_controls,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -595,6 +611,69 @@ mod tests {
         // data.json-serialized 0.
         let styled = &result.sheets[0].sheet;
         assert_eq!(styled.cells.get(&(1, 2)).map(|c| c.style_index), Some(3));
+    }
+
+    #[test]
+    fn pull_carries_controls() {
+        // Controls (buttons/checkboxes with onSelect wiring) travel as a
+        // per-sheet opaque payload keyed by the PACKAGE sheet id, like CF/DV.
+        // A control on an unpublished sheet must not leak into the package.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let published_sheet_id = wb.sheets[0].id;
+        let unpublished_sheet_id = wb.sheets[1].id;
+        wb.controls = vec![
+            persistence::SavedSheetControls {
+                sheet_id: published_sheet_id,
+                controls: serde_json::json!([
+                    { "row": 4, "col": 1, "controlType": "button",
+                      "properties": { "onSelect": { "valueType": "static", "value": "script-1" } } }
+                ]),
+            },
+            persistence::SavedSheetControls {
+                sheet_id: unpublished_sheet_id,
+                controls: serde_json::json!([
+                    { "row": 0, "col": 0, "controlType": "checkbox", "properties": {} }
+                ]),
+            },
+        ];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "controls-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0], // only the first sheet
+            now: "2026-07-02T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.control_sheets_published, 1);
+
+        let pull_req = PullRequest {
+            package_name: "controls-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-02T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.controls.len(), 1, "only the published sheet's controls travel");
+        assert_eq!(result.controls[0].sheet_id, published_sheet_id,
+            "controls carry the un-remapped PACKAGE sheet id, like CF/DV");
+        let entries = result.controls[0].controls.as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["controlType"], "button");
+        assert_eq!(entries[0]["properties"]["onSelect"]["value"], "script-1");
     }
 
     #[test]

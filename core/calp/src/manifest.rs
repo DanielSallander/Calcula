@@ -442,6 +442,32 @@ pub struct Subscription {
     /// Contains the subscriber's connection strings (may include credentials).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data_source_configs: Vec<SubscriberDataSourceConfig>,
+    /// Provenance ledger: every object this subscription materialized into the
+    /// local workbook (tables, charts, pivots, named ranges, scripts, data
+    /// sources, control sheets). Written at pull, updated at refresh. This is
+    /// what lets the UI show "which objects are connected to this package" and
+    /// lets refresh replace exactly the package-owned objects without touching
+    /// subscriber-authored ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<SubscribedObject>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// One object a subscription materialized into the local workbook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribedObject {
+    /// Object kind: "table" | "chart" | "pivot" | "namedRange" | "objectScript"
+    /// | "moduleScript" | "notebook" | "dataSource" | "controlSheet".
+    pub kind: String,
+    /// The object's stable id — EntityId/script id/data-source id as a string;
+    /// for named ranges the UPPERCASED name key; for control sheets the local
+    /// SheetId string.
+    pub id: String,
+    /// Display name at materialization time (may drift if renamed locally).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }

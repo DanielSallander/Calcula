@@ -40,6 +40,9 @@ pub struct PublishResponse {
     pub modules_published: usize,
     /// Number of standalone notebooks published (C8).
     pub notebooks_published: usize,
+    /// Transparency report: everything that shipped and everything present in
+    /// the workbook that packages cannot carry yet (no silent drops).
+    pub report: PublishReport,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,65 +107,72 @@ pub(crate) fn calcula_profile_dir() -> std::path::PathBuf {
 // Tauri Commands
 // ============================================================================
 
-/// Publish selected sheets to a local registry.
-#[tauri::command]
-pub fn calp_publish(
-    state: State<AppState>,
-    bi_state: State<BiState>,
-    pivot_state: State<crate::pivot::types::PivotState>,
-    script_state: State<crate::scripting::types::ScriptState>,
-    params: PublishParams,
-    window: tauri::Window,
-) -> Result<PublishResponse, String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
-        .map_err(|e| e.to_string())?;
+// ============================================================================
+// Publish assembly + transparency report
+// ============================================================================
 
-    let version = SemVer::parse(&params.version)
-        .map_err(|e| e.to_string())?;
+/// Everything calp_publish hands to core publish, assembled once so the real
+/// publish and the dry-run preview (calp_publish_preview) can never drift.
+struct PublishAssembly {
+    workbook: persistence::Workbook,
+    writeback_regions: Option<Vec<calp::WritebackRegionDeclaration>>,
+    object_scripts: Option<Vec<persistence::SavedObjectScript>>,
+    data_sources: Vec<calp::publish::PublishDataSource>,
+    excluded_regions: Vec<calp::publish::ExcludedRegion>,
+}
 
-    let now = chrono::Utc::now().to_rfc3339();
+/// Build the publish carrier. ONE collector — the same enriched builder as the
+/// .cala save path (active-sheet mirror content, notes/hyperlinks/hidden rows/
+/// page setup, CF/DV, controls, charts, sparklines, tables, named ranges,
+/// slicers, ribbon filters, theme, extension data) — so package fidelity
+/// automatically tracks file fidelity. Core publish writes the subset the
+/// .calp format supports; compute_publish_report tells the author exactly
+/// what shipped and what stayed behind.
+fn assemble_publish_workbook(
+    state: &State<AppState>,
+    bi_state: &State<BiState>,
+    pivot_state: &State<crate::pivot::types::PivotState>,
+    script_state: &State<crate::scripting::types::ScriptState>,
+    slicer_state: &State<crate::slicer::SlicerState>,
+    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: &State<crate::persistence::UserFilesState>,
+    sheet_indices: &[usize],
+) -> Result<PublishAssembly, String> {
+    let mut workbook = crate::persistence::build_workbook_for_save_with_slicers(
+        state,
+        user_files_state,
+        slicer_state,
+        ribbon_filter_state,
+    )?;
 
-    // Build a lightweight workbook snapshot for publishing
-    let mut workbook = crate::persistence::build_workbook_snapshot(&state)?;
-
-    // build_workbook_snapshot does not carry standalone module scripts /
-    // notebooks (they live in ScriptState, not AppState), so populate them
-    // here. With these present, the publish request's None ("all from the
-    // workbook") ships every module script + notebook (C8).
-    workbook.scripts = crate::persistence::collect_scripts_for_save(&script_state);
-    workbook.notebooks = crate::persistence::collect_notebooks_for_save(&script_state);
-
-    // build_workbook_snapshot omits charts + sparklines (unlike the .cala save
-    // path), so an in-app publish would ship them empty — subscribers lose every
-    // chart and sparkline (C2a). Populate them here from AppState using the same
-    // sheet-id mapping the snapshot used; publish/pull then filter + remap by
-    // sheet id exactly like tables.
-    {
-        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-        workbook.charts = crate::persistence::collect_charts_for_save(&state, &sheet_ids);
-        workbook.sparklines = crate::persistence::collect_sparklines_for_save(&state, &sheet_ids);
+    for &idx in sheet_indices {
+        if idx >= workbook.sheets.len() {
+            return Err(format!("Sheet index {} out of range", idx));
+        }
     }
+
+    // Standalone module scripts / notebooks live in ScriptState, not AppState.
+    // With these present, the publish request's None ("all from the workbook")
+    // ships every module script + notebook (C8).
+    workbook.scripts = crate::persistence::collect_scripts_for_save(script_state);
+    workbook.notebooks = crate::persistence::collect_notebooks_for_save(script_state);
 
     // Ship pivot definitions + BI pivot metadata so subscribers can rebuild
     // live pivots; per-pivot data source routing reads the dataSourceId
-    // carried in that metadata. Without this, in-app publishes shipped no
-    // pivots at all (only the example generator did).
-    crate::persistence::collect_pivot_definitions(&pivot_state, &state, &mut workbook);
+    // carried in that metadata.
+    crate::persistence::collect_pivot_definitions(pivot_state, state, &mut workbook);
 
     // The package contains only the selected sheets: drop pivots whose
     // source or destination sheet isn't included, and remap grid-source
     // sheet indices from workbook positions to package positions (pull
     // appends package sheets in order, offset by the pre-pull sheet count).
     {
-        let index_map: std::collections::HashMap<usize, usize> = params
-            .sheet_indices
+        let index_map: std::collections::HashMap<usize, usize> = sheet_indices
             .iter()
             .enumerate()
             .map(|(package_idx, &wb_idx)| (wb_idx, package_idx))
             .collect();
-        let published_names: std::collections::HashSet<String> = params
-            .sheet_indices
+        let published_names: std::collections::HashSet<String> = sheet_indices
             .iter()
             .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.clone()))
             .collect();
@@ -213,7 +223,7 @@ pub fn calp_publish(
     };
 
     // Capture active BI connections as data sources
-    let data_sources = capture_bi_data_sources(&bi_state)?;
+    let data_sources = capture_bi_data_sources(bi_state)?;
 
     // Validate BI pivot definitions against the embedded model before publishing.
     // This catches mismatched field names (e.g., grid-style "Category" instead of
@@ -240,18 +250,211 @@ pub fn calp_publish(
             .collect::<Vec<_>>()
     };
 
+    Ok(PublishAssembly {
+        workbook,
+        writeback_regions,
+        object_scripts,
+        data_sources,
+        excluded_regions,
+    })
+}
+
+/// One line of the publish transparency report.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishReportItem {
+    pub category: String,
+    pub count: usize,
+    pub detail: String,
+}
+
+/// What a publish did (or, for the preview, WOULD do) carry — and what stays
+/// behind. No silent drops: anything present in the workbook that packages
+/// cannot carry yet is listed under `excluded` with a reason.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishReport {
+    pub included: Vec<PublishReportItem>,
+    pub excluded: Vec<PublishReportItem>,
+}
+
+fn compute_publish_report(
+    assembly: &PublishAssembly,
+    state: &AppState,
+    sheet_indices: &[usize],
+) -> PublishReport {
+    let wb = &assembly.workbook;
+    let published_sheet_ids: std::collections::HashSet<SheetId> = sheet_indices
+        .iter()
+        .filter_map(|&i| wb.sheets.get(i).map(|s| s.id))
+        .collect();
+
+    let item = |list: &mut Vec<PublishReportItem>, category: &str, count: usize, detail: &str| {
+        if count > 0 {
+            list.push(PublishReportItem {
+                category: category.to_string(),
+                count,
+                detail: detail.to_string(),
+            });
+        }
+    };
+
+    let mut included: Vec<PublishReportItem> = Vec::new();
+    item(&mut included, "sheets", sheet_indices.len(),
+        "cell data, formulas, styles, merges, freeze panes, notes, hyperlinks, page setup");
+    item(&mut included, "tables",
+        wb.tables.iter().filter(|t| published_sheet_ids.contains(&t.sheet_id)).count(),
+        "table objects (name, range, columns, style)");
+    item(&mut included, "namedRanges",
+        wb.named_ranges.iter()
+            .filter(|nr| nr.sheet_id.map_or(true, |sid| published_sheet_ids.contains(&sid)))
+            .count(),
+        "workbook-scoped names + names on published sheets");
+    item(&mut included, "charts",
+        wb.charts.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
+        "charts on published sheets");
+    item(&mut included, "sparklines",
+        wb.sparklines.iter().filter(|s| published_sheet_ids.contains(&s.sheet_id)).count(),
+        "sheets with sparkline groups");
+    item(&mut included, "pivots", wb.pivot_definitions.len(),
+        "pivot definitions (output recalculated by subscribers)");
+    item(&mut included, "conditionalFormatting",
+        wb.conditional_formats.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
+        "sheets with conditional formatting rules");
+    item(&mut included, "dataValidation",
+        wb.data_validations.iter().filter(|d| published_sheet_ids.contains(&d.sheet_id)).count(),
+        "sheets with data validation");
+    item(&mut included, "controls",
+        wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
+        "sheets with buttons/checkboxes (incl. onSelect wiring)");
+    item(&mut included, "objectScripts",
+        assembly.object_scripts.as_ref().map_or(0, |s| s.len()),
+        "consent-gated on the subscriber; capability ceiling in the signed manifest");
+    item(&mut included, "moduleScripts", wb.scripts.len(),
+        "inert until explicitly run by the subscriber");
+    item(&mut included, "notebooks", wb.notebooks.len(),
+        "execution output stripped; inert until run");
+    item(&mut included, "dataSources", assembly.data_sources.len(),
+        "BI model schema only — no data, no credentials");
+    item(&mut included, "writebackRegions",
+        assembly.writeback_regions.as_ref().map_or(0, |w| w.len()),
+        "declared data-collection regions");
+
+    let mut excluded: Vec<PublishReportItem> = Vec::new();
+    item(&mut excluded, "slicers",
+        wb.slicers.iter().filter(|s| published_sheet_ids.contains(&s.sheet_id)).count(),
+        "slicers are not yet carried by packages");
+    item(&mut excluded, "ribbonFilters", wb.ribbon_filters.len(),
+        "filter-pane state is not yet carried by packages");
+    item(&mut excluded, "pivotLayouts", wb.pivot_layouts.len(),
+        "saved pivot layouts are not yet carried by packages");
+    let theme_custom = serde_json::to_value(&wb.theme).ok()
+        != serde_json::to_value(engine::ThemeDefinition::default()).ok();
+    item(&mut excluded, "documentTheme", usize::from(theme_custom),
+        "the document theme is not yet carried; concrete cell styles ship");
+    if !wb.extension_data.is_empty() {
+        let keys: Vec<&str> = wb.extension_data.keys().map(|k| k.as_str()).collect();
+        excluded.push(PublishReportItem {
+            category: "extensionData".to_string(),
+            count: wb.extension_data.len(),
+            detail: format!("extension state is not yet carried: {}", keys.join(", ")),
+        });
+    }
+    item(&mut excluded, "workbookFiles", wb.user_files.len(),
+        "workbook files (bookmarks, stored documents, filter state) stay local");
+    let comments: usize = state.comments.lock()
+        .map(|c| c.values().map(|m| m.len()).sum()).unwrap_or(0);
+    item(&mut excluded, "comments", comments,
+        "threaded comments are not yet persisted or published");
+    let scenarios: usize = state.scenarios.lock()
+        .map(|s| s.values().map(|v| v.len()).sum()).unwrap_or(0);
+    item(&mut excluded, "scenarios", scenarios,
+        "saved scenarios are not yet persisted or published");
+    let protected = state.sheet_protection.lock().map(|p| p.len()).unwrap_or(0);
+    item(&mut excluded, "protection", protected,
+        "sheet/cell protection is not yet carried by packages");
+    let outline_groups: usize = state.outlines.lock()
+        .map(|o| o.values().map(|g| g.row_groups.len() + g.column_groups.len()).sum())
+        .unwrap_or(0);
+    item(&mut excluded, "outlineGroups", outline_groups,
+        "outline structure is not carried (collapsed groups ship as hidden rows)");
+    let doc_props = [
+        &wb.properties.title,
+        &wb.properties.author,
+        &wb.properties.subject,
+        &wb.properties.description,
+        &wb.properties.keywords,
+        &wb.properties.category,
+    ]
+    .iter()
+    .filter(|s| !s.is_empty())
+    .count();
+    item(&mut excluded, "documentProperties", doc_props,
+        "document properties (title, author, description, ...) are not yet carried by packages");
+
+    PublishReport { included, excluded }
+}
+
+/// Publish selected sheets to a local registry.
+#[tauri::command]
+pub fn calp_publish(
+    state: State<AppState>,
+    bi_state: State<BiState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    params: PublishParams,
+    window: tauri::Window,
+) -> Result<PublishResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
+        .map_err(|e| e.to_string())?;
+
+    let version = SemVer::parse(&params.version)
+        .map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Empty selection = every sheet — the SAME normalization the preview
+    // applies, so the dry-run report can never describe a different package
+    // than the publish that follows it (previously an empty selection
+    // previewed the whole workbook but published a zero-sheet package).
+    let sheet_indices = resolve_publish_sheet_indices(&state, params.sheet_indices)?;
+
+    let assembly = assemble_publish_workbook(
+        &state,
+        &bi_state,
+        &pivot_state,
+        &script_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &user_files_state,
+        &sheet_indices,
+    )?;
+    let report = compute_publish_report(&assembly, &state, &sheet_indices);
+
+    let PublishAssembly {
+        workbook,
+        writeback_regions,
+        object_scripts,
+        data_sources,
+        excluded_regions,
+    } = assembly;
+
     let request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
         version,
         kind: params.kind,
-        sheet_indices: params.sheet_indices,
+        sheet_indices,
         now,
         published_by: params.published_by,
         writeback_regions,
         object_scripts,
         // None => publish all standalone module scripts / notebooks carried in
-        // the snapshot above (C8). They distribute as inert, transparent data.
+        // the carrier above (C8). They distribute as inert, transparent data.
         module_scripts: None,
         notebooks: None,
         data_sources,
@@ -287,7 +490,63 @@ pub fn calp_publish(
         scripts_published: result.scripts_published,
         modules_published: result.modules_published,
         notebooks_published: result.notebooks_published,
+        report,
     })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreviewParams {
+    /// Sheets to include (workbook indices). None or empty => all sheets.
+    #[serde(default)]
+    pub sheet_indices: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreviewResponse {
+    /// Names of the sheets the preview covered, in package order.
+    pub sheet_names: Vec<String>,
+    pub report: PublishReport,
+}
+
+/// Dry-run of calp_publish: assemble the EXACT carrier a publish would use
+/// (same collector, same filters) and report what would ship vs stay behind —
+/// without writing anything to any registry.
+#[tauri::command]
+pub fn calp_publish_preview(
+    state: State<AppState>,
+    bi_state: State<BiState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    params: PublishPreviewParams,
+    window: tauri::Window,
+) -> Result<PublishPreviewResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    let sheet_indices =
+        resolve_publish_sheet_indices(&state, params.sheet_indices.unwrap_or_default())?;
+
+    let assembly = assemble_publish_workbook(
+        &state,
+        &bi_state,
+        &pivot_state,
+        &script_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &user_files_state,
+        &sheet_indices,
+    )?;
+    let report = compute_publish_report(&assembly, &state, &sheet_indices);
+    let sheet_names = sheet_indices
+        .iter()
+        .filter_map(|&i| assembly.workbook.sheets.get(i).map(|s| s.name.clone()))
+        .collect();
+
+    Ok(PublishPreviewResponse { sheet_names, report })
 }
 
 /// Materialize ONE package's distributed standalone module scripts + notebooks
@@ -311,8 +570,14 @@ fn materialize_distributed_scripts(
     package_name: &str,
     modules: &[persistence::SavedScript],
     notebooks: &[persistence::SavedNotebook],
-) -> Result<(), String> {
+) -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
     use std::collections::HashSet;
+
+    // (id, name) of the modules/notebooks ACTUALLY inserted — conflict-skipped
+    // ones excluded, so the provenance ledger never attributes a preserved
+    // local (or other-package) document to this package.
+    let mut applied_modules: Vec<(String, String)> = Vec::new();
+    let mut applied_notebooks: Vec<(String, String)> = Vec::new();
 
     {
         use crate::scripting::types::{ScriptScope, WorkbookScript};
@@ -340,6 +605,7 @@ fn materialize_distributed_scripts(
                 );
                 continue;
             }
+            applied_modules.push((module.id.clone(), module.name.clone()));
             scripts.insert(
                 module.id.clone(),
                 WorkbookScript {
@@ -381,6 +647,7 @@ fn materialize_distributed_scripts(
                 );
                 continue;
             }
+            applied_notebooks.push((nb.id.clone(), nb.name.clone()));
             nbs.insert(
                 nb.id.clone(),
                 NotebookDocument {
@@ -404,7 +671,257 @@ fn materialize_distributed_scripts(
             );
         }
     }
+    Ok((applied_modules, applied_notebooks))
+}
+
+/// Grow an index-aligned per-sheet Vec store so `idx` is addressable.
+fn ensure_slot<T: Clone>(v: &mut Vec<T>, idx: usize, default: T) {
+    while v.len() <= idx {
+        v.push(default.clone());
+    }
+}
+
+/// Materialize pulled sheet presentation state (merged regions, freeze panes,
+/// tab color, visibility, gridlines, page setup, notes, hyperlinks) into the
+/// per-sheet AppState stores, and keep the index-aligned Vec stores aligned
+/// for appended sheets. Before this, pulled packages carried all of it in
+/// sheets/{id}/metadata.json and the Tauri materializer dropped it — the
+/// subscriber lost merges/freeze panes/notes — AND the aligned Vec stores
+/// stayed short, misaligning any sheet added after a pull.
+///
+/// Reset semantics per materialized sheet (the publisher owns a subscribed
+/// sheet's presentation): used by first pull (fresh sheets, so reset ==
+/// initialize), refresh (overwrite with the new version's state), and the
+/// dev-mode preview loop. `sheets` pairs each source/package sheet id with its
+/// carrier Sheet; ids resolve to local indices via `pkg_to_index`.
+fn materialize_pulled_sheet_state(
+    state: &AppState,
+    sheets: &[(SheetId, &persistence::Sheet)],
+    pkg_to_index: &std::collections::HashMap<SheetId, usize>,
+    active_sheet: usize,
+) -> Result<(), String> {
+    // Each store is locked, updated, and released independently (mirroring the
+    // .cala load path) to keep lock scopes small and ordering trivial.
+    let targets: Vec<(usize, &persistence::Sheet)> = sheets
+        .iter()
+        .filter_map(|(pkg_sid, sheet)| pkg_to_index.get(pkg_sid).map(|&idx| (idx, *sheet)))
+        .collect();
+
+    {
+        let mut v = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, crate::sheets::FreezeConfig::default());
+            v[*idx] = crate::sheets::FreezeConfig {
+                freeze_row: p.freeze_row,
+                freeze_col: p.freeze_col,
+            };
+        }
+    }
+    {
+        let mut v = state.split_configs.lock().map_err(|e| e.to_string())?;
+        for (idx, _) in &targets {
+            ensure_slot(&mut v, *idx, crate::sheets::SplitConfig::default());
+        }
+    }
+    {
+        let mut v = state.scroll_areas.lock().map_err(|e| e.to_string())?;
+        for (idx, _) in &targets {
+            ensure_slot(&mut v, *idx, None);
+        }
+    }
+    {
+        let mut v = state.tab_colors.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, String::new());
+            v[*idx] = p.tab_color.clone();
+        }
+    }
+    {
+        let mut v = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, "visible".to_string());
+            v[*idx] = p.visibility.clone();
+        }
+    }
+    {
+        let mut v = state.show_gridlines.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut v, *idx, true);
+            v[*idx] = p.show_gridlines;
+        }
+    }
+    {
+        let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut all_merged, *idx, std::collections::HashSet::new());
+            let merges: std::collections::HashSet<crate::api_types::MergedRegion> = p
+                .merged_regions
+                .iter()
+                .map(|mr| crate::api_types::MergedRegion {
+                    start_row: mr.start_row,
+                    start_col: mr.start_col,
+                    end_row: mr.end_row,
+                    end_col: mr.end_col,
+                })
+                .collect();
+            // The active sheet's merges live in the mirror (source of truth
+            // while active); a refreshed active sheet must sync it too.
+            if *idx == active_sheet {
+                let mut mirror = state.merged_regions.lock().map_err(|e| e.to_string())?;
+                *mirror = merges.clone();
+            }
+            all_merged[*idx] = merges;
+        }
+    }
+    {
+        let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            ensure_slot(&mut page_setups, *idx, crate::api_types::PageSetup::default());
+            page_setups[*idx] = match &p.page_setup {
+                Some(ps) => crate::api_types::PageSetup {
+                    paper_size: ps.paper_size.clone(),
+                    orientation: ps.orientation.clone(),
+                    margin_top: ps.margin_top,
+                    margin_bottom: ps.margin_bottom,
+                    margin_left: ps.margin_left,
+                    margin_right: ps.margin_right,
+                    margin_header: ps.margin_header,
+                    margin_footer: ps.margin_footer,
+                    header: ps.header.clone(),
+                    footer: ps.footer.clone(),
+                    print_area: ps.print_area.clone(),
+                    print_titles_rows: ps.print_titles_rows.clone(),
+                    manual_row_breaks: ps.manual_row_breaks.clone(),
+                    print_gridlines: ps.print_gridlines,
+                    center_horizontally: ps.center_horizontally,
+                    center_vertically: ps.center_vertically,
+                    scale: ps.scale,
+                    fit_to_width: ps.fit_to_width,
+                    fit_to_height: ps.fit_to_height,
+                    page_order: ps.page_order.clone(),
+                    first_page_number: ps.first_page_number,
+                    ..Default::default()
+                },
+                None => crate::api_types::PageSetup::default(),
+            };
+        }
+    }
+    {
+        let mut notes_storage = state.notes.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            if p.notes.is_empty() {
+                notes_storage.remove(idx);
+                continue;
+            }
+            let mut sheet_notes = std::collections::HashMap::new();
+            for n in &p.notes {
+                sheet_notes.insert(
+                    (n.row, n.col),
+                    crate::notes::Note {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        row: n.row,
+                        col: n.col,
+                        sheet_index: *idx,
+                        author_name: n.author.clone(),
+                        content: n.text.clone(),
+                        rich_content: None,
+                        width: 200.0,
+                        height: 100.0,
+                        visible: false,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        modified_at: None,
+                    },
+                );
+            }
+            notes_storage.insert(*idx, sheet_notes);
+        }
+    }
+    {
+        let mut hyperlinks_storage = state.hyperlinks.lock().map_err(|e| e.to_string())?;
+        for (idx, p) in &targets {
+            if p.hyperlinks.is_empty() {
+                hyperlinks_storage.remove(idx);
+                continue;
+            }
+            let mut sheet_links = std::collections::HashMap::new();
+            for h in &p.hyperlinks {
+                sheet_links.insert(
+                    (h.row, h.col),
+                    crate::hyperlinks::Hyperlink {
+                        row: h.row,
+                        col: h.col,
+                        sheet_index: *idx,
+                        link_type: crate::hyperlinks::HyperlinkType::Url,
+                        target: h.target.clone(),
+                        internal_ref: None,
+                        display_text: h.display_text.clone(),
+                        tooltip: h.tooltip.clone(),
+                    },
+                );
+            }
+            hyperlinks_storage.insert(*idx, sheet_links);
+        }
+    }
+
     Ok(())
+}
+
+/// Materialize pulled tables at the sheet indices resolved by `map`
+/// (ADDITIVE: id/name-collision skip so a subscriber's own table is never
+/// clobbered). Appends a ledger entry per table actually added when a ledger
+/// is supplied. Returns the number materialized. Shared by pull, refresh, and
+/// the dev-mode preview loop.
+fn materialize_pulled_tables(
+    state: &AppState,
+    saved_tables: &[persistence::SavedTable],
+    map: &std::collections::HashMap<SheetId, usize>,
+    mut ledger: Option<&mut Vec<calp::manifest::SubscribedObject>>,
+) -> Result<usize, String> {
+    if saved_tables.is_empty() {
+        return Ok(0);
+    }
+    let mut materialized = 0usize;
+    let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+    for saved in saved_tables {
+        let Some(&idx) = map.get(&saved.sheet_id) else {
+            continue; // the table's sheet wasn't pulled
+        };
+        let name_key = saved.name.to_uppercase();
+        if table_names.contains_key(&name_key) {
+            continue; // don't clobber a table the subscriber already has
+        }
+        if tables.values().any(|m| m.contains_key(&saved.id)) {
+            continue;
+        }
+        let table = crate::persistence::saved_table_to_table_at(saved, idx);
+        table_names.insert(name_key, (idx, table.id));
+        if let Some(ledger) = ledger.as_deref_mut() {
+            ledger.push(calp::manifest::SubscribedObject {
+                kind: "table".to_string(),
+                id: table.id.to_string(),
+                name: table.name.clone(),
+                extra: std::collections::HashMap::new(),
+            });
+        }
+        tables.entry(idx).or_default().insert(table.id, table);
+        materialized += 1;
+    }
+    Ok(materialized)
+}
+
+/// Normalize the author's sheet selection: empty means "every sheet". Shared
+/// by calp_publish and calp_publish_preview so the dry-run can never describe
+/// a different package than the one a publish with the same input would write.
+fn resolve_publish_sheet_indices(
+    state: &State<AppState>,
+    requested: Vec<usize>,
+) -> Result<Vec<usize>, String> {
+    if !requested.is_empty() {
+        return Ok(requested);
+    }
+    let names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    Ok((0..names.len()).collect())
 }
 
 /// Pull (subscribe to) a package.
@@ -494,11 +1011,37 @@ pub fn calp_pull(
         (chart_index_map, pkg_to_index)
     };
 
-    // Store subscription
+    // Provenance ledger: everything this pull actually materializes. Stored on
+    // the Subscription (subscriptions.json) so the Package Explorer can show
+    // "which objects are connected to this package" and refresh can replace
+    // exactly the package-owned objects.
+    let mut sub_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
+    let sub_object = |kind: &str, id: String, name: String| calp::manifest::SubscribedObject {
+        kind: kind.to_string(),
+        id,
+        name,
+        extra: std::collections::HashMap::new(),
+    };
+
+    // Materialize pulled sheet presentation state (merges, freeze panes, tab
+    // color, visibility, gridlines, page setup, notes, hyperlinks) and keep the
+    // index-aligned per-sheet stores aligned for the appended sheets.
     {
-        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
-        subs.subscriptions.push(result.subscription);
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let pairs: Vec<(SheetId, &persistence::Sheet)> = result
+            .sheets
+            .iter()
+            .map(|p| (p.package_sheet_id, &p.sheet))
+            .collect();
+        materialize_pulled_sheet_state(&state, &pairs, &pkg_to_index, active)?;
     }
+
+    // Materialize pulled tables. The package carries full table objects
+    // (tables/{id}.json); before this they were read, counted, and then
+    // dropped — the subscriber got the cells but lost the table entity (name,
+    // structured references, header/filter behavior).
+    let tables_materialized =
+        materialize_pulled_tables(&state, &result.tables, &pkg_to_index, Some(&mut sub_objects))?;
 
     // Materialize pulled object scripts (forced to restricted mode by the calp layer)
     let scripts_pulled = result.object_scripts.len();
@@ -507,6 +1050,11 @@ pub fn calp_pull(
         for script in result.object_scripts {
             // Don't overwrite existing scripts with the same ID (subscriber may have modified)
             if !scripts.iter().any(|s| s.id == script.id) {
+                sub_objects.push(sub_object(
+                    "objectScript",
+                    script.id.clone(),
+                    script.name.clone(),
+                ));
                 scripts.push(script);
             }
         }
@@ -520,6 +1068,7 @@ pub fn calp_pull(
         for chart in result.charts {
             if let Some(&sheet_index) = chart_sheet_index.get(&chart.sheet_id) {
                 if !charts.iter().any(|c| c.id == chart.id) {
+                    sub_objects.push(sub_object("chart", chart.id.to_string(), String::new()));
                     charts.push(crate::api_types::ChartEntry {
                         id: chart.id,
                         sheet_index,
@@ -561,6 +1110,7 @@ pub fn calp_pull(
             if names.contains_key(&key) {
                 continue; // don't clobber a name the subscriber already defined
             }
+            sub_objects.push(sub_object("namedRange", key.clone(), nr.name.clone()));
             names.insert(
                 key,
                 crate::named_ranges::NamedRange {
@@ -617,14 +1167,71 @@ pub fn calp_pull(
         }
     }
 
+    // Materialize pulled controls (buttons/checkboxes) onto the freshly-
+    // appended sheets — SANITIZED: distributed onSelect wiring is inline
+    // script source and must not execute outside the consent model, so
+    // packaged buttons arrive visually intact but disarmed. Publisher-shipped
+    // interactivity flows through the consent-gated object scripts above.
+    if !result.controls.is_empty() {
+        let local_sheet_ids: std::collections::HashMap<SheetId, (SheetId, String)> = result
+            .sheets
+            .iter()
+            .map(|p| (p.package_sheet_id, (p.sheet.id, p.name.clone())))
+            .collect();
+        let sanitized = crate::controls::sanitize_distributed_controls(&result.controls);
+        let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+        crate::controls::materialize_saved_controls(
+            &sanitized,
+            &mut controls,
+            |sid| pkg_to_index.get(&sid).copied(),
+        );
+        for entry in &result.controls {
+            if let Some((local_sid, sheet_name)) = local_sheet_ids.get(&entry.sheet_id) {
+                sub_objects.push(sub_object(
+                    "controlSheet",
+                    local_sid.to_string(),
+                    sheet_name.clone(),
+                ));
+            }
+        }
+    }
+
     // Materialize pulled standalone module scripts + notebooks (C8) into
-    // ScriptState. Shared with the refresh path so updates propagate identically.
-    materialize_distributed_scripts(
+    // ScriptState. Shared with the refresh path so updates propagate
+    // identically. Ledger entries come from the APPLIED lists so a
+    // conflict-skipped local document is never attributed to this package.
+    let (applied_modules, applied_notebooks) = materialize_distributed_scripts(
         &script_state,
         &result.package_name,
         &result.module_scripts,
         &result.notebooks,
     )?;
+    for (id, name) in &applied_modules {
+        sub_objects.push(sub_object("moduleScript", id.clone(), name.clone()));
+    }
+    for (id, name) in &applied_notebooks {
+        sub_objects.push(sub_object("notebook", id.clone(), name.clone()));
+    }
+    for def in &result.pivot_definitions {
+        sub_objects.push(sub_object("pivot", def.id.to_string(), String::new()));
+    }
+    for ds in &result.data_sources {
+        sub_objects.push(sub_object(
+            "dataSource",
+            ds.definition.id.clone(),
+            ds.definition.name.clone(),
+        ));
+    }
+
+    // Store subscription — WITH the provenance ledger of what this pull
+    // actually materialized. Must precede rebuild_writeback_index (it reads
+    // the subscription list).
+    {
+        let mut subscription = result.subscription;
+        subscription.objects = sub_objects;
+        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        subs.subscriptions.push(subscription);
+    }
 
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(&state);
@@ -673,7 +1280,10 @@ pub fn calp_pull(
         package_name: result.package_name,
         resolved_version: result.resolved_version.to_string(),
         sheets_pulled,
-        tables_pulled: result.tables.len(),
+        // Tables actually MATERIALIZED into the workbook (collision-skipped
+        // ones excluded) — the old count reported tables merely read from the
+        // package, overstating what happened.
+        tables_pulled: tables_materialized,
         scripts_pulled,
         publisher_name,
         trust_status,
@@ -745,6 +1355,15 @@ pub struct PackageInspection {
     pub writeback_region_count: usize,
     pub table_count: usize,
     pub named_range_count: usize,
+    /// Per-object transparency for the pre-pull review: names of the tables
+    /// and named ranges the package carries (counts alone hide what arrives).
+    pub table_names: Vec<String>,
+    pub named_range_names: Vec<String>,
+    pub chart_count: usize,
+    pub sparkline_count: usize,
+    pub pivot_count: usize,
+    /// Sheets carrying cell-anchored controls (buttons/checkboxes).
+    pub control_sheet_count: usize,
     /// S5 phase 2: the verified publisher's display name. Inspect is a pre-pull
     /// trust surface, so the manifest signature is checked here too.
     pub publisher_name: String,
@@ -829,6 +1448,57 @@ pub fn calp_inspect_package(
     }
     .to_string();
 
+    // Per-object detail read from the (integrity-checked) artifacts — computed
+    // BEFORE the response literal because the literal moves package_name/version.
+    let table_names: Vec<String> = {
+        let mut names = Vec::new();
+        for table_id in &manifest.tables {
+            if let Ok(Some(bytes)) = registry.read_artifact(
+                &package_name,
+                &version,
+                &format!("tables/{}.json", table_id),
+            ) {
+                if let Ok(table) = serde_json::from_slice::<persistence::SavedTable>(&bytes) {
+                    names.push(table.name);
+                }
+            }
+        }
+        names
+    };
+    let chart_count = match registry.read_artifact(&package_name, &version, "charts.json") {
+        Ok(Some(bytes)) => serde_json::from_slice::<Vec<persistence::SavedChart>>(&bytes)
+            .map(|v| v.len())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let sparkline_count = match registry.read_artifact(&package_name, &version, "sparklines.json") {
+        Ok(Some(bytes)) => serde_json::from_slice::<Vec<persistence::SavedSparkline>>(&bytes)
+            .map(|v| v.len())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    // Pivot artifacts are enumerated from the SIGNED manifest's checksum keys —
+    // a transport dir-walk lists nothing once publish commits artifacts into
+    // the content-addressed blob store.
+    let pivot_count = manifest
+        .artifact_checksums
+        .keys()
+        .filter(|p| {
+            p.starts_with("pivot_definitions/")
+                && p.ends_with(".json")
+                && p.as_str() != "pivot_definitions/bi_metadata.json"
+        })
+        .count();
+    let control_sheet_count =
+        match registry.read_artifact(&package_name, &version, "controls.json") {
+            Ok(Some(bytes)) => {
+                serde_json::from_slice::<Vec<persistence::SavedSheetControls>>(&bytes)
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        };
+
     Ok(PackageInspection {
         package_name,
         resolved_version: version,
@@ -866,6 +1536,12 @@ pub fn calp_inspect_package(
             .unwrap_or(0),
         table_count: manifest.tables.len(),
         named_range_count: manifest.named_ranges.len(),
+        table_names,
+        named_range_names: manifest.named_ranges.iter().map(|nr| nr.name.clone()).collect(),
+        chart_count,
+        sparkline_count,
+        pivot_count,
+        control_sheet_count,
     })
 }
 
@@ -878,6 +1554,148 @@ pub fn calp_get_subscriptions(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     Ok(subs.clone())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageObjectInfo {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    /// Whether the object still exists in the live workbook (a subscriber may
+    /// have deleted it since the pull).
+    pub present: bool,
+    /// The sheet the object lives on, when resolvable.
+    pub sheet_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageSheetObjectInfo {
+    pub local_name: String,
+    pub local_sheet_index: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageObjectsResponse {
+    pub package_name: String,
+    pub resolved_version: String,
+    pub registry_url: String,
+    pub sheets: Vec<PackageSheetObjectInfo>,
+    pub objects: Vec<PackageObjectInfo>,
+}
+
+/// Resolve one subscription's provenance ledger against the live workbook:
+/// which sheets and objects are connected to this package, and whether each
+/// still exists. Backs the Package Explorer pane.
+#[tauri::command]
+pub fn calp_get_package_objects(
+    state: State<AppState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    bi_state: State<BiState>,
+    package_name: String,
+    window: tauri::Window,
+) -> Result<PackageObjectsResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let Some(sub) = subs
+        .subscriptions
+        .iter()
+        .find(|s| s.package_name == package_name)
+    else {
+        return Err(format!("No subscription named '{}'", package_name));
+    };
+
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+
+    let sheets: Vec<PackageSheetObjectInfo> = sub
+        .sheets
+        .iter()
+        .map(|s| {
+            let idx = sheet_ids.iter().position(|id| *id == s.local_sheet_id);
+            PackageSheetObjectInfo {
+                local_name: idx
+                    .and_then(|i| sheet_names.get(i).cloned())
+                    .unwrap_or_else(|| s.local_name.clone()),
+                local_sheet_index: idx,
+            }
+        })
+        .collect();
+
+    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+    let charts = state.charts.lock().map_err(|e| e.to_string())?;
+    let named_ranges = state.named_ranges.lock().map_err(|e| e.to_string())?;
+    let object_scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+    let pivot_tables = pivot_state.pivot_tables.lock().map_err(|e| e.to_string())?;
+    let workbook_scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+    let workbook_notebooks = script_state
+        .workbook_notebooks
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+
+    let sheet_name_at =
+        |idx: usize| -> String { sheet_names.get(idx).cloned().unwrap_or_default() };
+
+    let objects: Vec<PackageObjectInfo> = sub
+        .objects
+        .iter()
+        .map(|o| {
+            let (present, sheet_name) = match o.kind.as_str() {
+                "table" => tables
+                    .iter()
+                    .find(|(_, m)| m.keys().any(|id| id.to_string() == o.id))
+                    .map(|(idx, _)| (true, sheet_name_at(*idx)))
+                    .unwrap_or((false, String::new())),
+                "chart" => charts
+                    .iter()
+                    .find(|c| c.id.to_string() == o.id)
+                    .map(|c| (true, sheet_name_at(c.sheet_index)))
+                    .unwrap_or((false, String::new())),
+                "namedRange" => (named_ranges.contains_key(&o.id), String::new()),
+                "objectScript" => (
+                    object_scripts.iter().any(|s| s.id == o.id),
+                    String::new(),
+                ),
+                "moduleScript" => (workbook_scripts.contains_key(&o.id), String::new()),
+                "notebook" => (workbook_notebooks.contains_key(&o.id), String::new()),
+                "pivot" => (
+                    pivot_tables.keys().any(|k| k.to_string() == o.id),
+                    String::new(),
+                ),
+                "dataSource" => (
+                    connections
+                        .values()
+                        .any(|c| c.package_data_source_id.as_deref() == Some(o.id.as_str())),
+                    String::new(),
+                ),
+                "controlSheet" => sheet_ids
+                    .iter()
+                    .position(|id| id.to_string() == o.id)
+                    .map(|idx| (true, sheet_name_at(idx)))
+                    .unwrap_or((false, String::new())),
+                _ => (false, String::new()),
+            };
+            PackageObjectInfo {
+                kind: o.kind.clone(),
+                id: o.id.clone(),
+                name: o.name.clone(),
+                present,
+                sheet_name,
+            }
+        })
+        .collect();
+
+    Ok(PackageObjectsResponse {
+        package_name: sub.package_name.clone(),
+        resolved_version: sub.resolved_version.clone(),
+        registry_url: sub.registry_url.clone(),
+        sheets,
+        objects,
+    })
 }
 
 /// Return the entire override layer for the current workbook.
@@ -1650,6 +2468,192 @@ pub fn calp_refresh_apply(
         }
     }
 
+    // Materialize refreshed sheet presentation state (merges, freeze panes,
+    // tab color, visibility, gridlines, page setup, notes, hyperlinks) with
+    // reset semantics — the publisher owns a subscribed sheet's presentation —
+    // and keep the index-aligned per-sheet stores aligned for sheets this
+    // refresh appended. The refresh analog of the calp_pull materialization.
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        for payload in &payloads {
+            let pairs: Vec<(SheetId, &persistence::Sheet)> = payload
+                .pull_result
+                .sheets
+                .iter()
+                .map(|p| (p.package_sheet_id, &p.sheet))
+                .collect();
+            materialize_pulled_sheet_state(&state, &pairs, &cfdv_pkg_to_index, active)?;
+        }
+    }
+
+    // Provenance-ledger updates accumulated per subscription while payloads
+    // are still borrowable; merged into the subscriptions after apply_refresh.
+    let mut refresh_ledgers: std::collections::HashMap<usize, Vec<calp::manifest::SubscribedObject>> =
+        std::collections::HashMap::new();
+    let ledger_entry = |kind: &str, id: String, name: String| calp::manifest::SubscribedObject {
+        kind: kind.to_string(),
+        id,
+        name,
+        extra: std::collections::HashMap::new(),
+    };
+
+    // Tables: replace this package's own tables (from the provenance ledger)
+    // with the new version's set, so table changes actually land on refresh.
+    // Subscriber-authored tables are not in the ledger and are never touched.
+    {
+        // Removal first (its own lock scope), then the shared additive
+        // materializer re-adds the v2 set.
+        {
+            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
+            let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                    continue;
+                };
+                let owned: std::collections::HashSet<String> = sub
+                    .objects
+                    .iter()
+                    .filter(|o| o.kind == "table")
+                    .map(|o| o.id.clone())
+                    .collect();
+                if !owned.is_empty() {
+                    for sheet_tables in tables.values_mut() {
+                        sheet_tables.retain(|id, t| {
+                            let keep = !owned.contains(&id.to_string());
+                            if !keep {
+                                table_names.remove(&t.name.to_uppercase());
+                            }
+                            keep
+                        });
+                    }
+                }
+            }
+        }
+        for payload in &payloads {
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            materialize_pulled_tables(
+                &state,
+                &payload.pull_result.tables,
+                &cfdv_pkg_to_index,
+                Some(entries),
+            )?;
+        }
+    }
+
+    // Charts: same ledger-scoped replace, so v2 charts actually land on
+    // refresh (previously a subscriber stayed on v1 charts forever). Chart
+    // sheet ids in the payload are the FRESH local ids this pull minted; map
+    // fresh id -> package id -> existing local index.
+    {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
+        for payload in &payloads {
+            let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                continue;
+            };
+            let owned: std::collections::HashSet<String> = sub
+                .objects
+                .iter()
+                .filter(|o| o.kind == "chart")
+                .map(|o| o.id.clone())
+                .collect();
+            charts.retain(|c| !owned.contains(&c.id.to_string()));
+            let fresh_to_pkg: std::collections::HashMap<SheetId, SheetId> = payload
+                .pull_result
+                .sheets
+                .iter()
+                .map(|p| (p.sheet.id, p.package_sheet_id))
+                .collect();
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for chart in &payload.pull_result.charts {
+                let Some(pkg_sid) = fresh_to_pkg.get(&chart.sheet_id) else {
+                    continue;
+                };
+                let Some(&idx) = cfdv_pkg_to_index.get(pkg_sid) else {
+                    continue;
+                };
+                if !charts.iter().any(|c| c.id == chart.id) {
+                    entries.push(ledger_entry("chart", chart.id.to_string(), String::new()));
+                    charts.push(crate::api_types::ChartEntry {
+                        id: chart.id,
+                        sheet_index: idx,
+                        spec_json: chart.spec_json.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Sparklines + controls: RESET each refreshed sheet's entries then apply
+    // v2's (CF/DV semantics — sparklines carry no id, and controls are
+    // publisher-owned presentation on subscribed sheets).
+    {
+        let refreshed: std::collections::HashSet<usize> =
+            cfdv_pkg_to_index.values().copied().collect();
+        {
+            let mut sparklines = state.sparklines.lock().map_err(|e| e.to_string())?;
+            sparklines.retain(|e| !refreshed.contains(&e.sheet_index));
+            for payload in &payloads {
+                let fresh_to_pkg: std::collections::HashMap<SheetId, SheetId> = payload
+                    .pull_result
+                    .sheets
+                    .iter()
+                    .map(|p| (p.sheet.id, p.package_sheet_id))
+                    .collect();
+                for sp in &payload.pull_result.sparklines {
+                    let Some(pkg_sid) = fresh_to_pkg.get(&sp.sheet_id) else { continue };
+                    let Some(&idx) = cfdv_pkg_to_index.get(pkg_sid) else { continue };
+                    sparklines.push(crate::api_types::SparklineEntry {
+                        sheet_index: idx,
+                        groups_json: sp.groups_json.clone(),
+                    });
+                }
+            }
+        }
+        {
+            let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+            controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
+            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+            let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                // Same sanitization as first pull: distributed onSelect wiring
+                // (inline script source) never materializes.
+                let sanitized =
+                    crate::controls::sanitize_distributed_controls(&payload.pull_result.controls);
+                crate::controls::materialize_saved_controls(
+                    &sanitized,
+                    &mut controls,
+                    |sid| cfdv_pkg_to_index.get(&sid).copied(),
+                );
+                let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+                for entry in &payload.pull_result.controls {
+                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                        if let Some(local_sid) = sheet_ids.get(idx) {
+                            entries.push(ledger_entry(
+                                "controlSheet",
+                                local_sid.to_string(),
+                                sheet_names.get(idx).cloned().unwrap_or_default(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Ledger entries for named ranges (upserted unconditionally above, so the
+    // full v2 set is accurate). Script kinds (objectScript/moduleScript/
+    // notebook) are recorded at their point of ACTUAL application below — the
+    // swap/materialize conflict guards can skip entries, and a skipped local
+    // script must never be attributed to the package.
+    for payload in &payloads {
+        let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+        for nr in &payload.pull_result.named_ranges {
+            entries.push(ledger_entry("namedRange", nr.name.to_uppercase(), nr.name.clone()));
+        }
+    }
+
     // Capture the pre-refresh writeback declarations BEFORE the index is
     // rebuilt below, so removed/incompatible regions are actually detected.
     let old_decls = state.writeback_declarations.lock()
@@ -1748,6 +2752,22 @@ pub fn calp_refresh_apply(
         .cloned()
         .collect();
 
+    // Merge the provenance-ledger updates into the refreshed subscriptions:
+    // kinds this refresh re-materialized are replaced with the v2 set; kinds a
+    // refresh does not touch (pivots, data sources) carry over from the pull.
+    for (sub_idx, new_entries) in refresh_ledgers {
+        if let Some(sub) = subs.subscriptions.get_mut(sub_idx) {
+            let mut objects: Vec<calp::manifest::SubscribedObject> = sub
+                .objects
+                .iter()
+                .filter(|o| o.kind == "pivot" || o.kind == "dataSource")
+                .cloned()
+                .collect();
+            objects.extend(new_entries);
+            sub.objects = objects;
+        }
+    }
+
     // Rebuild writeback index from updated subscriptions
     drop(subs);
     drop(layer);
@@ -1762,6 +2782,12 @@ pub fn calp_refresh_apply(
     // Without this the workbook keeps running v1 scripts against vN sheets
     // and the hash-keyed consent re-prompt can never trigger. Distributed
     // scripts are upstream-owned (read-only locally), so replacement is safe.
+    // (package name, ledger entries) for scripts ACTUALLY applied by the swap
+    // and the module/notebook materialization below — appended to each
+    // subscription's ledger afterwards, so a conflict-skipped local script is
+    // never attributed to a package.
+    let mut applied_script_entries: Vec<(String, Vec<calp::manifest::SubscribedObject>)> =
+        Vec::new();
     {
         let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
         for (package_name, new_scripts) in script_updates {
@@ -1769,13 +2795,21 @@ pub fn calp_refresh_apply(
                 !(matches!(s.provenance, persistence::ScriptProvenance::Distributed)
                     && s.package_name.as_deref() == Some(package_name.as_str()))
             });
+            let mut applied: Vec<calp::manifest::SubscribedObject> = Vec::new();
             for script in new_scripts {
                 // Never let a package script shadow an unrelated local
                 // script that happens to share its id.
                 if !scripts.iter().any(|s| s.id == script.id) {
+                    applied.push(calp::manifest::SubscribedObject {
+                        kind: "objectScript".to_string(),
+                        id: script.id.clone(),
+                        name: script.name.clone(),
+                        extra: std::collections::HashMap::new(),
+                    });
                     scripts.push(script);
                 }
             }
+            applied_script_entries.push((package_name, applied));
         }
     }
 
@@ -1783,7 +2817,45 @@ pub fn calp_refresh_apply(
     // notebooks so upstream updates (incl. removals) actually land on refresh,
     // while preserving subscriber-local same-id documents.
     for (pkg, modules, notebooks) in &module_notebook_updates {
-        materialize_distributed_scripts(&script_state, pkg, modules, notebooks)?;
+        let (applied_modules, applied_notebooks) =
+            materialize_distributed_scripts(&script_state, pkg, modules, notebooks)?;
+        let mut entries: Vec<calp::manifest::SubscribedObject> = Vec::new();
+        for (id, name) in applied_modules {
+            entries.push(calp::manifest::SubscribedObject {
+                kind: "moduleScript".to_string(),
+                id,
+                name,
+                extra: std::collections::HashMap::new(),
+            });
+        }
+        for (id, name) in applied_notebooks {
+            entries.push(calp::manifest::SubscribedObject {
+                kind: "notebook".to_string(),
+                id,
+                name,
+                extra: std::collections::HashMap::new(),
+            });
+        }
+        applied_script_entries.push((pkg.clone(), entries));
+    }
+
+    // Complete the provenance ledger with the script kinds recorded above at
+    // their point of actual application. (The earlier merge replaced all
+    // non-pivot/dataSource entries, so appending here cannot duplicate.)
+    {
+        let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        for (pkg, entries) in applied_script_entries {
+            if entries.is_empty() {
+                continue;
+            }
+            if let Some(sub) = subs
+                .subscriptions
+                .iter_mut()
+                .find(|s| s.package_name == pkg)
+            {
+                sub.objects.extend(entries);
+            }
+        }
     }
 
     rebuild_writeback_index(&state);
@@ -1932,13 +3004,12 @@ pub fn calp_dev_subscribe(
         .map_err(|e| e.to_string())?;
 
     let sheets_pulled = result.sheets.len();
-    let tables_pulled = result.tables.len();
 
     // Resolve the package name from the subscription that will be created.
     let package_name = format!("dev:{}", params.source_path);
 
     // Materialize pulled sheets into the workbook.
-    {
+    let dev_map: std::collections::HashMap<SheetId, usize> = {
         let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
@@ -1946,6 +3017,7 @@ pub fn calp_dev_subscribe(
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
 
+        let mut map = std::collections::HashMap::new();
         for pulled in &result.sheets {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
@@ -1960,21 +3032,42 @@ pub fn calp_dev_subscribe(
                 }
             }
 
+            map.insert(pulled.source_sheet_id, grids.len());
             grids.push(grid);
             sheet_names.push(pulled.name.clone());
             sheet_ids.push(pulled.sheet.id);
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
         }
-    }
+        map
+    };
 
-    // Store the dev subscription.
+    // Dev preview = subscriber fidelity: presentation state, tables and
+    // controls materialize exactly like a real pull (controls sanitized the
+    // same way), so the author's fast loop previews what subscribers get.
     {
-        let subscription = calp::dev_mode::make_dev_subscription(
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let pairs: Vec<(SheetId, &persistence::Sheet)> = result
+            .sheets
+            .iter()
+            .map(|p| (p.source_sheet_id, &p.sheet))
+            .collect();
+        materialize_pulled_sheet_state(&state, &pairs, &dev_map, active)?;
+    }
+    let mut dev_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
+    let tables_pulled =
+        materialize_pulled_tables(&state, &result.tables, &dev_map, Some(&mut dev_objects))?;
+    materialize_dev_controls(&state, &result, &dev_map, &mut dev_objects)?;
+
+    // Store the dev subscription (with the provenance ledger, so the Package
+    // Explorer works for dev subscriptions too).
+    {
+        let mut subscription = calp::dev_mode::make_dev_subscription(
             &params.source_path,
             &result,
             &now,
         );
+        subscription.objects = dev_objects;
         let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
         subs.subscriptions.push(subscription);
     }
@@ -1990,6 +3083,40 @@ pub fn calp_dev_subscribe(
         publisher_name: String::new(),
         trust_status: "dev".to_string(),
     })
+}
+
+/// Materialize a dev pull's controls (sanitized like a real pull) and record
+/// controlSheet ledger entries. Shared by dev subscribe + dev refresh.
+fn materialize_dev_controls(
+    state: &AppState,
+    result: &calp::dev_mode::DevPullResult,
+    dev_map: &std::collections::HashMap<SheetId, usize>,
+    ledger: &mut Vec<calp::manifest::SubscribedObject>,
+) -> Result<(), String> {
+    if result.controls.is_empty() {
+        return Ok(());
+    }
+    let sanitized = crate::controls::sanitize_distributed_controls(&result.controls);
+    let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+    crate::controls::materialize_saved_controls(&sanitized, &mut controls, |sid| {
+        dev_map.get(&sid).copied()
+    });
+    drop(controls);
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    for entry in &result.controls {
+        if let Some(&idx) = dev_map.get(&entry.sheet_id) {
+            if let Some(local_sid) = sheet_ids.get(idx) {
+                ledger.push(calp::manifest::SubscribedObject {
+                    kind: "controlSheet".to_string(),
+                    id: local_sid.to_string(),
+                    name: sheet_names.get(idx).cloned().unwrap_or_default(),
+                    extra: std::collections::HashMap::new(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Re-pull from the dev source, refreshing HEAD sheets in the workbook.
@@ -2022,11 +3149,10 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         .map_err(|e| e.to_string())?;
 
     let sheets_pulled = result.sheets.len();
-    let tables_pulled = result.tables.len();
     let package_name = format!("dev:{}", source_path);
 
     // Replace sheets already tracked by this subscription; append any new ones.
-    {
+    let dev_map: std::collections::HashMap<SheetId, usize> = {
         let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
         let mut sheet_names_state = state.sheet_names.lock().map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
@@ -2040,6 +3166,7 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
             .map(|s| s.local_sheet_id)
             .collect();
 
+        let mut map = std::collections::HashMap::new();
         for (i, pulled) in result.sheets.iter().enumerate() {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
@@ -2060,9 +3187,11 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
                     grids[grid_idx] = grid;
                     all_cw[grid_idx] = pulled.sheet.column_widths.clone();
                     all_rh[grid_idx] = pulled.sheet.row_heights.clone();
+                    map.insert(pulled.source_sheet_id, grid_idx);
                 }
             } else {
                 // New sheet added since last pull — append.
+                map.insert(pulled.source_sheet_id, grids.len());
                 grids.push(grid);
                 sheet_names_state.push(pulled.name.clone());
                 sheet_ids.push(pulled.sheet.id);
@@ -2070,12 +3199,63 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
                 all_rh.push(pulled.sheet.row_heights.clone());
             }
         }
-    }
+        map
+    };
 
-    // Update the subscription timestamp.
+    // Dev refresh mirrors the real refresh: presentation state resets to the
+    // source's, this subscription's own tables are replaced with the new set,
+    // and controls reset (sanitized) on the refreshed sheets.
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let pairs: Vec<(SheetId, &persistence::Sheet)> = result
+            .sheets
+            .iter()
+            .map(|p| (p.source_sheet_id, &p.sheet))
+            .collect();
+        materialize_pulled_sheet_state(&state, &pairs, &dev_map, active)?;
+    }
+    {
+        // Remove this dev subscription's ledger-owned tables, then re-add v2.
+        let owned: std::collections::HashSet<String> = {
+            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            subs.subscriptions[sub_index]
+                .objects
+                .iter()
+                .filter(|o| o.kind == "table")
+                .map(|o| o.id.clone())
+                .collect()
+        };
+        if !owned.is_empty() {
+            let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
+            let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
+            for sheet_tables in tables.values_mut() {
+                sheet_tables.retain(|id, t| {
+                    let keep = !owned.contains(&id.to_string());
+                    if !keep {
+                        table_names.remove(&t.name.to_uppercase());
+                    }
+                    keep
+                });
+            }
+        }
+    }
+    let mut dev_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
+    let tables_pulled =
+        materialize_pulled_tables(&state, &result.tables, &dev_map, Some(&mut dev_objects))?;
+    {
+        let refreshed: std::collections::HashSet<usize> = dev_map.values().copied().collect();
+        let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
+        controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
+    }
+    materialize_dev_controls(&state, &result, &dev_map, &mut dev_objects)?;
+
+    // Update the subscription timestamp + provenance ledger (a dev
+    // subscription only ever owns tables + control sheets, so wholesale
+    // replacement is accurate).
     {
         let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
         subs.subscriptions[sub_index].resolved_at = now;
+        subs.subscriptions[sub_index].objects = dev_objects;
     }
 
     Ok(PullResponse {

@@ -23,6 +23,32 @@ export interface PublishResponse {
   sheetsPublished: number;
   tablesPublished: number;
   namedRangesPublished: number;
+  scriptsPublished: number;
+  modulesPublished: number;
+  notebooksPublished: number;
+  /** Transparency report: everything that shipped and everything present in
+   * the workbook that packages cannot carry yet (no silent drops). */
+  report: PublishReport;
+}
+
+/** One line of the publish transparency report. */
+export interface PublishReportItem {
+  category: string;
+  count: number;
+  detail: string;
+}
+
+/** What a publish did (or, for the preview, would) carry — and what stays
+ * behind, with a reason per line. */
+export interface PublishReport {
+  included: PublishReportItem[];
+  excluded: PublishReportItem[];
+}
+
+export interface PublishPreviewResponse {
+  /** Names of the sheets the preview covered, in package order. */
+  sheetNames: string[];
+  report: PublishReport;
 }
 
 export interface PullParams {
@@ -54,6 +80,15 @@ export interface PackageInspection {
   writebackRegionCount: number;
   tableCount: number;
   namedRangeCount: number;
+  /** Names of the tables the package carries (per-object transparency). */
+  tableNames: string[];
+  /** Names of the named ranges the package carries. */
+  namedRangeNames: string[];
+  chartCount: number;
+  sparklineCount: number;
+  pivotCount: number;
+  /** Sheets carrying cell-anchored controls (buttons/checkboxes). */
+  controlSheetCount: number;
   /** Verified publisher display name (S5 phase 2). */
   publisherName: string;
   /** "firstUse" or "verified"; failed verification returns an error instead. */
@@ -107,6 +142,21 @@ export interface Subscription {
   resolvedVersion: string;
   resolvedAt: string;
   sheets: SubscribedSheet[];
+  /** Provenance ledger: every object this subscription materialized
+   * (written at pull, updated at refresh). May be absent on subscriptions
+   * created before the ledger existed. */
+  objects?: SubscribedObject[];
+}
+
+/** One object a subscription materialized into the local workbook. */
+export interface SubscribedObject {
+  /** "table" | "chart" | "pivot" | "namedRange" | "objectScript" |
+   * "moduleScript" | "notebook" | "dataSource" | "controlSheet" */
+  kind: string;
+  id: string;
+  /** Display name at materialization time; ABSENT when unknown (charts,
+   * pivots) — the backend omits empty names from the JSON. */
+  name?: string;
 }
 
 export interface SubscribedSheet {
@@ -197,6 +247,47 @@ export interface StructuralConflict {
 
 export function publishPackage(params: PublishParams): Promise<PublishResponse> {
   return invokeBackend("calp_publish", { params });
+}
+
+/**
+ * Dry-run of publishPackage: assemble the exact carrier a publish would use
+ * and report what would ship vs stay behind — without writing anything.
+ * Omit sheetIndices (or pass []) to preview publishing every sheet.
+ */
+export function publishPreview(sheetIndices?: number[]): Promise<PublishPreviewResponse> {
+  return invokeBackend("calp_publish_preview", {
+    params: { sheetIndices: sheetIndices ?? null },
+  });
+}
+
+/** One object connected to a package, resolved against the live workbook. */
+export interface PackageObjectInfo {
+  kind: string;
+  id: string;
+  name: string;
+  /** Whether the object still exists in the workbook. */
+  present: boolean;
+  /** The sheet the object lives on, when resolvable. */
+  sheetName: string;
+}
+
+export interface PackageSheetObjectInfo {
+  localName: string;
+  localSheetIndex: number | null;
+}
+
+export interface PackageObjectsResponse {
+  packageName: string;
+  resolvedVersion: string;
+  registryUrl: string;
+  sheets: PackageSheetObjectInfo[];
+  objects: PackageObjectInfo[];
+}
+
+/** Which sheets and objects are connected to a subscribed package, and
+ * whether each still exists in the live workbook (Package Explorer data). */
+export function getPackageObjects(packageName: string): Promise<PackageObjectsResponse> {
+  return invokeBackend("calp_get_package_objects", { packageName });
 }
 
 export function pullPackage(params: PullParams): Promise<PullResponse> {

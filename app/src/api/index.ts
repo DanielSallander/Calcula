@@ -1505,9 +1505,11 @@ export type {
 
 export {
   publishPackage,
+  publishPreview,
   pullPackage,
   browseRegistry,
   getSubscriptions,
+  getPackageObjects,
   getOverrides,
   revertOverride,
   acceptUpstream,
@@ -1526,6 +1528,9 @@ export {
 export type {
   PublishParams,
   PublishResponse,
+  PublishReport,
+  PublishReportItem,
+  PublishPreviewResponse,
   PullParams,
   PullResponse,
   PackageInfo,
@@ -1534,6 +1539,10 @@ export type {
   SubscriptionManifest,
   Subscription,
   SubscribedSheet,
+  SubscribedObject,
+  PackageObjectInfo,
+  PackageSheetObjectInfo,
+  PackageObjectsResponse,
   OverrideLayer,
   CellOverride,
   OverrideValue,

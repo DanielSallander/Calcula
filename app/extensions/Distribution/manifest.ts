@@ -15,6 +15,7 @@ export const WRITEBACK_PANE_ID = "distribution:writeback";
 export const SUBSCRIPTIONS_PANE_ID = "distribution:subscriptions";
 export const PUBLISHER_DASHBOARD_PANE_ID = "distribution:publisherDashboard";
 export const AUDIT_LOG_PANE_ID = "distribution:auditLog";
+export const PACKAGE_EXPLORER_PANEL_ID = "distribution:packageExplorer";
 
 export const DistributionManifest: AddInManifest = {
   id: DISTRIBUTION_EXTENSION_ID,

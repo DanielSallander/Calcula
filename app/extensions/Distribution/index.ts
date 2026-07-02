@@ -10,12 +10,17 @@ import { SubscriptionManagerPane } from "./components/SubscriptionManagerPane";
 import { PublisherDashboardPane } from "./components/PublisherDashboardPane";
 import { AuditLogPane } from "./components/AuditLogPane";
 import {
+  ConnectedObjectsSection,
+  PublishPreviewSection,
+} from "./components/PackageExplorerPanel";
+import {
   DistributionManifest,
   OVERRIDES_PANE_ID,
   WRITEBACK_PANE_ID,
   SUBSCRIPTIONS_PANE_ID,
   PUBLISHER_DASHBOARD_PANE_ID,
   AUDIT_LOG_PANE_ID,
+  PACKAGE_EXPLORER_PANEL_ID,
   PUBLISH_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
@@ -131,6 +136,31 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(AUDIT_LOG_PANE_ID));
 
+  // Register the Package Explorer transparency panel (sections API): which
+  // objects are connected to each subscribed package (with presence checks +
+  // click-to-navigate), and a dry-run publish preview for authors showing
+  // exactly what would ship vs stay behind.
+  context.ui.panels.register({
+    id: PACKAGE_EXPLORER_PANEL_ID,
+    title: "Package Explorer",
+    icon: IconPackage,
+    sections: [
+      {
+        id: `${PACKAGE_EXPLORER_PANEL_ID}.connected`,
+        label: "Connected objects",
+        component: ConnectedObjectsSection,
+      },
+      {
+        id: `${PACKAGE_EXPLORER_PANEL_ID}.publishPreview`,
+        label: "Publish preview",
+        component: PublishPreviewSection,
+      },
+    ],
+    defaultPlacement: "sidebar",
+    priority: 37,
+  });
+  cleanupFns.push(() => context.ui.panels.unregister(PACKAGE_EXPLORER_PANEL_ID));
+
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
@@ -178,6 +208,12 @@ function activate(context: ExtensionContext): void {
           context.ui.taskPanes.open(SUBSCRIPTIONS_PANE_ID);
           context.ui.taskPanes.showContainer();
         },
+      },
+      {
+        id: "externalData:distribution:packageExplorer",
+        label: "Package Explorer",
+        icon: IconPackage,
+        action: () => context.ui.panels.open(PACKAGE_EXPLORER_PANEL_ID),
       },
       {
         id: "externalData:distribution:collectedResponses",

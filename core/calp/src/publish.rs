@@ -79,6 +79,22 @@ pub struct PublishResult {
     pub modules_published: usize,
     /// Number of standalone notebooks published (C8).
     pub notebooks_published: usize,
+    /// Charts on the published sheets.
+    pub charts_published: usize,
+    /// Sparkline sheet-entries on the published sheets.
+    pub sparklines_published: usize,
+    /// Pivot definitions carried by the package.
+    pub pivots_published: usize,
+    /// Sheets that carried conditional-formatting rules.
+    pub conditional_format_sheets: usize,
+    /// Sheets that carried data-validation ranges.
+    pub data_validation_sheets: usize,
+    /// Sheets that carried cell-anchored controls (buttons/checkboxes).
+    pub control_sheets_published: usize,
+    /// Embedded BI data-source models.
+    pub data_sources_published: usize,
+    /// Writeback region declarations in the manifest.
+    pub writeback_regions_published: usize,
 }
 
 /// Publish selected sheets from a workbook to a local registry.
@@ -413,6 +429,26 @@ pub fn publish(
         )?;
     }
 
+    // Write cell-anchored controls (buttons/checkboxes — onSelect wiring,
+    // formula-driven properties) on the published sheets. Same per-sheet
+    // opaque-payload shape as CF/DV; pull remaps each entry's sheet id to the
+    // local sheet. The scripts a control references travel separately as
+    // object_scripts (consent-gated); this carries the HOST so a shipped
+    // script no longer arrives orphaned.
+    let published_controls: Vec<_> = request
+        .workbook
+        .controls
+        .iter()
+        .filter(|c| published_sheet_ids.contains(&c.sheet_id))
+        .collect();
+    if !published_controls.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "controls.json",
+            serde_json::to_string_pretty(&published_controls)?.as_bytes(),
+        )?;
+    }
+
     // Write object scripts
     if !scripts_to_publish.is_empty() {
         for script in &scripts_to_publish {
@@ -564,6 +600,17 @@ pub fn publish(
         scripts_published: scripts_to_publish.len(),
         modules_published: modules_to_publish.len(),
         notebooks_published: notebooks_to_publish.len(),
+        charts_published: published_charts.len(),
+        sparklines_published: published_sparklines.len(),
+        pivots_published: request.workbook.pivot_definitions.len(),
+        conditional_format_sheets: published_conditional_formats.len(),
+        data_validation_sheets: published_data_validations.len(),
+        control_sheets_published: published_controls.len(),
+        data_sources_published: request.data_sources.len(),
+        writeback_regions_published: request
+            .writeback_regions
+            .as_ref()
+            .map_or(0, |w| w.len()),
     })
 }
 

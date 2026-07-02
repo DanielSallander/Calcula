@@ -91,10 +91,17 @@ fn table_to_saved(table: &Table, sheet_ids: &[SheetId]) -> SavedTable {
 }
 
 fn saved_to_table(saved: &SavedTable, workbook: &persistence::Workbook) -> Table {
+    saved_table_to_table_at(saved, sheet_id_to_index(workbook, saved.sheet_id))
+}
+
+/// Convert a SavedTable into a live Table at an explicit sheet index. Used by
+/// the .cala load path (index resolved via the workbook) and the .calp pull
+/// path (index resolved via the package->local sheet map).
+pub fn saved_table_to_table_at(saved: &SavedTable, sheet_index: usize) -> Table {
     Table {
         id: saved.id,
         name: saved.name.clone(),
-        sheet_index: sheet_id_to_index(workbook, saved.sheet_id),
+        sheet_index,
         start_row: saved.start_row,
         start_col: saved.start_col,
         end_row: saved.end_row,
@@ -349,115 +356,12 @@ fn collect_cf_dv_for_save(
     (conditional_formats, data_validations)
 }
 
-/// Build a multi-sheet Workbook snapshot from the current AppState.
-/// Used by the .calp publish command to access all sheets by index.
-/// Unlike `build_workbook_for_save`, this captures ALL sheets, not just the active one.
-pub fn build_workbook_snapshot(state: &State<AppState>) -> Result<Workbook, String> {
-    let grids = state.grids.lock().map_err(|e| e.to_string())?;
-    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
-    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-    let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
-    let tables = state.tables.lock().map_err(|e| e.to_string())?;
-    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-
-    let mut workbook = Workbook::new();
-    workbook.sheets.clear();
-    workbook.active_sheet = active_sheet;
-    workbook.default_row_height = *state.default_row_height.lock().unwrap();
-    workbook.default_column_width = *state.default_column_width.lock().unwrap();
-    workbook.theme = state.theme.lock().unwrap().clone();
-    workbook.extension_data = state.extension_data.lock().unwrap().clone();
-
-    // Workbook properties
-    {
-        let props = state.workbook_properties.lock().unwrap();
-        workbook.properties = persistence::WorkbookProperties {
-            title: props.title.clone(),
-            author: props.author.clone(),
-            subject: props.subject.clone(),
-            description: props.description.clone(),
-            keywords: props.keywords.clone(),
-            category: props.category.clone(),
-            created: props.created.clone(),
-            last_modified: chrono::Utc::now().to_rfc3339(),
-        };
-    }
-
-    // Build a Sheet for each grid using the shared style registry
-    for (i, grid) in grids.iter().enumerate() {
-        let id = sheet_ids.get(i).copied().unwrap_or_else(|| {
-            identity::SheetId::from_bytes(identity::generate_uuid_v7())
-        });
-        let name = sheet_names.get(i).cloned().unwrap_or_else(|| format!("Sheet{}", i + 1));
-        let col_widths = all_cw.get(i).cloned().unwrap_or_default();
-        let row_heights = all_rh.get(i).cloned().unwrap_or_default();
-        let dimensions = DimensionData { column_widths: col_widths, row_heights: row_heights };
-        let mut sheet = persistence::Sheet::from_grid(id, name, grid, &styles, &dimensions);
-
-        // Populate sheet-level metadata
-        // Merged regions
-        if let Ok(all_merged) = state.all_merged_regions.lock() {
-            if let Some(sheet_merges) = all_merged.get(i) {
-                sheet.merged_regions = sheet_merges.iter().map(|r| SavedMergedRegion {
-                    start_row: r.start_row,
-                    start_col: r.start_col,
-                    end_row: r.end_row,
-                    end_col: r.end_col,
-                }).collect();
-            }
-        }
-        // Freeze panes
-        if let Ok(freeze_configs) = state.freeze_configs.lock() {
-            if let Some(fc) = freeze_configs.get(i) {
-                sheet.freeze_row = fc.freeze_row;
-                sheet.freeze_col = fc.freeze_col;
-            }
-        }
-        // Tab color
-        if let Ok(tab_colors) = state.tab_colors.lock() {
-            if let Some(color) = tab_colors.get(i) {
-                sheet.tab_color = color.clone();
-            }
-        }
-        // Visibility
-        if let Ok(vis) = state.sheet_visibility.lock() {
-            if let Some(v) = vis.get(i) {
-                sheet.visibility = v.clone();
-            }
-        }
-        // Gridlines
-        if let Ok(gridlines) = state.show_gridlines.lock() {
-            if let Some(&visible) = gridlines.get(i) {
-                sheet.show_gridlines = visible;
-            }
-        }
-
-        workbook.sheets.push(sheet);
-    }
-
-    // Named ranges
-    if let Ok(named_ranges) = state.named_ranges.lock() {
-        workbook.named_ranges = named_ranges.values().map(|nr| persistence::SavedNamedRange {
-            name: nr.name.clone(),
-            refers_to: nr.refers_to.clone(),
-            sheet_id: nr.sheet_index.map(|idx| sheet_index_to_id(&sheet_ids, idx)),
-            comment: nr.comment.clone(),
-            folder: nr.folder.clone(),
-        }).collect();
-    }
-
-    // Tables
-    workbook.tables = collect_tables_for_save(&tables, &sheet_ids);
-
-    // Conditional formatting + data validation (per-sheet)
-    let (cf, dv) = collect_cf_dv_for_save(state, &sheet_ids);
-    workbook.conditional_formats = cf;
-    workbook.data_validations = dv;
-
-    Ok(workbook)
-}
+// (build_workbook_snapshot was deleted: .calp publish now builds its carrier
+// via build_workbook_for_save_with_slicers — the SAME collector as the .cala
+// save path — so package fidelity automatically tracks file fidelity. The
+// snapshot was a drifted parallel copy that read stale active-sheet content
+// from grids[active] and never carried notes/hyperlinks/hidden rows/page
+// setup/controls.)
 
 /// Enrich a workbook with sheet-level metadata from AppState:
 /// merged regions, freeze panes, hidden rows/cols, tab colors,
@@ -631,6 +535,13 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     let (cf, dv) = collect_cf_dv_for_save(state, sheet_ids);
     workbook.conditional_formats = cf;
     workbook.data_validations = dv;
+
+    // ---- Controls (cell-anchored button/checkbox metadata, per-sheet) ----
+    // Without this, onSelect wiring and formula-driven properties lived only
+    // in AppState and vanished on every save/reload (and never published).
+    if let Ok(controls) = state.controls.lock() {
+        workbook.controls = crate::controls::collect_controls_for_save(&controls, sheet_ids);
+    }
 }
 
 /// Collect slicers from SlicerState into SavedSlicer format.
@@ -1820,6 +1731,18 @@ pub fn open_file(
                 store.entry(idx).or_default().extend(ranges);
             }
         }
+    }
+
+    // Restore controls (cell-anchored button/checkbox metadata). Like CF/DV
+    // these were lost on every reload before this — the CellStyle button flag
+    // survived but the onSelect wiring and formula properties did not.
+    if let Ok(mut controls) = state.controls.lock() {
+        controls.clear();
+        crate::controls::materialize_saved_controls(
+            &workbook.controls,
+            &mut controls,
+            |sid| Some(sheet_id_to_index(&workbook, sid)),
+        );
     }
 
     // Restore charts from workbook

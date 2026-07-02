@@ -187,7 +187,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   // Review step: show what the package contains before anything lands.
   if (inspection) {
     return (
-      <div style={{ padding: "16px", width: "420px" }}>
+      <div style={{ padding: "16px", width: "420px", maxHeight: "80vh", overflowY: "auto" }}>
         <h3 style={{ margin: "0 0 12px 0" }}>
           Review: {inspection.packageName} v{inspection.resolvedVersion}
         </h3>
@@ -236,8 +236,32 @@ export function SubscribeDialog({ onClose }: DialogProps) {
           {inspection.writebackRegionCount > 0 && (
             <div>{inspection.writebackRegionCount} writeback region(s) — cells you can fill in and submit back</div>
           )}
-          {inspection.tableCount > 0 && <div>{inspection.tableCount} table(s)</div>}
-          {inspection.namedRangeCount > 0 && <div>{inspection.namedRangeCount} named range(s)</div>}
+          {inspection.tableCount > 0 && (
+            <div>
+              {inspection.tableCount} table(s)
+              {inspection.tableNames.length > 0 ? `: ${inspection.tableNames.join(", ")}` : ""}
+            </div>
+          )}
+          {inspection.namedRangeCount > 0 && (
+            <div>
+              {inspection.namedRangeCount} named range(s)
+              {inspection.namedRangeNames.length > 0
+                ? `: ${inspection.namedRangeNames.join(", ")}`
+                : ""}
+            </div>
+          )}
+          {inspection.chartCount > 0 && <div>{inspection.chartCount} chart(s)</div>}
+          {inspection.sparklineCount > 0 && (
+            <div>{inspection.sparklineCount} sparkline group set(s)</div>
+          )}
+          {inspection.pivotCount > 0 && <div>{inspection.pivotCount} pivot table(s)</div>}
+          {inspection.controlSheetCount > 0 && (
+            <div>
+              {inspection.controlSheetCount} sheet(s) with buttons/checkboxes — they
+              arrive with their click actions disarmed; any package scripts are
+              listed above and require consent
+            </div>
+          )}
         </div>
 
         {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}

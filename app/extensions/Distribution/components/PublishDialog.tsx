@@ -1,9 +1,13 @@
 // FILENAME: app/extensions/Distribution/components/PublishDialog.tsx
-// PURPOSE: Dialog for publishing selected sheets to a registry.
+// PURPOSE: Dialog for publishing selected sheets to a registry, with a
+// transparency report: preview (dry-run) before publishing, and the actual
+// included/excluded report after — no silent drops.
 
 import React, { useState } from "react";
 import type { DialogProps } from "@api";
-import { publishPackage } from "@api";
+import { publishPackage, publishPreview } from "@api";
+import type { PublishReport } from "@api";
+import { PublishReportView } from "./PackageExplorerPanel";
 
 export function PublishDialog({ onClose }: DialogProps) {
   const [registryPath, setRegistryPath] = useState("");
@@ -14,24 +18,47 @@ export function PublishDialog({ onClose }: DialogProps) {
   const [sheetIndices, setSheetIndices] = useState("0");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<PublishReport | null>(null);
+  const [reportLabel, setReportLabel] = useState<string>("");
+
+  const parseIndices = () =>
+    sheetIndices
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n));
+
+  const handlePreview = async () => {
+    setError(null);
+    setStatus("Analyzing…");
+    try {
+      const result = await publishPreview(parseIndices());
+      setReport(result.report);
+      setReportLabel(`Preview — would publish ${result.sheetNames.join(", ")}`);
+      setStatus(null);
+    } catch (err: unknown) {
+      setError(String(err));
+      setStatus(null);
+    }
+  };
 
   const handlePublish = async () => {
     setError(null);
     setStatus("Publishing...");
 
     try {
-      const indices = sheetIndices.split(",").map((s) => parseInt(s.trim(), 10));
       const result = await publishPackage({
         registryPath,
         packageName,
         version,
         kind,
-        sheetIndices: indices,
+        sheetIndices: parseIndices(),
         publishedBy,
       });
       setStatus(
         `Published ${result.packageName} v${result.version}: ${result.sheetsPublished} sheet(s)`
       );
+      setReport(result.report);
+      setReportLabel(`Published ${result.packageName} v${result.version}`);
     } catch (err: unknown) {
       setError(String(err));
       setStatus(null);
@@ -46,7 +73,7 @@ export function PublishDialog({ onClose }: DialogProps) {
   };
 
   return (
-    <div style={{ padding: "16px", width: "400px" }}>
+    <div style={{ padding: "16px", width: "420px", maxHeight: "80vh", overflowY: "auto" }}>
       <h3 style={{ margin: "0 0 12px 0" }}>Publish Package</h3>
 
       <div style={fieldStyle}>
@@ -72,9 +99,9 @@ export function PublishDialog({ onClose }: DialogProps) {
         </select>
       </div>
       <div style={fieldStyle}>
-        <label>Sheet Indices (comma-separated)</label>
+        <label>Sheet Indices (comma-separated; empty = all sheets)</label>
         <input style={inputStyle} value={sheetIndices} onChange={(e) => setSheetIndices(e.target.value)}
-          placeholder="0, 1" />
+          placeholder="0, 1 — or leave empty for every sheet" />
       </div>
       <div style={fieldStyle}>
         <label>Published By</label>
@@ -85,8 +112,17 @@ export function PublishDialog({ onClose }: DialogProps) {
       {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}
       {status && <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>}
 
+      {report && (
+        <div style={{ margin: "8px 0", padding: "8px", border: "1px solid #ddd",
+          borderRadius: "3px", fontSize: "12px" }}>
+          <div style={{ fontWeight: 600, marginBottom: "4px" }}>{reportLabel}</div>
+          <PublishReportView report={report} />
+        </div>
+      )}
+
       <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
         <button onClick={onClose}>Cancel</button>
+        <button onClick={handlePreview}>Preview</button>
         <button onClick={handlePublish} style={{ fontWeight: 600 }}>Publish</button>
       </div>
     </div>

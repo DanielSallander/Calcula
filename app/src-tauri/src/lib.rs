@@ -4361,10 +4361,12 @@ pub fn run() {
             uninstall_extension,
             // .calp distribution commands
             calp_commands::calp_publish,
+            calp_commands::calp_publish_preview,
             calp_commands::calp_pull,
             calp_commands::calp_browse_registry,
             calp_commands::calp_inspect_package,
             calp_commands::calp_get_subscriptions,
+            calp_commands::calp_get_package_objects,
             calp_commands::calp_get_overrides,
             calp_commands::calp_revert_override,
             calp_commands::calp_accept_upstream,

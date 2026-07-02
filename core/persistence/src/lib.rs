@@ -105,6 +105,10 @@ pub struct Workbook {
     /// Data-validation ranges per sheet (opaque app-owned JSON payload, keyed by
     /// SheetId). Stored opaquely for the same reason as conditional_formats.
     pub data_validations: Vec<SavedSheetDataValidations>,
+    /// Cell-anchored control metadata per sheet (buttons, checkboxes, images —
+    /// onSelect scripts, formula-driven properties). Opaque app-owned JSON
+    /// payload keyed by SheetId, like conditional_formats.
+    pub controls: Vec<SavedSheetControls>,
 }
 
 /// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
@@ -124,6 +128,16 @@ pub struct SavedSheetConditionalFormats {
 pub struct SavedSheetDataValidations {
     pub sheet_id: SheetId,
     pub ranges: serde_json::Value,
+}
+
+/// Cell-anchored controls for one sheet. `controls` is the opaque app-owned
+/// payload (a serialized list of `{ row, col, controlType, properties }`
+/// entries); the persistence layer never inspects it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetControls {
+    pub sheet_id: SheetId,
+    pub controls: serde_json::Value,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -371,6 +385,7 @@ impl Workbook {
             extension_data: HashMap::new(),
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
+            controls: Vec::new(),
         }
     }
 
@@ -401,6 +416,7 @@ impl Workbook {
             extension_data: HashMap::new(),
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
+            controls: Vec::new(),
         }
     }
 }

@@ -295,6 +295,11 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.start_file("data_validations.json", options.clone())?;
         zip.write_all(dv_json.as_bytes())?;
     }
+    if !workbook.controls.is_empty() {
+        let controls_json = serde_json::to_string_pretty(&workbook.controls)?;
+        zip.start_file("controls.json", options.clone())?;
+        zip.write_all(controls_json.as_bytes())?;
+    }
 
     // Write generic per-extension state as a single extension-data.json object
     if !workbook.extension_data.is_empty() {
@@ -713,6 +718,9 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let data_validations: Vec<persistence::SavedSheetDataValidations> =
         read_optional_json::<Vec<persistence::SavedSheetDataValidations>>(&mut archive, "data_validations.json")?
             .unwrap_or_default();
+    let controls: Vec<persistence::SavedSheetControls> =
+        read_optional_json::<Vec<persistence::SavedSheetControls>>(&mut archive, "controls.json")?
+            .unwrap_or_default();
 
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
@@ -777,6 +785,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         extension_data,
         conditional_formats,
         data_validations,
+        controls,
     })
 }
 
@@ -926,6 +935,7 @@ mod tests {
             extension_data: Default::default(),
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
+            controls: Vec::new(),
         }
     }
 
@@ -1155,6 +1165,35 @@ mod tests {
         assert_eq!(loaded.data_validations.len(), 1, "DV must survive the .cala round-trip");
         assert_eq!(loaded.data_validations[0].sheet_id, sheet_id);
         assert_eq!(loaded.data_validations[0].ranges, workbook.data_validations[0].ranges);
+    }
+
+    #[test]
+    fn test_roundtrip_controls() {
+        // Regression: control metadata (buttons/checkboxes — onSelect scripts,
+        // formula-driven properties) lived only in AppState and vanished on every
+        // save/reload. The payload is opaque to the format (app-owned JSON), so
+        // this asserts the per-sheet payload + SheetId survive write/read.
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.controls = vec![persistence::SavedSheetControls {
+            sheet_id,
+            controls: serde_json::json!([
+                { "row": 2, "col": 3, "controlType": "button",
+                  "properties": {
+                      "text": { "valueType": "static", "value": "Run" },
+                      "onSelect": { "valueType": "static", "value": "script-uuid-1" }
+                  } }
+            ]),
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.controls.len(), 1, "controls must survive the .cala round-trip");
+        assert_eq!(loaded.controls[0].sheet_id, sheet_id);
+        assert_eq!(loaded.controls[0].controls, workbook.controls[0].controls);
     }
 
     #[test]

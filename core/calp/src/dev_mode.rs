@@ -62,6 +62,7 @@ pub fn pull_dev(
         sheets: pulled_sheets,
         tables: workbook.tables,
         named_ranges: workbook.named_ranges,
+        controls: workbook.controls,
     })
 }
 
@@ -70,6 +71,9 @@ pub struct DevPullResult {
     pub sheets: Vec<DevPulledSheet>,
     pub tables: Vec<persistence::SavedTable>,
     pub named_ranges: Vec<persistence::SavedNamedRange>,
+    /// Cell-anchored controls per sheet (keyed by SOURCE sheet id), so the
+    /// dev preview matches what a real subscriber would receive.
+    pub controls: Vec<persistence::SavedSheetControls>,
 }
 
 /// A sheet pulled from a dev source.
@@ -103,6 +107,7 @@ pub fn make_dev_subscription(
         sheets,
         channel: "dev".to_string(),
         data_source_configs: Vec::new(),
+        objects: Vec::new(),
         extra: std::collections::HashMap::new(),
     }
 }
@@ -211,6 +216,7 @@ mod tests {
             sheets: Vec::new(),
             channel: "dev".to_string(),
             data_source_configs: Vec::new(),
+        objects: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(is_dev_subscription(&sub));
@@ -224,6 +230,7 @@ mod tests {
             sheets: Vec::new(),
             channel: String::new(),
             data_source_configs: Vec::new(),
+        objects: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(!is_dev_subscription(&normal_sub));
