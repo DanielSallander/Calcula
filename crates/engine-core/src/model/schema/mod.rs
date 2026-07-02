@@ -513,6 +513,63 @@ impl DataModel {
         model
     }
 
+    /// Returns a copy of the model with its table list REPLACED (model
+    /// editing primitive; same caller-validates contract as
+    /// [`DataModel::with_measures`]).
+    pub fn with_tables(&self, tables: Vec<Table>) -> DataModel {
+        let mut model = self.clone();
+        model.tables = tables;
+        model
+    }
+
+    /// Returns a copy of the model with its relationship list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_relationships(&self, relationships: Vec<Relationship>) -> DataModel {
+        let mut model = self.clone();
+        model.relationships = relationships;
+        model
+    }
+
+    /// Returns a copy of the model with its calculated-column list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_calculated_columns(&self, columns: Vec<CalculatedColumn>) -> DataModel {
+        let mut model = self.clone();
+        model.calculated_columns = columns;
+        model
+    }
+
+    /// Returns a copy of the model with its hierarchy list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_hierarchies(&self, hierarchies: Vec<Hierarchy>) -> DataModel {
+        let mut model = self.clone();
+        model.hierarchies = hierarchies;
+        model
+    }
+
+    /// Returns a copy of the model with its KPI list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_kpis(&self, kpis: Vec<Kpi>) -> DataModel {
+        let mut model = self.clone();
+        model.kpis = kpis;
+        model
+    }
+
+    /// Returns a copy of the model with its security-role list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_security_roles(&self, roles: Vec<SecurityRole>) -> DataModel {
+        let mut model = self.clone();
+        model.security_roles = roles;
+        model
+    }
+
+    /// Returns a copy of the model with its calculation-group list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_calculation_groups(&self, groups: Vec<CalculationGroup>) -> DataModel {
+        let mut model = self.clone();
+        model.calculation_groups = groups;
+        model
+    }
+
     /// Returns all hierarchies that belong to a specific table.
     pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
         self.hierarchies
@@ -963,6 +1020,37 @@ mod tests {
         // Validation rebuilds via the builder but must not alter the
         // original model's stored version.
         assert_eq!(model.format_version(), 0);
+    }
+
+    // --- Entity list replacement (model editing primitives) ---
+
+    #[test]
+    fn with_entity_lists_replace_and_validate_catches_dangling_refs() {
+        use crate::model::relationship::{Cardinality, Relationship};
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .build()
+            .unwrap();
+
+        // A relationship to a non-existent table passes the (validation-free)
+        // list replacement but fails the caller's validate() contract.
+        let edited = model.with_relationships(vec![Relationship::new(
+            "sales_to_nowhere",
+            "Sales",
+            "id",
+            "Nowhere",
+            "id",
+            Cardinality::ManyToOne,
+        )]);
+        assert!(edited.validate().is_err());
+        assert!(model.relationships().is_empty(), "original untouched");
+
+        // Replacing tables with an empty list orphans nothing here and
+        // validates clean.
+        let empty = model.with_tables(Vec::new());
+        empty.validate().unwrap();
+        assert!(empty.tables().is_empty());
     }
 
     // --- Measure list replacement (model editing primitive) ---

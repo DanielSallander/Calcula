@@ -333,6 +333,28 @@ impl Table {
         self.display_name.as_deref()
     }
 
+    /// Mutable access to the columns (model editing: presentation setters on
+    /// individual columns).
+    pub fn columns_mut(&mut self) -> &mut [Column] {
+        &mut self.columns
+    }
+
+    /// In-place presentation setters (model editing): unlike the consuming
+    /// `with_*` builders these can also CLEAR a value.
+    pub fn set_display_name(&mut self, display_name: Option<String>) {
+        self.display_name = display_name;
+    }
+
+    /// See [`Table::set_display_name`].
+    pub fn set_description(&mut self, description: Option<String>) {
+        self.description = description;
+    }
+
+    /// See [`Table::set_display_name`].
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.is_hidden = hidden;
+    }
+
     /// Set the human-readable description of this table.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());

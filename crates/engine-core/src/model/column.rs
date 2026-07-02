@@ -192,6 +192,22 @@ impl Column {
         self.display_name.as_deref()
     }
 
+    /// In-place presentation setters (model editing): unlike the consuming
+    /// `with_*` builders these can also CLEAR a value.
+    pub fn set_display_name(&mut self, display_name: Option<String>) {
+        self.display_name = display_name;
+    }
+
+    /// See [`Column::set_display_name`].
+    pub fn set_description(&mut self, description: Option<String>) {
+        self.description = description;
+    }
+
+    /// See [`Column::set_display_name`].
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.is_hidden = hidden;
+    }
+
     /// Set the human-readable description of this column.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
