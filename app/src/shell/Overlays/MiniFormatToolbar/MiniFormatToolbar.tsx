@@ -53,6 +53,13 @@ const QUICK_COLORS = [
 
 export interface MiniFormatToolbarProps {
   position: { x: number; y: number };
+  /**
+   * The context menu's final rectangle (top/bottom in viewport px). When
+   * provided, the toolbar is placed directly above the menu's top edge so the
+   * two never overlap — even if a tall menu was shifted up to fit the viewport.
+   * Falls back to positioning above the raw click point when absent.
+   */
+  anchor?: { top: number; bottom: number };
   context: GridMenuContext;
   onClose: () => void;
 }
@@ -157,6 +164,7 @@ function InlineColorPicker({
 
 export function MiniFormatToolbar({
   position,
+  anchor,
   context,
   onClose,
 }: MiniFormatToolbarProps): React.ReactElement {
@@ -207,13 +215,20 @@ export function MiniFormatToolbar({
     // Keep within horizontal bounds
     if (x + rect.width > vw - 8) x = vw - rect.width - 8;
     if (x < 8) x = 8;
-    // Place it above the context menu click point
-    let y = position.y - rect.height - 4;
-    if (y < 8) y = position.y + 4; // If no room above, place below
+
+    // Vertical placement: prefer sitting directly above the context menu's
+    // actual top edge (so the two never overlap). Fall back to the raw click
+    // point when the menu's rectangle hasn't been reported yet.
+    const topRef = anchor ? anchor.top : position.y;
+    let y = topRef - rect.height - 4;
+    if (y < 8) {
+      // No room above — drop below the menu (or the click point) instead.
+      y = (anchor ? anchor.bottom : position.y) + 4;
+    }
 
     el.style.left = `${x}px`;
     el.style.top = `${y}px`;
-  }, [position]);
+  }, [position, anchor]);
 
   // Apply formatting helper
   const apply = useCallback(

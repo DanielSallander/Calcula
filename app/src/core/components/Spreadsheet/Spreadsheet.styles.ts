@@ -42,5 +42,8 @@ export const CanvasLayer = styled.div<CanvasLayerProps>`
   bottom: ${(props) => props.$scrollbarSize}px;
   overflow: hidden;
   background-color: ${v('--canvas-bg')};
-  z-index: 1; /* Ensure canvas sits below floating UI if needed */
+  /* Base layer. Must stay at z-index 0 so it never paints over floating UI such
+     as menus/dropdowns that are portaled without their own explicit z-index
+     (a positive z-index here made those menus render *behind* the grid). */
+  z-index: 0;
 `;

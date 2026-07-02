@@ -622,7 +622,10 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.panels.register({
     id: CODE_IN_FILE_PANEL_ID,
     title: "Code in This File",
-    icon: ShieldIcon,
+    // Use the "script/code" icon here (a page with code brackets) so the file
+    // code-inventory panel is visually distinct from the runtime Script
+    // Permissions panel, which keeps the shield-with-checkmark security icon.
+    icon: IconScript,
     sections: [
       {
         id: `${CODE_IN_FILE_PANEL_ID}.inventory`,

@@ -31,6 +31,12 @@ export interface ContextMenuProps {
   showSearch?: boolean;
   /** Internal: marks this as a nested sub-menu (skips outside-click handling). */
   isSubMenu?: boolean;
+  /**
+   * Reports the menu's final, viewport-adjusted rectangle after positioning.
+   * Used by the host to place the mini format toolbar directly above the menu
+   * (rather than above the raw click point) so the two never overlap.
+   */
+  onLayout?: (rect: { top: number; left: number; width: number; height: number }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +162,7 @@ export function ContextMenu({
   onClose,
   showSearch = false,
   isSubMenu = false,
+  onLayout,
 }: ContextMenuProps): React.ReactElement {
   const menuRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -222,7 +229,13 @@ export function ContextMenu({
 
     menu.style.left = `${adjustedX}px`;
     menu.style.top = `${adjustedY}px`;
-  }, [position]);
+
+    // Report the final, viewport-adjusted rectangle so the host can anchor the
+    // mini format toolbar above the menu instead of above the raw click point.
+    if (!isSubMenu && onLayout) {
+      onLayout({ top: adjustedY, left: adjustedX, width: rect.width, height: rect.height });
+    }
+  }, [position, isSubMenu, onLayout]);
 
   // Auto-focus search input when showing search
   useEffect(() => {

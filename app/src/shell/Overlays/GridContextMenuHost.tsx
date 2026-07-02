@@ -53,8 +53,20 @@ function isCellSelection(context: GridMenuContext): boolean {
   return sel.type === "cells";
 }
 
+/** Final, viewport-adjusted rectangle of the rendered context menu. */
+interface MenuLayout {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
 export function GridContextMenuHost(): React.ReactElement | null {
   const [menuState, setMenuState] = useState<ContextMenuState | null>(null);
+  // The context menu reports its final adjusted rectangle here so the mini
+  // toolbar can sit directly above the menu (never overlapping it), even when a
+  // tall menu gets repositioned upward to fit inside the viewport.
+  const [menuLayout, setMenuLayout] = useState<MenuLayout | null>(null);
 
   // Listen for context menu requests from Core
   useEffect(() => {
@@ -65,6 +77,8 @@ export function GridContextMenuHost(): React.ReactElement | null {
           position: payload.position,
           context: payload.context,
         });
+        // Clear any stale layout from a previous menu until the new one reports.
+        setMenuLayout(null);
       }
     );
 
@@ -109,6 +123,11 @@ export function GridContextMenuHost(): React.ReactElement | null {
       {showMiniToolbar && (
         <MiniFormatToolbar
           position={menuState.position}
+          anchor={
+            menuLayout
+              ? { top: menuLayout.top, bottom: menuLayout.top + menuLayout.height }
+              : undefined
+          }
           context={menuState.context}
           onClose={handleClose}
         />
@@ -118,6 +137,7 @@ export function GridContextMenuHost(): React.ReactElement | null {
         items={items}
         onClose={handleClose}
         showSearch={items.length > SEARCH_THRESHOLD}
+        onLayout={setMenuLayout}
       />
     </>
   );

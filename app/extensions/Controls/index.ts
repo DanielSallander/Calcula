@@ -343,10 +343,23 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregClickInterceptor);
 
   // 4. Track selection changes for design mode interactions
+  //
+  // Only deselect floating controls on a GENUINE grid-selection change (a real
+  // click on a cell), not on spurious re-emits of the same selection. Selecting
+  // a shape opens the Properties pane, which re-renders the grid and can emit an
+  // identical selection with a fresh object reference; deselecting on that would
+  // clear the just-selected shape before the user can press Delete on it.
+  let lastSelectionSig: string | null = null;
   const unregSelectionChange = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(sel);
-    // Deselect floating control when user clicks on the grid
-    deselectFloatingControl();
+    const sig = sel
+      ? `${sel.type ?? ""}:${sel.startRow},${sel.startCol},${sel.endRow},${sel.endCol}`
+      : "none";
+    if (sig !== lastSelectionSig) {
+      lastSelectionSig = sig;
+      // Deselect floating control when the user actually moves the grid selection
+      deselectFloatingControl();
+    }
     handleSelectionChange(sel);
   });
   cleanupFns.push(unregSelectionChange);

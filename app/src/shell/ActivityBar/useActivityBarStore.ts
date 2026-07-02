@@ -39,9 +39,11 @@ export interface ActivityBarActions {
   reset: () => void;
 }
 
-const DEFAULT_WIDTH = 200;
 const MIN_WIDTH = 140;
 const MAX_WIDTH = 480;
+// Default to 2/3 of the maximum panel width (480 * 2/3 = 320) so the side panel
+// opens wide enough to be useful out of the box.
+const DEFAULT_WIDTH = Math.round((MAX_WIDTH * 2) / 3);
 
 const initialState: ActivityBarState = {
   isOpen: false,
@@ -97,6 +99,9 @@ export const useActivityBarStore = create<ActivityBarState & ActivityBarActions>
     }),
     {
       name: "calcula-activity-bar",
+      // Bump when changing DEFAULT_WIDTH so a previously persisted width
+      // (e.g. the old 200px) is discarded and the new default takes effect.
+      version: 1,
       partialize: (state) => ({
         width: state.width,
         // Don't persist: isOpen, activeViewId (fresh start each session)

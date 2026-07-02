@@ -14,8 +14,8 @@ import {
   registerActivityView,
   unregisterActivityView,
   toggleActivityView,
+  openTaskPane,
 } from "@api/ui";
-import { CommandRegistry } from "@api/commands";
 import { IconWorkbookExplorer, IconJson } from "@api";
 import { JsonEditorPane } from "./components/JsonEditorPane";
 import { JsonEditorDialog } from "./components/JsonEditorDialog";
@@ -92,7 +92,7 @@ function activate(): void {
     label: "JSON View",
     icon: IconJson,
     action: () => {
-      CommandRegistry.execute("taskPane.open", { viewId: TASK_PANE_ID });
+      openTaskPane(TASK_PANE_ID);
     },
     priority: 80,
   });
