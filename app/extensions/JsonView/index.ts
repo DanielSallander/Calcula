@@ -16,6 +16,7 @@ import {
   toggleActivityView,
 } from "@api/ui";
 import { CommandRegistry } from "@api/commands";
+import { IconWorkbookExplorer, IconJson } from "@api";
 import { JsonEditorPane } from "./components/JsonEditorPane";
 import { JsonEditorDialog } from "./components/JsonEditorDialog";
 import { WorkbookExplorerPanel } from "./components/WorkbookExplorerPanel";
@@ -79,6 +80,7 @@ function activate(): void {
   registerMenuItem("developer", {
     id: "developer:workbookExplorer",
     label: "Workbook Explorer",
+    icon: IconWorkbookExplorer,
     action: () => {
       toggleActivityView(ACTIVITY_VIEW_ID);
     },
@@ -88,6 +90,7 @@ function activate(): void {
   registerMenuItem("view", {
     id: "jsonView.openPane",
     label: "JSON View",
+    icon: IconJson,
     action: () => {
       CommandRegistry.execute("taskPane.open", { viewId: TASK_PANE_ID });
     },

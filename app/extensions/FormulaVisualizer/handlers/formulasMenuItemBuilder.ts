@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/FormulaVisualizer/handlers/formulasMenuItemBuilder.ts
 // PURPOSE: Registers the "Visualize Formula..." item in the Formulas menu.
 
-import { registerMenuItem, DialogExtensions } from "@api";
+import { registerMenuItem, DialogExtensions, IconVisualizeFormula } from "@api";
 
 // ============================================================================
 // State
@@ -39,6 +39,7 @@ export function registerFormulaVisualizerMenuItem(): void {
   registerMenuItem("formulas", {
     id: "formulas:formulaVisualizer",
     label: "Visualize Formula...",
+    icon: IconVisualizeFormula,
     action: () => {
       const sel = currentSelection;
       DialogExtensions.openDialog("formula-visualizer", {

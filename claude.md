@@ -217,5 +217,9 @@ changes using `git diff` and `git status`. Suggest a conventional commit message
 on the changes. Format: `type(scope): description`. Do not run git commit -- only
 provide the message text so I can paste it into the Source Control input box.
 
+**End-of-feature rule (every session):** Whenever a feature or milestone is finished,
+end the session by providing a git commit message for the work -- maximum 3 rows, in a
+copy-able code block. Never run `git commit`; only output the message text.
+
 ## Backward compatibility
 Since we are currently not in production there is no need at all for backward compatibility.

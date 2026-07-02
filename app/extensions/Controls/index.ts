@@ -12,6 +12,11 @@ import {
   listWorkbookScripts,
   getWorkbookScript,
   runWorkbookScript,
+  IconControls,
+  IconButton,
+  IconShapes,
+  IconImage,
+  IconDesignMode,
 } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
@@ -391,10 +396,12 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("insert", {
     id: "insert.controls",
     label: "Controls",
+    icon: IconControls,
     children: [
       {
         id: "insert.controls.button",
         label: "Button",
+        icon: IconButton,
         action: insertButton,
       },
     ],
@@ -404,6 +411,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("insert", {
     id: "insert.shapes",
     label: "Shapes",
+    icon: IconShapes,
     customContent: (onClose) =>
       React.createElement(ShapeGalleryPanel, { insertShape, onClose }),
   });
@@ -412,6 +420,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("insert", {
     id: "insert.image",
     label: "Image",
+    icon: IconImage,
     action: insertImage,
   });
 
@@ -419,6 +428,7 @@ function activate(context: ExtensionContext): void {
   const menuItem = {
     id: DESIGN_MODE_MENU_ITEM_ID,
     label: "Design Mode",
+    icon: IconDesignMode,
     checked: getDesignMode(),
     action: () => {
       toggleDesignMode();

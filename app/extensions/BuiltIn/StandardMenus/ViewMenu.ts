@@ -47,6 +47,10 @@ import {
   IconShowFormulas,
   IconDisplayZeros,
   IconOtherOptions,
+  IconGridlines,
+  IconHeadings,
+  IconFormulaBar,
+  IconR1C1,
 } from '@api';
 
 export interface ViewMenuHandlers {
@@ -247,6 +251,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     dynamicPaneItems.push({
       id: `view.showPane.${view.id}`,
       label: `Show ${view.title}`,
+      icon: IconPanels,
       action: () => {
         clearTaskPaneManuallyClosed(view.id);
         window.dispatchEvent(
@@ -259,6 +264,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     dynamicPaneItems.push({
       id: `view.hidePane.${view.id}`,
       label: `Hide ${view.title}`,
+      icon: IconPanels,
       action: () => {
         markTaskPaneManuallyClosed(view.id);
         closeTaskPaneById(view.id);
@@ -275,6 +281,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   const sidebarChildren: MenuItemDefinition[] = activityBarViews.map((view) => ({
     id: `view.activity.${view.id}`,
     label: view.title,
+    icon: view.icon ?? IconSidebar,
     shortcut: view.id === 'explorer' ? 'Ctrl+Shift+E' :
               view.id === 'search' ? 'Ctrl+Shift+H' :
               view.id === 'extensions' ? 'Ctrl+Shift+X' : undefined,
@@ -287,8 +294,8 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   // ---------------------------------------------------------------------------
 
   const panelsChildren: MenuItemDefinition[] = [
-    { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
-    { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
+    { id: 'view.showTaskpane', label: 'Show Taskpane', icon: IconPanels, action: openTaskPane, hidden: isTaskPaneOpen },
+    { id: 'view.hideTaskpane', label: 'Hide Taskpane', icon: IconPanels, action: closeTaskPane, hidden: !isTaskPaneOpen },
   ];
 
   if (dynamicPaneItems.length > 0) {
@@ -388,6 +395,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   items.push({
     id: 'view.displayGridlines',
     label: 'Gridlines',
+    icon: IconGridlines,
     action: handleToggleDisplayGridlines,
     checked: gridState.displayGridlines !== false,
   });
@@ -396,6 +404,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   items.push({
     id: 'view.displayHeadings',
     label: 'Headings',
+    icon: IconHeadings,
     action: handleToggleDisplayHeadings,
     checked: gridState.displayHeadings !== false,
   });
@@ -404,6 +413,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   items.push({
     id: 'view.displayFormulaBar',
     label: 'Formula Bar',
+    icon: IconFormulaBar,
     action: handleToggleDisplayFormulaBar,
     checked: gridState.displayFormulaBar !== false,
   });
@@ -419,6 +429,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   items.push({
     id: 'view.r1c1ReferenceStyle',
     label: 'R1C1 Reference Style',
+    icon: IconR1C1,
     action: async () => {
       const { changeReferenceStyle, getReferenceStyle } = await import("@api/grid");
       const current = await getReferenceStyle();

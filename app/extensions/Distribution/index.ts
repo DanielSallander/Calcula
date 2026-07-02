@@ -47,7 +47,20 @@ import {
   type SubmissionValue,
 } from "@api/distribution";
 import { emitAppEvent } from "@api/events";
-import { ExtensionRegistry } from "@api";
+import {
+  ExtensionRegistry,
+  IconPackage,
+  IconPublishPackage,
+  IconSubscribePackage,
+  IconRefreshSubscriptions,
+  IconManageSubscriptions,
+  IconCollectedResponses,
+  IconAuditLog,
+  IconOverrides,
+  IconWriteback,
+  IconWritebackPane,
+  IconRefreshData,
+} from "@api";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -130,111 +143,115 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(CONNECTION_DIALOG_ID));
 
-  // Register menu items under Data menu
-  context.ui.menus.registerItem("data", {
-    id: "data:publishPackage",
-    label: "Publish Package...",
-    action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
-    order: 900,
+  // Register menu items under External Data menu: all .calp package features are
+  // grouped under a single "Distribution" header submenu; "Refresh Data" stays
+  // top-level because it verifies/refreshes external connections generally.
+  context.ui.menus.registerItem("externalData", {
+    id: "externalData:distribution",
+    label: "Distribution",
+    icon: IconPackage,
+    children: [
+      {
+        id: "externalData:distribution:publish",
+        label: "Publish Package...",
+        icon: IconPublishPackage,
+        action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
+      },
+      {
+        id: "externalData:distribution:subscribe",
+        label: "Subscribe to Package...",
+        icon: IconSubscribePackage,
+        action: () => context.ui.dialogs.show(SUBSCRIBE_DIALOG_ID),
+      },
+      {
+        id: "externalData:distribution:refreshSubscriptions",
+        label: "Refresh Subscriptions...",
+        icon: IconRefreshSubscriptions,
+        action: () => context.ui.dialogs.show(REFRESH_PREVIEW_DIALOG_ID),
+      },
+      { id: "externalData:distribution:sep1", label: "", separator: true },
+      {
+        id: "externalData:distribution:manageSubscriptions",
+        label: "Manage Subscriptions...",
+        icon: IconManageSubscriptions,
+        action: () => {
+          context.ui.taskPanes.open(SUBSCRIPTIONS_PANE_ID);
+          context.ui.taskPanes.showContainer();
+        },
+      },
+      {
+        id: "externalData:distribution:collectedResponses",
+        label: "Collected Responses...",
+        icon: IconCollectedResponses,
+        action: () => {
+          context.ui.taskPanes.open(PUBLISHER_DASHBOARD_PANE_ID);
+          context.ui.taskPanes.showContainer();
+        },
+      },
+      {
+        id: "externalData:distribution:auditLog",
+        label: "Audit Log...",
+        icon: IconAuditLog,
+        action: () => {
+          context.ui.taskPanes.open(AUDIT_LOG_PANE_ID);
+          context.ui.taskPanes.showContainer();
+        },
+      },
+      { id: "externalData:distribution:sep2", label: "", separator: true },
+      {
+        id: "externalData:distribution:overrides",
+        label: "Overrides Pane",
+        icon: IconOverrides,
+        action: () => {
+          context.ui.taskPanes.open(OVERRIDES_PANE_ID);
+          context.ui.taskPanes.showContainer();
+        },
+      },
+      {
+        id: "externalData:distribution:designateWriteback",
+        label: "Designate Writeback Region...",
+        icon: IconWriteback,
+        action: async () => {
+          if (!currentSelection) {
+            context.ui.notifications.showToast(
+              "Select the cell range to designate first, then run this command again.",
+              { type: "info", duration: 4000 },
+            );
+            return;
+          }
+          try {
+            const sheetId = await getSheetIdForIndex(getActiveSheetIndex());
+            context.ui.dialogs.show(DESIGNATE_WRITEBACK_DIALOG_ID, {
+              sheetId,
+              startRow: currentSelection.startRow,
+              endRow: currentSelection.endRow,
+              startCol: currentSelection.startCol,
+              endCol: currentSelection.endCol,
+            });
+          } catch (err) {
+            context.ui.notifications.showToast(
+              `Cannot designate writeback region: ${err}`,
+              { type: "error", duration: 5000 },
+            );
+          }
+        },
+      },
+      {
+        id: "externalData:distribution:writebackPane",
+        label: "Writeback Pane",
+        icon: IconWritebackPane,
+        action: () => {
+          context.ui.taskPanes.open(WRITEBACK_PANE_ID);
+          context.ui.taskPanes.showContainer();
+        },
+      },
+    ],
   });
 
-  context.ui.menus.registerItem("data", {
-    id: "data:subscribePackage",
-    label: "Subscribe to Package...",
-    action: () => context.ui.dialogs.show(SUBSCRIBE_DIALOG_ID),
-    order: 901,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:refreshSubscriptions",
-    label: "Refresh Subscriptions...",
-    action: () => context.ui.dialogs.show(REFRESH_PREVIEW_DIALOG_ID),
-    order: 902,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:showSubscriptions",
-    label: "Manage Subscriptions...",
-    action: () => {
-      context.ui.taskPanes.open(SUBSCRIPTIONS_PANE_ID);
-      context.ui.taskPanes.showContainer();
-    },
-    order: 903,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:showPublisherDashboard",
-    label: "Collected Responses...",
-    action: () => {
-      context.ui.taskPanes.open(PUBLISHER_DASHBOARD_PANE_ID);
-      context.ui.taskPanes.showContainer();
-    },
-    order: 903.5,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:showAuditLog",
-    label: "Distribution Audit Log...",
-    action: () => {
-      context.ui.taskPanes.open(AUDIT_LOG_PANE_ID);
-      context.ui.taskPanes.showContainer();
-    },
-    order: 903.7,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:showOverrides",
-    label: "Show Overrides Pane",
-    action: () => {
-      context.ui.taskPanes.open(OVERRIDES_PANE_ID);
-      context.ui.taskPanes.showContainer();
-    },
-    order: 904,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:designateWriteback",
-    label: "Designate Writeback Region...",
-    action: async () => {
-      if (!currentSelection) {
-        context.ui.notifications.showToast(
-          "Select the cell range to designate first, then run this command again.",
-          { type: "info", duration: 4000 },
-        );
-        return;
-      }
-      try {
-        const sheetId = await getSheetIdForIndex(getActiveSheetIndex());
-        context.ui.dialogs.show(DESIGNATE_WRITEBACK_DIALOG_ID, {
-          sheetId,
-          startRow: currentSelection.startRow,
-          endRow: currentSelection.endRow,
-          startCol: currentSelection.startCol,
-          endCol: currentSelection.endCol,
-        });
-      } catch (err) {
-        context.ui.notifications.showToast(
-          `Cannot designate writeback region: ${err}`,
-          { type: "error", duration: 5000 },
-        );
-      }
-    },
-    order: 904,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:showWritebackPane",
-    label: "Show Writeback Pane",
-    action: () => {
-      context.ui.taskPanes.open(WRITEBACK_PANE_ID);
-      context.ui.taskPanes.showContainer();
-    },
-    order: 905,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:refreshData",
+  context.ui.menus.registerItem("externalData", {
+    id: "externalData:refreshData",
     label: "Refresh Data",
+    icon: IconRefreshData,
     action: async () => {
       try {
         const result = await refreshData();
@@ -265,7 +282,6 @@ function activate(context: ExtensionContext): void {
         );
       }
     },
-    order: 906,
   });
 
   // -----------------------------------------------------------------------

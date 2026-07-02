@@ -8,6 +8,8 @@ import {
   IconNameManager,
   IconDefineName,
   IconDefineFunction,
+  IconPasteNames,
+  IconApplyNames,
   getAllNamedRanges,
   applyNamesToFormulas,
   updateCellsBatch,
@@ -60,6 +62,7 @@ export function registerDefinedNamesMenuItems(context: ExtensionContext): () => 
   context.ui.menus.registerItem("formulas", {
     id: "formulas:pasteNames",
     label: "Paste Names...",
+    icon: IconPasteNames,
     action: async () => {
       try {
         const namedRanges = await getAllNamedRanges();
@@ -91,6 +94,7 @@ export function registerDefinedNamesMenuItems(context: ExtensionContext): () => 
   context.ui.menus.registerItem("formulas", {
     id: "formulas:applyNames",
     label: "Apply Names...",
+    icon: IconApplyNames,
     action: async () => {
       try {
         const namedRanges = await getAllNamedRanges();

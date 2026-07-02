@@ -6,6 +6,7 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { IconNotebook } from "@api";
 import { scrollToCell, setSelection } from "@api/grid";
 import { dispatchGridAction } from "@api/gridDispatch";
 import { NotebookPanel } from "./components/NotebookPanel";
@@ -96,6 +97,7 @@ function activate(context: ExtensionContext): void {
       {
         id: "developer:notebook",
         label: "Notebook",
+        icon: IconNotebook,
         action: () => {
           context.ui.activityBar.toggle(VIEW_ID);
         },

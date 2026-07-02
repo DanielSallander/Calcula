@@ -14,7 +14,7 @@ import {
   registerMenuItem,
   notifyMenusChanged,
 } from "@api/ui";
-import { ExtensionRegistry, IconOtherOptions } from "@api";
+import { ExtensionRegistry, IconOtherOptions, IconEye } from "@api";
 import { getCellCollection } from "@api/lib";
 import { CollectionPreviewPanel } from "./components/CollectionPreviewPanel";
 
@@ -81,6 +81,7 @@ function activate(context: ExtensionContext): void {
       {
         id: "view.otherOptions.autoShowCollection",
         label: "Auto-show Collection Preview",
+        icon: IconEye,
         checked: autoShowEnabled,
         action: () => {
           autoShowEnabled = !autoShowEnabled;

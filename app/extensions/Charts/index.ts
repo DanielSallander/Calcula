@@ -24,6 +24,8 @@ import {
   CHART_TRANSFORMS_SCRIPT_ID,
   registerMenuItem,
   DialogExtensions,
+  IconChartMarks,
+  IconChartTransforms,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 import { ChartMarksDialog } from "./components/ChartMarksDialog";
@@ -318,6 +320,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("insert", {
     id: "insert:chartMarks",
     label: "Custom Chart Marks...",
+    icon: IconChartMarks,
     action: () => DialogExtensions.openDialog(CHART_MARKS_DIALOG_ID, {}),
   });
 
@@ -332,6 +335,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("insert", {
     id: "insert:chartTransforms",
     label: "Custom Chart Transforms...",
+    icon: IconChartTransforms,
     action: () => DialogExtensions.openDialog(CHART_TRANSFORMS_DIALOG_ID, {}),
   });
 

@@ -5,7 +5,7 @@
 //          is dirty. Settings are persisted in AppState on the Rust side.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenuItem } from "@api";
+import { registerMenuItem, IconAutoRecover, IconClock } from "@api";
 import { createBackendChannel } from "@api/backendCommands";
 
 const autoRecoverBackend = createBackendChannel("AutoRecover");
@@ -119,6 +119,7 @@ function registerMenuItems(): void {
   registerMenuItem("file", {
     id: "file:autoRecover:toggle",
     label: "AutoRecover",
+    icon: IconAutoRecover,
     get checked() {
       return currentEnabled;
     },
@@ -137,9 +138,11 @@ function registerMenuItems(): void {
   registerMenuItem("file", {
     id: "file:autoRecover:interval",
     label: "AutoRecover Interval",
+    icon: IconClock,
     children: intervalOptions.map((opt) => ({
       id: `file:autoRecover:interval:${opt.value}`,
       label: opt.label,
+      icon: IconClock,
       get checked() {
         return currentIntervalMs === opt.value;
       },

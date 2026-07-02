@@ -10,6 +10,7 @@ import {
   registerMenuItem,
   DialogExtensions,
   AppEvents,
+  IconCustomFunctions,
 } from "@api";
 import { CustomFunctionsDialog } from "./components/CustomFunctionsDialog";
 
@@ -32,6 +33,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("formulas", {
     id: "formulas:customFunctions",
     label: "Custom Functions...",
+    icon: IconCustomFunctions,
     action: () => DialogExtensions.openDialog(DIALOG_ID, {}),
   });
 

@@ -19,6 +19,9 @@ import {
   resolveCapabilityRequest,
   parseDeclaredCapabilities,
   applyConsentedCapabilities,
+  IconScript,
+  IconTemplate,
+  IconMarketplace,
 } from "@api";
 import type { CapabilityRequestPayload, CapabilityDecision, CapabilityId } from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
@@ -549,6 +552,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.manage",
     label: "Object Scripts...",
+    icon: IconScript,
     action: () => {
       openObjectScriptEditor();
     },
@@ -556,6 +560,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.templates",
     label: "Script Templates...",
+    icon: IconTemplate,
     action: () => {
       context.ui.dialogs.show("scriptable-objects.template-manager");
     },
@@ -563,6 +568,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.marketplace",
     label: "Script Marketplace...",
+    icon: IconMarketplace,
     action: () => {
       context.ui.dialogs.show("scriptable-objects.marketplace");
     },

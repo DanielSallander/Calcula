@@ -7,6 +7,7 @@ import {
   IconTracePrecedents,
   IconTraceDependents,
   IconRemoveArrows,
+  IconShowFormulas,
   emitAppEvent,
   AppEvents,
 } from "@api";
@@ -75,6 +76,7 @@ export function registerFormulasMenu(context: ExtensionContext): void {
       {
         id: "formulas:showFormulas",
         label: "Show Formulas",
+        icon: IconShowFormulas,
         shortcut: "Ctrl+`",
         action: () => {
           const state = getGridStateSnapshot();

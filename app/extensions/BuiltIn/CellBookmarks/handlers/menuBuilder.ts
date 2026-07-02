@@ -13,6 +13,8 @@ import {
   IconNext,
   IconPrev,
   IconSave,
+  IconHighlight,
+  IconDeleteAll,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -107,6 +109,7 @@ export function registerBookmarkMenuItems(): void {
       {
         id: "insert.bookmarks.toggleHighlight",
         label: "Toggle Highlight",
+        icon: IconHighlight,
         action: () => {
           const enabled = toggleHighlight();
           showToast(enabled ? "Bookmark highlighting on" : "Bookmark highlighting off", { variant: "info" });
@@ -115,6 +118,7 @@ export function registerBookmarkMenuItems(): void {
       {
         id: "insert.bookmarks.removeAll",
         label: "Remove All Bookmarks",
+        icon: IconDeleteAll,
         action: () => {
           const count = getBookmarkCount();
           if (count === 0) {
@@ -147,6 +151,7 @@ export function registerBookmarkMenuItems(): void {
       {
         id: "insert.bookmarks.showPanel",
         label: "Show Bookmarks Panel",
+        icon: IconBookmarks,
         action: () => {
           openTaskPane(TASK_PANE_ID);
         },

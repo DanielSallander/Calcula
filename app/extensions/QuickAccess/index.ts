@@ -4,7 +4,7 @@
 //          and a searchable "More..." submenu for discovering and pinning commands.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { CommandRegistry } from "@api";
+import { CommandRegistry, IconPin, IconMore } from "@api";
 import { registerMenu, getMenus, subscribeToMenus } from "@api/ui";
 import type { MenuItemDefinition } from "@api/uiTypes";
 import React from "react";
@@ -96,6 +96,7 @@ function rebuildPinnedEntries(): void {
         action: item.action,
         commandId: item.commandId,
         shortcut: item.shortcut,
+        icon: item.icon,
       });
     }
   }
@@ -134,6 +135,7 @@ function registerQuickAccessMenu(): void {
     items.push({
       id: `quickAccess:pinned:${entry.id}`,
       label: entry.shortLabel,
+      icon: entry.icon ?? IconPin,
       shortcut: entry.shortcut,
       action: () => executeCommand(capturedEntry),
       rightAction: {
@@ -162,6 +164,7 @@ function registerQuickAccessMenu(): void {
   items.push({
     id: "quickAccess:more",
     label: "More...",
+    icon: IconMore,
     customContent: (onClose: () => void) =>
       React.createElement(CommandPalette, {
         onClose,

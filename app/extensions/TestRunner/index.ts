@@ -12,6 +12,8 @@ import {
   openTaskPane,
   registerMenuItem,
   showToast,
+  IconRunTests,
+  IconTestPanel,
 } from "@api";
 import { TestRunnerPane } from "./components/TestRunnerPane";
 import {
@@ -224,12 +226,14 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("developer", {
     id: "test-runner.run-all",
     label: "Run All Tests",
+    icon: IconRunTests,
     commandId: "test.runAll",
   });
 
   registerMenuItem("developer", {
     id: "test-runner.show-panel",
     label: "Show Test Runner Panel",
+    icon: IconTestPanel,
     commandId: "test.showPanel",
   });
 

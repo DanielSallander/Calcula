@@ -3,7 +3,7 @@
 // CONTEXT: Uses ExtensionContext to register menu items and show dialogs.
 
 import type { ExtensionContext } from "@api/contract";
-import { getCurrentRegion } from "@api";
+import { getCurrentRegion, IconDataForm } from "@api";
 
 // ============================================================================
 // State
@@ -34,6 +34,7 @@ export function registerDataFormMenuItem(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:dataForm",
     label: "Data Form...",
+    icon: IconDataForm,
     action: async () => {
       const sel = currentSelection;
       const row = sel?.activeRow ?? 0;

@@ -9,7 +9,6 @@ vi.mock("@api", () => ({
     openDialog: vi.fn(),
   },
   IconEvaluateFormula: "eval-icon",
-  IconVisualizeFormula: "viz-icon",
 }));
 
 import { registerMenuItem, DialogExtensions } from "@api";
@@ -73,25 +72,10 @@ describe("registerEvaluateFormulaMenuItem", () => {
     });
   });
 
-  it("registers a Visualize Formula child item", () => {
+  it("registers no children (Visualize Formula is owned by the FormulaVisualizer extension)", () => {
     registerEvaluateFormulaMenuItem();
 
     const itemDef = mockRegister.mock.calls[1][1];
-    expect(itemDef.children).toHaveLength(1);
-    expect(itemDef.children[0].id).toBe("formulas:formulaVisualizer");
-    expect(itemDef.children[0].label).toBe("Visualize Formula...");
-  });
-
-  it("child action opens formula-visualizer dialog", () => {
-    setCurrentSelection({ activeRow: 2, activeCol: 3 });
-    registerEvaluateFormulaMenuItem();
-
-    const childDef = mockRegister.mock.calls[1][1].children[0];
-    childDef.action();
-
-    expect(mockOpenDialog).toHaveBeenCalledWith("formula-visualizer", {
-      activeRow: 2,
-      activeCol: 3,
-    });
+    expect(itemDef.children).toBeUndefined();
   });
 });

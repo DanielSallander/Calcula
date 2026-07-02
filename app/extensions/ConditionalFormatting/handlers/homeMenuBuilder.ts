@@ -9,6 +9,27 @@ import {
   addConditionalFormat,
   clearConditionalFormatsInRange,
   IconConditionalFormatting,
+  IconHighlightCells,
+  IconGreaterThan,
+  IconLessThan,
+  IconBetween,
+  IconEqualTo,
+  IconTextContains,
+  IconDuplicateValues,
+  IconUniqueValues,
+  IconTopBottom,
+  IconTop10,
+  IconTopPercent,
+  IconBottom10,
+  IconBottomPercent,
+  IconAboveAverage,
+  IconBelowAverage,
+  IconColorScales,
+  IconDataBars,
+  IconIconSets,
+  IconNewRule,
+  IconClear,
+  IconManageRules,
 } from "@api";
 
 import type {
@@ -127,40 +148,48 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:highlightCells",
         label: "Highlight Cells Rules",
+        icon: IconHighlightCells,
         children: [
           {
             id: "cf:greaterThan",
             label: "Greater Than...",
+            icon: IconGreaterThan,
             action: () => showQuickDialog("greaterThan"),
           },
           {
             id: "cf:lessThan",
             label: "Less Than...",
+            icon: IconLessThan,
             action: () => showQuickDialog("lessThan"),
           },
           {
             id: "cf:between",
             label: "Between...",
+            icon: IconBetween,
             action: () => showQuickDialog("between"),
           },
           {
             id: "cf:equalTo",
             label: "Equal To...",
+            icon: IconEqualTo,
             action: () => showQuickDialog("equalTo"),
           },
           {
             id: "cf:textContains",
             label: "Text that Contains...",
+            icon: IconTextContains,
             action: () => showQuickDialog("textContains"),
           },
           {
             id: "cf:duplicateValues",
             label: "Duplicate Values...",
+            icon: IconDuplicateValues,
             action: () => showQuickDialog("duplicateValues"),
           },
           {
             id: "cf:uniqueValues",
             label: "Unique Values...",
+            icon: IconUniqueValues,
             action: () => showQuickDialog("uniqueValues"),
           },
         ],
@@ -170,35 +199,42 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:topBottomRules",
         label: "Top/Bottom Rules",
+        icon: IconTopBottom,
         children: [
           {
             id: "cf:top10Items",
             label: "Top 10 Items...",
+            icon: IconTop10,
             action: () => showQuickDialog("top10Items"),
           },
           {
             id: "cf:top10Percent",
             label: "Top 10%...",
+            icon: IconTopPercent,
             action: () => showQuickDialog("top10Percent"),
           },
           {
             id: "cf:bottom10Items",
             label: "Bottom 10 Items...",
+            icon: IconBottom10,
             action: () => showQuickDialog("bottom10Items"),
           },
           {
             id: "cf:bottom10Percent",
             label: "Bottom 10%...",
+            icon: IconBottomPercent,
             action: () => showQuickDialog("bottom10Percent"),
           },
           {
             id: "cf:aboveAverage",
             label: "Above Average...",
+            icon: IconAboveAverage,
             action: () => showQuickDialog("aboveAverage"),
           },
           {
             id: "cf:belowAverage",
             label: "Below Average...",
+            icon: IconBelowAverage,
             action: () => showQuickDialog("belowAverage"),
           },
         ],
@@ -208,6 +244,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:colorScales",
         label: "Color Scales",
+        icon: IconColorScales,
         customContent: (onClose) =>
           React.createElement(ColorScaleGallery, {
             onSelect: (preset: PresetColorScale) => {
@@ -236,6 +273,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:dataBars",
         label: "Data Bars",
+        icon: IconDataBars,
         customContent: (onClose) =>
           React.createElement(DataBarGallery, {
             onSelect: (color: string, gradientFill: boolean) => {
@@ -260,6 +298,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:iconSets",
         label: "Icon Sets",
+        icon: IconIconSets,
         customContent: (onClose) =>
           React.createElement(IconSetGallery, {
             onSelect: (iconSetId: IconSetType, iconCount: number) => {
@@ -293,6 +332,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:newRule",
         label: "New Rule...",
+        icon: IconNewRule,
         action: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
       },
 
@@ -300,15 +340,18 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:clearRules",
         label: "Clear Rules",
+        icon: IconClear,
         children: [
           {
             id: "cf:clearFromSelection",
             label: "Clear Rules from Selected Cells",
+            icon: IconClear,
             action: handleClearRulesFromSelection,
           },
           {
             id: "cf:clearFromSheet",
             label: "Clear Rules from Entire Sheet",
+            icon: IconClear,
             action: handleClearAllRules,
           },
         ],
@@ -318,6 +361,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
       {
         id: "cf:manageRules",
         label: "Manage Rules...",
+        icon: IconManageRules,
         action: () => showDialog(RULES_MANAGER_DIALOG_ID),
       },
     ],

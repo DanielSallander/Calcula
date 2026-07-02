@@ -7,7 +7,6 @@ import {
   registerMenuItem,
   DialogExtensions,
   IconEvaluateFormula,
-  IconVisualizeFormula,
 } from "@api";
 
 // ============================================================================
@@ -54,19 +53,5 @@ export function registerEvaluateFormulaMenuItem(): void {
         activeCol: sel?.activeCol ?? 0,
       });
     },
-    children: [
-      {
-        id: "formulas:formulaVisualizer",
-        label: "Visualize Formula...",
-        icon: IconVisualizeFormula,
-        action: () => {
-          const sel = currentSelection;
-          DialogExtensions.openDialog("formula-visualizer", {
-            activeRow: sel?.activeRow ?? 0,
-            activeCol: sel?.activeCol ?? 0,
-          });
-        },
-      },
-    ],
   });
 }

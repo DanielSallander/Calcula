@@ -15,6 +15,8 @@ import {
   gridExtensions,
   ExtensionRegistry,
   showDialog,
+  IconHyperlink,
+  IconFollowLink,
 } from "@api";
 import type { GridContextMenuItem, GridMenuContext } from "@api";
 import {
@@ -331,6 +333,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("insert", {
     id: "insert:insertHyperlink",
     label: "Hyperlink...",
+    icon: IconHyperlink,
     shortcut: "Ctrl+K",
     action: () => {
       if (currentActiveCell) {
@@ -343,6 +346,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("insert", {
     id: "insert:followHyperlink",
     label: "Follow Hyperlink",
+    icon: IconFollowLink,
     shortcut: "Ctrl+Click",
     action: () => {
       if (currentActiveCell) {

@@ -13,6 +13,12 @@ import {
   IconRemovePageBreak,
   IconResetPageBreaks,
   IconPrintArea,
+  IconPrint,
+  IconPdf,
+  IconPageSetup,
+  IconClearPrintArea,
+  IconTitleRows,
+  IconTitleCols,
 } from "@api";
 import type { Selection } from "@api";
 import {
@@ -339,6 +345,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("file", {
     id: "file.print",
     label: "Print",
+    icon: IconPrint,
     shortcut: "Ctrl+P",
     action: handlePrint,
   });
@@ -346,12 +353,14 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("file", {
     id: "file.export-pdf",
     label: "Export to PDF...",
+    icon: IconPdf,
     action: handleExportPdf,
   });
 
   context.ui.menus.registerItem("file", {
     id: "file.page-setup",
     label: "Page Setup...",
+    icon: IconPageSetup,
     action: () => {
       context.ui.dialogs.show("page-setup");
     },
@@ -446,11 +455,13 @@ function activate(context: ExtensionContext): void {
       {
         id: "view.printArea:set",
         label: "Set Print Area",
+        icon: IconPrintArea,
         action: handleSetPrintArea,
       },
       {
         id: "view.printArea:clear",
         label: "Clear Print Area",
+        icon: IconClearPrintArea,
         action: handleClearPrintArea,
       },
       {
@@ -461,11 +472,13 @@ function activate(context: ExtensionContext): void {
       {
         id: "view.printArea:setTitleRows",
         label: "Rows to Repeat at Top...",
+        icon: IconTitleRows,
         action: handleSetPrintTitleRows,
       },
       {
         id: "view.printArea:clearTitleRows",
         label: "Clear Title Rows",
+        icon: IconClearPrintArea,
         action: handleClearPrintTitleRows,
       },
       {
@@ -476,11 +489,13 @@ function activate(context: ExtensionContext): void {
       {
         id: "view.printArea:setTitleCols",
         label: "Columns to Repeat at Left...",
+        icon: IconTitleCols,
         action: handleSetPrintTitleCols,
       },
       {
         id: "view.printArea:clearTitleCols",
         label: "Clear Title Columns",
+        icon: IconClearPrintArea,
         action: handleClearPrintTitleCols,
       },
     ],

@@ -7,6 +7,10 @@ import {
   cellEvents,
   AppEvents,
   ExtensionRegistry,
+  IconSparkline,
+  IconSparklineLine,
+  IconSparklineColumn,
+  IconSparklineWinLoss,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { drawSparkline } from "./rendering";
@@ -107,20 +111,24 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("insert", {
     id: "insert.sparklines",
     label: "Sparklines",
+    icon: IconSparkline,
     children: [
       {
         id: "insert.sparklines.line",
         label: "Line",
+        icon: IconSparklineLine,
         action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "line" as SparklineType }),
       },
       {
         id: "insert.sparklines.column",
         label: "Column",
+        icon: IconSparklineColumn,
         action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "column" as SparklineType }),
       },
       {
         id: "insert.sparklines.winloss",
         label: "Win/Loss",
+        icon: IconSparklineWinLoss,
         action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "winloss" as SparklineType }),
       },
     ],

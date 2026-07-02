@@ -7,6 +7,7 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { DialogExtensions, registerMenuItem, unregisterMenuItem } from "@api/ui";
+import { IconEncrypt } from "@api";
 import { workspace } from "@api/system";
 import type { PasswordPromptRequest, PasswordPromptResult } from "@api/system";
 import { EncryptFileDialog } from "./EncryptFileDialog";
@@ -91,6 +92,7 @@ function activate(_context: ExtensionContext): void {
   registerMenuItem("file", {
     id: MENU_ITEM_ID,
     label: "Encrypt with Password…",
+    icon: IconEncrypt,
     action: () => {
       void openEncryptDialog();
     },

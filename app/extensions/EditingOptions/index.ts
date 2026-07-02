@@ -4,7 +4,15 @@
 //          Edit menu, matching Excel's Options > Advanced > Editing Options.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { registerMenuItem } from "@api";
+import {
+  registerMenuItem,
+  IconMoveSelection,
+  IconMoveDirection,
+  IconArrowDown,
+  IconArrowUp,
+  IconNext,
+  IconPrev,
+} from "@api";
 import {
   getMoveAfterReturn,
   setMoveAfterReturn,
@@ -29,26 +37,36 @@ function registerMenuItems(): void {
   registerMenuItem("edit", {
     id: "edit:editingOptions:moveAfterReturn",
     label: "Move Selection After Enter",
+    icon: IconMoveSelection,
     get checked() { return getMoveAfterReturn(); },
     action: () => {
       setMoveAfterReturn(!getMoveAfterReturn());
     },
   });
 
-  // Move Direction submenu
-  const directions: Array<{ label: string; value: MoveDirection }> = [
+  // Move Direction submenu ("none" is not offered as a menu choice)
+  const directions: Array<{ label: string; value: Exclude<MoveDirection, "none"> }> = [
     { label: "Down", value: "down" },
     { label: "Right", value: "right" },
     { label: "Up", value: "up" },
     { label: "Left", value: "left" },
   ];
 
+  const directionIcons: Record<Exclude<MoveDirection, "none">, React.ReactNode> = {
+    down: IconArrowDown,
+    up: IconArrowUp,
+    right: IconNext,
+    left: IconPrev,
+  };
+
   registerMenuItem("edit", {
     id: "edit:editingOptions:moveDirection",
     label: "Move Direction",
+    icon: IconMoveDirection,
     children: directions.map((d) => ({
       id: `edit:editingOptions:moveDirection:${d.value}`,
       label: d.label,
+      icon: directionIcons[d.value],
       get checked() { return getMoveDirection() === d.value; },
       action: () => { setMoveDirection(d.value); },
     })),

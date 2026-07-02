@@ -15,6 +15,7 @@ vi.mock("@api", () => ({
   ExtensionRegistry: {
     onSelectionChange: vi.fn(() => vi.fn()),
   },
+  IconDataForm: "dataform-icon",
 }));
 
 import {

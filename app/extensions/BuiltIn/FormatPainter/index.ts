@@ -6,7 +6,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import type { Selection } from "@api";
 import { CoreCommands } from "@api/commands";
-import { ExtensionRegistry, IconFormatPainter } from "@api";
+import { ExtensionRegistry, IconFormatPainter, IconLock } from "@api";
 import { registerMenuItem } from "@api/ui";
 import { activateFormatPainter, deactivateFormatPainter } from "./formatPainterLogic";
 import { isFormatPainterActive } from "./formatPainterState";
@@ -86,6 +86,7 @@ function activate(context: ExtensionContext): void {
       {
         id: "edit:formatPainterLock",
         label: "Format Painter Lock",
+        icon: IconLock,
         action: () => context.commands.execute(CoreCommands.FORMAT_PAINTER_LOCK),
       },
     ],

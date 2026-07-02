@@ -9,6 +9,7 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { IconServer, IconAIChat } from "@api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChatView } from "./components/ChatView";
 import { aiChatBackend } from "./lib/aiChatBackend";
@@ -65,6 +66,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("developer", {
     id: "developer:mcpServer",
     label: "MCP Server",
+    icon: IconServer,
     action: () => {
       context.ui.taskPanes.open(AI_CHAT_PANE_ID);
       context.ui.taskPanes.showContainer();
@@ -76,6 +78,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("developer", {
     id: "developer:aiChat",
     label: "AI Chat",
+    icon: IconAIChat,
     action: () => {
       context.ui.taskPanes.open(AI_CHAT_LLM_PANE_ID);
       context.ui.taskPanes.showContainer();

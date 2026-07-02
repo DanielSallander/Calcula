@@ -12,6 +12,7 @@ import {
   IconUngroup,
   IconShowLevel,
   IconClearOutline,
+  IconOtherOptions,
 } from "@api";
 import {
   performGroupRows,
@@ -102,6 +103,7 @@ export function registerGroupingMenuItems(
         children: Array.from({ length: 8 }, (_, i) => i + 1).map((level) => ({
           id: `data:outline:showLevel${level}`,
           label: `Level ${level}`,
+          icon: IconShowLevel,
           action: () => {
             performShowLevel(level);
           },
@@ -123,6 +125,7 @@ export function registerGroupingMenuItems(
       {
         id: "data:outline:settings",
         label: "Group Settings...",
+        icon: IconOtherOptions,
         action: () => {
           context.ui.dialogs.show("group-settings");
         },

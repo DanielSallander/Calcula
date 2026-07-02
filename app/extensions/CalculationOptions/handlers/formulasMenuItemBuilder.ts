@@ -15,6 +15,10 @@ import {
   IconManual,
   IconCalcWorkbook,
   IconCalcWorksheet,
+  IconIteration,
+  IconOtherOptions,
+  IconPrecision,
+  IconCalcBeforeSave,
 } from "@api";
 import {
   setCalculationMode,
@@ -135,6 +139,7 @@ export function registerCalculationMenuItems(): void {
   const iterationToggleItem = {
     id: "formulas:calcOptions:iterationToggle",
     label: "Enable Iterative Calculation",
+    icon: IconIteration,
     get checked() { return iterationEnabled; },
     action: () => {
       iterationEnabled = !iterationEnabled;
@@ -152,6 +157,7 @@ export function registerCalculationMenuItems(): void {
   const iterationSettingsItem = {
     id: "formulas:calcOptions:iterationSettings",
     label: "Iteration Settings...",
+    icon: IconOtherOptions,
     action: () => {
       const maxIterInput = window.prompt("Maximum Iterations:", String(iterationMaxIterations));
       if (maxIterInput === null) return; // User cancelled
@@ -185,6 +191,7 @@ export function registerCalculationMenuItems(): void {
   const precisionItem = {
     id: "formulas:calcOptions:precisionAsDisplayed",
     label: "Precision As Displayed",
+    icon: IconPrecision,
     get checked() { return precisionAsDisplayed; },
     action: () => {
       precisionAsDisplayed = !precisionAsDisplayed;
@@ -203,6 +210,7 @@ export function registerCalculationMenuItems(): void {
   const calcBeforeSaveItem = {
     id: "formulas:calcOptions:calculateBeforeSave",
     label: "Calculate Before Save",
+    icon: IconCalcBeforeSave,
     get checked() { return calculateBeforeSave; },
     action: () => {
       calculateBeforeSave = !calculateBeforeSave;

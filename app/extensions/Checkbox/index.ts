@@ -6,6 +6,8 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
+  IconControls,
+  IconCheckbox,
 } from "@api";
 import { drawCheckbox } from "./rendering";
 import {
@@ -87,10 +89,12 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("insert", {
     id: "insert.controls",
     label: "Controls",
+    icon: IconControls,
     children: [
       {
         id: "insert.controls.checkbox",
         label: "Checkbox",
+        icon: IconCheckbox,
         action: insertCheckbox,
       },
     ],

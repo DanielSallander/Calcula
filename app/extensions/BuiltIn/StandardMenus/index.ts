@@ -6,6 +6,12 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { registerMenu, registerShellComponent, unregisterShellComponent, showDialog, type MenuDefinition } from "@api/ui";
 import { CoreCommands } from "@api/commands";
+import {
+  IconUndo, IconRedo, IconCut, IconCopy, IconPaste, IconPasteValues,
+  IconPasteFormulas, IconPasteFormatting, IconPasteLink, IconPasteSpecial,
+  IconClear, IconClearFormatting, IconClearContents, IconClearComments,
+  IconClearHyperlinks, IconFind, IconReplace,
+} from "@api";
 import { registerFormatMenu } from "./FormatMenu";
 import { fileNew, fileOpen, fileSave, fileSaveAs } from "./FileMenu";
 import { StandardMenus } from "./StandardMenus";
@@ -50,34 +56,36 @@ function registerEditMenu(context: ExtensionContext): void {
     label: "Edit",
     order: 20,
     items: [
-      { id: "edit:undo", label: "Undo", shortcut: "Ctrl+Z", commandId: CoreCommands.UNDO },
-      { id: "edit:redo", label: "Redo", shortcut: "Ctrl+Y", commandId: CoreCommands.REDO },
+      { id: "edit:undo", label: "Undo", shortcut: "Ctrl+Z", commandId: CoreCommands.UNDO, icon: IconUndo },
+      { id: "edit:redo", label: "Redo", shortcut: "Ctrl+Y", commandId: CoreCommands.REDO, icon: IconRedo },
       { id: "edit:sep1", label: "", separator: true },
-      { id: "edit:cut", label: "Cut", shortcut: "Ctrl+X", commandId: CoreCommands.CUT },
-      { id: "edit:copy", label: "Copy", shortcut: "Ctrl+C", commandId: CoreCommands.COPY },
+      { id: "edit:cut", label: "Cut", shortcut: "Ctrl+X", commandId: CoreCommands.CUT, icon: IconCut },
+      { id: "edit:copy", label: "Copy", shortcut: "Ctrl+C", commandId: CoreCommands.COPY, icon: IconCopy },
       {
         id: "edit:paste",
         label: "Paste",
+        icon: IconPaste,
         children: [
-          { id: "edit:paste:paste", label: "Paste", commandId: CoreCommands.PASTE, shortcut: "Ctrl+V" },
-          { id: "edit:paste:values", label: "Paste Values", commandId: CoreCommands.PASTE_VALUES },
-          { id: "edit:paste:formulas", label: "Paste Formulas", commandId: CoreCommands.PASTE_FORMULAS },
-          { id: "edit:paste:formatting", label: "Paste Formatting", commandId: CoreCommands.PASTE_FORMATTING },
-          { id: "edit:paste:link", label: "Paste Link", commandId: CoreCommands.PASTE_LINK },
+          { id: "edit:paste:paste", label: "Paste", commandId: CoreCommands.PASTE, shortcut: "Ctrl+V", icon: IconPaste },
+          { id: "edit:paste:values", label: "Paste Values", commandId: CoreCommands.PASTE_VALUES, icon: IconPasteValues },
+          { id: "edit:paste:formulas", label: "Paste Formulas", commandId: CoreCommands.PASTE_FORMULAS, icon: IconPasteFormulas },
+          { id: "edit:paste:formatting", label: "Paste Formatting", commandId: CoreCommands.PASTE_FORMATTING, icon: IconPasteFormatting },
+          { id: "edit:paste:link", label: "Paste Link", commandId: CoreCommands.PASTE_LINK, icon: IconPasteLink },
           { id: "edit:paste:sep", label: "", separator: true },
-          { id: "edit:paste:special", label: "Paste Special...", commandId: CoreCommands.PASTE_SPECIAL, shortcut: "Ctrl+Alt+V" },
+          { id: "edit:paste:special", label: "Paste Special...", commandId: CoreCommands.PASTE_SPECIAL, shortcut: "Ctrl+Alt+V", icon: IconPasteSpecial },
         ],
       },
       { id: "edit:sep2", label: "", separator: true },
       {
         id: "edit:clear",
         label: "Clear",
+        icon: IconClear,
         children: [
-          { id: "edit:clear:all", label: "Clear All", commandId: CoreCommands.CLEAR_ALL },
-          { id: "edit:clear:formatting", label: "Clear Formatting", commandId: CoreCommands.CLEAR_FORMATTING },
-          { id: "edit:clear:contents", label: "Clear Contents", commandId: CoreCommands.CLEAR_CONTENTS, shortcut: "Del" },
-          { id: "edit:clear:comments", label: "Clear Comments", commandId: CoreCommands.CLEAR_COMMENTS },
-          { id: "edit:clear:hyperlinks", label: "Clear Hyperlinks", commandId: CoreCommands.CLEAR_HYPERLINKS },
+          { id: "edit:clear:all", label: "Clear All", commandId: CoreCommands.CLEAR_ALL, icon: IconClear },
+          { id: "edit:clear:formatting", label: "Clear Formatting", commandId: CoreCommands.CLEAR_FORMATTING, icon: IconClearFormatting },
+          { id: "edit:clear:contents", label: "Clear Contents", commandId: CoreCommands.CLEAR_CONTENTS, shortcut: "Del", icon: IconClearContents },
+          { id: "edit:clear:comments", label: "Clear Comments", commandId: CoreCommands.CLEAR_COMMENTS, icon: IconClearComments },
+          { id: "edit:clear:hyperlinks", label: "Clear Hyperlinks", commandId: CoreCommands.CLEAR_HYPERLINKS, icon: IconClearHyperlinks },
         ],
       },
       { id: "edit:sep3", label: "", separator: true },
@@ -86,6 +94,7 @@ function registerEditMenu(context: ExtensionContext): void {
         label: "Find...",
         shortcut: "Ctrl+F",
         commandId: CoreCommands.FIND,
+        icon: IconFind,
         action: () => context.commands.execute(CoreCommands.FIND),
       },
       {
@@ -93,6 +102,7 @@ function registerEditMenu(context: ExtensionContext): void {
         label: "Replace...",
         shortcut: "Ctrl+H",
         commandId: CoreCommands.REPLACE,
+        icon: IconReplace,
         action: () => context.commands.execute(CoreCommands.REPLACE),
       },
     ],

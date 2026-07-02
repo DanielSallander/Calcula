@@ -2,7 +2,7 @@
 // PURPOSE: Registers "Insert CUBE Formula..." in the Formulas menu and tracks
 //          the active cell so the builder dialog inserts in the right place.
 
-import { registerMenuItem, DialogExtensions } from "@api";
+import { registerMenuItem, DialogExtensions, IconCube, IconCalculatedMeasure } from "@api";
 
 export const CUBE_DIALOG_ID = "cube-formula-builder";
 export const CALC_MEASURES_DIALOG_ID = "cube-calculated-measures";
@@ -25,6 +25,7 @@ export function registerCubeFormulaMenuItem(): void {
   registerMenuItem("formulas", {
     id: "formulas:cubeFormula",
     label: "Insert CUBE Formula...",
+    icon: IconCube,
     action: () => {
       const sel = currentSelection;
       DialogExtensions.openDialog(CUBE_DIALOG_ID, {
@@ -37,6 +38,7 @@ export function registerCubeFormulaMenuItem(): void {
   registerMenuItem("formulas", {
     id: "formulas:calculatedMeasures",
     label: "Calculated Measures...",
+    icon: IconCalculatedMeasure,
     action: () => DialogExtensions.openDialog(CALC_MEASURES_DIALOG_ID, {}),
   });
 }

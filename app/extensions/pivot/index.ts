@@ -18,6 +18,7 @@ import {
   openTaskPane,
   clearTaskPaneManuallyClosed,
   addTaskPaneContextKey,
+  IconInsertPivot,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
@@ -1182,6 +1183,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("formulas", {
     id: "pivot.generateGetPivotData",
     label: "Generate GetPivotData",
+    icon: IconInsertPivot,
     get checked() { return isGenerateGetPivotDataEnabled(); },
     action: () => {
       setGenerateGetPivotData(!isGenerateGetPivotDataEnabled());

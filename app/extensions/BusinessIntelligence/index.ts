@@ -12,6 +12,7 @@ import {
   registerBiConnectionService,
   IconConnections,
   IconGetData,
+  IconDataModel,
 } from "@api";
 
 import {
@@ -99,6 +100,7 @@ function activate(context: ExtensionContext): void {
       {
         id: "externalData:getData:calculaModel",
         label: "Calcula Model...",
+        icon: IconDataModel,
         action: () => {
           context.ui.dialogs.show(MODEL_DIALOG_ID);
         },
