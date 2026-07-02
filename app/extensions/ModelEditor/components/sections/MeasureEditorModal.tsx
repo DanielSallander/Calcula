@@ -1,22 +1,20 @@
-// FILENAME: app/extensions/ModelEditor/components/MeasureEditorDialog.tsx
-// PURPOSE: Monaco-based editor for ONE model measure (add or edit). Validates
-//          through the engine parser (positioned markers) and installs the
-//          edit via bi_model_upsert_measure on save.
+// FILENAME: app/extensions/ModelEditor/components/sections/MeasureEditorModal.tsx
+// PURPOSE: Monaco-based modal for ONE model measure (add or edit) inside the
+//          Model Editor window. Validates through the engine parser
+//          (positioned markers) and installs the edit via
+//          bi_model_upsert_measure on save. Ported from the old main-window
+//          MeasureEditorDialog.
 
 import React, { useCallback, useRef, useState } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import type { DialogProps, ModelMeasureInfo } from "@api";
-import {
-  biModelUpsertMeasure,
-  biModelValidateMeasure,
-  emitAppEvent,
-  recalcWithCube,
-} from "@api";
+import type { ModelMeasureInfo } from "@api";
+import { biModelUpsertMeasure, biModelValidateMeasure } from "@api";
+import { Field, Modal, styles } from "../editorShared";
 
-// Preserve any prior worker handler (Charts JSON, CustomFunctions TS, ...) so
-// this editor never clobbers another extension's Monaco setup.
+// Preserve any prior worker handler so this editor never clobbers another
+// Monaco setup living in the same window.
 const prevGetWorker = self.MonacoEnvironment?.getWorker;
 self.MonacoEnvironment = {
   getWorker(id: string, label: string) {
@@ -39,10 +37,17 @@ function byteToUtf16Offset(text: string, byteOffset: number): number {
   ).length;
 }
 
-export function MeasureEditorDialog({ onClose, data }: DialogProps) {
-  const connectionId = (data?.connectionId as string) ?? "";
-  const existing = data?.measure as ModelMeasureInfo | undefined;
-
+export function MeasureEditorModal({
+  connectionId,
+  existing,
+  onClose,
+  onSaved,
+}: {
+  connectionId: string;
+  existing: ModelMeasureInfo | null;
+  onClose: () => void;
+  onSaved: (measures: ModelMeasureInfo[]) => void;
+}): React.ReactElement {
   const [name, setName] = useState(existing?.name ?? "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [formatString, setFormatString] = useState(existing?.formatString ?? "");
@@ -105,7 +110,7 @@ export function MeasureEditorDialog({ onClose, data }: DialogProps) {
     setStatus(null);
     setBusy(true);
     try {
-      await biModelUpsertMeasure({
+      const measures = await biModelUpsertMeasure({
         connectionId,
         originalName: existing?.name ?? null,
         name,
@@ -113,87 +118,90 @@ export function MeasureEditorDialog({ onClose, data }: DialogProps) {
         description: description.trim() || null,
         formatString: formatString.trim() || null,
       });
-      // The model changed: let the panel reload, and force CUBE cells to
-      // re-evaluate against the updated model.
-      emitAppEvent("bi:model-changed", { connectionId });
-      void recalcWithCube();
-      onClose();
+      // The parent applies the fresh measure list and notifies the main
+      // window (which recalcs CUBE) — the grid lives in the other window.
+      onSaved(measures);
     } catch (err: unknown) {
       setError(String(err));
     } finally {
       setBusy(false);
     }
-  }, [connectionId, existing, name, formula, description, formatString, onClose]);
-
-  const fieldStyle: React.CSSProperties = {
-    display: "flex", flexDirection: "column", gap: "4px", marginBottom: "8px",
-  };
-  const inputStyle: React.CSSProperties = {
-    padding: "4px 6px", border: "1px solid #ccc", borderRadius: "3px", fontSize: "13px",
-  };
+  }, [connectionId, existing, name, formula, description, formatString, onSaved]);
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 1000,
-        background: "rgba(0, 0, 0, 0.35)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-      onClick={onClose}
+    <Modal
+      title={existing ? `Edit Measure: ${existing.name}` : "New Measure"}
+      width={560}
+      onClose={onClose}
+      footer={
+        <>
+          <button style={styles.btn} onClick={onClose}>
+            Cancel
+          </button>
+          <button style={styles.btn} onClick={() => void handleValidate()}>
+            Validate
+          </button>
+          <button
+            style={styles.primaryBtn}
+            onClick={() => void handleSave()}
+            disabled={busy || !name.trim() || !formula.trim() || !connectionId}
+          >
+            {busy ? "Saving…" : "Save Measure"}
+          </button>
+        </>
+      }
     >
-      <div
-        style={{
-          padding: "16px",
-          width: "560px",
-          background: "#fff",
-          borderRadius: "6px",
-          boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-      <h3 style={{ margin: "0 0 4px 0" }}>
-        {existing ? `Edit Measure: ${existing.name}` : "New Measure"}
-      </h3>
-      <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "12px" }}>
+      <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 12 }}>
         Model measures are part of the connection&apos;s model — they persist in
         this workbook and ship when the model is published as a package.
       </div>
       {existing && !existing.hasSource && (
-        <div style={{
-          fontSize: "12px", padding: "6px 8px", marginBottom: "8px",
-          backgroundColor: "#fff3cd", borderRadius: 4,
-        }}>
+        <div
+          style={{
+            fontSize: 12,
+            padding: "6px 8px",
+            marginBottom: 8,
+            backgroundColor: "#fff3cd",
+            borderRadius: 4,
+          }}
+        >
           This formula was reconstructed from the stored model (no original
           text). If you save without changing it, the stored definition is
           kept as-is; edit it only if you intend to redefine the measure.
         </div>
       )}
 
-      <div style={{ display: "flex", gap: "8px" }}>
-        <div style={{ ...fieldStyle, flex: 2 }}>
-          <label>Name</label>
-          <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)}
-            placeholder="Revenue" />
-        </div>
-        <div style={{ ...fieldStyle, flex: 1 }}>
-          <label>Format (optional)</label>
-          <input style={inputStyle} value={formatString}
-            onChange={(e) => setFormatString(e.target.value)} placeholder="#,##0.00" />
-        </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label="Name" flex={2}>
+          <input
+            style={styles.input}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Revenue"
+          />
+        </Field>
+        <Field label="Format (optional)" flex={1}>
+          <input
+            style={styles.input}
+            value={formatString}
+            onChange={(e) => setFormatString(e.target.value)}
+            placeholder="#,##0.00"
+          />
+        </Field>
       </div>
-      <div style={fieldStyle}>
-        <label>Description (optional)</label>
-        <input style={inputStyle} value={description}
-          onChange={(e) => setDescription(e.target.value)} />
-      </div>
+      <Field label="Description (optional)">
+        <input
+          style={styles.input}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+      </Field>
 
-      <div style={fieldStyle}>
-        <label>Formula</label>
-        <div style={{ border: "1px solid #ccc", borderRadius: "3px" }}>
+      <Field
+        label="Formula"
+        hint="e.g. SUM(Sales[amount]) or ([Profit] / [Revenue]) * SUM(Sales[qty]) — reference other measures as [Name], columns as Table[column]."
+      >
+        <div style={{ border: "1px solid #ccc", borderRadius: 3 }}>
           <Editor
             height="140px"
             language="plaintext"
@@ -212,27 +220,10 @@ export function MeasureEditorDialog({ onClose, data }: DialogProps) {
             }}
           />
         </div>
-        <div style={{ fontSize: "11px", opacity: 0.6 }}>
-          e.g. SUM(Sales[amount]) or ([Profit] / [Revenue]) * SUM(Sales[qty]) —
-          reference other measures as [Name], columns as Table[column].
-        </div>
-      </div>
+      </Field>
 
-      {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}
-      {status && <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>}
-
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-        <button onClick={onClose}>Cancel</button>
-        <button onClick={() => void handleValidate()}>Validate</button>
-        <button
-          onClick={() => void handleSave()}
-          style={{ fontWeight: 600 }}
-          disabled={busy || !name.trim() || !formula.trim() || !connectionId}
-        >
-          {busy ? "Saving…" : "Save Measure"}
-        </button>
-      </div>
-      </div>
-    </div>
+      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {status && <div style={{ color: "green", marginBottom: 8, fontSize: 12 }}>{status}</div>}
+    </Modal>
   );
 }

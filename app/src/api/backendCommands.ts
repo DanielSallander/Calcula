@@ -75,7 +75,37 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   // broker path — never by calling these backend commands directly. (Raw-SQL
   // bi.sql -> script_bi_sql is gated above under codeExecution; this closes the
   // matching gap for the model-scoped bi.query surface.)
-  biData: ["bi_query", "bi_get_connections"],
+  biData: [
+    "bi_query",
+    "bi_get_connections",
+    // Model Editor surface: model reads (incl. RLS role definitions), model
+    // MUTATION, live-connector schema reads, and connection creation. A
+    // non-trusted extension must not reach any of it directly — the broker's
+    // consent-gated bi.query path is the only sanctioned door.
+    "bi_model_get_measures",
+    "bi_model_validate_measure",
+    "bi_model_upsert_measure",
+    "bi_model_delete_measure",
+    "bi_model_measure_lineage",
+    "bi_model_get_overview",
+    "bi_model_update_table",
+    "bi_model_update_column",
+    "bi_model_upsert_calc_column",
+    "bi_model_delete_calc_column",
+    "bi_model_upsert_relationship",
+    "bi_model_delete_relationship",
+    "bi_model_upsert_hierarchy",
+    "bi_model_delete_hierarchy",
+    "bi_model_upsert_kpi",
+    "bi_model_delete_kpi",
+    "bi_model_upsert_role",
+    "bi_model_delete_role",
+    "bi_model_upsert_calc_group",
+    "bi_model_delete_calc_group",
+    "bi_model_list_source_tables",
+    "bi_model_import_tables",
+    "bi_model_create_blank",
+  ],
 };
 
 /** Flat set of all privileged command names (built once). */

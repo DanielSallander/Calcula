@@ -21,6 +21,11 @@ pub const MAIN: &[&str] = &["main"];
 /// editor window (verified: ObjectScriptEditorApp saves from its own window).
 pub const MAIN_AND_OBJECT_SCRIPT_EDITOR: &[&str] = &["main", "object-script-editor"];
 
+/// BI model editing (bi_model_*) is also legitimately called from the Model
+/// Editor window — the VBA-style standalone editor that hosts the model
+/// authoring UI.
+pub const MAIN_AND_MODEL_EDITOR: &[&str] = &["main", "model-editor"];
+
 /// Reject the call unless the invoking window's label is in `allowed`.
 /// First line of every guarded command:
 /// `crate::security::window_guard::require_label(&window, window_guard::MAIN)?;`

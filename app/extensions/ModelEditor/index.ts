@@ -1,17 +1,15 @@
 // FILENAME: app/extensions/ModelEditor/index.ts
-// PURPOSE: In-app BI Model Editor (ME-1: measures) — the first slice of
-//          bringing Calcula Studio's model authoring inside Calcula. Edits a
-//          connection's embedded model in place; edits persist with the
-//          workbook and ship via "Publish Model as Package".
+// PURPOSE: In-app BI Model Editor — a VBA-style STANDALONE WINDOW hosting the
+//          model authoring UI (measures, tables/columns, calculated columns,
+//          relationships, hierarchies, KPIs, security roles, calculation
+//          groups, schema import, blank models). Edits land on the live
+//          shared engine, persist with the workbook, and distribute via
+//          "Publish Model as Package".
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { IconDataModel } from "@api";
-import { MeasuresSection } from "./components/MeasuresSection";
-import {
-  MODEL_EDITOR_PANEL_ID,
-  MEASURE_EDITOR_DIALOG_ID,
-  MeasureEditorDialogDefinition,
-} from "./manifest";
+import { IconDataModel, emitAppEvent, recalcWithCube } from "@api";
+import { openModelEditorWindow } from "./lib/openModelEditorWindow";
+import { onModelChanged } from "./lib/crossWindowEvents";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -19,33 +17,26 @@ const cleanupFns: (() => void)[] = [];
 function activate(context: ExtensionContext): void {
   if (isActivated) return;
 
-  // Model Editor panel (sections API): measures list + lineage per connection.
-  context.ui.panels.register({
-    id: MODEL_EDITOR_PANEL_ID,
-    title: "Model Editor",
-    icon: IconDataModel,
-    sections: [
-      {
-        id: `${MODEL_EDITOR_PANEL_ID}.measures`,
-        label: "Measures",
-        component: MeasuresSection,
-      },
-    ],
-    defaultPlacement: "sidebar",
-    priority: 36,
-  });
-  cleanupFns.push(() => context.ui.panels.unregister(MODEL_EDITOR_PANEL_ID));
-
-  context.ui.dialogs.register(MeasureEditorDialogDefinition);
-  cleanupFns.push(() => context.ui.dialogs.unregister(MEASURE_EDITOR_DIALOG_ID));
-
-  // Entry point next to the other model surfaces in External Data. (The menu
-  // registry has no unregister — matching the sibling extensions here.)
+  // Entry point next to the other model surfaces in External Data.
   context.ui.menus.registerItem("externalData", {
     id: "externalData:modelEditor",
-    label: "Edit Model...",
+    label: "Model Editor...",
     icon: IconDataModel,
-    action: () => context.ui.panels.open(MODEL_EDITOR_PANEL_ID),
+    action: () => void openModelEditorWindow(),
+  });
+
+  // Bridge: edits made in the editor window must reach THIS window's
+  // surfaces — CUBE cells re-evaluate and the model-aware panes refresh.
+  let unlistenModelChanged: (() => void) | null = null;
+  void onModelChanged(({ connectionId }) => {
+    emitAppEvent("bi:model-changed", { connectionId });
+    void recalcWithCube();
+  }).then((off) => {
+    unlistenModelChanged = off;
+  });
+  cleanupFns.push(() => {
+    unlistenModelChanged?.();
+    unlistenModelChanged = null;
   });
 
   isActivated = true;
@@ -65,7 +56,7 @@ const extension: ExtensionModule = {
     name: "Model Editor",
     version: "1.0.0",
     description:
-      "Edit a BI connection's data model in place — measures first (add, edit, delete, validate, lineage).",
+      "Author BI data models in a standalone editor window — measures, tables, relationships, hierarchies, KPIs, roles, calculation groups, and schema import.",
   },
   activate,
   deactivate,

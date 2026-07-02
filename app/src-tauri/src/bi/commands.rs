@@ -1270,6 +1270,40 @@ pub async fn bi_create_connection(
         _ => return Err("Provide either modelJson or modelPath".to_string()),
     };
 
+    create_connection_core(
+        &bi_state,
+        request.name,
+        request.description,
+        request.connection_string,
+        request.model_path.filter(|p| !p.is_empty()),
+        json_value,
+    )
+    .await
+}
+
+/// Create a connection from INLINE model JSON (no filesystem identity). The
+/// public door for programmatic creators (blank models from the Model Editor).
+pub(crate) async fn create_connection_from_json(
+    bi_state: &BiState,
+    name: String,
+    description: Option<String>,
+    connection_string: String,
+    json_value: serde_json::Value,
+) -> Result<ConnectionInfo, String> {
+    create_connection_core(bi_state, name, description, connection_string, None, json_value).await
+}
+
+/// Shared core of connection creation: parse/validate the model, key the
+/// shared engine (path or "local:{id}"), load caches, adopt sibling state,
+/// and register the Connection.
+async fn create_connection_core(
+    bi_state: &BiState,
+    name: String,
+    description: Option<String>,
+    connection_string: String,
+    model_path: Option<String>,
+    json_value: serde_json::Value,
+) -> Result<ConnectionInfo, String> {
     // Extract connectionSpecs from ModelBundle (if present) for server/database info
     let model_conn_spec = crate::calp_commands::extract_connection_spec_info(&json_value);
 
@@ -1295,7 +1329,6 @@ pub async fn bi_create_connection(
     // that model's prior on-disk cache), otherwise a synthetic per-connection
     // key — the same "local:{id}" convention the .cala restore path uses for
     // path-less embedded models.
-    let model_path = request.model_path.clone().filter(|p| !p.is_empty());
     let model_key = match model_path.as_deref() {
         Some(path) => ModelKey::from_model_path(path),
         None => ModelKey::from_model_path(&format!("local:{}", id)),
@@ -1333,7 +1366,7 @@ pub async fn bi_create_connection(
     }
 
     // Prefer connectionSpecs from model, fall back to parsing the connection string
-    let (target, _auth) = parse_connection_string(&request.connection_string);
+    let (target, _auth) = parse_connection_string(&connection_string);
     let server = if !model_conn_spec.server.is_empty() { model_conn_spec.server } else { target.host.clone() };
     let database = if !model_conn_spec.database.is_empty() { model_conn_spec.database } else { target.database.clone() };
     let preferred_auth = if !model_conn_spec.preferred_auth.is_empty() { model_conn_spec.preferred_auth } else { "UsernamePassword".to_string() };
@@ -1364,10 +1397,10 @@ pub async fn bi_create_connection(
     };
     let connection = Connection {
         id,
-        name: request.name,
-        description: request.description.unwrap_or_default(),
+        name,
+        description: description.unwrap_or_default(),
         connection_type,
-        connection_string: request.connection_string,
+        connection_string,
         server,
         database,
         preferred_auth,
@@ -1473,23 +1506,35 @@ pub async fn bi_update_connection(
     Ok(conn.to_info())
 }
 
-/// Get all connections.
+/// Get all connections. Guarded: ConnectionInfo carries the raw connection
+/// string, and the only legitimate callers are the main window and the Model
+/// Editor window — the inert secondary editors must not enumerate it.
 #[tauri::command]
 pub async fn bi_get_connections(
     bi_state: State<'_, BiState>,
+    window: tauri::Window,
 ) -> Result<Vec<ConnectionInfo>, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
     let connections = bi_state.connections.lock().unwrap();
     let mut infos: Vec<ConnectionInfo> = connections.values().map(|c| c.to_info()).collect();
     infos.sort_by_key(|c| c.id);
     Ok(infos)
 }
 
-/// Get a single connection by ID.
+/// Get a single connection by ID. Guarded like bi_get_connections.
 #[tauri::command]
 pub async fn bi_get_connection(
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
+    window: tauri::Window,
 ) -> Result<ConnectionInfo, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
     let connections = bi_state.connections.lock().unwrap();
     let conn = connections.get(&connection_id)
         .ok_or_else(|| format!("Connection {} not found", connection_id))?;

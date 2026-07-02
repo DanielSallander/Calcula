@@ -3616,6 +3616,335 @@ export async function biModelMeasureLineage(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Model Editor (ME-2..5: tables, relationships, hierarchies, KPIs, roles,
+// calculation groups, schema import, blank models)
+// ---------------------------------------------------------------------------
+
+export interface ModelColumnInfo {
+  name: string;
+  dataType: string;
+  displayName: string | null;
+  description: string | null;
+  isHidden: boolean;
+  isCalculated: boolean;
+  formula: string | null;
+}
+
+export interface ModelTableInfo {
+  name: string;
+  displayName: string | null;
+  description: string | null;
+  isHidden: boolean;
+  storageMode: string;
+  bound: boolean;
+  columns: ModelColumnInfo[];
+}
+
+export interface RelationshipConditionDto {
+  fromColumn: string;
+  toColumn: string;
+  /** Join operator: "=" (default) | ">" | ">=" | "<" | "<=". Round-tripped so
+   * editing a relationship never coerces range joins to equality. */
+  operator?: string;
+}
+
+export interface ModelRelationshipInfo {
+  name: string;
+  fromTable: string;
+  toTable: string;
+  conditions: RelationshipConditionDto[];
+  /** "manyToOne" | "oneToMany" | "oneToOne" | "manyToMany" */
+  cardinality: string;
+  active: boolean;
+}
+
+export interface HierarchyLevelDto {
+  column: string;
+  displayName?: string | null;
+  /** Ragged-hierarchy metadata — round-trip when editing so it never drops. */
+  isOptional?: boolean;
+  stopperValue?: string | null;
+}
+
+export interface ModelHierarchyInfo {
+  name: string;
+  table: string;
+  levels: HierarchyLevelDto[];
+}
+
+export interface KpiBandDto {
+  threshold: number;
+  /** "offTrack" | "atRisk" | "onTrack" */
+  status: string;
+}
+
+export interface ModelKpiInfo {
+  name: string;
+  baseMeasure: string;
+  targetMeasure: string | null;
+  targetConstant: number | null;
+  statusBands: KpiBandDto[];
+  description: string | null;
+}
+
+export interface RoleFilterDto {
+  table: string;
+  column: string;
+  /** "=" | "!=" | ">" | ">=" | "<" | "<=" */
+  operator: string;
+  value: string;
+  /** null = static; "username" | "customData" = dynamic RLS. */
+  dynamic?: string | null;
+}
+
+export interface ModelRoleInfo {
+  name: string;
+  filters: RoleFilterDto[];
+}
+
+export interface CalcGroupItemDto {
+  name: string;
+  formula: string;
+}
+
+export interface ModelCalcGroupInfo {
+  name: string;
+  items: CalcGroupItemDto[];
+}
+
+export interface ModelOverview {
+  editable: boolean;
+  readOnlyReason: string | null;
+  tables: ModelTableInfo[];
+  relationships: ModelRelationshipInfo[];
+  hierarchies: ModelHierarchyInfo[];
+  kpis: ModelKpiInfo[];
+  securityRoles: ModelRoleInfo[];
+  calculationGroups: ModelCalcGroupInfo[];
+  measures: ModelMeasureInfo[];
+}
+
+export interface SourceTableInfo {
+  schema: string;
+  name: string;
+  imported: boolean;
+}
+
+/** Full model overview for the Model Editor window. */
+export async function biModelGetOverview(connectionId: string): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_get_overview", { connectionId });
+}
+
+export async function biModelUpdateTable(params: {
+  connectionId: string;
+  table: string;
+  displayName?: string | null;
+  description?: string | null;
+  isHidden: boolean;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_update_table", {
+    connectionId: params.connectionId,
+    table: params.table,
+    displayName: params.displayName ?? null,
+    description: params.description ?? null,
+    isHidden: params.isHidden,
+  });
+}
+
+export async function biModelUpdateColumn(params: {
+  connectionId: string;
+  table: string;
+  column: string;
+  displayName?: string | null;
+  description?: string | null;
+  isHidden: boolean;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_update_column", {
+    connectionId: params.connectionId,
+    table: params.table,
+    column: params.column,
+    displayName: params.displayName ?? null,
+    description: params.description ?? null,
+    isHidden: params.isHidden,
+  });
+}
+
+export async function biModelUpsertCalcColumn(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  table: string;
+  formula: string;
+  /** "String" | "Int32" | "Int64" | "Float64" | "Boolean" | "Date" | "Timestamp" */
+  dataType: string;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_calc_column", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    table: params.table,
+    formula: params.formula,
+    dataType: params.dataType,
+  });
+}
+
+export async function biModelDeleteCalcColumn(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_calc_column", { connectionId, name });
+}
+
+export async function biModelUpsertRelationship(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  fromTable: string;
+  toTable: string;
+  conditions: RelationshipConditionDto[];
+  cardinality: string;
+  active: boolean;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_relationship", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    fromTable: params.fromTable,
+    toTable: params.toTable,
+    conditions: params.conditions,
+    cardinality: params.cardinality,
+    active: params.active,
+  });
+}
+
+export async function biModelDeleteRelationship(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_relationship", { connectionId, name });
+}
+
+export async function biModelUpsertHierarchy(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  table: string;
+  levels: HierarchyLevelDto[];
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_hierarchy", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    table: params.table,
+    levels: params.levels,
+  });
+}
+
+export async function biModelDeleteHierarchy(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_hierarchy", { connectionId, name });
+}
+
+export async function biModelUpsertKpi(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  baseMeasure: string;
+  targetMeasure?: string | null;
+  targetConstant?: number | null;
+  statusBands: KpiBandDto[];
+  description?: string | null;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_kpi", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    baseMeasure: params.baseMeasure,
+    targetMeasure: params.targetMeasure ?? null,
+    targetConstant: params.targetConstant ?? null,
+    statusBands: params.statusBands,
+    description: params.description ?? null,
+  });
+}
+
+export async function biModelDeleteKpi(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_kpi", { connectionId, name });
+}
+
+export async function biModelUpsertRole(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  filters: RoleFilterDto[];
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_role", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    filters: params.filters,
+  });
+}
+
+export async function biModelDeleteRole(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_role", { connectionId, name });
+}
+
+export async function biModelUpsertCalcGroup(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  items: CalcGroupItemDto[];
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_calc_group", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    items: params.items,
+  });
+}
+
+export async function biModelDeleteCalcGroup(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_calc_group", { connectionId, name });
+}
+
+/** List the source database's tables (requires a connected connection). */
+export async function biModelListSourceTables(
+  connectionId: string,
+): Promise<SourceTableInfo[]> {
+  return invoke<SourceTableInfo[]>("bi_model_list_source_tables", { connectionId });
+}
+
+/** Import source tables into the model (introspect + append + bind). */
+export async function biModelImportTables(
+  connectionId: string,
+  tables: Array<{ schema: string; name: string }>,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_import_tables", { connectionId, tables });
+}
+
+/** Create a NEW blank model as a path-less connection (embedded from birth). */
+export async function biModelCreateBlank(
+  name: string,
+  connectionString?: string,
+): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_model_create_blank", {
+    name,
+    connectionString: connectionString ?? null,
+  });
+}
+
 /** Delete a connection by ID. */
 export async function biDeleteConnection(
   connectionId: string,

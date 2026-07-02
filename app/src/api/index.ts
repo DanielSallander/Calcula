@@ -403,19 +403,52 @@ export type {
   CalculatedMeasure,
 } from "./backend";
 
-// BI Model Editor (in-app model authoring — ME-1: measures)
+// BI Model Editor (in-app model authoring — measures, tables, relationships,
+// hierarchies, KPIs, roles, calculation groups, schema import, blank models)
 export {
   biModelGetMeasures,
   biModelValidateMeasure,
   biModelUpsertMeasure,
   biModelDeleteMeasure,
   biModelMeasureLineage,
+  biModelGetOverview,
+  biModelUpdateTable,
+  biModelUpdateColumn,
+  biModelUpsertCalcColumn,
+  biModelDeleteCalcColumn,
+  biModelUpsertRelationship,
+  biModelDeleteRelationship,
+  biModelUpsertHierarchy,
+  biModelDeleteHierarchy,
+  biModelUpsertKpi,
+  biModelDeleteKpi,
+  biModelUpsertRole,
+  biModelDeleteRole,
+  biModelUpsertCalcGroup,
+  biModelDeleteCalcGroup,
+  biModelListSourceTables,
+  biModelImportTables,
+  biModelCreateBlank,
 } from "./backend";
 export type {
   ModelMeasureInfo,
   MeasureValidation,
   MeasureLineage,
   MeasureLineageColumn,
+  ModelOverview,
+  ModelTableInfo,
+  ModelColumnInfo,
+  ModelRelationshipInfo,
+  RelationshipConditionDto,
+  ModelHierarchyInfo,
+  HierarchyLevelDto,
+  ModelKpiInfo,
+  KpiBandDto,
+  ModelRoleInfo,
+  RoleFilterDto,
+  ModelCalcGroupInfo,
+  CalcGroupItemDto,
+  SourceTableInfo,
 } from "./backend";
 
 // ============================================================================
