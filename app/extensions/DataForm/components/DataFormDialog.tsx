@@ -1,6 +1,9 @@
 //! FILENAME: app/extensions/DataForm/components/DataFormDialog.tsx
 // PURPOSE: Data Form dialog - form-based row viewer/editor.
 // CONTEXT: Shows one record at a time with labeled fields from column headers.
+//          Supports record navigation (First/Prev/Next/Last + jump-to), keyboard
+//          flow (Enter = next, Shift+Enter = prev, Ctrl+Home/End), reverting
+//          edits, and an Excel-style Criteria search mode (AND across fields).
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import type { DialogProps } from "@api/uiTypes";
@@ -96,8 +99,22 @@ const styles = {
   recordInfo: {
     fontSize: 12,
     color: v("--text-secondary"),
-    textAlign: "center" as const,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
     padding: "4px 0",
+  },
+  jumpInput: {
+    width: 48,
+    padding: "3px 4px",
+    fontSize: 12,
+    textAlign: "center" as const,
+    borderRadius: 3,
+    border: `1px solid ${v("--border-default")}`,
+    background: v("--grid-bg"),
+    color: v("--text-primary"),
+    outline: "none",
   },
   footer: {
     display: "flex",
@@ -109,50 +126,63 @@ const styles = {
   },
   footerLeft: {
     display: "flex",
-    gap: 8,
+    gap: 6,
+    flexWrap: "wrap" as const,
   },
   footerRight: {
     display: "flex",
-    gap: 8,
+    gap: 6,
+    flexWrap: "wrap" as const,
   },
   btn: {
-    padding: "6px 16px",
+    padding: "6px 12px",
     fontSize: 13,
     borderRadius: 4,
     cursor: "pointer",
-    minWidth: 72,
+    minWidth: 56,
     background: v("--grid-bg"),
     color: v("--text-primary"),
     border: `1px solid ${v("--border-default")}`,
   },
   btnPrimary: {
-    padding: "6px 16px",
+    padding: "6px 12px",
     fontSize: 13,
     borderRadius: 4,
     cursor: "pointer",
-    minWidth: 72,
+    minWidth: 56,
     background: v("--accent-primary"),
     color: "#ffffff",
     border: `1px solid ${v("--accent-primary")}`,
   },
   btnDanger: {
-    padding: "6px 16px",
+    padding: "6px 12px",
     fontSize: 13,
     borderRadius: 4,
     cursor: "pointer",
-    minWidth: 72,
+    minWidth: 56,
     background: "#c0392b",
     color: "#ffffff",
     border: "1px solid #a93226",
   },
-  newRecordBanner: {
+  banner: {
     fontSize: 12,
-    color: v("--accent-primary"),
     textAlign: "center" as const,
     fontStyle: "italic" as const,
     padding: "4px 0",
   },
 };
+
+// Disabled-button visual helper.
+function disabledStyle(
+  base: React.CSSProperties,
+  disabled: boolean,
+): React.CSSProperties {
+  return {
+    ...base,
+    opacity: disabled ? 0.5 : 1,
+    cursor: disabled ? "not-allowed" : "pointer",
+  };
+}
 
 // ============================================================================
 // Types
@@ -164,6 +194,8 @@ interface RegionData {
   endRow: number;
   endCol: number;
 }
+
+type Mode = "form" | "criteria";
 
 // ============================================================================
 // Component
@@ -193,6 +225,11 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
   const [isLoading, setIsLoading] = useState(true);
   // Track dynamic end row as records are added/deleted
   const [currentEndRow, setCurrentEndRow] = useState(endRow);
+  // Search-criteria mode (Excel-style): fields become search terms.
+  const [mode, setMode] = useState<Mode>("form");
+  const [criteria, setCriteria] = useState<string[]>([]);
+  // Editable "jump to record" box (1-based, as text so it can be cleared).
+  const [jumpText, setJumpText] = useState("");
 
   // First data row is right after the header row
   const headerRow = startRow;
@@ -204,6 +241,7 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
 
   useEffect(() => {
     loadHeaders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function loadHeaders(): Promise<void> {
@@ -213,6 +251,7 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
       hdrs.push(cell?.display || columnToLetter(c));
     }
     setHeaders(hdrs);
+    setCriteria(new Array(colCount).fill(""));
 
     const recordCount = currentEndRow - headerRow; // rows after header
     setTotalRecords(Math.max(0, recordCount));
@@ -235,12 +274,13 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
     const values: string[] = [];
     for (let c = startCol; c <= endCol; c++) {
       const cell = await getCell(row, c);
-      // Use the formula if present, otherwise the display value
-      values.push(cell?.formula ? `=${cell.formula}` : cell?.display || "");
+      // cell.formula already carries its leading "="; fall back to display text.
+      values.push(cell?.formula || cell?.display || "");
     }
     setFieldValues(values);
     setOriginalValues([...values]);
     setCurrentRecordIndex(index);
+    setJumpText(String(index + 1));
     setIsNewRecord(false);
     setIsDirty(false);
   }
@@ -282,22 +322,42 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
   // Navigation
   // ============================================================================
 
-  const handlePrevious = useCallback(async () => {
-    if (isDirty) await saveCurrentRecord();
-    if (currentRecordIndex > 0) {
-      await loadRecord(currentRecordIndex - 1);
-    }
-  }, [currentRecordIndex, isDirty, fieldValues, isNewRecord, currentEndRow]);
+  const goToRecord = useCallback(
+    async (index: number) => {
+      if (isDirty) await saveCurrentRecord();
+      const clamped = Math.max(0, Math.min(totalRecords - 1, index));
+      if (totalRecords > 0) await loadRecord(clamped);
+    },
+    // saveCurrentRecord/loadRecord close over the latest state via re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [totalRecords, isDirty, isNewRecord, fieldValues, currentEndRow, currentRecordIndex],
+  );
 
-  const handleNext = useCallback(async () => {
-    if (isDirty) await saveCurrentRecord();
-    if (currentRecordIndex < totalRecords - 1) {
-      await loadRecord(currentRecordIndex + 1);
+  const handlePrevious = useCallback(
+    () => goToRecord(currentRecordIndex - 1),
+    [goToRecord, currentRecordIndex],
+  );
+  const handleNext = useCallback(
+    () => goToRecord(currentRecordIndex + 1),
+    [goToRecord, currentRecordIndex],
+  );
+  const handleFirst = useCallback(() => goToRecord(0), [goToRecord]);
+  const handleLast = useCallback(
+    () => goToRecord(totalRecords - 1),
+    [goToRecord, totalRecords],
+  );
+
+  const commitJump = useCallback(async () => {
+    const n = parseInt(jumpText, 10);
+    if (!isNaN(n)) {
+      await goToRecord(n - 1); // jump box is 1-based
+    } else {
+      setJumpText(String(currentRecordIndex + 1));
     }
-  }, [currentRecordIndex, totalRecords, isDirty, fieldValues, isNewRecord, currentEndRow]);
+  }, [jumpText, goToRecord, currentRecordIndex]);
 
   // ============================================================================
-  // New Record
+  // New / Delete / Restore
   // ============================================================================
 
   const handleNew = useCallback(async () => {
@@ -306,11 +366,8 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
     setOriginalValues(new Array(colCount).fill(""));
     setIsNewRecord(true);
     setIsDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDirty, fieldValues, colCount, isNewRecord, currentEndRow]);
-
-  // ============================================================================
-  // Delete Record
-  // ============================================================================
 
   const handleDelete = useCallback(async () => {
     if (isNewRecord || totalRecords === 0) return;
@@ -337,7 +394,14 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
       // Same index, but row shifted up — reload
       await loadRecord(currentRecordIndex);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRecordIndex, totalRecords, isNewRecord, currentEndRow, colCount]);
+
+  // Revert unsaved edits to the current record (Excel "Restore").
+  const handleRestore = useCallback(() => {
+    setFieldValues([...originalValues]);
+    setIsDirty(false);
+  }, [originalValues]);
 
   // ============================================================================
   // Close
@@ -346,86 +410,145 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
   const handleClose = useCallback(async () => {
     if (isDirty) await saveCurrentRecord();
     onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDirty, fieldValues, isNewRecord, currentEndRow, onClose]);
 
   // ============================================================================
-  // Find (simple sequential search)
+  // Criteria search (Excel-style: AND across all non-empty criteria fields)
   // ============================================================================
+
+  const enterCriteria = useCallback(async () => {
+    if (isDirty) await saveCurrentRecord();
+    setMode("criteria");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDirty, fieldValues, isNewRecord, currentEndRow]);
+
+  const exitCriteria = useCallback(async () => {
+    setMode("form");
+    if (totalRecords > 0) await loadRecord(Math.min(currentRecordIndex, totalRecords - 1));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalRecords, currentRecordIndex]);
+
+  const clearCriteria = useCallback(() => {
+    setCriteria(new Array(colCount).fill(""));
+  }, [colCount]);
+
+  // A record matches when EVERY non-empty criterion is a substring of its field.
+  const recordMatchesCriteria = useCallback(
+    async (index: number): Promise<boolean> => {
+      const active = criteria
+        .map((c, i) => ({ i, term: c.trim().toLowerCase() }))
+        .filter((x) => x.term.length > 0);
+      if (active.length === 0) return true; // no criteria → every record matches
+      const row = firstDataRow + index;
+      for (const { i, term } of active) {
+        const cell = await getCell(row, startCol + i);
+        const val = (cell?.display || "").toLowerCase();
+        if (!val.includes(term)) return false;
+      }
+      return true;
+    },
+    [criteria, startCol, firstDataRow],
+  );
+
+  const findFrom = useCallback(
+    async (start: number, step: number) => {
+      for (let i = start; i >= 0 && i < totalRecords; i += step) {
+        if (await recordMatchesCriteria(i)) {
+          setMode("form");
+          await loadRecord(i);
+          return;
+        }
+      }
+      // No match: stay put (Excel beeps); leave criteria mode intact.
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [totalRecords, recordMatchesCriteria],
+  );
 
   const handleFindNext = useCallback(async () => {
-    if (isDirty) await saveCurrentRecord();
-    // Search forward from current position
-    for (let i = currentRecordIndex + 1; i < totalRecords; i++) {
-      const row = firstDataRow + i;
-      for (let c = startCol; c <= endCol; c++) {
-        const cell = await getCell(row, c);
-        const cellVal = cell?.display || "";
-        // Match against non-empty field values as criteria
-        const fieldIdx = c - startCol;
-        const criteria = fieldValues[fieldIdx];
-        if (
-          criteria &&
-          cellVal.toLowerCase().includes(criteria.toLowerCase())
-        ) {
-          await loadRecord(i);
-          return;
-        }
-      }
-    }
-  }, [currentRecordIndex, totalRecords, fieldValues, isDirty, isNewRecord, currentEndRow]);
+    if (mode !== "criteria" && isDirty) await saveCurrentRecord();
+    await findFrom(currentRecordIndex + 1, 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isDirty, findFrom, currentRecordIndex, fieldValues]);
 
   const handleFindPrev = useCallback(async () => {
-    if (isDirty) await saveCurrentRecord();
-    // Search backward from current position
-    for (let i = currentRecordIndex - 1; i >= 0; i--) {
-      const row = firstDataRow + i;
-      for (let c = startCol; c <= endCol; c++) {
-        const cell = await getCell(row, c);
-        const cellVal = cell?.display || "";
-        const fieldIdx = c - startCol;
-        const criteria = fieldValues[fieldIdx];
-        if (
-          criteria &&
-          cellVal.toLowerCase().includes(criteria.toLowerCase())
-        ) {
-          await loadRecord(i);
-          return;
-        }
-      }
-    }
-  }, [currentRecordIndex, fieldValues, isDirty, isNewRecord, currentEndRow]);
+    if (mode !== "criteria" && isDirty) await saveCurrentRecord();
+    await findFrom(currentRecordIndex - 1, -1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isDirty, findFrom, currentRecordIndex, fieldValues]);
 
   // ============================================================================
-  // Field change handler
+  // Field change handlers
   // ============================================================================
 
   function handleFieldChange(index: number, value: string): void {
+    if (mode === "criteria") {
+      const next = [...criteria];
+      next[index] = value;
+      setCriteria(next);
+      return;
+    }
     const newValues = [...fieldValues];
     newValues[index] = value;
     setFieldValues(newValues);
     setIsDirty(true);
   }
 
+  // Enter = next / Find Next; Shift+Enter = previous / Find Prev.
+  function handleFieldKeyDown(e: React.KeyboardEvent): void {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (mode === "criteria") {
+        if (e.shiftKey) handleFindPrev();
+        else handleFindNext();
+      } else if (e.shiftKey) {
+        handlePrevious();
+      } else {
+        handleNext();
+      }
+    }
+  }
+
   // ============================================================================
-  // Keyboard handlers
+  // Keyboard handlers (dialog-level: Escape, Ctrl+Home/End)
   // ============================================================================
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.stopPropagation();
-        // If dirty, revert instead of saving
-        if (isDirty && !isNewRecord) {
+        if (mode === "criteria") {
+          exitCriteria();
+        } else if (isDirty && !isNewRecord) {
+          // Revert instead of saving.
           setFieldValues([...originalValues]);
           setIsDirty(false);
         } else {
           onClose();
         }
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "Home") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (mode === "form") handleFirst();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "End") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (mode === "form") handleLast();
       }
     }
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [isDirty, isNewRecord, originalValues, onClose]);
+  }, [
+    mode,
+    isDirty,
+    isNewRecord,
+    originalValues,
+    onClose,
+    exitCriteria,
+    handleFirst,
+    handleLast,
+  ]);
 
   // Click outside to close
   const handleBackdropClick = useCallback(
@@ -456,13 +579,19 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
     );
   }
 
+  const isCriteria = mode === "criteria";
+  const shownValues = isCriteria ? criteria : fieldValues;
+  const noRecords = totalRecords === 0;
+
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
       <div ref={dialogRef} style={styles.dialog}>
         {/* Header */}
         <div style={styles.header}>
-          <span style={styles.title}>Data Form</span>
-          <button style={styles.closeBtn} onClick={handleClose}>
+          <span style={styles.title}>
+            Data Form{isCriteria ? " — Criteria" : ""}
+          </span>
+          <button style={styles.closeBtn} onClick={handleClose} title="Close">
             X
           </button>
         </div>
@@ -476,21 +605,47 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
               </label>
               <input
                 style={styles.fieldInput}
-                value={fieldValues[i] ?? ""}
+                value={shownValues[i] ?? ""}
+                placeholder={isCriteria ? "search…" : undefined}
                 onChange={(e) => handleFieldChange(i, e.target.value)}
+                onKeyDown={handleFieldKeyDown}
                 autoFocus={i === 0}
               />
             </div>
           ))}
 
-          {/* Record counter */}
-          {isNewRecord ? (
-            <div style={styles.newRecordBanner}>New Record</div>
+          {/* Status / record jump */}
+          {isCriteria ? (
+            <div style={{ ...styles.banner, color: v("--accent-primary") }}>
+              Enter criteria, then Find Next / Find Prev
+            </div>
+          ) : isNewRecord ? (
+            <div style={{ ...styles.banner, color: v("--accent-primary") }}>
+              New Record
+            </div>
           ) : (
             <div style={styles.recordInfo}>
-              {totalRecords > 0
-                ? `Record ${currentRecordIndex + 1} of ${totalRecords}`
-                : "No records"}
+              {noRecords ? (
+                "No records"
+              ) : (
+                <>
+                  <span>Record</span>
+                  <input
+                    style={styles.jumpInput}
+                    value={jumpText}
+                    onChange={(e) => setJumpText(e.target.value.replace(/[^0-9]/g, ""))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitJump();
+                      }
+                    }}
+                    onBlur={commitJump}
+                    aria-label="Jump to record"
+                  />
+                  <span>of {totalRecords}</span>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -498,78 +653,90 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
         {/* Footer - action buttons */}
         <div style={styles.footer}>
           <div style={styles.footerLeft}>
-            <button style={styles.btn} onClick={handleNew}>
-              New
-            </button>
+            {isCriteria ? (
+              <>
+                <button style={styles.btn} onClick={exitCriteria}>
+                  Form
+                </button>
+                <button style={styles.btn} onClick={clearCriteria}>
+                  Clear
+                </button>
+              </>
+            ) : (
+              <>
+                <button style={styles.btn} onClick={handleNew}>
+                  New
+                </button>
+                <button
+                  style={disabledStyle(styles.btnDanger, isNewRecord || noRecords)}
+                  onClick={handleDelete}
+                  disabled={isNewRecord || noRecords}
+                >
+                  Delete
+                </button>
+                <button
+                  style={disabledStyle(styles.btn, !isDirty)}
+                  onClick={handleRestore}
+                  disabled={!isDirty}
+                  title="Revert unsaved changes to this record"
+                >
+                  Restore
+                </button>
+                <button style={styles.btn} onClick={enterCriteria}>
+                  Criteria
+                </button>
+              </>
+            )}
             <button
-              style={{
-                ...styles.btnDanger,
-                opacity: isNewRecord || totalRecords === 0 ? 0.5 : 1,
-                cursor:
-                  isNewRecord || totalRecords === 0
-                    ? "not-allowed"
-                    : "pointer",
-              }}
-              onClick={handleDelete}
-              disabled={isNewRecord || totalRecords === 0}
-            >
-              Delete
-            </button>
-            <button
-              style={{
-                ...styles.btn,
-                opacity: totalRecords === 0 ? 0.5 : 1,
-                cursor: totalRecords === 0 ? "not-allowed" : "pointer",
-              }}
+              style={disabledStyle(styles.btn, noRecords)}
               onClick={handleFindPrev}
-              disabled={totalRecords === 0}
+              disabled={noRecords}
             >
               Find Prev
             </button>
             <button
-              style={{
-                ...styles.btn,
-                opacity: totalRecords === 0 ? 0.5 : 1,
-                cursor: totalRecords === 0 ? "not-allowed" : "pointer",
-              }}
+              style={disabledStyle(styles.btn, noRecords)}
               onClick={handleFindNext}
-              disabled={totalRecords === 0}
+              disabled={noRecords}
             >
               Find Next
             </button>
           </div>
           <div style={styles.footerRight}>
-            <button
-              style={{
-                ...styles.btn,
-                opacity: currentRecordIndex <= 0 || isNewRecord ? 0.5 : 1,
-                cursor:
-                  currentRecordIndex <= 0 || isNewRecord
-                    ? "not-allowed"
-                    : "pointer",
-              }}
-              onClick={handlePrevious}
-              disabled={currentRecordIndex <= 0 || isNewRecord}
-            >
-              Previous
-            </button>
-            <button
-              style={{
-                ...styles.btn,
-                opacity:
-                  currentRecordIndex >= totalRecords - 1 || isNewRecord
-                    ? 0.5
-                    : 1,
-                cursor:
-                  currentRecordIndex >= totalRecords - 1 || isNewRecord
-                    ? "not-allowed"
-                    : "pointer",
-              }}
-              onClick={handleNext}
-              disabled={currentRecordIndex >= totalRecords - 1 || isNewRecord}
-            >
-              Next
-            </button>
+            {!isCriteria && (
+              <>
+                <button
+                  style={disabledStyle(styles.btn, currentRecordIndex <= 0 || isNewRecord || noRecords)}
+                  onClick={handleFirst}
+                  disabled={currentRecordIndex <= 0 || isNewRecord || noRecords}
+                  title="First record (Ctrl+Home)"
+                >
+                  First
+                </button>
+                <button
+                  style={disabledStyle(styles.btn, currentRecordIndex <= 0 || isNewRecord)}
+                  onClick={handlePrevious}
+                  disabled={currentRecordIndex <= 0 || isNewRecord}
+                >
+                  Previous
+                </button>
+                <button
+                  style={disabledStyle(styles.btn, currentRecordIndex >= totalRecords - 1 || isNewRecord)}
+                  onClick={handleNext}
+                  disabled={currentRecordIndex >= totalRecords - 1 || isNewRecord}
+                >
+                  Next
+                </button>
+                <button
+                  style={disabledStyle(styles.btn, currentRecordIndex >= totalRecords - 1 || isNewRecord || noRecords)}
+                  onClick={handleLast}
+                  disabled={currentRecordIndex >= totalRecords - 1 || isNewRecord || noRecords}
+                  title="Last record (Ctrl+End)"
+                >
+                  Last
+                </button>
+              </>
+            )}
             <button style={styles.btnPrimary} onClick={handleClose}>
               Close
             </button>

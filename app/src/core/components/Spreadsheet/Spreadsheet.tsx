@@ -125,7 +125,7 @@ function SpreadsheetContent({
   } = state;
 
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
-  const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings } = gridState;
+  const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle } = gridState;
 
   // -------------------------------------------------------------------------
   // Split bar drag state
@@ -1269,6 +1269,7 @@ function SpreadsheetContent({
             displayZeros={displayZeros}
             displayGridlines={displayGridlines}
             displayHeadings={displayHeadings}
+            referenceStyle={referenceStyle}
             currentSheetName={gridState.sheetContext.activeSheetName}
             zoom={gridState.zoom}
           />

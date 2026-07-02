@@ -11,6 +11,7 @@ import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtect
 import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition, setChartSeriesRefMode } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
+import { formulaA1ToR1C1 } from "../../core/lib/r1c1";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../api/formulaAutocomplete";
 import { AppEvents } from "../../api/events";
@@ -83,7 +84,12 @@ export function FormulaInput(): React.ReactElement {
             // Non-origin spill cell: show the origin cell's formula in grey
             const originCell = await getCell(spillOrigin.row, spillOrigin.col);
             const formula = originCell?.formula || "";
-            setDisplayValue(formula);
+            // Show in R1C1 (relative to the origin cell) when that style is active.
+            setDisplayValue(
+              state.referenceStyle === "R1C1" && formula.startsWith("=")
+                ? formulaA1ToR1C1(formula, spillOrigin.row, spillOrigin.col)
+                : formula,
+            );
             setIsSpillRef(true);
             if (formula && formula.startsWith("=")) {
               const refs = parseFormulaReferences(formula, true);
@@ -112,7 +118,13 @@ export function FormulaInput(): React.ReactElement {
                 }
               }
 
-              setDisplayValue(content);
+              // Show the formula in R1C1 notation when that reference style is
+              // active; the A1 form (content) still drives reference highlighting.
+              setDisplayValue(
+                state.referenceStyle === "R1C1" && content.startsWith("=")
+                  ? formulaA1ToR1C1(content, cellRow, cellCol)
+                  : content,
+              );
 
               // FIX: Parse formula references for passive highlighting when selecting a formula cell
               if (content && content.startsWith("=")) {
@@ -136,7 +148,7 @@ export function FormulaInput(): React.ReactElement {
 
       fetchCellContent();
     }
-  }, [editing, state.selection, dispatch, chartSeriesFormula]);
+  }, [editing, state.selection, state.referenceStyle, dispatch, chartSeriesFormula]);
 
   // Listen for chart selection changes to show SERIES formula
   useEffect(() => {

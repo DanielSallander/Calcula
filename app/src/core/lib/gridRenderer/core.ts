@@ -21,6 +21,7 @@ import type {
 } from "../../../core/types";
 import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
+import { formulaA1ToR1C1 } from "../r1c1";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
 import { drawCellText } from "./rendering/cells";
@@ -377,8 +378,11 @@ function drawCellTextZone(
       const cell = cells.get(key);
       
       // In Show Formulas mode, use "=formula" for formula cells
+      // (converted to R1C1 notation when that reference style is active).
       let cellDisplayText = (state.showFormulas && cell?.formula)
-        ? cell.formula
+        ? (state.referenceStyle === "R1C1"
+            ? formulaA1ToR1C1(cell.formula, row, col)
+            : cell.formula)
         : cell?.display ?? "";
 
       // In Display Zeros = false mode, hide zero values for non-formula cells
@@ -572,6 +576,8 @@ export function renderGrid(
   displayGridlines?: boolean,
   // Display Headings mode - when false, row/column headers are not drawn
   displayHeadings?: boolean,
+  // Reference style - "R1C1" renders formulas (and headers) in R1C1 notation
+  referenceStyle?: "A1" | "R1C1",
 ): void {
   // When headings are hidden, collapse header dimensions to 0
   // so the cell area expands to fill the full canvas
@@ -640,6 +646,8 @@ export function renderGrid(
     displayGridlines: displayGridlines !== undefined ? displayGridlines : true,
     // Display Headings mode
     displayHeadings: displayHeadings !== undefined ? displayHeadings : true,
+    // Reference style (A1 default) — drives R1C1 headers + formula display
+    referenceStyle: referenceStyle || "A1",
   };
 
   ctx.fillStyle = theme.cellBackground;
@@ -1058,7 +1066,7 @@ function parseHeaderFooter(format: string): { left: string; center: string; righ
     if (section.toUpperCase() === "R") { currentSection = "right"; continue; }
 
     // Replace format codes with display values
-    let text = section
+    const text = section
       .replace(/&P/gi, "1")
       .replace(/&N/gi, "1")
       .replace(/&D/gi, new Date().toLocaleDateString())

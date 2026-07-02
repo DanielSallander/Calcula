@@ -33,6 +33,7 @@ import {
   setColumnWidth,
 } from "../../core/state/gridActions";
 import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo, updateCellOnSheets } from "../lib/tauri-api";
+import { formulaA1ToR1C1, formulaR1C1ToA1 } from "../lib/r1c1";
 import { isSheetGroupingActive, getGroupedSheetIndices } from "../state/sheetGrouping";
 import { cellEvents, cellToChange } from "../lib/cellEvents";
 import { emitAppEvent, AppEvents } from "../lib/events";
@@ -839,7 +840,7 @@ export function useEditing(): UseEditingReturn {
       
       // Determine the initial value to use
       let value = initialValue ?? "";
-      
+
       if (initialValue === undefined) {
         try {
           const cellData = await getCell(editRow, editCol);
@@ -848,7 +849,18 @@ export function useEditing(): UseEditingReturn {
           console.error("Failed to get cell data:", error);
         }
       }
-      
+
+      // Reference highlighting always parses the A1 form; capture it before any
+      // R1C1 display swap below.
+      const a1Value = value;
+
+      // In R1C1 mode, edit an existing formula in R1C1 notation (commitEdit
+      // converts it back to A1 before writing). Fresh input started by typing
+      // (initialValue provided) is already in the active style, so leave it.
+      if (initialValue === undefined && state.referenceStyle === "R1C1" && value.startsWith("=")) {
+        value = formulaA1ToR1C1(value, editRow, editCol);
+      }
+
       // FIX: Update global editing value and cursor position synchronously for formula mode detection
       setGlobalEditingValue(value);
       globalCursorPosition = value.length; // Cursor starts at end of value
@@ -856,8 +868,8 @@ export function useEditing(): UseEditingReturn {
       // FIX: Clear old references, then re-parse from the formula being edited.
       // This replaces the passive (faint) selection highlights with active (full) edit highlights.
       dispatch(clearFormulaReferences());
-      if (value.startsWith("=")) {
-        const refs = parseFormulaReferences(value, false);
+      if (a1Value.startsWith("=")) {
+        const refs = parseFormulaReferences(a1Value, false);
         if (refs.length > 0) {
           dispatch(setFormulaReferences(refs));
         }
@@ -882,7 +894,7 @@ export function useEditing(): UseEditingReturn {
         sheetIndex: sheetContext.activeSheetIndex,
       });
     },
-    [dispatch, sheetContext]
+    [dispatch, sheetContext, state.referenceStyle]
   );
 
   /**
@@ -1415,7 +1427,14 @@ export function useEditing(): UseEditingReturn {
       const perfT2GetOldCell = performance.now();
 
       // Smart formula completion - auto-close parentheses, etc.
-      const valueToCommit = autoCompleteFormula(editing.value);
+      let valueToCommit = autoCompleteFormula(editing.value);
+
+      // In R1C1 mode the editor holds R1C1 notation — convert it back to A1
+      // (the canonical stored form) before writing, relative to the edited cell.
+      // A1 refs already present (e.g. inserted by clicking) pass through unchanged.
+      if (state.referenceStyle === "R1C1" && valueToCommit.startsWith("=")) {
+        valueToCommit = formulaR1C1ToA1(valueToCommit, editing.row, editing.col);
+      }
 
       // === COMMIT GUARD CHECK ===
       // Extensions (e.g., Data Validation) can register guards that validate
@@ -1586,7 +1605,7 @@ export function useEditing(): UseEditingReturn {
       // FIX: Clear the ref guard
       commitInProgressRef.current = false;
     }
-  }, [editing, dispatch, sheetContext]);
+  }, [editing, dispatch, sheetContext, state.referenceStyle]);
 
   /**
    * Cancel the current edit without saving.

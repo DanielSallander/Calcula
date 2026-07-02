@@ -60,6 +60,8 @@ export interface GridCanvasProps {
   displayGridlines?: boolean;
   /** Whether to display row/column headings (when false, headers are hidden) */
   displayHeadings?: boolean;
+  /** Reference style — "R1C1" renders formulas/headers in R1C1 notation */
+  referenceStyle?: "A1" | "R1C1";
   /** Optional theme override */
   theme?: GridTheme;
   /** Callback when canvas is clicked */
@@ -183,6 +185,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       displayZeros = true,
       displayGridlines = true,
       displayHeadings = true,
+      referenceStyle = "A1",
       theme = DEFAULT_THEME,
       onMouseDown,
       onMouseMove,
@@ -521,13 +524,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         displayZeros,
         displayGridlines,
         displayHeadings,
+        referenceStyle,
       );
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

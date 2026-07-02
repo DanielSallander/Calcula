@@ -6,6 +6,7 @@
 
 import type { RenderState } from "../types";
 import type { RichTextRun, AccountingLayout, UnderlineStyle } from "../../../types";
+import { formulaA1ToR1C1 } from "../../r1c1";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { getStyleFromCache, isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../styles/styleUtils";
@@ -587,9 +588,12 @@ export function drawCellText(state: RenderState): void {
       }
 
       // In Show Formulas mode, display "=formula" for formula cells
+      // (converted to R1C1 notation when that reference style is active).
       const rawDisplay = cell.display ?? "";
       let displayValue = (state.showFormulas && cell.formula)
-        ? cell.formula
+        ? (state.referenceStyle === "R1C1"
+            ? formulaA1ToR1C1(cell.formula, row, col)
+            : cell.formula)
         : rawDisplay;
 
       // In Display Zeros = false mode, hide zero values for non-formula cells
