@@ -403,6 +403,21 @@ export type {
   CalculatedMeasure,
 } from "./backend";
 
+// BI Model Editor (in-app model authoring — ME-1: measures)
+export {
+  biModelGetMeasures,
+  biModelValidateMeasure,
+  biModelUpsertMeasure,
+  biModelDeleteMeasure,
+  biModelMeasureLineage,
+} from "./backend";
+export type {
+  ModelMeasureInfo,
+  MeasureValidation,
+  MeasureLineage,
+  MeasureLineageColumn,
+} from "./backend";
+
 // ============================================================================
 // JSON View (generic object inspection/editing)
 // ============================================================================

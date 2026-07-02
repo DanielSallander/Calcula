@@ -10,6 +10,7 @@ import {
   columnToLetter,
   getPivotStoreService,
   DialogExtensions,
+  onAppEvent,
 } from "@api";
 import { pivot } from "@api/pivot";
 import type { BiPivotModelInfo } from "@api/pivot";
@@ -252,6 +253,13 @@ export function ConnectionsPane(
   // Load connections on mount
   useEffect(() => {
     loadConnections();
+  }, [loadConnections]);
+
+  // The Model Editor edits measures in place — refresh table/measure counts
+  // when it announces a change.
+  useEffect(() => {
+    const off = onAppEvent("bi:model-changed", () => void loadConnections());
+    return off;
   }, [loadConnections]);
 
   const handleAddConnection = useCallback(() => {

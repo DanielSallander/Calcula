@@ -3511,6 +3511,111 @@ export async function biCreateConnection(
   return invoke<ConnectionInfo>("bi_create_connection", { request });
 }
 
+// ---------------------------------------------------------------------------
+// Model Editor (ME-1: measures)
+// ---------------------------------------------------------------------------
+
+/** One measure of a connection's base model, as shown in the Model Editor. */
+export interface ModelMeasureInfo {
+  name: string;
+  /** The measure's home (fact) table, inferred from referenced columns. */
+  table: string;
+  /** Author's original formula text, or an AST rendering when hasSource=false. */
+  formula: string;
+  hasSource: boolean;
+  description: string | null;
+  formatString: string | null;
+  isHidden: boolean;
+}
+
+/** Dry-run validation result for the measure editor. */
+export interface MeasureValidation {
+  ok: boolean;
+  message: string | null;
+  /** Byte offset into the formula for parse errors (editor marker). */
+  position: number | null;
+}
+
+export interface MeasureLineageColumn {
+  table: string;
+  column: string;
+}
+
+/** What a measure references, and what references it. */
+export interface MeasureLineage {
+  measures: string[];
+  columns: MeasureLineageColumn[];
+  contexts: string[];
+  tableVariables: string[];
+  globals: string[];
+  referencedBy: string[];
+}
+
+/** List the measures of a connection's base model. */
+export async function biModelGetMeasures(
+  connectionId: string,
+): Promise<ModelMeasureInfo[]> {
+  return invoke<ModelMeasureInfo[]>("bi_model_get_measures", { connectionId });
+}
+
+/** Validate a measure edit without applying it (positioned parse errors). */
+export async function biModelValidateMeasure(
+  connectionId: string,
+  name: string,
+  formula: string,
+  originalName?: string | null,
+): Promise<MeasureValidation> {
+  return invoke<MeasureValidation>("bi_model_validate_measure", {
+    connectionId,
+    originalName: originalName ?? null,
+    name,
+    formula,
+  });
+}
+
+/** Add (originalName omitted) or update/rename a model measure. Returns the
+ * updated measure list. The edit is installed on the shared engine and
+ * persists with the workbook's embedded model. */
+export async function biModelUpsertMeasure(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  formula: string;
+  description?: string | null;
+  formatString?: string | null;
+}): Promise<ModelMeasureInfo[]> {
+  return invoke<ModelMeasureInfo[]>("bi_model_upsert_measure", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    formula: params.formula,
+    description: params.description ?? null,
+    formatString: params.formatString ?? null,
+  });
+}
+
+/** Delete a model measure (refused while other measures reference it). */
+export async function biModelDeleteMeasure(
+  connectionId: string,
+  name: string,
+): Promise<ModelMeasureInfo[]> {
+  return invoke<ModelMeasureInfo[]>("bi_model_delete_measure", {
+    connectionId,
+    name,
+  });
+}
+
+/** Lineage for one measure: dependencies + measures that depend on it. */
+export async function biModelMeasureLineage(
+  connectionId: string,
+  name: string,
+): Promise<MeasureLineage> {
+  return invoke<MeasureLineage>("bi_model_measure_lineage", {
+    connectionId,
+    name,
+  });
+}
+
 /** Delete a connection by ID. */
 export async function biDeleteConnection(
   connectionId: string,

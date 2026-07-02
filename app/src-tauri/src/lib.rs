@@ -4021,6 +4021,11 @@ pub fn run() {
             bi::cube::cube_udf_members,
             bi::measures::bi_get_calculated_measures,
             bi::measures::bi_set_calculated_measures,
+            bi::model_editor::bi_model_get_measures,
+            bi::model_editor::bi_model_validate_measure,
+            bi::model_editor::bi_model_upsert_measure,
+            bi::model_editor::bi_model_delete_measure,
+            bi::model_editor::bi_model_measure_lineage,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,

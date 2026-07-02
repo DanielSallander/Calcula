@@ -151,7 +151,7 @@ pub async fn bi_set_calculated_measures(
         }
     }
 
-    let (engine_arc, base, model_key) = {
+    let engine_arc = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
         // Package (.calp-subscribed) connections reconstruct from the package on
@@ -164,12 +164,22 @@ pub async fn bi_set_calculated_measures(
                     .to_string(),
             );
         }
-        let engine_arc = conn.engine.clone().ok_or("No model loaded for this connection")?;
+        conn.engine.clone().ok_or("No model loaded for this connection")?
+    };
+
+    // The engine lock is the serialization point for every model writer
+    // (Model Editor edits, this command, dataset refresh). Snapshot the base
+    // UNDER it — a Model Editor upsert parked ahead of us may change it —
+    // then validate, mirror, and install atomically.
+    let mut guard = engine_arc.lock().await;
+    let (base, model_key) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
         let base = conn
             .base_model
             .clone()
             .ok_or("This connection has no editable base model")?;
-        (engine_arc, base, conn.model_key.clone())
+        (base, conn.model_key.clone())
     };
 
     // Validate the complete set against the base BEFORE mutating any state.
@@ -186,7 +196,6 @@ pub async fn bi_set_calculated_measures(
             }
         }
     }
-    let mut guard = engine_arc.lock().await;
     guard.set_model(combined).map_err(|e| format!("{}", e))
 }
 

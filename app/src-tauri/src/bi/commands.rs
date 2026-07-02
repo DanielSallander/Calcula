@@ -1344,19 +1344,23 @@ pub async fn bi_create_connection(
     // model path when file-created; path-less connections have no persisted
     // role yet — their role key is minted at save via the "local:{id}" key).
     let active_role = bi_state.pending_role_for(None, model_path.as_deref());
-    // Calculated measures belong to the MODEL. When reusing a shared engine that
-    // already has them baked in, inherit the set from a sibling so this
-    // connection knows about them (for the dialog + persistence). No re-apply
-    // needed — the engine already carries them.
-    let seed_measures: Vec<crate::bi::types::CalculatedMeasure> = if was_existing {
+    // Calculated measures AND the base model belong to the MODEL. When reusing
+    // a shared engine, inherit BOTH from a sibling connection: the sibling's
+    // base_model may carry in-app Model Editor edits that the on-disk file
+    // does not — re-reading the file here would resurrect the stale model and
+    // (via the editor's model-wide mirroring) silently destroy those edits.
+    let (seed_measures, sibling_base): (
+        Vec<crate::bi::types::CalculatedMeasure>,
+        Option<bi_engine::DataModel>,
+    ) = if was_existing {
         let conns = bi_state.connections.lock().unwrap();
         conns
             .values()
             .find(|c| c.model_key.as_ref() == Some(&model_key))
-            .map(|c| c.calculated_measures.clone())
+            .map(|c| (c.calculated_measures.clone(), c.base_model.clone()))
             .unwrap_or_default()
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     let connection = Connection {
         id,
@@ -1378,7 +1382,9 @@ pub async fn bi_create_connection(
         active_queries: std::collections::HashMap::new(),
         package_data_source_id: None,
         active_role,
-        base_model: Some(base_model),
+        // Sibling base first (carries in-app model edits); the freshly-parsed
+        // file model only seeds the FIRST connection for a model.
+        base_model: sibling_base.or(Some(base_model)),
         calculated_measures: seed_measures,
     };
 
