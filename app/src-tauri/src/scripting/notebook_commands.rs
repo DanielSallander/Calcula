@@ -102,30 +102,24 @@ pub fn notebook_list(
 
 /// Delete a notebook by ID. Also clears any active runtime for it.
 #[tauri::command]
-pub fn notebook_delete(
-    script_state: State<ScriptState>,
+pub async fn notebook_delete(
+    script_state: State<'_, ScriptState>,
     id: String,
 ) -> Result<(), String> {
-    let mut notebooks = script_state
-        .workbook_notebooks
-        .lock()
-        .map_err(|e| e.to_string())?;
+    // Don't delete out from under a running execution.
+    let _exec = script_state.notebook_exec_lock.lock().await;
 
-    if notebooks.remove(&id).is_none() {
-        return Err(format!("Notebook '{}' not found", id));
+    {
+        let mut notebooks = script_state
+            .workbook_notebooks
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if notebooks.remove(&id).is_none() {
+            return Err(format!("Notebook '{}' not found", id));
+        }
     }
 
-    // Clear runtime if it was active for this notebook
-    let mut runtime = script_state
-        .notebook_runtime
-        .lock()
-        .map_err(|e| e.to_string())?;
-    runtime.session.0 = None;
-    runtime.checkpoints.clear();
-    runtime.baseline = None;
-    runtime.execution_counter = 0;
-
-    Ok(())
+    reset_runtime_internal(&script_state).await
 }
 
 // ============================================================================
@@ -134,7 +128,13 @@ pub fn notebook_delete(
 
 /// Internal helper that runs a single notebook cell.
 /// Separated from the Tauri command so it can be called from run_all/rewind/run_from.
-fn run_cell_internal(
+///
+/// Callers (the command wrappers) hold `notebook_exec_lock` for the whole
+/// orchestration; this helper itself must NOT take it (run_all/rewind call it
+/// in a loop under one guard). Structured in three phases so no std
+/// MutexGuard is ever held across an await point.
+async fn run_cell_internal(
+    app: &tauri::AppHandle,
     app_state: &AppState,
     script_state: &ScriptState,
     notebook_id: &str,
@@ -144,61 +144,67 @@ fn run_cell_internal(
     // Notebook cells are script execution — same security gate as run_script.
     super::commands::check_script_security(script_state)?;
 
-    // 1. Clone current AppState data
+    // Phase 1 (sync): clone AppState data + checkpoint bookkeeping
     let grids = app_state.grids.lock().map_err(|e| e.to_string())?.clone();
     let style_registry = app_state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = app_state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *app_state.active_sheet.lock().map_err(|e| e.to_string())?;
 
-    let mut runtime = script_state
-        .notebook_runtime
-        .lock()
-        .map_err(|e| e.to_string())?;
+    {
+        let mut runtime = script_state
+            .notebook_runtime
+            .lock()
+            .map_err(|e| e.to_string())?;
 
-    // 2. Capture baseline if this is the first cell execution
-    if runtime.baseline.is_none() {
-        runtime.baseline = Some(grids.clone());
-    }
+        // Capture baseline if this is the first cell execution
+        if runtime.baseline.is_none() {
+            runtime.baseline = Some(grids.clone());
+        }
 
-    // 3. Ensure a NotebookSession exists
-    if runtime.session.0.is_none() {
-        let session = script_engine::NotebookSession::new(
-            grids.clone(),
-            style_registry.clone(),
-            sheet_names.clone(),
+        // Capture checkpoint (snapshot before this cell runs)
+        let checkpoint = GridCheckpoint {
+            cell_id: cell_id.to_string(),
+            grids: grids.clone(),
+        };
+
+        // Enforce max checkpoints (LRU: remove oldest)
+        if runtime.checkpoints.len() >= runtime.max_checkpoints {
+            runtime.checkpoints.remove(0);
+        }
+        runtime.checkpoints.push(checkpoint);
+    } // runtime guard dropped before the await below
+
+    // Phase 2 (async): execute on the dedicated executor thread, which owns
+    // the persistent QuickJS session (creates it on first use). The UI stays
+    // responsive while a long cell runs. The provider seed enables the
+    // read-only model.* API (capability-gated per call, keyed by the surface
+    // id); the tokio Handle lets the provider drive async BI calls from the
+    // executor thread.
+    let (result, modified_grids) = script_state
+        .notebook_executor
+        .run_cell(
+            source.to_string(),
+            grids,
+            style_registry,
+            sheet_names,
             active_sheet,
-        )?;
-        runtime.session.0 = Some(session);
-    }
+            format!("notebook:{}", notebook_id),
+            Some(super::notebook_executor::ProviderSeed {
+                app: app.clone(),
+                rt: tokio::runtime::Handle::current(),
+            }),
+        )
+        .await?;
 
-    // 4. Capture checkpoint (snapshot before this cell runs)
-    let checkpoint = GridCheckpoint {
-        cell_id: cell_id.to_string(),
-        grids: grids.clone(),
+    // Phase 3 (sync): execution index, grid apply, audit, document update
+    let execution_index = {
+        let mut runtime = script_state
+            .notebook_runtime
+            .lock()
+            .map_err(|e| e.to_string())?;
+        runtime.execution_counter += 1;
+        runtime.execution_counter
     };
-
-    // Enforce max checkpoints (LRU: remove oldest)
-    if runtime.checkpoints.len() >= runtime.max_checkpoints {
-        runtime.checkpoints.remove(0);
-    }
-    runtime.checkpoints.push(checkpoint);
-
-    // 5. Execute the cell in the persistent runtime
-    let session = runtime.session.0.as_ref().unwrap();
-    let (result, modified_grids) = session.run_cell(
-        source,
-        grids,
-        style_registry,
-        sheet_names,
-        active_sheet,
-    );
-
-    // 6. Increment execution counter
-    runtime.execution_counter += 1;
-    let execution_index = runtime.execution_counter;
-
-    // Must drop runtime lock before acquiring other locks
-    drop(runtime);
 
     // 7. Apply modified grids back to AppState (if cells were modified)
     match &result {
@@ -289,16 +295,19 @@ fn run_cell_internal(
     }
 }
 
-/// Internal helper to reset the notebook runtime.
-fn reset_runtime_internal(script_state: &ScriptState) -> Result<(), String> {
-    let mut runtime = script_state
-        .notebook_runtime
-        .lock()
-        .map_err(|e| e.to_string())?;
-    runtime.session.0 = None;
-    runtime.checkpoints.clear();
-    runtime.baseline = None;
-    runtime.execution_counter = 0;
+/// Internal helper to reset the notebook runtime (session + bookkeeping).
+/// Callers must hold `notebook_exec_lock`.
+async fn reset_runtime_internal(script_state: &ScriptState) -> Result<(), String> {
+    {
+        let mut runtime = script_state
+            .notebook_runtime
+            .lock()
+            .map_err(|e| e.to_string())?;
+        runtime.checkpoints.clear();
+        runtime.baseline = None;
+        runtime.execution_counter = 0;
+    } // guard dropped before the await
+    script_state.notebook_executor.reset().await;
     Ok(())
 }
 
@@ -314,28 +323,32 @@ fn reset_runtime_internal(script_state: &ScriptState) -> Result<(), String> {
 /// 4. Applies modified grids back to AppState
 /// 5. Returns the execution result
 #[tauri::command]
-pub fn notebook_run_cell(
-    state: State<AppState>,
-    script_state: State<ScriptState>,
+pub async fn notebook_run_cell(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    script_state: State<'_, ScriptState>,
     request: RunNotebookCellRequest,
     window: tauri::Window,
 ) -> Result<NotebookCellResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    run_cell_internal(&state, &script_state, &request.notebook_id, &request.cell_id, &request.source)
+    let _exec = script_state.notebook_exec_lock.lock().await;
+    run_cell_internal(&app, &state, &script_state, &request.notebook_id, &request.cell_id, &request.source).await
 }
 
 /// Run all notebook cells sequentially from the top.
 /// Resets the runtime and baseline, then executes each cell in order.
 #[tauri::command]
-pub fn notebook_run_all(
-    state: State<AppState>,
-    script_state: State<ScriptState>,
+pub async fn notebook_run_all(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    script_state: State<'_, ScriptState>,
     notebook_id: String,
     window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let _exec = script_state.notebook_exec_lock.lock().await;
     // Reset the runtime first
-    reset_runtime_internal(&script_state)?;
+    reset_runtime_internal(&script_state).await?;
 
     // Get the cell sources from the notebook
     let cell_sources: Vec<(String, String)> = {
@@ -356,7 +369,7 @@ pub fn notebook_run_all(
     let mut results = Vec::new();
 
     for (cell_id, source) in cell_sources {
-        let response = run_cell_internal(&state, &script_state, &notebook_id, &cell_id, &source)?;
+        let response = run_cell_internal(&app, &state, &script_state, &notebook_id, &cell_id, &source).await?;
 
         // Stop on error
         let is_error = matches!(&response, NotebookCellResponse::Error { .. });
@@ -377,18 +390,22 @@ pub fn notebook_run_all(
 /// 4. Replays all cells before the target to rebuild JS variable state
 /// 5. Marks the target cell and all subsequent cells as stale
 #[tauri::command]
-pub fn notebook_rewind(
-    state: State<AppState>,
-    script_state: State<ScriptState>,
+pub async fn notebook_rewind(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    script_state: State<'_, ScriptState>,
     request: RewindNotebookRequest,
     window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    notebook_rewind_internal(&state, &script_state, &request)
+    let _exec = script_state.notebook_exec_lock.lock().await;
+    notebook_rewind_internal(&app, &state, &script_state, &request).await
 }
 
 /// Internal rewind implementation (callable from other commands).
-fn notebook_rewind_internal(
+/// Callers must hold `notebook_exec_lock`.
+async fn notebook_rewind_internal(
+    app: &tauri::AppHandle,
     app_state: &AppState,
     script_state: &ScriptState,
     request: &RewindNotebookRequest,
@@ -451,16 +468,18 @@ fn notebook_rewind_internal(
         }
     }
 
-    // 3. Reset the runtime and clear checkpoints
+    // 3. Reset the runtime (drop the JS session) and clear checkpoints.
+    // Baseline is deliberately kept: it still describes the state before the
+    // first cell of this notebook ran.
     {
         let mut runtime = script_state
             .notebook_runtime
             .lock()
             .map_err(|e| e.to_string())?;
-        runtime.session.0 = None;
         runtime.checkpoints.clear();
         runtime.execution_counter = 0;
-    }
+    } // guard dropped before the await
+    script_state.notebook_executor.reset().await;
 
     // 4. Mark target and subsequent cells as stale in the notebook document
     {
@@ -489,12 +508,14 @@ fn notebook_rewind_internal(
     let mut replay_results = Vec::new();
     for (cell_id, source) in cells_before_target {
         let response = run_cell_internal(
+            app,
             app_state,
             script_state,
             &request.notebook_id,
             &cell_id,
             &source,
-        )?;
+        )
+        .await?;
         let is_error = matches!(&response, NotebookCellResponse::Error { .. });
         replay_results.push(response);
         if is_error {
@@ -507,15 +528,17 @@ fn notebook_rewind_internal(
 
 /// Run from a specific cell onwards (rewind to that cell, then run it and all after).
 #[tauri::command]
-pub fn notebook_run_from(
-    state: State<AppState>,
-    script_state: State<ScriptState>,
+pub async fn notebook_run_from(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    script_state: State<'_, ScriptState>,
     request: RewindNotebookRequest,
     window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let _exec = script_state.notebook_exec_lock.lock().await;
     // 1. Rewind to the target cell (restores snapshot + replays prior cells)
-    let replay_results = notebook_rewind_internal(&state, &script_state, &request)?;
+    let replay_results = notebook_rewind_internal(&app, &state, &script_state, &request).await?;
 
     // Check if replay had errors
     if replay_results
@@ -551,12 +574,14 @@ pub fn notebook_run_from(
     let mut all_results = replay_results;
     for (cell_id, source) in cells_from_target {
         let response = run_cell_internal(
+            &app,
             &state,
             &script_state,
             &request.notebook_id,
             &cell_id,
             &source,
-        )?;
+        )
+        .await?;
         let is_error = matches!(&response, NotebookCellResponse::Error { .. });
         all_results.push(response);
         if is_error {
@@ -570,10 +595,11 @@ pub fn notebook_run_from(
 /// Reset the notebook runtime — destroys the QuickJS session and clears
 /// all checkpoints. Called when switching notebooks or closing the notebook view.
 #[tauri::command]
-pub fn notebook_reset_runtime(
-    script_state: State<ScriptState>,
+pub async fn notebook_reset_runtime(
+    script_state: State<'_, ScriptState>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    reset_runtime_internal(&script_state)
+    let _exec = script_state.notebook_exec_lock.lock().await;
+    reset_runtime_internal(&script_state).await
 }

@@ -12,11 +12,25 @@ export interface NotebookDocument {
   sourcePackage?: string;
 }
 
+/** A structured output item from cell execution (mirrors Rust ScriptOutputItem). */
+export type NotebookOutputItem =
+  | { kind: "text"; text: string }
+  | {
+      kind: "table";
+      /** Column headers; empty = render without a header row. */
+      columns: string[];
+      rows: string[][];
+      /** True when rows were dropped to fit the per-item row cap. */
+      truncated: boolean;
+      /** Row count before truncation. */
+      totalRows: number;
+    };
+
 /** A single cell in a notebook. */
 export interface NotebookCell {
   id: string;
   source: string;
-  lastOutput: string[];
+  lastOutput: NotebookOutputItem[];
   lastError: string | null;
   cellsModified: number;
   durationMs: number;
@@ -53,7 +67,7 @@ export type DeferredAction =
 export type NotebookCellResponse =
   | {
       type: "success";
-      output: string[];
+      output: NotebookOutputItem[];
       cellsModified: number;
       durationMs: number;
       executionIndex: number;
@@ -67,5 +81,5 @@ export type NotebookCellResponse =
   | {
       type: "error";
       message: string;
-      output: string[];
+      output: NotebookOutputItem[];
     };

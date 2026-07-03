@@ -1002,7 +1002,7 @@ async fn resolve_set_binding(
 // BI engine plumbing
 // ===========================================================================
 
-fn conn_id_by_name(bi: &BiState, name: &str) -> Option<ConnectionId> {
+pub(crate) fn conn_id_by_name(bi: &BiState, name: &str) -> Option<ConnectionId> {
     let conns = bi.connections.lock().unwrap();
     if let Some(c) = conns.values().find(|c| c.name == name) {
         return Some(c.id.clone());

@@ -2573,6 +2573,58 @@ pub(crate) fn collect_scripts_for_save(
         .collect()
 }
 
+/// Cap for table rows persisted into .cala. Outputs are a replayable cache
+/// (Run All regenerates them); persisting full result tables would bloat the
+/// workbook file for no benefit.
+const PERSISTED_TABLE_ROW_CAP: usize = 50;
+
+/// Convert a live output item to its persistence mirror, capping table rows.
+pub(crate) fn output_item_to_saved(
+    item: &script_engine::ScriptOutputItem,
+) -> persistence::SavedNotebookOutputItem {
+    match item {
+        script_engine::ScriptOutputItem::Text { text } => {
+            persistence::SavedNotebookOutputItem::Text { text: text.clone() }
+        }
+        script_engine::ScriptOutputItem::Table {
+            columns,
+            rows,
+            truncated,
+            total_rows,
+        } => {
+            let capped = rows.len() > PERSISTED_TABLE_ROW_CAP;
+            persistence::SavedNotebookOutputItem::Table {
+                columns: columns.clone(),
+                rows: rows.iter().take(PERSISTED_TABLE_ROW_CAP).cloned().collect(),
+                truncated: *truncated || capped,
+                total_rows: *total_rows,
+            }
+        }
+    }
+}
+
+/// Convert a persisted output item back to the live shape.
+pub(crate) fn saved_output_to_item(
+    item: &persistence::SavedNotebookOutputItem,
+) -> script_engine::ScriptOutputItem {
+    match item {
+        persistence::SavedNotebookOutputItem::Text { text } => {
+            script_engine::ScriptOutputItem::Text { text: text.clone() }
+        }
+        persistence::SavedNotebookOutputItem::Table {
+            columns,
+            rows,
+            truncated,
+            total_rows,
+        } => script_engine::ScriptOutputItem::Table {
+            columns: columns.clone(),
+            rows: rows.clone(),
+            truncated: *truncated,
+            total_rows: *total_rows,
+        },
+    }
+}
+
 /// Collect notebooks from ScriptState into SavedNotebook format for persistence.
 pub(crate) fn collect_notebooks_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
@@ -2589,7 +2641,7 @@ pub(crate) fn collect_notebooks_for_save(
                 .map(|c| persistence::SavedNotebookCell {
                     id: c.id.clone(),
                     source: c.source.clone(),
-                    last_output: c.last_output.clone(),
+                    last_output: c.last_output.iter().map(output_item_to_saved).collect(),
                     last_error: c.last_error.clone(),
                     cells_modified: c.cells_modified,
                     duration_ms: c.duration_ms,
@@ -2764,7 +2816,7 @@ fn restore_notebooks(
                     .map(|c| crate::scripting::types::NotebookCell {
                         id: c.id.clone(),
                         source: c.source.clone(),
-                        last_output: c.last_output.clone(),
+                        last_output: c.last_output.iter().map(saved_output_to_item).collect(),
                         last_error: c.last_error.clone(),
                         cells_modified: c.cells_modified,
                         duration_ms: c.duration_ms,

@@ -69,7 +69,7 @@ function makeNotebook(overrides: Partial<NotebookDocument> = {}): NotebookDocume
 function successResult(index: number) {
   return {
     type: "success",
-    output: [`out-${index}`],
+    output: [{ kind: "text", text: `out-${index}` }],
     cellsModified: 0,
     durationMs: 1,
     executionIndex: index,

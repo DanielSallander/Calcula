@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/filterPaneApi.ts
+//! FILENAME: app/extensions/ControlsPane/lib/filterPaneApi.ts
 // PURPOSE: Tauri command wrappers for ribbon filter backend operations.
 
 import { filterPaneBackend } from "./filterPaneBackend";

@@ -5,6 +5,7 @@
 pub mod types;
 pub mod commands;
 pub mod notebook_commands;
+pub mod notebook_executor;
 pub mod object_script_commands;
 pub mod template_commands;
 pub mod capability_store;

@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/components/FilterPaneSection.tsx
+//! FILENAME: app/extensions/ControlsPane/components/FilterPaneSection.tsx
 // PURPOSE: Panel section hosting the dynamic filter cards.
 //          Ribbon band: horizontal strip of fixed-height cards (band-designed).
 //          Sidebar / launcher flyout: add-button row on top, cards stacked below,

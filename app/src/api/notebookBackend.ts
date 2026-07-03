@@ -10,11 +10,22 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+/** A structured output item from cell execution (mirrors Rust ScriptOutputItem). */
+export type NotebookOutputItemData =
+  | { kind: "text"; text: string }
+  | {
+      kind: "table";
+      columns: string[];
+      rows: string[][];
+      truncated: boolean;
+      totalRows: number;
+    };
+
 /** One executed/saved cell of a notebook (the rust-quickjs surface). */
 export interface NotebookCellData {
   id: string;
   source: string;
-  lastOutput: string[];
+  lastOutput: NotebookOutputItemData[];
   lastError: string | null;
   cellsModified: number;
   durationMs: number;

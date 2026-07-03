@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/components/FilterDropdown.tsx
+//! FILENAME: app/extensions/ControlsPane/components/FilterDropdown.tsx
 // PURPOSE: Dropdown checklist anchored below a ribbon filter card.
 //          Includes search, select all/none, OK/Cancel, and actions.
 // CONTEXT: Report Connections only ever offer the BI pivots backed by the

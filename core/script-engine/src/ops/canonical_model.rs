@@ -515,7 +515,7 @@ mod tests {
         let (result, grids) = ScriptEngine::run(src, "test.js", grids, registry, names, active);
         match result {
             ScriptResult::Success { output, .. } => {
-                let last = output.last().cloned().unwrap_or_default();
+                let last = output.last().map(|i| i.to_text()).unwrap_or_default();
                 (last, grids)
             }
             ScriptResult::Error { message, .. } => panic!("script error: {message}"),

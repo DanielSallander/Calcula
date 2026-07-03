@@ -49,6 +49,62 @@ fn default_true() -> bool {
     true
 }
 
+/// A single structured output item produced during script execution.
+/// Text items come from console.log / Calcula.log and the REPL last-expression
+/// display; Table items come from display.table() and table-shaped last
+/// expressions (objects with `columns` + `rows` arrays).
+///
+/// Surfaces that only carry plain strings (run_script, MCP execute_script)
+/// flatten items via `to_text()`. The notebook keeps items end-to-end so the
+/// frontend can render tables. Mirrored in TS as `NotebookOutputItem`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ScriptOutputItem {
+    #[serde(rename_all = "camelCase")]
+    Text { text: String },
+    #[serde(rename_all = "camelCase")]
+    Table {
+        /// Column headers; empty = render without a header row.
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+        /// True when rows were dropped to fit the per-item row cap.
+        truncated: bool,
+        /// Row count before truncation.
+        total_rows: usize,
+    },
+}
+
+impl ScriptOutputItem {
+    pub fn text(s: impl Into<String>) -> Self {
+        ScriptOutputItem::Text { text: s.into() }
+    }
+
+    /// Flatten to plain text for string-only surfaces (tab-separated rows).
+    pub fn to_text(&self) -> String {
+        match self {
+            ScriptOutputItem::Text { text } => text.clone(),
+            ScriptOutputItem::Table {
+                columns,
+                rows,
+                truncated,
+                total_rows,
+            } => {
+                let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 2);
+                if !columns.is_empty() {
+                    lines.push(columns.join("\t"));
+                }
+                for row in rows {
+                    lines.push(row.join("\t"));
+                }
+                if *truncated {
+                    lines.push(format!("... ({} rows total)", total_rows));
+                }
+                lines.join("\n")
+            }
+        }
+    }
+}
+
 /// A deferred action requested by a script, to be executed by the frontend
 /// after the script completes. Analogous to Excel Application methods/properties
 /// that affect the UI.
@@ -179,8 +235,8 @@ pub struct ScriptContext {
     pub sheet_names: Vec<String>,
     /// Active sheet index
     pub active_sheet: usize,
-    /// Console output collected during execution
-    pub console_output: RefCell<Vec<String>>,
+    /// Structured output collected during execution (console lines, tables)
+    pub console_output: RefCell<Vec<ScriptOutputItem>>,
     /// Count of cells modified by the script
     pub cells_modified: RefCell<u32>,
     /// Serialized cell bookmarks JSON (read-only from script perspective)
@@ -225,6 +281,12 @@ pub struct ScriptContext {
     pub display_gridlines: bool,
     /// Whether row/column headings are displayed
     pub display_headings: bool,
+    /// Host-provided read-only model access (None on surfaces without it:
+    /// one-off run_script, MCP execute_script). See model_provider.rs.
+    pub model_provider: Option<std::rc::Rc<dyn crate::model_provider::ModelDataProvider>>,
+    /// The calling script-surface id (e.g. "notebook:nb-123"); the host keys
+    /// capability grants + audit by it. Empty on surfaces without a provider.
+    pub surface_id: String,
 }
 
 /// The result of executing a script, returned to the Tauri command layer.
@@ -233,8 +295,8 @@ pub struct ScriptContext {
 pub enum ScriptResult {
     /// Script executed successfully
     Success {
-        /// Console output lines
-        output: Vec<String>,
+        /// Structured output items (console lines, tables)
+        output: Vec<ScriptOutputItem>,
         /// Number of cells modified
         cells_modified: u32,
         /// Execution duration in milliseconds
@@ -254,8 +316,8 @@ pub enum ScriptResult {
     Error {
         /// Error message
         message: String,
-        /// Console output collected before the error
-        output: Vec<String>,
+        /// Structured output collected before the error
+        output: Vec<ScriptOutputItem>,
     },
 }
 

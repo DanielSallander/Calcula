@@ -2,7 +2,7 @@
 //! Notebook definitions serialization.
 //! Each notebook is stored as notebooks/notebook_{id}.json.
 
-use persistence::{SavedNotebook, SavedNotebookCell};
+use persistence::{SavedNotebook, SavedNotebookCell, SavedNotebookOutputItem};
 use serde::{Deserialize, Serialize};
 
 /// JSON-friendly notebook definition that uses camelCase for the .cala format.
@@ -25,7 +25,7 @@ pub struct NotebookCellDef {
     pub id: String,
     pub source: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub last_output: Vec<String>,
+    pub last_output: Vec<NotebookOutputItemDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -34,6 +34,64 @@ pub struct NotebookCellDef {
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_index: Option<u32>,
+}
+
+/// JSON-friendly structured output item (mirror of
+/// persistence::SavedNotebookOutputItem, same serde representation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum NotebookOutputItemDef {
+    #[serde(rename_all = "camelCase")]
+    Text { text: String },
+    #[serde(rename_all = "camelCase")]
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+        truncated: bool,
+        total_rows: usize,
+    },
+}
+
+impl From<&SavedNotebookOutputItem> for NotebookOutputItemDef {
+    fn from(i: &SavedNotebookOutputItem) -> Self {
+        match i {
+            SavedNotebookOutputItem::Text { text } => {
+                NotebookOutputItemDef::Text { text: text.clone() }
+            }
+            SavedNotebookOutputItem::Table {
+                columns,
+                rows,
+                truncated,
+                total_rows,
+            } => NotebookOutputItemDef::Table {
+                columns: columns.clone(),
+                rows: rows.clone(),
+                truncated: *truncated,
+                total_rows: *total_rows,
+            },
+        }
+    }
+}
+
+impl From<&NotebookOutputItemDef> for SavedNotebookOutputItem {
+    fn from(i: &NotebookOutputItemDef) -> Self {
+        match i {
+            NotebookOutputItemDef::Text { text } => {
+                SavedNotebookOutputItem::Text { text: text.clone() }
+            }
+            NotebookOutputItemDef::Table {
+                columns,
+                rows,
+                truncated,
+                total_rows,
+            } => SavedNotebookOutputItem::Table {
+                columns: columns.clone(),
+                rows: rows.clone(),
+                truncated: *truncated,
+                total_rows: *total_rows,
+            },
+        }
+    }
 }
 
 impl From<&SavedNotebook> for NotebookDef {
@@ -52,7 +110,7 @@ impl From<&SavedNotebookCell> for NotebookCellDef {
         NotebookCellDef {
             id: c.id.clone(),
             source: c.source.clone(),
-            last_output: c.last_output.clone(),
+            last_output: c.last_output.iter().map(NotebookOutputItemDef::from).collect(),
             last_error: c.last_error.clone(),
             cells_modified: c.cells_modified,
             duration_ms: c.duration_ms,
@@ -77,7 +135,7 @@ impl From<&NotebookCellDef> for SavedNotebookCell {
         SavedNotebookCell {
             id: d.id.clone(),
             source: d.source.clone(),
-            last_output: d.last_output.clone(),
+            last_output: d.last_output.iter().map(SavedNotebookOutputItem::from).collect(),
             last_error: d.last_error.clone(),
             cells_modified: d.cells_modified,
             duration_ms: d.duration_ms,

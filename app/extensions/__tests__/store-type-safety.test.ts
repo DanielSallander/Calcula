@@ -73,7 +73,7 @@ vi.mock("../DataValidation/lib/validationEvents", () => ({
   },
 }));
 
-vi.mock("../FilterPane/lib/filterPaneApi", () => ({
+vi.mock("../ControlsPane/lib/filterPaneApi", () => ({
   createRibbonFilter: vi.fn(),
   deleteRibbonFilter: vi.fn(),
   updateRibbonFilter: vi.fn(),
@@ -84,7 +84,7 @@ vi.mock("../FilterPane/lib/filterPaneApi", () => ({
   getBiColumnAvailableValues: vi.fn(),
 }));
 
-vi.mock("../FilterPane/lib/filterPaneEvents", () => ({
+vi.mock("../ControlsPane/lib/filterPaneEvents", () => ({
   FilterPaneEvents: {
     FILTER_CREATED: "filterpane:filter-created",
     FILTER_DELETED: "filterpane:filter-deleted",
@@ -94,7 +94,7 @@ vi.mock("../FilterPane/lib/filterPaneEvents", () => ({
   },
 }));
 
-vi.mock("../FilterPane/lib/filterPaneFilterBridge", () => ({
+vi.mock("../ControlsPane/lib/filterPaneFilterBridge", () => ({
   applyRibbonFilter: vi.fn(),
   clearRibbonFilter: vi.fn(),
 }));

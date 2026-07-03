@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/components/AddFilterDialog.tsx
+//! FILENAME: app/extensions/ControlsPane/components/AddFilterDialog.tsx
 // PURPOSE: Dialog for adding filters to the Filter Pane. Filters are always
 //          sourced from a Calcula model (BI) connection — the dialog lists
 //          the workbook's model connections and their model fields.

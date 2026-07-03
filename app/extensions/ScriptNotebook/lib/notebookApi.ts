@@ -117,3 +117,18 @@ export async function runFromCell(
 export async function resetNotebookRuntime(): Promise<void> {
   return notebookBackend.invoke<void>("notebook_reset_runtime");
 }
+
+/**
+ * Mirror a session grant of a BI capability ("bi.query" / "bi.sql") for a
+ * notebook surface into the authoritative backend CapabilityStore — the same
+ * store the model.* provider re-checks per call. Session-scoped (in-memory).
+ */
+export async function grantNotebookBiCapability(
+  notebookId: string,
+  capability: string,
+): Promise<void> {
+  return notebookBackend.invoke<void>("grant_script_bi", {
+    scriptId: `notebook:${notebookId}`,
+    capability,
+  });
+}

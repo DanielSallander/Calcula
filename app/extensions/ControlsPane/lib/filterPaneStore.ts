@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/filterPaneStore.ts
+//! FILENAME: app/extensions/ControlsPane/lib/filterPaneStore.ts
 // PURPOSE: Frontend cache for ribbon filter state.
 // CONTEXT: All filters are sourced from a Calcula model (BI) connection;
 //          item values are fetched through the BI engine. The store also

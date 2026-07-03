@@ -87,7 +87,7 @@ vi.mock("../DataValidation/lib/validationEvents", () => ({
   ValidationEvents: { emit: vi.fn(), on: vi.fn(), off: vi.fn() },
 }));
 
-vi.mock("../FilterPane/lib/filterPaneApi", () => ({
+vi.mock("../ControlsPane/lib/filterPaneApi", () => ({
   createRibbonFilter: vi.fn(),
   getAllRibbonFilters: vi.fn().mockResolvedValue([]),
   getBiConnections: vi.fn().mockResolvedValue([]),
@@ -95,11 +95,11 @@ vi.mock("../FilterPane/lib/filterPaneApi", () => ({
   updateRibbonFilter: vi.fn(),
 }));
 
-vi.mock("../FilterPane/lib/filterPaneEvents", () => ({
+vi.mock("../ControlsPane/lib/filterPaneEvents", () => ({
   FilterPaneEvents: { emit: vi.fn(), on: vi.fn(), off: vi.fn() },
 }));
 
-vi.mock("../FilterPane/lib/filterPaneFilterBridge", () => ({
+vi.mock("../ControlsPane/lib/filterPaneFilterBridge", () => ({
   applyRibbonFilter: vi.fn(),
   clearRibbonFilter: vi.fn(),
 }));
@@ -149,7 +149,7 @@ import { useFindStore } from "../_shared/lib/useFindStore";
 import {
   clearCache as clearFilterPaneCache,
   getAllFilters as getAllPaneFilters,
-} from "../FilterPane/lib/filterPaneStore";
+} from "../ControlsPane/lib/filterPaneStore";
 
 import {
   addBookmark,

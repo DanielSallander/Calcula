@@ -21,7 +21,10 @@ pub fn register_utility_ops<'js>(
             ctx.clone(),
             move |args: rquickjs::function::Rest<String>| {
                 let message = args.0.join(" ");
-                sc.borrow().console_output.borrow_mut().push(message);
+                sc.borrow()
+                    .console_output
+                    .borrow_mut()
+                    .push(crate::types::ScriptOutputItem::text(message));
             },
         )
         .map_err(|e| format!("Failed to create Calcula.log: {}", e))?;

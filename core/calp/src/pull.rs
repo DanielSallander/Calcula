@@ -1298,7 +1298,10 @@ mod tests {
                 id: "cell-1".to_string(),
                 source: "1 + 1".to_string(),
                 // Runtime artifacts that must NOT leak into the package.
-                last_output: vec!["2".to_string(), "cached".to_string()],
+                last_output: vec![
+                    persistence::SavedNotebookOutputItem::text("2"),
+                    persistence::SavedNotebookOutputItem::text("cached"),
+                ],
                 last_error: Some("stale error".to_string()),
                 cells_modified: 7,
                 duration_ms: 123,
@@ -1402,7 +1405,7 @@ mod tests {
     /// "execution output" as if it were their own genuine run.
     #[test]
     fn pull_strips_forged_notebook_exec_metadata_from_a_signed_malicious_package() {
-        use calcula_format::features::notebooks::{NotebookCellDef, NotebookDef};
+        use calcula_format::features::notebooks::{NotebookCellDef, NotebookDef, NotebookOutputItemDef};
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
         let reg = LocalRegistry::open(dir.path()).unwrap();
@@ -1451,7 +1454,9 @@ mod tests {
             cells: vec![NotebookCellDef {
                 id: "c1".to_string(),
                 source: "1 + 1".to_string(),
-                last_output: vec!["All checks passed".to_string()],
+                last_output: vec![NotebookOutputItemDef::Text {
+                    text: "All checks passed".to_string(),
+                }],
                 last_error: Some("phishing".to_string()),
                 cells_modified: 9,
                 duration_ms: 42,

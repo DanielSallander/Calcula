@@ -507,7 +507,8 @@ pub fn run_script(
         )?;
     }
 
-    // 4. Convert to response type
+    // 4. Convert to response type. run_script is a string-output surface:
+    //    structured items (tables from display.table) flatten to text.
     match result {
         script_engine::ScriptResult::Success {
             output,
@@ -518,7 +519,7 @@ pub fn run_script(
             screen_updating,
             enable_events,
         } => Ok(RunScriptResponse::Success {
-            output,
+            output: output.iter().map(|i| i.to_text()).collect(),
             cells_modified,
             duration_ms,
             bookmark_mutations,
@@ -527,7 +528,10 @@ pub fn run_script(
             enable_events,
         }),
         script_engine::ScriptResult::Error { message, output } => {
-            Ok(RunScriptResponse::Error { message, output })
+            Ok(RunScriptResponse::Error {
+                message,
+                output: output.iter().map(|i| i.to_text()).collect(),
+            })
         }
     }
 }

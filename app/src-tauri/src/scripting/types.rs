@@ -19,9 +19,16 @@ pub struct ScriptState {
     pub security_level: Mutex<String>,
     /// Workbook-embedded notebooks: notebook_id -> NotebookDocument
     pub workbook_notebooks: Mutex<HashMap<String, NotebookDocument>>,
-    /// Active notebook runtime (session + checkpoints). Only one notebook
-    /// can have an active runtime at a time.
+    /// Active notebook runtime bookkeeping (checkpoints, counters). Only one
+    /// notebook can have an active runtime at a time. The QuickJS session
+    /// itself lives on the executor thread (see notebook_executor).
     pub notebook_runtime: Mutex<NotebookRuntime>,
+    /// Dedicated thread that owns the persistent QuickJS NotebookSession.
+    pub notebook_executor: super::notebook_executor::NotebookExecutor,
+    /// Serializes notebook execution commands end-to-end (run/run-all/rewind/
+    /// reset). The frontend's isExecuting flag is advisory only; this lock is
+    /// what actually prevents interleaved checkpoint bookkeeping.
+    pub notebook_exec_lock: tokio::sync::Mutex<()>,
 }
 
 impl ScriptState {
@@ -32,6 +39,8 @@ impl ScriptState {
             security_level: Mutex::new("prompt".to_string()),
             workbook_notebooks: Mutex::new(HashMap::new()),
             notebook_runtime: Mutex::new(NotebookRuntime::new()),
+            notebook_executor: super::notebook_executor::NotebookExecutor::new(),
+            notebook_exec_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -155,9 +164,9 @@ pub struct NotebookDocument {
 pub struct NotebookCell {
     pub id: String,
     pub source: String,
-    /// Console output from last execution
+    /// Structured output from last execution (text lines, tables)
     #[serde(default)]
-    pub last_output: Vec<String>,
+    pub last_output: Vec<script_engine::ScriptOutputItem>,
     /// Error message from last execution (if any)
     pub last_error: Option<String>,
     /// Number of cells modified in last execution
@@ -186,26 +195,11 @@ pub struct GridCheckpoint {
     pub grids: Vec<Grid>,
 }
 
-/// Wrapper to allow NotebookSession (which contains !Send QuickJS types)
-/// to be stored in Tauri managed state behind a Mutex.
-///
-/// # Safety
-/// This is safe because:
-/// - Access is always serialized through a Mutex
-/// - The session is never moved to another thread — it stays in place
-/// - All operations on the session happen while the Mutex is held
-pub struct SendableSession(pub Option<script_engine::NotebookSession>);
-
-// SAFETY: See SendableSession doc comment. Access is Mutex-protected.
-unsafe impl Send for SendableSession {}
-unsafe impl Sync for SendableSession {}
-
-/// Runtime state for an active notebook session.
+/// Runtime bookkeeping for an active notebook session.
 /// Not persisted — exists only while the notebook is open.
+/// The QuickJS session itself is owned by the executor thread
+/// (notebook_executor.rs), never stored here, so no unsafe Send is needed.
 pub struct NotebookRuntime {
-    /// The persistent QuickJS session (variables survive across cells).
-    /// Wrapped in SendableSession for thread-safety with Tauri's State.
-    pub session: SendableSession,
     /// Grid snapshots taken before each cell execution, in execution order.
     pub checkpoints: Vec<GridCheckpoint>,
     /// Grid state before any notebook cell ran (for full rewind).
@@ -219,7 +213,6 @@ pub struct NotebookRuntime {
 impl NotebookRuntime {
     pub fn new() -> Self {
         NotebookRuntime {
-            session: SendableSession(None),
             checkpoints: Vec::new(),
             baseline: None,
             execution_counter: 0,
@@ -256,7 +249,7 @@ pub struct RewindNotebookRequest {
 pub enum NotebookCellResponse {
     #[serde(rename_all = "camelCase")]
     Success {
-        output: Vec<String>,
+        output: Vec<script_engine::ScriptOutputItem>,
         cells_modified: u32,
         duration_ms: u64,
         execution_index: u32,
@@ -271,6 +264,6 @@ pub enum NotebookCellResponse {
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
-        output: Vec<String>,
+        output: Vec<script_engine::ScriptOutputItem>,
     },
 }

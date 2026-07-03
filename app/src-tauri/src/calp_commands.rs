@@ -779,7 +779,11 @@ fn materialize_distributed_scripts(
                         .map(|c| NotebookCell {
                             id: c.id.clone(),
                             source: c.source.clone(),
-                            last_output: c.last_output.clone(),
+                            last_output: c
+                                .last_output
+                                .iter()
+                                .map(crate::persistence::saved_output_to_item)
+                                .collect(),
                             last_error: c.last_error.clone(),
                             cells_modified: c.cells_modified,
                             duration_ms: c.duration_ms,

@@ -57,10 +57,15 @@ function makeNotebook(overrides: Partial<NotebookDocument> = {}): NotebookDocume
   };
 }
 
+/** Text output items from plain strings (mirrors the Rust ScriptOutputItem shape). */
+function textItems(lines: string[]): Array<{ kind: "text"; text: string }> {
+  return lines.map((text) => ({ kind: "text" as const, text }));
+}
+
 function successResponse(index: number, output: string[] = []): any {
   return {
     type: "success",
-    output,
+    output: textItems(output),
     cellsModified: 0,
     durationMs: 5,
     executionIndex: index,
@@ -153,7 +158,7 @@ describe("notebook workflows", () => {
 
       const c3 = useNotebookStore.getState().activeNotebook!.cells[2];
       expect(c3.executionIndex).toBe(3);
-      expect(c3.lastOutput).toEqual(["30"]);
+      expect(c3.lastOutput).toEqual(textItems(["30"]));
       expect(c3.lastError).toBeNull();
     });
   });
@@ -344,7 +349,7 @@ describe("notebook workflows", () => {
       await useNotebookStore.getState().runCell("c1");
 
       const cell = useNotebookStore.getState().activeNotebook!.cells[0];
-      expect(cell.lastOutput).toEqual(["0", "1", "2"]);
+      expect(cell.lastOutput).toEqual(textItems(["0", "1", "2"]));
     });
 
     it("re-running a cell replaces previous output", async () => {
@@ -357,13 +362,13 @@ describe("notebook workflows", () => {
 
       mockRunNotebookCell.mockResolvedValue(successResponse(1, ["a"]));
       await useNotebookStore.getState().runCell("c1");
-      expect(useNotebookStore.getState().activeNotebook!.cells[0].lastOutput).toEqual(["a"]);
+      expect(useNotebookStore.getState().activeNotebook!.cells[0].lastOutput).toEqual(textItems(["a"]));
 
       // Re-run with different output
       useNotebookStore.setState({ isExecuting: false, executingCellId: null });
       mockRunNotebookCell.mockResolvedValue(successResponse(2, ["b"]));
       await useNotebookStore.getState().runCell("c1");
-      expect(useNotebookStore.getState().activeNotebook!.cells[0].lastOutput).toEqual(["b"]);
+      expect(useNotebookStore.getState().activeNotebook!.cells[0].lastOutput).toEqual(textItems(["b"]));
       expect(useNotebookStore.getState().activeNotebook!.cells[0].executionIndex).toBe(2);
     });
 
@@ -377,14 +382,14 @@ describe("notebook workflows", () => {
       mockRunNotebookCell.mockResolvedValue({
         type: "error",
         message: "err",
-        output: ["before"],
+        output: textItems(["before"]),
       });
 
       await useNotebookStore.getState().runCell("c1");
 
       const cell = useNotebookStore.getState().activeNotebook!.cells[0];
       expect(cell.lastError).toBe("err");
-      expect(cell.lastOutput).toEqual(["before"]);
+      expect(cell.lastOutput).toEqual(textItems(["before"]));
     });
   });
 });

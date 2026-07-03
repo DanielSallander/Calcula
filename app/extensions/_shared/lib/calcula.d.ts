@@ -648,3 +648,148 @@ declare namespace console {
   function error(...args: string[]): void;
   function info(...args: string[]): void;
 }
+
+// ============================================================================
+// Model (read-only BI model access — NOTEBOOK CELLS ONLY)
+// ============================================================================
+
+/** A whitelisted, non-sensitive BI connection summary. */
+interface ModelConnectionSummary {
+  id: string;
+  name: string;
+  description: string;
+  connectionType: string;
+  isConnected: boolean;
+  tableCount: number;
+  measureCount: number;
+}
+
+/**
+ * A tabular model-query result. Cells are display strings (null = missing).
+ * When a result is the LAST EXPRESSION of a notebook cell it auto-renders as
+ * a table output.
+ */
+interface ModelResult {
+  columns: string[];
+  rows: (string | null)[][];
+  /** Rows in this result object (post any row-cap truncation). */
+  rowCount: number;
+  /** Rows the query produced before truncation. */
+  totalRows: number;
+  /** True when rows were dropped to fit the row cap (50,000). */
+  truncated: boolean;
+  /** The rows as an array of {column: value} records. */
+  objects(): Array<Record<string, string | null>>;
+  /**
+   * Write the result into the grid through the notebook's cloned grid state
+   * (audited, undoable, rewindable like any notebook mutation).
+   * @param startRow - 0-based anchor row
+   * @param startCol - 0-based anchor column
+   * @param opts - headers (default true) writes the column row first;
+   *               sheet targets a specific sheet index (default active)
+   * @returns The written extent (rows and cols).
+   */
+  toGrid(
+    startRow: number,
+    startCol: number,
+    opts?: { headers?: boolean; sheet?: number },
+  ): { rows: number; cols: number };
+}
+
+/**
+ * Read-only access to this workbook's Calcula models (BI connections).
+ * AVAILABLE IN NOTEBOOK CELLS ONLY — other script surfaces throw
+ * "Model API is not available on this surface".
+ *
+ * Governance: model.* is capability-gated per notebook. The first call
+ * prompts for consent (`bi.query` for structured/metadata access, the
+ * higher-trust `bi.sql` for raw SQL); grants last for the session and every
+ * call — success or denial — is recorded in the always-on audit log.
+ * Row-level-security roles active on a connection apply to every query.
+ *
+ * `connection` arguments accept a connection NAME or id.
+ */
+declare namespace model {
+  /** List this workbook's BI connections (non-sensitive summaries). [bi.query] */
+  function connections(): ModelConnectionSummary[];
+
+  /**
+   * Model metadata for a connection: tables/columns, measures, relationships,
+   * hierarchies, KPIs, security roles, calculation groups. [bi.query]
+   */
+  function info(connection: string): unknown;
+
+  /**
+   * Run a structured model query. [bi.query]
+   * @example
+   * const r = model.query("Sales DB", {
+   *   measures: ["Total Revenue"],
+   *   groupBy: [{ table: "Geo", column: "Country" }],
+   *   filters: [{ table: "Date", column: "Year", operator: "=", value: "2026" }],
+   * });
+   * r // last expression -> renders as a table
+   */
+  function query(
+    connection: string,
+    spec: {
+      measures: string[];
+      groupBy?: Array<{ table: string; column: string }>;
+      filters?: Array<{ table: string; column: string; operator: string; value: string }>;
+    },
+  ): ModelResult;
+
+  /**
+   * Run READ-ONLY raw SQL against the connection's data source (single
+   * SELECT/WITH statement; validated server-side). [bi.sql — higher trust,
+   * separate consent]
+   */
+  function sql(connection: string, sql: string): ModelResult;
+
+  /**
+   * Scalar measure value under member filters (CUBEVALUE parity). Members use
+   * the native syntax: "[Measure Name]", "Table[Column]=Value". [bi.query]
+   * @example model.value("Sales DB", "[Total Revenue]", "Geo[Country]=Sweden")
+   */
+  function value(connection: string, ...members: string[]): number | null;
+
+  /** Distinct members of a Table[Column] level (CUBEMEMBER-ish parity). [bi.query] */
+  function members(connection: string, level: string): string[];
+
+  /**
+   * KPI value (property 1), goal (2), or status -1/0/1 (3) — CUBEKPIMEMBER
+   * parity. [bi.query]
+   */
+  function kpi(connection: string, name: string, property?: number): number | null;
+}
+
+// ============================================================================
+// Display (rich structured output)
+// ============================================================================
+
+declare namespace display {
+  /**
+   * Render tabular data as a table output item (notebook cells render it as a
+   * real table; string-only surfaces flatten it to tab-separated text).
+   *
+   * Accepted shapes:
+   * - `display.table([{a: 1, b: 2}, ...])` — array of objects (keys of the
+   *   first object become the column headers)
+   * - `display.table([[1, 2], [3, 4]])` — array of arrays (no header row)
+   * - `display.table(["A", "B"], [[1, 2], [3, 4]])` — explicit columns + rows
+   * - `display.table({columns: [...], rows: [[...]]})` — result-shaped object
+   *
+   * A notebook cell whose LAST EXPRESSION is a `{columns, rows}`-shaped object
+   * (all columns strings, all rows arrays) auto-renders as a table without
+   * calling display.table.
+   *
+   * Rows are capped per table item (200 live / 50 persisted in the workbook
+   * file); the rendered footer shows the original row count when truncated.
+   */
+  function table(
+    data:
+      | Array<Record<string, unknown>>
+      | unknown[][]
+      | { columns: string[]; rows: unknown[][] },
+    rows?: unknown[][],
+  ): void;
+}

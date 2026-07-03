@@ -74,7 +74,7 @@ import AnimationExtension from "./Animation";
 import PivotExtension from "./Pivot";
 import TableExtension from "./Table";
 import SlicerExtension from "./Slicer";
-import FilterPaneExtension from "./FilterPane";
+import ControlsPaneExtension from "./ControlsPane";
 import TimelineSlicerExtension from "./TimelineSlicer";
 import AutoFilterExtension from "./AutoFilter";
 import ControlsExtension from "./Controls";
@@ -189,7 +189,7 @@ export const builtInExtensions: ExtensionModule[] = [
   PivotExtension,
   TableExtension,
   SlicerExtension,
-  FilterPaneExtension,
+  ControlsPaneExtension,
   TimelineSlicerExtension,
   ControlsExtension,
   BusinessIntelligenceExtension,

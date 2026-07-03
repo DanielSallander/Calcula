@@ -35,6 +35,13 @@ pub fn execute_script(
         // Register console.log
         register_console(&ctx, &globals, shared_ctx.clone())?;
 
+        // Register the display global (display.table -> Table output items)
+        crate::display::register_display(&ctx, &globals, shared_ctx.clone())?;
+
+        // Register the model global (read-only BI model access; throws a clear
+        // "not available on this surface" error when no provider is injected)
+        crate::ops::model::register_model_ops(&ctx, &globals, shared_ctx.clone())?;
+
         // Execute the user script
         let eval_result: rquickjs::Result<Value> = ctx.eval(js_source);
 
@@ -128,7 +135,11 @@ fn register_console<'js>(
         let ctx_ref = shared_ctx.clone();
         Function::new(ctx.clone(), move |args: rquickjs::function::Rest<String>| {
             let message = args.0.join(" ");
-            ctx_ref.borrow().console_output.borrow_mut().push(message);
+            ctx_ref
+                .borrow()
+                .console_output
+                .borrow_mut()
+                .push(crate::types::ScriptOutputItem::text(message));
         })
         .map_err(|e| format!("Failed to create console.log: {}", e))?
     };

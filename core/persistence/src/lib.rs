@@ -1029,11 +1029,36 @@ pub struct SavedNotebook {
 pub struct SavedNotebookCell {
     pub id: String,
     pub source: String,
-    pub last_output: Vec<String>,
+    #[serde(default)]
+    pub last_output: Vec<SavedNotebookOutputItem>,
     pub last_error: Option<String>,
     pub cells_modified: u32,
     pub duration_ms: u64,
     pub execution_index: Option<u32>,
+}
+
+/// A structured output item persisted with a notebook cell. Mirrors
+/// script_engine::ScriptOutputItem (persistence must not depend on the
+/// script engine crate, so the shape is mirrored here; the app layer
+/// converts). Same serde representation across all layers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SavedNotebookOutputItem {
+    #[serde(rename_all = "camelCase")]
+    Text { text: String },
+    #[serde(rename_all = "camelCase")]
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+        truncated: bool,
+        total_rows: usize,
+    },
+}
+
+impl SavedNotebookOutputItem {
+    pub fn text(s: impl Into<String>) -> Self {
+        SavedNotebookOutputItem::Text { text: s.into() }
+    }
 }
 
 // ============================================================================

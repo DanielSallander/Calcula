@@ -69,7 +69,7 @@ const getState = () => useNotebookStore.getState();
 
 const successResponse = (idx = 1) => ({
   type: 'success' as const,
-  output: ['ok'],
+  output: [{ kind: 'text' as const, text: 'ok' }],
   cellsModified: 0,
   durationMs: 5,
   executionIndex: idx,
@@ -232,7 +232,7 @@ describe('Notebook Store - State Machine', () => {
     mockRunNotebookCell.mockResolvedValue(successResponse(1));
     await getState().runCell('c1');
     const cell = getState().activeNotebook!.cells[0];
-    expect(cell.lastOutput).toEqual(['ok']);
+    expect(cell.lastOutput).toEqual([{ kind: 'text', text: 'ok' }]);
     expect(cell.lastError).toBeNull();
     expect(cell.executionIndex).toBe(1);
   });

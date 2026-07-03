@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/__tests__/filterPaneStore.test.ts
+//! FILENAME: app/extensions/ControlsPane/lib/__tests__/filterPaneStore.test.ts
 // PURPOSE: Tests for FilterPane store cache management and accessors.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";

@@ -8,6 +8,7 @@ pub mod bookmarks;
 pub mod canonical_model;
 pub mod cells;
 pub mod extended;
+pub mod model;
 pub mod sheets;
 pub mod utility;
 pub mod worksheet_props;

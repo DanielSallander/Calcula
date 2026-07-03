@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/filterPaneTypes.ts
+//! FILENAME: app/extensions/ControlsPane/lib/filterPaneTypes.ts
 // PURPOSE: TypeScript types mirroring Rust ribbon_filter types.
 // CONTEXT: Ribbon filter values always come from a Calcula model (BI)
 //          connection; filters apply to the BI pivots of that connection.

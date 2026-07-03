@@ -1,14 +1,14 @@
-//! FILENAME: app/extensions/FilterPane/index.ts
-// PURPOSE: Filter Pane extension entry point — activation and deactivation.
+//! FILENAME: app/extensions/ControlsPane/index.ts
+// PURPOSE: Controls pane extension entry point — activation and deactivation.
 
 import type { ExtensionContext, ExtensionModule } from "@api/contract";
 import { ExtensionRegistry } from "@api";
 import { registerPanel, unregisterPanel } from "@api/ui";
 import {
-  FilterPaneManifest,
-  FilterPanePanelDefinition,
+  ControlsPaneManifest,
+  ControlsPanePanelDefinition,
   AddFilterDialogDefinition,
-  FILTER_PANE_TAB_ID,
+  CONTROLS_PANE_TAB_ID,
 } from "./manifest";
 import { refreshCache, clearCache } from "./lib/filterPaneStore";
 import { registerFilterBadge } from "./lib/filterBadge";
@@ -25,18 +25,18 @@ function activate(context: ExtensionContext): void {
   // Bind the capability-scoped backend door before any code can trigger a backend call.
   filterPaneBackend.set(context.invokeBackend);
 
-  console.log("[FilterPane Extension] Registering...");
+  console.log("[ControlsPane Extension] Registering...");
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn({
-    id: FilterPaneManifest.id,
-    name: FilterPaneManifest.name,
-    version: FilterPaneManifest.version,
-    description: FilterPaneManifest.description,
+    id: ControlsPaneManifest.id,
+    name: ControlsPaneManifest.name,
+    version: ControlsPaneManifest.version,
+    description: ControlsPaneManifest.description,
   });
 
-  // Register the permanent "Filters" panel (ribbon-placed by default)
-  registerPanel(FilterPanePanelDefinition);
+  // Register the permanent "Controls" panel (ribbon-placed by default)
+  registerPanel(ControlsPanePanelDefinition);
 
   // Register dialogs
   context.ui.dialogs.register(AddFilterDialogDefinition);
@@ -54,29 +54,29 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("filterpane:filters-refreshed", handleRefresh);
   };
 
-  // Track applied filters and show count badge on the Filters tab
+  // Track applied filters and show count badge on the Controls tab
   unregisterBadge = registerFilterBadge();
 
   // Initial cache load
   refreshCache();
 
-  console.log("[FilterPane Extension] Registered.");
+  console.log("[ControlsPane Extension] Registered.");
 }
 
 function deactivate(): void {
-  console.log("[FilterPane Extension] Deactivating...");
+  console.log("[ControlsPane Extension] Deactivating...");
   unregisterBadge?.();
   unregisterBadge = null;
   removeWindowListeners?.();
   removeWindowListeners = null;
-  unregisterPanel(FILTER_PANE_TAB_ID);
+  unregisterPanel(CONTROLS_PANE_TAB_ID);
   clearCache();
 }
 
-const FilterPaneExtension: ExtensionModule = {
-  manifest: FilterPaneManifest,
+const ControlsPaneExtension: ExtensionModule = {
+  manifest: ControlsPaneManifest,
   activate,
   deactivate,
 };
 
-export default FilterPaneExtension;
+export default ControlsPaneExtension;

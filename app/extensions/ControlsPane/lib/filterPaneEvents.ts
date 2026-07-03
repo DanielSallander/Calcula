@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/filterPaneEvents.ts
+//! FILENAME: app/extensions/ControlsPane/lib/filterPaneEvents.ts
 // PURPOSE: Custom event names for the Filter Pane extension.
 
 export const FilterPaneEvents = {

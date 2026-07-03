@@ -5,6 +5,8 @@
 //! The engine operates on a ScriptContext (cloned from AppState) and returns
 //! a ScriptResult with the outcome and any modified grid data.
 
+pub mod display;
+pub mod model_provider;
 pub mod notebook;
 pub mod ops;
 pub mod runtime;
@@ -96,6 +98,8 @@ impl ScriptEngine {
             scroll_area: None,
             display_gridlines: true,
             display_headings: true,
+            model_provider: None,
+            surface_id: String::new(),
         };
 
         match runtime::execute_script(source, filename, context) {
@@ -131,5 +135,9 @@ impl ScriptEngine {
 }
 
 // Re-export key types for consumers
+pub use model_provider::{
+    ModelColumnRef, ModelDataProvider, ModelFilterSpec, ModelProviderError,
+    ModelProviderErrorKind, ModelQuerySpec, ModelTable,
+};
 pub use notebook::NotebookSession;
-pub use types::{ScriptContext, ScriptMeta, ScriptResult};
+pub use types::{ScriptContext, ScriptMeta, ScriptOutputItem, ScriptResult};

@@ -887,7 +887,11 @@ pub fn execute_script(
             // same Tauri-event bridge create_chart_from_spec uses for charts.
             let _ = handle.emit("grid:refresh", ());
 
-            let output_text = output.join("\n");
+            let output_text = output
+                .iter()
+                .map(|i| i.to_text())
+                .collect::<Vec<_>>()
+                .join("\n");
             Ok(format!(
                 "Script executed ({}ms, {} cells modified){}",
                 duration_ms,
@@ -904,7 +908,11 @@ pub fn execute_script(
             output,
             ..
         } => {
-            let output_text = output.join("\n");
+            let output_text = output
+                .iter()
+                .map(|i| i.to_text())
+                .collect::<Vec<_>>()
+                .join("\n");
             Err(format!(
                 "Script error: {}{}",
                 message,

@@ -36,3 +36,4 @@ export { FilterDropdown } from './FilterDropdown';
 export type { FilterDropdownProps } from './FilterDropdown';
 export { NumberFormatModal, NUMBER_FORMAT_PRESETS } from './NumberFormatModal';
 export type { NumberFormatModalProps, NumberFormatOption } from './NumberFormatModal';
+export { ResultTable } from './ResultTable';

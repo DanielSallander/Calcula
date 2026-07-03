@@ -49,12 +49,30 @@ describe("script-surface taxonomy", () => {
     ]);
   });
 
-  it("only the worker-realm surfaces carry grantable capabilities", () => {
+  it("capability-bearing surfaces are worker-realm or the Rust-gated notebook", () => {
     for (const s of SCRIPT_SURFACES) {
       if (s.capabilities.length > 0) {
-        expect(s.runtime).toBe("worker-realm");
+        // Worker-realm surfaces are broker-gated; the notebook (rust-quickjs)
+        // is the ONE non-worker surface with capabilities — its gate is the
+        // server-side CapabilityStore (see notebook-analysis-workbench.md).
+        const rustGatedNotebook = s.id === "notebook-cell" && s.runtime === "rust-quickjs";
+        expect(
+          s.runtime === "worker-realm" || rustGatedNotebook,
+          `unexpected capability-bearing surface: ${s.id} (${s.runtime})`,
+        ).toBe(true);
       }
     }
+  });
+
+  it("the notebook carries EXACTLY the read-only model pair (anti-goal pin)", () => {
+    // The analysis-workbench identity forbids net.fetch/storage/ui.html/
+    // formula.udf on notebook cells — model reads only. A change here is a
+    // deliberate security-design decision, not a drive-by.
+    expect(getScriptSurface("notebook-cell")?.capabilities.slice().sort()).toEqual([
+      "bi.query",
+      "bi.sql",
+    ]);
+    expect(getScriptSurface("one-off-script")?.capabilities).toEqual([]);
   });
 
   it("getScriptSurface resolves by id", () => {

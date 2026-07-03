@@ -1811,13 +1811,42 @@ pub async fn bi_query(
         request.group_by.iter().map(|g| format!("{}.{}", g.table, g.column)).collect::<Vec<_>>()
     );
 
-    let query_request = build_engine_query(&request);
-    let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+    let result = bi_query_core(&bi_state, connection_id.clone(), &request).await?;
+
+    // Audit (unified trail): persist a script-attributed bi.query call (success).
+    // Trusted built-in callers carry no script_id and are not audited (avoid
+    // flooding the trail with the app's own feature queries).
+    if let Some(sid) = script_id.as_deref() {
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.query",
+            sid,
+            true,
+            Some(&format!("connection {}", connection_id)),
+            None,
+        );
+    }
+
+    Ok(result)
+}
+
+/// Gate-free core of `bi_query`: RLS role application, auto-refresh query,
+/// cache save, last_refreshed bump, string-grid conversion. EVERY structured
+/// query surface (the bi_query command, the notebook model.* provider) runs
+/// through here, so RLS cannot be bypassed by a new path. Callers own their
+/// own capability gating + audit.
+pub(crate) async fn bi_query_core(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+    request: &BiQueryRequest,
+) -> Result<BiQueryResult, String> {
+    let query_request = build_engine_query(request);
+    let engine_arc = get_engine_arc(bi_state, connection_id.clone())?;
 
     let (batches, refreshed_tables, refresh_failures) = {
         let mut engine = engine_arc.lock().await;
         // Apply this connection's RLS role (or clear a sibling's) before querying.
-        apply_connection_role(&mut engine, &bi_state, connection_id);
+        apply_connection_role(&mut engine, bi_state, connection_id.clone());
         let (b, rt) = engine.query_auto_refresh(query_request).await
             .map_err(|e| friendly_bi_query_error("Query failed", &e))?;
         // Capture partial refresh failures so they aren't silently swallowed
@@ -1850,7 +1879,7 @@ pub async fn bi_query(
     } else {
         log_info!("BI", "bi_query: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
         // Save cache after auto-refresh (crash protection)
-        save_cache_for_connection(&bi_state, connection_id).await;
+        save_cache_for_connection(bi_state, connection_id.clone()).await;
     }
 
     // Update last_refreshed timestamp
@@ -1863,21 +1892,6 @@ pub async fn bi_query(
 
     let result = batches_to_result(&batches);
     log_info!("BI", "Query returned {} rows, {} columns", result.row_count, result.columns.len());
-
-    // Audit (unified trail): persist a script-attributed bi.query call (success).
-    // Trusted built-in callers carry no script_id and are not audited (avoid
-    // flooding the trail with the app's own feature queries).
-    if let Some(sid) = script_id.as_deref() {
-        crate::net_commands::record_capability_call(
-            &app_state.audit_log,
-            "bi.query",
-            sid,
-            true,
-            Some(&format!("connection {}", connection_id)),
-            None,
-        );
-    }
-
     Ok(result)
 }
 
@@ -1909,9 +1923,39 @@ pub async fn script_bi_sql(
             return Err("PermissionDenied: bi.sql not granted for this script".to_string());
         }
     }
-    validate_readonly_sql(&sql)?;
+    let result = bi_sql_core(&bi_state, connection_id.clone(), &sql).await?;
+    log_info!("BI", "script_bi_sql: conn={}, returned {} rows", connection_id, result.row_count);
 
-    auto_connect_bi_connection(&bi_state, connection_id).await?;
+    // Audit (unified trail): persist a script-attributed bi.sql call (success).
+    // Record a short SQL PREFIX for forensic context, never the full query.
+    if let Some(sid) = script_id.as_deref() {
+        let sql_prefix: String = sql.trim().chars().take(60).collect();
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.sql",
+            sid,
+            true,
+            Some(&format!("connection {} — {}", connection_id, sql_prefix)),
+            None,
+        );
+    }
+
+    Ok(result)
+}
+
+/// Gate-free core of `script_bi_sql`: read-only validation, auto-connect,
+/// connector execution, 100k row cap. EVERY raw-SQL surface (the script_bi_sql
+/// command, the notebook model.* provider) runs through here, so the read-only
+/// validation cannot be bypassed by a new path. Callers own their own
+/// capability gating + audit.
+pub(crate) async fn bi_sql_core(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+    sql: &str,
+) -> Result<BiQueryResult, String> {
+    validate_readonly_sql(sql)?;
+
+    auto_connect_bi_connection(bi_state, connection_id.clone()).await?;
 
     let (engine_arc, connector_index) = {
         let connections = bi_state.connections.lock().unwrap();
@@ -1932,7 +1976,7 @@ pub async fn script_bi_sql(
             .connector_by_index(connector_index)
             .ok_or("Connector not found for this connection")?;
         connector
-            .execute_query(&sql)
+            .execute_query(sql)
             .await
             .map_err(|e| format!("SQL query failed: {}", e))?
     };
@@ -1943,22 +1987,6 @@ pub async fn script_bi_sql(
         result.rows.truncate(MAX_ROWS);
         result.row_count = MAX_ROWS;
     }
-    log_info!("BI", "script_bi_sql: conn={}, returned {} rows", connection_id, result.row_count);
-
-    // Audit (unified trail): persist a script-attributed bi.sql call (success).
-    // Record a short SQL PREFIX for forensic context, never the full query.
-    if let Some(sid) = script_id.as_deref() {
-        let sql_prefix: String = sql.trim().chars().take(60).collect();
-        crate::net_commands::record_capability_call(
-            &app_state.audit_log,
-            "bi.sql",
-            sid,
-            true,
-            Some(&format!("connection {} — {}", connection_id, sql_prefix)),
-            None,
-        );
-    }
-
     Ok(result)
 }
 

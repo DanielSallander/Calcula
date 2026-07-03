@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/__tests__/filterPaneStoreDeep.test.ts
+//! FILENAME: app/extensions/ControlsPane/lib/__tests__/filterPaneStoreDeep.test.ts
 // PURPOSE: Deep tests for FilterPane store: multiple active filters interaction,
 //          filter ordering, cache invalidation, cross-filtering, BI filter items,
 //          multi-connection isolation, and concurrent operations.

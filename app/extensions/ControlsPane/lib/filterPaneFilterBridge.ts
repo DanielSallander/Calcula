@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/filterPaneFilterBridge.ts
+//! FILENAME: app/extensions/ControlsPane/lib/filterPaneFilterBridge.ts
 // PURPOSE: Bridges ribbon filter selection changes to the BI pivots backed
 //          by the filter's model connection. Only pivots on the SAME
 //          connection are ever targeted — a filter from one Calcula model

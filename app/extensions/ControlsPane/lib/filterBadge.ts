@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/lib/filterBadge.ts
+//! FILENAME: app/extensions/ControlsPane/lib/filterBadge.ts
 // PURPOSE: Updates the badge on the "Filters" tab showing the count of applied filters.
 // CONTEXT: A filter is "applied" when selectedItems !== null (same rule as the
 //          filter card's visual indicator). Badge hides when no filters are applied.
@@ -6,11 +6,11 @@
 import { PanelExtensions } from "@api";
 import { FilterPaneEvents } from "./filterPaneEvents";
 import { getAllFilters } from "./filterPaneStore";
-import { FILTER_PANE_TAB_ID } from "../manifest";
+import { CONTROLS_PANE_TAB_ID } from "../manifest";
 
 function updateBadge(): void {
   const appliedCount = getAllFilters().filter((f) => f.selectedItems !== null).length;
-  PanelExtensions.setBadge(FILTER_PANE_TAB_ID, appliedCount > 0 ? String(appliedCount) : null);
+  PanelExtensions.setBadge(CONTROLS_PANE_TAB_ID, appliedCount > 0 ? String(appliedCount) : null);
 }
 
 /**
@@ -37,6 +37,6 @@ export function registerFilterBadge(): () => void {
     for (const eventName of events) {
       window.removeEventListener(eventName, updateBadge);
     }
-    PanelExtensions.setBadge(FILTER_PANE_TAB_ID, null);
+    PanelExtensions.setBadge(CONTROLS_PANE_TAB_ID, null);
   };
 }

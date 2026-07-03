@@ -69,9 +69,9 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Notebook cells",
     runtime: "rust-quickjs",
     containment:
-      "Isolated QuickJS over a clone of grid state; grid-only ops, no network / filesystem / Tauri",
-    capabilities: [],
-    gate: "Coarse session approval (check_script_security)",
+      "Isolated QuickJS over a clone of grid state; grid ops + read-only model.* (Rust-gated, RLS-enforced); no network / filesystem / Tauri",
+    capabilities: ["bi.query", "bi.sql"],
+    gate: "Coarse session approval (check_script_security) + JIT per-notebook capability consent (Rust CapabilityStore-enforced, audited)",
     executesUserCode: true,
   },
   {

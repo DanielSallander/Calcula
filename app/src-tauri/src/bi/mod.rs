@@ -9,6 +9,7 @@ pub mod measures;
 pub mod model_editor;
 pub mod engine_registry;
 pub mod credential_cache;
+pub mod script_provider;
 
 pub use commands::*;
 pub use types::{BiState, ConnectionId};

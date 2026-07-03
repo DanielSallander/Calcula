@@ -60,4 +60,31 @@ describe("calcula.d.ts op coverage (C3)", () => {
     const missing = ops.filter((op) => !documented.has(op));
     expect(missing, `core ops missing from calcula.d.ts: ${missing.join(", ")}`).toEqual([]);
   });
+
+  it("documents the model global (glue-installed, hidden native sinks)", () => {
+    // model.* is installed via JS glue in core/script-engine/src/ops/model.rs;
+    // the native sinks are hidden __calcula_model_* names the op extraction
+    // (letter-initial) deliberately skips. Pin the JS-facing surface here.
+    const modelSrc = fs.readFileSync(path.join(OPS_DIR, "model.rs"), "utf8");
+    expect(modelSrc).toContain("globalThis.model");
+    const dts = fs.readFileSync(DTS_PATH, "utf8");
+    expect(dts).toContain("declare namespace model");
+    for (const fn of ["connections", "info", "query", "sql", "value", "members", "kpi"]) {
+      expect(documented.has(fn), `model.${fn} missing from calcula.d.ts`).toBe(true);
+    }
+  });
+
+  it("documents the display global (display.rs lives outside ops/)", () => {
+    // display.table is installed via JS glue in core/script-engine/src/display.rs
+    // (the native sink is a hidden internal name), so the ops-file extraction
+    // above can't see it. Pin it explicitly so the surface can't drift silently.
+    const displaySrc = fs.readFileSync(
+      path.resolve(__dirname, "../../../../core/script-engine/src/display.rs"),
+      "utf8",
+    );
+    expect(displaySrc).toContain("globalThis.display");
+    const dts = fs.readFileSync(DTS_PATH, "utf8");
+    expect(dts).toContain("declare namespace display");
+    expect(documented.has("table"), "display.table missing from calcula.d.ts").toBe(true);
+  });
 });

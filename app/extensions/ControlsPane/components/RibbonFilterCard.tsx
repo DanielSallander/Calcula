@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/FilterPane/components/RibbonFilterCard.tsx
+//! FILENAME: app/extensions/ControlsPane/components/RibbonFilterCard.tsx
 // PURPOSE: Compact filter card in the ribbon — field name, summary, dropdown
 //          arrow, plus the model connection the filter is sourced from
 //          (visible so multi-model workbooks stay unambiguous).

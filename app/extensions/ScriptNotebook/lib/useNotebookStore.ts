@@ -17,6 +17,53 @@ function shouldSuppressRefresh(responses: NotebookCellResponse[]): boolean {
   return last?.type === "success" && last.screenUpdating === false;
 }
 
+/**
+ * The model.* ops throw this sentinel when a cell calls the model API without
+ * the capability granted for this notebook's surface. Format (from
+ * core/script-engine/src/ops/model.rs):
+ *   BI_CONSENT_REQUIRED capability=bi.query surface=notebook:{id} — ...
+ */
+const BI_CONSENT_SENTINEL = "BI_CONSENT_REQUIRED";
+
+/** Extract the requested capability from a consent-sentinel error, or null. */
+function parseBiConsentCapability(message: string | undefined): string | null {
+  if (!message || !message.includes(BI_CONSENT_SENTINEL)) return null;
+  const m = message.match(/capability=([a-z.]+)/);
+  return m ? m[1] : "bi.query";
+}
+
+/**
+ * JIT consent for notebook model access: prompt, and on approval mirror the
+ * grant into the authoritative backend CapabilityStore (session-scoped).
+ * Returns true when granted (caller should retry the run once).
+ */
+async function promptAndGrantBiCapability(
+  notebookId: string,
+  message: string,
+): Promise<boolean> {
+  const capability = parseBiConsentCapability(message);
+  if (!capability) return false;
+  const what =
+    capability === "bi.sql"
+      ? "run read-only SQL against its data sources"
+      : "run read-only queries against this workbook's Calcula models";
+  const ok = window.confirm(
+    `This notebook wants to ${what}.\n\n` +
+      `Capability: ${capability} (read-only; every call is recorded in the audit log)\n\n` +
+      `Allow for this session?`,
+  );
+  if (!ok) return false;
+  await api.grantNotebookBiCapability(notebookId, capability);
+  return true;
+}
+
+/** True when the LAST response of a batch is a consent-sentinel error. */
+function batchNeedsBiConsent(responses: NotebookCellResponse[]): string | null {
+  const last = responses[responses.length - 1];
+  if (last?.type === "error") return parseBiConsentCapability(last.message) ? last.message : null;
+  return null;
+}
+
 /** Dispatch deferred actions from the last successful response in a batch. */
 function dispatchBatchDeferredActions(responses: NotebookCellResponse[]): void {
   const last = responses[responses.length - 1];
@@ -224,11 +271,26 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       // Save first so backend has latest sources
       await api.saveNotebook(activeNotebook);
 
-      const response = await api.runNotebookCell({
+      let response = await api.runNotebookCell({
         notebookId: activeNotebook.id,
         cellId,
         source: cell.source,
       });
+
+      // JIT model-access consent: a consent-sentinel error means the cell
+      // called model.* without the capability. Prompt once; on approval,
+      // grant for the session and retry the cell.
+      if (
+        response.type === "error" &&
+        parseBiConsentCapability(response.message) &&
+        (await promptAndGrantBiCapability(activeNotebook.id, response.message))
+      ) {
+        response = await api.runNotebookCell({
+          notebookId: activeNotebook.id,
+          cellId,
+          source: cell.source,
+        });
+      }
 
       // Update the cell with execution results
       const cells = activeNotebook.cells.map((c) => {
@@ -288,7 +350,14 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
     try {
       await api.saveNotebook(activeNotebook);
-      const responses = await api.runAllCells(activeNotebook.id);
+      let responses = await api.runAllCells(activeNotebook.id);
+
+      // JIT model-access consent: run-all stops on the first error, so a
+      // consent sentinel is always the LAST response. Grant + rerun once.
+      const consentMsg = batchNeedsBiConsent(responses);
+      if (consentMsg && (await promptAndGrantBiCapability(activeNotebook.id, consentMsg))) {
+        responses = await api.runAllCells(activeNotebook.id);
+      }
 
       // Reload the notebook to get updated cell states
       const updated = await api.loadNotebook(activeNotebook.id);
@@ -312,10 +381,20 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ isExecuting: true });
 
     try {
-      const responses = await api.rewindNotebook({
+      let responses = await api.rewindNotebook({
         notebookId: activeNotebook.id,
         targetCellId: cellId,
       });
+
+      // Replay can hit the consent gate too (session grants are in-memory,
+      // so a granted-then-restarted session re-prompts). Grant + retry once.
+      const consentMsg = batchNeedsBiConsent(responses);
+      if (consentMsg && (await promptAndGrantBiCapability(activeNotebook.id, consentMsg))) {
+        responses = await api.rewindNotebook({
+          notebookId: activeNotebook.id,
+          targetCellId: cellId,
+        });
+      }
 
       // Reload the notebook to get updated cell states
       const updated = await api.loadNotebook(activeNotebook.id);
@@ -340,10 +419,18 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
     try {
       await api.saveNotebook(activeNotebook);
-      const responses = await api.runFromCell({
+      let responses = await api.runFromCell({
         notebookId: activeNotebook.id,
         targetCellId: cellId,
       });
+
+      const consentMsg = batchNeedsBiConsent(responses);
+      if (consentMsg && (await promptAndGrantBiCapability(activeNotebook.id, consentMsg))) {
+        responses = await api.runFromCell({
+          notebookId: activeNotebook.id,
+          targetCellId: cellId,
+        });
+      }
 
       const updated = await api.loadNotebook(activeNotebook.id);
       set({ activeNotebook: updated });

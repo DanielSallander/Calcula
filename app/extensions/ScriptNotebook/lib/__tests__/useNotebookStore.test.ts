@@ -329,7 +329,7 @@ describe("useNotebookStore", () => {
       mockSaveNotebook.mockResolvedValue(undefined);
       mockRunNotebookCell.mockResolvedValue({
         type: "success",
-        output: ["1"],
+        output: [{ kind: "text", text: "1" }],
         cellsModified: 0,
         durationMs: 5,
         executionIndex: 1,
@@ -343,7 +343,7 @@ describe("useNotebookStore", () => {
       expect(state.isExecuting).toBe(false);
       expect(state.executingCellId).toBeNull();
       const cell = state.activeNotebook!.cells[0];
-      expect(cell.lastOutput).toEqual(["1"]);
+      expect(cell.lastOutput).toEqual([{ kind: "text", text: "1" }]);
       expect(cell.lastError).toBeNull();
       expect(cell.executionIndex).toBe(1);
     });
