@@ -4,7 +4,6 @@
 import { filterPaneBackend } from "./filterPaneBackend";
 import type {
   RibbonFilter,
-  SlicerItem,
   CreateRibbonFilterParams,
   UpdateRibbonFilterParams,
 } from "./filterPaneTypes";
@@ -47,12 +46,6 @@ export async function getRibbonFilter(
   filterId: string,
 ): Promise<RibbonFilter> {
   return filterPaneBackend.invoke<RibbonFilter>("get_ribbon_filter", { filterId });
-}
-
-export async function getRibbonFilterItems(
-  filterId: string,
-): Promise<SlicerItem[]> {
-  return filterPaneBackend.invoke<SlicerItem[]>("get_ribbon_filter_items", { filterId });
 }
 
 export async function clearRibbonFilter(filterId: string): Promise<void> {
@@ -112,6 +105,13 @@ export interface BiModelInfo {
   }>;
 }
 
+/** A BI pivot belonging to a specific model connection. */
+export interface BiConnectionPivot {
+  id: string;
+  name: string;
+  sheetIndex: number;
+}
+
 export async function getBiConnections(): Promise<BiConnectionInfo[]> {
   return filterPaneBackend.invoke<BiConnectionInfo[]>("bi_get_connections");
 }
@@ -120,6 +120,16 @@ export async function getBiModelInfo(
   connectionId: string,
 ): Promise<BiModelInfo> {
   return filterPaneBackend.invoke<BiModelInfo>("bi_get_model_info", { connectionId });
+}
+
+/** List the BI pivots backed by the given model connection. */
+export async function getPivotsForBiConnection(
+  connectionId: string,
+): Promise<BiConnectionPivot[]> {
+  return filterPaneBackend.invoke<BiConnectionPivot[]>(
+    "get_pivots_for_bi_connection",
+    { connectionId },
+  );
 }
 
 export async function getBiColumnValues(

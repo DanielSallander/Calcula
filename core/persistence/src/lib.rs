@@ -848,20 +848,6 @@ fn default_button_columns() -> u32 {
 // RIBBON FILTERS
 // ============================================================================
 
-/// Serializable ribbon filter scope
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SavedRibbonFilterScope {
-    Workbook,
-    Sheet,
-}
-
-impl Default for SavedRibbonFilterScope {
-    fn default() -> Self {
-        SavedRibbonFilterScope::Sheet
-    }
-}
-
 /// Serializable ribbon filter display mode
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -892,20 +878,26 @@ impl Default for SavedConnectionMode {
     }
 }
 
-/// Serializable ribbon filter definition
+/// Serializable ribbon filter definition.
+/// Ribbon filter values always come from a Calcula model (BI) connection;
+/// `connection_id` is the stable connection UUID (SavedBiConnection.id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedRibbonFilter {
     pub id: EntityId,
     pub name: String,
-    pub source_type: SavedSlicerSourceType,
-    pub cache_source_id: EntityId,
+    pub connection_id: EntityId,
+    /// For filters on a package-pulled connection: the stable package
+    /// data-source id used to re-bind connection_id after re-pull.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
     pub field_name: String,
     #[serde(default = "default_unknown")]
     pub field_data_type: String,
     #[serde(default)]
     pub connection_mode: SavedConnectionMode,
+    /// For manual mode: explicitly selected target pivots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connected_sources: Vec<SavedSlicerConnection>,
+    pub connected_pivots: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sheets: Vec<usize>,
     #[serde(default)]

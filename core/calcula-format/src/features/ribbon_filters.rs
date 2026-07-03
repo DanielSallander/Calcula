@@ -1,11 +1,13 @@
 //! FILENAME: core/calcula-format/src/features/ribbon_filters.rs
 //! Ribbon filter definitions serialization.
 //! Each ribbon filter is stored as ribbon_filters/filter_{id}.json.
+//! Filter values always come from a Calcula model (BI) connection;
+//! `connectionId` references the embedded connection's stable UUID.
 
 use identity::EntityId;
 use persistence::{
     SavedRibbonFilter, SavedRibbonFilterDisplayMode, SavedConnectionMode,
-    SavedSlicerSourceType, SavedSlicerConnection, SavedAdvancedFilter,
+    SavedAdvancedFilter,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,15 +17,20 @@ use serde::{Deserialize, Serialize};
 pub struct RibbonFilterDef {
     pub id: EntityId,
     pub name: String,
-    pub source_type: String,
-    pub cache_source_id: EntityId,
+    /// The Calcula model (BI) connection providing this filter's values.
+    pub connection_id: EntityId,
+    /// For filters on a package-pulled connection: the stable package
+    /// data-source id used to re-bind connection_id after re-pull.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
     pub field_name: String,
     #[serde(default = "default_unknown")]
     pub field_data_type: String,
     #[serde(default = "default_connection_mode")]
     pub connection_mode: String,
+    /// For manual mode: explicitly selected target pivots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connected_sources: Vec<RibbonFilterConnectionDef>,
+    pub connected_pivots: Vec<EntityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sheets: Vec<usize>,
     #[serde(default = "default_display_mode")]
@@ -56,14 +63,6 @@ pub struct RibbonFilterDef {
     pub button_rows: u32,
 }
 
-/// JSON-friendly connection reference for the .cala format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RibbonFilterConnectionDef {
-    pub source_type: String,
-    pub source_id: EntityId,
-}
-
 fn default_unknown() -> String {
     "unknown".to_string()
 }
@@ -89,12 +88,8 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
         RibbonFilterDef {
             id: f.id,
             name: f.name.clone(),
-            source_type: match f.source_type {
-                SavedSlicerSourceType::Table => "table".to_string(),
-                SavedSlicerSourceType::Pivot => "pivot".to_string(),
-                SavedSlicerSourceType::BiConnection => "biConnection".to_string(),
-            },
-            cache_source_id: f.cache_source_id,
+            connection_id: f.connection_id,
+            data_source_id: f.data_source_id.clone(),
             field_name: f.field_name.clone(),
             field_data_type: f.field_data_type.clone(),
             connection_mode: match f.connection_mode {
@@ -102,16 +97,7 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
                 SavedConnectionMode::BySheet => "bySheet".to_string(),
                 SavedConnectionMode::Workbook => "workbook".to_string(),
             },
-            connected_sources: f.connected_sources.iter().map(|c| {
-                RibbonFilterConnectionDef {
-                    source_type: match c.source_type {
-                        SavedSlicerSourceType::Table => "table".to_string(),
-                        SavedSlicerSourceType::Pivot => "pivot".to_string(),
-                        SavedSlicerSourceType::BiConnection => "biConnection".to_string(),
-                    },
-                    source_id: c.source_id,
-                }
-            }).collect(),
+            connected_pivots: f.connected_pivots.clone(),
             connected_sheets: f.connected_sheets.clone(),
             display_mode: match f.display_mode {
                 SavedRibbonFilterDisplayMode::Checklist => "checklist".to_string(),
@@ -140,12 +126,8 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
             id: f.id,
             advanced_filter: f.advanced_filter.clone(),
             name: f.name.clone(),
-            source_type: match f.source_type.as_str() {
-                "pivot" => SavedSlicerSourceType::Pivot,
-                "biConnection" => SavedSlicerSourceType::BiConnection,
-                _ => SavedSlicerSourceType::Table,
-            },
-            cache_source_id: f.cache_source_id,
+            connection_id: f.connection_id,
+            data_source_id: f.data_source_id.clone(),
             field_name: f.field_name.clone(),
             field_data_type: f.field_data_type.clone(),
             connection_mode: match f.connection_mode.as_str() {
@@ -153,16 +135,7 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
                 "workbook" => SavedConnectionMode::Workbook,
                 _ => SavedConnectionMode::Manual,
             },
-            connected_sources: f.connected_sources.iter().map(|c| {
-                SavedSlicerConnection {
-                    source_type: match c.source_type.as_str() {
-                        "pivot" => SavedSlicerSourceType::Pivot,
-                        "biConnection" => SavedSlicerSourceType::BiConnection,
-                        _ => SavedSlicerSourceType::Table,
-                    },
-                    source_id: c.source_id,
-                }
-            }).collect(),
+            connected_pivots: f.connected_pivots.clone(),
             connected_sheets: f.connected_sheets.clone(),
             display_mode: match f.display_mode.as_str() {
                 "buttons" => SavedRibbonFilterDisplayMode::Buttons,

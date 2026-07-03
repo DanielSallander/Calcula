@@ -1051,6 +1051,7 @@ pub fn calp_pull(
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, BiState>,
     script_state: State<'_, crate::scripting::types::ScriptState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: PullParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
@@ -1358,7 +1359,8 @@ pub fn calp_pull(
 
     // Auto-load embedded BI models from the pulled package.
     // This creates BI connections so that BI pivots have a live engine to query.
-    let embedded_connection_ids = load_embedded_data_sources(&result.data_sources, &bi_state);
+    let embedded_connection_ids =
+        load_embedded_data_sources(&result.data_sources, &bi_state, &ribbon_filter_state);
 
     // Restore pivot definitions from the package and render to grid.
     // The source_sheet_index in each definition is relative to the publisher's
@@ -2353,6 +2355,7 @@ pub fn calp_refresh_apply(
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
     bi_state: State<BiState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -2782,7 +2785,11 @@ pub fn calp_refresh_apply(
     // silently serving the old model. Existing dataSource ledger entries
     // carry over in the merge below; only newly-added ones are appended.
     for payload in &payloads {
-        let added = refresh_embedded_data_sources(&payload.pull_result.data_sources, &bi_state);
+        let added = refresh_embedded_data_sources(
+            &payload.pull_result.data_sources,
+            &bi_state,
+            &ribbon_filter_state,
+        );
         if !added.is_empty() {
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for (id, name) in added {
@@ -6045,9 +6052,12 @@ fn read_pulled_model(
 
 /// Load embedded BI model data sources from a pulled package into BiState.
 /// Returns a mapping from package data source ID to the created connection ID.
+/// Also re-binds ribbon filters saved against a previous session's connection
+/// uuid to the freshly minted ones (via their stable data_source_id).
 fn load_embedded_data_sources(
     data_sources: &[calp::pull::PulledDataSource],
     bi_state: &BiState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
 ) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
     use crate::bi::types::{Connection, ConnectionType};
     use crate::bi::engine_registry::ModelKey;
@@ -6155,6 +6165,8 @@ fn load_embedded_data_sources(
         );
     }
 
+    crate::ribbon_filter::remap_ribbon_filter_connections(ribbon_filter_state, &ds_to_conn);
+
     ds_to_conn
 }
 
@@ -6168,6 +6180,7 @@ fn load_embedded_data_sources(
 fn refresh_embedded_data_sources(
     data_sources: &[calp::pull::PulledDataSource],
     bi_state: &BiState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
 ) -> Vec<(String, String)> {
     let mut newly_created: Vec<(String, String)> = Vec::new();
     for ds in data_sources {
@@ -6182,7 +6195,8 @@ fn refresh_embedded_data_sources(
         };
         let Some(conn_id) = conn_id else {
             // Added in this version — materialize like a first pull.
-            let created = load_embedded_data_sources(std::slice::from_ref(ds), bi_state);
+            let created =
+                load_embedded_data_sources(std::slice::from_ref(ds), bi_state, ribbon_filter_state);
             if created.contains_key(&ds.definition.id) {
                 newly_created.push((ds.definition.id.clone(), ds.definition.name.clone()));
             }

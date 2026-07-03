@@ -1,32 +1,30 @@
 //! FILENAME: app/extensions/FilterPane/components/AddFilterDialog.tsx
-// PURPOSE: Dialog for adding filters to the Filter Pane. Lists available
-//          Tables and PivotTables, shows their fields, creates ribbon filters.
+// PURPOSE: Dialog for adding filters to the Filter Pane. Filters are always
+//          sourced from a Calcula model (BI) connection — the dialog lists
+//          the workbook's model connections and their model fields.
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
-import { getAllTables, getPivotHierarchies, type Table, getAllPivotTables } from "@api/backend";
 import { createFilterAsync } from "../lib/filterPaneStore";
 import {
   getBiConnections,
   getBiModelInfo,
-  type BiConnectionInfo,
 } from "../lib/filterPaneApi";
-import type { SlicerSourceType, SlicerConnection } from "../lib/filterPaneTypes";
+import type { FieldDataType } from "../lib/filterPaneTypes";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-interface DataSource {
-  type: SlicerSourceType;
-  id: string;
+interface ModelSource {
+  /** The BI connection id. */
+  connectionId: string;
   name: string;
-  sheetIndex: number;
+  description: string;
+  /** "Table.Column" keys of all model columns. */
   fields: string[];
-  /** Map of field name -> data type */
-  fieldTypes?: Map<string, string>;
-  /** For biConnection sources: the connection ID */
-  connectionId?: string;
+  /** Map of field name -> data type category. */
+  fieldTypes: Map<string, FieldDataType>;
 }
 
 // ============================================================================
@@ -37,128 +35,62 @@ export function AddFilterDialog({
   isOpen,
   onClose,
 }: DialogProps): React.ReactElement | null {
-  const [sources, setSources] = useState<DataSource[]>([]);
+  const [sources, setSources] = useState<ModelSource[]>([]);
   const [selectedSourceIndex, setSelectedSourceIndex] = useState<number>(-1);
   const [checkedFields, setCheckedFields] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingSources, setIsLoadingSources] = useState(false);
   const [searchText, setSearchText] = useState("");
 
-  // Load data sources when dialog opens
+  // Load model connections when dialog opens
   useEffect(() => {
     if (isOpen) {
       setCheckedFields(new Set());
       setSelectedSourceIndex(-1);
       setSearchText("");
-      loadDataSources();
+      loadModelSources();
     }
   }, [isOpen]);
 
-  const loadDataSources = async () => {
+  const loadModelSources = async () => {
     setIsLoadingSources(true);
     try {
-      const allSources: DataSource[] = [];
+      const allSources: ModelSource[] = [];
 
-      // Fetch all tables
-      try {
-        const tables = await getAllTables();
-        for (const table of tables) {
+      const connections = await getBiConnections();
+      for (const conn of connections) {
+        // NOTE: no modelPath check — connections created from an embedded
+        // model (packages, inline JSON) have no path but a loaded model;
+        // the try below already handles a connection without one.
+        try {
+          const modelInfo = await getBiModelInfo(conn.id);
+          const allFields: string[] = [];
+          const fieldTypes = new Map<string, FieldDataType>();
+          for (const table of modelInfo.tables) {
+            for (const col of table.columns) {
+              const key = `${table.name}.${col.name}`;
+              allFields.push(key);
+              // Map BI data types to our categories
+              const dt = (col.dataType || "").toLowerCase();
+              if (dt.includes("int") || dt.includes("float") || dt.includes("decimal") || dt.includes("numeric") || dt.includes("double") || dt.includes("real")) {
+                fieldTypes.set(key, "number");
+              } else if (dt.includes("date") || dt.includes("time") || dt.includes("timestamp")) {
+                fieldTypes.set(key, "date");
+              } else {
+                fieldTypes.set(key, "text");
+              }
+            }
+          }
           allSources.push({
-            type: "table",
-            id: table.id,
-            name: table.name,
-            sheetIndex: table.sheetIndex,
-            fields: table.columns.map((c) => c.name),
+            connectionId: conn.id,
+            name: conn.name,
+            description: conn.description,
+            fields: allFields,
+            fieldTypes,
           });
+        } catch (err) {
+          console.warn("[AddFilterDialog] Failed to load BI model info:", err);
         }
-      } catch (err) {
-        console.warn("[AddFilterDialog] Failed to load tables:", err);
-      }
-
-      // Fetch all pivots
-      try {
-        const pivots = await getAllPivotTables<
-          Array<{ id: string; name: string; sourceRange: string }>
-        >();
-        for (const pv of pivots) {
-          try {
-            const result = await getPivotHierarchies<{
-              hierarchies: Array<{ index: number; name: string }>;
-              biModel?: { tables: Array<{ name: string; columns: Array<{ name: string }> }> };
-            }>(pv.id);
-
-            if (result.biModel) {
-              const allFields: string[] = [];
-              for (const table of result.biModel.tables) {
-                for (const col of table.columns) {
-                  allFields.push(`${table.name}.${col.name}`);
-                }
-              }
-              allSources.push({
-                type: "pivot",
-                id: pv.id,
-                name: pv.name,
-                sheetIndex: 0,
-                fields: allFields,
-              });
-            } else {
-              allSources.push({
-                type: "pivot",
-                id: pv.id,
-                name: pv.name,
-                sheetIndex: 0,
-                fields: result.hierarchies.map((h) => h.name),
-              });
-            }
-          } catch (err) {
-            console.warn("[AddFilterDialog] Failed to load pivot fields:", err);
-          }
-        }
-      } catch (err) {
-        console.warn("[AddFilterDialog] Failed to load pivots:", err);
-      }
-
-      // Fetch BI connections (direct model access without pivot)
-      try {
-        const connections = await getBiConnections();
-        for (const conn of connections) {
-          // NOTE: no modelPath check — connections created from an embedded
-          // model (packages, inline JSON) have no path but a loaded model;
-          // the try below already handles a connection without one.
-          try {
-            const modelInfo = await getBiModelInfo(conn.id);
-            const allFields: string[] = [];
-            const fieldTypes = new Map<string, string>();
-            for (const table of modelInfo.tables) {
-              for (const col of table.columns) {
-                const key = `${table.name}.${col.name}`;
-                allFields.push(key);
-                // Map BI data types to our categories
-                const dt = (col.dataType || "").toLowerCase();
-                if (dt.includes("int") || dt.includes("float") || dt.includes("decimal") || dt.includes("numeric") || dt.includes("double") || dt.includes("real")) {
-                  fieldTypes.set(key, "number");
-                } else if (dt.includes("date") || dt.includes("time") || dt.includes("timestamp")) {
-                  fieldTypes.set(key, "date");
-                } else {
-                  fieldTypes.set(key, "text");
-                }
-              }
-            }
-            allSources.push({
-              type: "biConnection",
-              id: conn.id,
-              name: `${conn.name} (BI Model)`,
-              sheetIndex: 0,
-              fields: allFields,
-              fieldTypes,
-              connectionId: conn.id,
-            });
-          } catch (err) {
-            console.warn("[AddFilterDialog] Failed to load BI model info:", err);
-          }
-        }
-      } catch (err) {
-        console.warn("[AddFilterDialog] Failed to load BI connections:", err);
       }
 
       setSources(allSources);
@@ -166,7 +98,7 @@ export function AddFilterDialog({
         setSelectedSourceIndex(0);
       }
     } catch (err) {
-      console.error("[AddFilterDialog] Failed to load data sources:", err);
+      console.error("[AddFilterDialog] Failed to load model connections:", err);
     } finally {
       setIsLoadingSources(false);
     }
@@ -194,34 +126,15 @@ export function AddFilterDialog({
     const source = sources[selectedSourceIndex];
 
     try {
-      if (source.type === "biConnection") {
-        // BI connection: default to "workbook" mode (auto-connect all pivots)
-        for (const fieldName of checkedFields) {
-          const fieldDataType = source.fieldTypes?.get(fieldName) as "text" | "number" | "date" | undefined;
-          await createFilterAsync({
-            name: fieldName,
-            sourceType: source.type,
-            cacheSourceId: source.id,
-            fieldName,
-            fieldDataType: fieldDataType ?? "unknown",
-            connectionMode: "workbook",
-          });
-        }
-      } else {
-        // Table/Pivot: default to "manual" mode with the source as connection
-        const connectedSources: SlicerConnection[] = [
-          { sourceType: source.type, sourceId: source.id },
-        ];
-        for (const fieldName of checkedFields) {
-          await createFilterAsync({
-            name: fieldName,
-            sourceType: source.type,
-            cacheSourceId: source.id,
-            fieldName,
-            connectionMode: "manual",
-            connectedSources,
-          });
-        }
+      // Default to "workbook" mode: auto-connect all of this connection's pivots
+      for (const fieldName of checkedFields) {
+        await createFilterAsync({
+          name: fieldName,
+          connectionId: source.connectionId,
+          fieldName,
+          fieldDataType: source.fieldTypes.get(fieldName) ?? "unknown",
+          connectionMode: "workbook",
+        });
       }
       onClose();
     } catch (err) {
@@ -253,15 +166,16 @@ export function AddFilterDialog({
 
         {/* Body */}
         <div style={styles.body}>
-          {/* Source picker */}
+          {/* Model connection picker */}
           <div style={styles.field}>
-            <label style={styles.label}>Data Source</label>
+            <label style={styles.label}>Model Connection</label>
             {isLoadingSources ? (
-              <div style={styles.loading}>Loading sources...</div>
+              <div style={styles.loading}>Loading model connections...</div>
             ) : sources.length === 0 ? (
               <div style={styles.noData}>
-                No tables or pivot tables found. Create a Table or PivotTable
-                first.
+                No Calcula model connections found. Filters are sourced from
+                model connections — add one via Data &#9656; Business
+                Intelligence... first.
               </div>
             ) : (
               <select
@@ -273,10 +187,11 @@ export function AddFilterDialog({
                   setSearchText("");
                 }}
               >
-                <option value={-1}>-- Select a source --</option>
+                <option value={-1}>-- Select a model connection --</option>
                 {sources.map((s, i) => (
-                  <option key={`${s.type}-${s.id}`} value={i}>
-                    {s.type === "table" ? "[Table]" : s.type === "biConnection" ? "[BI]" : "[Pivot]"} {s.name}
+                  <option key={s.connectionId} value={i}>
+                    {s.name}
+                    {s.description ? ` — ${s.description}` : ""}
                   </option>
                 ))}
               </select>
@@ -395,17 +310,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     color: "#555",
     marginBottom: "4px",
-  },
-  radioGroup: {
-    display: "flex",
-    gap: "16px",
-  },
-  radioLabel: {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
-    fontSize: "12px",
-    cursor: "pointer",
   },
   select: {
     width: "100%",

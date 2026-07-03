@@ -1,15 +1,22 @@
 //! FILENAME: app/extensions/FilterPane/components/FilterDropdown.tsx
 // PURPOSE: Dropdown checklist anchored below a ribbon filter card.
 //          Includes search, select all/none, OK/Cancel, and actions.
+// CONTEXT: Report Connections only ever offer the BI pivots backed by the
+//          filter's own model connection.
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { getSheets, emitAppEvent, AppEvents } from "@api";
-import { getAllPivotTables } from "@api/backend";
-import type { SlicerItem, SlicerConnection, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
+import type { SlicerItem, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
 import { filterPaneBackend } from "../lib/filterPaneBackend";
-import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters } from "../lib/filterPaneStore";
-import { getAllSlicers as fetchAllSlicers, type SlicerInfo } from "../lib/filterPaneApi";
+import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters, getConnectionName } from "../lib/filterPaneStore";
+import { applyRibbonFilter } from "../lib/filterPaneFilterBridge";
+import {
+  getAllSlicers as fetchAllSlicers,
+  getPivotsForBiConnection,
+  type SlicerInfo,
+  type BiConnectionPivot,
+} from "../lib/filterPaneApi";
 
 /** Resolve a pivot field's index from its name. */
 async function resolveFieldIndex(
@@ -40,12 +47,14 @@ export interface FilterDropdownProps {
   onApply: (selectedItems: string[] | null) => void;
   onClose: () => void;
   onDelete: () => void;
+  /** The model connection this filter is sourced from. */
+  connectionId: string;
   connectionMode: ConnectionMode;
   crossFilterTargets: string[];
   crossFilterSlicerTargets: string[];
   advancedFilter: AdvancedFilter | null;
   fieldDataType: FieldDataType;
-  connectedSources?: SlicerConnection[];
+  connectedPivots?: string[];
   connectedSheets?: number[];
   hideNoData: boolean;
   indicateNoData: boolean;
@@ -63,11 +72,12 @@ export function FilterDropdown({
   onApply,
   onClose,
   onDelete,
+  connectionId,
   connectionMode,
   crossFilterTargets,
   advancedFilter,
   fieldDataType,
-  connectedSources,
+  connectedPivots,
   connectedSheets,
   hideNoData,
   indicateNoData,
@@ -77,6 +87,7 @@ export function FilterDropdown({
   crossFilterSlicerTargets,
 }: FilterDropdownProps): React.ReactElement {
   const cachedFilters = getAllFilters();
+  const connectionName = getConnectionName(connectionId);
   // Local selection state for OK/Cancel pattern
   const allValues = useMemo(() => items.map((i) => i.value), [items]);
   const [localSelected, setLocalSelected] = useState<Set<string>>(() => {
@@ -110,17 +121,10 @@ export function FilterDropdown({
   );
   const [availableSlicers, setAvailableSlicers] = useState<SlicerInfo[]>([]);
 
-  // For manual mode: list of all available pivots + tables
-  interface SourceEntry {
-    type: "pivot" | "table";
-    id: string;
-    name: string;
-  }
-  const [availableSources, setAvailableSources] = useState<SourceEntry[]>([]);
+  // For manual mode: the connection's BI pivots available as targets
+  const [availablePivots, setAvailablePivots] = useState<BiConnectionPivot[]>([]);
   const [localConnections, setLocalConnections] = useState<Set<string>>(() => {
-    return new Set(
-      (connectedSources ?? []).map((c) => `${c.sourceType}:${c.sourceId}`),
-    );
+    return new Set(connectedPivots ?? []);
   });
 
   // Load slicers when cross-filter panel opens
@@ -129,40 +133,41 @@ export function FilterDropdown({
     fetchAllSlicers().then(setAvailableSlicers).catch(console.error);
   }, [panelView]);
 
-  // Load sheet names + available sources when showing connections
+  // Load sheet names + this connection's pivots when showing connections
   useEffect(() => {
     if (!showConnections) return;
     getSheets().then((result) => {
       setSheetNames(result.sheets.map((s: { name: string }) => s.name));
     });
-    // Load all pivots and tables for manual mode
-    (async () => {
-      const entries: SourceEntry[] = [];
-      try {
-        const pivots = await getAllPivotTables<
-          Array<{ id: string; name: string; sourceRange: string }>
-        >();
-        for (const pv of pivots) {
-          entries.push({ type: "pivot", id: pv.id, name: pv.name });
-        }
-      } catch { /* no pivots */ }
-      try {
-        const tables = await filterPaneBackend.invoke<
-          Array<{ id: string; name: string; sheetIndex: number }>
-        >("get_all_tables", {});
-        for (const t of tables) {
-          entries.push({ type: "table", id: t.id, name: t.name });
-        }
-      } catch { /* no tables */ }
-      setAvailableSources(entries);
-    })();
-  }, [showConnections]);
+    getPivotsForBiConnection(connectionId)
+      .then(setAvailablePivots)
+      .catch(() => setAvailablePivots([]));
+  }, [showConnections, connectionId]);
 
   const handleSaveConnections = useCallback(async () => {
-    // Find connections that were removed so we can clear their filters
-    const oldKeys = new Set(
-      (connectedSources ?? []).map((c) => `${c.sourceType}:${c.sourceId}`),
+    // Effective target sets before and after the change, resolved the same
+    // way the bridge's resolveTargetPivots does. Diffing modes naively
+    // (only the stored manual list) either left stale filters on pivots no
+    // longer targeted, or cleared pivots that remain targets.
+    const effectiveTargets = (
+      mode: ConnectionMode,
+      sheets: Set<number>,
+      manualPivots: Set<string>,
+    ): Set<string> => {
+      if (mode === "manual") {
+        return new Set(availablePivots.filter((p) => manualPivots.has(p.id)).map((p) => p.id));
+      }
+      if (mode === "bySheet") {
+        return new Set(availablePivots.filter((p) => sheets.has(p.sheetIndex)).map((p) => p.id));
+      }
+      return new Set(availablePivots.map((p) => p.id));
+    };
+    const oldTargets = effectiveTargets(
+      connectionMode,
+      new Set(connectedSheets ?? []),
+      new Set(connectedPivots ?? []),
     );
+    const newTargets = effectiveTargets(localMode, localSheets, localConnections);
 
     const updates: UpdateRibbonFilterParams = {
       connectionMode: localMode,
@@ -171,35 +176,30 @@ export function FilterDropdown({
       crossFilterSlicerTargets: Array.from(localCrossSlicerTargets),
     };
     if (localMode === "manual") {
-      updates.connectedSources = Array.from(localConnections).map((key) => {
-        const [type, id] = key.split(":");
-        return { sourceType: type as "pivot" | "table", sourceId: id };
-      });
+      updates.connectedPivots = Array.from(localConnections);
     }
-    await updateFilterAsync(filterId, updates);
+    const updated = await updateFilterAsync(filterId, updates);
 
-    // Clear filters on removed connections
-    const newKeys = localMode === "manual" ? localConnections : new Set<string>();
-    for (const oldKey of oldKeys) {
-      if (localMode !== "manual" || !newKeys.has(oldKey)) {
-        const [type, id] = oldKey.split(":");
-        try {
-          if (type === "pivot") {
-            // Clear pivot filter for this field
-            const fieldIndex = await resolveFieldIndex(id, fieldName);
-            if (fieldIndex >= 0) {
-              await filterPaneBackend.invoke("clear_pivot_filter", {
-                request: { pivotId: id, fieldIndex },
-              });
-              window.dispatchEvent(new Event("pivot:refresh"));
-            }
-          } else if (type === "table") {
-            await filterPaneBackend.invoke("clear_column_filter", { columnIndex: 0 });
-          }
-        } catch {
-          // Best effort
+    // Clear this filter's field on pivots that are no longer targeted
+    for (const pivotId of oldTargets) {
+      if (newTargets.has(pivotId)) continue;
+      try {
+        const fieldIndex = await resolveFieldIndex(pivotId, fieldName);
+        if (fieldIndex >= 0) {
+          await filterPaneBackend.invoke("clear_pivot_filter", {
+            request: { pivotId, fieldIndex },
+          });
+          window.dispatchEvent(new Event("pivot:refresh"));
         }
+      } catch {
+        // Best effort
       }
+    }
+
+    // Re-apply an active selection to the (possibly grown) target set —
+    // newly targeted pivots have never seen this filter.
+    if (updated && updated.selectedItems !== null) {
+      await applyRibbonFilter(updated);
     }
 
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -212,7 +212,7 @@ export function FilterDropdown({
     );
 
     setShowConnections(false);
-  }, [filterId, fieldName, localMode, localSheets, localConnections, localCrossTargets, localCrossSlicerTargets, connectedSources]);
+  }, [filterId, fieldName, connectionMode, connectedSheets, availablePivots, localMode, localSheets, localConnections, localCrossTargets, localCrossSlicerTargets, connectedPivots]);
 
   // Close on outside click
   useEffect(() => {
@@ -446,9 +446,10 @@ export function FilterDropdown({
             Target items will be dimmed when they have no matching data.
           </div>
           <div style={styles.sheetList}>
-            {/* Other ribbon filters */}
+            {/* Other ribbon filters on the SAME model connection — item
+                availability can only be evaluated within one model */}
             {cachedFilters
-              .filter((f) => f.id !== filterId)
+              .filter((f) => f.id !== filterId && f.connectionId === connectionId)
               .map((f) => {
                 const shortName = f.fieldName.includes(".")
                   ? f.fieldName.split(".").pop()!
@@ -498,9 +499,11 @@ export function FilterDropdown({
                 </label>
               );
             })}
-            {cachedFilters.filter((f) => f.id !== filterId).length === 0 &&
+            {cachedFilters.filter((f) => f.id !== filterId && f.connectionId === connectionId).length === 0 &&
               availableSlicers.length === 0 && (
-              <div style={styles.modeHint}>No other filters or slicers to cross-filter.</div>
+              <div style={styles.modeHint}>
+                No other filters on this model connection or slicers to cross-filter.
+              </div>
             )}
           </div>
           <div style={styles.connectionsFooter}>
@@ -520,6 +523,9 @@ export function FilterDropdown({
       ) : (
         <div style={styles.connectionsPanel}>
           <div style={styles.connectionsHeader}>Report Connections</div>
+          <div style={styles.modeHint}>
+            Model: {connectionName ?? "(connection missing)"}
+          </div>
           {/* Mode selector */}
           <div style={styles.modeRow}>
             {(["manual", "bySheet", "workbook"] as const).map((mode) => (
@@ -565,42 +571,39 @@ export function FilterDropdown({
 
           {localMode === "workbook" && (
             <div style={styles.modeHint}>
-              Automatically connects to all pivot tables and tables in the
-              workbook, including newly created ones.
+              Automatically connects to all pivot tables using this model
+              connection, including newly created ones.
             </div>
           )}
 
           {localMode === "manual" && (
             <div style={styles.sheetList}>
-              {availableSources.length === 0 ? (
+              {availablePivots.length === 0 ? (
                 <div style={styles.modeHint}>
-                  No pivot tables or tables found in the workbook.
+                  No pivot tables use this model connection yet.
                 </div>
               ) : (
-                availableSources.map((src) => {
-                  const key = `${src.type}:${src.id}`;
-                  return (
-                    <label key={key} style={styles.itemRow}>
-                      <input
-                        type="checkbox"
-                        checked={localConnections.has(key)}
-                        onChange={() => {
-                          setLocalConnections((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(key)) next.delete(key);
-                            else next.add(key);
-                            return next;
-                          });
-                        }}
-                        style={{ marginRight: 8 }}
-                      />
-                      <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>
-                        {src.type === "pivot" ? "[P]" : "[T]"}
-                      </span>
-                      <span>{src.name}</span>
-                    </label>
-                  );
-                })
+                availablePivots.map((pv) => (
+                  <label key={pv.id} style={styles.itemRow}>
+                    <input
+                      type="checkbox"
+                      checked={localConnections.has(pv.id)}
+                      onChange={() => {
+                        setLocalConnections((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(pv.id)) next.delete(pv.id);
+                          else next.add(pv.id);
+                          return next;
+                        });
+                      }}
+                      style={{ marginRight: 8 }}
+                    />
+                    <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>
+                      [P]
+                    </span>
+                    <span>{pv.name}</span>
+                  </label>
+                ))
               )}
             </div>
           )}
@@ -613,6 +616,7 @@ export function FilterDropdown({
               onClick={() => {
                 setLocalMode(connectionMode);
                 setLocalSheets(new Set(connectedSheets ?? []));
+                setLocalConnections(new Set(connectedPivots ?? []));
                 setLocalCrossTargets(new Set(crossFilterTargets));
                 setPanelView("none");
               }}

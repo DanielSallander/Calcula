@@ -1,26 +1,27 @@
 //! FILENAME: app/extensions/FilterPane/lib/filterPaneTypes.ts
 // PURPOSE: TypeScript types mirroring Rust ribbon_filter types.
+// CONTEXT: Ribbon filter values always come from a Calcula model (BI)
+//          connection; filters apply to the BI pivots of that connection.
 
 export type ConnectionMode = "manual" | "bySheet" | "workbook";
 export type RibbonFilterDisplayMode = "checklist" | "buttons" | "dropdown";
-export type SlicerSourceType = "table" | "pivot" | "biConnection";
-
-export interface SlicerConnection {
-  sourceType: SlicerSourceType;
-  sourceId: string;
-}
 
 export type FieldDataType = "text" | "number" | "date" | "unknown";
 
 export interface RibbonFilter {
   id: string;
   name: string;
-  sourceType: SlicerSourceType;
-  cacheSourceId: string;
+  /** The Calcula model (BI) connection providing this filter's values. */
+  connectionId: string;
+  /** For filters on a package-pulled connection: the stable package
+   *  data-source id (backend re-binds connectionId by it after re-pull). */
+  dataSourceId?: string | null;
+  /** Field to filter on, in "Table.Column" form. */
   fieldName: string;
   fieldDataType: FieldDataType;
   connectionMode: ConnectionMode;
-  connectedSources: SlicerConnection[];
+  /** For manual mode: explicitly selected target pivots. */
+  connectedPivots: string[];
   connectedSheets: number[];
   displayMode: RibbonFilterDisplayMode;
   selectedItems: string[] | null;
@@ -45,12 +46,11 @@ export interface SlicerItem {
 
 export interface CreateRibbonFilterParams {
   name: string;
-  sourceType: SlicerSourceType;
-  cacheSourceId: string;
+  connectionId: string;
   fieldName: string;
   fieldDataType?: FieldDataType;
   connectionMode?: ConnectionMode;
-  connectedSources?: SlicerConnection[];
+  connectedPivots?: string[];
   connectedSheets?: number[];
   displayMode?: RibbonFilterDisplayMode;
   order?: number;
@@ -63,7 +63,7 @@ export interface UpdateRibbonFilterParams {
   buttonColumns?: number;
   buttonRows?: number;
   connectionMode?: ConnectionMode;
-  connectedSources?: SlicerConnection[];
+  connectedPivots?: string[];
   connectedSheets?: number[];
   crossFilterTargets?: string[];
   crossFilterSlicerTargets?: string[];

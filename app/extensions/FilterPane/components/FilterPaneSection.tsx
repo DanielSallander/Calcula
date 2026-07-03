@@ -1,8 +1,10 @@
 //! FILENAME: app/extensions/FilterPane/components/FilterPaneSection.tsx
 // PURPOSE: Panel section hosting the dynamic filter cards.
 //          Ribbon band: horizontal strip of fixed-height cards (band-designed).
-//          Sidebar / launcher flyout: add-button row on top, cards stacked below.
-// CONTEXT: Each card shows field name + selection summary + dropdown arrow
+//          Sidebar / launcher flyout: add-button row on top, cards stacked below,
+//          grouped per model connection when the workbook has filters from
+//          more than one connection.
+// CONTEXT: Each card shows field name + selection summary + model connection
 //          (see RibbonFilterCard); "+" opens the Add Filter dialog.
 
 import React, { useState, useEffect, useCallback } from "react";
@@ -16,7 +18,7 @@ import {
   useSurfaceLayout,
 } from "@api/layout";
 import { FilterPaneEvents } from "../lib/filterPaneEvents";
-import { getAllFilters } from "../lib/filterPaneStore";
+import { getAllFilters, getConnectionName } from "../lib/filterPaneStore";
 import { ADD_FILTER_DIALOG_ID } from "../manifest";
 import { RibbonFilterCard } from "./RibbonFilterCard";
 import type { RibbonFilter } from "../lib/filterPaneTypes";
@@ -65,30 +67,47 @@ export function FilterPaneSection(
       <StatusText>Click + to add filters</StatusText>
     ) : null;
 
-  const cards = filters.map((f) => (
-    <RibbonFilterCard key={f.id} filter={f} />
-  ));
-
   // Band: the cards ARE band-designed content (fixed 56px height) — host them
-  // as a single horizontal strip. The shell owns overflow handling.
+  // as a single horizontal strip; each card carries its own model attribution.
+  // The shell owns overflow handling.
   if (band) {
     return (
       <div style={styles.bandStrip}>
         {addButton}
         {emptyHint}
-        {cards}
+        {filters.map((f) => (
+          <RibbonFilterCard key={f.id} filter={f} />
+        ))}
       </div>
     );
   }
 
   // Sidebar / launcher flyout: add-button row on top, cards stacked vertically.
+  // With filters from more than one model connection, group them under
+  // per-connection headers so the source of each filter is unmistakable.
+  const connectionIds = [...new Set(filters.map((f) => f.connectionId))];
+  const grouped = connectionIds.length > 1;
+
   return (
     <Stack gap={6}>
       <ControlRow gap={6}>
         {addButton}
         {emptyHint}
       </ControlRow>
-      {cards}
+      {grouped
+        ? connectionIds.map((connId) => (
+            <React.Fragment key={connId}>
+              <div style={styles.groupHeader}>
+                {getConnectionName(connId) ?? "(connection missing)"}
+              </div>
+              {filters
+                .filter((f) => f.connectionId === connId)
+                .map((f) => (
+                  <RibbonFilterCard key={f.id} filter={f} />
+                ))}
+            </React.Fragment>
+          ))
+        : filters.map((f) => <RibbonFilterCard key={f.id} filter={f} />)}
     </Stack>
   );
 }
@@ -109,5 +128,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: "bold",
     fontSize: "16px",
     lineHeight: 1,
+  },
+  groupHeader: {
+    fontSize: "10px",
+    fontWeight: 600,
+    color: "#777",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.4px",
+    marginTop: "4px",
+    whiteSpace: "nowrap" as const,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
 };

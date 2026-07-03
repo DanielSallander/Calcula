@@ -1,17 +1,18 @@
 //! FILENAME: app/extensions/FilterPane/components/RibbonFilterCard.tsx
-// PURPOSE: Compact filter card in the ribbon — field name, summary, dropdown arrow.
+// PURPOSE: Compact filter card in the ribbon — field name, summary, dropdown
+//          arrow, plus the model connection the filter is sourced from
+//          (visible so multi-model workbooks stay unambiguous).
 //          Clicking the arrow opens a checklist dropdown anchored below the card.
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
 import type { RibbonFilter, SlicerItem } from "../lib/filterPaneTypes";
 import {
   getCachedItems,
   refreshFilterItems,
   updateFilterSelectionAsync,
   deleteFilterAsync,
-  updateFilterAsync,
   getFilterById,
+  getConnectionName,
 } from "../lib/filterPaneStore";
 import { FilterPaneEvents } from "../lib/filterPaneEvents";
 import { FilterDropdown } from "./FilterDropdown";
@@ -125,6 +126,11 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
     ? filter.fieldName.split(".").pop()!
     : filter.fieldName;
 
+  // Model connection attribution — always visible so it's unambiguous
+  // which model each filter comes from when several connections exist.
+  const connectionName = getConnectionName(filter.connectionId);
+  const connectionMissing = connectionName === undefined;
+
   return (
     <>
       <div
@@ -134,15 +140,32 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
           borderColor: hasFilter ? "#0078d4" : "#c0c0c0",
           background: hasFilter ? "#edf4fc" : "#fff",
         }}
-        title={`${filter.fieldName}\n${hasFilter ? `Filtered: ${localSelectedItems?.length ?? 0} of ${totalCount}` : "No filter applied"}`}
+        title={
+          `${filter.fieldName}\nModel: ${connectionName ?? "(connection missing)"}\n` +
+          (hasFilter
+            ? `Filtered: ${localSelectedItems?.length ?? 0} of ${totalCount}`
+            : "No filter applied")
+        }
       >
-        <div style={styles.fieldName}>{shortName}:</div>
-        <div style={styles.summary}>{summaryText}</div>
+        <div style={styles.cardBody}>
+          <div style={styles.topRow}>
+            <div style={styles.fieldName}>{shortName}:</div>
+            <div style={styles.summary}>{summaryText}</div>
+          </div>
+          <div
+            style={{
+              ...styles.connectionRow,
+              ...(connectionMissing ? styles.connectionMissing : {}),
+            }}
+          >
+            {connectionName ?? "(connection missing)"}
+          </div>
+        </div>
         <button
           style={styles.arrow}
           onClick={toggleDropdown}
         >
-          {dropdownOpen ? "\u25B2" : "\u25BC"}
+          {dropdownOpen ? "▲" : "▼"}
         </button>
       </div>
 
@@ -159,12 +182,13 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
             onClose={handleDropdownClose}
             filterId={f.id}
             onDelete={handleDelete}
+            connectionId={f.connectionId}
             connectionMode={f.connectionMode ?? "manual"}
             crossFilterTargets={f.crossFilterTargets ?? []}
             crossFilterSlicerTargets={f.crossFilterSlicerTargets ?? []}
             advancedFilter={f.advancedFilter ?? null}
             fieldDataType={f.fieldDataType ?? "unknown"}
-            connectedSources={f.connectedSources}
+            connectedPivots={f.connectedPivots}
             connectedSheets={f.connectedSheets}
             hideNoData={f.hideNoData ?? false}
             indicateNoData={f.indicateNoData ?? true}
@@ -193,6 +217,20 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: "220px",
     minWidth: "120px",
   },
+  cardBody: {
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+    gap: "2px",
+    flex: 1,
+    minWidth: 0,
+  },
+  topRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
+    minWidth: 0,
+  },
   fieldName: {
     fontSize: "11px",
     fontWeight: 600,
@@ -208,6 +246,17 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     flex: 1,
+  },
+  connectionRow: {
+    fontSize: "9px",
+    color: "#8a8a8a",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+  connectionMissing: {
+    color: "#c00",
+    fontStyle: "italic",
   },
   arrow: {
     border: "none",

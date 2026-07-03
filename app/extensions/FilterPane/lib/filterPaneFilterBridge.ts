@@ -1,11 +1,15 @@
 //! FILENAME: app/extensions/FilterPane/lib/filterPaneFilterBridge.ts
-// PURPOSE: Bridges ribbon filter selection changes to table/pivot filters.
+// PURPOSE: Bridges ribbon filter selection changes to the BI pivots backed
+//          by the filter's model connection. Only pivots on the SAME
+//          connection are ever targeted — a filter from one Calcula model
+//          never touches pivots of another model.
 
-import type { RibbonFilter, SlicerConnection } from "./filterPaneTypes";
-import { updateBiPivotFields, getAllPivotTables } from "@api/backend";
+import type { RibbonFilter } from "./filterPaneTypes";
+import { updateBiPivotFields } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
 import { filterPaneBackend } from "./filterPaneBackend";
 import { getAllFilters } from "./filterPaneStore";
+import { getPivotsForBiConnection } from "./filterPaneApi";
 
 // ============================================================================
 // BI Field Helpers
@@ -148,80 +152,36 @@ async function ensureBiFieldsInPivotCache(
 // ============================================================================
 
 /**
- * Resolve the effective connected sources for a filter based on its connectionMode.
- * - "manual": uses connectedSources as-is
- * - "bySheet": finds all pivots/tables on the specified sheets
- * - "workbook": finds all pivots/tables in the workbook
+ * Resolve the pivots a filter applies to, based on its connectionMode.
+ * Candidates are ALWAYS limited to the BI pivots backed by the filter's
+ * model connection:
+ * - "manual": the user-selected subset (stale/foreign ids dropped)
+ * - "bySheet": the connection's pivots on the specified sheets
+ * - "workbook": all of the connection's pivots
  */
-async function resolveConnections(
-  filter: RibbonFilter,
-): Promise<SlicerConnection[]> {
-  if (filter.connectionMode === "manual" || !filter.connectionMode) {
-    return filter.connectedSources ?? [];
-  }
-
-  const connections: SlicerConnection[] = [];
-
-  // Get all pivots
+async function resolveTargetPivots(filter: RibbonFilter): Promise<string[]> {
+  let candidates;
   try {
-    const pivots = await getAllPivotTables<
-      Array<{ id: string; name: string; sourceRange: string }>
-    >();
-
-    if (filter.connectionMode === "workbook") {
-      // Include all pivots
-      for (const pv of pivots) {
-        connections.push({ sourceType: "pivot", sourceId: pv.id });
-      }
-    } else if (filter.connectionMode === "bySheet") {
-      const sheetSet = new Set(filter.connectedSheets ?? []);
-      for (const pv of pivots) {
-        try {
-          const biMeta = await filterPaneBackend.invoke<{
-            connectionId: string;
-            sheetIndex: number;
-          } | null>("get_pivot_bi_metadata", { pivotId: pv.id });
-          if (biMeta && sheetSet.has(biMeta.sheetIndex)) {
-            connections.push({ sourceType: "pivot", sourceId: pv.id });
-          }
-        } catch {
-          // Non-BI pivot — check via pivot table info
-          // For now include all pivots (sheet detection for range pivots TBD)
-        }
-      }
-    }
+    candidates = await getPivotsForBiConnection(filter.connectionId);
   } catch {
-    // No pivots available
+    return [];
   }
 
-  // Get all tables
-  try {
-    const tables = await filterPaneBackend.invoke<
-      Array<{ id: string; name: string; sheetIndex: number }>
-    >("get_all_tables", {});
-
-    if (filter.connectionMode === "workbook") {
-      for (const t of tables) {
-        connections.push({ sourceType: "table", sourceId: t.id });
-      }
-    } else if (filter.connectionMode === "bySheet") {
-      const sheetSet = new Set(filter.connectedSheets ?? []);
-      for (const t of tables) {
-        if (sheetSet.has(t.sheetIndex)) {
-          connections.push({ sourceType: "table", sourceId: t.id });
-        }
-      }
-    }
-  } catch {
-    // No tables available
+  const mode = filter.connectionMode ?? "manual";
+  if (mode === "manual") {
+    const selected = new Set(filter.connectedPivots ?? []);
+    return candidates.filter((p) => selected.has(p.id)).map((p) => p.id);
   }
-
-  return connections;
+  if (mode === "bySheet") {
+    const sheetSet = new Set(filter.connectedSheets ?? []);
+    return candidates.filter((p) => sheetSet.has(p.sheetIndex)).map((p) => p.id);
+  }
+  return candidates.map((p) => p.id);
 }
 
 /**
- * Apply a ribbon filter's selection to all its connected sources.
- * Resolves connections dynamically based on connectionMode.
+ * Apply a ribbon filter's selection to all its target pivots.
+ * Resolves targets dynamically based on connectionMode.
  * After applying, re-applies all OTHER active filters that target the same
  * pivots, because adding slicer fields can reset the pivot query.
  */
@@ -231,8 +191,8 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
     // Skip entirely to avoid unnecessary pivot resets and flicker.
     if (filter.selectedItems === null) return;
 
-    const connected = await resolveConnections(filter);
-    if (connected.length === 0) return;
+    const targetPivotIds = await resolveTargetPivots(filter);
+    if (targetPivotIds.length === 0) return;
 
     // Collect ALL active filters so we can ensure all fields exist and apply them together
     const allFilters = getAllFilters();
@@ -240,89 +200,75 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
       (f) => f.selectedItems !== null,
     );
 
-    // Collect pivot IDs we're applying to
-    const affectedPivotIds = new Set<string>();
-
-    // Show loading overlay on affected pivots
-    for (const conn of connected) {
-      if (conn.sourceType === "pivot") {
-        affectedPivotIds.add(conn.sourceId);
-        window.dispatchEvent(
-          new CustomEvent("pivot:set-loading", {
-            detail: { pivotId: conn.sourceId, stage: "Applying filter..." },
-          }),
-        );
-      }
+    // Resolve targets of the other active filters once (used per pivot below)
+    const otherTargets = new Map<string, string[]>();
+    for (const other of activeFilters) {
+      if (other.id === filter.id) continue;
+      otherTargets.set(other.id, await resolveTargetPivots(other));
     }
 
-    // For each affected pivot, ensure ALL active filter fields are in the cache
-    // in a single rebuild, then apply all filters without intermediate refreshes.
-    for (const pivotId of affectedPivotIds) {
-      // Collect all field names that need to be in this pivot's cache
-      const allFieldNames: string[] = [];
-      const filtersForPivot: Array<{ fieldName: string; selectedItems: string[] }> = [];
+    // Show loading overlay on affected pivots; the finally guarantees the
+    // overlays clear even when an apply step throws mid-way.
+    for (const pivotId of targetPivotIds) {
+      window.dispatchEvent(
+        new CustomEvent("pivot:set-loading", {
+          detail: { pivotId, stage: "Applying filter..." },
+        }),
+      );
+    }
 
-      // The current filter
-      allFieldNames.push(filter.fieldName);
-      filtersForPivot.push({
-        fieldName: filter.fieldName,
-        selectedItems: filter.selectedItems!,
-      });
+    try {
+      // For each affected pivot, ensure ALL active filter fields are in the cache
+      // in a single rebuild, then apply all filters without intermediate refreshes.
+      for (const pivotId of targetPivotIds) {
+        // Collect all field names that need to be in this pivot's cache
+        const allFieldNames: string[] = [];
+        const filtersForPivot: Array<{ fieldName: string; selectedItems: string[] }> = [];
 
-      // Other active filters targeting the same pivot
-      for (const other of activeFilters) {
-        if (other.id === filter.id) continue;
-        const otherConnected = await resolveConnections(other);
-        if (otherConnected.some((c) => c.sourceType === "pivot" && c.sourceId === pivotId)) {
-          allFieldNames.push(other.fieldName);
-          filtersForPivot.push({
-            fieldName: other.fieldName,
-            selectedItems: other.selectedItems!,
+        // The current filter
+        allFieldNames.push(filter.fieldName);
+        filtersForPivot.push({
+          fieldName: filter.fieldName,
+          selectedItems: filter.selectedItems!,
+        });
+
+        // Other active filters targeting the same pivot
+        for (const other of activeFilters) {
+          if (other.id === filter.id) continue;
+          if ((otherTargets.get(other.id) ?? []).includes(pivotId)) {
+            allFieldNames.push(other.fieldName);
+            filtersForPivot.push({
+              fieldName: other.fieldName,
+              selectedItems: other.selectedItems!,
+            });
+          }
+        }
+
+        // Ensure all fields exist in the cache (single rebuild if needed)
+        await ensureBiFieldsInPivotCache(pivotId, allFieldNames);
+
+        // Apply all filters without triggering pivot:refresh between them
+        for (const f of filtersForPivot) {
+          const fieldIndex = await resolveFieldIndex(pivotId, f.fieldName);
+          if (fieldIndex < 0) continue;
+          await filterPaneBackend.invoke("apply_pivot_filter", {
+            request: {
+              pivotId,
+              fieldIndex,
+              filters: { manualFilter: { selectedItems: f.selectedItems } },
+            },
           });
         }
       }
 
-      // Ensure all fields exist in the cache (single rebuild if needed)
-      await ensureBiFieldsInPivotCache(pivotId, allFieldNames);
-
-      // Apply all filters without triggering pivot:refresh between them
-      for (const f of filtersForPivot) {
-        const fieldIndex = await resolveFieldIndex(pivotId, f.fieldName);
-        if (fieldIndex < 0) continue;
-        await filterPaneBackend.invoke("apply_pivot_filter", {
-          request: {
-            pivotId,
-            fieldIndex,
-            filters: { manualFilter: { selectedItems: f.selectedItems } },
-          },
-        });
-      }
-    }
-
-    // Apply table filters
-    for (const conn of connected) {
-      if (conn.sourceType !== "table") continue;
-      try {
-        await applyTableFilterForSource(
-          conn.sourceId,
-          filter.fieldName,
-          filter.selectedItems,
-        );
-      } catch (err) {
-        console.warn("[FilterPane] Failed to apply table filter", conn, err);
-      }
-    }
-
-    // Single pivot:refresh after all filters are applied
-    if (affectedPivotIds.size > 0) {
+      // Single pivot:refresh after all filters are applied
       window.dispatchEvent(new Event("pivot:refresh"));
-    }
-
-    // Clear loading overlay on affected pivots
-    for (const pivotId of affectedPivotIds) {
-      window.dispatchEvent(
-        new CustomEvent("pivot:clear-loading", { detail: { pivotId } }),
-      );
+    } finally {
+      for (const pivotId of targetPivotIds) {
+        window.dispatchEvent(
+          new CustomEvent("pivot:clear-loading", { detail: { pivotId } }),
+        );
+      }
     }
 
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -332,41 +278,35 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
 }
 
 /**
- * Clear a ribbon filter from all its connected sources.
+ * Clear a ribbon filter from all its target pivots.
  */
 export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
   try {
-    const connected = await resolveConnections(filter);
-    if (connected.length === 0) return;
+    const targetPivotIds = await resolveTargetPivots(filter);
+    if (targetPivotIds.length === 0) return;
 
-    // Show loading overlay on affected pivots
-    for (const conn of connected) {
-      if (conn.sourceType === "pivot") {
-        window.dispatchEvent(
-          new CustomEvent("pivot:set-loading", {
-            detail: { pivotId: conn.sourceId, stage: "Clearing filter..." },
-          }),
-        );
-      }
+    // Show loading overlay on affected pivots; cleared in the finally so a
+    // failure mid-way can't leave a pivot stuck behind the overlay.
+    for (const pivotId of targetPivotIds) {
+      window.dispatchEvent(
+        new CustomEvent("pivot:set-loading", {
+          detail: { pivotId, stage: "Clearing filter..." },
+        }),
+      );
     }
 
-    for (const conn of connected) {
-      try {
-        if (conn.sourceType === "pivot") {
-          await applyPivotFilterForSource(conn.sourceId, filter.fieldName, null);
-        } else {
-          await applyTableFilterForSource(conn.sourceId, filter.fieldName, null);
+    try {
+      for (const pivotId of targetPivotIds) {
+        try {
+          await applyPivotFilterForSource(pivotId, filter.fieldName, null);
+        } catch (err) {
+          // Best effort
         }
-      } catch (err) {
-        // Best effort
       }
-    }
-
-    // Clear loading overlay
-    for (const conn of connected) {
-      if (conn.sourceType === "pivot") {
+    } finally {
+      for (const pivotId of targetPivotIds) {
         window.dispatchEvent(
-          new CustomEvent("pivot:clear-loading", { detail: { pivotId: conn.sourceId } }),
+          new CustomEvent("pivot:clear-loading", { detail: { pivotId } }),
         );
       }
     }
@@ -380,53 +320,6 @@ export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
 // ============================================================================
 // INTERNAL HELPERS
 // ============================================================================
-
-async function applyTableFilterForSource(
-  tableId: string,
-  fieldName: string,
-  selectedItems: string[] | null,
-): Promise<void> {
-  // Find all tables across all sheets to get the correct sheet index
-  const allSheetTables: Array<{
-    id: string;
-    sheetIndex: number;
-    columns: Array<{ name: string }>;
-    styleOptions: { headerRow: boolean; showFilterButton: boolean };
-  }>[] = [];
-
-  // Try sheets 0..20 (reasonable upper bound)
-  for (let si = 0; si < 20; si++) {
-    try {
-      const tables = await filterPaneBackend.invoke<
-        Array<{
-          id: string;
-          sheetIndex: number;
-          columns: Array<{ name: string }>;
-          styleOptions: { headerRow: boolean; showFilterButton: boolean };
-        }>
-      >("get_tables_for_sheet", { sheetIndex: si });
-      allSheetTables.push(tables);
-    } catch {
-      break;
-    }
-  }
-
-  const flatTables = allSheetTables.flat();
-  const table = flatTables.find((t) => t.id === tableId);
-  if (!table) return;
-
-  const colIndex = table.columns.findIndex((c) => c.name === fieldName);
-  if (colIndex < 0) return;
-
-  if (selectedItems === null) {
-    await filterPaneBackend.invoke("clear_column_filter", { columnIndex: colIndex });
-  } else {
-    await filterPaneBackend.invoke("set_column_filter_values", {
-      columnIndex: colIndex,
-      values: selectedItems,
-    });
-  }
-}
 
 async function resolveFieldIndex(
   pivotId: string,

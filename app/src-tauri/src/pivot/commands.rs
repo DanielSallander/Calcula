@@ -3306,8 +3306,10 @@ pub fn get_pivot_bi_metadata(
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
 ) -> Option<serde_json::Value> {
-    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    // Lock order: pivot_tables before bi_metadata (canonical — see
+    // bi_pivots_for_connection).
     let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
 
     if let Some(meta) = bi_meta.get(&pivot_id) {
         // Get the sheet index from the pivot definition
@@ -3327,6 +3329,48 @@ pub fn get_pivot_bi_metadata(
     } else {
         None
     }
+}
+
+/// List the BI-backed pivots that belong to a given model connection.
+/// Matches on the live connection id, falling back to the stable package
+/// data-source id (which equals the connection UUID for locally created
+/// connections) so targets resolve right after load, before the runtime
+/// connection_id is re-bound.
+pub(crate) fn bi_pivots_for_connection(
+    state: &AppState,
+    pivot_state: &PivotState,
+    connection_id: identity::EntityId,
+) -> Vec<super::types::BiConnectionPivot> {
+    // Lock order: pivot_tables BEFORE bi_metadata — the order every site that
+    // holds both uses (refresh_pivot_cache, collect_pivot_definitions); the
+    // reverse order would be an ABBA deadlock.
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    let connection_key = connection_id.to_string();
+
+    bi_meta
+        .iter()
+        .filter(|(_, meta)| {
+            meta.connection_id == connection_id
+                || meta.data_source_id.as_deref() == Some(connection_key.as_str())
+        })
+        .filter_map(|(pivot_id, _)| {
+            pivot_tables.get(pivot_id).map(|(def, _)| super::types::BiConnectionPivot {
+                id: *pivot_id,
+                name: def.name.clone().unwrap_or_else(|| format!("PivotTable{}", pivot_id)),
+                sheet_index: resolve_dest_sheet_index(state, def),
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn get_pivots_for_bi_connection(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    connection_id: identity::EntityId,
+) -> Vec<super::types::BiConnectionPivot> {
+    bi_pivots_for_connection(&state, &pivot_state, connection_id)
 }
 
 /// Sets the expand/collapse state of a specific pivot item.

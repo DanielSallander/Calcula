@@ -12,7 +12,7 @@ const mockDeleteRibbonFilter = vi.fn();
 const mockUpdateRibbonFilter = vi.fn();
 const mockUpdateRibbonFilterSelection = vi.fn();
 const mockGetAllRibbonFilters = vi.fn();
-const mockGetRibbonFilterItems = vi.fn();
+const mockGetBiConnections = vi.fn();
 const mockGetBiColumnValues = vi.fn();
 const mockGetBiColumnAvailableValues = vi.fn();
 
@@ -22,7 +22,7 @@ vi.mock("../filterPaneApi", () => ({
   updateRibbonFilter: (...args: unknown[]) => mockUpdateRibbonFilter(...args),
   updateRibbonFilterSelection: (...args: unknown[]) => mockUpdateRibbonFilterSelection(...args),
   getAllRibbonFilters: (...args: unknown[]) => mockGetAllRibbonFilters(...args),
-  getRibbonFilterItems: (...args: unknown[]) => mockGetRibbonFilterItems(...args),
+  getBiConnections: (...args: unknown[]) => mockGetBiConnections(...args),
   getBiColumnValues: (...args: unknown[]) => mockGetBiColumnValues(...args),
   getBiColumnAvailableValues: (...args: unknown[]) => mockGetBiColumnAvailableValues(...args),
 }));
@@ -50,6 +50,7 @@ import {
   getAllFilters,
   getFilterById,
   getCachedItems,
+  getConnectionName,
   createFilterAsync,
   deleteFilterAsync,
   updateFilterAsync,
@@ -63,16 +64,18 @@ import {
 // Test Helpers
 // ============================================================================
 
+const CONN_A = "0197a001-0000-7000-8000-00000000000a";
+const CONN_B = "0197a001-0000-7000-8000-00000000000b";
+
 function makeFilter(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
   return {
-    id: 1,
+    id: "0197f001-0000-7000-8000-000000000001",
     name: "Test Filter",
-    sourceType: "table",
-    cacheSourceId: 100,
-    fieldName: "Category",
+    connectionId: CONN_A,
+    fieldName: "Products.Category",
     fieldDataType: "text",
-    connectionMode: "manual",
-    connectedSources: [],
+    connectionMode: "workbook",
+    connectedPivots: [],
     connectedSheets: [],
     displayMode: "checklist",
     selectedItems: null,
@@ -91,6 +94,13 @@ function makeFilter(overrides: Partial<RibbonFilter> = {}): RibbonFilter {
   };
 }
 
+beforeEach(() => {
+  mockGetBiConnections.mockResolvedValue([
+    { id: CONN_A, name: "Sales Model", description: "", isConnected: true, modelPath: null },
+    { id: CONN_B, name: "HR Model", description: "", isConnected: true, modelPath: null },
+  ]);
+});
+
 // ============================================================================
 // Accessors
 // ============================================================================
@@ -106,11 +116,15 @@ describe("filterPaneStore accessors", () => {
   });
 
   it("getFilterById returns undefined when cache is empty", () => {
-    expect(getFilterById(1)).toBeUndefined();
+    expect(getFilterById("nope")).toBeUndefined();
   });
 
   it("getCachedItems returns undefined for unknown filter", () => {
-    expect(getCachedItems(999)).toBeUndefined();
+    expect(getCachedItems("nope")).toBeUndefined();
+  });
+
+  it("getConnectionName returns undefined before refresh", () => {
+    expect(getConnectionName(CONN_A)).toBeUndefined();
   });
 });
 
@@ -126,9 +140,9 @@ describe("getAllFilters sorting", () => {
 
   it("returns filters sorted by order", async () => {
     const filters = [
-      makeFilter({ id: 1, name: "C", order: 2 }),
-      makeFilter({ id: 2, name: "A", order: 0 }),
-      makeFilter({ id: 3, name: "B", order: 1 }),
+      makeFilter({ id: "f-1", name: "C", order: 2 }),
+      makeFilter({ id: "f-2", name: "A", order: 0 }),
+      makeFilter({ id: "f-3", name: "B", order: 1 }),
     ];
     mockGetAllRibbonFilters.mockResolvedValue(filters);
     await refreshCache();
@@ -149,7 +163,7 @@ describe("createFilterAsync", () => {
   });
 
   it("creates filter and refreshes cache", async () => {
-    const newFilter = makeFilter({ id: 5 });
+    const newFilter = makeFilter({ id: "f-5" });
     mockCreateRibbonFilter.mockResolvedValue(newFilter);
     mockGetAllRibbonFilters.mockResolvedValue([newFilter]);
 
@@ -157,9 +171,8 @@ describe("createFilterAsync", () => {
 
     const result = await createFilterAsync({
       name: "Test",
-      sourceType: "table",
-      cacheSourceId: 100,
-      fieldName: "Category",
+      connectionId: CONN_A,
+      fieldName: "Products.Category",
     });
 
     expect(result).toEqual(newFilter);
@@ -177,9 +190,8 @@ describe("createFilterAsync", () => {
 
     const result = await createFilterAsync({
       name: "Test",
-      sourceType: "table",
-      cacheSourceId: 100,
-      fieldName: "X",
+      connectionId: CONN_A,
+      fieldName: "Products.X",
     });
 
     expect(result).toBeNull();
@@ -191,7 +203,7 @@ describe("deleteFilterAsync", () => {
     vi.clearAllMocks();
     clearCache();
     // Seed cache with a filter
-    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: 10 })]);
+    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: "f-10" })]);
     await refreshCache();
     vi.clearAllMocks();
   });
@@ -201,11 +213,11 @@ describe("deleteFilterAsync", () => {
     mockGetAllRibbonFilters.mockResolvedValue([]);
     mockClearRibbonFilter.mockResolvedValue(undefined);
 
-    const result = await deleteFilterAsync(10);
+    const result = await deleteFilterAsync("f-10");
 
     expect(result).toBe(true);
     expect(mockClearRibbonFilter).toHaveBeenCalled();
-    expect(mockDeleteRibbonFilter).toHaveBeenCalledWith(10);
+    expect(mockDeleteRibbonFilter).toHaveBeenCalledWith("f-10");
     expect(getAllFilters()).toEqual([]);
   });
 
@@ -213,7 +225,7 @@ describe("deleteFilterAsync", () => {
     mockDeleteRibbonFilter.mockRejectedValue(new Error("fail"));
     mockClearRibbonFilter.mockResolvedValue(undefined);
 
-    const result = await deleteFilterAsync(10);
+    const result = await deleteFilterAsync("f-10");
 
     expect(result).toBe(false);
   });
@@ -226,14 +238,14 @@ describe("updateFilterAsync", () => {
   });
 
   it("updates filter and refreshes cache", async () => {
-    const updated = makeFilter({ id: 1, name: "Updated" });
+    const updated = makeFilter({ id: "f-1", name: "Updated" });
     mockUpdateRibbonFilter.mockResolvedValue(updated);
     mockGetAllRibbonFilters.mockResolvedValue([updated]);
 
-    const result = await updateFilterAsync(1, { name: "Updated" });
+    const result = await updateFilterAsync("f-1", { name: "Updated" });
 
     expect(result).toEqual(updated);
-    expect(mockUpdateRibbonFilter).toHaveBeenCalledWith(1, { name: "Updated" });
+    expect(mockUpdateRibbonFilter).toHaveBeenCalledWith("f-1", { name: "Updated" });
   });
 });
 
@@ -245,7 +257,7 @@ describe("updateFilterSelectionAsync", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     clearCache();
-    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: 1 })]);
+    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: "f-1" })]);
     await refreshCache();
     vi.clearAllMocks();
   });
@@ -254,9 +266,9 @@ describe("updateFilterSelectionAsync", () => {
     mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
     mockApplyRibbonFilter.mockResolvedValue(undefined);
 
-    await updateFilterSelectionAsync(1, ["Apple", "Banana"]);
+    await updateFilterSelectionAsync("f-1", ["Apple", "Banana"]);
 
-    expect(mockUpdateRibbonFilterSelection).toHaveBeenCalledWith(1, ["Apple", "Banana"]);
+    expect(mockUpdateRibbonFilterSelection).toHaveBeenCalledWith("f-1", ["Apple", "Banana"]);
     expect(mockApplyRibbonFilter).toHaveBeenCalled();
   });
 
@@ -264,7 +276,7 @@ describe("updateFilterSelectionAsync", () => {
     mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
     mockClearRibbonFilter.mockResolvedValue(undefined);
 
-    await updateFilterSelectionAsync(1, null);
+    await updateFilterSelectionAsync("f-1", null);
 
     expect(mockClearRibbonFilter).toHaveBeenCalled();
     expect(mockApplyRibbonFilter).not.toHaveBeenCalled();
@@ -274,9 +286,9 @@ describe("updateFilterSelectionAsync", () => {
     mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
     mockApplyRibbonFilter.mockResolvedValue(undefined);
 
-    await updateFilterSelectionAsync(1, ["X"]);
+    await updateFilterSelectionAsync("f-1", ["X"]);
 
-    const filter = getFilterById(1);
+    const filter = getFilterById("f-1");
     expect(filter?.selectedItems).toEqual(["X"]);
   });
 });
@@ -289,21 +301,62 @@ describe("refreshFilterItems", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     clearCache();
-    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: 1 })]);
+    mockGetAllRibbonFilters.mockResolvedValue([
+      makeFilter({ id: "f-1", selectedItems: ["A"] }),
+    ]);
     await refreshCache();
     vi.clearAllMocks();
   });
 
-  it("fetches items from backend for table source", async () => {
-    const items = [
+  it("fetches values from the BI engine and marks selection", async () => {
+    mockGetBiColumnValues.mockResolvedValue(["A", "B"]);
+
+    await refreshFilterItems("f-1");
+
+    expect(mockGetBiColumnValues).toHaveBeenCalledWith(CONN_A, "Products", "Category");
+    expect(getCachedItems("f-1")).toEqual([
       { value: "A", selected: true, hasData: true },
       { value: "B", selected: false, hasData: true },
-    ];
-    mockGetRibbonFilterItems.mockResolvedValue(items);
+    ]);
+  });
 
-    await refreshFilterItems(1);
+  it("only cross-filters against siblings on the same connection", async () => {
+    // Seed: f-1 (CONN_A) is targeted by f-2 (CONN_A) and f-3 (CONN_B, other model)
+    mockGetAllRibbonFilters.mockResolvedValue([
+      makeFilter({ id: "f-1", selectedItems: null }),
+      makeFilter({
+        id: "f-2",
+        connectionId: CONN_A,
+        fieldName: "Products.Color",
+        selectedItems: ["Red"],
+        crossFilterTargets: ["f-1"],
+      }),
+      makeFilter({
+        id: "f-3",
+        connectionId: CONN_B,
+        fieldName: "Employees.Dept",
+        selectedItems: ["IT"],
+        crossFilterTargets: ["f-1"],
+      }),
+    ]);
+    await refreshCache();
 
-    expect(getCachedItems(1)).toEqual(items);
+    mockGetBiColumnValues.mockResolvedValue(["A", "B"]);
+    mockGetBiColumnAvailableValues.mockResolvedValue(["A"]);
+
+    await refreshFilterItems("f-1");
+
+    // Only the same-connection sibling contributes a cross-filter constraint
+    expect(mockGetBiColumnAvailableValues).toHaveBeenCalledWith(
+      CONN_A,
+      "Products",
+      "Category",
+      [{ table: "Products", column: "Color", values: ["Red"] }],
+    );
+    expect(getCachedItems("f-1")).toEqual([
+      { value: "A", selected: true, hasData: true },
+      { value: "B", selected: true, hasData: false },
+    ]);
   });
 });
 
@@ -318,12 +371,22 @@ describe("refreshCache", () => {
   });
 
   it("loads all filters from backend", async () => {
-    const filters = [makeFilter({ id: 1 }), makeFilter({ id: 2 })];
+    const filters = [makeFilter({ id: "f-1" }), makeFilter({ id: "f-2" })];
     mockGetAllRibbonFilters.mockResolvedValue(filters);
 
     await refreshCache();
 
     expect(getAllFilters()).toHaveLength(2);
+  });
+
+  it("caches connection names for attribution", async () => {
+    mockGetAllRibbonFilters.mockResolvedValue([makeFilter()]);
+
+    await refreshCache();
+
+    expect(getConnectionName(CONN_A)).toBe("Sales Model");
+    expect(getConnectionName(CONN_B)).toBe("HR Model");
+    expect(getConnectionName("unknown")).toBeUndefined();
   });
 
   it("dispatches FILTERS_REFRESHED event", async () => {
@@ -345,14 +408,15 @@ describe("refreshCache", () => {
 
 describe("clearCache", () => {
   it("clears all cached data", async () => {
-    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: 1 })]);
+    mockGetAllRibbonFilters.mockResolvedValue([makeFilter({ id: "f-1" })]);
     await refreshCache();
-    mockGetRibbonFilterItems.mockResolvedValue([{ value: "X", selected: true, hasData: true }]);
-    await refreshFilterItems(1);
+    mockGetBiColumnValues.mockResolvedValue(["X"]);
+    await refreshFilterItems("f-1");
 
     clearCache();
 
     expect(getAllFilters()).toEqual([]);
-    expect(getCachedItems(1)).toBeUndefined();
+    expect(getCachedItems("f-1")).toBeUndefined();
+    expect(getConnectionName(CONN_A)).toBeUndefined();
   });
 });

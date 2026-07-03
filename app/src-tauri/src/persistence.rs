@@ -740,12 +740,8 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
     persistence::SavedRibbonFilter {
         id: f.id,
         name: f.name.clone(),
-        source_type: match f.source_type {
-            crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
-            crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
-            crate::slicer::SlicerSourceType::BiConnection => persistence::SavedSlicerSourceType::BiConnection,
-        },
-        cache_source_id: f.cache_source_id,
+        connection_id: f.connection_id,
+        data_source_id: f.data_source_id.clone(),
         field_name: f.field_name.clone(),
         field_data_type: f.field_data_type.clone(),
         connection_mode: match f.connection_mode {
@@ -753,16 +749,7 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
             crate::ribbon_filter::ConnectionMode::BySheet => persistence::SavedConnectionMode::BySheet,
             crate::ribbon_filter::ConnectionMode::Workbook => persistence::SavedConnectionMode::Workbook,
         },
-        connected_sources: f.connected_sources.iter().map(|c| {
-            persistence::SavedSlicerConnection {
-                source_type: match c.source_type {
-                    crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
-                    crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
-                    crate::slicer::SlicerSourceType::BiConnection => persistence::SavedSlicerSourceType::BiConnection,
-                },
-                source_id: c.source_id,
-            }
-        }).collect(),
+        connected_pivots: f.connected_pivots.clone(),
         connected_sheets: f.connected_sheets.clone(),
         display_mode: match f.display_mode {
             crate::ribbon_filter::RibbonFilterDisplayMode::Checklist => persistence::SavedRibbonFilterDisplayMode::Checklist,
@@ -803,12 +790,8 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
     crate::ribbon_filter::RibbonFilter {
         id: saved.id,
         name: saved.name.clone(),
-        source_type: match saved.source_type {
-            persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
-            persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
-            persistence::SavedSlicerSourceType::BiConnection => crate::slicer::SlicerSourceType::BiConnection,
-        },
-        cache_source_id: saved.cache_source_id,
+        connection_id: saved.connection_id,
+        data_source_id: saved.data_source_id.clone(),
         field_name: saved.field_name.clone(),
         field_data_type: saved.field_data_type.clone(),
         connection_mode: match saved.connection_mode {
@@ -816,16 +799,7 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
             persistence::SavedConnectionMode::BySheet => crate::ribbon_filter::ConnectionMode::BySheet,
             persistence::SavedConnectionMode::Workbook => crate::ribbon_filter::ConnectionMode::Workbook,
         },
-        connected_sources: saved.connected_sources.iter().map(|c| {
-            crate::slicer::SlicerConnection {
-                source_type: match c.source_type {
-                    persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
-                    persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
-                    persistence::SavedSlicerSourceType::BiConnection => crate::slicer::SlicerSourceType::BiConnection,
-                },
-                source_id: c.source_id,
-            }
-        }).collect(),
+        connected_pivots: saved.connected_pivots.clone(),
         connected_sheets: saved.connected_sheets.clone(),
         display_mode: match saved.display_mode {
             persistence::SavedRibbonFilterDisplayMode::Checklist => crate::ribbon_filter::RibbonFilterDisplayMode::Checklist,

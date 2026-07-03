@@ -65,7 +65,7 @@ vi.mock("../FilterPane/lib/filterPaneApi", () => ({
   updateRibbonFilter: vi.fn(),
   updateRibbonFilterSelection: vi.fn(),
   getAllRibbonFilters: vi.fn().mockResolvedValue([]),
-  getRibbonFilterItems: vi.fn(),
+  getBiConnections: vi.fn().mockResolvedValue([]),
   getBiColumnValues: vi.fn(),
   getBiColumnAvailableValues: vi.fn(),
 }));

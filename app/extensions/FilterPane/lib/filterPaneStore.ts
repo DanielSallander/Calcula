@@ -1,5 +1,9 @@
 //! FILENAME: app/extensions/FilterPane/lib/filterPaneStore.ts
 // PURPOSE: Frontend cache for ribbon filter state.
+// CONTEXT: All filters are sourced from a Calcula model (BI) connection;
+//          item values are fetched through the BI engine. The store also
+//          caches connection display info so the UI can attribute each
+//          filter to its model connection.
 
 import type {
   RibbonFilter,
@@ -19,6 +23,9 @@ let cachedFilters: RibbonFilter[] = [];
 
 /** Cached items per filter (filter id -> items). Refreshed on demand. */
 const itemsCache = new Map<string, SlicerItem[]>();
+
+/** Cached BI connection info (connection id -> info) for attribution. */
+let connectionInfoCache = new Map<string, api.BiConnectionInfo>();
 
 /** Simple mutex to serialize BI engine access (take/put pattern can't handle concurrency). */
 let biMutex: Promise<void> = Promise.resolve();
@@ -45,6 +52,11 @@ export function getCachedItems(filterId: string): SlicerItem[] | undefined {
   return itemsCache.get(filterId);
 }
 
+/** Display name of a model connection, or undefined if it no longer exists. */
+export function getConnectionName(connectionId: string): string | undefined {
+  return connectionInfoCache.get(connectionId)?.name;
+}
+
 // ============================================================================
 // CRUD operations
 // ============================================================================
@@ -55,6 +67,7 @@ export async function createFilterAsync(
   try {
     const filter = await api.createRibbonFilter(params);
     cachedFilters = await api.getAllRibbonFilters();
+    await refreshConnectionInfo();
     // Don't refresh items here — it takes the BI engine and conflicts
     // with pivot operations. Items are loaded lazily when the user
     // opens the dropdown for the first time.
@@ -145,52 +158,26 @@ export async function updateFilterSelectionAsync(
 // Item management
 // ============================================================================
 
+/** Fetch items for a filter via the BI engine. */
 export async function refreshFilterItems(filterId: string): Promise<void> {
   try {
     const filter = cachedFilters.find((f) => f.id === filterId);
+    if (!filter) return;
 
-    if (filter && filter.sourceType === "biConnection") {
-      await refreshBiFilterItems(filter);
-      return;
-    }
+    const [table, column] = parseBiFieldName(filter.fieldName);
 
-    // Table/Pivot sources: use the standard backend command
-    try {
-      const items = await api.getRibbonFilterItems(filterId);
-      itemsCache.set(filterId, items);
-    } catch (err) {
-      // If the standard API fails (e.g., BiConnection source type mismatch),
-      // try the BI path as fallback
-      const filter2 = cachedFilters.find((f) => f.id === filterId);
-      if (filter2) {
-        await refreshBiFilterItems(filter2);
-      } else {
-        throw err;
-      }
-    }
-  } catch (err) {
-    console.error("[FilterPane] Failed to refresh filter items:", err);
-  }
-}
+    // Get ALL unique values for this column
+    const allValues = await withBiMutex(() =>
+      api.getBiColumnValues(filter.connectionId, table, column),
+    );
 
-/** Fetch items for a BI connection filter via the BI engine. */
-async function refreshBiFilterItems(filter: RibbonFilter): Promise<void> {
-  const [table, column] = parseBiFieldName(filter.fieldName);
-
-  // Get ALL unique values for this column
-  const allValues = await withBiMutex(() =>
-    api.getBiColumnValues(filter.cacheSourceId, table, column),
-  );
-
-  // Collect cross-filter constraints from sibling BI filters
-  // that have this filter listed in their crossFilterTargets.
-  const crossFilters: api.BiCrossFilter[] = [];
-  {
+    // Collect cross-filter constraints from sibling filters on the SAME
+    // model connection that have this filter listed in their crossFilterTargets.
+    const crossFilters: api.BiCrossFilter[] = [];
     for (const sibling of cachedFilters) {
       if (
         sibling.id === filter.id ||
-        sibling.sourceType !== "biConnection" ||
-        sibling.cacheSourceId !== filter.cacheSourceId ||
+        sibling.connectionId !== filter.connectionId ||
         sibling.selectedItems === null ||
         !(sibling.crossFilterTargets ?? []).includes(filter.id)
       ) {
@@ -203,31 +190,33 @@ async function refreshBiFilterItems(filter: RibbonFilter): Promise<void> {
         values: sibling.selectedItems,
       });
     }
-  }
 
-  // If there are cross-filters, get the available values (subset with data)
-  let availableSet: Set<string> | null = null;
-  if (crossFilters.length > 0) {
-    const available = await withBiMutex(() =>
-      api.getBiColumnAvailableValues(
-        filter.cacheSourceId,
-        table,
-        column,
-        crossFilters,
-      ),
-    );
-    availableSet = new Set(available);
-  }
+    // If there are cross-filters, get the available values (subset with data)
+    let availableSet: Set<string> | null = null;
+    if (crossFilters.length > 0) {
+      const available = await withBiMutex(() =>
+        api.getBiColumnAvailableValues(
+          filter.connectionId,
+          table,
+          column,
+          crossFilters,
+        ),
+      );
+      availableSet = new Set(available);
+    }
 
-  const selectedSet = filter.selectedItems
-    ? new Set(filter.selectedItems)
-    : null;
-  const items: SlicerItem[] = allValues.map((v) => ({
-    value: v,
-    selected: selectedSet === null || selectedSet.has(v),
-    hasData: availableSet === null || availableSet.has(v),
-  }));
-  itemsCache.set(filter.id, items);
+    const selectedSet = filter.selectedItems
+      ? new Set(filter.selectedItems)
+      : null;
+    const items: SlicerItem[] = allValues.map((v) => ({
+      value: v,
+      selected: selectedSet === null || selectedSet.has(v),
+      hasData: availableSet === null || availableSet.has(v),
+    }));
+    itemsCache.set(filter.id, items);
+  } catch (err) {
+    console.error("[FilterPane] Failed to refresh filter items:", err);
+  }
 }
 
 /** Parse "table.column" BI field name into [table, column]. */
@@ -239,30 +228,16 @@ function parseBiFieldName(fieldName: string): [string, string] {
   return ["", fieldName];
 }
 
-/** Refresh items for sibling filters (those affected by this filter's selection).
- *  Includes: filters sharing connected sources + BI filters on the same connection.
- *  Also dispatches slicer refresh events for targeted slicers. */
+/** Refresh items for sibling filters (those affected by this filter's
+ *  selection): cross-filter targets in both directions. Targeted canvas
+ *  slicers refresh themselves via the FILTER_SELECTION_CHANGED event. */
 async function refreshSiblingFilterItems(filterId: string): Promise<void> {
   const filter = cachedFilters.find((f) => f.id === filterId);
   if (!filter) return;
 
   const siblingIds = new Set<string>();
 
-  // Siblings sharing connected sources (table/pivot cross-filtering)
-  const connected = filter.connectedSources ?? [];
-  if (connected.length > 0) {
-    const connectedIds = new Set(connected.map((c) => c.sourceId));
-    for (const f of cachedFilters) {
-      if (
-        f.id !== filterId &&
-        (f.connectedSources ?? []).some((c) => connectedIds.has(c.sourceId))
-      ) {
-        siblingIds.add(f.id);
-      }
-    }
-  }
-
-  // BI siblings: filters that this filter targets for cross-filtering
+  // Filters that this filter targets for cross-filtering
   const targets = filter.crossFilterTargets ?? [];
   for (const targetId of targets) {
     siblingIds.add(targetId);
@@ -288,9 +263,20 @@ async function refreshSiblingFilterItems(filterId: string): Promise<void> {
 // Cache management
 // ============================================================================
 
+/** Refresh the connection-info cache used for per-filter attribution. */
+export async function refreshConnectionInfo(): Promise<void> {
+  try {
+    const connections = await api.getBiConnections();
+    connectionInfoCache = new Map(connections.map((c) => [c.id, c]));
+  } catch (err) {
+    console.warn("[FilterPane] Failed to refresh BI connection info:", err);
+  }
+}
+
 export async function refreshCache(): Promise<void> {
   try {
     cachedFilters = await api.getAllRibbonFilters();
+    await refreshConnectionInfo();
     window.dispatchEvent(new CustomEvent(FilterPaneEvents.FILTERS_REFRESHED));
   } catch (err) {
     console.error("[FilterPane] Failed to refresh cache:", err);
@@ -306,4 +292,5 @@ export async function refreshAllItems(): Promise<void> {
 export function clearCache(): void {
   cachedFilters = [];
   itemsCache.clear();
+  connectionInfoCache = new Map();
 }

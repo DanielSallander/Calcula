@@ -15,6 +15,7 @@ import { registerFilterBadge } from "./lib/filterBadge";
 import { filterPaneBackend } from "./lib/filterPaneBackend";
 
 let unregisterBadge: (() => void) | null = null;
+let removeWindowListeners: (() => void) | null = null;
 
 // ============================================================================
 // Extension Module
@@ -40,11 +41,18 @@ function activate(context: ExtensionContext): void {
   // Register dialogs
   context.ui.dialogs.register(AddFilterDialogDefinition);
 
-  // Refresh cache on sheet change
-  const handleSheetChange = () => {
+  // Refresh cache on sheet change, and after undo/redo restores ribbon-filter
+  // state (the shell fans the ribbonFilter mutation domain out as
+  // "filterpane:filters-refreshed").
+  const handleRefresh = () => {
     refreshCache();
   };
-  window.addEventListener("sheet:activated", handleSheetChange);
+  window.addEventListener("sheet:activated", handleRefresh);
+  window.addEventListener("filterpane:filters-refreshed", handleRefresh);
+  removeWindowListeners = () => {
+    window.removeEventListener("sheet:activated", handleRefresh);
+    window.removeEventListener("filterpane:filters-refreshed", handleRefresh);
+  };
 
   // Track applied filters and show count badge on the Filters tab
   unregisterBadge = registerFilterBadge();
@@ -59,6 +67,8 @@ function deactivate(): void {
   console.log("[FilterPane Extension] Deactivating...");
   unregisterBadge?.();
   unregisterBadge = null;
+  removeWindowListeners?.();
+  removeWindowListeners = null;
   unregisterPanel(FILTER_PANE_TAB_ID);
   clearCache();
 }

@@ -469,6 +469,55 @@ pub fn get_slicer_items(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     slicer_id: identity::EntityId,
 ) -> Result<Vec<SlicerItem>, String> {
+    // Pre-resolve each active ribbon filter's cross-filter candidacy BEFORE
+    // taking the slicer lock: its field + selection, whether it explicitly
+    // targets this slicer, and its effective target-pivot set. Targets are
+    // mode-aware — manual uses the stored list; bySheet/workbook resolve to
+    // the pivots of the filter's model connection (mirrors the frontend
+    // bridge's resolveTargetPivots, which is where filters actually apply).
+    let ribbon_candidates: Vec<(String, Vec<String>, bool, std::collections::HashSet<identity::EntityId>)> = {
+        use crate::ribbon_filter::ConnectionMode;
+        let snapshot: Vec<_> = {
+            let filters = ribbon_filter_state.filters.lock().unwrap();
+            filters
+                .values()
+                .filter(|f| f.selected_items.is_some())
+                .map(|f| (
+                    f.field_name.clone(),
+                    f.selected_items.clone().unwrap(),
+                    f.cross_filter_slicer_targets.contains(&slicer_id),
+                    f.connection_id,
+                    f.connection_mode,
+                    f.connected_pivots.clone(),
+                    f.connected_sheets.clone(),
+                ))
+                .collect()
+        };
+        snapshot
+            .into_iter()
+            .map(|(field, selection, explicit, conn_id, mode, pivots, sheets)| {
+                let targets: std::collections::HashSet<identity::EntityId> = match mode {
+                    ConnectionMode::Manual => pivots.into_iter().collect(),
+                    ConnectionMode::Workbook => {
+                        crate::pivot::commands::bi_pivots_for_connection(&state, &pivot_state, conn_id)
+                            .into_iter()
+                            .map(|p| p.id)
+                            .collect()
+                    }
+                    ConnectionMode::BySheet => {
+                        let sheet_set: std::collections::HashSet<usize> = sheets.into_iter().collect();
+                        crate::pivot::commands::bi_pivots_for_connection(&state, &pivot_state, conn_id)
+                            .into_iter()
+                            .filter(|p| sheet_set.contains(&p.sheet_index))
+                            .map(|p| p.id)
+                            .collect()
+                    }
+                };
+                (field, selection, explicit, targets)
+            })
+            .collect()
+    };
+
     let slicers = slicer_state.slicers.lock().unwrap();
     let slicer = slicers
         .get(&slicer_id)
@@ -495,18 +544,16 @@ pub fn get_slicer_items(
         .collect();
 
     // Also collect cross-filters from ribbon filters.
-    // Match if: (a) they share connected sources, OR
+    // Match if: (a) their effective target pivots overlap this slicer's
+    //               connected sources (both filter the same pivot), OR
     //           (b) they explicitly target this slicer via crossFilterSlicerTargets.
     {
-        let filters = ribbon_filter_state.filters.lock().unwrap();
-        let ribbon_siblings: Vec<(String, Vec<String>)> = filters
-            .values()
-            .filter(|f| {
-                f.selected_items.is_some()
-                    && (f.cross_filter_slicer_targets.contains(&slicer_id)
-                        || f.connected_sources.iter().any(|c| slicer_connected.contains(&c.source_id)))
+        let ribbon_siblings: Vec<(String, Vec<String>)> = ribbon_candidates
+            .iter()
+            .filter(|(_, _, explicit, targets)| {
+                *explicit || targets.iter().any(|p| slicer_connected.contains(p))
             })
-            .map(|f| (f.field_name.clone(), f.selected_items.clone().unwrap()))
+            .map(|(field, selection, _, _)| (field.clone(), selection.clone()))
             .collect();
         sibling_filters.extend(ribbon_siblings);
     }

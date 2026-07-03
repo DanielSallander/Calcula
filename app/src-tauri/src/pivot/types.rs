@@ -987,6 +987,19 @@ pub struct PivotTableInfo {
     pub source_table_name: Option<String>,
 }
 
+/// A BI-backed pivot belonging to a specific model connection
+/// (returned by get_pivots_for_bi_connection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiConnectionPivot {
+    /// Pivot table ID
+    pub id: PivotId,
+    /// Pivot table name
+    pub name: String,
+    /// Destination sheet index
+    pub sheet_index: usize,
+}
+
 /// Range information response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

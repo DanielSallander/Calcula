@@ -90,6 +90,7 @@ vi.mock("../DataValidation/lib/validationEvents", () => ({
 vi.mock("../FilterPane/lib/filterPaneApi", () => ({
   createRibbonFilter: vi.fn(),
   getAllRibbonFilters: vi.fn().mockResolvedValue([]),
+  getBiConnections: vi.fn().mockResolvedValue([]),
   deleteRibbonFilter: vi.fn(),
   updateRibbonFilter: vi.fn(),
 }));

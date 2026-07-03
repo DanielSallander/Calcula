@@ -3960,6 +3960,7 @@ pub fn run() {
             pivot::set_pivot_item_visibility,
             pivot::get_all_pivot_tables,
             pivot::get_pivot_bi_metadata,
+            pivot::get_pivots_for_bi_connection,
             pivot::refresh_all_pivot_tables,
             pivot::set_pivot_item_expanded,
             pivot::expand_collapse_level,
@@ -4329,7 +4330,6 @@ pub fn run() {
             ribbon_filter::get_ribbon_filter,
             ribbon_filter::clear_ribbon_filter,
             ribbon_filter::set_ribbon_filter_item_selected,
-            ribbon_filter::get_ribbon_filter_items,
             // Timeline slicer commands
             timeline_slicer::create_timeline_slicer,
             timeline_slicer::delete_timeline_slicer,

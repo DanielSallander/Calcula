@@ -1,26 +1,27 @@
 //! FILENAME: app/src-tauri/src/ribbon_filter/types.rs
 //! PURPOSE: Type definitions for Ribbon Filter API.
 //! CONTEXT: Power BI-style filter pane — filters pinned to a ribbon tab.
+//!          Filter values always come from a Calcula model (BI) connection;
+//!          filters apply to the BI pivots backed by that same connection.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::slicer::types::{SlicerSourceType, SlicerConnection};
-
 // ============================================================================
 // ENUMS
 // ============================================================================
 
-/// How a ribbon filter determines which pivots/tables it connects to.
+/// How a ribbon filter determines which pivots it connects to.
+/// Only pivots backed by the filter's model connection are ever targeted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionMode {
-    /// User manually selects which pivots/tables to filter
+    /// User manually selects which of the connection's pivots to filter
     Manual,
-    /// Automatically filters all pivots/tables on selected sheets
+    /// Automatically filters the connection's pivots on selected sheets
     BySheet,
-    /// Automatically filters all pivots/tables in the workbook
+    /// Automatically filters all of the connection's pivots in the workbook
     Workbook,
 }
 
@@ -60,21 +61,27 @@ pub struct RibbonFilter {
     pub id: identity::EntityId,
     /// Display name
     pub name: String,
-    /// Source type (table, pivot, or biConnection)
-    pub source_type: SlicerSourceType,
-    /// The pivot/table/connection ID used as the data source for fetching filter items
-    pub cache_source_id: identity::EntityId,
-    /// Field/column name to filter on
+    /// The Calcula model (BI) connection whose model provides this filter's
+    /// values — the only allowed value source for ribbon filters.
+    pub connection_id: identity::EntityId,
+    /// For filters on a package-pulled connection: the stable package
+    /// data-source id. Package connections mint a fresh uuid on every pull,
+    /// so this key re-binds connection_id after reload/re-pull (local
+    /// connection ids are stable and need no re-bind; None for those).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
+    /// Field to filter on, in "Table.Column" form
     pub field_name: String,
     /// Data type of the field (text, number, date, unknown)
     #[serde(default = "default_field_data_type")]
     pub field_data_type: String,
-    /// How connections are determined: manual, bySheet, or workbook
+    /// How target pivots are determined: manual, bySheet, or workbook
     #[serde(default)]
     pub connection_mode: ConnectionMode,
-    /// For manual mode: explicitly selected pivots/tables
+    /// For manual mode: explicitly selected target pivots (BI pivots
+    /// backed by this filter's connection)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connected_sources: Vec<SlicerConnection>,
+    pub connected_pivots: Vec<identity::EntityId>,
     /// For bySheet mode: which sheet indices to auto-connect pivots from
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sheets: Vec<usize>,
@@ -217,15 +224,14 @@ where
 #[serde(rename_all = "camelCase")]
 pub struct CreateRibbonFilterParams {
     pub name: String,
-    pub source_type: SlicerSourceType,
-    pub cache_source_id: identity::EntityId,
+    pub connection_id: identity::EntityId,
     pub field_name: String,
     #[serde(default = "default_field_data_type")]
     pub field_data_type: String,
     #[serde(default)]
     pub connection_mode: ConnectionMode,
     #[serde(default)]
-    pub connected_sources: Vec<SlicerConnection>,
+    pub connected_pivots: Vec<identity::EntityId>,
     #[serde(default)]
     pub connected_sheets: Vec<usize>,
     pub display_mode: Option<RibbonFilterDisplayMode>,
@@ -242,7 +248,7 @@ pub struct UpdateRibbonFilterParams {
     pub button_columns: Option<u32>,
     pub button_rows: Option<u32>,
     pub connection_mode: Option<ConnectionMode>,
-    pub connected_sources: Option<Vec<SlicerConnection>>,
+    pub connected_pivots: Option<Vec<identity::EntityId>>,
     pub connected_sheets: Option<Vec<usize>>,
     pub cross_filter_targets: Option<Vec<identity::EntityId>>,
     pub cross_filter_slicer_targets: Option<Vec<identity::EntityId>>,
