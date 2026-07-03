@@ -2,6 +2,7 @@
 // PURPOSE: Tauri commands for undo/redo operations.
 
 use crate::api_types::{CellData, MergedRegion};
+use crate::pane_control::types::{PaneControl, PaneControlState};
 use crate::persistence::{FileState, UserFilesState};
 use crate::pivot::operations::*;
 use crate::pivot::types::PivotState;
@@ -42,6 +43,8 @@ pub struct UndoResult {
     pub slicer_changed: bool,
     /// Whether ribbon filter state was restored (frontend should refresh ribbon filters)
     pub ribbon_filter_changed: bool,
+    /// Whether pane control state was restored (frontend should refresh the Controls pane)
+    pub pane_control_changed: bool,
     /// Whether object state was restored (charts, sparklines, tables,
     /// autofilters, validation, named ranges, freeze panes) — frontend
     /// should refresh the corresponding stores.
@@ -229,6 +232,7 @@ fn apply_changes(
     pivot_state: &PivotState,
     slicer_state: &SlicerState,
     ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
     transaction: Transaction,
     is_undo: bool,
 ) -> UndoResult {
@@ -249,6 +253,7 @@ fn apply_changes(
     let mut pivot_changed = false;
     let mut slicer_changed = false;
     let mut ribbon_filter_changed = false;
+    let mut pane_control_changed = false;
     let mut objects_changed = false;
     // True when an off-active-sheet script/AI write was undone/redone — drives a
     // post-restore active-sheet recalc (see the deferred-restore loop below).
@@ -444,12 +449,13 @@ fn apply_changes(
                     Some(spec) => {
                         (spec.restore)(
                             state, pivot_state, slicer_state, ribbon_filter_state,
-                            kind, data, &mut inverse_transaction,
+                            pane_control_state, kind, data, &mut inverse_transaction,
                         );
                         set_restore_change_flag(
                             spec.change_class,
                             &mut pivot_changed, &mut slicer_changed,
-                            &mut ribbon_filter_changed, &mut objects_changed,
+                            &mut ribbon_filter_changed, &mut pane_control_changed,
+                            &mut objects_changed,
                         );
                     }
                     None => eprintln!("[undo] Unknown custom restore kind: {}", kind),
@@ -482,12 +488,13 @@ fn apply_changes(
             Some(spec) => {
                 (spec.restore)(
                     state, pivot_state, slicer_state, ribbon_filter_state,
-                    &kind, &data, &mut inverse_transaction,
+                    pane_control_state, &kind, &data, &mut inverse_transaction,
                 );
                 set_restore_change_flag(
                     spec.change_class,
                     &mut pivot_changed, &mut slicer_changed,
-                    &mut ribbon_filter_changed, &mut objects_changed,
+                    &mut ribbon_filter_changed, &mut pane_control_changed,
+                    &mut objects_changed,
                 );
                 if kind == "script_grid_cells" {
                     script_cells_restored = true;
@@ -504,7 +511,7 @@ fn apply_changes(
     // the active sheet (scripting::commands). Without this, an active formula like
     // `=Sheet2!A1` would keep its pre-undo (stale) value until the next edit.
     if script_cells_restored {
-        crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, active_sheet);
+        crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, active_sheet, Some((pane_control_state, ribbon_filter_state)));
     }
 
     // Push inverse transaction to the appropriate stack (re-acquire undo_stack)
@@ -538,6 +545,7 @@ fn apply_changes(
         pivot_changed,
         slicer_changed,
         ribbon_filter_changed,
+        pane_control_changed,
         objects_changed,
     }
 }
@@ -549,6 +557,8 @@ enum CustomRestoreKind {
     Pivot,
     Slicer,
     RibbonFilter,
+    /// Pane controls (Controls pane) — drives `pane_control_changed`.
+    PaneControl,
     Objects,
     Other,
 }
@@ -587,6 +597,7 @@ type RestoreFn = fn(
     &PivotState,
     &SlicerState,
     &RibbonFilterState,
+    &PaneControlState,
     &str,
     &[u8],
     &mut Transaction,
@@ -600,21 +611,24 @@ struct RestoreSpec {
 }
 
 // --- Adapters: forward the uniform signature to each concrete restore fn. ----
-fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_comment_restore(s, d, inv); }
-fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_note_restore(s, d, inv); }
-fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_hyperlink_restore(s, d, inv); }
-fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, k: &str, d: &[u8], inv: &mut Transaction) { apply_default_dimension_restore(s, k, d, inv); }
-fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_definition_restore(s, p, d, inv); }
-fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_create_restore(s, p, d, inv); }
-fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_delete_restore(s, p, d, inv); }
-fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_restore(sl, d, inv); }
-fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_create_restore(sl, d, inv); }
-fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_delete_restore(sl, d, inv); }
-fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_restore(rf, d, inv); }
-fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_create_restore(rf, d, inv); }
-fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_delete_restore(rf, d, inv); }
-fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
-fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
+fn r_comment(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_comment_restore(s, d, inv); }
+fn r_note(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_note_restore(s, d, inv); }
+fn r_hyperlink(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_hyperlink_restore(s, d, inv); }
+fn r_default_dim(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_default_dimension_restore(s, k, d, inv); }
+fn r_pivot_definition(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_definition_restore(s, p, rf, pc, d, inv); }
+fn r_pivot_create(s: &AppState, p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_create_restore(s, p, d, inv); }
+fn r_pivot_delete(s: &AppState, p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pivot_delete_restore(s, p, rf, pc, d, inv); }
+fn r_slicer(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_restore(sl, d, inv); }
+fn r_slicer_create(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_create_restore(sl, d, inv); }
+fn r_slicer_delete(_s: &AppState, _p: &PivotState, sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_slicer_delete_restore(sl, d, inv); }
+fn r_ribbon_filter(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_restore(rf, d, inv); }
+fn r_ribbon_filter_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_create_restore(rf, d, inv); }
+fn r_ribbon_filter_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_ribbon_filter_delete_restore(rf, d, inv); }
+fn r_pane_control(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_restore(pc, d, inv); }
+fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_create_restore(pc, d, inv); }
+fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_delete_restore(pc, d, inv); }
+fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
+fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -636,6 +650,9 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     m.insert("ribbon_filter", RestoreSpec { restore: r_ribbon_filter, change_class: RibbonFilter, defer: true });
     m.insert("ribbon_filter_create", RestoreSpec { restore: r_ribbon_filter_create, change_class: RibbonFilter, defer: true });
     m.insert("ribbon_filter_delete", RestoreSpec { restore: r_ribbon_filter_delete, change_class: RibbonFilter, defer: true });
+    m.insert("pane_control", RestoreSpec { restore: r_pane_control, change_class: PaneControl, defer: true });
+    m.insert("pane_control_create", RestoreSpec { restore: r_pane_control_create, change_class: PaneControl, defer: true });
+    m.insert("pane_control_delete", RestoreSpec { restore: r_pane_control_delete, change_class: PaneControl, defer: true });
     for k in [
         "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
         "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
@@ -662,12 +679,14 @@ fn set_restore_change_flag(
     pivot_changed: &mut bool,
     slicer_changed: &mut bool,
     ribbon_filter_changed: &mut bool,
+    pane_control_changed: &mut bool,
     objects_changed: &mut bool,
 ) {
     match class {
         CustomRestoreKind::Pivot => *pivot_changed = true,
         CustomRestoreKind::Slicer => *slicer_changed = true,
         CustomRestoreKind::RibbonFilter => *ribbon_filter_changed = true,
+        CustomRestoreKind::PaneControl => *pane_control_changed = true,
         CustomRestoreKind::Objects => *objects_changed = true,
         CustomRestoreKind::Other => {}
     }
@@ -941,6 +960,7 @@ pub fn undo(
     pivot_state: State<'_, PivotState>,
     slicer_state: State<'_, SlicerState>,
     ribbon_filter_state: State<'_, RibbonFilterState>,
+    pane_control_state: State<'_, PaneControlState>,
 ) -> UndoResult {
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -958,13 +978,14 @@ pub fn undo(
                     pivot_changed: false,
                     slicer_changed: false,
                     ribbon_filter_changed: false,
+                    pane_control_changed: false,
                     objects_changed: false,
                 };
             }
         }
     };
 
-    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, true)
+    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, transaction, true)
 }
 
 /// Perform redo operation.
@@ -976,6 +997,7 @@ pub fn redo(
     pivot_state: State<'_, PivotState>,
     slicer_state: State<'_, SlicerState>,
     ribbon_filter_state: State<'_, RibbonFilterState>,
+    pane_control_state: State<'_, PaneControlState>,
 ) -> UndoResult {
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -993,13 +1015,14 @@ pub fn redo(
                     pivot_changed: false,
                     slicer_changed: false,
                     ribbon_filter_changed: false,
+                    pane_control_changed: false,
                     objects_changed: false,
                 };
             }
         }
     };
 
-    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, transaction, false)
+    apply_changes(&state, &file_state, &user_files_state, &pivot_state, &slicer_state, &ribbon_filter_state, &pane_control_state, transaction, false)
 }
 
 /// Clear undo/redo history (e.g., when opening a new file).
@@ -1042,6 +1065,8 @@ struct PivotFullSnapshot {
 fn apply_pivot_definition_restore(
     state: &AppState,
     pivot_state: &PivotState,
+    ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1088,7 +1113,7 @@ fn apply_pivot_definition_restore(
         drop(pivot_tables);
 
         // Rewrite the grid
-        finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
 
         // Restore cells that were overwritten by the previous pivot expansion
         if !snapshot.overwritten_cells.is_empty() {
@@ -1189,6 +1214,8 @@ fn apply_pivot_create_restore(
 fn apply_pivot_delete_restore(
     state: &AppState,
     pivot_state: &PivotState,
+    ribbon_filter_state: &RibbonFilterState,
+    pane_control_state: &PaneControlState,
     data: &[u8],
     inverse_transaction: &mut Transaction,
 ) {
@@ -1229,7 +1256,7 @@ fn apply_pivot_delete_restore(
     drop(pivot_tables);
 
     // Write to grid
-    finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(state, pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((pane_control_state, ribbon_filter_state)));
 }
 
 // ============================================================================
@@ -1441,6 +1468,110 @@ fn apply_ribbon_filter_delete_restore(
 
     let mut filters = ribbon_filter_state.filters.lock().unwrap();
     filters.insert(snapshot.filter_id, snapshot.previous);
+}
+
+// ============================================================================
+// PANE CONTROL UNDO/REDO HANDLERS (mirror the ribbon filter handlers)
+// ============================================================================
+
+/// Snapshot of a pane control for property/value undo.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PaneControlSnapshot {
+    control_id: identity::EntityId,
+    previous: PaneControl,
+}
+
+/// Snapshot for pane control creation undo (undo = delete).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PaneControlCreateSnapshot {
+    control_id: identity::EntityId,
+}
+
+/// Restore a pane control's previous state (properties/value).
+fn apply_pane_control_restore(
+    pane_control_state: &PaneControlState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: PaneControlSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize pane control snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut controls = pane_control_state.controls.lock().unwrap();
+    if let Some(control) = controls.get_mut(&snapshot.control_id) {
+        // Save current state for inverse
+        let inverse_snapshot = PaneControlSnapshot {
+            control_id: snapshot.control_id,
+            previous: control.clone(),
+        };
+        let inverse_data = serde_json::to_vec(&inverse_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "pane_control".to_string(),
+            data: inverse_data,
+        });
+
+        // Restore previous state
+        *control = snapshot.previous;
+    }
+}
+
+/// Undo pane control creation: remove the control.
+fn apply_pane_control_create_restore(
+    pane_control_state: &PaneControlState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: PaneControlCreateSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize pane control create snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut controls = pane_control_state.controls.lock().unwrap();
+    if let Some(control) = controls.remove(&snapshot.control_id) {
+        let redo_snapshot = PaneControlSnapshot {
+            control_id: snapshot.control_id,
+            previous: control,
+        };
+        let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+        inverse_transaction.add_change(CellChange::CustomRestore {
+            kind: "pane_control_delete".to_string(),
+            data: redo_data,
+        });
+    }
+}
+
+/// Undo pane control deletion: re-create the control from snapshot.
+fn apply_pane_control_delete_restore(
+    pane_control_state: &PaneControlState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: PaneControlSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize pane control delete snapshot: {}", e);
+            return;
+        }
+    };
+
+    let redo_snapshot = PaneControlCreateSnapshot {
+        control_id: snapshot.control_id,
+    };
+    let redo_data = serde_json::to_vec(&redo_snapshot).unwrap_or_default();
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "pane_control_create".to_string(),
+        data: redo_data,
+    });
+
+    let mut controls = pane_control_state.controls.lock().unwrap();
+    controls.insert(snapshot.control_id, snapshot.previous);
 }
 
 // ============================================================================
@@ -1795,6 +1926,9 @@ mod restore_registry_tests {
             ("ribbon_filter", true, CustomRestoreKind::RibbonFilter),
             ("ribbon_filter_create", true, CustomRestoreKind::RibbonFilter),
             ("ribbon_filter_delete", true, CustomRestoreKind::RibbonFilter),
+            ("pane_control", true, CustomRestoreKind::PaneControl),
+            ("pane_control_create", true, CustomRestoreKind::PaneControl),
+            ("pane_control_delete", true, CustomRestoreKind::PaneControl),
             ("obj_chart", true, CustomRestoreKind::Objects),
             ("obj_sparklines", true, CustomRestoreKind::Objects),
             ("obj_table", true, CustomRestoreKind::Objects),
@@ -1819,13 +1953,15 @@ mod restore_registry_tests {
     /// EVERY registered kind — this is what guarantees lock-ordering is preserved.
     /// `script_grid_cells` is newer than the legacy prefixes but is likewise
     /// deferred (it re-acquires the grid/grids/active-sheet locks), so it joins the
-    /// deferred set explicitly.
+    /// deferred set explicitly; `pane_control*` kinds acquire the PaneControlState
+    /// lock and are deferred exactly like their ribbon_filter siblings.
     #[test]
     fn defer_agrees_with_legacy_prefix_logic() {
         for (kind, spec) in RESTORE_REGISTRY.iter() {
             let legacy_deferred = kind.starts_with("pivot_")
                 || kind.starts_with("slicer")
                 || kind.starts_with("ribbon_filter")
+                || kind.starts_with("pane_control")
                 || kind.starts_with("obj_")
                 || *kind == "script_grid_cells";
             assert_eq!(

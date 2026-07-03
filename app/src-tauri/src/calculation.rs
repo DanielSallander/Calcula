@@ -135,6 +135,7 @@ fn evaluate_single_formula(
     row_heights: &std::collections::HashMap<u32, f64>,
     column_widths: &std::collections::HashMap<u32, f64>,
     cube: Option<&std::sync::Arc<engine::CubePrefetch>>,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> engine::CellValue {
     match parser::parse(formula) {
         Ok(parsed) => {
@@ -167,6 +168,7 @@ fn evaluate_single_formula(
                 row_heights: Some(row_heights.clone()),
                 column_widths: Some(column_widths.clone()),
                 hidden_rows: None,
+                control_values: control_values.cloned(),
             };
             evaluate_formula_with_pivot(
                 grids,
@@ -315,11 +317,16 @@ fn partition_formula_cells(
 /// When iterative calculation is enabled, circular references are resolved
 /// by repeatedly evaluating the circular group until convergence.
 #[tauri::command]
-pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
+pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
     // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
     // on the frontend before calling). Shared via Arc so each formula's eval gets
     // it cheaply; None => cube cells preserve their last value (see eval_cube).
     let cube_arc = cube_results.map(std::sync::Arc::new);
+    // GET.CONTROLVALUE snapshot: built ONCE per recalc, BEFORE the grid locks
+    // below (canonical lock order: control stores first, grids last).
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -396,6 +403,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
             &tables_map, &table_names_map, &named_ranges_map,
             &row_heights, &column_widths,
             cube_arc.as_ref(),
+            Some(&control_values),
         );
 
         if let Some(cell) = grid.get_cell(*row, *col) {
@@ -474,6 +482,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         &tables_map, &table_names_map, &named_ranges_map,
                         &row_heights, &column_widths,
                         cube_arc.as_ref(),
+                        Some(&control_values),
                     );
 
                     let new_numeric = cell_value_as_f64(&new_result);
@@ -536,6 +545,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 &mut row_heights,
                 &mut column_widths,
                 &mut styles,
+                Some(&control_values),
             );
         // Note: calculate_now returns Vec<CellData>, not UpdateCellResult.
         // Dimension changes and style refresh are handled by the frontend
@@ -560,7 +570,13 @@ pub(crate) fn recalculate_sheet_values(
     user_files_state: &UserFilesState,
     pivot_state: &PivotState,
     sheet_index: usize,
+    control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
 ) {
+    // GET.CONTROLVALUE snapshot: built BEFORE any grid locks (canonical lock
+    // order). None (states unreachable at the call site) => those formulas
+    // evaluate to #N/A for this pass (v1).
+    let control_values =
+        crate::control_values::build_control_values_from_states(state, control_states);
     let mut grid_mirror = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -639,6 +655,7 @@ pub(crate) fn recalculate_sheet_values(
             &tables_map, &table_names_map, &named_ranges_map,
             &row_heights, &column_widths,
             None,
+            control_values.as_ref(),
         );
         if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
             let mut updated = cell.clone();
@@ -676,6 +693,7 @@ pub(crate) fn recalculate_sheet_values(
                         &tables_map, &table_names_map, &named_ranges_map,
                         &row_heights, &column_widths,
                         None,
+                        control_values.as_ref(),
                     );
                     let new_numeric = cell_value_as_f64(&new_result);
                     if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
@@ -701,11 +719,11 @@ pub(crate) fn recalculate_sheet_values(
 
 /// Recalculate all formula cells in the current sheet (same as calculate_now for single-sheet)
 #[tauri::command]
-pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
 
     // For now, calculate_sheet does the same as calculate_now since we have a single sheet
-    let result = calculate_now(state, user_files_state, pivot_state, None);
+    let result = calculate_now(state, user_files_state, pivot_state, pane_control_state, ribbon_filter_state, None);
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result

@@ -378,6 +378,8 @@ pub fn anim_reroll_and_read(
     state: State<AppState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: AnimRerollParams,
 ) -> AnimRerollResult {
     crate::calculation::recalculate_sheet_values(
@@ -385,6 +387,7 @@ pub fn anim_reroll_and_read(
         &user_files_state,
         &pivot_state,
         params.sheet_index,
+        Some((&*pane_control_state, &*ribbon_filter_state)),
     );
 
     let grids = state.grids.lock().unwrap();

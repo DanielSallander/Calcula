@@ -93,6 +93,20 @@ export interface IBiConnectionService {
 }
 
 // ============================================================================
+// Pane Control Store Interface
+// ============================================================================
+
+/** Access to pane controls (Controls pane), registered by the ControlsPane
+ *  extension. Lets the script host seed a pane-hosted custom control's shape
+ *  script with its declared properties (instanceId "pane-{controlId}") without
+ *  importing the extension directly. */
+export interface IPaneControlStoreService {
+  /** Declared property values for a pane control (Custom config), or undefined
+   *  if the control doesn't exist. Keyed by property name. */
+  getProperties(controlId: string): Record<string, string> | undefined;
+}
+
+// ============================================================================
 // Registry
 // ============================================================================
 
@@ -101,6 +115,7 @@ let timelineStore: ITimelineStoreService | null = null;
 let chartStore: IChartStoreService | null = null;
 let pivotStore: IPivotStoreService | null = null;
 let biConnectionService: IBiConnectionService | null = null;
+let paneControlStore: IPaneControlStoreService | null = null;
 
 export function registerSlicerStoreService(service: ISlicerStoreService): void {
   slicerStore = service;
@@ -140,4 +155,12 @@ export function getPivotStoreService(): IPivotStoreService | null {
 
 export function getBiConnectionService(): IBiConnectionService | null {
   return biConnectionService;
+}
+
+export function registerPaneControlStoreService(service: IPaneControlStoreService | null): void {
+  paneControlStore = service;
+}
+
+export function getPaneControlStoreService(): IPaneControlStoreService | null {
+  return paneControlStore;
 }

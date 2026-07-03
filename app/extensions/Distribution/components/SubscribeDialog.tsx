@@ -100,6 +100,11 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       // Notify the app that sheets have changed so UI refreshes
       emitAppEvent(AppEvents.SHEET_CHANGED, {});
 
+      // The pull may have materialized pane controls — tell the Controls pane
+      // to reload (cross-extension window event; same name the shell fans the
+      // paneControl mutation domain out as).
+      window.dispatchEvent(new CustomEvent("controlspane:controls-refreshed"));
+
       // Let the ScriptableObjects extension register the pulled scripts and
       // run the consent flow in this session (not only after save/reopen).
       if (result.scriptsPulled > 0) {
@@ -260,6 +265,14 @@ export function SubscribeDialog({ onClose }: DialogProps) {
               {inspection.controlSheetCount} sheet(s) with buttons/checkboxes — they
               arrive with their click actions disarmed; any package scripts are
               listed above and require consent
+            </div>
+          )}
+          {inspection.paneControlCount > 0 && (
+            <div>
+              {inspection.paneControlCount} pane control(s)
+              {inspection.paneControlNames.length > 0
+                ? `: ${inspection.paneControlNames.join(", ")}`
+                : ""}
             </div>
           )}
         </div>

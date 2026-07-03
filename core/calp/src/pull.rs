@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls, SavedPaneControl};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -67,6 +67,14 @@ pub struct PullResult {
     /// the PACKAGE sheet id (un-remapped); `controls` is the opaque app payload.
     /// Empty for packages published before controls were carried.
     pub controls: Vec<SavedSheetControls>,
+    /// Pane controls (Controls pane) carried by the package. WORKBOOK-scoped
+    /// (no sheet remap needed) and complete: the package list is the
+    /// publisher's whole pane-control set, in the deterministic (order, id)
+    /// order publish wrote. `config`/`value` are opaque app-owned JSON;
+    /// configs contain no inline code by design (D6) — custom-control /
+    /// button scripts travel separately as consent-gated object_scripts.
+    /// Empty for packages published before pane controls were carried.
+    pub pane_controls: Vec<SavedPaneControl>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
@@ -303,6 +311,17 @@ pub fn pull(
             None => Vec::new(),
         };
 
+    // Read pane controls (workbook-scoped, like pivot definitions — no
+    // per-sheet filtering or sheet-id remap). The artifact carries the
+    // publisher's COMPLETE pane-control set; the caller materializes it as a
+    // whole (the app layer decides collision handling against the
+    // subscriber's own controls). Absent in older packages -> empty.
+    let pulled_pane_controls: Vec<SavedPaneControl> =
+        match registry.read_artifact(pkg, ver, "pane_controls.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+
     // Read tables
     let mut pulled_tables = Vec::new();
     for table_id in &ver_manifest.tables {
@@ -485,6 +504,7 @@ pub fn pull(
         conditional_formats: pulled_conditional_formats,
         data_validations: pulled_data_validations,
         controls: pulled_controls,
+        pane_controls: pulled_pane_controls,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -674,6 +694,180 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["controlType"], "button");
         assert_eq!(entries[0]["properties"]["onSelect"]["value"], "script-1");
+    }
+
+    /// Two pane controls for the pane-control tests: a slider carrying a
+    /// published value and a custom scripted control carrying declared
+    /// properties (its script would travel separately as an object script —
+    /// configs hold no inline code by design, D6).
+    fn make_test_pane_controls() -> Vec<persistence::SavedPaneControl> {
+        vec![
+            persistence::SavedPaneControl {
+                id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+                name: "Rate".to_string(),
+                control_type: "slider".to_string(),
+                config: serde_json::json!({
+                    "type": "slider", "min": 0.0, "max": 100.0, "step": 1.0, "showValue": true
+                }),
+                value: serde_json::json!({ "kind": "number", "value": 42.0 }),
+                order: 3,
+            },
+            persistence::SavedPaneControl {
+                id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+                name: "Gauge".to_string(),
+                control_type: "custom".to_string(),
+                config: serde_json::json!({
+                    "type": "custom", "properties": { "color": "#ff0000", "label": "Fuel" }
+                }),
+                value: serde_json::Value::Null,
+                order: 1,
+            },
+        ]
+    }
+
+    #[test]
+    fn pull_carries_pane_controls_with_config_value_and_order_intact() {
+        // Pane controls are WORKBOOK-scoped: all of them travel regardless of
+        // which sheets are published, and pull hands back the complete set in
+        // the deterministic (order, id) order publish wrote.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        wb.pane_controls = make_test_pane_controls();
+        let slider_id = wb.pane_controls[0].id;
+        let custom_id = wb.pane_controls[1].id;
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "pane-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0], // partial sheet selection — controls still all travel
+            now: "2026-07-03T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.pane_controls_published, 2);
+
+        // The artifact is covered by the signed manifest's integrity checksums.
+        let ver = reg.get_version_manifest("pane-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("pane_controls.json"));
+
+        let pull_req = PullRequest {
+            package_name: "pane-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-03T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.pane_controls.len(), 2, "both pane controls travel");
+
+        // Deterministic order: sorted by (order, id) — custom (order 1) first.
+        let custom = &result.pane_controls[0];
+        let slider = &result.pane_controls[1];
+        assert_eq!(custom.id, custom_id);
+        assert_eq!(slider.id, slider_id);
+
+        // Custom control: config properties intact, value-less (null).
+        assert_eq!(custom.name, "Gauge");
+        assert_eq!(custom.control_type, "custom");
+        assert_eq!(custom.order, 1);
+        assert_eq!(custom.config["type"], "custom");
+        assert_eq!(custom.config["properties"]["color"], "#ff0000");
+        assert_eq!(custom.config["properties"]["label"], "Fuel");
+        assert!(custom.value.is_null(), "value-less control stays null");
+
+        // Slider: config AND current published value intact.
+        assert_eq!(slider.name, "Rate");
+        assert_eq!(slider.control_type, "slider");
+        assert_eq!(slider.order, 3);
+        assert_eq!(slider.config["type"], "slider");
+        assert_eq!(slider.config["max"], 100.0);
+        assert_eq!(slider.config["showValue"], true);
+        assert_eq!(slider.value["kind"], "number");
+        assert_eq!(slider.value["value"], 42.0);
+    }
+
+    #[test]
+    fn pane_controls_artifact_is_byte_stable_across_publishes() {
+        // Determinism: the SAME control set handed to publish in a DIFFERENT
+        // Vec order must produce byte-identical pane_controls.json (publish
+        // sorts by order, then id) — stable checksums, blob dedup intact.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let controls = make_test_pane_controls();
+
+        let wb = make_test_workbook();
+        for (version, reversed) in [(SemVer::new(1, 0, 0), false), (SemVer::new(1, 0, 1), true)] {
+            let mut wb = wb.clone();
+            wb.pane_controls = if reversed {
+                controls.iter().rev().cloned().collect()
+            } else {
+                controls.clone()
+            };
+            let publish_req = PublishRequest {
+                workbook: &wb,
+                package_name: "pane-det".to_string(),
+                version,
+                kind: "report".to_string(),
+                sheet_indices: vec![0, 1],
+                now: "2026-07-03T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+            };
+            publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        }
+
+        let bytes_v1 = reg
+            .read_artifact("pane-det", "1.0.0", "pane_controls.json")
+            .unwrap()
+            .expect("pane_controls.json in v1.0.0");
+        let bytes_v2 = reg
+            .read_artifact("pane-det", "1.0.1", "pane_controls.json")
+            .unwrap()
+            .expect("pane_controls.json in v1.0.1");
+        assert_eq!(bytes_v1, bytes_v2, "artifact bytes must be input-order independent");
+
+        // And the signed checksums agree (one shared blob after dedup).
+        let v1 = reg.get_version_manifest("pane-det", "1.0.0").unwrap();
+        let v2 = reg.get_version_manifest("pane-det", "1.0.1").unwrap();
+        assert_eq!(
+            v1.artifact_checksums.get("pane_controls.json"),
+            v2.artifact_checksums.get("pane_controls.json"),
+        );
+    }
+
+    #[test]
+    fn pull_with_no_pane_controls_returns_empty() {
+        // Packages published without pane controls (or before they were
+        // carried) pull an empty set — no artifact, no error.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        assert!(reg
+            .read_artifact("test-pkg", "1.0.0", "pane_controls.json")
+            .unwrap()
+            .is_none());
+        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        assert!(result.pane_controls.is_empty());
     }
 
     #[test]

@@ -872,11 +872,15 @@ pub fn execute_script(
             let file_state = handle.state::<crate::persistence::FileState>();
             let user_files_state = handle.state::<crate::persistence::UserFilesState>();
             let pivot_state = handle.state::<crate::pivot::PivotState>();
+            let pane_control_state = handle.state::<crate::pane_control::PaneControlState>();
+            let ribbon_filter_state = handle.state::<crate::ribbon_filter::RibbonFilterState>();
             crate::scripting::commands::apply_script_modified_grids(
                 &state,
                 &file_state,
                 &user_files_state,
                 &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
                 &modified_grids,
                 active_sheet,
                 *cells_modified,

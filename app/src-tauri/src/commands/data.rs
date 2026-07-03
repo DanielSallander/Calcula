@@ -11,7 +11,6 @@ use crate::api_types::{
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
     evaluate_formula_multi_sheet_with_files,
-    evaluate_formula_multi_sheet_with_ast_and_files,
     evaluate_formula_raw_with_files_and_pivot,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_cell_input_invariant,
@@ -489,6 +488,17 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, lo
 /// Update a cell with new content.
 /// Returns all cells that were updated (including dependent cells),
 /// plus any dimension changes triggered by UI formulas.
+///
+/// Thin command wrapper: the body lives in `update_cell_impl`. Afterwards, if
+/// the edited cell is the ANCHOR of a NAMED on-grid control (a control whose
+/// properties carry a static "name"), the shared targeted control recalc
+/// refreshes GET.CONTROLVALUE("name") dependents — the dependency maps carry
+/// no control-name -> formula-cell edges, so the main cascade cannot see
+/// them. The anchor probe costs one HashMap lookup on the hot path; the
+/// recalc core acquires its own locks (every guard of `update_cell_impl` has
+/// dropped by then) and cannot recurse by construction — it only re-evaluates
+/// formulas (reevaluate_formula_cell / recalculate_sheet_values) and never
+/// re-enters update_cell or this anchor check.
 #[tauri::command]
 pub fn update_cell(
     state: State<AppState>,
@@ -496,6 +506,72 @@ pub fn update_cell(
     user_files_state: State<UserFilesState>,
     slicer_state: State<SlicerState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    row: u32,
+    col: u32,
+    value: String,
+    udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    cube_results: Option<engine::CubePrefetch>,
+) -> Result<UpdateCellResult, String> {
+    // Anchor probe BEFORE the edit (the name lives in the control's
+    // properties, not the cell, so before/after is equivalent — probing first
+    // keeps the hot path front-loaded and branch-free afterwards).
+    let anchor_control_name = named_control_anchor_name(&state, row, col);
+
+    let mut result = update_cell_impl(
+        &state,
+        &file_state,
+        &user_files_state,
+        &slicer_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        row,
+        col,
+        value,
+        udf_results,
+        cube_results,
+    )?;
+
+    if let Some(name) = anchor_control_name {
+        let extra = crate::control_values::recalc_control_dependents_core(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            Some(vec![name]),
+        )?;
+        result.cells.extend(extra);
+    }
+
+    Ok(result)
+}
+
+/// One-probe hot-path lookup: the static, non-empty "name" of the on-grid
+/// control anchored at (active_sheet, row, col), or None (the overwhelmingly
+/// common case — a single HashMap probe under a brief lock).
+fn named_control_anchor_name(state: &AppState, row: u32, col: u32) -> Option<String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let controls = state.controls.lock().unwrap();
+    controls
+        .get(&(active_sheet, row, col))
+        .and_then(crate::control_values::static_control_name)
+}
+
+/// Body of `update_cell` — every lock is acquired AND dropped inside, so the
+/// command wrapper can run the named-anchor control recalc afterwards without
+/// lock re-entry.
+#[allow(clippy::too_many_arguments)]
+fn update_cell_impl(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    slicer_state: &SlicerState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     row: u32,
     col: u32,
     value: String,
@@ -514,6 +590,13 @@ pub fn update_cell(
     // the async `cube_prefetch` command before this synchronous recalc. Shared via
     // Arc so the main eval and the dependent-recalc cascade both serve it cheaply.
     let cube_arc = cube_results.map(std::sync::Arc::new);
+
+    // GET.CONTROLVALUE snapshot: built ONCE per edit, BEFORE the grid locks
+    // below (canonical lock order: control stores first, grids last). Shared
+    // via Arc by the main eval and the dependent-recalc cascade.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
 
     // Lock user files for FILEREAD/FILELINES/FILEEXISTS support
     let user_files = user_files_state.files.lock().unwrap();
@@ -581,8 +664,6 @@ pub fn update_cell(
     };
 
     let perf_t1_locks = Instant::now();
-
-    let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
     let mut updated_cells = Vec::new();
     let mut dimension_changes: Vec<DimensionData> = Vec::new();
@@ -811,6 +892,7 @@ pub fn update_cell(
                     row_heights: Some(rh_map),
                     column_widths: Some(cw_map),
                     hidden_rows: None,
+                    control_values: Some(control_values.clone()),
                 };
                 let raw_result = evaluate_formula_raw_with_files_and_pivot(
                     &grids,
@@ -1046,394 +1128,59 @@ pub fn update_cell(
             if let Some(dep_cell) = dep_cell_opt {
                 if let Some(formula) = dep_cell.formula_string() {
                     let perf_eval_start = Instant::now();
-
-                    // Get the AST (cached or freshly parsed) and evaluate to raw EvalResult
-                    let (raw_result, ast_to_cache) = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                        perf_cache_hits += 1;
-                        let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
-                            &grids, &sheet_names, active_sheet, cached_ast, &user_files,
-                            udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
-                            cube_arc.clone(),
-                        );
-                        (result, None)
-                    } else {
-                        perf_cache_misses += 1;
-                        if let Ok(engine_ast) = parser::parse(&formula).map(|parsed| {
-                            let resolved = if crate::ast_has_named_refs(&parsed) {
-                                let mut visited = HashSet::new();
-                                crate::resolve_names_in_ast(&parsed, &cascade_named_ranges, active_sheet, &mut visited)
-                            } else {
-                                parsed
-                            };
-                            let resolved = if crate::ast_has_table_refs(&resolved) {
-                                let ctx = crate::TableRefContext {
-                                    tables: &cascade_tables,
-                                    table_names: &cascade_table_names,
-                                    current_sheet_index: active_sheet,
-                                    current_row: dep_row,
-                                };
-                                crate::resolve_table_refs_in_ast(&resolved, &ctx)
-                            } else {
-                                resolved
-                            };
-                            crate::convert_expr(&resolved)
-                        }).map_err(|e| format!("{}", e)) {
-                            let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
-                                &grids, &sheet_names, active_sheet, &engine_ast, &user_files,
-                                udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
-                                cube_arc.clone(),
-                            );
-                            (result, Some(engine_ast))
-                        } else {
-                            // Fallback to string-based evaluation (no spill support)
-                            let cv = evaluate_formula_multi_sheet_with_files(
-                                &grids, &sheet_names, active_sheet, &formula, &user_files,
-                            );
-                            let er = match cv {
-                                engine::CellValue::Number(n) => engine::EvalResult::Number(n),
-                                engine::CellValue::Text(s) => engine::EvalResult::Text(s),
-                                engine::CellValue::Boolean(b) => engine::EvalResult::Boolean(b),
-                                engine::CellValue::Error(e) => engine::EvalResult::Error(e),
-                                _ => engine::EvalResult::Text(String::new()),
-                            };
-                            (er, None)
-                        }
-                    };
-
-                    // Clear any previous spill range for this dependent cell
-                    {
-                        let mut spill_ranges = state.spill_ranges.lock().unwrap();
-                        let mut spill_hosts = state.spill_hosts.lock().unwrap();
-                        if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, dep_row, dep_col)) {
-                            for (sr, sc) in &old_spill_cells {
-                                spill_hosts.remove(&(active_sheet, *sr, *sc));
-                                grid.cells.remove(&(*sr, *sc));
-                                if active_sheet < grids.len() {
-                                    grids[active_sheet].cells.remove(&(*sr, *sc));
-                                }
-                                updated_cells.push(CellData {
-                                    row: *sr, col: *sc, display: String::new(),
-                                    display_color: None, formula: None, style_index: 0,
-                                    row_span: 1, col_span: 1, sheet_index: None,
-                                    rich_text: None, accounting_layout: None,
-                                });
-                            }
-                        }
-                    }
-
-                    // Handle spill for array results
-                    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
-                    let cell_value = if spill_rows > 1 || spill_cols > 1 {
-                        let spill_values = raw_result.to_spill_values();
-                        let mut spill_blocked = false;
-
-                        for &(dr, dc, _) in &spill_values {
-                            if dr == 0 && dc == 0 { continue; }
-                            let target_r = dep_row + dr;
-                            let target_c = dep_col + dc;
-                            if let Some(existing) = grid.get_cell(target_r, target_c) {
-                                if existing.value != engine::CellValue::Empty {
-                                    // Check if it's a spill cell from this same origin
-                                    let spill_hosts = state.spill_hosts.lock().unwrap();
-                                    let is_own_spill = spill_hosts.get(&(active_sheet, target_r, target_c))
-                                        .map_or(false, |origin| *origin == (dep_row, dep_col));
-                                    if !is_own_spill {
-                                        spill_blocked = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if spill_blocked {
-                            engine::CellValue::Error(engine::CellError::Value)
-                        } else {
-                            // Write spill cells
-                            let mut new_spill_cells = Vec::new();
-                            let mut spill_ranges = state.spill_ranges.lock().unwrap();
-                            let mut spill_hosts = state.spill_hosts.lock().unwrap();
-
-                            for (dr, dc, cv) in &spill_values {
-                                if *dr == 0 && *dc == 0 { continue; }
-                                let target_r = dep_row + dr;
-                                let target_c = dep_col + dc;
-
-                                let spill_cell = engine::Cell {
-                                    ast: None,
-                                    value: cv.clone(),
-                                    style_index: 0,
-                                    rich_text: None,
-                                };
-                                grid.set_cell(target_r, target_c, spill_cell.clone());
-                                if active_sheet < grids.len() {
-                                    grids[active_sheet].set_cell(target_r, target_c, spill_cell);
-                                }
-
-                                let style = styles.get(0);
-                                let display = format_cell_value(cv, style, &locale);
-                                updated_cells.push(CellData {
-                                    row: target_r, col: target_c, display,
-                                    display_color: None, formula: None, style_index: 0,
-                                    row_span: 1, col_span: 1, sheet_index: None,
-                                    rich_text: None, accounting_layout: None,
-                                });
-
-                                new_spill_cells.push((target_r, target_c));
-                                spill_hosts.insert((active_sheet, target_r, target_c), (dep_row, dep_col));
-                            }
-
-                            if !new_spill_cells.is_empty() {
-                                spill_ranges.insert((active_sheet, dep_row, dep_col), new_spill_cells);
-                            }
-
-                            raw_result.to_cell_value()
-                        }
-                    } else {
-                        raw_result.to_cell_value()
-                    };
-
-                    // Update the origin cell
-                    let mut updated_dep = dep_cell.clone();
-                    updated_dep.value = cell_value;
-                    if let Some(ast) = ast_to_cache {
-                        updated_dep.set_cached_ast(ast);
-                    }
-                    grid.set_cell(dep_row, dep_col, updated_dep.clone());
-                    if active_sheet < grids.len() {
-                        grids[active_sheet].set_cell(dep_row, dep_col, updated_dep.clone());
-                    }
-
-                    let dep_style = styles.get(updated_dep.style_index);
-                    let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
-
-                    let (dep_row_span, dep_col_span) =
-                        if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
-                            (
-                                region.end_row - region.start_row + 1,
-                                region.end_col - region.start_col + 1,
-                            )
-                        } else {
-                            (1, 1)
-                        };
-
-                    updated_cells.push(CellData {
-                        row: dep_row,
-                        col: dep_col,
-                        display: dep_display,
-                        display_color: None,
-                        formula: formula_display(&updated_dep, &locale),
-                        style_index: updated_dep.style_index,
-                        row_span: dep_row_span,
-                        col_span: dep_col_span,
-                        sheet_index: None,
-                        rich_text: None,
-                        accounting_layout: None,
-                    });
+                    // Shared spill-aware cascade body (also used by the
+                    // targeted control recalc); evaluates with the dependent's
+                    // own position so cube/UDF preserve semantics engage.
+                    reevaluate_formula_cell(
+                        &state,
+                        &mut grid,
+                        &mut grids,
+                        &sheet_names,
+                        active_sheet,
+                        dep_row,
+                        dep_col,
+                        &dep_cell,
+                        &formula,
+                        &user_files,
+                        udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>),
+                        cube_arc.as_ref(),
+                        Some(&control_values),
+                        &styles,
+                        &locale,
+                        &merge_lookup,
+                        &cascade_tables,
+                        &cascade_table_names,
+                        &cascade_named_ranges,
+                        &mut updated_cells,
+                        &mut perf_cache_hits,
+                        &mut perf_cache_misses,
+                    );
                     perf_eval_total += perf_eval_start.elapsed();
                 }
             }
         }
         let perf_t5_same_sheet = Instant::now();
 
-        // Also recalculate cross-sheet dependents (formulas on OTHER sheets that reference this cell)
-        // Use a work queue to properly cascade recalculations across sheets
-        // Work queue contains: (sheet_index, sheet_name, row, col) of cells that changed
-        let mut work_queue: Vec<(usize, String, u32, u32)> =
-            vec![(active_sheet, current_sheet_name.clone(), row, col)];
-        let mut processed: HashSet<(usize, u32, u32)> = HashSet::new();
-
-        // Mark the original cell and same-sheet recalculated cells as processed
-        processed.insert((active_sheet, row, col));
-        for (dep_row, dep_col) in &recalc_order {
-            processed.insert((active_sheet, *dep_row, *dep_col));
-        }
-
-        while let Some((source_sheet_idx, source_sheet_name, source_row, source_col)) =
-            work_queue.pop()
-        {
-            // 1. Find cross-sheet dependents (formulas on OTHER sheets that reference this cell)
-            let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
-
-            if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key).cloned() {
-                for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
-                    // Skip if already processed
-                    if processed.contains(&(*dep_sheet_idx, *dep_row, *dep_col)) {
-                        continue;
-                    }
-                    processed.insert((*dep_sheet_idx, *dep_row, *dep_col));
-
-                    // Get the dependent cell from its sheet
-                    if *dep_sheet_idx < grids.len() {
-                        if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
-                            if let Some(formula) = dep_cell.formula_string() {
-                                // Use cached AST if available
-                                let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast_and_files(
-                                        &grids,
-                                        &sheet_names,
-                                        *dep_sheet_idx,
-                                        cached_ast,
-                                        &user_files,
-                                    )
-                                } else {
-                                    // Fallback: parse and evaluate
-                                    evaluate_formula_multi_sheet_with_files(
-                                        &grids,
-                                        &sheet_names,
-                                        *dep_sheet_idx,
-                                        &formula,
-                                        &user_files,
-                                    )
-                                };
-
-                                let mut updated_dep = dep_cell.clone();
-                                updated_dep.value = result.clone();
-                                grids[*dep_sheet_idx].set_cell(
-                                    *dep_row,
-                                    *dep_col,
-                                    updated_dep.clone(),
-                                );
-
-                                // If the dependent is on the active sheet, also update the
-                                // active-sheet grid mutex so both stay in sync. This happens
-                                // when a named range's refers_to contains a sheet prefix
-                                // pointing to the same sheet (e.g., =Sheet1!$E$2*10).
-                                let is_same_sheet = *dep_sheet_idx == active_sheet;
-                                if is_same_sheet {
-                                    grid.set_cell(*dep_row, *dep_col, updated_dep.clone());
-                                }
-
-                                // Format the display value and add to updated_cells
-                                let dep_style = styles.get(updated_dep.style_index);
-                                let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
-
-                                // Same-sheet deps: use merge span info and sheet_index=None
-                                // so the frontend emits cell events for re-rendering.
-                                // Cross-sheet deps: use default span (1,1) and sheet_index=Some
-                                // since they're on other sheets and will be fetched on switch.
-                                let (dep_row_span, dep_col_span, dep_sheet_index) = if is_same_sheet {
-                                    let span = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
-                                        (
-                                            region.end_row - region.start_row + 1,
-                                            region.end_col - region.start_col + 1,
-                                        )
-                                    } else {
-                                        (1, 1)
-                                    };
-                                    (span.0, span.1, None)
-                                } else {
-                                    (1, 1, Some(*dep_sheet_idx))
-                                };
-
-                                updated_cells.push(CellData {
-                                    row: *dep_row,
-                                    col: *dep_col,
-                                    display: dep_display,
-                                    display_color: None,
-                                    formula: formula_display(&updated_dep, &locale),
-                                    style_index: updated_dep.style_index,
-                                    row_span: dep_row_span,
-                                    col_span: dep_col_span,
-                                    sheet_index: dep_sheet_index,
-                                    rich_text: None,
-                                    accounting_layout: None,
-                                });
-
-                                // Add this updated cell to the work queue so its dependents also get recalculated
-                                if let Some(dep_sheet_name) = sheet_names.get(*dep_sheet_idx) {
-                                    work_queue.push((
-                                        *dep_sheet_idx,
-                                        dep_sheet_name.clone(),
-                                        *dep_row,
-                                        *dep_col,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 2. For non-active sheets, also cascade same-sheet dependents
-            // (The active sheet's same-sheet dependents were already handled above)
-            if source_sheet_idx != active_sheet && source_sheet_idx < grids.len() {
-                // Look up same-sheet dependents in the global dependents map
-                // and filter to cells that exist on this sheet
-                if let Some(same_sheet_deps) =
-                    dependents_map.get(&(source_row, source_col)).cloned()
-                {
-                    for (ss_dep_row, ss_dep_col) in same_sheet_deps {
-                        // Skip if already processed
-                        if processed.contains(&(source_sheet_idx, ss_dep_row, ss_dep_col)) {
-                            continue;
-                        }
-
-                        // Only process if this cell exists on the source sheet (not another sheet)
-                        if let Some(dep_cell) =
-                            grids[source_sheet_idx].get_cell(ss_dep_row, ss_dep_col)
-                        {
-                            if let Some(formula) = dep_cell.formula_string() {
-                                processed.insert((source_sheet_idx, ss_dep_row, ss_dep_col));
-
-                                // Use cached AST if available
-                                let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast_and_files(
-                                        &grids,
-                                        &sheet_names,
-                                        source_sheet_idx,
-                                        cached_ast,
-                                        &user_files,
-                                    )
-                                } else {
-                                    // Fallback: parse and evaluate
-                                    evaluate_formula_multi_sheet_with_files(
-                                        &grids,
-                                        &sheet_names,
-                                        source_sheet_idx,
-                                        &formula,
-                                        &user_files,
-                                    )
-                                };
-
-                                let mut updated_dep = dep_cell.clone();
-                                updated_dep.value = result.clone();
-                                grids[source_sheet_idx].set_cell(
-                                    ss_dep_row,
-                                    ss_dep_col,
-                                    updated_dep.clone(),
-                                );
-
-                                // Format the display value and add to updated_cells
-                                let dep_style = styles.get(updated_dep.style_index);
-                                let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
-
-                                updated_cells.push(CellData {
-                                    row: ss_dep_row,
-                                    col: ss_dep_col,
-                                    display: dep_display,
-                                    display_color: None,
-                                    formula: formula_display(&updated_dep, &locale),
-                                    style_index: updated_dep.style_index,
-                                    row_span: 1,
-                                    col_span: 1,
-                                    sheet_index: Some(source_sheet_idx),
-                                    rich_text: None,
-                                    accounting_layout: None,
-                                });
-
-                                // Add this updated cell to the work queue so its dependents also get recalculated
-                                work_queue.push((
-                                    source_sheet_idx,
-                                    source_sheet_name.clone(),
-                                    ss_dep_row,
-                                    ss_dep_col,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Also recalculate cross-sheet dependents (formulas on OTHER sheets
+        // that reference the edited cell), cascading across sheets — shared
+        // walk, also used by the targeted control recalc
+        // (recalc_control_dependents in control_values.rs).
+        cascade_cross_sheet_dependents(
+            &mut grid,
+            &mut grids,
+            &sheet_names,
+            active_sheet,
+            &cross_sheet_dependents_map,
+            &dependents_map,
+            &user_files,
+            &control_values,
+            &styles,
+            &locale,
+            &merge_lookup,
+            &[(row, col)],
+            &recalc_order,
+            &mut updated_cells,
+        );
         let perf_t6_cross_sheet = Instant::now();
         let perf_cross_sheet_count = updated_cells.len().saturating_sub(1 + perf_same_sheet_count);
 
@@ -1489,6 +1236,7 @@ pub fn update_cell(
                     &mut rh,
                     &mut cw,
                     &mut styles,
+                    Some(&control_values),
                 );
 
             dimension_changes.extend(cp_dim_changes);
@@ -1518,6 +1266,7 @@ pub fn update_cell(
                 &cw,
                 &styles,
                 &slicer_state,
+                Some(&control_values),
             );
             !modified.is_empty()
         }
@@ -1529,22 +1278,640 @@ pub fn update_cell(
     Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed })
 }
 
+/// Re-evaluate ONE formula cell on the ACTIVE sheet with full spill handling —
+/// the shared body of `update_cell`'s dependent cascade, extracted so targeted
+/// recalc paths (`recalc_control_dependents` in control_values.rs) reuse the
+/// exact same spill-aware logic. `update_cell` remains the hottest path: keep
+/// this mechanical.
+///
+/// Each cell is evaluated with an `EvalContext` carrying ITS OWN position
+/// (`current_row`/`current_col`) — required for the preserve-on-no-prefetch
+/// semantics: `preserved_cube_value` / `preserved_udf_value` (evaluator.rs)
+/// read the cell's stored value through the position when no cube prefetch /
+/// UDF resolver is supplied, so cube-bearing dependents keep their last value
+/// instead of collapsing to #N/A (and UDF-bearing ones to #NAME?).
+///
+/// Steps: evaluate the cached AST (or, on a cache miss, parse + resolve
+/// names/tables/spill refs and cache the converted AST), clear the cell's
+/// previous spill range, spill new array results (or mark the origin #VALUE!
+/// when blocked), write the result to both `grid` (active-sheet mirror) and
+/// `grids[active_sheet]`, and append `CellData` for every touched cell
+/// (cleared spill cells, new spill cells, origin) to `updated_cells`.
+///
+/// Locking: takes `state.spill_ranges` / `state.spill_hosts` briefly, AFTER
+/// the caller's grid locks — the same order `update_cell` uses. The caller
+/// holds grid/grids/styles/locale/tables/... and passes the guards' contents.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reevaluate_formula_cell(
+    state: &AppState,
+    grid: &mut Grid,
+    grids: &mut Vec<Grid>,
+    sheet_names: &[String],
+    active_sheet: usize,
+    dep_row: u32,
+    dep_col: u32,
+    dep_cell: &engine::Cell,
+    formula: &str,
+    user_files: &std::collections::HashMap<String, Vec<u8>>,
+    udf_resolver: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
+    cube: Option<&std::sync::Arc<engine::CubePrefetch>>,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
+    styles: &StyleRegistry,
+    locale: &engine::LocaleSettings,
+    merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
+    tables: &crate::tables::TableStorage,
+    table_names: &crate::tables::TableNameRegistry,
+    named_ranges: &std::collections::HashMap<String, crate::named_ranges::NamedRange>,
+    updated_cells: &mut Vec<CellData>,
+    cache_hits: &mut u32,
+    cache_misses: &mut u32,
+) {
+    // Per-cell EvalContext with the dependent's OWN position — current_row/
+    // current_col MUST be set so the preserve semantics can engage (see the
+    // fn doc). Mirrors the main-edit EvalContext in update_cell, except
+    // row_heights/column_widths stay None: cloning those maps per dependent
+    // is too expensive on this hot path, so GET.ROW.HEIGHT-style dependents
+    // keep their fallback behavior.
+    let eval_ctx = engine::EvalContext {
+        cube_prefetch: cube.cloned(),
+        current_row: Some(dep_row),
+        current_col: Some(dep_col),
+        row_heights: None,
+        column_widths: None,
+        hidden_rows: None,
+        control_values: control_values.cloned(),
+    };
+
+    // Get the AST (cached or freshly parsed) and evaluate to raw EvalResult
+    let (raw_result, ast_to_cache) = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+        *cache_hits += 1;
+        let result = evaluate_formula_raw_with_files_and_pivot(
+            &*grids,
+            sheet_names,
+            active_sheet,
+            cached_ast,
+            eval_ctx,
+            Some(styles),
+            user_files,
+            None, // pivot lookup: not wired on this path (unchanged)
+            None, // gather lookup: not wired on this path (unchanged)
+            udf_resolver,
+        );
+        (result, None)
+    } else {
+        *cache_misses += 1;
+        if let Ok(engine_ast) = parser::parse(formula).map(|parsed| {
+            let resolved = if crate::ast_has_named_refs(&parsed) {
+                let mut visited = HashSet::new();
+                crate::resolve_names_in_ast(&parsed, named_ranges, active_sheet, &mut visited)
+            } else {
+                parsed
+            };
+            let resolved = if crate::ast_has_table_refs(&resolved) {
+                let ctx = crate::TableRefContext {
+                    tables,
+                    table_names,
+                    current_sheet_index: active_sheet,
+                    current_row: dep_row,
+                };
+                crate::resolve_table_refs_in_ast(&resolved, &ctx)
+            } else {
+                resolved
+            };
+            // Resolve spill-range refs (A1#) so the rare cache-miss path
+            // matches the main update_cell eval (cached ASTs already carry
+            // this resolution from when the formula was entered).
+            let resolved = if crate::ast_has_spill_refs(&resolved) {
+                let spill_ranges_map = state.spill_ranges.lock().unwrap();
+                let resolved = crate::resolve_spill_refs_in_ast(
+                    &resolved,
+                    &spill_ranges_map,
+                    active_sheet,
+                );
+                drop(spill_ranges_map);
+                resolved
+            } else {
+                resolved
+            };
+            crate::convert_expr(&resolved)
+        }).map_err(|e| format!("{}", e)) {
+            let result = evaluate_formula_raw_with_files_and_pivot(
+                &*grids,
+                sheet_names,
+                active_sheet,
+                &engine_ast,
+                eval_ctx,
+                Some(styles),
+                user_files,
+                None, // pivot lookup: not wired on this path (unchanged)
+                None, // gather lookup: not wired on this path (unchanged)
+                udf_resolver,
+            );
+            (result, Some(engine_ast))
+        } else {
+            // Fallback to string-based evaluation (no spill support)
+            // (GET.CONTROLVALUE unavailable here (v1): string path)
+            let cv = evaluate_formula_multi_sheet_with_files(
+                &*grids, sheet_names, active_sheet, formula, user_files,
+            );
+            let er = match cv {
+                engine::CellValue::Number(n) => engine::EvalResult::Number(n),
+                engine::CellValue::Text(s) => engine::EvalResult::Text(s),
+                engine::CellValue::Boolean(b) => engine::EvalResult::Boolean(b),
+                engine::CellValue::Error(e) => engine::EvalResult::Error(e),
+                _ => engine::EvalResult::Text(String::new()),
+            };
+            (er, None)
+        }
+    };
+
+    // Clear any previous spill range for this dependent cell
+    {
+        let mut spill_ranges = state.spill_ranges.lock().unwrap();
+        let mut spill_hosts = state.spill_hosts.lock().unwrap();
+        if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, dep_row, dep_col)) {
+            for (sr, sc) in &old_spill_cells {
+                spill_hosts.remove(&(active_sheet, *sr, *sc));
+                grid.cells.remove(&(*sr, *sc));
+                if active_sheet < grids.len() {
+                    grids[active_sheet].cells.remove(&(*sr, *sc));
+                }
+                updated_cells.push(CellData {
+                    row: *sr, col: *sc, display: String::new(),
+                    display_color: None, formula: None, style_index: 0,
+                    row_span: 1, col_span: 1, sheet_index: None,
+                    rich_text: None, accounting_layout: None,
+                });
+            }
+        }
+    }
+
+    // Handle spill for array results
+    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
+    let cell_value = if spill_rows > 1 || spill_cols > 1 {
+        let spill_values = raw_result.to_spill_values();
+        let mut spill_blocked = false;
+
+        for &(dr, dc, _) in &spill_values {
+            if dr == 0 && dc == 0 { continue; }
+            let target_r = dep_row + dr;
+            let target_c = dep_col + dc;
+            if let Some(existing) = grid.get_cell(target_r, target_c) {
+                if existing.value != engine::CellValue::Empty {
+                    // Check if it's a spill cell from this same origin
+                    let spill_hosts = state.spill_hosts.lock().unwrap();
+                    let is_own_spill = spill_hosts.get(&(active_sheet, target_r, target_c))
+                        .map_or(false, |origin| *origin == (dep_row, dep_col));
+                    if !is_own_spill {
+                        spill_blocked = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if spill_blocked {
+            engine::CellValue::Error(engine::CellError::Value)
+        } else {
+            // Write spill cells
+            let mut new_spill_cells = Vec::new();
+            let mut spill_ranges = state.spill_ranges.lock().unwrap();
+            let mut spill_hosts = state.spill_hosts.lock().unwrap();
+
+            for (dr, dc, cv) in &spill_values {
+                if *dr == 0 && *dc == 0 { continue; }
+                let target_r = dep_row + dr;
+                let target_c = dep_col + dc;
+
+                let spill_cell = engine::Cell {
+                    ast: None,
+                    value: cv.clone(),
+                    style_index: 0,
+                    rich_text: None,
+                };
+                grid.set_cell(target_r, target_c, spill_cell.clone());
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(target_r, target_c, spill_cell);
+                }
+
+                let style = styles.get(0);
+                let display = format_cell_value(cv, style, locale);
+                updated_cells.push(CellData {
+                    row: target_r, col: target_c, display,
+                    display_color: None, formula: None, style_index: 0,
+                    row_span: 1, col_span: 1, sheet_index: None,
+                    rich_text: None, accounting_layout: None,
+                });
+
+                new_spill_cells.push((target_r, target_c));
+                spill_hosts.insert((active_sheet, target_r, target_c), (dep_row, dep_col));
+            }
+
+            if !new_spill_cells.is_empty() {
+                spill_ranges.insert((active_sheet, dep_row, dep_col), new_spill_cells);
+            }
+
+            raw_result.to_cell_value()
+        }
+    } else {
+        raw_result.to_cell_value()
+    };
+
+    // Update the origin cell
+    let mut updated_dep = dep_cell.clone();
+    updated_dep.value = cell_value;
+    if let Some(ast) = ast_to_cache {
+        updated_dep.set_cached_ast(ast);
+    }
+    grid.set_cell(dep_row, dep_col, updated_dep.clone());
+    if active_sheet < grids.len() {
+        grids[active_sheet].set_cell(dep_row, dep_col, updated_dep.clone());
+    }
+
+    let dep_style = styles.get(updated_dep.style_index);
+    let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
+
+    let (dep_row_span, dep_col_span) =
+        if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
+            (
+                region.end_row - region.start_row + 1,
+                region.end_col - region.start_col + 1,
+            )
+        } else {
+            (1, 1)
+        };
+
+    updated_cells.push(CellData {
+        row: dep_row,
+        col: dep_col,
+        display: dep_display,
+        display_color: None,
+        formula: formula_display(&updated_dep, locale),
+        style_index: updated_dep.style_index,
+        row_span: dep_row_span,
+        col_span: dep_col_span,
+        sheet_index: None,
+        rich_text: None,
+        accounting_layout: None,
+    });
+}
+
+/// Cascade value changes on the ACTIVE sheet to their cross-sheet dependents —
+/// the shared body of `update_cell`'s cross-sheet walk, extracted so the
+/// targeted control recalc (`recalc_control_dependents` in control_values.rs)
+/// reuses the exact same propagation. Walks `cross_sheet_dependents_map` with
+/// a work queue: each changed cell's dependents on OTHER sheets are
+/// re-evaluated and queued so chains (Sheet2 -> Sheet3 -> ...) propagate, and
+/// on non-active sheets the same-sheet dependents of each recalculated cell
+/// cascade too. LIMITATION: dependents re-evaluated by this walk are written
+/// as SCALAR values (no spill maintenance, no per-cell position/preserve
+/// context) — the same behavior `update_cell` has always had on this path.
+///
+/// `initial_changed` are the active-sheet cells whose values changed (the
+/// walk roots); `already_recalced` are active-sheet cells the caller's
+/// same-sheet cascade already re-evaluated (marked processed so the walk
+/// never evaluates a cell twice). Cross-sheet results are appended to
+/// `updated_cells` with `sheet_index: Some(..)`; same-sheet results (a
+/// cross-sheet ref that resolves to the active sheet) carry `None` plus
+/// merge spans, exactly like `update_cell` reports them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cascade_cross_sheet_dependents(
+    grid: &mut Grid,
+    grids: &mut Vec<Grid>,
+    sheet_names: &[String],
+    active_sheet: usize,
+    cross_sheet_dependents_map: &std::collections::HashMap<
+        (String, u32, u32),
+        HashSet<(usize, u32, u32)>,
+    >,
+    dependents_map: &std::collections::HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    user_files: &std::collections::HashMap<String, Vec<u8>>,
+    control_values: &std::sync::Arc<crate::control_values::ControlValuesMap>,
+    styles: &StyleRegistry,
+    locale: &engine::LocaleSettings,
+    merge_lookup: &std::collections::HashMap<(u32, u32), &MergedRegion>,
+    initial_changed: &[(u32, u32)],
+    already_recalced: &[(u32, u32)],
+    updated_cells: &mut Vec<CellData>,
+) {
+    let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
+
+    // Work queue contains: (sheet_index, sheet_name, row, col) of cells that changed
+    let mut work_queue: Vec<(usize, String, u32, u32)> = initial_changed
+        .iter()
+        .map(|&(r, c)| (active_sheet, current_sheet_name.clone(), r, c))
+        .collect();
+    let mut processed: HashSet<(usize, u32, u32)> = HashSet::new();
+
+    // Mark the changed cells and same-sheet recalculated cells as processed
+    for &(r, c) in initial_changed.iter().chain(already_recalced.iter()) {
+        processed.insert((active_sheet, r, c));
+    }
+
+    while let Some((source_sheet_idx, source_sheet_name, source_row, source_col)) =
+        work_queue.pop()
+    {
+        // 1. Find cross-sheet dependents (formulas on OTHER sheets that reference this cell)
+        let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
+
+        if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key).cloned() {
+            for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
+                // Skip if already processed
+                if processed.contains(&(*dep_sheet_idx, *dep_row, *dep_col)) {
+                    continue;
+                }
+                processed.insert((*dep_sheet_idx, *dep_row, *dep_col));
+
+                // Get the dependent cell from its sheet
+                if *dep_sheet_idx < grids.len() {
+                    if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
+                        if let Some(formula) = dep_cell.formula_string() {
+                            // Use cached AST if available
+                            let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                                crate::evaluate_formula_raw_with_ast_files_and_cube(
+                                    &*grids,
+                                    sheet_names,
+                                    *dep_sheet_idx,
+                                    cached_ast,
+                                    user_files,
+                                    None,
+                                    None,
+                                    Some(control_values.clone()),
+                                ).to_cell_value()
+                            } else {
+                                // Fallback: parse and evaluate
+                                // (GET.CONTROLVALUE unavailable here (v1): string path)
+                                evaluate_formula_multi_sheet_with_files(
+                                    &*grids,
+                                    sheet_names,
+                                    *dep_sheet_idx,
+                                    &formula,
+                                    user_files,
+                                )
+                            };
+
+                            let mut updated_dep = dep_cell.clone();
+                            updated_dep.value = result.clone();
+                            grids[*dep_sheet_idx].set_cell(
+                                *dep_row,
+                                *dep_col,
+                                updated_dep.clone(),
+                            );
+
+                            // If the dependent is on the active sheet, also update the
+                            // active-sheet grid mutex so both stay in sync. This happens
+                            // when a named range's refers_to contains a sheet prefix
+                            // pointing to the same sheet (e.g., =Sheet1!$E$2*10).
+                            let is_same_sheet = *dep_sheet_idx == active_sheet;
+                            if is_same_sheet {
+                                grid.set_cell(*dep_row, *dep_col, updated_dep.clone());
+                            }
+
+                            // Format the display value and add to updated_cells
+                            let dep_style = styles.get(updated_dep.style_index);
+                            let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
+
+                            // Same-sheet deps: use merge span info and sheet_index=None
+                            // so the frontend emits cell events for re-rendering.
+                            // Cross-sheet deps: use default span (1,1) and sheet_index=Some
+                            // since they're on other sheets and will be fetched on switch.
+                            let (dep_row_span, dep_col_span, dep_sheet_index) = if is_same_sheet {
+                                let span = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
+                                    (
+                                        region.end_row - region.start_row + 1,
+                                        region.end_col - region.start_col + 1,
+                                    )
+                                } else {
+                                    (1, 1)
+                                };
+                                (span.0, span.1, None)
+                            } else {
+                                (1, 1, Some(*dep_sheet_idx))
+                            };
+
+                            updated_cells.push(CellData {
+                                row: *dep_row,
+                                col: *dep_col,
+                                display: dep_display,
+                                display_color: None,
+                                formula: formula_display(&updated_dep, locale),
+                                style_index: updated_dep.style_index,
+                                row_span: dep_row_span,
+                                col_span: dep_col_span,
+                                sheet_index: dep_sheet_index,
+                                rich_text: None,
+                                accounting_layout: None,
+                            });
+
+                            // Add this updated cell to the work queue so its dependents also get recalculated
+                            if let Some(dep_sheet_name) = sheet_names.get(*dep_sheet_idx) {
+                                work_queue.push((
+                                    *dep_sheet_idx,
+                                    dep_sheet_name.clone(),
+                                    *dep_row,
+                                    *dep_col,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. For non-active sheets, also cascade same-sheet dependents
+        // (The active sheet's same-sheet dependents were already handled by the caller)
+        if source_sheet_idx != active_sheet && source_sheet_idx < grids.len() {
+            // Look up same-sheet dependents in the global dependents map
+            // and filter to cells that exist on this sheet
+            if let Some(same_sheet_deps) =
+                dependents_map.get(&(source_row, source_col)).cloned()
+            {
+                for (ss_dep_row, ss_dep_col) in same_sheet_deps {
+                    // Skip if already processed
+                    if processed.contains(&(source_sheet_idx, ss_dep_row, ss_dep_col)) {
+                        continue;
+                    }
+
+                    // Only process if this cell exists on the source sheet (not another sheet)
+                    if let Some(dep_cell) =
+                        grids[source_sheet_idx].get_cell(ss_dep_row, ss_dep_col)
+                    {
+                        if let Some(formula) = dep_cell.formula_string() {
+                            processed.insert((source_sheet_idx, ss_dep_row, ss_dep_col));
+
+                            // Use cached AST if available
+                            let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                                crate::evaluate_formula_raw_with_ast_files_and_cube(
+                                    &*grids,
+                                    sheet_names,
+                                    source_sheet_idx,
+                                    cached_ast,
+                                    user_files,
+                                    None,
+                                    None,
+                                    Some(control_values.clone()),
+                                ).to_cell_value()
+                            } else {
+                                // Fallback: parse and evaluate
+                                // (GET.CONTROLVALUE unavailable here (v1): string path)
+                                evaluate_formula_multi_sheet_with_files(
+                                    &*grids,
+                                    sheet_names,
+                                    source_sheet_idx,
+                                    &formula,
+                                    user_files,
+                                )
+                            };
+
+                            let mut updated_dep = dep_cell.clone();
+                            updated_dep.value = result.clone();
+                            grids[source_sheet_idx].set_cell(
+                                ss_dep_row,
+                                ss_dep_col,
+                                updated_dep.clone(),
+                            );
+
+                            // Format the display value and add to updated_cells
+                            let dep_style = styles.get(updated_dep.style_index);
+                            let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
+
+                            updated_cells.push(CellData {
+                                row: ss_dep_row,
+                                col: ss_dep_col,
+                                display: dep_display,
+                                display_color: None,
+                                formula: formula_display(&updated_dep, locale),
+                                style_index: updated_dep.style_index,
+                                row_span: 1,
+                                col_span: 1,
+                                sheet_index: Some(source_sheet_idx),
+                                rich_text: None,
+                                accounting_layout: None,
+                            });
+
+                            // Add this updated cell to the work queue so its dependents also get recalculated
+                            work_queue.push((
+                                source_sheet_idx,
+                                source_sheet_name.clone(),
+                                ss_dep_row,
+                                ss_dep_col,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Batch update multiple cells in a single operation.
 /// This is significantly faster than calling update_cell multiple times
 /// because it acquires locks once and processes all cells together.
 /// Recalculation of dependents happens once at the end, after all cells are updated.
+///
+/// Thin command wrapper around `update_cells_batch_with_controls`; afterwards,
+/// if any edited cell is the ANCHOR of a NAMED on-grid control, the shared
+/// targeted control recalc refreshes GET.CONTROLVALUE dependents of those
+/// names (see `update_cell` for the rationale and the recursion argument).
 #[tauri::command]
 pub fn update_cells_batch(
     state: State<AppState>,
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+) -> Result<Vec<CellData>, String> {
+    // GET.CONTROLVALUE snapshot: built ONCE per batch, BEFORE the grid locks
+    // in the core (canonical lock order); shared across every evaluation.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
+
+    // Anchor probe for NAMED on-grid controls (one map probe per edited cell,
+    // skipped entirely when the workbook has no on-grid controls): editing an
+    // anchor changes that control's GET.CONTROLVALUE value, which the
+    // dependency maps cannot see. Names are collected BEFORE the batch core
+    // runs; the targeted recalc runs AFTER it, once every core lock dropped.
+    let anchor_names: Vec<String> = {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let controls = state.controls.lock().unwrap();
+        if controls.is_empty() {
+            Vec::new()
+        } else {
+            let mut names: Vec<String> = updates
+                .iter()
+                .filter_map(|u| {
+                    controls
+                        .get(&(active_sheet, u.row, u.col))
+                        .and_then(crate::control_values::static_control_name)
+                })
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        }
+    };
+
+    // Plain refs that outlive the State wrappers moved into the core below
+    // (tauri's State::inner returns &'r T) — needed for the post-batch recalc.
+    let state_ref = state.inner();
+    let user_files_ref = user_files_state.inner();
+    let pivot_ref = pivot_state.inner();
+    let pane_ref = pane_control_state.inner();
+    let ribbon_ref = ribbon_filter_state.inner();
+
+    let mut cells = update_cells_batch_with_controls(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        updates,
+        udf_results,
+        Some(control_values),
+    )?;
+
+    // Named-anchor edits: refresh GET.CONTROLVALUE dependents of the edited
+    // controls. No recursion by construction — the recalc core only
+    // re-evaluates formulas; it never re-enters update_cell(s_batch) or the
+    // anchor probe above.
+    if !anchor_names.is_empty() {
+        let extra = crate::control_values::recalc_control_dependents_core(
+            state_ref,
+            user_files_ref,
+            pivot_ref,
+            pane_ref,
+            ribbon_ref,
+            Some(anchor_names),
+        )?;
+        cells.extend(extra);
+    }
+
+    Ok(cells)
+}
+
+/// Core of `update_cells_batch`, callable from Rust-side paths that cannot
+/// reach the pane-control/ribbon-filter states (the script apply path is also
+/// invoked from mcp/tools.rs, owned by a parallel workstream).
+/// `control_values: None` => GET.CONTROLVALUE evaluates to #N/A in this pass (v1).
+pub(crate) fn update_cells_batch_with_controls(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    updates: Vec<crate::api_types::CellUpdateInput>,
+    udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> Result<Vec<CellData>, String> {
     use std::collections::HashMap;
     use std::time::Instant;
     let perf_t0 = Instant::now();
+
+    // An absent snapshot behaves exactly like an empty one (every lookup
+    // misses -> #N/A/default), so normalize to keep the eval sites uniform.
+    let control_values = control_values.unwrap_or_default();
 
     // Build the apply-time UDF resolver from the pre-fetched results table (if
     // any). Omitting udfResults -> None -> behavior identical to before.
@@ -1854,6 +2221,7 @@ pub fn update_cells_batch(
                         row_heights: None,
                         column_widths: None,
                         hidden_rows: None,
+                        control_values: Some(control_values.clone()),
                     };
                     let raw_result = crate::evaluate_formula_raw_with_files_and_pivot(
                         &grids,
@@ -2072,13 +2440,16 @@ pub fn update_cells_batch(
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
                 if let Some(formula) = dep_cell.formula_string() {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                        evaluate_formula_multi_sheet_with_ast_and_files(
+                        crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
                             &sheet_names,
                             active_sheet,
                             cached_ast,
                             &user_files,
-                        )
+                            None,
+                            None,
+                            Some(control_values.clone()),
+                        ).to_cell_value()
                     } else {
                         // Slow path: parse, resolve refs, and cache AST
                         if let Ok(engine_ast) = {
@@ -2103,13 +2474,16 @@ pub fn update_cells_batch(
                                 crate::convert_expr(&resolved)
                             }).map_err(|e| format!("{}", e))
                         } {
-                            let result = evaluate_formula_multi_sheet_with_ast_and_files(
+                            let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
                                 &grids,
                                 &sheet_names,
                                 active_sheet,
                                 &engine_ast,
                                 &user_files,
-                            );
+                                None,
+                                None,
+                                Some(control_values.clone()),
+                            ).to_cell_value();
                             let mut updated_with_ast = dep_cell.clone();
                             updated_with_ast.set_cached_ast(engine_ast);
                             updated_with_ast.value = result.clone();
@@ -2218,14 +2592,18 @@ pub fn update_cells_batch(
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
                             if let Some(formula) = dep_cell.formula_string() {
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast_and_files(
+                                    crate::evaluate_formula_raw_with_ast_files_and_cube(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
                                         cached_ast,
                                         &user_files,
-                                    )
+                                        None,
+                                        None,
+                                        Some(control_values.clone()),
+                                    ).to_cell_value()
                                 } else {
+                                    // (GET.CONTROLVALUE unavailable here (v1): string path)
                                     evaluate_formula_multi_sheet_with_files(
                                         &grids,
                                         &sheet_names,
@@ -3998,6 +4376,8 @@ pub fn fill_range(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     source_start_row: u32,
     source_start_col: u32,
     source_end_row: u32,
@@ -4011,6 +4391,11 @@ pub fn fill_range(
     use std::time::Instant;
     let perf_t0 = Instant::now();
 
+    // GET.CONTROLVALUE snapshot: built ONCE per fill, BEFORE the grid locks
+    // below (canonical lock order); shared across every evaluation.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     let user_files = user_files_state.files.lock().unwrap();
 
     // Check if target range overlaps any writeback region
@@ -4251,6 +4636,7 @@ pub fn fill_range(
                                 row_heights: None,
                                 column_widths: None,
                                 hidden_rows: None,
+                                control_values: Some(control_values.clone()),
                             };
                             let raw_result = evaluate_formula_raw_with_files_and_pivot(
                                 &grids,
@@ -4409,13 +4795,16 @@ pub fn fill_range(
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
                 if let Some(formula) = dep_cell.formula_string() {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                        evaluate_formula_multi_sheet_with_ast_and_files(
+                        crate::evaluate_formula_raw_with_ast_files_and_cube(
                             &grids,
                             &sheet_names,
                             active_sheet,
                             cached_ast,
                             &user_files,
-                        )
+                            None,
+                            None,
+                            Some(control_values.clone()),
+                        ).to_cell_value()
                     } else {
                         if let Ok(engine_ast) = {
                             parser::parse(&formula).map(|parsed| {
@@ -4439,13 +4828,16 @@ pub fn fill_range(
                                 crate::convert_expr(&resolved)
                             }).map_err(|e| format!("{}", e))
                         } {
-                            let result = evaluate_formula_multi_sheet_with_ast_and_files(
+                            let result = crate::evaluate_formula_raw_with_ast_files_and_cube(
                                 &grids,
                                 &sheet_names,
                                 active_sheet,
                                 &engine_ast,
                                 &user_files,
-                            );
+                                None,
+                                None,
+                                Some(control_values.clone()),
+                            ).to_cell_value();
                             let mut updated_with_ast = dep_cell.clone();
                             updated_with_ast.set_cached_ast(engine_ast);
                             updated_with_ast.value = result.clone();
@@ -4523,10 +4915,12 @@ pub fn fill_range(
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
                             if let Some(formula) = dep_cell.formula_string() {
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast_and_files(
+                                    crate::evaluate_formula_raw_with_ast_files_and_cube(
                                         &grids, &sheet_names, *dep_sheet_idx, cached_ast, &user_files,
-                                    )
+                                        None, None, Some(control_values.clone()),
+                                    ).to_cell_value()
                                 } else {
+                                    // (GET.CONTROLVALUE unavailable here (v1): string path)
                                     evaluate_formula_multi_sheet_with_files(
                                         &grids, &sheet_names, *dep_sheet_idx, &formula, &user_files,
                                     )

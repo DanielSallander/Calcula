@@ -42,6 +42,10 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
       // package versions — reload them so changed sources re-prompt for
       // consent (ScriptableObjects de-dupes unchanged ones by source hash).
       emitAppEvent("calp:scripts-pulled", {});
+      // Pane controls may also have changed — tell the Controls pane to
+      // reload (cross-extension window event; same name the shell fans the
+      // paneControl mutation domain out as).
+      window.dispatchEvent(new CustomEvent("controlspane:controls-refreshed"));
       setResult(
         `Refreshed ${r.subscriptionsRefreshed} subscription(s). ` +
         `${r.sheetsAdded} added, ${r.sheetsUpdated} updated, ${r.sheetsRemoved} removed. ` +

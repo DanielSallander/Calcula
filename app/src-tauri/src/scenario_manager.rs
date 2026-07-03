@@ -177,6 +177,8 @@ pub fn scenario_delete(
 #[tauri::command]
 pub fn scenario_show(
     state: State<AppState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ScenarioShowParams,
 ) -> ScenarioShowResult {
     crate::log_info!(
@@ -204,6 +206,12 @@ pub fn scenario_show(
         }
     };
     drop(scenarios);
+
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below (canonical
+    // lock order: control stores first, grids last).
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
 
     // Check writeback regions: skip changing cells that fall in writeback regions
     let writeback_skip: std::collections::HashSet<(u32, u32)> = {
@@ -275,12 +283,35 @@ pub fn scenario_show(
         }
     }
 
-    // Re-evaluate all affected formula cells
+    // Re-evaluate all affected formula cells (context-taking eval so
+    // GET.CONTROLVALUE sees the snapshot; parity otherwise with the plain
+    // multi-sheet string eval used before).
     for &(r, c) in &all_affected {
         if let Some(cell) = grids[sheet_idx].get_cell(r, c).cloned() {
             if let Some(formula) = cell.formula_string() {
-                let new_value =
-                    evaluate_formula_multi_sheet(&grids, &sheet_names, sheet_idx, &formula);
+                let new_value = match parser::parse(&formula) {
+                    Ok(parsed) => {
+                        let engine_ast = crate::convert_expr(&parsed);
+                        let eval_ctx = engine::EvalContext {
+                            cube_prefetch: None,
+                            current_row: Some(r),
+                            current_col: Some(c),
+                            row_heights: None,
+                            column_widths: None,
+                            hidden_rows: None,
+                            control_values: Some(control_values.clone()),
+                        };
+                        crate::evaluate_formula_with_context(
+                            &grids,
+                            &sheet_names,
+                            sheet_idx,
+                            &engine_ast,
+                            eval_ctx,
+                            None,
+                        )
+                    }
+                    Err(_) => CellValue::Error(engine::CellError::Value),
+                };
                 let mut updated = cell;
                 updated.value = new_value;
                 grids[sheet_idx].set_cell(r, c, updated.clone());

@@ -538,6 +538,85 @@ mod tests {
     }
 
     #[test]
+    fn refresh_pull_carries_the_new_versions_pane_controls() {
+        // v1 ships a slider; v1.1 reconfigures it AND adds a checkbox. The
+        // refresh pull must hand the app layer the FULL v1.1 set in package
+        // order (the replace-exactly-package-owned materialization happens
+        // app-side; a refresh that dropped pane_controls left subscribers on
+        // first-pull pane controls forever).
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let slider_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let checkbox_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let slider = |max: f64| persistence::SavedPaneControl {
+            id: slider_id,
+            name: "Rate".to_string(),
+            control_type: "slider".to_string(),
+            config: serde_json::json!({
+                "type": "slider", "min": 0.0, "max": max, "step": 1.0, "showValue": true
+            }),
+            value: serde_json::json!({ "kind": "number", "value": 5.0 }),
+            order: 0,
+        };
+        let checkbox = persistence::SavedPaneControl {
+            id: checkbox_id,
+            name: "Show details".to_string(),
+            control_type: "checkbox".to_string(),
+            config: serde_json::json!({ "type": "checkbox", "label": "Show details" }),
+            value: serde_json::Value::Null,
+            order: 1,
+        };
+
+        for (version, controls) in [
+            (SemVer::new(1, 0, 0), vec![slider(10.0)]),
+            (SemVer::new(1, 1, 0), vec![slider(100.0), checkbox]),
+        ] {
+            let mut wb = make_workbook();
+            wb.pane_controls = controls;
+            let request = PublishRequest {
+                workbook: &wb,
+                package_name: "pane-refresh".to_string(),
+                version,
+                kind: "report".to_string(),
+                sheet_indices: vec![0],
+                now: "2026-01-01T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+            };
+            publish::publish(&reg, &request, prof.path()).unwrap();
+        }
+
+        let sub = Subscription {
+            package_name: "pane-refresh".to_string(),
+            registry_url: String::new(),
+            version_pin: "^1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let payloads = pull_all_updates(&reg, &[sub], prof.path()).unwrap();
+        assert_eq!(payloads.len(), 1);
+        let controls = &payloads[0].pull_result.pane_controls;
+        assert_eq!(controls.len(), 2, "refresh payload carries the FULL v1.1 set");
+        assert_eq!(controls[0].id, slider_id);
+        assert_eq!(controls[0].config["max"], 100.0, "updated config replaces v1's");
+        assert_eq!(controls[1].id, checkbox_id, "control ADDED in v1.1 arrives");
+        assert_eq!(controls[1].name, "Show details");
+    }
+
+    #[test]
     fn apply_refresh_updates_subscription() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();

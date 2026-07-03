@@ -33,6 +33,7 @@ import {
   commitUndoTransaction,
   fillRange,
   calculateNow,
+  recalcControlDependents,
   getAllColumnWidths,
   getAllRowHeights,
   getDefaultDimensions,
@@ -531,6 +532,33 @@ export function useSpreadsheetSelection({
     }
   }, [dispatch]);
 
+  // GET.CONTROLVALUE dependents: control/filter state changed (undo/redo of a
+  // pane control or ribbon filter) — run a targeted, spill-aware recalc with
+  // no name hint (every GET.CONTROLVALUE cell re-evaluates) and apply the
+  // results exactly like calculate_now results (refreshCells + redraw + emit).
+  const recalcControlValueCells = useCallback(async () => {
+    try {
+      const updatedCells = await recalcControlDependents();
+      if (updatedCells.length === 0) return;
+
+      const canvas = canvasRef.current;
+      if (canvas) {
+        await canvas.refreshCells();
+        canvas.redraw();
+      }
+
+      cellEvents.emit({
+        row: updatedCells[0].row,
+        col: updatedCells[0].col,
+        oldValue: undefined,
+        newValue: updatedCells[0].display,
+        formula: updatedCells[0].formula ?? null,
+      });
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Control-dependent recalc failed:", error);
+    }
+  }, [canvasRef]);
+
   // Handle Undo (Ctrl+Z)
   const handleUndo = useCallback(async () => {
     console.log("[useSpreadsheetSelection] Undo requested");
@@ -565,8 +593,15 @@ export function useSpreadsheetSelection({
       if (result.pivotChanged) domains.push("pivot");
       if (result.slicerChanged) domains.push("slicer");
       if (result.ribbonFilterChanged) domains.push("ribbonFilter");
+      if (result.paneControlChanged) domains.push("paneControl");
       if (result.objectsChanged) domains.push("objects");
       emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "undo" });
+
+      // Control/filter state restored: recalc GET.CONTROLVALUE dependents
+      // (fire-and-forget; repaints when done).
+      if (result.ribbonFilterChanged || result.paneControlChanged) {
+        void recalcControlValueCells();
+      }
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
@@ -582,7 +617,7 @@ export function useSpreadsheetSelection({
     } catch (error) {
       console.error("[useSpreadsheetSelection] Undo failed:", error);
     }
-  }, [canvasRef, refreshDimensionsFromBackend]);
+  }, [canvasRef, refreshDimensionsFromBackend, recalcControlValueCells]);
 
   // Handle Redo (Ctrl+Y or Ctrl+Shift+Z)
   const handleRedo = useCallback(async () => {
@@ -615,8 +650,15 @@ export function useSpreadsheetSelection({
       if (result.pivotChanged) domains.push("pivot");
       if (result.slicerChanged) domains.push("slicer");
       if (result.ribbonFilterChanged) domains.push("ribbonFilter");
+      if (result.paneControlChanged) domains.push("paneControl");
       if (result.objectsChanged) domains.push("objects");
       emitAppEvent(AppEvents.MUTATION_REFRESH, { domains, source: "redo" });
+
+      // Control/filter state restored: recalc GET.CONTROLVALUE dependents
+      // (fire-and-forget; repaints when done).
+      if (result.ribbonFilterChanged || result.paneControlChanged) {
+        void recalcControlValueCells();
+      }
 
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
@@ -632,7 +674,7 @@ export function useSpreadsheetSelection({
     } catch (error) {
       console.error("[useSpreadsheetSelection] Redo failed:", error);
     }
-  }, [canvasRef, refreshDimensionsFromBackend]);
+  }, [canvasRef, refreshDimensionsFromBackend, recalcControlValueCells]);
 
   // FIX: Wrapper for extendTo that uses merge expansion during drag
   // This is passed to useMouseSelection for drag operations

@@ -29,6 +29,10 @@ export interface PublishResponse {
   /** Transparency report: everything that shipped and everything present in
    * the workbook that packages cannot carry yet (no silent drops). */
   report: PublishReport;
+  /** Publish-time disclosure warnings — e.g. a dropdown pane control whose
+   * CellRange item source references a sheet outside the published selection
+   * (the artifact is unchanged; these only warn). */
+  warnings: string[];
 }
 
 /** One line of the publish transparency report. */
@@ -49,6 +53,10 @@ export interface PublishPreviewResponse {
   /** Names of the sheets the preview covered, in package order. */
   sheetNames: string[];
   report: PublishReport;
+  /** The SAME disclosure warnings a real publish of this selection would emit
+   * — e.g. a dropdown pane control whose CellRange item source references a
+   * sheet outside the selection. Non-blocking. */
+  warnings: string[];
 }
 
 export interface PullParams {
@@ -89,6 +97,10 @@ export interface PackageInspection {
   pivotCount: number;
   /** Sheets carrying cell-anchored controls (buttons/checkboxes). */
   controlSheetCount: number;
+  /** Pane controls (Controls pane widgets) the package carries. */
+  paneControlCount: number;
+  /** Names of the pane controls the package carries. */
+  paneControlNames: string[];
   /** Verified publisher display name (S5 phase 2). */
   publisherName: string;
   /** "firstUse" or "verified"; failed verification returns an error instead. */

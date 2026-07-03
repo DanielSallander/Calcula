@@ -43,6 +43,10 @@ pub struct PublishResponse {
     /// Transparency report: everything that shipped and everything present in
     /// the workbook that packages cannot carry yet (no silent drops).
     pub report: PublishReport,
+    /// Publish-time disclosure warnings from core publish — e.g. a dropdown
+    /// pane control whose CellRange item source references a sheet outside
+    /// the published selection (the artifact is unchanged; these only warn).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +139,7 @@ fn assemble_publish_workbook(
     script_state: &State<crate::scripting::types::ScriptState>,
     slicer_state: &State<crate::slicer::SlicerState>,
     ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: &State<crate::pane_control::PaneControlState>,
     user_files_state: &State<crate::persistence::UserFilesState>,
     sheet_indices: &[usize],
 ) -> Result<PublishAssembly, String> {
@@ -144,6 +149,13 @@ fn assemble_publish_workbook(
         slicer_state,
         ribbon_filter_state,
     )?;
+
+    // Pane controls (Controls pane) are workbook-scoped and ride in the
+    // package as pane_controls.json (config + current values, sorted
+    // deterministically at publish). Their custom-control/button scripts are
+    // ordinary object scripts and ship consent-gated via object_scripts below.
+    workbook.pane_controls =
+        crate::persistence::collect_pane_controls_for_save(pane_control_state);
 
     for &idx in sheet_indices {
         if idx >= workbook.sheets.len() {
@@ -327,6 +339,8 @@ fn compute_publish_report(
     item(&mut included, "controls",
         wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
         "sheets with buttons/checkboxes (incl. onSelect wiring)");
+    item(&mut included, "paneControls", wb.pane_controls.len(),
+        "pane controls (config + current values); custom-control scripts ship as object scripts (consent-gated)");
     item(&mut included, "objectScripts",
         assembly.object_scripts.as_ref().map_or(0, |s| s.len()),
         "consent-gated on the subscriber; capability ceiling in the signed manifest");
@@ -404,6 +418,7 @@ pub fn calp_publish(
     script_state: State<crate::scripting::types::ScriptState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     params: PublishParams,
     window: tauri::Window,
@@ -430,6 +445,7 @@ pub fn calp_publish(
         &script_state,
         &slicer_state,
         &ribbon_filter_state,
+        &pane_control_state,
         &user_files_state,
         &sheet_indices,
     )?;
@@ -491,6 +507,7 @@ pub fn calp_publish(
         modules_published: result.modules_published,
         notebooks_published: result.notebooks_published,
         report,
+        warnings: result.warnings,
     })
 }
 
@@ -611,6 +628,7 @@ pub fn calp_publish_model(
         modules_published: result.modules_published,
         notebooks_published: result.notebooks_published,
         report,
+        warnings: result.warnings,
     })
 }
 
@@ -628,6 +646,11 @@ pub struct PublishPreviewResponse {
     /// Names of the sheets the preview covered, in package order.
     pub sheet_names: Vec<String>,
     pub report: PublishReport,
+    /// The SAME disclosure warnings a real publish of this selection would
+    /// emit (core `dropdown_reference_warnings` over the same carrier) — e.g.
+    /// a dropdown pane control whose CellRange item source references a sheet
+    /// outside the selection. Non-blocking; the artifact is never rewritten.
+    pub warnings: Vec<String>,
 }
 
 /// Dry-run of calp_publish: assemble the EXACT carrier a publish would use
@@ -641,6 +664,7 @@ pub fn calp_publish_preview(
     script_state: State<crate::scripting::types::ScriptState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     params: PublishPreviewParams,
     window: tauri::Window,
@@ -657,16 +681,21 @@ pub fn calp_publish_preview(
         &script_state,
         &slicer_state,
         &ribbon_filter_state,
+        &pane_control_state,
         &user_files_state,
         &sheet_indices,
     )?;
     let report = compute_publish_report(&assembly, &state, &sheet_indices);
+    // Same check core publish runs, over the same carrier — so the author
+    // sees dangling dropdown references at PREVIEW time, not only after the
+    // artifact is already written.
+    let warnings = calp::publish::dropdown_reference_warnings(&assembly.workbook, &sheet_indices);
     let sheet_names = sheet_indices
         .iter()
         .filter_map(|&i| assembly.workbook.sheets.get(i).map(|s| s.name.clone()))
         .collect();
 
-    Ok(PublishPreviewResponse { sheet_names, report })
+    Ok(PublishPreviewResponse { sheet_names, report, warnings })
 }
 
 /// Materialize ONE package's distributed standalone module scripts + notebooks
@@ -1048,6 +1077,142 @@ fn resolve_publish_sheet_indices(
     Ok((0..names.len()).collect())
 }
 
+/// Uppercased name-collision set for pulled pane controls: existing pane
+/// controls + ribbon filters (GET.CONTROLVALUE names are unique across both
+/// families) + NAMED on-grid controls. Without the on-grid family a pulled
+/// pane control could silently shadow a subscriber's named button/checkbox —
+/// pane controls win the GET.CONTROLVALUE precedence, so the subscriber's
+/// formulas would switch source without any warning. On-grid names use the
+/// SAME extraction rule as the snapshot map (`static_control_name`: static,
+/// non-empty after trim; formula-typed names excluded).
+fn pane_control_taken_names<'a>(
+    pane_controls: impl Iterator<Item = &'a crate::pane_control::PaneControl>,
+    ribbon_filters: impl Iterator<Item = &'a crate::ribbon_filter::RibbonFilter>,
+    on_grid_controls: &crate::controls::ControlStorage,
+) -> std::collections::HashSet<String> {
+    pane_controls
+        .map(|c| c.name.to_uppercase())
+        .chain(ribbon_filters.map(|f| f.name.to_uppercase()))
+        .chain(
+            on_grid_controls
+                .values()
+                .filter_map(crate::control_values::static_control_name)
+                .map(|n| n.to_uppercase()),
+        )
+        .collect()
+}
+
+/// Snapshot AppState.controls (on-grid control metadata) under its own short
+/// lock, released before the pane/filter locks are taken — the lock-order
+/// convention (pane_control/types.rs, control_values.rs) never nests these.
+fn snapshot_on_grid_controls(state: &AppState) -> Result<crate::controls::ControlStorage, String> {
+    Ok(state.controls.lock().map_err(|e| e.to_string())?.clone())
+}
+
+/// Materialize pulled pane controls (Controls pane) into PaneControlState —
+/// shared by calp_pull and calp_refresh_apply so first-pull and refresh
+/// semantics can never drift. Workbook-scoped, ADDITIVE with don't-clobber
+/// (the named-range / object-script convention): a control whose id already
+/// exists, or whose name collides CASE-INSENSITIVELY with an existing pane
+/// control, ribbon filter, or NAMED on-grid control (see
+/// `pane_control_taken_names`), is skipped with a warning. Applied controls
+/// re-base to the end of the subscriber's strip (max existing order + 1,
+/// preserving package-relative order) — the same append semantics
+/// create_pane_control uses. Configs carry no inline code by design (D6); a
+/// custom control's script arrives separately as a consent-gated distributed
+/// object script and stays inert until the subscriber consents.
+///
+/// `on_grid_controls` is a snapshot taken via `snapshot_on_grid_controls`
+/// (its lock already released) — never a live guard, so no lock nests with
+/// the pane/filter locks taken here.
+///
+/// Returns (id, name) for each control ACTUALLY inserted, so callers record
+/// provenance-ledger entries only for what landed (a collision-skipped local
+/// control is never attributed to the package).
+fn materialize_pulled_pane_controls(
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    on_grid_controls: &crate::controls::ControlStorage,
+    pulled: &[persistence::SavedPaneControl],
+) -> Result<Vec<(String, String)>, String> {
+    if pulled.is_empty() {
+        return Ok(Vec::new());
+    }
+    // LOCK ORDER (pane_control/types.rs): PaneControlState.controls BEFORE
+    // RibbonFilterState.filters; neither held while touching grids (we
+    // don't touch grids here).
+    let mut controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
+    let (mut taken_names, base_order) = {
+        let filters = ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?;
+        let names = pane_control_taken_names(controls.values(), filters.values(), on_grid_controls);
+        let max_order = controls
+            .values()
+            .map(|c| c.order)
+            .chain(filters.values().map(|f| f.order))
+            .max();
+        (names, max_order.map_or(0, |m| m.saturating_add(1)))
+    };
+
+    // Package order is already (order, id)-sorted at publish; re-sort
+    // defensively so re-based positions are deterministic regardless.
+    let mut incoming = pulled.to_vec();
+    incoming.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+
+    let mut applied: Vec<(String, String)> = Vec::new();
+    let mut next_order = base_order;
+    for saved in &incoming {
+        if controls.contains_key(&saved.id) {
+            continue; // subscriber already has this control (id collision)
+        }
+        if taken_names.contains(&saved.name.to_uppercase()) {
+            crate::log_warn!(
+                "CALP",
+                "Skipping pulled pane control \"{}\": name already in use",
+                saved.name
+            );
+            continue;
+        }
+        // Same converter as .cala load: unknown types / bad configs are
+        // skipped with a warning, never fail the pull.
+        if let Some(mut control) = crate::persistence::saved_to_pane_control(saved) {
+            control.order = next_order;
+            next_order = next_order.saturating_add(1);
+            taken_names.insert(control.name.to_uppercase());
+            applied.push((control.id.to_string(), control.name.clone()));
+            controls.insert(control.id, control);
+        }
+    }
+    Ok(applied)
+}
+
+/// Instance ids ("pane-{controlId}", the CustomControlHost/ButtonControl
+/// convention) of the incoming pane controls whose host did NOT land in the
+/// strip after `materialize_pulled_pane_controls` ran for `incoming`. Strip
+/// MEMBERSHIP is the criterion — it distinguishes the two skip reasons:
+/// - name-collision skip (or converter drop): the control is ABSENT, so its
+///   package-shipped "pane-{id}" object script would persist host-less
+///   (inert, but violating delete-path hygiene) — reported for pruning;
+/// - id-collision skip: the id is PRESENT (the subscriber's own control was
+///   retained), so the script keeps a live host — NOT reported.
+/// Every APPLIED control is present by construction, so "absent" is exactly
+/// "in the incoming payload but neither applied nor retained".
+///
+/// Takes (and releases) the pane-controls lock; callers must not hold it.
+fn orphaned_pane_script_instance_ids(
+    pane_control_state: &crate::pane_control::PaneControlState,
+    incoming: &[persistence::SavedPaneControl],
+) -> Result<std::collections::HashSet<String>, String> {
+    if incoming.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
+    Ok(incoming
+        .iter()
+        .filter(|saved| !controls.contains_key(&saved.id))
+        .map(|saved| format!("pane-{}", saved.id))
+        .collect())
+}
+
 /// Pull (subscribe to) a package.
 #[tauri::command]
 pub fn calp_pull(
@@ -1056,6 +1221,7 @@ pub fn calp_pull(
     bi_state: State<'_, BiState>,
     script_state: State<'_, crate::scripting::types::ScriptState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     params: PullParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
@@ -1292,6 +1458,15 @@ pub fn calp_pull(
         }
     }
 
+    // On-grid name snapshot for the pane-control collision guard below —
+    // taken BEFORE the package's own on-grid controls materialize, so the
+    // guard sees only the SUBSCRIBER's pre-existing names. Taking it after
+    // would let the package's own just-landed on-grid names enter
+    // taken_names and shadow the package's own same-named pane controls.
+    // (The snapshot's lock is released inside the helper before any other
+    // control lock is taken — canonical order preserved.)
+    let on_grid_snapshot = snapshot_on_grid_controls(&state)?;
+
     // Materialize pulled controls (buttons/checkboxes) onto the freshly-
     // appended sheets — SANITIZED: distributed onSelect wiring is inline
     // script source and must not execute outside the consent model, so
@@ -1318,6 +1493,56 @@ pub fn calp_pull(
                     sheet_name.clone(),
                 ));
             }
+        }
+    }
+
+    // Materialize pulled pane controls (Controls pane) into PaneControlState —
+    // shared with the refresh path (see materialize_pulled_pane_controls for
+    // the collision/ordering semantics). Ledger entries come from the APPLIED
+    // list so a collision-skipped control is never attributed to this package.
+    // `on_grid_snapshot` predates the package's own on-grid materialization
+    // above (see the comment at its binding).
+    let applied_pane_controls = materialize_pulled_pane_controls(
+        &pane_control_state,
+        &ribbon_filter_state,
+        &on_grid_snapshot,
+        &result.pane_controls,
+    )?;
+    for (id, name) in &applied_pane_controls {
+        sub_objects.push(sub_object("paneControl", id.clone(), name.clone()));
+    }
+
+    // Delete-path hygiene: a collision-skipped pane control must not leave
+    // the package's own just-landed "pane-{id}" object script behind with no
+    // host control. Prune EXACTLY those scripts — this package's Distributed
+    // set only; local scripts, other packages' scripts, and pane scripts of
+    // applied/retained (id-collision) controls are untouched. Ledger entries
+    // for pruned scripts are dropped too: they never became subscriber state.
+    {
+        let orphaned = orphaned_pane_script_instance_ids(
+            &pane_control_state,
+            &result.pane_controls,
+        )?;
+        if !orphaned.is_empty() {
+            let mut removed_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut scripts = state.object_scripts.lock().map_err(|e| e.to_string())?;
+            scripts.retain(|s| {
+                let orphan = matches!(s.provenance, persistence::ScriptProvenance::Distributed)
+                    && s.package_name.as_deref() == Some(result.package_name.as_str())
+                    && s.instance_id.as_deref().is_some_and(|i| orphaned.contains(i));
+                if orphan {
+                    crate::log_warn!(
+                        "CALP",
+                        "Pruning distributed script '{}' from package '{}': its host pane control was collision-skipped",
+                        s.name, result.package_name
+                    );
+                    removed_ids.insert(s.id.clone());
+                }
+                !orphan
+            });
+            drop(scripts);
+            sub_objects.retain(|o| !(o.kind == "objectScript" && removed_ids.contains(&o.id)));
         }
     }
 
@@ -1490,6 +1715,11 @@ pub struct PackageInspection {
     pub pivot_count: usize,
     /// Sheets carrying cell-anchored controls (buttons/checkboxes).
     pub control_sheet_count: usize,
+    /// Pane controls (Controls pane widgets) the package carries —
+    /// workbook-scoped, materialized into the subscriber's Controls pane.
+    pub pane_control_count: usize,
+    /// Their display names (per-object transparency, like table_names).
+    pub pane_control_names: Vec<String>,
     /// S5 phase 2: the verified publisher's display name. Inspect is a pre-pull
     /// trust surface, so the manifest signature is checked here too.
     pub publisher_name: String,
@@ -1624,6 +1854,15 @@ pub fn calp_inspect_package(
             }
             _ => 0,
         };
+    // Pane controls (workbook-scoped): count AND names, so the subscriber
+    // reviews what will land in their Controls pane instead of accepting blind.
+    let pane_control_names: Vec<String> =
+        match registry.read_artifact(&package_name, &version, "pane_controls.json") {
+            Ok(Some(bytes)) => serde_json::from_slice::<Vec<persistence::SavedPaneControl>>(&bytes)
+                .map(|v| v.into_iter().map(|c| c.name).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
 
     Ok(PackageInspection {
         package_name,
@@ -1668,6 +1907,8 @@ pub fn calp_inspect_package(
         sparkline_count,
         pivot_count,
         control_sheet_count,
+        pane_control_count: pane_control_names.len(),
+        pane_control_names,
     })
 }
 
@@ -1721,6 +1962,7 @@ pub fn calp_get_package_objects(
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
     bi_state: State<BiState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     package_name: String,
     window: tauri::Window,
 ) -> Result<PackageObjectsResponse, String> {
@@ -1762,6 +2004,10 @@ pub fn calp_get_package_objects(
         .lock()
         .map_err(|e| e.to_string())?;
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    // Pane-control lock: safe alongside the AppState locks above (the
+    // pane_control/types.rs order constraint only forbids holding it while
+    // acquiring the grid locks, which this command never touches).
+    let pane_controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
 
     let sheet_name_at =
         |idx: usize| -> String { sheet_names.get(idx).cloned().unwrap_or_default() };
@@ -1796,6 +2042,11 @@ pub fn calp_get_package_objects(
                     connections
                         .values()
                         .any(|c| c.package_data_source_id.as_deref() == Some(o.id.as_str())),
+                    String::new(),
+                ),
+                // Pane controls are workbook-scoped (no sheet), like pivots.
+                "paneControl" => (
+                    pane_controls.keys().any(|k| k.to_string() == o.id),
                     String::new(),
                 ),
                 "controlSheet" => sheet_ids
@@ -1950,6 +2201,8 @@ pub fn calp_revert_override(
     state: State<AppState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     sheet_id: String,
     cell_id: String,
     window: tauri::Window,
@@ -1979,7 +2232,7 @@ pub fn calp_revert_override(
             // correctly even when the sheet is not active — the frontend's
             // calculateNow only covers the active one.
             if let Some(idx) = sheet_index_for_id(&state, sid) {
-                crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx);
+                crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
             }
             Ok(true)
         }
@@ -1994,6 +2247,8 @@ pub fn calp_accept_upstream(
     state: State<AppState>,
     user_files_state: State<crate::persistence::UserFilesState>,
     pivot_state: State<crate::pivot::types::PivotState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     sheet_id: String,
     cell_id: String,
     window: tauri::Window,
@@ -2022,7 +2277,7 @@ pub fn calp_accept_upstream(
         Some((upstream, position)) => {
             apply_override_value_to_grid(&state, sid, cid, position, &upstream);
             if let Some(idx) = sheet_index_for_id(&state, sid) {
-                crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx);
+                crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
             }
             Ok(true)
         }
@@ -2360,6 +2615,7 @@ pub fn calp_refresh_apply(
     script_state: State<crate::scripting::types::ScriptState>,
     bi_state: State<BiState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -2715,8 +2971,13 @@ pub fn calp_refresh_apply(
 
     // Sparklines + controls: RESET each refreshed sheet's entries then apply
     // v2's (CF/DV semantics — sparklines carry no id, and controls are
-    // publisher-owned presentation on subscribed sheets).
-    {
+    // publisher-owned presentation on subscribed sheets). Yields the on-grid
+    // snapshot for the pane-control collision guard below: cloned AFTER the
+    // reset removed the packages' v1 on-grid controls but BEFORE the v2 set
+    // lands, so the guard sees only the SUBSCRIBER's own on-grid names —
+    // never the packages' own (v1 or just-landed v2) names, which would
+    // shadow the packages' own same-named pane controls.
+    let on_grid_snapshot = {
         let refreshed: std::collections::HashSet<usize> =
             cfdv_pkg_to_index.values().copied().collect();
         {
@@ -2742,6 +3003,10 @@ pub fn calp_refresh_apply(
         {
             let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
             controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
+            // Cloned under the ALREADY-HELD controls lock (calling
+            // snapshot_on_grid_controls here would re-lock and deadlock);
+            // released with this scope, before the pane/filter locks below.
+            let snapshot = controls.clone();
             let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
             let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
             for payload in &payloads {
@@ -2767,8 +3032,82 @@ pub fn calp_refresh_apply(
                     }
                 }
             }
+            snapshot
         }
-    }
+    };
+
+    // Pane controls: same ledger-scoped replace as tables/charts — remove the
+    // package's own pane controls (from the provenance ledger; subscriber-
+    // authored ones are never in it and are never touched), then re-add the
+    // new version's set through the SAME collision-guarded materializer
+    // calp_pull uses (a v2 control landing on a subscriber-taken name is
+    // skipped, not clobbered). Without this a subscriber stayed on first-pull
+    // pane controls forever. Fresh "paneControl" ledger entries come from the
+    // APPLIED list; like every other kind here, refresh mutates backend state
+    // directly and the document-modified flag stays frontend-owned
+    // (mark_file_modified after the command returns).
+    //
+    // Yields package name -> "pane-{id}" instance ids of incoming pane
+    // controls whose host did NOT land (collision-skipped, not retained):
+    // the script swap below must not land those packages' host-less pane
+    // scripts (delete-path hygiene).
+    let orphaned_pane_instances: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = {
+        // Removal first (its own lock scope, subscriptions before pane
+        // controls — the same order as the table/chart removal blocks), then
+        // the shared additive materializer re-adds the v2 set.
+        {
+            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let mut controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                    continue;
+                };
+                let owned: std::collections::HashSet<String> = sub
+                    .objects
+                    .iter()
+                    .filter(|o| o.kind == "paneControl")
+                    .map(|o| o.id.clone())
+                    .collect();
+                if !owned.is_empty() {
+                    controls.retain(|id, _| !owned.contains(&id.to_string()));
+                }
+            }
+        }
+        // `on_grid_snapshot` was cloned above AFTER the refreshed sheets'
+        // on-grid controls were reset but BEFORE v2's landed, so a package's
+        // own on-grid names never block its own pane controls (they only
+        // guard the subscriber's).
+        let mut orphaned: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
+        for payload in &payloads {
+            let applied = materialize_pulled_pane_controls(
+                &pane_control_state,
+                &ribbon_filter_state,
+                &on_grid_snapshot,
+                &payload.pull_result.pane_controls,
+            )?;
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for (id, name) in applied {
+                entries.push(ledger_entry("paneControl", id, name));
+            }
+            let missing_hosts = orphaned_pane_script_instance_ids(
+                &pane_control_state,
+                &payload.pull_result.pane_controls,
+            )?;
+            if !missing_hosts.is_empty() {
+                orphaned
+                    .entry(payload.pull_result.package_name.clone())
+                    .or_default()
+                    .extend(missing_hosts);
+            }
+        }
+        orphaned
+    };
 
     // Ledger entries for named ranges (upserted unconditionally above, so the
     // full v2 set is accurate). Script kinds (objectScript/moduleScript/
@@ -2903,6 +3242,13 @@ pub fn calp_refresh_apply(
     // Merge the provenance-ledger updates into the refreshed subscriptions:
     // kinds this refresh re-materialized are replaced with the v2 set; kinds a
     // refresh does not touch (pivots, data sources) carry over from the pull.
+    // paneControl deliberately does NOT carry over: every refreshed payload
+    // re-materializes pane controls above (pull_all_updates always reads
+    // pane_controls.json, empty set included, and every payload enters
+    // refresh_ledgers via the tables block), so the fresh entries are the
+    // full truth — carrying old ones would resurrect ledger rows for controls
+    // the v2 removal just deleted. Subscriptions WITHOUT an update never get
+    // a payload, never enter refresh_ledgers, and keep their ledger wholesale.
     for (sub_idx, new_entries) in refresh_ledgers {
         if let Some(sub) = subs.subscriptions.get_mut(sub_idx) {
             let mut objects: Vec<calp::manifest::SubscribedObject> = sub
@@ -2943,8 +3289,24 @@ pub fn calp_refresh_apply(
                 !(matches!(s.provenance, persistence::ScriptProvenance::Distributed)
                     && s.package_name.as_deref() == Some(package_name.as_str()))
             });
+            let orphaned = orphaned_pane_instances.get(&package_name);
             let mut applied: Vec<calp::manifest::SubscribedObject> = Vec::new();
             for script in new_scripts {
+                // Delete-path hygiene: a v2 "pane-{id}" script whose host
+                // pane control was collision-skipped above never lands —
+                // it would persist host-less (inert, but a distributed
+                // script with nothing to attach to). Applied/retained
+                // controls' scripts, and everything non-pane, pass through.
+                if orphaned.is_some_and(|set| {
+                    script.instance_id.as_deref().is_some_and(|i| set.contains(i))
+                }) {
+                    crate::log_warn!(
+                        "CALP",
+                        "Skipping distributed script '{}' from package '{}': its host pane control was collision-skipped",
+                        script.name, package_name
+                    );
+                    continue;
+                }
                 // Never let a package script shadow an unrelated local
                 // script that happens to share its id.
                 if !scripts.iter().any(|s| s.id == script.id) {
@@ -3055,7 +3417,7 @@ pub fn calp_refresh_apply(
             crate::undo_commands::rebuild_all_dependencies(&state);
         }
         for idx in refreshed_indices {
-            crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx);
+            crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
         }
     }
 
@@ -7064,5 +7426,196 @@ mod c8_materialize_tests {
         let scripts = st.workbook_scripts.lock().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "from-a");
         assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg-a"));
+    }
+}
+
+#[cfg(test)]
+mod pane_control_pull_tests {
+    //! Unit tests for the shared pull/refresh pane-control materializer —
+    //! above all the taken-names collision guard, which must also cover NAMED
+    //! on-grid controls: a pulled pane control shadows them in the
+    //! GET.CONTROLVALUE precedence (pane > filter > on-grid), so collisions
+    //! are SKIPPED (never renamed, never clobbered), matching the existing
+    //! pane/filter collision policy.
+    use super::{
+        materialize_pulled_pane_controls, orphaned_pane_script_instance_ids,
+        pane_control_taken_names,
+    };
+    use crate::controls::{ControlMetadata, ControlPropertyValue, ControlStorage};
+    use crate::pane_control::{PaneControl, PaneControlConfig, PaneControlState, PaneControlType};
+    use crate::ribbon_filter::RibbonFilterState;
+    use std::collections::HashMap;
+
+    /// An on-grid control whose "name" property has the given type/value.
+    fn on_grid(name_type: &str, name: &str) -> ControlMetadata {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "name".to_string(),
+            ControlPropertyValue {
+                value_type: name_type.to_string(),
+                value: name.to_string(),
+            },
+        );
+        ControlMetadata {
+            control_type: "button".to_string(),
+            properties,
+        }
+    }
+
+    /// A pulled (package) checkbox pane control.
+    fn saved(name: &str, order: u32) -> persistence::SavedPaneControl {
+        persistence::SavedPaneControl {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            control_type: "checkbox".to_string(),
+            config: serde_json::json!({ "type": "checkbox", "label": name }),
+            value: serde_json::Value::Null,
+            order,
+        }
+    }
+
+    /// A subscriber-local pane control already in the strip.
+    fn existing_pane(name: &str, order: u32) -> PaneControl {
+        PaneControl {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            control_type: PaneControlType::Checkbox,
+            config: PaneControlConfig::Checkbox {
+                label: name.to_string(),
+            },
+            value: None,
+            order,
+        }
+    }
+
+    #[test]
+    fn taken_names_include_static_named_on_grid_controls_only() {
+        // The static_control_name rule: static + non-empty after trim counts;
+        // formula-typed and blank names never block a pull.
+        let mut storage: ControlStorage = HashMap::new();
+        storage.insert((0, 1, 1), on_grid("static", "  Threshold "));
+        storage.insert((0, 2, 1), on_grid("formula", "=A1"));
+        storage.insert((0, 3, 1), on_grid("static", "   "));
+        let pane = PaneControlState::new();
+        let filters = RibbonFilterState::new();
+        let names = pane_control_taken_names(
+            pane.controls.lock().unwrap().values(),
+            filters.filters.lock().unwrap().values(),
+            &storage,
+        );
+        assert_eq!(
+            names,
+            std::collections::HashSet::from(["THRESHOLD".to_string()])
+        );
+    }
+
+    #[test]
+    fn pulled_pane_control_cannot_shadow_a_named_on_grid_control() {
+        let pane = PaneControlState::new();
+        let filters = RibbonFilterState::new();
+        let mut storage: ControlStorage = HashMap::new();
+        storage.insert((0, 0, 0), on_grid("static", "Threshold"));
+
+        // Case-insensitive: "THRESHOLD" collides with on-grid "Threshold"
+        // and is skipped; "Rate" lands and is reported as applied.
+        let pulled = vec![saved("THRESHOLD", 0), saved("Rate", 1)];
+        let applied =
+            materialize_pulled_pane_controls(&pane, &filters, &storage, &pulled).unwrap();
+        assert_eq!(applied.len(), 1, "applied: {:?}", applied);
+        assert_eq!(applied[0].1, "Rate");
+        let controls = pane.controls.lock().unwrap();
+        assert_eq!(controls.len(), 1);
+        assert!(controls.values().all(|c| c.name == "Rate"));
+    }
+
+    #[test]
+    fn applied_controls_rebase_after_existing_strip_and_skip_id_collisions() {
+        let pane = PaneControlState::new();
+        let filters = RibbonFilterState::new();
+        let existing = existing_pane("Local", 7);
+        let existing_id = existing.id;
+        pane.controls.lock().unwrap().insert(existing_id, existing);
+
+        // A same-id pull is skipped (never clobbers the subscriber's control);
+        // the fresh one appends after the strip's max order.
+        let mut same_id = saved("Local2", 0);
+        same_id.id = existing_id;
+        let pulled = vec![same_id, saved("Fresh", 5)];
+        let applied =
+            materialize_pulled_pane_controls(&pane, &filters, &HashMap::new(), &pulled).unwrap();
+        assert_eq!(applied.len(), 1, "applied: {:?}", applied);
+        assert_eq!(applied[0].1, "Fresh");
+        let controls = pane.controls.lock().unwrap();
+        assert_eq!(controls.len(), 2);
+        let fresh = controls.values().find(|c| c.name == "Fresh").unwrap();
+        assert_eq!(fresh.order, 8, "re-based to max existing order + 1");
+        assert_eq!(
+            controls.get(&existing_id).unwrap().name,
+            "Local",
+            "id collision never clobbers the subscriber's control"
+        );
+    }
+
+    #[test]
+    fn package_own_on_grid_names_never_shadow_its_pane_controls() {
+        // The calp_pull/refresh ordering contract: the on-grid snapshot handed
+        // to the materializer is taken BEFORE the package's own on-grid
+        // controls land. A package shipping BOTH an on-grid button and a pane
+        // control named "Threshold" must still get its pane control applied —
+        // the guard protects the SUBSCRIBER's pre-existing names, not the
+        // package against itself.
+        let pane = PaneControlState::new();
+        let filters = RibbonFilterState::new();
+        // Subscriber's pre-pull on-grid state: one named control of their own.
+        let mut storage: ControlStorage = HashMap::new();
+        storage.insert((0, 0, 0), on_grid("static", "LocalName"));
+        let snapshot = storage.clone(); // what calp_pull snapshots pre-materialization
+        // The package's own on-grid control materializes (same name as its
+        // pane control) — AFTER the snapshot, so it must not enter taken_names.
+        storage.insert((3, 1, 1), on_grid("static", "Threshold"));
+
+        let pulled = vec![saved("Threshold", 0), saved("LocalName", 1)];
+        let applied =
+            materialize_pulled_pane_controls(&pane, &filters, &snapshot, &pulled).unwrap();
+        assert_eq!(applied.len(), 1, "applied: {:?}", applied);
+        assert_eq!(
+            applied[0].1, "Threshold",
+            "the package's own on-grid name must not block its own pane control"
+        );
+        // The subscriber's name still guards: "LocalName" was skipped.
+        assert!(pane.controls.lock().unwrap().values().all(|c| c.name == "Threshold"));
+    }
+
+    #[test]
+    fn orphaned_pane_script_instances_cover_skipped_but_not_retained_controls() {
+        // Name-collision skip -> host absent -> "pane-{id}" reported orphaned.
+        // Id-collision skip -> the subscriber's control is retained under that
+        // id -> its script keeps a live host -> NOT reported. Applied -> not
+        // reported.
+        let pane = PaneControlState::new();
+        let filters = RibbonFilterState::new();
+        let existing = existing_pane("Local", 0);
+        let existing_id = existing.id;
+        pane.controls.lock().unwrap().insert(existing_id, existing);
+        let mut storage: ControlStorage = HashMap::new();
+        storage.insert((0, 0, 0), on_grid("static", "Taken"));
+
+        let name_skipped = saved("Taken", 0); // on-grid name collision -> absent
+        let mut id_skipped = saved("Local2", 1); // id collision -> retained
+        id_skipped.id = existing_id;
+        let applied_ok = saved("Fresh", 2); // lands
+        let name_skipped_id = name_skipped.id;
+        let pulled = vec![name_skipped, id_skipped, applied_ok];
+
+        let applied =
+            materialize_pulled_pane_controls(&pane, &filters, &storage, &pulled).unwrap();
+        assert_eq!(applied.len(), 1, "applied: {:?}", applied);
+
+        let orphaned = orphaned_pane_script_instance_ids(&pane, &pulled).unwrap();
+        assert_eq!(
+            orphaned,
+            std::collections::HashSet::from([format!("pane-{}", name_skipped_id)]),
+            "only the name-collision-skipped control's instance id is orphaned"
+        );
     }
 }

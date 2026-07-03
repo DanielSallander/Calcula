@@ -1443,10 +1443,16 @@ pub fn resolve_structured_reference(
 pub fn set_calculated_column(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
     column_name: String,
     formula: String,
 ) -> TableResult {
+    // GET.CONTROLVALUE snapshot: built BEFORE the table/grid locks below.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
 
@@ -1517,6 +1523,7 @@ pub fn set_calculated_column(
                 row_heights: None,
                 column_widths: None,
                 hidden_rows: None,
+                control_values: Some(control_values.clone()),
             };
             let result = crate::evaluate_formula_raw_with_files(
                 &grids,

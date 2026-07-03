@@ -31,6 +31,7 @@ const KIND_LABELS: Record<string, string> = {
   notebook: "Notebooks",
   dataSource: "Data sources",
   controlSheet: "Controls (per sheet)",
+  paneControl: "Pane controls",
 };
 
 const KIND_ORDER = [
@@ -43,6 +44,7 @@ const KIND_ORDER = [
   "notebook",
   "dataSource",
   "controlSheet",
+  "paneControl",
 ];
 
 const sectionStyle: React.CSSProperties = {

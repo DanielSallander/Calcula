@@ -397,6 +397,7 @@ pub enum BuiltinFunction {
     GetRowHeight,
     GetColumnWidth,
     GetCellFillColor,
+    GetControlValue,
 
     // Reference functions
     Row,
@@ -977,6 +978,7 @@ impl BuiltinFunction {
             "GET.ROW.HEIGHT" | "GETROWHEIGHT" => BuiltinFunction::GetRowHeight,
             "GET.COLUMN.WIDTH" | "GETCOLUMNWIDTH" => BuiltinFunction::GetColumnWidth,
             "GET.CELL.FILLCOLOR" | "GETCELLFILLCOLOR" => BuiltinFunction::GetCellFillColor,
+            "GET.CONTROLVALUE" | "GET.CONTROL.VALUE" | "GETCONTROLVALUE" => BuiltinFunction::GetControlValue,
 
             // Reference functions
             "ROW" => BuiltinFunction::Row,
@@ -1535,6 +1537,7 @@ impl BuiltinFunction {
             BuiltinFunction::GetRowHeight => "GET.ROW.HEIGHT",
             BuiltinFunction::GetColumnWidth => "GET.COLUMN.WIDTH",
             BuiltinFunction::GetCellFillColor => "GET.CELL.FILLCOLOR",
+            BuiltinFunction::GetControlValue => "GET.CONTROLVALUE",
             BuiltinFunction::Row => "ROW",
             BuiltinFunction::Column => "COLUMN",
             BuiltinFunction::Let => "LET",
@@ -2446,6 +2449,7 @@ impl BuiltinFunction {
             FunctionMeta::new("GET.ROW.HEIGHT", "UI", "GET.ROW.HEIGHT(row)", "Returns the height in pixels of the specified row"),
             FunctionMeta::new("GET.COLUMN.WIDTH", "UI", "GET.COLUMN.WIDTH(col)", "Returns the width in pixels of the specified column"),
             FunctionMeta::new("GET.CELL.FILLCOLOR", "UI", "GET.CELL.FILLCOLOR(cell_ref)", "Returns the background fill color of a cell as a CSS color string"),
+            FunctionMeta::new("GET.CONTROLVALUE", "UI", "GET.CONTROLVALUE(name, [default])", "Returns the current value of the named UI control (pane control, ribbon filter, or named on-grid control)"),
 
             // ================================================================
             // File functions
@@ -2469,6 +2473,8 @@ impl BuiltinFunction {
             FunctionMeta::alias("GETROWHEIGHT", "UI"),
             FunctionMeta::alias("GETCOLUMNWIDTH", "UI"),
             FunctionMeta::alias("GETCELLFILLCOLOR", "UI"),
+            FunctionMeta::alias("GET.CONTROL.VALUE", "UI"),
+            FunctionMeta::alias("GETCONTROLVALUE", "UI"),
         ]
     }
 }

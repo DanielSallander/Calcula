@@ -803,6 +803,22 @@ export async function calculateSheet(): Promise<CellData[]> {
   return result;
 }
 
+/**
+ * Targeted recalc of GET.CONTROLVALUE dependents after a control/ribbon-filter
+ * value change. `changedNames` limits the recalc to formulas bound to those
+ * control names (case-insensitive); omit to re-evaluate every GET.CONTROLVALUE
+ * cell (undo/redo path). Spill-aware on the active sheet — apply the returned
+ * cells exactly like calculate_now results (canvas refreshCells + redraw).
+ */
+export async function recalcControlDependents(
+  changedNames?: string[]
+): Promise<CellData[]> {
+  return invoke<CellData[]>(
+    "recalc_control_dependents",
+    changedNames ? { changedNames } : {}
+  );
+}
+
 // ============================================================================
 // Iterative Calculation Settings
 // ============================================================================
@@ -998,6 +1014,9 @@ export interface UndoResult {
   pivotChanged: boolean;
   slicerChanged: boolean;
   ribbonFilterChanged: boolean;
+  /** Pane controls (Controls pane) restored — GET.CONTROLVALUE dependents
+   *  need a targeted recalc. */
+  paneControlChanged: boolean;
   /** Object state restored (charts, sparklines, tables, autofilters,
    *  validation, named ranges, freeze panes) — stores must refresh. */
   objectsChanged: boolean;

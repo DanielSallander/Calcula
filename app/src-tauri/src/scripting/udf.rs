@@ -177,12 +177,19 @@ pub fn collect_udf_calls(
     user_files_state: State<UserFilesState>,
     _slicer_state: State<SlicerState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     row: u32,
     col: u32,
     value: String,
     udf_names: Vec<String>,
     known: HashMap<String, UdfValue>,
 ) -> Result<Vec<UdfCall>, String> {
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below, so the
+    // discovery pass evaluates cells the same way update_cell's apply will.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     // --- Lock the same READ state update_cell uses to evaluate. We take only
     // immutable locks and never write back. Undo / dependents maps are NOT
     // touched (this pass is discarded).
@@ -337,6 +344,7 @@ pub fn collect_udf_calls(
                     row_heights: None,
                     column_widths: None,
                     hidden_rows: None,
+                    control_values: Some(control_values.clone()),
                 };
                 let _ = crate::evaluate_formula_raw_with_files_and_pivot(
                     scratch,
@@ -392,6 +400,7 @@ pub fn collect_udf_calls(
                             row_heights: None,
                             column_widths: None,
                             hidden_rows: None,
+                            control_values: Some(control_values.clone()),
                         };
                         let _ = crate::evaluate_formula_raw_with_files_and_pivot(
                             &scratch,

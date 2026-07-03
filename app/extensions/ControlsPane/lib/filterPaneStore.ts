@@ -14,6 +14,36 @@ import type {
 import * as api from "./filterPaneApi";
 import { FilterPaneEvents } from "./filterPaneEvents";
 import { applyRibbonFilter, clearRibbonFilter } from "./filterPaneFilterBridge";
+import { cellEvents } from "@api/cellEvents";
+import { emitAppEvent, AppEvents } from "@api/events";
+
+/** Fire-and-forget: re-evaluate GET.CONTROLVALUE formulas bound to `names`
+ *  (ALL control names when omitted, e.g. after a rename) and apply the
+ *  returned cells to the grid — same application pattern as other
+ *  extension-triggered recalcs (cellEvents per active-sheet cell +
+ *  GRID_REFRESH; see FileExplorer's virtual-file recalc handling). */
+function triggerControlValueRecalc(names?: string[]): void {
+  api
+    .recalcControlDependents(names)
+    .then((cells) => {
+      if (cells.length === 0) return;
+      for (const cell of cells) {
+        // Non-active sheets are recalculated backend-side and refresh on
+        // sheet switch; only emit for active-sheet cells.
+        if (cell.sheetIndex != null) continue;
+        cellEvents.emit({
+          row: cell.row,
+          col: cell.col,
+          newValue: cell.display,
+          formula: cell.formula ?? null,
+        });
+      }
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    })
+    .catch((err) => {
+      console.warn("[FilterPane] GET.CONTROLVALUE recalc failed:", err);
+    });
+}
 
 // ============================================================================
 // Module-level cache
@@ -71,6 +101,9 @@ export async function createFilterAsync(
     // Don't refresh items here — it takes the BI engine and conflicts
     // with pivot operations. Items are loaded lazily when the user
     // opens the dropdown for the first time.
+    // GET.CONTROLVALUE: formulas already bound to the new filter's name pick
+    // up its value ("(All)" while nothing is selected) instead of staying #N/A.
+    triggerControlValueRecalc([filter.name]);
     window.dispatchEvent(
       new CustomEvent(FilterPaneEvents.FILTER_CREATED, { detail: filter }),
     );
@@ -83,14 +116,21 @@ export async function createFilterAsync(
 
 export async function deleteFilterAsync(filterId: string): Promise<boolean> {
   try {
-    // Clear applied filter before deleting
+    // Clear applied filter before deleting; capture the name BEFORE the
+    // cache refresh drops the filter (needed for the recalc below).
     const filter = getFilterById(filterId);
+    const deletedName = filter?.name;
     if (filter) {
       await clearRibbonFilter(filter);
     }
     await api.deleteRibbonFilter(filterId);
     itemsCache.delete(filterId);
     await refreshCache();
+    // GET.CONTROLVALUE: formulas bound to the deleted filter's name go #N/A.
+    // Fall back to a full control recalc if the filter wasn't in the cache.
+    triggerControlValueRecalc(
+      deletedName !== undefined ? [deletedName] : undefined,
+    );
     window.dispatchEvent(
       new CustomEvent(FilterPaneEvents.FILTER_DELETED, { detail: { filterId } }),
     );
@@ -108,6 +148,12 @@ export async function updateFilterAsync(
   try {
     const updated = await api.updateRibbonFilter(filterId, params);
     await refreshCache();
+    // Rename breaks GET.CONTROLVALUE bindings by name (Excel-like): formulas
+    // bound to the old name go #N/A, ones bound to the new name pick up the
+    // value — full control recalc, no name hint (plan: rename => full recalc).
+    if (params.name !== undefined) {
+      triggerControlValueRecalc();
+    }
     window.dispatchEvent(
       new CustomEvent(FilterPaneEvents.FILTER_UPDATED, { detail: updated }),
     );
@@ -139,6 +185,9 @@ export async function updateFilterSelectionAsync(
       } else {
         await applyRibbonFilter(updatedFilter);
       }
+      // GET.CONTROLVALUE: formulas bound to this filter's name react to the
+      // new selection (multi-select spills handled backend-side).
+      triggerControlValueRecalc([updatedFilter.name]);
     }
 
     // Refresh sibling filter items (cross-filtering has_data)

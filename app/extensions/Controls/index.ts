@@ -114,6 +114,40 @@ const PROPERTIES_PANE_ID = "control-properties";
 const DESIGN_MODE_MENU_ITEM_ID = "developer:designMode";
 
 // ============================================================================
+// Instance-Id Parsing (strict)
+// ============================================================================
+
+/**
+ * Strictly parse an ON-GRID control instance id of the form
+ * "control-<sheetIndex>-<row>-<col>" (as produced by makeFloatingControlId).
+ *
+ * Returns null for anything else. This guard is REQUIRED at the top of every
+ * global shape:* app-event handler in this extension: those events are shared
+ * with foreign script surfaces (e.g. pane-hosted controls with instanceId
+ * "pane-<uuid>", whose uuid hyphens satisfy a naive split("-").length check
+ * while parseInt("pane") yields NaN). No undo transaction and no state
+ * mutation may happen unless the id fully parses.
+ */
+function parseOnGridControlInstanceId(
+  instanceId: string,
+): { sheetIndex: number; row: number; col: number } | null {
+  if (typeof instanceId !== "string") return null;
+  const match = /^control-(\d+)-(\d+)-(\d+)$/.exec(instanceId);
+  if (!match) return null;
+  const sheetIndex = Number(match[1]);
+  const row = Number(match[2]);
+  const col = Number(match[3]);
+  if (
+    !Number.isSafeInteger(sheetIndex) ||
+    !Number.isSafeInteger(row) ||
+    !Number.isSafeInteger(col)
+  ) {
+    return null;
+  }
+  return { sheetIndex, row, col };
+}
+
+// ============================================================================
 // State
 // ============================================================================
 
@@ -647,22 +681,44 @@ function activate(context: ExtensionContext): void {
   // Handle shape:setProperty from scripts (script calls shape.setProperty)
   const unsubSetProperty = onAppEvent("shape:setProperty", async (detail) => {
     const d = detail as { instanceId: string; key: string; value: string; oldValue: string };
-    // Parse instanceId to extract sheet/row/col
-    const parts = d.instanceId.replace("control-", "").split("-");
-    if (parts.length < 3) return;
-    const si = parseInt(parts[0], 10);
-    const r = parseInt(parts[1], 10);
-    const c = parseInt(parts[2], 10);
+    // Strict guard BEFORE any undo transaction or state mutation: foreign ids
+    // (e.g. pane-hosted "pane-<uuid>") are handled by their own host, not here.
+    const loc = parseOnGridControlInstanceId(d.instanceId);
+    if (!loc) return;
+    const { sheetIndex: si, row: r, col: c } = loc;
 
-    // Wrap in undo transaction so changes are reversible
+    // Wrap in an undo transaction so the change is reversible. The transaction
+    // is GUARANTEED to close — commit on success, cancel on any failure — so
+    // the engine's current_transaction can never be left dangling (a dangling
+    // transaction silently swallows every subsequent edit).
+    const { beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction } =
+      await import("@api/lib");
+    let txOpen = false;
     try {
-      const { beginUndoTransaction, commitUndoTransaction } = await import("@api/lib");
       await beginUndoTransaction("Shape property: " + d.key);
-      await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
-      await commitUndoTransaction();
+      txOpen = true;
     } catch {
-      // Fallback without undo if transaction API unavailable
+      // Undo-transaction API unavailable; apply the property without grouping.
+    }
+    try {
       await setControlProperty(si, r, c, "shape", d.key, "static", d.value);
+      if (txOpen) {
+        await commitUndoTransaction();
+        txOpen = false;
+      }
+    } catch (err) {
+      // Property write (or commit) failed: skip the refresh/propertyChanged
+      // fan-out below — nothing actually changed.
+      console.error("[Controls] shape:setProperty failed for", d.instanceId, err);
+      return;
+    } finally {
+      if (txOpen) {
+        try {
+          await cancelUndoTransaction();
+        } catch {
+          // Best effort — nothing else can close the transaction.
+        }
+      }
     }
 
     // Invalidate cache and redraw
@@ -687,6 +743,7 @@ function activate(context: ExtensionContext): void {
   // Handle shape:setCanvasRenderer from scripts
   const unsubSetRenderer = onAppEvent("shape:setCanvasRenderer", (detail) => {
     const d = detail as { instanceId: string; renderer: (ctx: CanvasRenderingContext2D, bounds: { x: number; y: number; width: number; height: number }) => void };
+    if (!parseOnGridControlInstanceId(d.instanceId)) return;
     setCustomCanvasRenderer(d.instanceId, d.renderer);
     invalidateShapeCache(d.instanceId);
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -696,6 +753,7 @@ function activate(context: ExtensionContext): void {
   // Handle shape:removeCanvasRenderer from scripts
   const unsubRemoveRenderer = onAppEvent("shape:removeCanvasRenderer", (detail) => {
     const d = detail as { instanceId: string };
+    if (!parseOnGridControlInstanceId(d.instanceId)) return;
     removeCustomCanvasRenderer(d.instanceId);
     invalidateShapeCache(d.instanceId);
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -705,6 +763,9 @@ function activate(context: ExtensionContext): void {
   // Handle shape:setHtmlContent from scripts
   const unsubSetHtml = onAppEvent("shape:setHtmlContent", (detail) => {
     const d = detail as { instanceId: string; html: string };
+    // Foreign ids (pane-hosted controls) must not pollute the on-grid html
+    // overlay map or trigger spurious grid refreshes per pane-script render.
+    if (!parseOnGridControlInstanceId(d.instanceId)) return;
     setShapeHtmlContent(d.instanceId, d.html);
     invalidateShapeCache(d.instanceId);
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -714,6 +775,7 @@ function activate(context: ExtensionContext): void {
   // Handle shape:sendMessage from scripts (forward to iframe)
   const unsubSendMsg = onAppEvent("shape:sendMessage", (detail) => {
     const d = detail as { instanceId: string; type: string; data: unknown };
+    if (!parseOnGridControlInstanceId(d.instanceId)) return;
     const frame = getShapeOverlayFrame(d.instanceId);
     if (frame?.contentWindow) {
       frame.contentWindow.postMessage(
@@ -727,14 +789,14 @@ function activate(context: ExtensionContext): void {
   // Handle shape:declareProperties from scripts
   const unsubDeclareProps = onAppEvent("shape:declareProperties", (detail) => {
     const d = detail as { instanceId: string; props: DeclaredProperty[] };
+    // Pane-hosted controls declare properties via their own host wiring.
+    const loc = parseOnGridControlInstanceId(d.instanceId);
+    if (!loc) return;
     setDeclaredProperties(d.instanceId, d.props);
     // Refresh the properties pane if it's open for this shape
-    const parts = d.instanceId.replace("control-", "").split("-");
-    if (parts.length >= 3) {
-      window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
-        detail: { row: parseInt(parts[1], 10), col: parseInt(parts[2], 10) },
-      }));
-    }
+    window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
+      detail: { row: loc.row, col: loc.col },
+    }));
   });
   cleanupFns.push(unsubDeclareProps);
 
@@ -742,7 +804,9 @@ function activate(context: ExtensionContext): void {
   // When a script is created/saved for a shape, mark it; when edit-script fires, check & mark
   const unsubScriptEdit = onAppEvent("scriptable-objects:edit-script", (detail) => {
     const d = detail as { objectType: string; instanceId: string };
-    if (d.objectType === "shape" && d.instanceId) {
+    // Pane-hosted custom controls are also objectType "shape" but use
+    // "pane-<uuid>" ids — only badge genuine on-grid shapes.
+    if (d.objectType === "shape" && d.instanceId && parseOnGridControlInstanceId(d.instanceId)) {
       markShapeHasScript(d.instanceId);
       emitAppEvent(AppEvents.GRID_REFRESH);
     }
@@ -755,7 +819,11 @@ function activate(context: ExtensionContext): void {
       const { listObjectScripts } = await import("../../src/api/objectScriptBackend");
       const scripts = await listObjectScripts();
       for (const script of scripts) {
-        if (script.objectType === "shape" && script.instanceId) {
+        if (
+          script.objectType === "shape" &&
+          script.instanceId &&
+          parseOnGridControlInstanceId(script.instanceId)
+        ) {
           markShapeHasScript(script.instanceId);
         }
       }
@@ -769,6 +837,10 @@ function activate(context: ExtensionContext): void {
   const applyingTemplates = new Set<string>();
   const unsubApplyTemplate = onAppEvent("shape:applyTemplate", async (detail) => {
     const d = detail as { instanceId: string; templateId: string };
+    // Strict guard BEFORE any state mutation: templates only apply to
+    // on-grid shapes, never to foreign ids (e.g. pane-hosted controls).
+    const loc = parseOnGridControlInstanceId(d.instanceId);
+    if (!loc) return;
     // Guard against double-click / rapid re-entry
     if (applyingTemplates.has(d.instanceId)) return;
     applyingTemplates.add(d.instanceId);
@@ -783,12 +855,7 @@ function activate(context: ExtensionContext): void {
       const { saveObjectScript, deleteObjectScriptsForInstance } = await import("../../src/api/objectScriptBackend");
       const { ObjectScriptManager } = await import("../../src/api/scriptableObjects");
 
-      // Parse instanceId for shape location
-      const parts = d.instanceId.replace("control-", "").split("-");
-      if (parts.length < 3) return;
-      const si = parseInt(parts[0], 10);
-      const r = parseInt(parts[1], 10);
-      const c = parseInt(parts[2], 10);
+      const { sheetIndex: si, row: r, col: c } = loc;
 
       // Clean up any existing script and overlay for this shape
       const existingScript = ObjectScriptManager.getScript("shape", d.instanceId);
@@ -846,6 +913,8 @@ function activate(context: ExtensionContext): void {
   // Handle shape:openTemplateGallery — open the template gallery overlay
   const unsubOpenGallery = onAppEvent("shape:openTemplateGallery", (detail) => {
     const d = detail as { instanceId: string };
+    // The template gallery targets on-grid shapes only.
+    if (!parseOnGridControlInstanceId(d.instanceId)) return;
     // Render the gallery as a React portal
     import("react-dom/client").then(({ createRoot }) => {
       import("react").then((React) => {

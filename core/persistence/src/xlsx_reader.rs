@@ -268,6 +268,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         sparklines: Vec::new(),
         named_ranges: Vec::new(),
         ribbon_filters: Vec::new(),
+        pane_controls: Vec::new(),
         pivot_layouts: Vec::new(),
         pivot_definitions: Vec::new(),
         bi_pivot_metadata: Vec::new(),

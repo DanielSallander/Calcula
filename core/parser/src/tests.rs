@@ -1619,3 +1619,84 @@ fn test_parse_3d_ref_with_range_and_spaces() {
         _ => panic!("Expected Sheet3DRef, got {:?}", result),
     }
 }
+// ========================================
+// GET.CONTROLVALUE NAME MAPPING TESTS
+// ========================================
+
+#[test]
+fn test_get_controlvalue_from_name_all_spellings() {
+    // All three accepted spellings must resolve to the same variant.
+    assert_eq!(
+        BuiltinFunction::from_name("GET.CONTROLVALUE"),
+        BuiltinFunction::GetControlValue
+    );
+    assert_eq!(
+        BuiltinFunction::from_name("GET.CONTROL.VALUE"),
+        BuiltinFunction::GetControlValue
+    );
+    assert_eq!(
+        BuiltinFunction::from_name("GETCONTROLVALUE"),
+        BuiltinFunction::GetControlValue
+    );
+    // Case-insensitive (from_name uppercases).
+    assert_eq!(
+        BuiltinFunction::from_name("get.controlvalue"),
+        BuiltinFunction::GetControlValue
+    );
+}
+
+#[test]
+fn test_get_controlvalue_to_canonical_name_round_trip() {
+    // to_canonical_name is the inverse of from_name for the primary spelling.
+    assert_eq!(
+        BuiltinFunction::GetControlValue.to_canonical_name(),
+        "GET.CONTROLVALUE"
+    );
+    assert_eq!(
+        BuiltinFunction::from_name(BuiltinFunction::GetControlValue.to_canonical_name()),
+        BuiltinFunction::GetControlValue
+    );
+}
+
+#[test]
+fn test_get_controlvalue_parses_as_function_call() {
+    let result = parse("=GET.CONTROLVALUE(\"MySlider\")").unwrap();
+    match result {
+        Expression::FunctionCall { func, args, .. } => {
+            assert_eq!(func, BuiltinFunction::GetControlValue);
+            assert_eq!(args.len(), 1);
+        }
+        _ => panic!("Expected FunctionCall, got {:?}", result),
+    }
+    // Alternate spellings parse to the same variant.
+    for formula in ["=GET.CONTROL.VALUE(\"X\", 0)", "=GETCONTROLVALUE(\"X\", 0)"] {
+        let result = parse(formula).unwrap();
+        match result {
+            Expression::FunctionCall { func, args, .. } => {
+                assert_eq!(func, BuiltinFunction::GetControlValue);
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected FunctionCall, got {:?}", result),
+        }
+    }
+}
+
+#[test]
+fn test_get_controlvalue_catalog_entry_and_aliases() {
+    use crate::ast::BuiltinFunction as BF;
+    let entries = BF::all_catalog_entries();
+    let primary = entries
+        .iter()
+        .find(|m| m.name == "GET.CONTROLVALUE")
+        .expect("GET.CONTROLVALUE missing from function catalog");
+    assert!(!primary.is_alias);
+    assert_eq!(primary.category, "UI");
+    assert_eq!(primary.syntax, "GET.CONTROLVALUE(name, [default])");
+    for alias in ["GET.CONTROL.VALUE", "GETCONTROLVALUE"] {
+        let meta = entries
+            .iter()
+            .find(|m| m.name == alias)
+            .unwrap_or_else(|| panic!("{} alias missing from catalog", alias));
+        assert!(meta.is_alias, "{} must be a hidden alias entry", alias);
+    }
+}

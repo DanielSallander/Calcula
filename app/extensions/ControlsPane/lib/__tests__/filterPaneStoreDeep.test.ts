@@ -17,6 +17,9 @@ const mockGetAllRibbonFilters = vi.fn();
 const mockGetBiConnections = vi.fn();
 const mockGetBiColumnValues = vi.fn();
 const mockGetBiColumnAvailableValues = vi.fn();
+// Fire-and-forget GET.CONTROLVALUE recalc: must return a promise (the store
+// chains .then/.catch on it). Implementation survives vi.clearAllMocks().
+const mockRecalcControlDependents = vi.fn(() => Promise.resolve([]));
 
 vi.mock("../filterPaneApi", () => ({
   createRibbonFilter: (...args: unknown[]) => mockCreateRibbonFilter(...args),
@@ -27,6 +30,7 @@ vi.mock("../filterPaneApi", () => ({
   getBiConnections: (...args: unknown[]) => mockGetBiConnections(...args),
   getBiColumnValues: (...args: unknown[]) => mockGetBiColumnValues(...args),
   getBiColumnAvailableValues: (...args: unknown[]) => mockGetBiColumnAvailableValues(...args),
+  recalcControlDependents: (...args: unknown[]) => mockRecalcControlDependents(...args),
 }));
 
 const mockApplyRibbonFilter = vi.fn();

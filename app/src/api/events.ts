@@ -138,7 +138,7 @@ export const AppEvents = {
  * extension consumes each. The Shell translator maps each domain to the concrete
  * per-feature refresh event(s).
  */
-export type MutationDomain = "styles" | "pivot" | "slicer" | "ribbonFilter" | "objects";
+export type MutationDomain = "styles" | "pivot" | "slicer" | "ribbonFilter" | "paneControl" | "objects";
 
 /** Payload of AppEvents.MUTATION_REFRESH. */
 export interface MutationRefreshPayload {

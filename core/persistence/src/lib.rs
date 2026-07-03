@@ -65,6 +65,10 @@ pub struct Workbook {
     pub named_ranges: Vec<SavedNamedRange>,
     /// Ribbon filter definitions (Filter Pane)
     pub ribbon_filters: Vec<SavedRibbonFilter>,
+    /// Pane control definitions (Controls Pane — buttons, sliders, dropdowns,
+    /// checkboxes, custom scripted controls). `config` and `value` are opaque
+    /// app-owned JSON payloads.
+    pub pane_controls: Vec<SavedPaneControl>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: Vec<SavedPivotLayout>,
     /// Full pivot table definitions (opaque JSON — PivotDefinition from pivot-engine).
@@ -375,6 +379,7 @@ impl Workbook {
             sparklines: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
+            pane_controls: Vec::new(),
             pivot_layouts: Vec::new(),
             pivot_definitions: Vec::new(),
             bi_pivot_metadata: Vec::new(),
@@ -406,6 +411,7 @@ impl Workbook {
             sparklines: Vec::new(),
             named_ranges: Vec::new(),
             ribbon_filters: Vec::new(),
+            pane_controls: Vec::new(),
             pivot_layouts: Vec::new(),
             pivot_definitions: Vec::new(),
             bi_pivot_metadata: Vec::new(),
@@ -951,6 +957,30 @@ fn default_unknown() -> String {
 
 fn default_and() -> String {
     "and".to_string()
+}
+
+// ============================================================================
+// PANE CONTROLS (Controls Pane)
+// ============================================================================
+
+/// Serializable pane control definition (Controls Pane).
+/// `config` and `value` are opaque app-owned JSON payloads — the persistence
+/// layer never inspects them (like `bi_pivot_metadata`). A value-less control
+/// (e.g. a button) stores `value: null`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPaneControl {
+    pub id: EntityId,
+    pub name: String,
+    /// "button" | "slider" | "dropdown" | "checkbox" | "custom"
+    pub control_type: String,
+    /// Opaque control configuration (app-owned PaneControlConfig JSON).
+    pub config: serde_json::Value,
+    /// Opaque current value (app-owned ControlValue JSON; null when value-less).
+    pub value: serde_json::Value,
+    /// Position in the Controls-pane strip. Shares the number space with
+    /// `SavedRibbonFilter.order` (one merged, mixed list).
+    pub order: u32,
 }
 
 /// Calcula metadata structure stored as JSON in the hidden _calcula_meta sheet.

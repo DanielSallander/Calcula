@@ -7,6 +7,9 @@ pub mod slicers;
 pub mod ribbon_filters;
 #[cfg(test)]
 mod ribbon_filter_tests;
+pub mod pane_controls;
+#[cfg(test)]
+mod pane_control_tests;
 pub mod scripts;
 pub mod notebooks;
 pub mod pivot_layouts;

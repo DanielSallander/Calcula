@@ -72,6 +72,8 @@ pub mod computed_properties;
 pub mod controls;
 pub mod slicer;
 pub mod ribbon_filter;
+pub mod pane_control;
+pub mod control_values;
 pub mod timeline_slicer;
 pub mod mcp;
 pub mod locale_commands;
@@ -2913,6 +2915,7 @@ pub fn evaluate_formula_raw_with_ast_and_files(
 ) -> EvalResult {
     evaluate_formula_raw_with_ast_files_and_cube(
         grids, sheet_names, current_sheet_index, ast, user_files, udf_fn, None,
+        None, // GET.CONTROLVALUE unavailable here (v1)
     )
 }
 
@@ -2927,6 +2930,7 @@ pub fn evaluate_formula_raw_with_ast_files_and_cube(
     user_files: &HashMap<String, Vec<u8>>,
     udf_fn: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
     cube: Option<std::sync::Arc<engine::CubePrefetch>>,
+    control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
@@ -2946,6 +2950,7 @@ pub fn evaluate_formula_raw_with_ast_files_and_cube(
     if let Some(c) = cube {
         evaluator.set_cube_prefetch(c);
     }
+    if let Some(cv) = control_values { evaluator.set_control_values(cv); }
     evaluator.evaluate(ast)
 }
 
@@ -3761,6 +3766,7 @@ pub fn run() {
         .manage(scripting::CapabilityStore::new())
         .manage(slicer::SlicerState::new())
         .manage(ribbon_filter::RibbonFilterState::new())
+        .manage(pane_control::PaneControlState::new())
         .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
         .manage(managed_policy::ManagedAppearanceState(std::sync::Mutex::new(appearance_policy)))
@@ -4330,6 +4336,15 @@ pub fn run() {
             ribbon_filter::get_ribbon_filter,
             ribbon_filter::clear_ribbon_filter,
             ribbon_filter::set_ribbon_filter_item_selected,
+            // Pane control commands (Controls pane)
+            pane_control::create_pane_control,
+            pane_control::delete_pane_control,
+            pane_control::update_pane_control,
+            pane_control::set_pane_control_value,
+            pane_control::get_all_pane_controls,
+            pane_control::get_pane_control,
+            pane_control::get_all_control_values,
+            control_values::recalc_control_dependents,
             // Timeline slicer commands
             timeline_slicer::create_timeline_slicer,
             timeline_slicer::delete_timeline_slicer,

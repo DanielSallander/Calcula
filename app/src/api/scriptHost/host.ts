@@ -67,7 +67,7 @@ import {
 } from "./objectCoords";
 import { showToast } from "../notifications";
 import { ExtensionRegistry } from "../extensionRegistry";
-import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService } from "../componentStoreRegistry";
+import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService } from "../componentStoreRegistry";
 import type { IStyleOverride } from "../styleInterceptors";
 
 type CleanupFn = () => void;
@@ -1615,6 +1615,20 @@ async function buildSnapshot(definition: HostMountDefinition, mw: MountedWorker)
         break;
       }
       case "shape": {
+        // Pane-hosted custom control ("pane-{controlId}"): seed declared
+        // properties from the ControlsPane store service (read-only; no
+        // backend/broker call, no canvas anchor cell to resolve).
+        if (instanceId.startsWith("pane-")) {
+          const paneStore = getPaneControlStoreService();
+          const declared = paneStore?.getProperties(instanceId.slice("pane-".length));
+          if (declared) {
+            properties["shape.properties"] = declared;
+            for (const [k, v] of Object.entries(declared)) {
+              mw.shapeProps.set(k, v);
+            }
+          }
+          break;
+        }
         const parts = instanceId.replace("control-", "").split("-");
         if (parts.length >= 3) {
           const sheetIndex = parseInt(parts[0], 10);

@@ -1238,17 +1238,22 @@ pub(crate) fn finalize_pivot_update(
     dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
+    control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
 ) {
     update_pivot_in_grid(state, pivot_id, dest_sheet_idx, destination, view);
     update_pivot_region(state, pivot_id, dest_sheet_idx, destination, view);
-    recalculate_sheet_formulas(state, pivot_state);
+    recalculate_sheet_formulas(state, pivot_state, control_states);
 }
 
 /// Re-evaluate all formula cells on the active sheet when calculation mode is
 /// "automatic".  This is intentionally a full-sheet recalculation (like the
 /// Ctrl+= "Calculate Now" command) to keep the implementation simple.  Pivot
 /// operations are infrequent enough that the cost is negligible.
-pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotState) {
+pub(crate) fn recalculate_sheet_formulas(
+    state: &AppState,
+    pivot_state: &PivotState,
+    control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
+) {
     // Only recalculate in automatic mode
     {
         let calc_mode = state.calculation_mode.lock().unwrap();
@@ -1256,6 +1261,12 @@ pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotSt
             return;
         }
     }
+
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below (canonical
+    // lock order). None (states unreachable at the call site) => those
+    // formulas evaluate to #N/A for this pass (v1).
+    let control_values =
+        crate::control_values::build_control_values_from_states(state, control_states);
 
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -1299,6 +1310,7 @@ pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotSt
             row_heights: Some(row_heights.clone()),
             column_widths: Some(column_widths.clone()),
             hidden_rows: None,
+            control_values: control_values.clone(),
         };
 
         let result = match parser::parse(&formula) {

@@ -410,6 +410,8 @@ pub fn cancel_pivot_operation(
 pub fn revert_pivot_operation(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
     let prev = pivot_state.previous_states.lock().unwrap().remove(&pivot_id);
@@ -434,7 +436,7 @@ pub fn revert_pivot_operation(
         }
 
         // Re-write grid with the old view
-        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
         Ok(())
     } else {
@@ -456,6 +458,8 @@ pub fn revert_pivot_operation(
 pub fn undo_pivot_overwrite(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
 ) -> Result<(), String> {
     log_info!("PIVOT", "undo_pivot_overwrite pivot_id={}", pivot_id);
@@ -493,7 +497,7 @@ pub fn undo_pivot_overwrite(
                                 store_view(&pivot_state, pivot_id, &view);
                                 drop(pivot_tables);
 
-                                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+                                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
                                 // Restore cells that were overwritten by the pivot expansion
                                 if !snapshot.overwritten_cells.is_empty() {
@@ -531,6 +535,8 @@ pub async fn update_pivot_fields(
     window: tauri::Window,
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_fields pivot_id={}", request.pivot_id);
@@ -722,7 +728,7 @@ pub async fn update_pivot_fields(
     let region_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     // Recalculate formulas referencing pivot cells
-    recalculate_sheet_formulas(&state, &pivot_state);
+    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     // Clean up cancellation token (keep previous_states for potential revert command)
     pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
@@ -762,6 +768,8 @@ pub async fn update_pivot_fields(
 pub fn toggle_pivot_group(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ToggleGroupRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -909,7 +917,7 @@ pub fn toggle_pivot_group(
 
                 let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 response.overwritten_cell_count = saved_cells.len() as u32;
-                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
                 record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -944,7 +952,7 @@ pub fn toggle_pivot_group(
             // when pivot shrinks after collapse)
             let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, view);
             response.overwritten_cell_count = saved_cells.len() as u32;
-            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, view);
+            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, view, Some((&*pane_control_state, &*ribbon_filter_state)));
             record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo.clone(), saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -979,7 +987,7 @@ pub fn toggle_pivot_group(
     // Clear old cells and write updated view to grid, then update region bounds
     let saved_cells = save_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     response.overwritten_cell_count = saved_cells.len() as u32;
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
     record_pivot_definition_undo(&state, pivot_id, old_definition_for_undo, saved_cells, dest_sheet_idx, "Pivot expand/collapse");
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -1171,6 +1179,8 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
 pub fn relocate_pivot(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pivot_id: PivotId,
     new_row: u32,
     new_col: u32,
@@ -1209,7 +1219,7 @@ pub fn relocate_pivot(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
 
     // 5b. Recalculate formulas referencing pivot cells
-    recalculate_sheet_formulas(&state, &pivot_state);
+    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     // 6. Store the updated view
     store_view(&pivot_state, pivot_id, &view);
@@ -1287,6 +1297,8 @@ pub async fn refresh_pivot_cache(
     window: tauri::Window,
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, crate::bi::types::BiState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
@@ -1437,7 +1449,7 @@ pub async fn refresh_pivot_cache(
         }
 
         // Delegate to update_bi_pivot_fields which handles the full BI query flow
-        return update_bi_pivot_fields(state, pivot_state, bi_state, bi_request).await;
+        return update_bi_pivot_fields(state, pivot_state, pane_control_state, ribbon_filter_state, bi_state, bi_request).await;
     }
 
     // 1. Lock briefly: read source info, build new cache from grid, release locks
@@ -1596,7 +1608,7 @@ pub async fn refresh_pivot_cache(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Recalculate formulas referencing pivot cells
-    recalculate_sheet_formulas(&state, &pivot_state);
+    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     // Clean up cancellation token
     pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
@@ -2056,6 +2068,8 @@ pub async fn change_pivot_data_source(
     window: tauri::Window,
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ChangePivotDataSourceRequest,
 ) -> Result<PivotViewResponse, String> {
     let pivot_id = request.pivot_id;
@@ -2141,7 +2155,7 @@ pub async fn change_pivot_data_source(
     // Write to grid
     emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
     let overwritten = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     // Store updated cache
     {
@@ -2296,6 +2310,8 @@ pub fn get_pivot_layout_ranges(
 pub fn update_pivot_layout(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: UpdatePivotLayoutRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_layout pivot_id={}", request.pivot_id);
@@ -2354,7 +2370,7 @@ pub fn update_pivot_layout(
 
     // Update pivot in grid
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2514,6 +2530,8 @@ pub fn get_pivot_hierarchies(
 pub fn add_pivot_hierarchy(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: AddHierarchyRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -2597,7 +2615,7 @@ pub fn add_pivot_hierarchy(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2607,6 +2625,8 @@ pub fn add_pivot_hierarchy(
 pub fn remove_pivot_hierarchy(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RemoveHierarchyRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -2669,7 +2689,7 @@ pub fn remove_pivot_hierarchy(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2679,6 +2699,8 @@ pub fn remove_pivot_hierarchy(
 pub fn move_pivot_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: MoveFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -2799,7 +2821,7 @@ pub fn move_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2809,6 +2831,8 @@ pub fn move_pivot_field(
 pub fn set_pivot_aggregation(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: SetAggregationRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -2848,7 +2872,7 @@ pub fn set_pivot_aggregation(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2858,6 +2882,8 @@ pub fn set_pivot_aggregation(
 pub fn set_pivot_number_format(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: SetNumberFormatRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -2896,7 +2922,7 @@ pub fn set_pivot_number_format(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -2906,6 +2932,8 @@ pub fn set_pivot_number_format(
 pub fn apply_pivot_filter(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ApplyPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3002,7 +3030,7 @@ pub fn apply_pivot_filter(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3012,6 +3040,8 @@ pub fn apply_pivot_filter(
 pub fn clear_pivot_filter(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ClearPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3058,7 +3088,7 @@ pub fn clear_pivot_filter(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3068,6 +3098,8 @@ pub fn clear_pivot_filter(
 pub fn sort_pivot_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: SortPivotFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3113,7 +3145,7 @@ pub fn sort_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3204,6 +3236,8 @@ pub fn get_pivot_field_info(
 pub fn set_pivot_item_visibility(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: SetItemVisibilityRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3262,7 +3296,7 @@ pub fn set_pivot_item_visibility(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3378,6 +3412,8 @@ pub fn get_pivots_for_bi_connection(
 pub fn set_pivot_item_expanded(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: SetItemExpandedRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3430,7 +3466,7 @@ pub fn set_pivot_item_expanded(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3440,6 +3476,8 @@ pub fn set_pivot_item_expanded(
 pub fn expand_collapse_level(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ExpandCollapseLevelRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3489,7 +3527,7 @@ pub fn expand_collapse_level(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3499,6 +3537,8 @@ pub fn expand_collapse_level(
 pub fn expand_collapse_all(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: ExpandCollapseAllRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3531,7 +3571,7 @@ pub fn expand_collapse_all(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3542,6 +3582,8 @@ pub async fn refresh_all_pivot_tables(
     window: tauri::Window,
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, crate::bi::types::BiState>,
 ) -> Result<Vec<PivotViewResponse>, String> {
     log_info!("PIVOT", "refresh_all_pivot_tables");
@@ -3553,7 +3595,7 @@ pub async fn refresh_all_pivot_tables(
 
     let mut responses = Vec::new();
     for pivot_id in pivot_ids {
-        match refresh_pivot_cache(window.clone(), state.clone(), pivot_state.clone(), bi_state.clone(), pivot_id).await {
+        match refresh_pivot_cache(window.clone(), state.clone(), pivot_state.clone(), pane_control_state.clone(), ribbon_filter_state.clone(), bi_state.clone(), pivot_id).await {
             Ok(response) => responses.push(response),
             Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
         }
@@ -3674,6 +3716,8 @@ fn show_values_as_to_api(vf: &pivot_engine::ValueField, fields: &[pivot_engine::
 pub fn group_pivot_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: GroupFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3717,7 +3761,7 @@ pub fn group_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3727,6 +3771,8 @@ pub fn group_pivot_field(
 pub fn create_manual_group(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CreateManualGroupRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3789,7 +3835,7 @@ pub fn create_manual_group(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -3799,6 +3845,8 @@ pub fn create_manual_group(
 pub fn ungroup_pivot_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: UngroupFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3841,7 +3889,7 @@ pub fn ungroup_pivot_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -4755,6 +4803,8 @@ pub async fn create_pivot_from_bi_model(
 pub async fn update_bi_pivot_fields(
     state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     bi_state: State<'_, BiState>,
     request: UpdateBiPivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
@@ -4817,7 +4867,7 @@ pub async fn update_bi_pivot_fields(
                     auto_fit_pivot_columns(&state, destination, &view);
                 }
                 update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-                recalculate_sheet_formulas(&state, &pivot_state);
+                recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
 
                 let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
                 log_perf!("PIVOT", "update_bi_pivot_fields (cosmetic) pivot_id={} | TOTAL={:.1}ms", pivot_id, total_ms);
@@ -4869,7 +4919,7 @@ pub async fn update_bi_pivot_fields(
         drop(pt);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
         return Ok(response);
     }
 
@@ -4929,7 +4979,7 @@ pub async fn update_bi_pivot_fields(
         drop(pivot_tables);
 
         response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
         return Ok(response);
     }
 
@@ -5370,7 +5420,7 @@ pub async fn update_bi_pivot_fields(
                 drop(pivot_tables);
 
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
                 return Ok(response);
             }
             return Err(crate::bi::commands::friendly_bi_query_error("BI query failed", &e));
@@ -5781,7 +5831,7 @@ pub async fn update_bi_pivot_fields(
         auto_fit_pivot_columns(&state, destination, &view);
     }
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    recalculate_sheet_formulas(&state, &pivot_state);
+    recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
 
     // Store last query + lookup column set in bi_metadata
@@ -5995,6 +6045,8 @@ fn sanitize_sheet_name(name: &str) -> String {
 pub fn add_calculated_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -6033,7 +6085,7 @@ pub fn add_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -6043,6 +6095,8 @@ pub fn add_calculated_field(
 pub fn update_calculated_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: UpdateCalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -6089,7 +6143,7 @@ pub fn update_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -6099,6 +6153,8 @@ pub fn update_calculated_field(
 pub fn remove_calculated_field(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RemoveCalculatedFieldRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -6135,7 +6191,7 @@ pub fn remove_calculated_field(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -6149,6 +6205,8 @@ pub fn remove_calculated_field(
 pub fn add_calculated_item(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CalculatedItemRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -6187,7 +6245,7 @@ pub fn add_calculated_item(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }
@@ -6197,6 +6255,8 @@ pub fn add_calculated_item(
 pub fn remove_calculated_item(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RemoveCalculatedItemRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -6233,7 +6293,7 @@ pub fn remove_calculated_item(
     drop(pivot_tables);
 
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
 
     Ok(response)
 }

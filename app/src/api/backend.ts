@@ -4343,6 +4343,22 @@ export async function recalculateFormulas(): Promise<CellData[]> {
 }
 
 /**
+ * Targeted recalculation of GET.CONTROLVALUE dependents after a control or
+ * ribbon-filter value change. Pass the changed control names to limit the
+ * recalc to formulas bound to them (case-insensitive); omit to re-evaluate
+ * every GET.CONTROLVALUE cell (e.g. after undo/redo). Spill-aware on the
+ * active sheet. Returns the updated cells to apply like calculate_now results.
+ */
+export async function recalcControlDependents(
+  changedNames?: string[]
+): Promise<CellData[]> {
+  return invoke<CellData[]>(
+    "recalc_control_dependents",
+    changedNames ? { changedNames } : {}
+  );
+}
+
+/**
  * Listen for Tauri backend events (e.g., "virtual-file-changed").
  * Returns an unlisten function for cleanup.
  */

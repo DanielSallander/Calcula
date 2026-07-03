@@ -2,6 +2,7 @@
 // PURPOSE: Tauri command wrappers for ribbon filter backend operations.
 
 import { filterPaneBackend } from "./filterPaneBackend";
+import type { CellData } from "@api/types";
 import type {
   RibbonFilter,
   CreateRibbonFilterParams,
@@ -62,6 +63,21 @@ export async function setRibbonFilterItemSelected(
     value,
     selected,
   });
+}
+
+/**
+ * Targeted recalc of GET.CONTROLVALUE dependents after a filter/control value
+ * change. `changedNames` limits the recalc to formulas bound to those control
+ * names (case-insensitive); omit to re-evaluate every GET.CONTROLVALUE cell.
+ * Returns the updated active-sheet cells (spill-aware) to apply to the grid.
+ */
+export async function recalcControlDependents(
+  changedNames?: string[],
+): Promise<CellData[]> {
+  return filterPaneBackend.invoke<CellData[]>(
+    "recalc_control_dependents",
+    changedNames ? { changedNames } : {},
+  );
 }
 
 // ============================================================================

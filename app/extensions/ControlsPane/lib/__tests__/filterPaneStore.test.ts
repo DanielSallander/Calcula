@@ -15,6 +15,9 @@ const mockGetAllRibbonFilters = vi.fn();
 const mockGetBiConnections = vi.fn();
 const mockGetBiColumnValues = vi.fn();
 const mockGetBiColumnAvailableValues = vi.fn();
+// Fire-and-forget GET.CONTROLVALUE recalc: must return a promise (the store
+// chains .then/.catch on it). Implementation survives vi.clearAllMocks().
+const mockRecalcControlDependents = vi.fn(() => Promise.resolve([]));
 
 vi.mock("../filterPaneApi", () => ({
   createRibbonFilter: (...args: unknown[]) => mockCreateRibbonFilter(...args),
@@ -25,6 +28,7 @@ vi.mock("../filterPaneApi", () => ({
   getBiConnections: (...args: unknown[]) => mockGetBiConnections(...args),
   getBiColumnValues: (...args: unknown[]) => mockGetBiColumnValues(...args),
   getBiColumnAvailableValues: (...args: unknown[]) => mockGetBiColumnAvailableValues(...args),
+  recalcControlDependents: (...args: unknown[]) => mockRecalcControlDependents(...args),
 }));
 
 const mockApplyRibbonFilter = vi.fn();
@@ -185,6 +189,20 @@ describe("createFilterAsync", () => {
     dispatchSpy.mockRestore();
   });
 
+  it("triggers GET.CONTROLVALUE recalc for the new filter's name", async () => {
+    const newFilter = makeFilter({ id: "f-5", name: "Region" });
+    mockCreateRibbonFilter.mockResolvedValue(newFilter);
+    mockGetAllRibbonFilters.mockResolvedValue([newFilter]);
+
+    await createFilterAsync({
+      name: "Region",
+      connectionId: CONN_A,
+      fieldName: "Products.Category",
+    });
+
+    expect(mockRecalcControlDependents).toHaveBeenCalledWith(["Region"]);
+  });
+
   it("returns null on error", async () => {
     mockCreateRibbonFilter.mockRejectedValue(new Error("fail"));
 
@@ -195,6 +213,7 @@ describe("createFilterAsync", () => {
     });
 
     expect(result).toBeNull();
+    expect(mockRecalcControlDependents).not.toHaveBeenCalled();
   });
 });
 
@@ -221,6 +240,17 @@ describe("deleteFilterAsync", () => {
     expect(getAllFilters()).toEqual([]);
   });
 
+  it("triggers GET.CONTROLVALUE recalc for the deleted filter's name", async () => {
+    mockDeleteRibbonFilter.mockResolvedValue(undefined);
+    mockGetAllRibbonFilters.mockResolvedValue([]);
+    mockClearRibbonFilter.mockResolvedValue(undefined);
+
+    await deleteFilterAsync("f-10");
+
+    // Name captured before the cache refresh dropped the filter
+    expect(mockRecalcControlDependents).toHaveBeenCalledWith(["Test Filter"]);
+  });
+
   it("returns false on error", async () => {
     mockDeleteRibbonFilter.mockRejectedValue(new Error("fail"));
     mockClearRibbonFilter.mockResolvedValue(undefined);
@@ -228,6 +258,7 @@ describe("deleteFilterAsync", () => {
     const result = await deleteFilterAsync("f-10");
 
     expect(result).toBe(false);
+    expect(mockRecalcControlDependents).not.toHaveBeenCalled();
   });
 });
 

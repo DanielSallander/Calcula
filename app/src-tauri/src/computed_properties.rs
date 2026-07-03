@@ -83,6 +83,7 @@ fn evaluate_property(
     row_heights: &HashMap<u32, f64>,
     column_widths: &HashMap<u32, f64>,
     styles: &StyleRegistry,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> CellValue {
     let ast = match &prop.cached_ast {
         Some(ast) => ast.clone(),
@@ -102,6 +103,7 @@ fn evaluate_property(
         row_heights: Some(row_heights.clone()),
         column_widths: Some(column_widths.clone()),
         hidden_rows: None,
+        control_values: control_values.cloned(),
     };
 
     evaluate_formula_with_context(
@@ -570,12 +572,18 @@ pub fn get_available_attributes(target_type: String) -> Vec<String> {
 #[tauri::command]
 pub fn add_computed_property(
     state: State<AppState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     target_type: String,
     index: u32,
     index2: Option<u32>,
     attribute: String,
     formula: String,
 ) -> ComputedPropertyResult {
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     let active_sheet = *state.active_sheet.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let grid = state.grid.lock().unwrap();
@@ -620,6 +628,7 @@ pub fn add_computed_property(
         &row_heights_snapshot,
         &col_widths_snapshot,
         &styles,
+        Some(&control_values),
     );
 
     // Store the property
@@ -702,10 +711,16 @@ pub fn add_computed_property(
 #[tauri::command]
 pub fn update_computed_property(
     state: State<AppState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     prop_id: u64,
     attribute: String,
     formula: String,
 ) -> ComputedPropertyResult {
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     let active_sheet = *state.active_sheet.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let grid = state.grid.lock().unwrap();
@@ -755,6 +770,7 @@ pub fn update_computed_property(
         &row_heights_snapshot,
         &col_widths_snapshot,
         &styles,
+        Some(&control_values),
     );
 
     // Update in storage
@@ -922,6 +938,7 @@ pub fn re_evaluate_for_changed_cells(
     row_heights: &mut HashMap<u32, f64>,
     column_widths: &mut HashMap<u32, f64>,
     style_registry: &mut StyleRegistry,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> (Vec<DimensionData>, bool) {
     // 1. Collect all affected prop_ids
     let mut affected_props: HashSet<u64> = HashSet::new();
@@ -949,6 +966,7 @@ pub fn re_evaluate_for_changed_cells(
                         let val = evaluate_property(
                             grids, sheet_names, sheet_idx, prop,
                             0, col_idx, row_heights, column_widths, style_registry,
+                            control_values,
                         );
                         eval_results.push((prop_id, prop.attribute.clone(), "column".to_string(), col_idx, None, val));
                     }
@@ -961,6 +979,7 @@ pub fn re_evaluate_for_changed_cells(
                         let val = evaluate_property(
                             grids, sheet_names, sheet_idx, prop,
                             row_idx, 0, row_heights, column_widths, style_registry,
+                            control_values,
                         );
                         eval_results.push((prop_id, prop.attribute.clone(), "row".to_string(), row_idx, None, val));
                     }
@@ -973,6 +992,7 @@ pub fn re_evaluate_for_changed_cells(
                         let val = evaluate_property(
                             grids, sheet_names, sheet_idx, prop,
                             row_idx, col_idx, row_heights, column_widths, style_registry,
+                            control_values,
                         );
                         eval_results.push((prop_id, prop.attribute.clone(), "cell".to_string(), row_idx, Some(col_idx), val));
                     }
@@ -1026,6 +1046,7 @@ pub fn re_evaluate_all_properties(
     row_heights: &mut HashMap<u32, f64>,
     column_widths: &mut HashMap<u32, f64>,
     style_registry: &mut StyleRegistry,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> (Vec<DimensionData>, bool) {
     let sheet_props = match cp_storage.get(&sheet_index) {
         Some(sp) => sp.clone(),
@@ -1040,6 +1061,7 @@ pub fn re_evaluate_all_properties(
             let val = evaluate_property(
                 grids, sheet_names, sheet_index, prop,
                 0, col_idx, row_heights, column_widths, style_registry,
+                control_values,
             );
             eval_results.push((prop.id, prop.attribute.clone(), "column".to_string(), col_idx, None, val));
         }
@@ -1049,6 +1071,7 @@ pub fn re_evaluate_all_properties(
             let val = evaluate_property(
                 grids, sheet_names, sheet_index, prop,
                 row_idx, 0, row_heights, column_widths, style_registry,
+                control_values,
             );
             eval_results.push((prop.id, prop.attribute.clone(), "row".to_string(), row_idx, None, val));
         }
@@ -1058,6 +1081,7 @@ pub fn re_evaluate_all_properties(
             let val = evaluate_property(
                 grids, sheet_names, sheet_index, prop,
                 row_idx, col_idx, row_heights, column_widths, style_registry,
+                control_values,
             );
             eval_results.push((prop.id, prop.attribute.clone(), "cell".to_string(), row_idx, Some(col_idx), val));
         }

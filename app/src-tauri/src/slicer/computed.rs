@@ -73,6 +73,7 @@ fn evaluate_slicer_property(
     row_heights: &HashMap<u32, f64>,
     column_widths: &HashMap<u32, f64>,
     styles: &StyleRegistry,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> CellValue {
     let ast = match &prop.cached_ast {
         Some(ast) => ast.clone(),
@@ -92,6 +93,7 @@ fn evaluate_slicer_property(
         row_heights: Some(row_heights.clone()),
         column_widths: Some(column_widths.clone()),
         hidden_rows: None,
+        control_values: control_values.cloned(),
     };
 
     evaluate_formula_with_context(
@@ -365,10 +367,16 @@ pub fn get_slicer_available_attributes() -> Vec<String> {
 pub fn add_slicer_computed_property(
     state: State<AppState>,
     slicer_state: State<SlicerState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     slicer_id: identity::EntityId,
     attribute: String,
     formula: String,
 ) -> Result<SlicerComputedPropertyResult, String> {
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     // Validate attribute
     let valid = slicer_available_attributes();
     if !valid.contains(&attribute.as_str()) {
@@ -430,6 +438,7 @@ pub fn add_slicer_computed_property(
         &row_heights,
         &column_widths,
         &styles,
+        Some(&control_values),
     );
     prop.cached_value = Some(value.clone());
 
@@ -494,10 +503,16 @@ pub fn add_slicer_computed_property(
 pub fn update_slicer_computed_property(
     state: State<AppState>,
     slicer_state: State<SlicerState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     prop_id: identity::EntityId,
     attribute: Option<String>,
     formula: Option<String>,
 ) -> Result<SlicerComputedPropertyResult, String> {
+    // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     // Validate attribute if provided
     if let Some(ref attr) = attribute {
         let valid = slicer_available_attributes();
@@ -586,6 +601,7 @@ pub fn update_slicer_computed_property(
             &row_heights,
             &column_widths,
             &styles,
+            Some(&control_values),
         )
     };
 
@@ -739,6 +755,7 @@ pub fn re_evaluate_slicer_computed_properties(
     column_widths: &HashMap<u32, f64>,
     styles: &StyleRegistry,
     slicer_state: &SlicerState,
+    control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> HashSet<identity::EntityId> {
     let mut affected_prop_ids: HashSet<identity::EntityId> = HashSet::new();
     let mut modified_slicers: HashSet<identity::EntityId> = HashSet::new();
@@ -794,6 +811,7 @@ pub fn re_evaluate_slicer_computed_properties(
                     row_heights,
                     column_widths,
                     styles,
+                    control_values,
                 )
             };
 

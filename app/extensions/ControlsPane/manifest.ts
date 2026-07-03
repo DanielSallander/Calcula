@@ -4,11 +4,13 @@
 import React from "react";
 import type { AddInManifest, DialogDefinition, DialogProps } from "@api";
 import type { PanelDefinition } from "@api/ui";
-import { FilterPaneSection } from "./components/FilterPaneSection";
+import { ControlsPaneSection } from "./components/ControlsPaneSection";
 import { AddFilterDialog } from "./components/AddFilterDialog";
+import { AddControlDialog } from "./components/AddControlDialog";
 
 export const CONTROLS_PANE_TAB_ID = "controls-pane";
 export const ADD_FILTER_DIALOG_ID = "controls-pane-add-filter";
+export const ADD_CONTROL_DIALOG_ID = "controls-pane-add-control";
 
 export const ControlsPaneManifest: AddInManifest = {
   id: "calcula.controls-pane",
@@ -32,7 +34,7 @@ export const ControlsPanePanelDefinition: PanelDefinition = {
     {
       id: "controls-pane.items",
       label: "Controls",
-      component: FilterPaneSection,
+      component: ControlsPaneSection,
       // The item cards are a fixed-height (56px) band-designed strip;
       // trust it inline and skip the shell's height probe.
       ribbonPresentation: "inline",
@@ -46,5 +48,11 @@ export const ControlsPanePanelDefinition: PanelDefinition = {
 export const AddFilterDialogDefinition: DialogDefinition = {
   id: ADD_FILTER_DIALOG_ID,
   component: AddFilterDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const AddControlDialogDefinition: DialogDefinition = {
+  id: ADD_CONTROL_DIALOG_ID,
+  component: AddControlDialog as React.ComponentType<DialogProps>,
   priority: 100,
 };

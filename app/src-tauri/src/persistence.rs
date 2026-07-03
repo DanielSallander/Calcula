@@ -878,6 +878,100 @@ fn restore_ribbon_filters(
 }
 
 // ============================================================================
+// PaneControl <-> SavedPaneControl conversion (Controls pane)
+// ============================================================================
+
+/// Collect pane controls from PaneControlState into SavedPaneControl format.
+/// Sorted by (order, id) for deterministic artifact bytes across saves.
+pub(crate) fn collect_pane_controls_for_save(
+    pane_control_state: &State<crate::pane_control::PaneControlState>,
+) -> Vec<persistence::SavedPaneControl> {
+    let controls = pane_control_state.controls.lock().unwrap();
+    let mut saved: Vec<persistence::SavedPaneControl> =
+        controls.values().map(pane_control_to_saved).collect();
+    saved.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+    saved
+}
+
+fn pane_control_to_saved(c: &crate::pane_control::PaneControl) -> persistence::SavedPaneControl {
+    persistence::SavedPaneControl {
+        id: c.id,
+        name: c.name.clone(),
+        control_type: c.control_type.as_type_str().to_string(),
+        // Opaque app-owned JSON payloads (like bi_pivot_metadata): the
+        // persistence layer never inspects config/value.
+        config: serde_json::to_value(&c.config).unwrap_or(serde_json::Value::Null),
+        // Option<ControlValue>: None serializes to null (value-less control).
+        value: serde_json::to_value(&c.value).unwrap_or(serde_json::Value::Null),
+        order: c.order,
+    }
+}
+
+/// Convert one SavedPaneControl back to the live entity. None (skip) when the
+/// control_type string is unknown or the config payload does not deserialize —
+/// a single bad control must not fail the whole load. pub(crate): the .calp
+/// pull path (calp_commands) materializes pulled pane controls through the
+/// same converter so wire-format handling can never drift from .cala load.
+pub(crate) fn saved_to_pane_control(
+    saved: &persistence::SavedPaneControl,
+) -> Option<crate::pane_control::PaneControl> {
+    let Some(control_type) = crate::pane_control::PaneControlType::from_type_str(&saved.control_type)
+    else {
+        crate::log_warn!(
+            "PANE_CONTROL",
+            "Skipping saved pane control \"{}\" ({}): unknown control type \"{}\"",
+            saved.name,
+            saved.id,
+            saved.control_type
+        );
+        return None;
+    };
+    let config: crate::pane_control::PaneControlConfig =
+        match serde_json::from_value(saved.config.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::log_warn!(
+                    "PANE_CONTROL",
+                    "Skipping saved pane control \"{}\" ({}): bad config payload: {}",
+                    saved.name,
+                    saved.id,
+                    e
+                );
+                return None;
+            }
+        };
+    // A malformed value degrades to None (control present, no published value)
+    // rather than dropping the whole control.
+    let value: Option<engine::ControlValue> =
+        serde_json::from_value(saved.value.clone()).unwrap_or(None);
+    Some(crate::pane_control::PaneControl {
+        id: saved.id,
+        name: saved.name.clone(),
+        control_type,
+        config,
+        value,
+        order: saved.order,
+    })
+}
+
+/// Restore pane controls from SavedPaneControl format into PaneControlState.
+/// Unknown/bad entries are skipped with a warning (see saved_to_pane_control).
+fn restore_pane_controls(
+    saved_controls: &[persistence::SavedPaneControl],
+    pane_control_state: &State<crate::pane_control::PaneControlState>,
+) {
+    let mut controls = pane_control_state.controls.lock().unwrap();
+
+    controls.clear();
+
+    for saved in saved_controls {
+        if let Some(control) = saved_to_pane_control(saved) {
+            controls.insert(control.id, control);
+        }
+    }
+}
+
+// ============================================================================
 // Chart <-> SavedChart conversion
 // ============================================================================
 
@@ -1141,6 +1235,7 @@ pub fn save_file(
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
@@ -1160,6 +1255,8 @@ pub fn save_file(
                 state.clone(),
                 user_files_state.clone(),
                 pivot_state.clone(),
+                pane_control_state.clone(),
+                ribbon_filter_state.clone(),
                 None,
             );
         }
@@ -1174,6 +1271,7 @@ pub fn save_file(
     let sheet_ids_save = state.sheet_ids.lock().map_err(|e| e.to_string())?;
     workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_save);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
+    workbook.pane_controls = collect_pane_controls_for_save(&pane_control_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     workbook.extension_data = state.extension_data.lock().unwrap().clone();
@@ -1318,6 +1416,7 @@ pub fn open_file(
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     bi_state: State<'_, crate::bi::types::BiState>,
@@ -1604,6 +1703,9 @@ pub fn open_file(
 
     // Restore ribbon filters from workbook
     restore_ribbon_filters(&workbook.ribbon_filters, &ribbon_filter_state);
+
+    // Restore pane controls (Controls pane) from workbook
+    restore_pane_controls(&workbook.pane_controls, &pane_control_state);
 
     // Restore pivot layouts from workbook
     *state.pivot_layouts.lock().unwrap() = workbook.pivot_layouts.clone();
@@ -1913,6 +2015,7 @@ pub fn new_file(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     script_state: State<crate::scripting::types::ScriptState>,
     window: tauri::Window,
 ) -> Result<(), String> {
@@ -2073,6 +2176,9 @@ pub fn new_file(
     slicer_state.computed_properties.lock().unwrap().clear();
     slicer_state.computed_prop_dependencies.lock().unwrap().clear();
     slicer_state.computed_prop_dependents.lock().unwrap().clear();
+
+    // Clear pane control state (Controls pane)
+    pane_control_state.controls.lock().unwrap().clear();
 
     // Clear chart state
     state.charts.lock().unwrap().clear();
@@ -2720,6 +2826,7 @@ pub fn auto_recover_save(
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
     script_state: State<crate::scripting::types::ScriptState>,
     window: tauri::Window,
 ) -> Result<String, String> {
@@ -2763,6 +2870,7 @@ pub fn auto_recover_save(
     workbook.tables = collect_tables_for_save(&tables, &sheet_ids_ar);
     workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_ar);
     workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
+    workbook.pane_controls = collect_pane_controls_for_save(&pane_control_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     workbook.extension_data = state.extension_data.lock().unwrap().clone();

@@ -20,6 +20,7 @@ export function PublishDialog({ onClose }: DialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<PublishReport | null>(null);
   const [reportLabel, setReportLabel] = useState<string>("");
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   const parseIndices = () =>
     sheetIndices
@@ -34,6 +35,7 @@ export function PublishDialog({ onClose }: DialogProps) {
       const result = await publishPreview(parseIndices());
       setReport(result.report);
       setReportLabel(`Preview — would publish ${result.sheetNames.join(", ")}`);
+      setWarnings(result.warnings);
       setStatus(null);
     } catch (err: unknown) {
       setError(String(err));
@@ -59,6 +61,7 @@ export function PublishDialog({ onClose }: DialogProps) {
       );
       setReport(result.report);
       setReportLabel(`Published ${result.packageName} v${result.version}`);
+      setWarnings(result.warnings);
     } catch (err: unknown) {
       setError(String(err));
       setStatus(null);
@@ -111,6 +114,19 @@ export function PublishDialog({ onClose }: DialogProps) {
 
       {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}
       {status && <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>}
+
+      {warnings.length > 0 && (
+        <div style={{
+          fontSize: "12px", margin: "8px 0", padding: "6px 8px",
+          backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
+        }}>
+          <strong>Warnings ({warnings.length})</strong> — the package publishes
+          as-is; these only degrade for subscribers.
+          {warnings.map((w, i) => (
+            <div key={i} style={{ marginLeft: 8, marginTop: 4 }}>{w}</div>
+          ))}
+        </div>
+      )}
 
       {report && (
         <div style={{ margin: "8px 0", padding: "8px", border: "1px solid #ddd",

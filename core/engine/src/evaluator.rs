@@ -19,6 +19,7 @@
 //!
 
 use crate::cell::{CellError, CellValue, DictKey};
+use crate::control_values::ControlValue;
 use crate::coord::col_to_index;
 use crate::cube::{cube_call_key, CubeBinding, CubeCallResult, CubePrefetch, CubeResolver};
 use crate::date_serial;
@@ -325,6 +326,12 @@ pub struct EvalContext {
     /// An `Arc` so it is cheap to attach to the per-cell `EvalContext` built in
     /// recalc loops without deep-cloning the (potentially large) prefetch.
     pub cube_prefetch: Option<std::sync::Arc<CubePrefetch>>,
+    /// Snapshot of every named UI control's current value, for GET.CONTROLVALUE.
+    /// Keys are UPPERCASED control names (lookup is case-insensitive). Built by
+    /// the app layer before a recalc (pane controls > ribbon filters > named
+    /// on-grid controls precedence). `None` => GET.CONTROLVALUE evaluates to
+    /// #N/A (unless the formula supplies a default argument).
+    pub control_values: Option<std::sync::Arc<HashMap<String, ControlValue>>>,
 }
 
 /// Pre-fetched data for a single writeback region, used by GATHER functions.
@@ -498,6 +505,17 @@ impl<'a> Evaluator<'a> {
     /// `EvalContext::cube_prefetch` directly instead.
     pub fn set_cube_prefetch(&mut self, prefetch: std::sync::Arc<CubePrefetch>) {
         self.context.cube_prefetch = Some(prefetch);
+    }
+
+    /// Injects the GET.CONTROLVALUE snapshot (UPPERCASE-keyed name -> value)
+    /// into the evaluation context. Used by eval paths that build their own
+    /// evaluator via `with_multi_sheet` (e.g. the dependent-recalc cascade);
+    /// paths using `with_context` set `EvalContext::control_values` directly.
+    pub fn set_control_values(
+        &mut self,
+        values: std::sync::Arc<HashMap<String, ControlValue>>,
+    ) {
+        self.context.control_values = Some(values);
     }
 
     /// Binds a name to a value in the evaluation scope, so a bare identifier
@@ -1423,6 +1441,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::GetRowHeight => self.fn_get_row_height(args),
             BuiltinFunction::GetColumnWidth => self.fn_get_column_width(args),
             BuiltinFunction::GetCellFillColor => self.fn_get_cell_fillcolor(args),
+            BuiltinFunction::GetControlValue => self.fn_get_control_value(args),
 
             // Reference functions
             BuiltinFunction::Row => self.fn_row(args),
@@ -3438,6 +3457,63 @@ impl<'a> Evaluator<'a> {
 
         let style = style_registry.get(style_index);
         EvalResult::Text(style.fill.background_color().to_css_default())
+    }
+
+    /// GET.CONTROLVALUE(name, [default])
+    /// Returns the current value of the named UI control (pane control, ribbon
+    /// filter, or named on-grid control). Lookup is case-insensitive against
+    /// the UPPERCASE-keyed snapshot in `EvalContext.control_values`.
+    ///
+    /// - Number / Text / Boolean control values return the matching scalar.
+    /// - TextList (multi-select filter): 1 item collapses to Text, 2+ items
+    ///   return a vertical spill (n rows x 1 column), 0 items yield #N/A.
+    /// - Unknown name, or no snapshot attached (`None`): the evaluated
+    ///   `default` argument if provided, else #N/A.
+    fn fn_get_control_value(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let name_result = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = name_result {
+            return EvalResult::Error(e);
+        }
+        let name = match &name_result {
+            EvalResult::Text(s) => s.clone(),
+            EvalResult::Number(_) | EvalResult::Boolean(_) => name_result.as_text(),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let key = name.trim().to_uppercase();
+
+        let hit = self
+            .context
+            .control_values
+            .as_ref()
+            .and_then(|map| map.get(&key));
+
+        match hit {
+            Some(ControlValue::Number(n)) => EvalResult::Number(*n),
+            Some(ControlValue::Text(s)) => EvalResult::Text(s.clone()),
+            Some(ControlValue::Boolean(b)) => EvalResult::Boolean(*b),
+            Some(ControlValue::TextList(items)) => match items.len() {
+                // An empty selection is a present-but-valueless control: #N/A
+                // (deliberately NOT the default — the control exists).
+                0 => EvalResult::Error(CellError::NA),
+                1 => EvalResult::Text(items[0].clone()),
+                // 2+ items: vertical spill (flat Array => (n, 1) dimensions).
+                _ => EvalResult::Array(
+                    items.iter().map(|s| EvalResult::Text(s.clone())).collect(),
+                ),
+            },
+            // Unknown name or no snapshot: default argument if given, else #N/A.
+            None => {
+                if args.len() == 2 {
+                    self.evaluate(&args[1])
+                } else {
+                    EvalResult::Error(CellError::NA)
+                }
+            }
+        }
     }
 
     // ==================== Criteria Matching Infrastructure ====================
@@ -15783,6 +15859,208 @@ mod tests {
             EvalResult::Number(n) => assert!(*n > 0.0, "VDB should be positive, got {}", n),
             _ => panic!("Expected Number, got {:?}", result),
         }
+    }
+
+    // ==================== GET.CONTROLVALUE ====================
+
+    /// Builds an EvalContext with a control-values snapshot. Keys are stored
+    /// UPPERCASED, exactly as the app-layer snapshot builder produces them.
+    fn control_ctx(entries: &[(&str, ControlValue)]) -> EvalContext {
+        let mut map: HashMap<String, ControlValue> = HashMap::new();
+        for (k, v) in entries {
+            map.insert(k.to_uppercase(), v.clone());
+        }
+        EvalContext {
+            control_values: Some(std::sync::Arc::new(map)),
+            ..Default::default()
+        }
+    }
+
+    fn control_eval<'g>(grid: &'g Grid, ctx: EvalContext) -> Evaluator<'g> {
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        Evaluator::with_context(grid, ms, ctx)
+    }
+
+    #[test]
+    fn test_get_controlvalue_scalar_variants() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[
+            ("SLIDER1", ControlValue::Number(42.5)),
+            ("REGION", ControlValue::Text("North".to_string())),
+            ("SHOWALL", ControlValue::Boolean(true)),
+        ]);
+        let eval = control_eval(&grid, ctx);
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("SLIDER1")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(42.5));
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("REGION")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Text("North".to_string()));
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("SHOWALL")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Boolean(true));
+    }
+
+    #[test]
+    fn test_get_controlvalue_case_insensitive_and_trimmed() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[("MYSLIDER", ControlValue::Number(7.0))]);
+        let eval = control_eval(&grid, ctx);
+
+        // Lowercase name resolves (map keys are UPPERCASED, lookup uppercases).
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("myslider")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(7.0));
+
+        // Surrounding whitespace is trimmed before lookup.
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("  MySlider  ")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(7.0));
+    }
+
+    #[test]
+    fn test_get_controlvalue_missing_name_is_na() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[("EXISTS", ControlValue::Number(1.0))]);
+        let eval = control_eval(&grid, ctx);
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("NOPE")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::NA));
+    }
+
+    #[test]
+    fn test_get_controlvalue_default_arg_on_miss() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[("EXISTS", ControlValue::Number(1.0))]);
+        let eval = control_eval(&grid, ctx);
+
+        // Miss with a default: the evaluated default is returned.
+        let expr = make_fn_expr(
+            BuiltinFunction::GetControlValue,
+            vec![text("NOPE"), num(99.0)],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(99.0));
+
+        // Text default works too.
+        let expr = make_fn_expr(
+            BuiltinFunction::GetControlValue,
+            vec![text("NOPE"), text("(none)")],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Text("(none)".to_string()));
+
+        // Hit ignores the default.
+        let expr = make_fn_expr(
+            BuiltinFunction::GetControlValue,
+            vec![text("EXISTS"), num(99.0)],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(1.0));
+    }
+
+    #[test]
+    fn test_get_controlvalue_none_map_is_na() {
+        // No snapshot attached (plain Evaluator::new): #N/A without a default,
+        // the default when one is given.
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("ANY")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::NA));
+
+        let expr = make_fn_expr(
+            BuiltinFunction::GetControlValue,
+            vec![text("ANY"), num(5.0)],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(5.0));
+    }
+
+    #[test]
+    fn test_get_controlvalue_textlist_single_collapses_to_text() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[(
+            "FILTER1",
+            ControlValue::TextList(vec!["OnlyOne".to_string()]),
+        )]);
+        let eval = control_eval(&grid, ctx);
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("FILTER1")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Text("OnlyOne".to_string()));
+    }
+
+    #[test]
+    fn test_get_controlvalue_textlist_multi_spills_vertically() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[(
+            "FILTER1",
+            ControlValue::TextList(vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+            ]),
+        )]);
+        let eval = control_eval(&grid, ctx);
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("FILTER1")]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(
+            result,
+            EvalResult::Array(vec![
+                EvalResult::Text("A".to_string()),
+                EvalResult::Text("B".to_string()),
+                EvalResult::Text("C".to_string()),
+            ])
+        );
+        // A flat Array spills as n rows x 1 column (vertical).
+        assert_eq!(result.spill_dimensions(), (3, 1));
+    }
+
+    #[test]
+    fn test_get_controlvalue_textlist_empty_is_na_even_with_default() {
+        // An empty selection is a present-but-valueless control: #N/A, and the
+        // default does NOT apply (the control exists — this is not a miss).
+        let grid = Grid::new();
+        let ctx = control_ctx(&[("FILTER1", ControlValue::TextList(vec![]))]);
+        let eval = control_eval(&grid, ctx);
+
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![text("FILTER1")]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::NA));
+
+        let expr = make_fn_expr(
+            BuiltinFunction::GetControlValue,
+            vec![text("FILTER1"), num(0.0)],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::NA));
+    }
+
+    #[test]
+    fn test_get_controlvalue_propagates_name_arg_error() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[("X", ControlValue::Number(1.0))]);
+        let eval = control_eval(&grid, ctx);
+
+        // 1/0 as the name argument: the #DIV/0! propagates out.
+        let div0 = Expression::BinaryOp {
+            left: Box::new(num(1.0)),
+            op: BinaryOperator::Divide,
+            right: Box::new(num(0.0)),
+        };
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![div0]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Div0));
+    }
+
+    #[test]
+    fn test_get_controlvalue_arg_count_errors() {
+        let grid = Grid::new();
+        let ctx = control_ctx(&[("X", ControlValue::Number(1.0))]);
+        let eval = control_eval(&grid, ctx);
+
+        // 0 args -> #VALUE!
+        let expr = make_fn_expr(BuiltinFunction::GetControlValue, vec![]);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Value));
+
+        // 3 args -> #VALUE!
+        let expr = make_fn_expr(
+            BuiltinFunction::GetControlValue,
+            vec![text("X"), num(1.0), num(2.0)],
+        );
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Value));
     }
 }
 

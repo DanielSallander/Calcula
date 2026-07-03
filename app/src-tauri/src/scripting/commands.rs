@@ -264,6 +264,8 @@ pub(crate) fn apply_script_modified_grids(
     file_state: &State<FileState>,
     user_files_state: &State<UserFilesState>,
     pivot_state: &State<'_, crate::pivot::PivotState>,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     modified_grids: &[Grid],
     active_sheet: usize,
     cells_modified: u32,
@@ -273,6 +275,16 @@ pub(crate) fn apply_script_modified_grids(
     if cells_modified == 0 || modified_grids.is_empty() {
         return Ok(());
     }
+
+    // GET.CONTROLVALUE snapshot: built ONCE, BEFORE any grid locks (canonical
+    // lock order: control stores first, grids last). Consumed by the
+    // active-sheet batch below; the per-sheet recalc passes rebuild their own
+    // snapshot from the same states (recalculate_sheet_values builds before
+    // its grid locks too). Without this, a script write would re-evaluate
+    // GET.CONTROLVALUE formulas with an empty snapshot and clobber them to #N/A.
+    let control_values = crate::control_values::build_control_values(
+        state, pane_control_state, ribbon_filter_state,
+    );
 
     // Build the active-sheet diff WITHOUT mutating AppState. Hold the AppState
     // grid locks only long enough to compute the diff, then drop them.
@@ -361,13 +373,14 @@ pub(crate) fn apply_script_modified_grids(
         // Active-sheet audit (transparency): accurate sheet + effective-change count
         // + range. Recorded before the move into update_cells_batch.
         record_script_grid_mutation(state, surface, surface_id, active_sheet, cell_count as u32, &updates);
-        let r = crate::commands::data::update_cells_batch(
+        let r = crate::commands::data::update_cells_batch_with_controls(
             state.clone(),
             file_state.clone(),
             user_files_state.clone(),
             pivot_state.clone(),
             updates,
             None,
+            Some(control_values),
         );
         if r.is_ok() {
             log_info!(
@@ -400,10 +413,24 @@ pub(crate) fn apply_script_modified_grids(
         // active sheet (active formulas that READ the written cells — the batch
         // path's cascade is seeded only from active-sheet writes, so it misses
         // active -> non-active references). Reuses the .calp refresh pattern.
+        // Each pass receives the pane-control/ribbon-filter states so
+        // GET.CONTROLVALUE formulas re-evaluate against the real snapshot.
         for w in &non_active_writes {
-            crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, w.sheet_index);
+            crate::calculation::recalculate_sheet_values(
+                state,
+                user_files_state,
+                pivot_state,
+                w.sheet_index,
+                Some((pane_control_state, ribbon_filter_state)),
+            );
         }
-        crate::calculation::recalculate_sheet_values(state, user_files_state, pivot_state, active_sheet);
+        crate::calculation::recalculate_sheet_values(
+            state,
+            user_files_state,
+            pivot_state,
+            active_sheet,
+            Some((pane_control_state, ribbon_filter_state)),
+        );
         // Dirty flag (update_cells_batch sets it only when there was an active diff).
         if let Ok(mut modified) = file_state.is_modified.lock() {
             *modified = true;
@@ -435,10 +462,12 @@ pub(crate) fn apply_script_modified_grids(
 ///    and a single undo entry — instead of a wholesale grid swap.
 /// 4. Returns the result to the frontend
 ///
-/// The `file_state`, `user_files_state`, and `pivot_state` parameters exist
-/// solely so this command can forward them to `update_cells_batch`; Tauri
-/// injects them by type from the managed-state set, so no change to the
-/// `generate_handler!` registration is needed.
+/// The `file_state`, `user_files_state`, `pivot_state`, `pane_control_state`,
+/// and `ribbon_filter_state` parameters exist solely so this command can
+/// forward them to the apply path (`update_cells_batch` + recalc, incl. the
+/// GET.CONTROLVALUE snapshot); Tauri injects them by type from the
+/// managed-state set, so no change to the `generate_handler!` registration is
+/// needed.
 #[tauri::command]
 pub fn run_script(
     state: State<AppState>,
@@ -446,6 +475,8 @@ pub fn run_script(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RunScriptRequest,
     window: tauri::Window,
 ) -> Result<RunScriptResponse, String> {
@@ -499,6 +530,8 @@ pub fn run_script(
             &file_state,
             &user_files_state,
             &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
             &modified_grids,
             active_sheet,
             *cells_modified,

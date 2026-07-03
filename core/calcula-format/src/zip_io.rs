@@ -7,6 +7,7 @@ use crate::error::FormatError;
 use crate::features::tables::TableDef;
 use crate::features::slicers::SlicerDef;
 use crate::features::ribbon_filters::RibbonFilterDef;
+use crate::features::pane_controls::PaneControlDef;
 use crate::features::scripts::ScriptDef;
 use crate::features::notebooks::NotebookDef;
 use crate::features::pivot_layouts::PivotLayoutDef;
@@ -21,7 +22,7 @@ use crate::sheet_styles::{
 use engine::theme::ThemeDefinition;
 use identity::SheetId;
 use crate::features::object_scripts::ObjectScriptDef;
-use persistence::{SavedChart, SavedNotebook, SavedObjectScript, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
+use persistence::{SavedChart, SavedNotebook, SavedObjectScript, SavedPaneControl, SavedPivotLayout, SavedRibbonFilter, SavedScript, SavedSlicer, SavedSparkline, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use zip::write::FileOptions;
 use zip::CompressionMethod;
@@ -47,6 +48,9 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }
     if !workbook.ribbon_filters.is_empty() {
         manifest.features.push("ribbon_filters".to_string());
+    }
+    if !workbook.pane_controls.is_empty() {
+        manifest.features.push("pane_controls".to_string());
     }
     if !workbook.scripts.is_empty() {
         manifest.features.push("scripts".to_string());
@@ -207,6 +211,17 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
             options.clone(),
         )?;
         zip.write_all(filter_json.as_bytes())?;
+    }
+
+    // Write pane controls (Controls Pane)
+    for pane_control in &workbook.pane_controls {
+        let control_def = PaneControlDef::from(pane_control);
+        let control_json = serde_json::to_string_pretty(&control_def)?;
+        zip.start_file(
+            format!("pane_controls/control_{}.json", pane_control.id),
+            options.clone(),
+        )?;
+        zip.write_all(control_json.as_bytes())?;
     }
 
     // Write object scripts (scriptable objects)
@@ -649,6 +664,29 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read pane controls (Controls Pane). Old files without the feature flag
+    // load as an empty list.
+    let mut pane_controls: Vec<SavedPaneControl> = Vec::new();
+    if manifest.features.contains(&"pane_controls".to_string()) {
+        let control_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("pane_controls/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for control_name in control_names {
+            if let Some(control_def) = read_optional_json::<PaneControlDef>(&mut archive, &control_name)? {
+                pane_controls.push(SavedPaneControl::from(&control_def));
+            }
+        }
+    }
+
     // Read scripts
     let mut scripts: Vec<SavedScript> = Vec::new();
     if manifest.features.contains(&"scripts".to_string()) {
@@ -765,6 +803,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         tables,
         slicers,
         ribbon_filters,
+        pane_controls,
         user_files,
         theme,
         scripts,
@@ -915,6 +954,7 @@ mod tests {
             tables: vec![],
             slicers: vec![],
             ribbon_filters: vec![],
+            pane_controls: vec![],
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
@@ -1129,6 +1169,64 @@ mod tests {
         assert_eq!(af.condition1.value, "100");
         assert_eq!(af.condition2.as_ref().expect("condition2").operator, "lessThan");
         assert_eq!(af.logic, "and");
+    }
+
+    #[test]
+    fn test_roundtrip_pane_controls() {
+        // Pane controls (Controls Pane) persist one file per control under
+        // pane_controls/control_{id}.json. `config`/`value` are opaque JSON and
+        // must round-trip byte-identical (structurally).
+        let mut workbook = make_test_workbook();
+        let slider_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let button_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        workbook.pane_controls.push(persistence::SavedPaneControl {
+            id: slider_id,
+            name: "Growth".to_string(),
+            control_type: "slider".to_string(),
+            config: serde_json::json!({
+                "type": "slider", "min": 0.0, "max": 1.0, "step": 0.05, "showValue": true
+            }),
+            value: serde_json::json!({ "type": "number", "value": 0.25 }),
+            order: 3,
+        });
+        workbook.pane_controls.push(persistence::SavedPaneControl {
+            id: button_id,
+            name: "Refresh".to_string(),
+            control_type: "button".to_string(),
+            config: serde_json::json!({ "type": "button", "label": "Refresh data" }),
+            value: serde_json::Value::Null, // value-less control
+            order: 7,
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane_controls.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.pane_controls.len(), 2, "pane controls must survive the .cala round-trip");
+        let slider = loaded.pane_controls.iter().find(|c| c.id == slider_id).expect("slider present");
+        assert_eq!(slider.name, "Growth");
+        assert_eq!(slider.control_type, "slider");
+        assert_eq!(slider.config, workbook.pane_controls[0].config);
+        assert_eq!(slider.value, workbook.pane_controls[0].value);
+        assert_eq!(slider.order, 3);
+        let button = loaded.pane_controls.iter().find(|c| c.id == button_id).expect("button present");
+        assert_eq!(button.control_type, "button");
+        assert!(button.value.is_null(), "value-less control must round-trip as null");
+        assert_eq!(button.order, 7);
+    }
+
+    #[test]
+    fn test_pane_controls_absent_defaults_to_empty() {
+        // Old files (written before pane controls existed) have no
+        // pane_controls feature flag or entries — they must load as an
+        // empty list.
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_pane_controls.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.pane_controls.is_empty());
     }
 
     #[test]
