@@ -1,5 +1,7 @@
 //! FILENAME: app/extensions/EvaluateFormula/handlers/formulasMenuItemBuilder.ts
-// PURPOSE: Registers the "Evaluate Formula..." item in the Formulas menu.
+// PURPOSE: Registers the "Evaluate Formula..." item in the Formulas menu, with a
+//          "Visualize Formula..." submenu child (owned here by design — the
+//          FormulaVisualizer extension only registers the "formula-visualizer" dialog).
 // CONTEXT: Uses registerMenuItem to append to the existing "formulas" menu
 //          (created by the Tracing extension).
 
@@ -7,6 +9,7 @@ import {
   registerMenuItem,
   DialogExtensions,
   IconEvaluateFormula,
+  IconVisualizeFormula,
 } from "@api";
 
 // ============================================================================
@@ -53,5 +56,19 @@ export function registerEvaluateFormulaMenuItem(): void {
         activeCol: sel?.activeCol ?? 0,
       });
     },
+    children: [
+      {
+        id: "formulas:evalFormula:visualize",
+        label: "Visualize Formula...",
+        icon: IconVisualizeFormula,
+        action: () => {
+          const sel = currentSelection;
+          DialogExtensions.openDialog("formula-visualizer", {
+            activeRow: sel?.activeRow ?? 0,
+            activeCol: sel?.activeCol ?? 0,
+          });
+        },
+      },
+    ],
   });
 }
