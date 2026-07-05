@@ -51,6 +51,7 @@ pub enum ObjectScriptObjectTypeDef {
     Table,
     NamedRange,
     Panel,
+    Range,
 }
 
 /// Access level in the .cala JSON format.
@@ -103,6 +104,7 @@ impl From<&ScriptableObjectType> for ObjectScriptObjectTypeDef {
             ScriptableObjectType::Table => ObjectScriptObjectTypeDef::Table,
             ScriptableObjectType::NamedRange => ObjectScriptObjectTypeDef::NamedRange,
             ScriptableObjectType::Panel => ObjectScriptObjectTypeDef::Panel,
+            ScriptableObjectType::Range => ObjectScriptObjectTypeDef::Range,
         }
     }
 }
@@ -125,6 +127,7 @@ impl From<&ObjectScriptObjectTypeDef> for ScriptableObjectType {
             ObjectScriptObjectTypeDef::Table => ScriptableObjectType::Table,
             ObjectScriptObjectTypeDef::NamedRange => ScriptableObjectType::NamedRange,
             ObjectScriptObjectTypeDef::Panel => ScriptableObjectType::Panel,
+            ObjectScriptObjectTypeDef::Range => ScriptableObjectType::Range,
         }
     }
 }

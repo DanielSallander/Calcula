@@ -9,6 +9,13 @@ import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/view
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { columnToLetter } from "../../../types";
 import { getColumnHeaderOverride, type ColumnHeaderOverride } from "../../../../api/columnHeaderOverrides";
+import {
+  hasRowHeaderOverrides,
+  getRowHeaderOverride,
+  hasRowGutterWidgets,
+  getRowGutterWidget,
+  drawRowGutterGlyph,
+} from "../../../../api/rowHeaderOverrides";
 
 /** Color for the double-line indicator drawn at hidden row/column boundaries. */
 const HIDDEN_INDICATOR_COLOR = "#4a4a4a";
@@ -447,8 +454,14 @@ export function drawRowHeaders(state: RenderState): void {
       }
       const outlineBarW = config.outlineBarWidth ?? 0;
       const numberCenterX = outlineBarW + (rowHeaderWidth - outlineBarW) / 2;
-      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
-      ctx.fillText(String(row + 1), numberCenterX, y + rh / 2);
+      const override = hasRowHeaderOverrides() ? getRowHeaderOverride(row) : null;
+      ctx.fillStyle = override?.textColor
+        ?? (isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText);
+      ctx.fillText(override?.text ?? String(row + 1), numberCenterX, y + rh / 2);
+      if (hasRowGutterWidgets()) {
+        const gutterHit = getRowGutterWidget(row);
+        if (gutterHit) drawRowGutterGlyph(ctx, gutterHit.widget, outlineBarW, y, rh);
+      }
     };
 
     // Helper to draw a scrollable section of row headers
@@ -595,11 +608,17 @@ export function drawRowHeaders(state: RenderState): void {
         ctx.stroke();
       }
 
-      // Draw row number (1-based)
+      // Draw row number (1-based), honoring row-header overrides + gutter widgets
       const outlineBarW3 = config.outlineBarWidth ?? 0;
       const numberCenterX3 = outlineBarW3 + (rowHeaderWidth - outlineBarW3) / 2;
-      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
-      ctx.fillText(String(row + 1), numberCenterX3, y + rowHeight / 2);
+      const override3 = hasRowHeaderOverrides() ? getRowHeaderOverride(row) : null;
+      ctx.fillStyle = override3?.textColor
+        ?? (isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText);
+      ctx.fillText(override3?.text ?? String(row + 1), numberCenterX3, y + rowHeight / 2);
+      if (hasRowGutterWidgets()) {
+        const gutterHit3 = getRowGutterWidget(row);
+        if (gutterHit3) drawRowGutterGlyph(ctx, gutterHit3.widget, outlineBarW3, y, rowHeight);
+      }
 
       baseY += rowHeight;
     }

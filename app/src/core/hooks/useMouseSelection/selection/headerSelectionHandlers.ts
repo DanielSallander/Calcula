@@ -14,6 +14,11 @@ import { getColumnFromHeader, getRowFromHeader } from "../../../lib/gridRenderer
 import { getColumnWidth } from "../../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../../types";
 import { checkColumnHeaderClickInterceptor } from "../../../../api/columnHeaderOverrides";
+import {
+  hasRowGutterWidgets,
+  checkRowGutterClick,
+  ROW_GUTTER_WIDTH,
+} from "../../../../api/rowHeaderOverrides";
 
 interface HeaderSelectionDependencies {
   config: GridConfig;
@@ -201,6 +206,16 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     if (event.button === 2 && isRowWithinSelection(headerRow, selection)) {
       // Don't change selection, just let context menu appear
       return true;
+    }
+
+    // Row-gutter widgets (granular bricks phase 3): a left-click inside the
+    // gutter X-zone routes to the row's widget before default row selection.
+    if (event.button === 0 && hasRowGutterWidgets()) {
+      const outlineBarW = config.outlineBarWidth ?? 0;
+      if (mouseX >= outlineBarW && mouseX <= outlineBarW + ROW_GUTTER_WIDTH) {
+        const handled = await checkRowGutterClick(headerRow);
+        if (handled) return true;
+      }
     }
 
     // FIX: Set drag state BEFORE any async operations to prevent race conditions.

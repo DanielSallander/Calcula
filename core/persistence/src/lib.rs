@@ -117,6 +117,9 @@ pub struct Workbook {
     /// button/... typed cells). Opaque app-owned JSON payload keyed by SheetId,
     /// like conditional_formats.
     pub cell_types: Vec<SavedSheetCellTypes>,
+    /// Cell-behavior bindings (granular bricks phase 2: per-range script
+    /// behaviors). One entry per binding, keyed by SheetId.
+    pub cell_behaviors: Vec<SavedCellBehavior>,
 }
 
 /// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
@@ -156,6 +159,16 @@ pub struct SavedSheetControls {
 pub struct SavedSheetCellTypes {
     pub sheet_id: SheetId,
     pub cells: serde_json::Value,
+}
+
+/// One cell-behavior binding (granular bricks phase 2). `binding` is the
+/// opaque app-owned payload (id, scriptId, in-sheet range, dispatch metadata);
+/// the sheet association rides on the SheetId.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCellBehavior {
+    pub sheet_id: SheetId,
+    pub binding: serde_json::Value,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -406,6 +419,7 @@ impl Workbook {
             data_validations: Vec::new(),
             controls: Vec::new(),
             cell_types: Vec::new(),
+            cell_behaviors: Vec::new(),
         }
     }
 
@@ -439,6 +453,7 @@ impl Workbook {
             data_validations: Vec::new(),
             controls: Vec::new(),
             cell_types: Vec::new(),
+            cell_behaviors: Vec::new(),
         }
     }
 }
@@ -1130,6 +1145,9 @@ pub enum ScriptableObjectType {
     Table,
     NamedRange,
     Panel,
+    /// A cell-behavior binding target (granular bricks phase 2): the script's
+    /// instanceId is the binding id in the cell-behaviors store.
+    Range,
 }
 
 /// Access level for object scripts.

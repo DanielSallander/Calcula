@@ -1135,6 +1135,26 @@ export type {
   ICellTypeAPI,
 } from "./cellTypes";
 
+// Cell Behaviors (granular bricks phase 2: per-range script behaviors)
+export {
+  attachCellBehavior,
+  removeCellBehavior,
+  setCellBehaviorEnabled,
+  refreshCellBehaviors,
+  getCellBehaviorAt,
+  getCellBehaviorById,
+  listCellBehaviors,
+  hasCellBehaviors,
+  activeBehaviorSheet,
+  CELL_BEHAVIORS_CHANGED_EVENT,
+} from "./cellBehaviors";
+
+export type {
+  CellBehaviorBinding,
+  CellBehaviorClickPayload,
+  AttachCellBehaviorOptions,
+} from "./cellBehaviors";
+
 // Style Interceptors
 export {
   registerStyleInterceptor,
@@ -1154,10 +1174,30 @@ export type {
 // Column Header Overrides
 export {
   setColumnHeaderOverrideProvider,
+  registerColumnHeaderOverrideProvider,
   getColumnHeaderOverride,
   registerColumnHeaderClickInterceptor,
   checkColumnHeaderClickInterceptor,
 } from "./columnHeaderOverrides";
+
+// Row Header Overrides + Gutter Widgets (granular bricks phase 3)
+export {
+  registerRowHeaderOverrideProvider,
+  hasRowHeaderOverrides,
+  getRowHeaderOverride,
+  registerRowGutterWidget,
+  hasRowGutterWidgets,
+  getRowGutterWidget,
+  checkRowGutterClick,
+  ROW_GUTTER_WIDTH,
+} from "./rowHeaderOverrides";
+
+export type {
+  RowHeaderOverride,
+  RowHeaderOverrideProvider,
+  RowGutterWidget,
+  RowGutterWidgetRegistration,
+} from "./rowHeaderOverrides";
 
 export type {
   ColumnHeaderOverride,

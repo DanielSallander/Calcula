@@ -548,6 +548,12 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
         workbook.cell_types =
             crate::cell_types::collect_cell_types_for_save(&cell_types, sheet_ids);
     }
+
+    // ---- Cell-behavior bindings (granular bricks phase 2, per-binding) ----
+    if let Ok(behaviors) = state.cell_behaviors.lock() {
+        workbook.cell_behaviors =
+            crate::cell_behaviors::collect_cell_behaviors_for_save(&behaviors, sheet_ids);
+    }
 }
 
 /// Collect slicers from SlicerState into SavedSlicer format.
@@ -1837,6 +1843,16 @@ pub fn open_file(
         );
     }
 
+    // Restore cell-behavior bindings (granular bricks phase 2).
+    if let Ok(mut behaviors) = state.cell_behaviors.lock() {
+        behaviors.clear();
+        crate::cell_behaviors::materialize_saved_cell_behaviors(
+            &workbook.cell_behaviors,
+            &mut behaviors,
+            |sid| Some(sheet_id_to_index(&workbook, sid)),
+        );
+    }
+
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state, &workbook);
 
@@ -2163,6 +2179,9 @@ pub fn new_file(
 
     // Clear cell-type assignments
     state.cell_types.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear cell-behavior bindings
+    state.cell_behaviors.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear spill tracking
     state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();

@@ -77,6 +77,7 @@ fn object_type_to_string(t: &ScriptableObjectType) -> String {
         ScriptableObjectType::Table => "table".to_string(),
         ScriptableObjectType::NamedRange => "namedRange".to_string(),
         ScriptableObjectType::Panel => "panel".to_string(),
+        ScriptableObjectType::Range => "range".to_string(),
     }
 }
 
@@ -97,6 +98,7 @@ fn string_to_object_type(s: &str) -> Result<ScriptableObjectType, String> {
         "table" => Ok(ScriptableObjectType::Table),
         "namedRange" => Ok(ScriptableObjectType::NamedRange),
         "panel" => Ok(ScriptableObjectType::Panel),
+        "range" => Ok(ScriptableObjectType::Range),
         _ => Err(format!("Invalid object type: {}", s)),
     }
 }

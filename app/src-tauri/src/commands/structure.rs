@@ -603,6 +603,18 @@ pub fn insert_rows(
             );
         }
     }
+    // Cell-behavior bindings track their target ranges the same way.
+    {
+        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_behaviors::all_bindings(&behaviors);
+        if crate::cell_behaviors::shift_rows_for_insert(&mut behaviors, active_sheet, row, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_behaviors".to_string(),
+                crate::undo_commands::cell_behaviors_snapshot_bytes(previous),
+                "Shift cell behaviors",
+            );
+        }
+    }
     undo_stack.commit_transaction();
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
@@ -784,6 +796,17 @@ pub fn insert_columns(
                 "obj_cell_types".to_string(),
                 crate::undo_commands::cell_types_snapshot_bytes(active_sheet, previous),
                 "Shift cell types",
+            );
+        }
+    }
+    {
+        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_behaviors::all_bindings(&behaviors);
+        if crate::cell_behaviors::shift_cols_for_insert(&mut behaviors, active_sheet, col, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_behaviors".to_string(),
+                crate::undo_commands::cell_behaviors_snapshot_bytes(previous),
+                "Shift cell behaviors",
             );
         }
     }
@@ -1435,6 +1458,18 @@ pub fn delete_rows(
             );
         }
     }
+    // Bindings shrink with overlapping deletes; fully-deleted targets orphan.
+    {
+        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_behaviors::all_bindings(&behaviors);
+        if crate::cell_behaviors::shift_rows_for_delete(&mut behaviors, active_sheet, row, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_behaviors".to_string(),
+                crate::undo_commands::cell_behaviors_snapshot_bytes(previous),
+                "Shift cell behaviors",
+            );
+        }
+    }
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -1668,6 +1703,17 @@ pub fn delete_columns(
                 "obj_cell_types".to_string(),
                 crate::undo_commands::cell_types_snapshot_bytes(active_sheet, previous),
                 "Shift cell types",
+            );
+        }
+    }
+    {
+        let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_behaviors::all_bindings(&behaviors);
+        if crate::cell_behaviors::shift_cols_for_delete(&mut behaviors, active_sheet, col, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_behaviors".to_string(),
+                crate::undo_commands::cell_behaviors_snapshot_bytes(previous),
+                "Shift cell behaviors",
             );
         }
     }

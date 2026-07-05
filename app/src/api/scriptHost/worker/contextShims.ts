@@ -651,6 +651,24 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         },
       };
 
+    case "range":
+      // A cell-behavior binding (granular bricks phase 2): grid gestures reach
+      // the script asynchronously; writes go through host-side aspects clamped
+      // to the binding's target.
+      return {
+        ...base,
+        instanceId,
+        onClick: (h: Handler) => registerHook(rt, "onClick", h),
+        onDoubleClick: (h: Handler) => registerHook(rt, "onDoubleClick", h),
+        onChange: (h: Handler) => registerHook(rt, "onChange", h),
+        getAddress: () => mirror(rt, "range.address", ""),
+        getValues: () => mirror<string[][]>(rt, "range.values", []),
+        setValues: (values: string[][]) => setState(rt, "range.setValues", [values]),
+        setCellType: (typeId: string, params?: Record<string, unknown>) =>
+          setState(rt, "range.setCellType", [typeId, params ?? {}]),
+        clearCellType: () => setState(rt, "range.clearCellType", []),
+      };
+
     case "timeline":
       return {
         ...base,

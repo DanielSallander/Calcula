@@ -656,7 +656,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     for k in [
         "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
         "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
-        "obj_cell_types",
+        "obj_cell_types", "obj_cell_behaviors",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1641,6 +1641,22 @@ pub(crate) fn cell_types_snapshot_bytes(
     serde_json::to_vec(&CellTypesObjSnapshot { sheet_index, previous }).unwrap_or_default()
 }
 
+/// Snapshot for the "obj_cell_behaviors" CustomRestore — the WHOLE binding
+/// store before the mutation (bindings are workbook-level and few; a
+/// whole-store swap keeps restore trivially correct).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CellBehaviorsObjSnapshot {
+    previous: Vec<crate::cell_behaviors::CellBehaviorBinding>,
+}
+
+/// Serialized "obj_cell_behaviors" snapshot bytes (same in-open-transaction
+/// contract as cell_types_snapshot_bytes).
+pub(crate) fn cell_behaviors_snapshot_bytes(
+    previous: Vec<crate::cell_behaviors::CellBehaviorBinding>,
+) -> Vec<u8> {
+    serde_json::to_vec(&CellBehaviorsObjSnapshot { previous }).unwrap_or_default()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NamedRangeObjSnapshot {
     /// Uppercase registry key.
@@ -1790,6 +1806,18 @@ fn apply_object_swap_restore(
                 snap.previous,
             );
         }
+        "obj_cell_behaviors" => {
+            let snap: CellBehaviorsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_cell_behaviors snapshot: {}", e); return; }
+            };
+            let mut behaviors = state.cell_behaviors.lock().unwrap();
+            let current = crate::cell_behaviors::all_bindings(&behaviors);
+            push_obj_inverse(inverse_transaction, kind, &CellBehaviorsObjSnapshot {
+                previous: current,
+            });
+            crate::cell_behaviors::replace_all(&mut behaviors, snap.previous);
+        }
         "obj_named_range" => {
             let snap: NamedRangeObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -1933,6 +1961,19 @@ pub(crate) fn record_cell_types_undo(
     record_object_undo(state, "obj_cell_types", serde_json::to_vec(&snap).unwrap_or_default(), description);
 }
 
+pub(crate) fn record_cell_behaviors_undo(
+    state: &AppState,
+    previous: Vec<crate::cell_behaviors::CellBehaviorBinding>,
+    description: &str,
+) {
+    record_object_undo(
+        state,
+        "obj_cell_behaviors",
+        cell_behaviors_snapshot_bytes(previous),
+        description,
+    );
+}
+
 pub(crate) fn record_named_range_undo(
     state: &AppState,
     key: &str,
@@ -1989,6 +2030,7 @@ mod restore_registry_tests {
             ("script_grid_cells", true, CustomRestoreKind::Objects),
             ("obj_extension_data", true, CustomRestoreKind::Objects),
             ("obj_cell_types", true, CustomRestoreKind::Objects),
+            ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));

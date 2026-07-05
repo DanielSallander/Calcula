@@ -43,6 +43,7 @@ import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
 import type { DialogProps } from "@api/uiTypes";
 import { openObjectScriptEditor } from "./lib/openObjectScriptWindow";
+import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
 import {
   onSaveAndApply,
   onRegisterScript,
@@ -688,6 +689,11 @@ async function activate(context: ExtensionContext): Promise<void> {
       emitScriptsChanged(scripts);
     }),
   );
+
+  // ---- Cell-behavior bindings (granular bricks phase 2) ----
+  // Context-menu attach/edit/remove for per-range behavior scripts + the
+  // design-mode cell badge. The binding store lives in @api/cellBehaviors.
+  cleanupFunctions.push(registerCellBehaviorUx(context));
 
   // ---- Listen for edit-script requests (from context menus or property panels) ----
   cleanupFunctions.push(

@@ -66,11 +66,51 @@ import {
   type NamedRangeCoordsLike,
 } from "./objectCoords";
 import { showToast } from "../notifications";
+import { getCellBehaviorById } from "../cellBehaviors";
 import { ExtensionRegistry } from "../extensionRegistry";
 import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService } from "../componentStoreRegistry";
 import type { IStyleOverride } from "../styleInterceptors";
 
 type CleanupFn = () => void;
+
+// ============================================================================
+// Script write attribution (self-echo suppression for range behaviors)
+// ============================================================================
+// Broker-originated cell writes are remembered briefly so a range behavior's
+// onChange never re-fires for its OWN writes (the classic feedback loop).
+// Keyed per script + cell with a short TTL — the rAF-debounced cell-event
+// batch always flushes well inside it.
+
+const SCRIPT_WRITE_TTL_MS = 250;
+const recentScriptWrites = new Map<string, number>();
+
+function scriptWriteKey(scriptId: string, sheetIndex: number, row: number, col: number): string {
+  return `${scriptId}|${sheetIndex}:${row}:${col}`;
+}
+
+function recordScriptWrite(scriptId: string, sheetIndex: number, row: number, col: number): void {
+  if (recentScriptWrites.size > 8192) {
+    const now = performance.now();
+    for (const [k, expiry] of recentScriptWrites) {
+      if (expiry < now) recentScriptWrites.delete(k);
+    }
+  }
+  recentScriptWrites.set(
+    scriptWriteKey(scriptId, sheetIndex, row, col),
+    performance.now() + SCRIPT_WRITE_TTL_MS,
+  );
+}
+
+function isOwnScriptWrite(scriptId: string, sheetIndex: number, row: number, col: number): boolean {
+  const key = scriptWriteKey(scriptId, sheetIndex, row, col);
+  const expiry = recentScriptWrites.get(key);
+  if (expiry === undefined) return false;
+  if (expiry < performance.now()) {
+    recentScriptWrites.delete(key);
+    return false;
+  }
+  return true;
+}
 
 // Lazy backend imports (same pattern as scriptableObjects.ts — avoids
 // circular deps at module load).
@@ -183,6 +223,17 @@ interface MountedWorker {
 
 const mounted = new Map<string, MountedWorker>();
 const faulted = new Map<string, string>();
+
+/**
+ * Whether a mounted script declared a hook (its worker posted hookRegistered
+ * and the host wired the forwarder). Cell-behavior dispatch uses this so a
+ * binding never claims a gesture its script doesn't even handle — an
+ * onChange-only behavior must not swallow clicks.
+ */
+export function mountedScriptHasHook(scriptId: string, hook: string): boolean {
+  const mw = mounted.get(scriptId);
+  return !!mw && mw.forwarders.has(hook);
+}
 
 // ============================================================================
 // Spawn / terminate
@@ -636,12 +687,16 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "api.setCellValue": {
       const [row, col, value] = args as [number, number, string];
       const lib = await getLib();
+      recordScriptWrite(definition.id, activeSheetIndexForEvents, row, col);
       await lib.updateCell(row, col, value);
       return undefined;
     }
     case "api.updateCellsBatch": {
       const [updates] = args as [Array<{ row: number; col: number; value: string }>];
       const lib = await getLib();
+      for (const u of updates) {
+        recordScriptWrite(definition.id, activeSheetIndexForEvents, u.row, u.col);
+      }
       await lib.updateCellsBatch(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
       return undefined;
     }
@@ -714,6 +769,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "sheet.setCellValue": {
       const [row, col, value, sheetIndex] = args as [number, number, string, number?];
       const lib = await getLib();
+      recordScriptWrite(definition.id, sheetIndex ?? activeSheetIndexForEvents, row, col);
       if (sheetIndex !== undefined) {
         const active = await lib.getActiveSheet();
         if (sheetIndex !== active) {
@@ -963,6 +1019,70 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
         await lib.updateCellsBatch(updates);
       }
       emitAppEvent("namedRange:changed", { name: instanceId });
+      return undefined;
+    }
+    case "range.setValues": {
+      // Structurally clamped: a range behavior can only write inside its own
+      // binding target (R16). Same write mechanics as namedRange.setValues.
+      const [values] = args as [string[][]];
+      const b = getCellBehaviorById(instanceId);
+      if (!b) throw new BrokerError("ValidationError", `Behavior binding not found: ${instanceId}`);
+      const lib = await getLib();
+      const active = await lib.getActiveSheet();
+      const updates: Array<{ row: number; col: number; value: string }> = [];
+      const rows = b.endRow - b.startRow + 1;
+      const cols = b.endCol - b.startCol + 1;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const v = values?.[r]?.[c];
+          if (v === undefined) continue;
+          const gridRow = b.startRow + r;
+          const gridCol = b.startCol + c;
+          recordScriptWrite(mw.definition.id, b.sheetIndex, gridRow, gridCol);
+          if (b.sheetIndex === active) {
+            updates.push({ row: gridRow, col: gridCol, value: String(v) });
+          } else {
+            await lib.updateCellOnSheets([b.sheetIndex], gridRow, gridCol, String(v));
+          }
+        }
+      }
+      if (updates.length > 0) {
+        await lib.updateCellsBatch(updates);
+      }
+      return undefined;
+    }
+    case "range.setCellType": {
+      // The two-tier handshake: a script assigns an extension-tier cell type
+      // to its own target (undoable via the cell-types store).
+      const [typeId, params] = args as [string, Record<string, unknown> | undefined];
+      const b = getCellBehaviorById(instanceId);
+      if (!b) throw new BrokerError("ValidationError", `Behavior binding not found: ${instanceId}`);
+      const lib = await getLib();
+      const active = await lib.getActiveSheet();
+      if (b.sheetIndex !== active) {
+        // The cell-types backend commands operate on the active sheet (v1).
+        throw new BrokerError(
+          "HostError",
+          "range.setCellType currently requires the binding's sheet to be active",
+        );
+      }
+      const cellTypes = await import("../cellTypes");
+      await cellTypes.setCellTypeRange(b.startRow, b.startCol, b.endRow, b.endCol, typeId, params ?? {});
+      return undefined;
+    }
+    case "range.clearCellType": {
+      const b = getCellBehaviorById(instanceId);
+      if (!b) throw new BrokerError("ValidationError", `Behavior binding not found: ${instanceId}`);
+      const lib = await getLib();
+      const active = await lib.getActiveSheet();
+      if (b.sheetIndex !== active) {
+        throw new BrokerError(
+          "HostError",
+          "range.clearCellType currently requires the binding's sheet to be active",
+        );
+      }
+      const cellTypes = await import("../cellTypes");
+      await cellTypes.clearCellTypeRange(b.startRow, b.startCol, b.endRow, b.endCol);
       return undefined;
     }
     case "panel.open":
@@ -1458,6 +1578,67 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       break;
     }
 
+    // ---- range (cell-behavior bindings, granular bricks phase 2) ----
+    case "range.onClick":
+      addForwarder(mw, hook, onAppEvent("cellbehavior:clicked", (detail) => {
+        const d = detail as { bindingId: string; row: number; col: number; sheetIndex: number; ctrlKey: boolean; metaKey: boolean };
+        if (d.bindingId !== instanceId) return;
+        forwardEvent(mw, hook, {
+          row: d.row,
+          col: d.col,
+          sheetIndex: d.sheetIndex,
+          ctrlKey: d.ctrlKey,
+          metaKey: d.metaKey,
+        });
+      }));
+      break;
+    case "range.onDoubleClick":
+      addForwarder(mw, hook, onAppEvent("cellbehavior:dblclicked", (detail) => {
+        const d = detail as { bindingId: string; row: number; col: number; sheetIndex: number };
+        if (d.bindingId !== instanceId) return;
+        forwardEvent(mw, hook, { row: d.row, col: d.col, sheetIndex: d.sheetIndex });
+      }));
+      break;
+    case "range.onChange": {
+      // Per-binding delivery policy: one delivery per cell-event flush,
+      // clipped to the binding's target, capped, self-echo suppressed, and
+      // rate-limited by a token bucket so a recalc storm can't flood the
+      // worker queue.
+      const MAX_CHANGE_ENTRIES = 1000;
+      const BUCKET_CAPACITY = 20; // deliveries
+      const REFILL_PER_SECOND = 20;
+      let tokens = BUCKET_CAPACITY;
+      let lastRefill = performance.now();
+      addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
+        const b = getCellBehaviorById(instanceId);
+        if (!b || !b.enabled || b.orphaned) return;
+        const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; newValue: string }> };
+        const changes = d.changes ?? [];
+        const clipped: Array<{ row: number; col: number; newValue: string }> = [];
+        for (const c of changes) {
+          const sheet = c.sheetIndex ?? activeSheetIndexForEvents;
+          if (sheet !== b.sheetIndex) continue;
+          if (c.row < b.startRow || c.row > b.endRow || c.col < b.startCol || c.col > b.endCol) continue;
+          // Self-echo suppression: this script's own broker writes never
+          // re-fire its onChange (the classic feedback loop).
+          if (isOwnScriptWrite(definition.id, sheet, c.row, c.col)) continue;
+          clipped.push({ row: c.row, col: c.col, newValue: c.newValue });
+          if (clipped.length > MAX_CHANGE_ENTRIES) break;
+        }
+        if (clipped.length === 0) return;
+        const now = performance.now();
+        tokens = Math.min(BUCKET_CAPACITY, tokens + ((now - lastRefill) / 1000) * REFILL_PER_SECOND);
+        lastRefill = now;
+        if (tokens < 1) return; // over budget this second — drop (script re-reads via getValues)
+        tokens -= 1;
+        const truncated = clipped.length > MAX_CHANGE_ENTRIES;
+        if (truncated) clipped.length = MAX_CHANGE_ENTRIES;
+        pushRangeMirror(mw, instanceId);
+        forwardEvent(mw, hook, truncated ? { changes: clipped, truncated: true } : { changes: clipped });
+      }));
+      break;
+    }
+
     // ---- shape ----
     case "shape.onClick":
       addForwarder(mw, hook, onAppEvent("shape:clicked", (detail) => {
@@ -1686,6 +1867,30 @@ async function buildSnapshot(definition: HostMountDefinition, mw: MountedWorker)
         } catch { /* defaults */ }
         break;
       }
+      case "range": {
+        // The binding may not be in the frontend index yet at workbook-open
+        // mount time — fall back to the authoritative backend store.
+        let b = getCellBehaviorById(instanceId);
+        if (!b) {
+          try {
+            const { invokeBackend } = await import("../backend");
+            b = await invokeBackend<typeof b>("get_cell_behavior", { id: instanceId });
+          } catch { /* defaults */ }
+        }
+        if (b) {
+          const lib = await getLib();
+          const coords: NamedRangeCoordsLike = {
+            sheetIndex: b.sheetIndex,
+            startRow: b.startRow,
+            startCol: b.startCol,
+            endRow: b.endRow,
+            endCol: b.endCol,
+          };
+          properties["range.address"] = await formatRangeAddress(lib, coords);
+          properties["range.values"] = await readRangeValues(lib, coords);
+        }
+        break;
+      }
     }
   } catch {
     // Snapshot failures degrade to defaults — scripts still mount.
@@ -1828,6 +2033,30 @@ function pushNamedRangeMirror(mw: MountedWorker, instanceId: string): void {
       postMirror(mw, "namedRange.startCol", coords.startCol);
       postMirror(mw, "namedRange.endRow", coords.endRow);
       postMirror(mw, "namedRange.endCol", coords.endCol);
+    } catch { /* keep stale mirror */ }
+  })();
+}
+
+/**
+ * Refetch a range behavior's target and push its mirrors (values/address for
+ * the sync getters). The target coords come from the binding store — the
+ * binding is the source of truth, shifted by structural edits.
+ */
+function pushRangeMirror(mw: MountedWorker, bindingId: string): void {
+  void (async () => {
+    try {
+      const b = getCellBehaviorById(bindingId);
+      if (!b) return;
+      const lib = await getLib();
+      const coords: NamedRangeCoordsLike = {
+        sheetIndex: b.sheetIndex,
+        startRow: b.startRow,
+        startCol: b.startCol,
+        endRow: b.endRow,
+        endCol: b.endCol,
+      };
+      postMirror(mw, "range.values", await readRangeValues(lib, coords));
+      postMirror(mw, "range.address", await formatRangeAddress(lib, coords));
     } catch { /* keep stale mirror */ }
   })();
 }

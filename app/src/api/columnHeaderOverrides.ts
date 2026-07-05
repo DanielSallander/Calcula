@@ -65,68 +65,93 @@ export type ColumnHeaderClickInterceptorFn = (
 ) => ColumnHeaderClickResult | null;
 
 // ============================================================================
-// Internal State
+// Internal State (multi-provider: granular bricks phase 3 generalized the
+// original single last-wins slot into priority-ordered registries)
 // ============================================================================
 
-let currentProvider: ColumnHeaderOverrideProvider | null = null;
-let clickInterceptor: ColumnHeaderClickInterceptorFn | null = null;
+interface ProviderRegistration {
+  provider: ColumnHeaderOverrideProvider;
+  priority: number;
+}
+
+const providers: ProviderRegistration[] = [];
+const clickInterceptors = new Set<ColumnHeaderClickInterceptorFn>();
 
 // ============================================================================
 // API
 // ============================================================================
 
 /**
- * Set the column header override provider.
- * Only one provider can be active at a time (last one wins).
- * Pass null to clear the provider.
+ * Register a column-header override provider. Lower priority is consulted
+ * first; the first non-null override wins. Multiple extensions can register
+ * concurrently (Table + AutoFilter no longer clobber each other's slot).
  *
- * @returns A cleanup function that clears the provider.
+ * @returns A cleanup function that unregisters the provider.
  */
-export function setColumnHeaderOverrideProvider(
-  provider: ColumnHeaderOverrideProvider | null,
+export function registerColumnHeaderOverrideProvider(
+  provider: ColumnHeaderOverrideProvider,
+  priority: number = 0,
 ): () => void {
-  currentProvider = provider;
+  const registration = { provider, priority };
+  providers.push(registration);
+  providers.sort((a, b) => a.priority - b.priority);
   return () => {
-    if (currentProvider === provider) {
-      currentProvider = null;
-    }
+    const i = providers.indexOf(registration);
+    if (i >= 0) providers.splice(i, 1);
   };
 }
 
 /**
- * Get the column header override for a specific column.
- * Called by the core header renderer during painting.
+ * Set a column header override provider (legacy single-slot signature, kept
+ * for existing callers). Registers into the multi-provider registry at
+ * default priority; pass null as a no-op that returns a no-op cleanup.
  *
- * @param col - Zero-based column index
- * @param viewportStartRow - First visible row in the viewport
- * @returns Override data, or null if no override applies
+ * @returns A cleanup function that unregisters the provider.
+ */
+export function setColumnHeaderOverrideProvider(
+  provider: ColumnHeaderOverrideProvider | null,
+): () => void {
+  if (!provider) return () => {};
+  return registerColumnHeaderOverrideProvider(provider);
+}
+
+/**
+ * Get the column header override for a specific column: the first non-null
+ * answer across providers in priority order.
+ * Called by the core header renderer during painting.
  */
 export function getColumnHeaderOverride(
   col: number,
   viewportStartRow: number,
 ): ColumnHeaderOverride | null {
-  return currentProvider ? currentProvider(col, viewportStartRow) : null;
+  for (const r of providers) {
+    try {
+      const override = r.provider(col, viewportStartRow);
+      if (override) return override;
+    } catch (error) {
+      console.error("[ColumnHeaderOverrides] Error in provider:", error);
+    }
+  }
+  return null;
 }
 
 /**
- * Register a column header click interceptor.
- * Called by the core header selection handler before default column selection.
+ * Register a column header click interceptor. Multiple interceptors may
+ * register; the first non-null result wins.
  *
  * @returns A cleanup function that unregisters the interceptor.
  */
 export function registerColumnHeaderClickInterceptor(
   interceptor: ColumnHeaderClickInterceptorFn,
 ): () => void {
-  clickInterceptor = interceptor;
+  clickInterceptors.add(interceptor);
   return () => {
-    if (clickInterceptor === interceptor) {
-      clickInterceptor = null;
-    }
+    clickInterceptors.delete(interceptor);
   };
 }
 
 /**
- * Check the column header click interceptor.
+ * Check the column header click interceptors (first non-null result wins).
  * Called by the core before default column selection behavior.
  */
 export function checkColumnHeaderClickInterceptor(
@@ -137,11 +162,13 @@ export function checkColumnHeaderClickInterceptor(
   colWidth: number,
   colHeaderHeight: number,
 ): ColumnHeaderClickResult | null {
-  if (!clickInterceptor) return null;
-  try {
-    return clickInterceptor(col, canvasX, canvasY, colX, colWidth, colHeaderHeight);
-  } catch (error) {
-    console.error("[ColumnHeaderOverrides] Error in click interceptor:", error);
-    return null;
+  for (const interceptor of clickInterceptors) {
+    try {
+      const result = interceptor(col, canvasX, canvasY, colX, colWidth, colHeaderHeight);
+      if (result) return result;
+    } catch (error) {
+      console.error("[ColumnHeaderOverrides] Error in click interceptor:", error);
+    }
   }
+  return null;
 }

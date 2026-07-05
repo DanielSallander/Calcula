@@ -71,6 +71,7 @@ pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
 pub mod cell_types;
+pub mod cell_behaviors;
 pub mod slicer;
 pub mod ribbon_filter;
 pub mod pane_control;
@@ -274,6 +275,8 @@ pub struct AppState {
     pub controls: Mutex<controls::ControlStorage>,
     /// Cell-type assignments: (sheet_index, row, col) -> { typeId, params }
     pub cell_types: Mutex<cell_types::CellTypeStorage>,
+    /// Cell-behavior bindings: binding id -> { range target, scriptId, dispatch metadata }
+    pub cell_behaviors: Mutex<cell_behaviors::CellBehaviorStorage>,
     /// Page setup settings per sheet (indexed by sheet index)
     pub page_setups: Mutex<Vec<crate::api_types::PageSetup>>,
     /// Tab colors per sheet (CSS hex string, empty = no color)
@@ -435,6 +438,7 @@ pub fn create_app_state() -> AppState {
         computed_prop_dependents: Mutex::new(HashMap::new()),
         controls: Mutex::new(HashMap::new()),
         cell_types: Mutex::new(HashMap::new()),
+        cell_behaviors: Mutex::new(HashMap::new()),
         page_setups: Mutex::new(vec![crate::api_types::PageSetup::default()]),
         tab_colors: Mutex::new(vec![String::new()]),
         sheet_visibility: Mutex::new(vec!["visible".to_string()]),
@@ -4297,6 +4301,12 @@ pub fn run() {
             cell_types::clear_cell_type_range,
             cell_types::get_cell_type,
             cell_types::get_all_cell_types,
+            // Cell-behavior binding commands (granular bricks phase 2)
+            cell_behaviors::set_cell_behavior,
+            cell_behaviors::remove_cell_behavior,
+            cell_behaviors::set_cell_behavior_enabled,
+            cell_behaviors::get_cell_behavior,
+            cell_behaviors::get_all_cell_behaviors,
             // Print commands
             commands::get_page_setup,
             commands::set_page_setup,

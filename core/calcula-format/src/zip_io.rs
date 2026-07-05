@@ -320,6 +320,11 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.start_file("cell_types.json", options.clone())?;
         zip.write_all(cell_types_json.as_bytes())?;
     }
+    if !workbook.cell_behaviors.is_empty() {
+        let cell_behaviors_json = serde_json::to_string_pretty(&workbook.cell_behaviors)?;
+        zip.start_file("cell_behaviors.json", options.clone())?;
+        zip.write_all(cell_behaviors_json.as_bytes())?;
+    }
 
     // Write generic per-extension state as a single extension-data.json object
     if !workbook.extension_data.is_empty() {
@@ -767,6 +772,9 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let cell_types: Vec<persistence::SavedSheetCellTypes> =
         read_optional_json::<Vec<persistence::SavedSheetCellTypes>>(&mut archive, "cell_types.json")?
             .unwrap_or_default();
+    let cell_behaviors: Vec<persistence::SavedCellBehavior> =
+        read_optional_json::<Vec<persistence::SavedCellBehavior>>(&mut archive, "cell_behaviors.json")?
+            .unwrap_or_default();
 
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
@@ -834,6 +842,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         data_validations,
         controls,
         cell_types,
+        cell_behaviors,
     })
 }
 
@@ -986,6 +995,7 @@ mod tests {
             data_validations: Vec::new(),
             controls: Vec::new(),
             cell_types: Vec::new(),
+            cell_behaviors: Vec::new(),
         }
     }
 

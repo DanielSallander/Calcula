@@ -317,6 +317,39 @@ function setup(namedRange) {
 }
 `;
 
+    case "range":
+      return `// Cell Behavior: "${name}"
+// Access level: restricted (unlock full API via access level setting)
+//
+// This script is BOUND to a cell range: grid gestures on the range reach it as
+// asynchronous events, and its writes are clamped to the range. Whether a click
+// suppresses normal selection is the binding's "claim click" setting — not a
+// return value. Behaviors fire in run mode (not Design Mode).
+
+function setup(range) {
+  // == Events ==
+  range.onClick(({ row, col }) => {
+    range.notify("Clicked " + row + "," + col, "info");
+  });
+
+  // range.onDoubleClick(({ row, col }) => { ... });
+
+  // range.onChange(({ changes, truncated }) => {
+  //   range.log(changes.length, "cell(s) changed", truncated ? "(truncated)" : "");
+  //   range.log("Values now:", range.getValues());
+  // });
+
+  // == Data Access (clamped to the bound range) ==
+  // const address = range.getAddress();   // e.g. "Sheet1!B2:B10"
+  // const values = range.getValues();     // 2D array of display strings
+  // await range.setValues([["1", "2"]]);  // undoable
+
+  // == Cell types (the extension-tier brick, scriptable) ==
+  // await range.setCellType("calcula.progress", { max: 100 });
+  // await range.clearCellType();
+}
+`;
+
     case "textbox":
       return `// Text Box: "${name}"
 // Access level: restricted

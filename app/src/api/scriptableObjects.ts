@@ -33,6 +33,9 @@ export type ScriptableObjectType =
   | "shape"
   | "table"
   | "namedRange"
+  // A cell-behavior binding target (granular bricks phase 2); the instanceId
+  // is the binding id in the cell-behaviors store.
+  | "range"
   // UI objects (per-instance scripts, keyed by panel ID)
   | "panel";
 
@@ -829,6 +832,47 @@ export interface NamedRangeContext extends BaseObjectContext {
   };
 }
 
+/** Context for a cell-behavior binding (objectType "range") — the tinkerer's
+ *  per-cell brick (granular bricks phase 2). The instanceId is the binding id;
+ *  the target range lives in the cell-behaviors store and shifts with
+ *  structural edits. Events arrive asynchronously from grid gestures; whether
+ *  a click suppresses default selection is the binding's `claimClick`
+ *  metadata, never a handler return value. */
+export interface RangeContext extends BaseObjectContext {
+  readonly objectType: "range";
+  /** The binding id. */
+  readonly instanceId: string;
+
+  /** A cell inside the target was clicked (run mode). */
+  onClick(
+    handler: EventHandler<{ row: number; col: number; sheetIndex: number; ctrlKey: boolean; metaKey: boolean }>
+  ): CleanupFn;
+  /** A cell inside the target was double-clicked (run mode). */
+  onDoubleClick(
+    handler: EventHandler<{ row: number; col: number; sheetIndex: number }>
+  ): CleanupFn;
+  /** Cells inside the target changed. Batched per frame; `truncated` is set
+   *  when more than the delivery cap changed (re-read via getValues). */
+  onChange(
+    handler: EventHandler<{
+      changes: Array<{ row: number; col: number; newValue: string }>;
+      truncated?: boolean;
+    }>
+  ): CleanupFn;
+
+  /** The target's A1 address (e.g. "Sheet1!B2:B10"). Sync, mirror-backed. */
+  getAddress(): string;
+  /** The target's values as a 2D array of display strings. Sync, refreshed on change. */
+  getValues(): string[][];
+  /** Write a 2D array of values into the target (async, undoable, clamped). */
+  setValues(values: string[][]): Promise<void>;
+  /** Assign a cell type to the whole target (the two-tier handshake with the
+   *  extension-tier cell-type brick). Undoable. */
+  setCellType(typeId: string, params?: Record<string, unknown>): Promise<void>;
+  /** Clear cell-type assignments on the target. Undoable. */
+  clearCellType(): Promise<void>;
+}
+
 // ============================================================================
 // Context Type Map (for generic access)
 // ============================================================================
@@ -849,6 +893,7 @@ export interface ObjectContextMap {
   shape: ShapeContext;
   table: TableContext;
   namedRange: NamedRangeContext;
+  range: RangeContext;
   panel: PanelContext;
 }
 
