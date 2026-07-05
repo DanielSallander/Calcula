@@ -1458,7 +1458,11 @@ export function useEditing(): UseEditingReturn {
           commitInProgressRef.current = false;
           return null;
         }
-        // action === "allow" -- fall through to normal commit
+        // action === "allow" -- fall through to normal commit, honoring a
+        // guard-rewritten value (e.g. a cell type coercing "yes" -> "TRUE").
+        if (typeof guardResult.newValue === "string") {
+          valueToCommit = guardResult.newValue;
+        }
       }
 
       const updateResult = await updateCell(editing.row, editing.col, valueToCommit);

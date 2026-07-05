@@ -49,6 +49,23 @@ facade registers once per extension and is referenced through init-time `@api` i
 keeping the import graph acyclic. This is the practical form of the Inversion-of-Control rule
 in `CLAUDE.md`: the Core (and one extension) emit capabilities; consumers respond.
 
+## Granular Bricks (per-cell and per-layer extension points)
+
+The grid itself is pluggable at the cell grain ("Bricks of Every Size" in PHILOSOPHY.md;
+full design in `docs/design/granular-bricks.md`). The pattern is always the same
+two-tier split: **trusted extension-tier registries run inside the hot paths** (the
+cell-type registry `@api/cellTypes.ts` composes render/edit/click/validate per tagged
+cell, alongside style interceptors, cell decorations, grid overlays, and the guard
+registries), while **sandboxed script-tier bricks never enter a hot path** — scripts set
+declarative state that trusted renderers interpret, and grid events reach them
+asynchronously. Per-cell state that bricks depend on (cell-type assignments in
+`app/src-tauri/src/cell_types.rs`) lives in the trusted backend kernel: undoable,
+persisted per sheet by SheetId, and shifted by structural row/column edits **inside the
+same undo transaction** as the grid change, so one undo restores both. Paint-path bricks
+obey a strict performance contract (O(1) indexed lookup per visible cell, fast-flag
+bail-outs, balanced save/clip/restore, no sync I/O, no sandboxed code) — documented in
+the design doc and enforced by the shape of the hook signatures.
+
 ## The Backend is the Trusted Kernel (a deliberate boundary)
 
 The lint-enforced microkernel boundary above governs the **frontend** (`app/src` +

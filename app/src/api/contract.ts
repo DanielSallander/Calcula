@@ -37,6 +37,7 @@ import type { CustomFunctionDef } from "./formulaFunctions";
 import type { EditGuardResult } from "./editGuards";
 import type { CellClickEvent } from "./cellClickInterceptors";
 import type { CellDoubleClickEvent } from "./cellDoubleClickInterceptors";
+import type { ICellTypeAPI } from "./cellTypes";
 import type { InvokeArgs } from "./backend";
 
 // ============================================================================
@@ -228,6 +229,8 @@ export interface ExtensionContext {
     editGuards: IEditGuardAPI;
     rangeGuards: IRangeGuardAPI;
     cellClicks: ICellClickAPI;
+    /** Cell types: per-cell composition of render/edit/click/validate */
+    cellTypes: ICellTypeAPI;
   };
 
   /**

@@ -6,8 +6,6 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
-  IconControls,
-  IconCheckbox,
 } from "@api";
 import { drawCheckbox } from "./rendering";
 import {
@@ -85,20 +83,10 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  // 8. Register Insert > Controls > Checkbox menu item
-  context.ui.menus.registerItem("insert", {
-    id: "insert.controls",
-    label: "Controls",
-    icon: IconControls,
-    children: [
-      {
-        id: "insert.controls.checkbox",
-        label: "Checkbox",
-        icon: IconCheckbox,
-        action: insertCheckbox,
-      },
-    ],
-  });
+  // 8. (Removed) The Insert > Controls > Checkbox menu item now lives in the
+  // CellTypes extension ("Insert > Cell Type > Checkbox", cell-type brick).
+  // Legacy style-flag checkboxes keep rendering/toggling for existing
+  // workbooks until this extension is retired.
 
   // 9. Register cursor change for checkbox cells
   const unregCursor = setupCheckboxCursor();
@@ -185,54 +173,6 @@ function setupCheckboxCursor(): () => void {
   return () => {
     document.removeEventListener("mousemove", handleMouseMove);
   };
-}
-
-// ============================================================================
-// Insert Checkbox Action
-// ============================================================================
-
-/**
- * Insert checkbox formatting on the current selection.
- * Applies checkbox=true style and sets empty cells to FALSE.
- */
-async function insertCheckbox(): Promise<void> {
-  const { applyFormatting, getCell, updateCell } = await import("../../src/api/lib");
-  const { dispatchGridAction } = await import("../../src/api/gridDispatch");
-  const { restoreFocusToGrid } = await import("../../src/api/events");
-
-  // Get current selection from the tracked state
-  const { getCurrentSelection } = await import("./interceptors");
-  const sel = getCurrentSelection();
-  if (!sel) return;
-
-  const minRow = Math.min(sel.startRow, sel.endRow);
-  const maxRow = Math.max(sel.startRow, sel.endRow);
-  const minCol = Math.min(sel.startCol, sel.endCol);
-  const maxCol = Math.max(sel.startCol, sel.endCol);
-
-  // Collect all rows and cols for formatting
-  const rows: number[] = [];
-  const cols: number[] = [];
-  for (let r = minRow; r <= maxRow; r++) rows.push(r);
-  for (let c = minCol; c <= maxCol; c++) cols.push(c);
-
-  // Apply checkbox formatting
-  await applyFormatting(rows, cols, { checkbox: true });
-
-  // Set empty cells to FALSE so they show an unchecked box instead of ghost
-  for (let r = minRow; r <= maxRow; r++) {
-    for (let c = minCol; c <= maxCol; c++) {
-      const cellData = await getCell(r, c);
-      if (!cellData || cellData.display === "") {
-        await updateCell(r, c, "FALSE");
-      }
-    }
-  }
-
-  // Refresh style caches (extension-level + renderer-level) and restore focus
-  await refreshStyleCache();
-  window.dispatchEvent(new CustomEvent("styles:refresh"));
-  restoreFocusToGrid();
 }
 
 // ============================================================================

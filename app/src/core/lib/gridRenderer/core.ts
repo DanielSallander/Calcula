@@ -40,6 +40,7 @@ import {
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
 import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
+import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/cellTypes";
 
 // ============================================================================
 // Post-Header Overlay Types
@@ -337,7 +338,13 @@ function drawCellTextZone(
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   const paddingX = 4;
-  
+
+  // Cell types render as their own content (suppressed in Show Formulas mode,
+  // where the raw value/formula must stay visible). Unlike the main draw path,
+  // this zone path historically skipped empty cells entirely — typed cells
+  // must not be skipped (ghost checkbox, button on an empty cell).
+  const useCellTypes = hasCellTypes() && !state.showFormulas;
+
   const zoneLeft = clipX;
   const zoneTop = clipY;
   const zoneRight = clipX + clipWidth;
@@ -393,13 +400,15 @@ function drawCellTextZone(
         }
       }
 
-      if (!cell || cellDisplayText === "") {
+      const cellTypeHere = useCellTypes && getCellTypeAt(row, col) !== null;
+
+      if ((!cell || cellDisplayText === "") && !cellTypeHere) {
         baseX += colWidth;
         continue;
       }
-      
-      const rowSpan = (cell as { rowSpan?: number }).rowSpan ?? 1;
-      const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
+
+      const rowSpan = (cell as { rowSpan?: number } | undefined)?.rowSpan ?? 1;
+      const colSpan = (cell as { colSpan?: number } | undefined)?.colSpan ?? 1;
       
       const actualWidth = colSpan > 1 
         ? getMergedCellWidth(col, colSpan, config, dimensions)
@@ -433,7 +442,7 @@ function drawCellTextZone(
         continue;
       }
       
-      const styleIndex = cell.styleIndex ?? 0;
+      const styleIndex = cell?.styleIndex ?? 0;
       const cellStyle = styleCache.get(styleIndex) ?? styleCache.get(0);
       
       ctx.save();
@@ -452,6 +461,27 @@ function drawCellTextZone(
       // Draw cell decorations (e.g., sparklines) between background and text
       if (hasCellDecorations()) {
         applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cellDisplayText, styleIndex, styleCache });
+      }
+
+      // Cell-type renderer: a typed cell can take over content rendering
+      // entirely (checkbox/progress/button). Handled -> skip the text pass.
+      if (cellTypeHere && renderCellTypeCell({
+        ctx, row, col, cellLeft, cellTop, cellRight, cellBottom,
+        config, viewport, dimensions,
+        display: cell?.display ?? "",
+        styleIndex, styleCache,
+        hasFormula: !!cell?.formula,
+      })) {
+        ctx.restore();
+        baseX += colWidth;
+        continue;
+      }
+
+      // Typed-but-unhandled empty cells have nothing left to draw.
+      if (!cell || cellDisplayText === "") {
+        ctx.restore();
+        baseX += colWidth;
+        continue;
       }
 
       const fontWeight = cellStyle?.bold ? "bold" : "normal";

@@ -70,6 +70,7 @@ pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
+pub mod cell_types;
 pub mod slicer;
 pub mod ribbon_filter;
 pub mod pane_control;
@@ -271,6 +272,8 @@ pub struct AppState {
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
     /// Control metadata: (sheet_index, row, col) -> ControlMetadata
     pub controls: Mutex<controls::ControlStorage>,
+    /// Cell-type assignments: (sheet_index, row, col) -> { typeId, params }
+    pub cell_types: Mutex<cell_types::CellTypeStorage>,
     /// Page setup settings per sheet (indexed by sheet index)
     pub page_setups: Mutex<Vec<crate::api_types::PageSetup>>,
     /// Tab colors per sheet (CSS hex string, empty = no color)
@@ -431,6 +434,7 @@ pub fn create_app_state() -> AppState {
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
         controls: Mutex::new(HashMap::new()),
+        cell_types: Mutex::new(HashMap::new()),
         page_setups: Mutex::new(vec![crate::api_types::PageSetup::default()]),
         tab_colors: Mutex::new(vec![String::new()]),
         sheet_visibility: Mutex::new(vec!["visible".to_string()]),
@@ -4286,6 +4290,13 @@ pub fn run() {
             controls::remove_control_metadata,
             controls::get_all_controls,
             controls::resolve_control_properties,
+            // Cell-type assignment commands (granular bricks)
+            cell_types::set_cell_type,
+            cell_types::set_cell_type_range,
+            cell_types::clear_cell_type,
+            cell_types::clear_cell_type_range,
+            cell_types::get_cell_type,
+            cell_types::get_all_cell_types,
             // Print commands
             commands::get_page_setup,
             commands::set_page_setup,

@@ -62,6 +62,7 @@ import ScenarioManagerExtension from "./ScenarioManager";
 import DataTablesExtension from "./DataTables";
 import SolverExtension from "./Solver";
 import CheckboxExtension from "./Checkbox";
+import CellTypesExtension from "./CellTypes";
 import SparklinesExtension from "./Sparklines";
 import GroupingExtension from "./Grouping";
 import PrintExtension from "./Print";
@@ -177,6 +178,9 @@ export const builtInExtensions: ExtensionModule[] = [
   DataTablesExtension,
   SolverExtension,
   CheckboxExtension,
+  // Standard Cell Types (checkbox/progress/button via the cell-type brick).
+  // Supersedes the legacy style-flag Checkbox for NEW inserts; loads after it.
+  CellTypesExtension,
   SparklinesExtension,
   GroupingExtension,
   PrintExtension,

@@ -589,8 +589,22 @@ pub fn insert_rows(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Insert {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Cell-type assignments move with their rows; their pre-shift state is
+    // recorded in the SAME transaction so one undo restores grid + assignments
+    // atomically.
+    {
+        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
+        if crate::cell_types::shift_rows_for_insert(&mut cell_types, active_sheet, row, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_types".to_string(),
+                crate::undo_commands::cell_types_snapshot_bytes(active_sheet, previous),
+                "Shift cell types",
+            );
+        }
+    }
     undo_stack.commit_transaction();
-    
+
     // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
@@ -761,6 +775,18 @@ pub fn insert_columns(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Insert {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Cell-type assignments move with their columns (same transaction; see insert_rows).
+    {
+        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
+        if crate::cell_types::shift_cols_for_insert(&mut cell_types, active_sheet, col, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_types".to_string(),
+                crate::undo_commands::cell_types_snapshot_bytes(active_sheet, previous),
+                "Shift cell types",
+            );
+        }
+    }
     undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells
@@ -1396,6 +1422,19 @@ pub fn delete_rows(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Delete {} row(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Assignments on deleted rows drop; those below shift up (same transaction;
+    // see insert_rows).
+    {
+        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
+        if crate::cell_types::shift_rows_for_delete(&mut cell_types, active_sheet, row, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_types".to_string(),
+                crate::undo_commands::cell_types_snapshot_bytes(active_sheet, previous),
+                "Shift cell types",
+            );
+        }
+    }
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -1619,6 +1658,19 @@ pub fn delete_columns(
     // Record snapshot for undo
     undo_stack.begin_transaction(format!("Delete {} column(s)", count));
     undo_stack.record_snapshot(snapshot);
+    // Assignments on deleted columns drop; those to the right shift left (same
+    // transaction; see insert_rows).
+    {
+        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        let previous = crate::cell_types::entries_for_sheet(&cell_types, active_sheet);
+        if crate::cell_types::shift_cols_for_delete(&mut cell_types, active_sheet, col, count) {
+            undo_stack.record_custom_restore(
+                "obj_cell_types".to_string(),
+                crate::undo_commands::cell_types_snapshot_bytes(active_sheet, previous),
+                "Shift cell types",
+            );
+        }
+    }
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted columns

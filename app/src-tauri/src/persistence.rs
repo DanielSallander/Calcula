@@ -542,6 +542,12 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     if let Ok(controls) = state.controls.lock() {
         workbook.controls = crate::controls::collect_controls_for_save(&controls, sheet_ids);
     }
+
+    // ---- Cell-type assignments (granular bricks, per-sheet) ----
+    if let Ok(cell_types) = state.cell_types.lock() {
+        workbook.cell_types =
+            crate::cell_types::collect_cell_types_for_save(&cell_types, sheet_ids);
+    }
 }
 
 /// Collect slicers from SlicerState into SavedSlicer format.
@@ -1821,6 +1827,16 @@ pub fn open_file(
         );
     }
 
+    // Restore cell-type assignments (granular bricks: typed cells).
+    if let Ok(mut cell_types) = state.cell_types.lock() {
+        cell_types.clear();
+        crate::cell_types::materialize_saved_cell_types(
+            &workbook.cell_types,
+            &mut cell_types,
+            |sid| Some(sheet_id_to_index(&workbook, sid)),
+        );
+    }
+
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state, &workbook);
 
@@ -2144,6 +2160,9 @@ pub fn new_file(
 
     // Clear controls
     state.controls.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear cell-type assignments
+    state.cell_types.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear spill tracking
     state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();

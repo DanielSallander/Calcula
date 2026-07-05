@@ -17,6 +17,13 @@ export interface CommitGuardResult {
    * - "retry" = keep the cell in edit mode so the user can correct the value
    */
   action: "allow" | "block" | "retry";
+  /**
+   * Optional replacement value when action is "allow" — the commit proceeds
+   * with this string instead of what the user typed (e.g. a cell type
+   * coercing "yes" to "TRUE"). Rewrites chain: later guards see the rewritten
+   * value.
+   */
+  newValue?: string;
 }
 
 /**
@@ -57,22 +64,28 @@ export function registerCommitGuard(guard: CommitGuardFn): () => void {
 
 /**
  * Check all registered commit guards for a given cell and value.
- * Returns the first non-allow result, or `null` if all guards allow the commit.
+ * Returns the first non-allow result; an allow-with-`newValue` when any guard
+ * rewrote the value (rewrites chain through subsequent guards); or `null`
+ * when all guards allow the commit unchanged.
  */
 export async function checkCommitGuards(
   row: number,
   col: number,
   value: string
 ): Promise<CommitGuardResult | null> {
+  let current = value;
   for (const guard of guards) {
     try {
-      const result = await guard(row, col, value);
+      const result = await guard(row, col, current);
       if (result && result.action !== "allow") {
         return result;
+      }
+      if (result && typeof result.newValue === "string") {
+        current = result.newValue;
       }
     } catch (error) {
       console.error("Error in commit guard:", error);
     }
   }
-  return null;
+  return current !== value ? { action: "allow", newValue: current } : null;
 }

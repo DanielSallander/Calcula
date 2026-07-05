@@ -17,6 +17,7 @@ import { setSelection } from "../state/gridActions";
 import { findCtrlArrowTarget, getMergeInfo, getUsedRange, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";
+import { handleCellTypeKeyDown } from "../../api/cellTypes";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -809,14 +810,26 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         }
 
         if (!modKey && !shiftKey && !altKey) {
-          // Bare Space - Toggle checkbox (if active cell has checkbox formatting)
+          // Bare Space - generic cell-type keydown hook (checkbox toggle etc.).
+          // Falls back to the legacy style-flag checkbox command when no cell
+          // type handles it (removed when that extension retires).
           event.preventDefault();
           event.stopPropagation();
           eventLog.keyboard('Grid', 'handleKeyDown', 'Space', []);
-          if (onCommand) {
-            onCommand('checkbox.toggle');
-          }
-          fnLog.exit('handleKeyDown', 'checkbox toggle');
+          // endRow/endCol is the active cell (same convention as the legacy
+          // checkbox.toggle command).
+          const activeRow = selection?.endRow;
+          const activeCol = selection?.endCol;
+          void (async () => {
+            const handled =
+              activeRow !== undefined && activeCol !== undefined
+                ? await handleCellTypeKeyDown(activeRow, activeCol, " ")
+                : false;
+            if (!handled && onCommand) {
+              onCommand('checkbox.toggle');
+            }
+          })();
+          fnLog.exit('handleKeyDown', 'cell-type space');
           return;
         }
       }

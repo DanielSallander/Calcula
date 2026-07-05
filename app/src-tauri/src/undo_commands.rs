@@ -656,6 +656,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     for k in [
         "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
         "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
+        "obj_cell_types",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1618,6 +1619,28 @@ struct ValidationObjSnapshot {
     previous: Vec<crate::data_validation::ValidationRange>,
 }
 
+/// Snapshot for the "obj_cell_types" CustomRestore — every cell-type
+/// assignment on one sheet BEFORE the mutation; restore swaps the sheet's
+/// assignments wholesale (same shape as obj_validation).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CellTypesObjSnapshot {
+    sheet_index: usize,
+    previous: Vec<crate::cell_types::CellTypeEntry>,
+}
+
+/// Serialized "obj_cell_types" snapshot bytes for callers that record into an
+/// already-open transaction themselves. The structure commands hold the
+/// undo-stack lock while shifting, so they cannot go through
+/// record_cell_types_undo (it re-locks the stack); they call
+/// `undo_stack.record_custom_restore("obj_cell_types", bytes, …)` directly,
+/// which is what makes grid + assignment restore a single undo step.
+pub(crate) fn cell_types_snapshot_bytes(
+    sheet_index: usize,
+    previous: Vec<crate::cell_types::CellTypeEntry>,
+) -> Vec<u8> {
+    serde_json::to_vec(&CellTypesObjSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NamedRangeObjSnapshot {
     /// Uppercase registry key.
@@ -1749,6 +1772,23 @@ fn apply_object_swap_restore(
             if !snap.previous.is_empty() {
                 validations.insert(snap.sheet_index, snap.previous);
             }
+        }
+        "obj_cell_types" => {
+            let snap: CellTypesObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_cell_types snapshot: {}", e); return; }
+            };
+            let mut cell_types = state.cell_types.lock().unwrap();
+            let current = crate::cell_types::entries_for_sheet(&cell_types, snap.sheet_index);
+            push_obj_inverse(inverse_transaction, kind, &CellTypesObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            crate::cell_types::replace_sheet_entries(
+                &mut cell_types,
+                snap.sheet_index,
+                snap.previous,
+            );
         }
         "obj_named_range" => {
             let snap: NamedRangeObjSnapshot = match serde_json::from_slice(data) {
@@ -1883,6 +1923,16 @@ pub(crate) fn record_validation_undo(
     record_object_undo(state, "obj_validation", serde_json::to_vec(&snap).unwrap_or_default(), description);
 }
 
+pub(crate) fn record_cell_types_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Vec<crate::cell_types::CellTypeEntry>,
+    description: &str,
+) {
+    let snap = CellTypesObjSnapshot { sheet_index, previous };
+    record_object_undo(state, "obj_cell_types", serde_json::to_vec(&snap).unwrap_or_default(), description);
+}
+
 pub(crate) fn record_named_range_undo(
     state: &AppState,
     key: &str,
@@ -1938,6 +1988,7 @@ mod restore_registry_tests {
             ("obj_freeze", true, CustomRestoreKind::Objects),
             ("script_grid_cells", true, CustomRestoreKind::Objects),
             ("obj_extension_data", true, CustomRestoreKind::Objects),
+            ("obj_cell_types", true, CustomRestoreKind::Objects),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));

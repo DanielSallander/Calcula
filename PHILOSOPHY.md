@@ -28,6 +28,10 @@ Built-in extensions receive no privileges that a third-party extension cannot ha
 
 The Core provides *mechanisms*, not *policies*. It offers a way to read and write ranges, emit events, register commands -- but never decides what those capabilities should be used for. Sorting is not a grid primitive; the ability to reorder cells is. This separation keeps the kernel small, stable, and universally useful.
 
+## Bricks of Every Size
+
+Excel was lego: bricks anyone could build anything with. Calcula's ambition is *smaller bricks*. Customization must not stop at the feature level -- the unit of tinkering scales down to a single cell (its rendering, its editor, what a click does) and up to a layer across the whole grid. Every visual and behavioral element the grid draws should, in the limit, be a brick a user can replace or compose. Two rules keep this from ever costing stability: untrusted code never runs inside the frame -- sandboxed scripts declare state that trusted renderers interpret, and interaction reaches scripts as asynchronous events -- and every brick's writes flow through the same undoable, audited pipeline as a keystroke. The paint loop and the undo stack are sacred; everything else is negotiable.
+
 ## Performance is Architecture
 
 Calcula targets a million rows not by optimizing late, but by choosing the right foundations early. Rust for computation, Canvas for rendering, virtualization for layout. Performance is not a feature we add -- it is a consequence of the materials we build with.

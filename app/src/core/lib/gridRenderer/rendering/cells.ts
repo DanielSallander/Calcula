@@ -21,6 +21,11 @@ import {
   hasCellDecorations,
   applyCellDecorations,
 } from "../../../../api/cellDecorations";
+import {
+  hasCellTypes,
+  getCellTypeAt,
+  renderCellTypeCell,
+} from "../../../../api/cellTypes";
 import { drawCellFill } from "../styles/fillRenderer";
 import { buildMergeSlaveIndex } from "./mergeIndex";
 
@@ -475,6 +480,10 @@ export function drawCellText(state: RenderState): void {
   // Check if we need to run style interceptors
   const useInterceptors = hasStyleInterceptors();
 
+  // Cell types render as their own content (suppressed in Show Formulas mode,
+  // where the raw value/formula must stay visible).
+  const useCellTypes = hasCellTypes() && !state.showFormulas;
+
   // Calculate insertion/deletion animation offset
   let rowAnimOffset = 0;
   let colAnimOffset = 0;
@@ -542,6 +551,10 @@ export function drawCellText(state: RenderState): void {
       // Look up cell data
       const cell = cells.get(key);
 
+      // Cell-type assignment (checkbox/progress/button ...): typed cells
+      // render even when empty or without backend data.
+      const cellTypeHere = useCellTypes && getCellTypeAt(row, col) !== null;
+
       // No cell data at all - but still apply style interceptors (e.g., table banding)
       // and cell decorations (e.g., sparklines) for cells that have no backend data.
       if (!cell) {
@@ -582,6 +595,16 @@ export function drawCellText(state: RenderState): void {
               styleCache,
             });
           }
+          if (cellTypeHere) {
+            renderCellTypeCell({
+              ctx, row, col,
+              cellLeft, cellTop, cellRight, cellBottom,
+              config, viewport, dimensions,
+              display: "",
+              styleIndex: 0,
+              styleCache,
+            });
+          }
         }
         baseX += colWidth;
         continue;
@@ -613,9 +636,10 @@ export function drawCellText(state: RenderState): void {
       const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
       const isMergedMaster = rowSpan > 1 || colSpan > 1;
 
-      // For empty cells with default style, skip entirely (unless merged, interceptors, or decorations)
+      // For empty cells with default style, skip entirely (unless merged,
+      // interceptors, decorations, or a cell-type assignment)
       const hasDecorations = hasCellDecorations();
-      if (isEmpty && !isMergedMaster) {
+      if (isEmpty && !isMergedMaster && !cellTypeHere) {
         const si = cell.styleIndex ?? 0;
         if (si === 0 && !hasDecorations && !useInterceptors) {
           baseX += colWidth;
@@ -918,6 +942,20 @@ export function drawCellText(state: RenderState): void {
       // Draw cell decorations (e.g., sparklines, checkboxes) between background/borders and text
       if (hasCellDecorations()) {
         applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: displayValue, styleIndex, styleCache });
+      }
+
+      // Cell-type renderer: a typed cell can take over content rendering
+      // entirely (checkbox/progress/button). Handled -> skip the text pass.
+      if (cellTypeHere && renderCellTypeCell({
+        ctx, row, col, cellLeft, cellTop, cellRight, cellBottom,
+        config, viewport, dimensions,
+        display: rawDisplay,
+        styleIndex, styleCache,
+        hasFormula: !!cell.formula,
+      })) {
+        ctx.restore();
+        baseX += colWidth;
+        continue;
       }
 
       // If cell has no text to display, restore and skip text rendering

@@ -113,6 +113,10 @@ pub struct Workbook {
     /// onSelect scripts, formula-driven properties). Opaque app-owned JSON
     /// payload keyed by SheetId, like conditional_formats.
     pub controls: Vec<SavedSheetControls>,
+    /// Cell-type assignments per sheet (granular bricks: checkbox/progress/
+    /// button/... typed cells). Opaque app-owned JSON payload keyed by SheetId,
+    /// like conditional_formats.
+    pub cell_types: Vec<SavedSheetCellTypes>,
 }
 
 /// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
@@ -142,6 +146,16 @@ pub struct SavedSheetDataValidations {
 pub struct SavedSheetControls {
     pub sheet_id: SheetId,
     pub controls: serde_json::Value,
+}
+
+/// Cell-type assignments for one sheet. `cells` is the opaque app-owned
+/// payload (a serialized list of `{ row, col, typeId, params }` entries); the
+/// persistence layer never inspects it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetCellTypes {
+    pub sheet_id: SheetId,
+    pub cells: serde_json::Value,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -391,6 +405,7 @@ impl Workbook {
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
             controls: Vec::new(),
+            cell_types: Vec::new(),
         }
     }
 
@@ -423,6 +438,7 @@ impl Workbook {
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
             controls: Vec::new(),
+            cell_types: Vec::new(),
         }
     }
 }

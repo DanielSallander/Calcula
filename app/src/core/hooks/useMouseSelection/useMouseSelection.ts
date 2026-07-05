@@ -33,6 +33,7 @@ import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
 import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
 import { isGlobalFormulaMode, isEditingFormula, isChartSeriesRefMode, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
 import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
+import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../types";
 import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
@@ -682,7 +683,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                         }
                       }
                     }
-                    setCursorStyle(overlayCursor ?? "cell");
+                    // Cell-level cursor overrides (cell types, dropdown arrows)
+                    // rank below overlay cursors — overlays sit on top of cells.
+                    const cellCursor = overlayCursor ?? getCellCursorOverride(cell.row, cell.col);
+                    setCursorStyle(cellCursor ?? "cell");
                   } else {
                     setCursorStyle("default");
                   }

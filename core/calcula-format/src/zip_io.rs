@@ -315,6 +315,11 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.start_file("controls.json", options.clone())?;
         zip.write_all(controls_json.as_bytes())?;
     }
+    if !workbook.cell_types.is_empty() {
+        let cell_types_json = serde_json::to_string_pretty(&workbook.cell_types)?;
+        zip.start_file("cell_types.json", options.clone())?;
+        zip.write_all(cell_types_json.as_bytes())?;
+    }
 
     // Write generic per-extension state as a single extension-data.json object
     if !workbook.extension_data.is_empty() {
@@ -759,6 +764,9 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let controls: Vec<persistence::SavedSheetControls> =
         read_optional_json::<Vec<persistence::SavedSheetControls>>(&mut archive, "controls.json")?
             .unwrap_or_default();
+    let cell_types: Vec<persistence::SavedSheetCellTypes> =
+        read_optional_json::<Vec<persistence::SavedSheetCellTypes>>(&mut archive, "cell_types.json")?
+            .unwrap_or_default();
 
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
@@ -825,6 +833,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         conditional_formats,
         data_validations,
         controls,
+        cell_types,
     })
 }
 
@@ -976,6 +985,7 @@ mod tests {
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
             controls: Vec::new(),
+            cell_types: Vec::new(),
         }
     }
 
@@ -1292,6 +1302,43 @@ mod tests {
         assert_eq!(loaded.controls.len(), 1, "controls must survive the .cala round-trip");
         assert_eq!(loaded.controls[0].sheet_id, sheet_id);
         assert_eq!(loaded.controls[0].controls, workbook.controls[0].controls);
+    }
+
+    #[test]
+    fn test_roundtrip_cell_types() {
+        // Cell-type assignments (granular bricks: checkbox/progress/button
+        // typed cells) persist as an opaque per-sheet payload keyed by SheetId,
+        // exactly like controls.
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.cell_types = vec![persistence::SavedSheetCellTypes {
+            sheet_id,
+            cells: serde_json::json!([
+                { "row": 1, "col": 0, "typeId": "calcula.checkbox", "params": {} },
+                { "row": 4, "col": 2, "typeId": "calcula.progress", "params": { "max": 100 } }
+            ]),
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cell_types.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.cell_types.len(), 1, "cell types must survive the .cala round-trip");
+        assert_eq!(loaded.cell_types[0].sheet_id, sheet_id);
+        assert_eq!(loaded.cell_types[0].cells, workbook.cell_types[0].cells);
+    }
+
+    #[test]
+    fn test_cell_types_absent_defaults_to_empty() {
+        // Files written before cell types existed have no cell_types.json —
+        // they must load as an empty store, not error.
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_cell_types.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.cell_types.is_empty());
     }
 
     #[test]

@@ -1109,6 +1109,32 @@ export type {
   CellDecorationRegistration,
 } from "./cellDecorations";
 
+// Cell Types (granular bricks: per-cell render/edit/click/validate composition)
+export {
+  registerCellType,
+  unregisterCellType,
+  getCellTypeDefinition,
+  hasCellTypes,
+  getCellTypeAt,
+  renderCellTypeCell,
+  handleCellTypeKeyDown,
+  refreshCellTypeAssignments,
+  setCellType,
+  setCellTypeRange,
+  clearCellType,
+  clearCellTypeRange,
+  cellTypeAPI,
+} from "./cellTypes";
+
+export type {
+  CellTypeDefinition,
+  CellTypeRenderContext,
+  CellTypeClickContext,
+  CellTypeKeyContext,
+  CellTypeAssignment,
+  ICellTypeAPI,
+} from "./cellTypes";
+
 // Style Interceptors
 export {
   registerStyleInterceptor,
