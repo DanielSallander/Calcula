@@ -661,6 +661,19 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         onClick: (h: Handler) => registerHook(rt, "onClick", h),
         onDoubleClick: (h: Handler) => registerHook(rt, "onDoubleClick", h),
         onChange: (h: Handler) => registerHook(rt, "onChange", h),
+        // onBeforeCommit is a REPLYING hook: the host awaits the handler's
+        // verdict (via the methodCall channel) under a hard deadline, so it
+        // registers as an internal exposed method rather than an event hook.
+        onBeforeCommit: (h: (payload: unknown) => unknown): CleanupFn => {
+          rt.exposed.set("__range_onBeforeCommit", h as (...args: unknown[]) => unknown);
+          if (!rt.registeredHooks.has("onBeforeCommit")) {
+            rt.registeredHooks.add("onBeforeCommit");
+            rt.post({ t: "hookRegistered", hook: "onBeforeCommit" });
+          }
+          return () => {
+            rt.exposed.delete("__range_onBeforeCommit");
+          };
+        },
         getAddress: () => mirror(rt, "range.address", ""),
         getValues: () => mirror<string[][]>(rt, "range.values", []),
         setValues: (values: string[][]) => setState(rt, "range.setValues", [values]),

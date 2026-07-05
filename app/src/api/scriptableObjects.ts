@@ -859,6 +859,23 @@ export interface RangeContext extends BaseObjectContext {
       truncated?: boolean;
     }>
   ): CleanupFn;
+  /**
+   * Validate/rewrite a user edit inside the target BEFORE it commits. Unlike
+   * the other hooks this one REPLIES: return "block" (cancel the edit),
+   * "retry" (keep the editor open for correction), { newValue } (commit a
+   * rewritten value), or null/undefined to allow. The verdict is awaited
+   * under a hard 1.5s deadline — timeouts and errors default to ALLOW, so a
+   * slow script can never hold the user's keystroke hostage.
+   */
+  onBeforeCommit(
+    handler: (payload: { row: number; col: number; value: string }) =>
+      | "block"
+      | "retry"
+      | { action?: "allow" | "block" | "retry"; newValue?: string }
+      | null
+      | undefined
+      | Promise<"block" | "retry" | { action?: "allow" | "block" | "retry"; newValue?: string } | null | undefined>
+  ): CleanupFn;
 
   /** The target's A1 address (e.g. "Sheet1!B2:B10"). Sync, mirror-backed. */
   getAddress(): string;

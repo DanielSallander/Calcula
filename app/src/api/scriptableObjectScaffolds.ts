@@ -339,6 +339,12 @@ function setup(range) {
   //   range.log("Values now:", range.getValues());
   // });
 
+  // Validate/rewrite edits BEFORE they commit (verdict awaited, 1.5s deadline;
+  // timeout/error = allow). Return "block", "retry", or { newValue }.
+  // range.onBeforeCommit(({ value }) => {
+  //   if (value !== "" && isNaN(Number(value))) return "retry"; // keep editing
+  // });
+
   // == Data Access (clamped to the bound range) ==
   // const address = range.getAddress();   // e.g. "Sheet1!B2:B10"
   // const values = range.getValues();     // 2D array of display strings

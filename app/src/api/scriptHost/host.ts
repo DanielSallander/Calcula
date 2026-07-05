@@ -1181,6 +1181,64 @@ function parseCellRef(ref: string): { row: number; col: number } | null {
   return { row: rowNum - 1, col: col - 1 };
 }
 
+// ============================================================================
+// Range onBeforeCommit (granular bricks phase 3): sandboxed commit verdicts
+// ============================================================================
+
+/** Hard deadline for a script's commit verdict. A slow or hung handler must
+ *  never hold the user's Enter keypress hostage — timeout = allow. */
+const BEFORE_COMMIT_DEADLINE_MS = 1500;
+
+const BEFORE_COMMIT_TIMEOUT = Symbol("beforeCommitTimeout");
+
+/** Verdict a range script's onBeforeCommit may return. */
+export interface RangeCommitVerdict {
+  action?: "allow" | "block" | "retry";
+  /** Replacement value when allowing (rewrites chain via commit guards). */
+  newValue?: string;
+}
+
+/**
+ * Ask a mounted range script for a commit verdict (its onBeforeCommit
+ * handler), bounded by BEFORE_COMMIT_DEADLINE_MS. Timeouts, errors, and
+ * unmounted scripts all resolve to null = allow (default-allow policy; the
+ * opt-in blocking mode is a later slice surfaced through consent).
+ */
+export async function callRangeBeforeCommit(
+  scriptId: string,
+  payload: { row: number; col: number; value: string },
+): Promise<RangeCommitVerdict | null> {
+  const mw = mounted.get(scriptId);
+  if (!mw) return null;
+  try {
+    const result = await Promise.race([
+      relayMethodCall(mw, "__range_onBeforeCommit", [payload]),
+      new Promise<typeof BEFORE_COMMIT_TIMEOUT>((resolve) =>
+        setTimeout(() => resolve(BEFORE_COMMIT_TIMEOUT), BEFORE_COMMIT_DEADLINE_MS),
+      ),
+    ]);
+    if (result === BEFORE_COMMIT_TIMEOUT) {
+      console.warn(
+        `[CellBehaviors] onBeforeCommit of "${mw.definition.name}" exceeded ${BEFORE_COMMIT_DEADLINE_MS}ms — allowing the commit`,
+      );
+      return null;
+    }
+    // Accept both the shorthand string verdict and the object form.
+    if (result === "block" || result === "retry") {
+      return { action: result };
+    }
+    if (result && typeof result === "object") {
+      const v = result as RangeCommitVerdict;
+      if (v.action === "block" || v.action === "retry" || typeof v.newValue === "string") {
+        return v;
+      }
+    }
+    return null;
+  } catch {
+    return null; // handler threw — allow (error already surfaced via console)
+  }
+}
+
 /** Relay a callMethod from another script INTO this worker (5s deadline). */
 function relayMethodCall(mw: MountedWorker, methodName: string, args: unknown[]): Promise<unknown> {
   const callId = mw.nextReqId++;
@@ -1579,6 +1637,12 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     }
 
     // ---- range (cell-behavior bindings, granular bricks phase 2) ----
+    case "range.onBeforeCommit":
+      // A replying hook: no event forwarder — the commit guard PULLS a verdict
+      // via callRangeBeforeCommit. The no-op forwarder records hook presence
+      // (mountedScriptHasHook) so untyped commits skip the worker entirely.
+      addForwarder(mw, hook, () => {});
+      break;
     case "range.onClick":
       addForwarder(mw, hook, onAppEvent("cellbehavior:clicked", (detail) => {
         const d = detail as { bindingId: string; row: number; col: number; sheetIndex: number; ctrlKey: boolean; metaKey: boolean };

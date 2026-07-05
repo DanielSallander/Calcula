@@ -157,6 +157,47 @@ test.describe("Cell behaviors (range scripts)", () => {
     }
   });
 
+  test("onBeforeCommit verdicts: block rejects, newValue rewrites, allow passes", async ({
+    appPage: page,
+    grid,
+  }) => {
+    const ROW = 29;
+    const COL = 3; // D30
+    const ids = await attachBehavior(
+      page,
+      { startRow: ROW, startCol: COL, endRow: ROW, endCol: COL },
+      `function setup(range) {
+         range.onBeforeCommit(function (e) {
+           if (e.value === "nope") return "block";
+           if (e.value === "42") return { newValue: "forty-two" };
+         });
+       }`,
+    );
+
+    try {
+      // Blocked: the edit is cancelled and nothing commits.
+      await grid.setCellValue("D30", "nope");
+      await page.waitForTimeout(500);
+      expect(await getCellDisplay(page, ROW, COL)).toBe("");
+
+      // Allowed: normal values commit untouched.
+      await grid.setCellValue("D30", "hello");
+      await page.waitForTimeout(500);
+      expect(await getCellDisplay(page, ROW, COL)).toBe("hello");
+
+      // Rewritten: the guard's newValue is what actually commits.
+      await grid.setCellValue("D30", "42");
+      await page.waitForTimeout(500);
+      expect(await getCellDisplay(page, ROW, COL)).toBe("forty-two");
+    } finally {
+      await detachBehavior(page, ids);
+      await page.evaluate(async (a) => {
+        const tauri = (window as any).__TAURI__;
+        await tauri.core.invoke("update_cell", { row: a.ROW, col: a.COL, value: "" }).catch(() => {});
+      }, { ROW, COL });
+    }
+  });
+
   test("row inserts shift the binding target; undo restores it", async ({ appPage: page, grid }) => {
     const ROW = 19;
     const COL = 3; // D20

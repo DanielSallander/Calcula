@@ -16,6 +16,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { registerCellClickInterceptor } from "../core/lib/cellClickInterceptors";
 import { registerCellDoubleClickInterceptor } from "../core/lib/cellDoubleClickInterceptors";
+import { registerCommitGuard } from "../core/lib/commitGuards";
 import { getDesignMode } from "./designMode";
 import { AppEvents, emitAppEvent, onAppEvent } from "./events";
 
@@ -214,6 +215,27 @@ function ensureInit(): void {
   registerCellDoubleClickInterceptor((row, col, event) =>
     dispatchGesture("cellbehavior:dblclicked", row, col, event)
   );
+
+  // onBeforeCommit: a REPLYING hook — the commit pipeline awaits the script's
+  // verdict under a hard deadline (default-allow on timeout/error, so a hung
+  // script can never hold the user's Enter keypress hostage).
+  registerCommitGuard(async (row, col, value) => {
+    const b = getCellBehaviorAt(row, col);
+    if (!b || !b.enabled || b.orphaned) return null;
+    const { ObjectScriptManager } = await import("./scriptableObjects");
+    if (!ObjectScriptManager.isScriptMounted(b.scriptId)) return null;
+    const host = await import("./scriptHost/host");
+    if (!host.mountedScriptHasHook(b.scriptId, "onBeforeCommit")) return null;
+    const verdict = await host.callRangeBeforeCommit(b.scriptId, { row, col, value });
+    if (!verdict) return null;
+    if (verdict.action === "block" || verdict.action === "retry") {
+      return { action: verdict.action };
+    }
+    if (typeof verdict.newValue === "string") {
+      return { action: "allow", newValue: verdict.newValue };
+    }
+    return null;
+  });
 
   onAppEvent(AppEvents.SHEET_CHANGED, (detail) => {
     const d = detail as { sheetIndex?: number } | undefined;
