@@ -18,6 +18,13 @@ import {
   getDesignMode,
   onDesignModeChange,
   registerRowGutterWidget,
+  registerGridLayer,
+  overlayGetColumnX,
+  overlayGetRowY,
+  overlayGetColumnsWidth,
+  overlayGetRowsHeight,
+  type GridLayerContext,
+  type OverlayRenderContext,
 } from "@api";
 import {
   attachCellBehavior,
@@ -179,6 +186,64 @@ function drawBehaviorBadge(context: {
 }
 
 // ============================================================================
+// Behavior-highlight grid layer (phase 4 dogfood)
+// ============================================================================
+// A full-viewport "under-selection" layer that tints every behavior target on
+// the active sheet — the review mode for "where does code live in this grid?".
+
+let highlightActive = false;
+let highlightLayerCleanup: (() => void) | null = null;
+
+/** Toggle the highlight layer (command + context menu). The layer is only
+ *  REGISTERED while active, so idle workbooks pay zero per-frame cost. */
+function toggleHighlight(): void {
+  highlightActive = !highlightActive;
+  if (highlightActive && !highlightLayerCleanup) {
+    highlightLayerCleanup = registerGridLayer({
+      id: "cell-behaviors-highlight",
+      anchor: "under-selection",
+      priority: 10,
+      paint: paintBehaviorHighlights,
+    });
+  } else if (!highlightActive && highlightLayerCleanup) {
+    highlightLayerCleanup();
+    highlightLayerCleanup = null;
+  }
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+function paintBehaviorHighlights(context: GridLayerContext): void {
+  if (!highlightActive || !hasCellBehaviors()) return;
+  const sheet = activeBehaviorSheet();
+  // The overlay dimension helpers want an OverlayRenderContext; a layer paints
+  // viewport-wide, so adapt with a zero region.
+  const octx = {
+    ctx: context.ctx,
+    config: context.config,
+    viewport: context.viewport,
+    dimensions: context.dimensions,
+    canvasWidth: context.canvasWidth,
+    canvasHeight: context.canvasHeight,
+    region: { id: "", type: "", startRow: 0, startCol: 0, endRow: 0, endCol: 0 },
+  } as OverlayRenderContext;
+
+  const { ctx } = context;
+  for (const b of listCellBehaviors()) {
+    if (b.sheetIndex !== sheet || !b.enabled) continue;
+    const x = overlayGetColumnX(octx, b.startCol);
+    const y = overlayGetRowY(octx, b.startRow);
+    const w = overlayGetColumnsWidth(octx, b.startCol, b.endCol);
+    const h = overlayGetRowsHeight(octx, b.startRow, b.endRow);
+    if (x + w < 0 || y + h < 0 || x > context.canvasWidth || y > context.canvasHeight) continue;
+    ctx.fillStyle = b.orphaned ? "rgba(200, 60, 60, 0.14)" : "rgba(0, 120, 212, 0.14)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = b.orphaned ? "rgba(200, 60, 60, 0.7)" : "rgba(0, 120, 212, 0.7)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+  }
+}
+
+// ============================================================================
 // Registration
 // ============================================================================
 
@@ -278,6 +343,27 @@ export function registerCellBehaviorUx(context: ExtensionContext): () => void {
     gridExtensions.unregisterContextMenuItem("cellBehaviors.edit");
     gridExtensions.unregisterContextMenuItem("cellBehaviors.remove");
   });
+
+  // Behavior-highlight layer (grid-layer brick dogfood): tints every behavior
+  // target under the selection chrome while toggled (registered on demand).
+  cleanups.push(() => {
+    highlightLayerCleanup?.();
+    highlightLayerCleanup = null;
+    highlightActive = false;
+  });
+  ExtensionRegistry.registerCommand({
+    id: "cellBehaviors.toggleHighlight",
+    name: "Highlight Cell Behaviors",
+    execute: async () => toggleHighlight(),
+  });
+  gridExtensions.registerContextMenuItem({
+    id: "cellBehaviors.highlight",
+    label: () => (highlightActive ? "Hide Behavior Highlights" : "Highlight Cell Behaviors"),
+    group: "cellTypes",
+    visible: () => hasCellBehaviors() || highlightActive,
+    onClick: () => toggleHighlight(),
+  });
+  cleanups.push(() => gridExtensions.unregisterContextMenuItem("cellBehaviors.highlight"));
 
   // Command mirror of the attach flow (usable from the palette / buttons).
   ExtensionRegistry.registerCommand({

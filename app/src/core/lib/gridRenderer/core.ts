@@ -41,6 +41,7 @@ import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
 import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
 import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/cellTypes";
+import { hasGridLayers, paintGridLayers, type GridLayerAnchor, type GridLayerContext } from "../../../api/gridLayers";
 
 // ============================================================================
 // Post-Header Overlay Types
@@ -683,6 +684,27 @@ export function renderGrid(
   ctx.fillStyle = theme.cellBackground;
   ctx.fillRect(0, 0, width, height);
 
+  // Grid layers (granular bricks phase 4): full-viewport paint layers at
+  // named z-anchors, slotted between the built-in passes.
+  const layerContext: GridLayerContext | null =
+    hasGridLayers("under-cells") || hasGridLayers("under-selection") ||
+    hasGridLayers("over-selection") || hasGridLayers("over-headers")
+      ? {
+          ctx,
+          config: effectiveConfig,
+          viewport,
+          dimensions: dims,
+          canvasWidth: width,
+          canvasHeight: height,
+          freezeConfig: effectiveFreezeConfig,
+        }
+      : null;
+  const paintLayers = (anchor: GridLayerAnchor) => {
+    if (layerContext && hasGridLayers(anchor)) paintGridLayers(anchor, layerContext);
+  };
+
+  paintLayers("under-cells");
+
   // Split window rendering
   const hasSplitRows = splitConfig && splitConfig.splitRow !== null && splitConfig.splitRow > 0;
   const hasSplitCols = splitConfig && splitConfig.splitCol !== null && splitConfig.splitCol > 0;
@@ -906,6 +928,8 @@ export function renderGrid(
   // Draw spill range borders (blue dashed) before selection so selection draws on top
   drawSpillBorders(state);
 
+  paintLayers("under-selection");
+
   if (selection) {
     drawSelection(state);
   }
@@ -922,6 +946,8 @@ export function renderGrid(
     }
   }
 
+  paintLayers("over-selection");
+
   if (displayHeadings !== false) {
     drawColumnHeaders(state);
     drawRowHeaders(state);
@@ -932,6 +958,8 @@ export function renderGrid(
   for (const renderer of postHeaderRenderers) {
     renderer(ctx, effectiveConfig, viewport, dims, width, height);
   }
+
+  paintLayers("over-headers");
 
   // Page Layout View: draw page boundaries, margins, and header/footer areas
   if (viewMode === "pageLayout" && pageSetup) {

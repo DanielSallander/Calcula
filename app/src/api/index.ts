@@ -1199,6 +1199,21 @@ export type {
   RowGutterWidgetRegistration,
 } from "./rowHeaderOverrides";
 
+// Grid Layers (granular bricks phase 4: full-viewport z-anchored paint layers)
+export {
+  registerGridLayer,
+  unregisterGridLayer,
+  hasGridLayers,
+  paintGridLayers,
+  listGridLayers,
+} from "./gridLayers";
+
+export type {
+  GridLayerAnchor,
+  GridLayerContext,
+  GridLayerRegistration,
+} from "./gridLayers";
+
 export type {
   ColumnHeaderOverride,
   ColumnHeaderOverrideProvider,

@@ -73,6 +73,7 @@ import { registerEditGuard, registerRangeGuard } from "../../api/editGuards";
 import { registerCellClickInterceptor } from "../../api/cellClickInterceptors";
 import { registerCellDoubleClickInterceptor } from "../../api/cellDoubleClickInterceptors";
 import { cellTypeAPI } from "../../api/cellTypes";
+import { registerGridLayer } from "../../api/gridLayers";
 import {
   registerKeybinding,
   getAllKeybindings,
@@ -291,6 +292,9 @@ function buildContext(): ExtensionContext {
         registerDoubleClickInterceptor: registerCellDoubleClickInterceptor,
       },
       cellTypes: cellTypeAPI,
+      layers: {
+        register: registerGridLayer,
+      },
     },
     keybindings: {
       register: registerKeybinding,

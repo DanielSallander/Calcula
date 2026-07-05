@@ -38,6 +38,7 @@ import type { EditGuardResult } from "./editGuards";
 import type { CellClickEvent } from "./cellClickInterceptors";
 import type { CellDoubleClickEvent } from "./cellDoubleClickInterceptors";
 import type { ICellTypeAPI } from "./cellTypes";
+import type { GridLayerRegistration } from "./gridLayers";
 import type { InvokeArgs } from "./backend";
 
 // ============================================================================
@@ -231,6 +232,10 @@ export interface ExtensionContext {
     cellClicks: ICellClickAPI;
     /** Cell types: per-cell composition of render/edit/click/validate */
     cellTypes: ICellTypeAPI;
+    /** Grid layers: full-viewport paint layers at named z-anchors */
+    layers: {
+      register(registration: GridLayerRegistration): () => void;
+    };
   };
 
   /**
