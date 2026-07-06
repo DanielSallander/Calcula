@@ -94,6 +94,8 @@ mod disk_cache_tests;
 #[cfg(test)]
 mod having_tests;
 #[cfg(test)]
+mod clear_reset_tests;
+#[cfg(test)]
 mod meta_tests;
 #[cfg(test)]
 mod rank_tests;
@@ -105,8 +107,6 @@ mod in_filter_tests;
 mod security_tests;
 #[cfg(test)]
 mod context_column_tests;
-#[cfg(test)]
-mod nested_ctx_probe_tmp;
 #[cfg(test)]
 mod test_fixtures;
 

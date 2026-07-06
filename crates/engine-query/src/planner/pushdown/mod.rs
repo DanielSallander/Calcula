@@ -275,6 +275,97 @@ fn context_pushdown_fact_filters(
     Some(fact_filters)
 }
 
+fn lc_set_has(set: &std::collections::HashSet<String>, target_lc: &str) -> bool {
+    set.iter().any(|s| s.eq_ignore_ascii_case(target_lc))
+}
+
+fn lc_pair_set_has(
+    set: &std::collections::HashSet<(String, String)>,
+    table_lc: &str,
+    column_lc: &str,
+) -> bool {
+    set.iter()
+        .any(|(t, c)| t.eq_ignore_ascii_case(table_lc) && c.eq_ignore_ascii_case(column_lc))
+}
+
+/// Fail closed when a measure clears a table/column — via a **both-source**
+/// (`CLEAR`/`RESET`/`CLEAREXCEPT`) or **outer** (`CLEAR_OUTER`/`RESET_OUTER`)
+/// context op — that the request currently restricts with a report slicer.
+///
+/// The chosen semantics are REMOVEFILTERS: `CLEAR`/`RESET` remove BOTH the
+/// group-by axis and report slicers. The axis half is delivered by the window
+/// (`OVER (PARTITION BY …)`) render; the slicer half would require fetching the
+/// cleared table *unfiltered*, which is not yet wired. Rather than silently
+/// return an axis-only (slicer-respecting) number — wrong under the chosen
+/// semantics, and inconsistent between the pushed and local paths — we refuse.
+/// Axis-only clearing is available today via `CLEAR_INNER`/`RESET_INNER`, which
+/// never touch slicers (and never reach this guard).
+///
+/// Runs before path selection so the pushed and local paths behave identically.
+fn validate_no_slicer_clear(request: &QueryRequest, model: &DataModel) -> QueryResult<()> {
+    use engine_core::compute::context::ContextResolver;
+
+    // (owner_table_lc, column_lc) for every report slicer column.
+    let mut sliced_cols: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let slicer_columns = request
+        .filters
+        .iter()
+        .map(|f| f.column.as_str())
+        .chain(request.or_filters.iter().map(|f| f.column.as_str()))
+        .chain(request.in_filters.iter().map(|f| f.column.as_str()));
+    for col in slicer_columns {
+        for t in model.tables().iter().filter(|t| t.column(col).is_ok()) {
+            sliced_cols.insert((t.name().to_lowercase(), col.to_lowercase()));
+        }
+    }
+    if sliced_cols.is_empty() {
+        return Ok(());
+    }
+
+    for m_name in &request.measures {
+        // Missing / unresolvable measures are reported by the normal path.
+        let Ok(measure) = model.measure(m_name) else {
+            continue;
+        };
+        let Ok(expanded) = expand_measure_refs(measure.expression(), model) else {
+            continue;
+        };
+        let Ok((_, ctx)) = ContextResolver::new(model).resolve(&expanded) else {
+            continue;
+        };
+
+        // `is_reset` / `is_reset_outer` drop ALL query-level filters — any slicer
+        // present is one they would need to strip. `is_reset_inner` is axis-only.
+        let clears_all_slicers = ctx.is_reset || ctx.is_reset_outer;
+        let offending = if clears_all_slicers {
+            sliced_cols.iter().next()
+        } else {
+            sliced_cols.iter().find(|(t, c)| {
+                lc_set_has(&ctx.cleared_tables, t)
+                    || lc_set_has(&ctx.cleared_outer_tables, t)
+                    || lc_pair_set_has(&ctx.cleared_columns, t, c)
+                    || lc_pair_set_has(&ctx.cleared_outer_columns, t, c)
+                    || ctx.clear_except.iter().any(|(et, preserved)| {
+                        et.eq_ignore_ascii_case(t)
+                            && !preserved.iter().any(|p| p.eq_ignore_ascii_case(c))
+                    })
+            })
+        };
+
+        if let Some((t, c)) = offending {
+            return Err(QueryError::InvalidQuery(format!(
+                "measure '{m_name}' clears '{t}[{c}]' (via CLEAR/RESET/CLEAREXCEPT or \
+                 CLEAR_OUTER/RESET_OUTER), which the query currently restricts with a report \
+                 slicer. Removing a report slicer from inside a measure (REMOVEFILTERS \
+                 semantics) is not yet supported. Use CLEAR_INNER/RESET_INNER to ignore only \
+                 the group-by axis while keeping slicers, or remove the slicer from the request."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The pushdown planner analyzes a query request and produces an execution plan.
 pub struct PushdownPlanner;
 
@@ -519,6 +610,12 @@ impl PushdownPlanner {
 
         // Validate ORDER BY targets against group_by and measures.
         validate_order_by(request)?;
+
+        // Fail closed (both paths) when a measure's CLEAR/RESET/CLEAR_OUTER would
+        // need to remove a report slicer — slicer removal is not yet wired, so
+        // returning an axis-only number would be silently wrong under the chosen
+        // REMOVEFILTERS semantics. Axis-only clearing (CLEAR_INNER) is unaffected.
+        validate_no_slicer_clear(request, model)?;
 
         // Validate ROLLUP totals constraints (see `TotalsMode` docs).
         validate_totals(request)?;

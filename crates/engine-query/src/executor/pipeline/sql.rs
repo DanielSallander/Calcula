@@ -246,11 +246,125 @@ pub(super) fn reject_unconsumed_in_filters(
     Ok(())
 }
 
+/// A group-by column paired with its rendered SQL, used to build the
+/// `PARTITION BY` list when a measure clears the group-by axis.
+#[derive(Clone)]
+pub(super) struct GroupColumn {
+    pub table_lc: String,
+    pub column_lc: String,
+    pub sql: String,
+}
+
+fn lc_has(set: &std::collections::HashSet<String>, target_lc: &str) -> bool {
+    set.iter().any(|s| s.eq_ignore_ascii_case(target_lc))
+}
+
+fn lc_pair_has(
+    set: &std::collections::HashSet<(String, String)>,
+    t_lc: &str,
+    c_lc: &str,
+) -> bool {
+    set.iter()
+        .any(|(t, c)| t.eq_ignore_ascii_case(t_lc) && c.eq_ignore_ascii_case(c_lc))
+}
+
+/// Does `ctx` clear the group-by AXIS filter on `(table, column)`? Both-source
+/// (`CLEAR`/`CLEAREXCEPT`) and inner (`CLEAR_INNER`) clears remove the axis
+/// grouping; outer clears (`CLEAR_OUTER`) target only slicers and never touch
+/// the partition.
+fn column_axis_cleared(ctx: &EvaluationContext, t_lc: &str, c_lc: &str) -> bool {
+    lc_has(&ctx.cleared_tables, t_lc)
+        || lc_has(&ctx.cleared_inner_tables, t_lc)
+        || lc_pair_has(&ctx.cleared_columns, t_lc, c_lc)
+        || lc_pair_has(&ctx.cleared_inner_columns, t_lc, c_lc)
+        || ctx.clear_except.iter().any(|(et, preserved)| {
+            et.eq_ignore_ascii_case(t_lc) && !preserved.iter().any(|p| p.eq_ignore_ascii_case(c_lc))
+        })
+}
+
+/// If `ctx` clears the group-by axis, return the surviving `PARTITION BY`
+/// columns for a windowed re-aggregation; `None` means no axis clearing (render
+/// normally). An empty vec means every axis column was cleared → `OVER ()`,
+/// a single grand-total partition.
+pub(super) fn axis_clear_partition(
+    ctx: &EvaluationContext,
+    group_columns: &[GroupColumn],
+) -> Option<Vec<String>> {
+    let axis_clearing = ctx.is_reset
+        || ctx.is_reset_inner
+        || !ctx.cleared_tables.is_empty()
+        || !ctx.cleared_columns.is_empty()
+        || !ctx.cleared_inner_tables.is_empty()
+        || !ctx.cleared_inner_columns.is_empty()
+        || !ctx.clear_except.is_empty();
+    if !axis_clearing {
+        return None;
+    }
+    if ctx.is_reset || ctx.is_reset_inner {
+        return Some(Vec::new());
+    }
+    Some(
+        group_columns
+            .iter()
+            .filter(|g| !column_axis_cleared(ctx, &g.table_lc, &g.column_lc))
+            .map(|g| g.sql.clone())
+            .collect(),
+    )
+}
+
+/// The window re-aggregation function for a CLEAR'd aggregate. `SUM` re-sums
+/// additive aggregates (SUM/COUNT/COUNTROWS) over the partition; MIN/MAX carry
+/// through; other aggregates (AVG/DISTINCTCOUNT/MEDIAN/STDEV/…) cannot be
+/// recombined from per-group values, so they must fail closed.
+fn clear_reagg_fn(op: AggregateOp) -> Option<&'static str> {
+    match op {
+        AggregateOp::Sum | AggregateOp::Count | AggregateOp::CountRows => Some("SUM"),
+        AggregateOp::Min => Some("MIN"),
+        AggregateOp::Max => Some("MAX"),
+        _ => None,
+    }
+}
+
+/// Wrap an inner aggregate SQL string in the windowed re-aggregation implied by
+/// an axis-clearing context: `<reagg>(inner) OVER (PARTITION BY partition)`.
+/// `stripped` is the aggregate the context wrapped — its op picks the
+/// re-aggregation function (and fails closed for non-recombinable aggregates).
+pub(super) fn wrap_axis_clear(
+    inner_sql: String,
+    stripped: &Expression,
+    partition: &[String],
+    label: &str,
+) -> QueryResult<String> {
+    let op = match stripped {
+        Expression::Aggregate { operation, .. } => *operation,
+        _ => {
+            return Err(crate::error::QueryError::InvalidQuery(format!(
+                "{label} applies CLEAR/RESET around a non-aggregate expression, which cannot be \
+                 recombined over the cleared partition"
+            )))
+        }
+    };
+    let reagg = clear_reagg_fn(op).ok_or_else(|| {
+        crate::error::QueryError::InvalidQuery(format!(
+            "{label} applies CLEAR/RESET around a {op:?} aggregate, which cannot be recombined \
+             from per-group values over the cleared partition; CLEAR/RESET currently supports \
+             SUM, COUNT, COUNTROWS, MIN, and MAX"
+        ))
+    })?;
+    let over = if partition.is_empty() {
+        "OVER ()".to_string()
+    } else {
+        format!("OVER (PARTITION BY {})", partition.join(", "))
+    };
+    Ok(format!("{reagg}({inner_sql}) {over}"))
+}
+
 pub(super) fn resolve_compound_sql(
     expr: &Expression,
     model: &DataModel,
     fact_table: &str,
     fact_model_name: &str,
+    group_columns: &[GroupColumn],
     context_join_tables: &mut Vec<String>,
     override_joins: &mut Vec<OverrideJoinEntry>,
 ) -> QueryResult<String> {
@@ -262,6 +376,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -270,6 +385,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -285,6 +401,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -293,6 +410,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -302,6 +420,7 @@ pub(super) fn resolve_compound_sql(
                     model,
                     fact_table,
                     fact_model_name,
+                    group_columns,
                     context_join_tables,
                     override_joins,
                 )?,
@@ -320,6 +439,7 @@ pub(super) fn resolve_compound_sql(
                         model,
                         fact_table,
                         fact_model_name,
+                        group_columns,
                         context_join_tables,
                         override_joins,
                     )
@@ -336,6 +456,7 @@ pub(super) fn resolve_compound_sql(
                         model,
                         fact_table,
                         fact_model_name,
+                        group_columns,
                         context_join_tables,
                         override_joins,
                     )
@@ -353,6 +474,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -361,6 +483,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -369,6 +492,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -380,6 +504,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -391,6 +516,7 @@ pub(super) fn resolve_compound_sql(
                 model,
                 fact_table,
                 fact_model_name,
+                group_columns,
                 context_join_tables,
                 override_joins,
             )?;
@@ -414,26 +540,51 @@ pub(super) fn resolve_compound_sql(
             let alias_map =
                 build_override_alias_map(&ctx, model, fact_model_name, fact_table, override_joins);
 
-            if effective.is_empty() {
-                return resolve_compound_sql(
+            // Inner aggregate SQL: CASE WHEN when KEEP filters are present, else
+            // the plain aggregate (recurse into the stripped expression).
+            let inner_sql = if effective.is_empty() {
+                resolve_compound_sql(
                     &stripped,
                     model,
                     fact_table,
                     fact_model_name,
+                    group_columns,
                     context_join_tables,
                     override_joins,
-                );
-            }
+                )?
+            } else {
+                let condition = build_condition_sql_with_aliases(
+                    &effective,
+                    fact_table,
+                    fact_model_name,
+                    model,
+                    &alias_map,
+                )?;
+                let measure_table = &fact_model_name.to_lowercase();
+                stripped.to_case_when_sql(&condition, measure_table)?
+            };
 
-            let condition = build_condition_sql_with_aliases(
-                &effective,
-                fact_table,
-                fact_model_name,
-                model,
-                &alias_map,
-            )?;
-            let measure_table = &fact_model_name.to_lowercase();
-            Ok(stripped.to_case_when_sql(&condition, measure_table)?)
+            // If the context clears the group-by axis, it must re-aggregate over
+            // the surviving partition as a window (`SUM(inner) OVER (...)`). That
+            // works as a top-level SELECT column (a bare CLEAR/RESET measure),
+            // but here we are INSIDE a compound expression (e.g. the DIVIDE of a
+            // percent-of-total), and DataFusion's physical planner rejects a
+            // window function nested inside a scalar expression. Fail closed with
+            // a clear message rather than emit SQL DataFusion cannot execute.
+            // (The pushed PostgreSQL path supports the nested form; the local
+            // two-level-query rendering that would support it here is pending.)
+            if axis_clear_partition(&ctx, group_columns).is_some() {
+                return Err(crate::error::QueryError::InvalidQuery(
+                    "CLEAR/RESET inside a compound expression (for example the DIVIDE of a \
+                     percent-of-total) is not yet supported on the local (in-memory) execution \
+                     path — DataFusion cannot nest the required window aggregate inside an \
+                     expression. Compute the cleared total as its own measure (e.g. \
+                     `Total = SUM(x, RESET())`) and divide in the host, or run the model against \
+                     a PostgreSQL source, which supports the nested form."
+                        .into(),
+                ));
+            }
+            Ok(inner_sql)
         }
 
         // Naked aggregate without context: generate plain SQL with qualified columns.

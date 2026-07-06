@@ -38,8 +38,9 @@ use super::order_limit::{
     apply_order_and_limit, grouping_id_select_sql, strip_order_helper_columns, totals_unsupported,
 };
 use super::sql::{
-    build_condition_sql_with_conditions, build_override_alias_map, collect_qualified_tables,
-    reject_unconsumed_in_filters, resolve_compound_sql, OverrideJoinEntry,
+    axis_clear_partition, build_condition_sql_with_conditions, build_override_alias_map,
+    collect_qualified_tables, reject_unconsumed_in_filters, resolve_compound_sql, wrap_axis_clear,
+    GroupColumn, OverrideJoinEntry,
 };
 use super::QueryExecutor;
 
@@ -1183,6 +1184,19 @@ impl QueryExecutor {
             }
         }
 
+        // Pair each group-by column with its rendered SQL (index-aligned with
+        // `group_by`), so a CLEAR/RESET measure can re-aggregate over the
+        // surviving columns as a window (`OVER (PARTITION BY ...)`).
+        let group_columns: Vec<GroupColumn> = group_by
+            .iter()
+            .zip(group_parts.iter())
+            .map(|(gb, sql)| GroupColumn {
+                table_lc: gb.table.to_lowercase(),
+                column_lc: gb.column.to_lowercase(),
+                sql: sql.clone(),
+            })
+            .collect();
+
         // Detect measures with USERELATIONSHIP overrides that target a GROUP BY
         // dim through an unsafe (non-equi, ManyToMany) relationship. These
         // measures need separate pre-aggregate evaluation because they use a
@@ -1302,6 +1316,7 @@ impl QueryExecutor {
                     model,
                     fact_table,
                     fact_model_name,
+                    &group_columns,
                     &mut context_join_tables,
                     &mut override_joins,
                 )?;
@@ -1334,9 +1349,11 @@ impl QueryExecutor {
                     &mut override_joins,
                 );
 
-                if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
-                    // Track measures with CASE WHEN for HAVING clause.
-                    case_when_measures.push(name.to_string());
+                let has_case = !effective.is_empty() || !eval_ctx.conditions.is_empty();
+
+                // Inner aggregate SQL: CASE WHEN when KEEP filters/conditions are
+                // present, else the plain aggregate.
+                let inner_sql = if has_case {
                     let condition = build_condition_sql_with_conditions(
                         &effective,
                         &eval_ctx.conditions,
@@ -1347,16 +1364,30 @@ impl QueryExecutor {
                     )?;
                     // Use the measure's own table for column qualification.
                     let measure_table = &measure.table().to_lowercase();
-                    let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table)?;
-                    format!("{expr_sql} AS {}", quote_ident_double(name))
+                    stripped_expr.to_case_when_sql(&condition, measure_table)?
                 } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
                     let fact = measure.table().to_lowercase();
-                    let col = quote_ident_double(col);
-                    let name = quote_ident_double(name);
-                    format!("{} AS {name}", op.render_sql(&format!("{fact}.{col}")))
+                    op.render_sql(&format!("{fact}.{}", quote_ident_double(col)))
                 } else {
-                    let expr_sql = stripped_expr.to_sql_string()?;
-                    format!("{expr_sql} AS {}", quote_ident_double(name))
+                    stripped_expr.to_sql_string()?
+                };
+
+                // A measure that clears the group-by axis re-aggregates over the
+                // surviving partition as a window; otherwise render as-is. A
+                // windowed measure needs no NULL-group HAVING (it spans the
+                // partition), so it is not tracked as a CASE WHEN measure.
+                match axis_clear_partition(&eval_ctx, &group_columns) {
+                    Some(partition) => {
+                        let wrapped = wrap_axis_clear(inner_sql, &stripped_expr, &partition, name)?;
+                        format!("{wrapped} AS {}", quote_ident_double(name))
+                    }
+                    None => {
+                        if has_case {
+                            // Track measures with CASE WHEN for the HAVING clause.
+                            case_when_measures.push(name.to_string());
+                        }
+                        format!("{inner_sql} AS {}", quote_ident_double(name))
+                    }
                 }
             };
             select_parts.push(sql_fragment);
