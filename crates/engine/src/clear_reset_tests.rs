@@ -189,18 +189,29 @@ async fn clear_dimension_broadcasts_grand_total() {
 }
 
 #[tokio::test]
-async fn compound_percent_of_total_fails_closed_cleanly() {
-    // The nested-window form `DIVIDE(SUM(x), SUM(x, RESET()))` cannot execute on
-    // the local DataFusion path (no window nesting inside a scalar expression).
-    // It must fail with a clear message, NOT an opaque DataFusion error and NOT
-    // a silently-wrong 1.0.
+async fn compound_percent_of_grand_total_via_reset() {
+    // `DIVIDE(SUM(x), SUM(x, RESET()))` — the RESET grand total is rendered as
+    // an uncorrelated scalar subquery, so the ratio is each product's share of
+    // 190 (no longer a silent 1.0, and not a DataFusion window-nesting error).
     let engine = clear_engine();
-    let err = engine.query(request(&["Revenue", "PctOfTotal"])).await;
-    assert!(err.is_err(), "compound CLEAR/RESET must fail closed locally");
-    let msg = format!("{}", err.unwrap_err());
+    let batches = engine
+        .query(request(&["Revenue", "PctOfTotal"]))
+        .await
+        .unwrap();
+    let pct = grouped(&batches, "PctOfTotal");
     assert!(
-        msg.contains("compound") && msg.contains("not yet supported"),
-        "expected a clear guidance message, got: {msg}"
+        (pct["Bikes"] - 130.0 / 190.0).abs() < 1e-9,
+        "Bikes share should be 130/190, got {}",
+        pct["Bikes"]
+    );
+    assert!(
+        (pct["Helmets"] - 60.0 / 190.0).abs() < 1e-9,
+        "Helmets share should be 60/190, got {}",
+        pct["Helmets"]
+    );
+    assert!(
+        (pct["Bikes"] + pct["Helmets"] - 1.0).abs() < 1e-9,
+        "shares sum to 1.0 (no longer both 1.0)"
     );
 }
 

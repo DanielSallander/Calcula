@@ -565,26 +565,48 @@ pub(super) fn resolve_compound_sql(
             };
 
             // If the context clears the group-by axis, it must re-aggregate over
-            // the surviving partition as a window (`SUM(inner) OVER (...)`). That
-            // works as a top-level SELECT column (a bare CLEAR/RESET measure),
-            // but here we are INSIDE a compound expression (e.g. the DIVIDE of a
-            // percent-of-total), and DataFusion's physical planner rejects a
-            // window function nested inside a scalar expression. Fail closed with
-            // a clear message rather than emit SQL DataFusion cannot execute.
-            // (The pushed PostgreSQL path supports the nested form; the local
-            // two-level-query rendering that would support it here is pending.)
-            if axis_clear_partition(&ctx, group_columns).is_some() {
-                return Err(crate::error::QueryError::InvalidQuery(
-                    "CLEAR/RESET inside a compound expression (for example the DIVIDE of a \
-                     percent-of-total) is not yet supported on the local (in-memory) execution \
-                     path — DataFusion cannot nest the required window aggregate inside an \
-                     expression. Compute the cleared total as its own measure (e.g. \
+            // the surviving partition. Inside a compound expression (e.g. the
+            // DIVIDE of a percent-of-total) DataFusion's physical planner rejects
+            // a window function (`SUM(inner) OVER (...)`) nested in a scalar
+            // expression, so we cannot use the windowed form here.
+            match axis_clear_partition(&ctx, group_columns) {
+                None => Ok(inner_sql),
+                // Grand-total clear (RESET, or CLEAR of every axis dimension →
+                // empty partition) over a fact-only aggregate: an UNCORRELATED
+                // scalar subquery gives the same total and DataFusion CAN nest
+                // it inside the surrounding expression. Restricted to the
+                // no-extra-JOIN case (effective/conditions empty) so the
+                // subquery's `FROM <fact>` has every column it references; the
+                // registered fact batch is already slicer/RLS-filtered, so RESET
+                // still cannot strip RLS (correct) and Step A guarantees no
+                // report slicer remains to clear.
+                Some(partition)
+                    if partition.is_empty()
+                        && effective.is_empty()
+                        && ctx.conditions.is_empty() =>
+                {
+                    // Alias the subquery's aggregate to a name the outer query
+                    // does not use — otherwise DataFusion's scalar-subquery
+                    // decorrelation sees two `sum(...)` columns and reports an
+                    // ambiguous reference.
+                    let fact_lc = fact_model_name.to_lowercase();
+                    Ok(format!(
+                        "(SELECT {inner_sql} AS __clear_scalar FROM {fact_lc})"
+                    ))
+                }
+                // Partitioned (percent-of-parent) or a cleared aggregate that
+                // needs a JOIN: still needs the two-level-query rendering. Fail
+                // closed with guidance rather than emit SQL DataFusion cannot run.
+                Some(_) => Err(crate::error::QueryError::InvalidQuery(
+                    "CLEAR/RESET that keeps a surviving group-by column in the partition (for \
+                     example percent-of-parent with CLEAREXCEPT), or clears a joined aggregate, \
+                     inside a compound expression is not yet supported on the local (in-memory) \
+                     path. Compute the cleared total as its own measure (e.g. \
                      `Total = SUM(x, RESET())`) and divide in the host, or run the model against \
-                     a PostgreSQL source, which supports the nested form."
+                     a PostgreSQL source."
                         .into(),
-                ));
+                )),
             }
-            Ok(inner_sql)
         }
 
         // Naked aggregate without context: generate plain SQL with qualified columns.
