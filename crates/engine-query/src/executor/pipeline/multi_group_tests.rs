@@ -339,8 +339,16 @@ async fn multi_fact_combine_unifies_a_null_conformed_dimension_member() {
     let null_rows: Vec<usize> = (0..combined.num_rows())
         .filter(|&i| region.is_null(i))
         .collect();
-    assert_eq!(null_rows.len(), 1, "the NULL region is a single combined row");
+    assert_eq!(
+        null_rows.len(),
+        1,
+        "the NULL region is a single combined row"
+    );
     let r = null_rows[0];
     assert_eq!(sales.value(r), 50.0, "NULL-region sales present");
-    assert_eq!(returns.value(r), 5.0, "NULL-region returns present on same row");
+    assert_eq!(
+        returns.value(r),
+        5.0,
+        "NULL-region returns present on same row"
+    );
 }

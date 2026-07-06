@@ -1060,7 +1060,10 @@ async fn multi_role_union_composes_with_group_by_on_another_dimension() {
         "Revenue",
     );
     assert!((by_cat["Bikes"] - 100.0).abs() < 1e-9, "Bikes: {by_cat:?}");
-    assert!((by_cat["Helmets"] - 90.0).abs() < 1e-9, "Helmets: {by_cat:?}");
+    assert!(
+        (by_cat["Helmets"] - 90.0).abs() < 1e-9,
+        "Helmets: {by_cat:?}"
+    );
 }
 
 #[tokio::test]
@@ -1478,10 +1481,18 @@ fn dynamic_rls_engine(role: SecurityRole) -> Engine {
             .with_storage_mode(StorageMode::InMemory),
         )
         .add_relationship(Relationship::many_to_one(
-            "Sales_Geo", "Sales", "geo_id", "Geography", "id",
+            "Sales_Geo",
+            "Sales",
+            "geo_id",
+            "Geography",
+            "id",
         ))
         .add_relationship(Relationship::many_to_one(
-            "Sales_Cat", "Sales", "cat_id", "Category", "id",
+            "Sales_Cat",
+            "Sales",
+            "cat_id",
+            "Category",
+            "id",
         ))
         .add_measure(sum_measure("Revenue", "Sales", "amount"))
         .add_security_role(role)
@@ -1517,11 +1528,17 @@ async fn dynamic_username_restricts_to_the_identity_region() {
 
     engine.set_user_identity(Some("West".into()));
     let west = engine.query(revenue_request()).await.unwrap();
-    assert!((scalar(&west, "Revenue") - 130.0).abs() < 1e-9, "USERNAME()=West → 130");
+    assert!(
+        (scalar(&west, "Revenue") - 130.0).abs() < 1e-9,
+        "USERNAME()=West → 130"
+    );
 
     engine.set_user_identity(Some("East".into()));
     let east = engine.query(revenue_request()).await.unwrap();
-    assert!((scalar(&east, "Revenue") - 60.0).abs() < 1e-9, "USERNAME()=East → 60");
+    assert!(
+        (scalar(&east, "Revenue") - 60.0).abs() < 1e-9,
+        "USERNAME()=East → 60"
+    );
 }
 
 #[tokio::test]
@@ -1595,7 +1612,10 @@ async fn dynamic_identity_isolates_the_cache() {
     // never the cached West result.
     engine.set_user_identity(Some("East".into()));
     let east = engine.query(revenue_request()).await.unwrap();
-    assert!((scalar(&east, "Revenue") - 60.0).abs() < 1e-9, "East must not be served West's cached 130");
+    assert!(
+        (scalar(&east, "Revenue") - 60.0).abs() < 1e-9,
+        "East must not be served West's cached 130"
+    );
 }
 
 #[tokio::test]
@@ -1638,7 +1658,10 @@ fn role_cache_key_folds_identity_custom_data_and_all_roles() {
     let k_alice = e.role_cache_key();
     e.set_user_identity(Some("bob".into()));
     let k_bob = e.role_cache_key();
-    assert_ne!(k_alice, k_bob, "different user identities must produce different keys");
+    assert_ne!(
+        k_alice, k_bob,
+        "different user identities must produce different keys"
+    );
 
     // All roles fold in (not just the first): two sets sharing a first role differ.
     e.set_user_identity(None);
@@ -1646,7 +1669,10 @@ fn role_cache_key_folds_identity_custom_data_and_all_roles() {
     let k_alpha = e.role_cache_key();
     e.set_active_roles(vec!["WestOnly".into(), "Beta".into()]);
     let k_beta = e.role_cache_key();
-    assert_ne!(k_alpha, k_beta, "role sets sharing a first role must differ");
+    assert_ne!(
+        k_alpha, k_beta,
+        "role sets sharing a first role must differ"
+    );
 
     // custom_data folds in too.
     e.set_active_roles(Vec::new());
@@ -1654,7 +1680,10 @@ fn role_cache_key_folds_identity_custom_data_and_all_roles() {
     let k_t1 = e.role_cache_key();
     e.set_custom_data(Some("tenant2".into()));
     let k_t2 = e.role_cache_key();
-    assert_ne!(k_t1, k_t2, "different custom data must produce different keys");
+    assert_ne!(
+        k_t1, k_t2,
+        "different custom data must produce different keys"
+    );
 
     // No context at all → None.
     e.set_custom_data(None);

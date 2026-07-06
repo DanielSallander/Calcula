@@ -26,6 +26,18 @@ impl<'a> MeasureEngine<'a> {
         let ref_expanded = expand_measure_refs(measure.expression(), self.model)?;
         let expanded = expand_global_variables(&ref_expanded, self.model);
 
+        // Query-scoped (GVAR) variables are resolved once per query at the
+        // Engine facade; the in-memory MeasureEngine has no facade to run the
+        // inner scalar query, so it fails closed rather than mis-evaluate a
+        // GVAR as a per-row VAR.
+        if expanded.has_query_scoped_bindings() {
+            return Err(crate::error::EngineError::InvalidExpression(format!(
+                "measure '{measure_name}' uses a query-scoped (GVAR) variable, which requires \
+                 the query-engine facade (Engine::query) and is not supported by the in-memory \
+                 MeasureEngine"
+            )));
+        }
+
         // Infer fact table after expansion (MeasureRef measures have empty cached_table).
         let table_name_owned;
         let table_name = if measure.table().is_empty() {

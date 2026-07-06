@@ -185,12 +185,87 @@ impl Expression {
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
             | Expression::ClearExcept { expr, .. } => expr.validate_inner(allow_selected_measure),
-            Expression::Block { bindings, result } => {
-                for (name, binding_expr) in bindings {
-                    // QUERY bindings are materialized and registered under
-                    // the binding name, which then appears raw in FROM
-                    // clauses of the second-stage SQL.
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                // Names are unique across the combined VAR + GVAR namespace —
+                // both are referenced as bare identifiers, so a collision is
+                // ambiguous. (QUERY bindings are also materialized and
+                // registered under the binding name, appearing raw in FROM
+                // clauses of the second-stage SQL, so the name must be a safe
+                // identifier.)
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for (name, _) in query_scoped_bindings.iter().chain(bindings.iter()) {
                     validate_identifier(name, "variable binding")?;
+                    if !seen.insert(name.to_ascii_lowercase()) {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "variable '{name}' is declared more than once in the same \
+                             VAR/GVAR block"
+                        )));
+                    }
+                }
+
+                // Validate each GVAR (query-scoped) binding.
+                //
+                // A GVAR is a single scalar evaluated once per query context; it
+                // may reference only *earlier* GVARs and physical columns —
+                // never a per-row VAR, and never a later-or-self GVAR. A bare
+                // reference is detected precisely by substituting the forbidden
+                // names with a unique `MeasureRef` sentinel (`substitute_vars`
+                // rewrites only a bare `ColumnRef`, never a qualified
+                // `table[col]`), then inspecting `measure_references`.
+                const VAR_SENTINEL: &str = "\u{0}__gvar_refs_var__";
+                const FWD_SENTINEL: &str = "\u{0}__gvar_refs_forward__";
+                let mut declared_gvars: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for (gname, gbinding) in query_scoped_bindings {
+                    gbinding.validate_inner(allow_selected_measure)?;
+
+                    // Scalar-only: reject window/RANK/time-intelligence (checked
+                    // recursively by has_window) and a QUERY node anywhere in the
+                    // binding (contains_query — a top-level is_query() would miss
+                    // `SUM(x) + QUERY(...)`).
+                    if crate::model::calculation_group::contains_query(gbinding)
+                        || gbinding.has_window()
+                    {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "query-scoped variable (GVAR) '{gname}' must be a scalar; QUERY, \
+                             window (WINDOW/OFFSET/INDEX/RANK) and time-intelligence \
+                             expressions are not allowed in a GVAR binding"
+                        )));
+                    }
+
+                    let mut env: std::collections::HashMap<String, Expression> =
+                        std::collections::HashMap::new();
+                    for (n, _) in bindings {
+                        env.insert(n.clone(), Expression::MeasureRef(VAR_SENTINEL.to_string()));
+                    }
+                    for (n, _) in query_scoped_bindings {
+                        if !declared_gvars.contains(n.as_str()) {
+                            env.insert(n.clone(), Expression::MeasureRef(FWD_SENTINEL.to_string()));
+                        }
+                    }
+                    let refs = gbinding.substitute_vars(&env);
+                    let mrefs = refs.measure_references();
+                    if mrefs.contains(&VAR_SENTINEL) {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "query-scoped variable (GVAR) '{gname}' references a per-row VAR; a \
+                             GVAR is evaluated once per query context and cannot depend on a VAR \
+                             binding"
+                        )));
+                    }
+                    if mrefs.contains(&FWD_SENTINEL) {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "query-scoped variable (GVAR) '{gname}' references a GVAR declared \
+                             later (or itself); a GVAR may reference only earlier GVARs"
+                        )));
+                    }
+                    declared_gvars.insert(gname.as_str());
+                }
+
+                for (_, binding_expr) in bindings {
                     binding_expr.validate_inner(allow_selected_measure)?;
                 }
                 result.validate_inner(allow_selected_measure)

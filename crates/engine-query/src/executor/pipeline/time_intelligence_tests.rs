@@ -1791,7 +1791,11 @@ async fn rank_measure_null_order_key_ranks_last() {
         rk.insert(regions[i].clone(), rnk[i]);
     }
     assert_eq!(rk["east"], Some(1.0), "east (SUM 300) ranks 1");
-    assert_eq!(rk["nullreg"], Some(2.0), "all-NULL amount ranks LAST, not first");
+    assert_eq!(
+        rk["nullreg"],
+        Some(2.0),
+        "all-NULL amount ranks LAST, not first"
+    );
 }
 
 #[tokio::test]
@@ -2020,7 +2024,11 @@ async fn window_plus_normal_null_dimension_group_does_not_split() {
     );
     let r = null_rows[0];
     assert_eq!(ytd[r], Some(5.0), "NULL-region YTD present");
-    assert_eq!(total[r], Some(5.0), "NULL-region total present on the same row");
+    assert_eq!(
+        total[r],
+        Some(5.0),
+        "NULL-region total present on the same row"
+    );
 }
 
 // ===========================================================================
@@ -2315,7 +2323,9 @@ async fn rollup_ytd_by_region_recomputes_grand_total() {
         &[("year", FilterOperator::Equal, "2024")],
     );
     req.totals = TotalsMode::Rollup;
-    let batches = run("YTD(SUM(fact_sales[amount]))", true, req).await.unwrap();
+    let batches = run("YTD(SUM(fact_sales[amount]))", true, req)
+        .await
+        .unwrap();
     let map = rollup_region_map(&batches, "m");
     assert_eq!(map.len(), 3, "two region detail rows + one grand total");
     assert_eq!(map[&(Some("east".into()), 0)], Some(78.0));

@@ -10,8 +10,8 @@ use arrow::datatypes::{DataType as ArrowType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::{
-    sum_measure, Column, ColumnRef, DataModel, DataType, Engine, RankBy, ResultColumnKind,
-    Relationship, SourceBinding, StorageMode, Table,
+    sum_measure, Column, ColumnRef, DataModel, DataType, Engine, RankBy, Relationship,
+    ResultColumnKind, SourceBinding, StorageMode, Table,
 };
 
 fn meta_model() -> DataModel {
@@ -170,7 +170,11 @@ async fn metadata_marks_a_kpi_base_measure() {
         ))
         .add_measure(sum_measure("Revenue", "Sales", "amount"))
         .add_measure(sum_measure("Cost", "Sales", "amount"))
-        .add_kpi(Kpi::new("Revenue Goal", "Revenue", KpiTarget::Constant(1000.0)))
+        .add_kpi(Kpi::new(
+            "Revenue Goal",
+            "Revenue",
+            KpiTarget::Constant(1000.0),
+        ))
         .build()
         .unwrap();
     let mut engine = Engine::new(model);
@@ -327,7 +331,9 @@ async fn metadata_does_not_misclassify_dimension_colliding_with_a_measure_name()
 fn validate_measure_text_accepts_valid_and_rejects_bad() {
     let engine = meta_engine();
     // Valid: references the existing measure.
-    assert!(engine.validate_measure_text("Double", "[Revenue] * 2").is_ok());
+    assert!(engine
+        .validate_measure_text("Double", "[Revenue] * 2")
+        .is_ok());
     assert!(engine
         .validate_measure_text("More", "SUM(Sales[amount])")
         .is_ok());

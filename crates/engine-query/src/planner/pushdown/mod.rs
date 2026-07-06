@@ -217,8 +217,7 @@ fn apply_sargable_filter_kinds(plan: &mut QueryPlan, model: &DataModel) {
             }
         }
         QueryPlan::PushedJoinAggregation { request, .. } => {
-            let tables: Vec<&str> =
-                request.table_map.iter().map(|(m, _)| m.as_str()).collect();
+            let tables: Vec<&str> = request.table_map.iter().map(|(m, _)| m.as_str()).collect();
             stamp(model, &tables, &mut request.filters);
         }
     }
@@ -579,14 +578,17 @@ impl PushdownPlanner {
             for m_name in inlined.measure_references() {
                 let measure = model.measure(m_name).map_err(QueryError::Engine)?;
                 let source_table = if measure.table().is_empty() {
-                    let expanded =
-                        expand_measure_refs(measure.expression(), model).map_err(QueryError::Engine)?;
+                    let expanded = expand_measure_refs(measure.expression(), model)
+                        .map_err(QueryError::Engine)?;
                     infer_fact_table(&expanded)
                 } else {
                     Some(measure.table().to_string())
                 };
                 if let Some(t) = source_table {
-                    if !context_scalar_tables.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                    if !context_scalar_tables
+                        .iter()
+                        .any(|x| x.eq_ignore_ascii_case(&t))
+                    {
                         context_scalar_tables.push(t);
                     }
                 }
@@ -746,27 +748,30 @@ impl PushdownPlanner {
         // fetch is per-table; a cross-table OR cannot be pushed to one fetch).
         // Resolve that table now and fail closed if no single table owns every
         // OR-condition column. That table is fetched and the OR restricts it.
-        let or_filter_table: Option<&str> = if request.or_filters.is_empty() {
-            None
-        } else {
-            let cols: Vec<&str> = request.or_filters.iter().map(|f| f.column.as_str()).collect();
-            match model
-                .tables()
-                .iter()
-                .find(|t| cols.iter().all(|c| t.column(c).is_ok()))
-                .map(|t| t.name())
-            {
-                Some(t) => Some(t),
-                None => {
-                    return Err(QueryError::InvalidQuery(
+        let or_filter_table: Option<&str> =
+            if request.or_filters.is_empty() {
+                None
+            } else {
+                let cols: Vec<&str> = request
+                    .or_filters
+                    .iter()
+                    .map(|f| f.column.as_str())
+                    .collect();
+                match model
+                    .tables()
+                    .iter()
+                    .find(|t| cols.iter().all(|c| t.column(c).is_ok()))
+                    .map(|t| t.name())
+                {
+                    Some(t) => Some(t),
+                    None => return Err(QueryError::InvalidQuery(
                         "an OR slicer (`or_filters`) must reference columns of a single table; \
                          conditions spanning different tables are not yet supported — use \
                          separate IN-list slicers, or model the columns on one table"
                             .into(),
-                    ))
+                    )),
                 }
-            }
-        };
+            };
 
         // Collect all referenced tables (deduplication happens below).
         let referenced_tables: Vec<&str> = measure_tables
@@ -1145,14 +1150,13 @@ impl PushdownPlanner {
         // Filters safe to push onto the fact-only query: fact-owned filters are
         // pushed; disconnected scalar-shaping filters are dropped (baked into the
         // resolved literal). `None` means a filter requires local propagation.
-        let context_push_fact_filters = if has_context_columns
-            && !context_column_cases.is_empty()
-            && measure_tables.len() == 1
-        {
-            context_pushdown_fact_filters(model, measure_tables[0], &request.filters)
-        } else {
-            None
-        };
+        let context_push_fact_filters =
+            if has_context_columns && !context_column_cases.is_empty() && measure_tables.len() == 1
+            {
+                context_pushdown_fact_filters(model, measure_tables[0], &request.filters)
+            } else {
+                None
+            };
         // Only the FACT is queried here, so only the fact must be a live source —
         // an in-memory/cached as-of *reference* table (a common slicer) is fine,
         // since its scalar is already resolved to a literal. (`any_in_memory`
@@ -1564,7 +1568,11 @@ mod tests {
         let model = test_model_star_schema();
         let mut registry = SourceRegistry::new();
         let idx = registry.add_connector(AnyConnector::InMemory(InMemoryConnector::new()));
-        registry.bind("Sales", idx, SourceBinding::new("sales", "salesorderheader"));
+        registry.bind(
+            "Sales",
+            idx,
+            SourceBinding::new("sales", "salesorderheader"),
+        );
         registry.bind("Products", idx, SourceBinding::new("production", "product"));
 
         let request = QueryRequest {

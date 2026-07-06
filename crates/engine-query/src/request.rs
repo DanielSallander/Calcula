@@ -987,7 +987,11 @@ mod tests {
 
     #[test]
     fn detail_request_builders_replace_fields() {
-        let filters = vec![FilterCondition::new("region", FilterOperator::Equal, "West")];
+        let filters = vec![FilterCondition::new(
+            "region",
+            FilterOperator::Equal,
+            "West",
+        )];
         let request = DetailRequest::new("Sales", 50)
             .with_columns(["order_id", "amount"])
             .with_filters(filters.clone())

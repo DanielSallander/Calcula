@@ -216,8 +216,7 @@ mod tests {
 
     #[test]
     fn parse_closing_and_opening_balance() {
-        let closing =
-            parse_measure_expression("CLOSINGBALANCE(SUM(fact_sales[amount]))").unwrap();
+        let closing = parse_measure_expression("CLOSINGBALANCE(SUM(fact_sales[amount]))").unwrap();
         let Expression::SemiAdditiveBalance { opening, .. } = &closing else {
             panic!("expected SemiAdditiveBalance, got {closing:?}");
         };
@@ -228,7 +227,10 @@ mod tests {
         let Expression::SemiAdditiveBalance { opening, .. } = &opening_expr else {
             panic!("expected SemiAdditiveBalance, got {opening_expr:?}");
         };
-        assert!(*opening, "OPENINGBALANCE is an opening (first-date) balance");
+        assert!(
+            *opening,
+            "OPENINGBALANCE is an opening (first-date) balance"
+        );
     }
 
     #[test]

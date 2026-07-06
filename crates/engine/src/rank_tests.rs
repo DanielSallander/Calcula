@@ -110,7 +110,9 @@ fn rank_engine() -> Engine {
                 ])),
                 vec![
                     Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
-                    Arc::new(StringArray::from(vec!["Bikes", "Helmets", "Tires", "Widgets"])),
+                    Arc::new(StringArray::from(vec![
+                        "Bikes", "Helmets", "Tires", "Widgets",
+                    ])),
                 ],
             )
             .unwrap(),
@@ -193,7 +195,10 @@ async fn rank_descending_standard_ties() {
     assert_eq!(r["Bikes"], 1);
     assert_eq!(r["Helmets"], 2);
     assert_eq!(r["Tires"], 2, "tie shares the rank");
-    assert_eq!(r["Widgets"], 4, "standard ranking skips rank 3 after the tie");
+    assert_eq!(
+        r["Widgets"], 4,
+        "standard ranking skips rank 3 after the tie"
+    );
 }
 
 #[tokio::test]
@@ -216,7 +221,9 @@ async fn rank_ascending_inverts_order() {
     // Ascending: Widgets(10)=1, then the 60 tie=2, Bikes(130)=4.
     let engine = rank_engine();
     let batches = engine
-        .query(base_request(Some(RankBy::new("Revenue", "Rank").ascending())))
+        .query(base_request(Some(
+            RankBy::new("Revenue", "Rank").ascending(),
+        )))
         .await
         .unwrap();
     let r = ranks_by_product(&batches, "Rank");
@@ -308,10 +315,8 @@ fn rank_partition_key_does_not_collide_on_control_chars() {
         ],
     )
     .unwrap();
-    let rank = RankBy::new("Revenue", "Rank").within(vec![
-        ColumnRef::new("T", "p1"),
-        ColumnRef::new("T", "p2"),
-    ]);
+    let rank = RankBy::new("Revenue", "Rank")
+        .within(vec![ColumnRef::new("T", "p1"), ColumnRef::new("T", "p2")]);
     let out = crate::apply_ranking(&[batch], &rank).unwrap();
     let b = &out[0];
     let r = b

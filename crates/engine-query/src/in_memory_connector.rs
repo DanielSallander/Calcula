@@ -95,7 +95,10 @@ fn render_value(value: &str, column: &str, schema: &arrow::datatypes::Schema) ->
 }
 
 /// Render a single scalar [`FilterCondition`] as a safe SQL predicate.
-fn render_scalar(f: &engine_connectors::FilterCondition, schema: &arrow::datatypes::Schema) -> String {
+fn render_scalar(
+    f: &engine_connectors::FilterCondition,
+    schema: &arrow::datatypes::Schema,
+) -> String {
     format!(
         "{} {} {}",
         quote_ident_double(&f.column),
@@ -278,7 +281,11 @@ mod tests {
     #[tokio::test]
     async fn fetch_with_boolean_filter_works() {
         use arrow::array::BooleanArray;
-        let schema = Arc::new(Schema::new(vec![Field::new("active", DataType::Boolean, true)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "active",
+            DataType::Boolean,
+            true,
+        )]));
         let batch = RecordBatch::try_new(
             schema,
             vec![Arc::new(BooleanArray::from(vec![true, false, true]))],
@@ -288,7 +295,11 @@ mod tests {
         let req = FetchRequest {
             schema: Some("public".into()),
             table: "t".into(),
-            filters: vec![FilterCondition::new("active", FilterOperator::Equal, "true")],
+            filters: vec![FilterCondition::new(
+                "active",
+                FilterOperator::Equal,
+                "true",
+            )],
             ..Default::default()
         };
         // A Boolean column must render `"active" = true` (unquoted), not
@@ -315,7 +326,11 @@ mod tests {
         let req = FetchRequest {
             schema: Some("public".into()),
             table: "t".into(),
-            filters: vec![FilterCondition::new("fk", FilterOperator::GreaterThan, "50")],
+            filters: vec![FilterCondition::new(
+                "fk",
+                FilterOperator::GreaterThan,
+                "50",
+            )],
             ..Default::default()
         };
         // Numeric compare: only 100 > 50 → 1 row. A lexical (quoted) compare

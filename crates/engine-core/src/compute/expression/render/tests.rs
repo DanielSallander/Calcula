@@ -215,7 +215,9 @@ fn multi_table_qualifier_qualifies_each_ref_to_its_own_table() {
     let renderer = SqlRenderer::new(DataFusionDialect, &qualifier);
     // Host column (qualified with the host table) → host.
     assert_eq!(
-        renderer.render(&qualified_col("Invoice", "paid_date")).unwrap(),
+        renderer
+            .render(&qualified_col("Invoice", "paid_date"))
+            .unwrap(),
         "invoice.\"paid_date\""
     );
     // Related table column → its own table.
@@ -224,7 +226,10 @@ fn multi_table_qualifier_qualifies_each_ref_to_its_own_table() {
         "customer.\"tier\""
     );
     // Bare column → the default (host) table.
-    assert_eq!(renderer.render(&col("paid_date")).unwrap(), "invoice.\"paid_date\"");
+    assert_eq!(
+        renderer.render(&col("paid_date")).unwrap(),
+        "invoice.\"paid_date\""
+    );
 }
 
 #[test]

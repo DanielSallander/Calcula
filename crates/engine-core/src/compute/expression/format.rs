@@ -437,7 +437,10 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 let parts: Vec<String> = predicates
                     .iter()
                     .map(|p| {
-                        format!("{}.{} IN {}.{}", p.table, p.column, p.var_name, p.var_column)
+                        format!(
+                            "{}.{} IN {}.{}",
+                            p.table, p.column, p.var_name, p.var_column
+                        )
                     })
                     .collect();
                 format!("KEEP({inner_str}, {})", parts.join(", "))
@@ -462,9 +465,16 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             let inner_str = format_expr(inner, table, Precedence::Lowest);
             let func_str = format_agg_name(function);
             let ob_str = format_column_pairs(order_by);
-            let mut parts = vec![inner_str, func_str.to_string(), format!("ORDERBY({ob_str})")];
+            let mut parts = vec![
+                inner_str,
+                func_str.to_string(),
+                format!("ORDERBY({ob_str})"),
+            ];
             if !partition_by.is_empty() {
-                parts.push(format!("PARTITIONBY({})", format_column_pairs(partition_by)));
+                parts.push(format!(
+                    "PARTITIONBY({})",
+                    format_column_pairs(partition_by)
+                ));
             }
             if let Some(f) = frame {
                 let ft = |bt: &BoundaryType| match bt {
@@ -491,7 +501,10 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             let ob_str = format_column_pairs(order_by);
             let mut parts = vec![inner_str, delta.to_string(), format!("ORDERBY({ob_str})")];
             if !partition_by.is_empty() {
-                parts.push(format!("PARTITIONBY({})", format_column_pairs(partition_by)));
+                parts.push(format!(
+                    "PARTITIONBY({})",
+                    format_column_pairs(partition_by)
+                ));
             }
             format!("OFFSET({})", parts.join(", "))
         }
@@ -503,9 +516,16 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
         } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
             let ob_str = format_column_pairs(order_by);
-            let mut parts = vec![inner_str, position.to_string(), format!("ORDERBY({ob_str})")];
+            let mut parts = vec![
+                inner_str,
+                position.to_string(),
+                format!("ORDERBY({ob_str})"),
+            ];
             if !partition_by.is_empty() {
-                parts.push(format!("PARTITIONBY({})", format_column_pairs(partition_by)));
+                parts.push(format!(
+                    "PARTITIONBY({})",
+                    format_column_pairs(partition_by)
+                ));
             }
             format!("INDEX({})", parts.join(", "))
         }
@@ -521,9 +541,20 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             format!("{inner_str} IN {{{}}}", vals.join(", "))
         }
 
-        // --- Block / VAR-RETURN ---
-        Expression::Block { bindings, result } => {
+        // --- Block / GVAR + VAR-RETURN ---
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
             let mut parts = Vec::new();
+            // Query-scoped (GVAR) declarations are emitted first; the parser
+            // routes bindings by keyword, so re-parsing round-trips to the same
+            // AST regardless of the original source ordering.
+            for (name, binding_expr) in query_scoped_bindings {
+                let val = format_expr(binding_expr, table, Precedence::Lowest);
+                parts.push(format!("GVAR {name} = {val}"));
+            }
             for (name, binding_expr) in bindings {
                 let val = format_expr(binding_expr, table, Precedence::Lowest);
                 parts.push(format!("VAR {name} = {val}"));
@@ -687,7 +718,10 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
         } => {
             let mut parts = vec![format!("ORDERBY({})", format_column_pairs(order_by))];
             if !partition_by.is_empty() {
-                parts.push(format!("PARTITIONBY({})", format_column_pairs(partition_by)));
+                parts.push(format!(
+                    "PARTITIONBY({})",
+                    format_column_pairs(partition_by)
+                ));
             }
             format!("{function}({})", parts.join(", "))
         }
@@ -832,7 +866,10 @@ mod tests {
     #[test]
     fn test_qualified_col() {
         let expr = qualified_col("premium", "category");
-        assert_eq!(expression_to_formula(&expr, "Products"), "premium[category]");
+        assert_eq!(
+            expression_to_formula(&expr, "Products"),
+            "premium[category]"
+        );
     }
 
     #[test]
@@ -912,6 +949,29 @@ mod tests {
     }
 
     #[test]
+    fn test_gvar_formula_and_roundtrip() {
+        use crate::compute::parser::parse_measure_expression;
+        let expr = parse_measure_expression(
+            "GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)",
+        )
+        .unwrap();
+        // GVAR lines are emitted before the RETURN.
+        let formula = expression_to_formula(&expr, "Sales");
+        assert!(formula.contains("GVAR grand ="), "got: {formula}");
+        assert!(formula.contains("RETURN"), "got: {formula}");
+        // Re-parsing the formatted text yields the same (formatted) text.
+        let reparsed = parse_measure_expression(&formula).unwrap();
+        assert_eq!(expression_to_formula(&reparsed, "Sales"), formula);
+        match reparsed {
+            Expression::Block {
+                query_scoped_bindings,
+                ..
+            } => assert_eq!(query_scoped_bindings.len(), 1),
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_string_literal() {
         let expr = Expression::LiteralString("hello".to_string());
         assert_eq!(expression_to_formula(&expr, "T"), "\"hello\"");
@@ -928,7 +988,10 @@ mod tests {
         // formatter must render it as [Name].
         let expr = Expression::MeasureRef("Total Sales".to_string())
             .subtract(Expression::MeasureRef("Cost".to_string()));
-        assert_eq!(expression_to_formula(&expr, "Sales"), "[Total Sales] - [Cost]");
+        assert_eq!(
+            expression_to_formula(&expr, "Sales"),
+            "[Total Sales] - [Cost]"
+        );
     }
 
     #[test]

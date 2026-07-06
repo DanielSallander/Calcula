@@ -63,7 +63,8 @@ fn clear_model() -> DataModel {
         ))
         .add_measure(expression_measure(
             "PctOfTotalClear",
-            parse_measure("DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], CLEAR(Product)))").unwrap(),
+            parse_measure("DIVIDE(SUM(Sales[amount]), SUM(Sales[amount], CLEAR(Product)))")
+                .unwrap(),
         ))
         .add_measure(expression_measure(
             "GrandTotal",
@@ -174,7 +175,11 @@ async fn reset_measure_broadcasts_grand_total_to_every_row() {
     let batches = engine.query(request(&["GrandTotal"])).await.unwrap();
     let gt = grouped(&batches, "GrandTotal");
     assert!((gt["Bikes"] - 190.0).abs() < 1e-9, "got {}", gt["Bikes"]);
-    assert!((gt["Helmets"] - 190.0).abs() < 1e-9, "got {}", gt["Helmets"]);
+    assert!(
+        (gt["Helmets"] - 190.0).abs() < 1e-9,
+        "got {}",
+        gt["Helmets"]
+    );
 }
 
 #[tokio::test]
@@ -367,9 +372,21 @@ async fn percent_of_parent_partitions_by_category() {
     };
     let batches = engine.query(req).await.unwrap();
     let pct = grouped(&batches, "PctOfParent");
-    assert!((pct["Road"] - 100.0 / 150.0).abs() < 1e-9, "Road {}", pct["Road"]);
-    assert!((pct["Trail"] - 50.0 / 150.0).abs() < 1e-9, "Trail {}", pct["Trail"]);
-    assert!((pct["Helmet"] - 1.0).abs() < 1e-9, "Helmet {}", pct["Helmet"]);
+    assert!(
+        (pct["Road"] - 100.0 / 150.0).abs() < 1e-9,
+        "Road {}",
+        pct["Road"]
+    );
+    assert!(
+        (pct["Trail"] - 50.0 / 150.0).abs() < 1e-9,
+        "Trail {}",
+        pct["Trail"]
+    );
+    assert!(
+        (pct["Helmet"] - 1.0).abs() < 1e-9,
+        "Helmet {}",
+        pct["Helmet"]
+    );
     // The two Bikes products' shares sum to 1.0 within their category.
     assert!((pct["Road"] + pct["Trail"] - 1.0).abs() < 1e-9);
 }

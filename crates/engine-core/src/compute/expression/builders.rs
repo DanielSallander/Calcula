@@ -196,6 +196,24 @@ pub fn qualified_col(table_or_var: impl Into<String>, column: impl Into<String>)
 pub fn block(bindings: Vec<(String, Expression)>, result: Expression) -> Expression {
     Expression::Block {
         bindings,
+        query_scoped_bindings: Vec::new(),
+        result: Box::new(result),
+    }
+}
+
+/// Create a block expression carrying query-scoped (`GVAR`) bindings alongside
+/// ordinary (`VAR`) bindings.
+///
+/// `query_scoped` are the `GVAR` bindings (resolved once per query context at
+/// the facade); `bindings` are the ordinary `VAR` bindings (inlined per group).
+pub fn block_with_globals(
+    query_scoped: Vec<(String, Expression)>,
+    bindings: Vec<(String, Expression)>,
+    result: Expression,
+) -> Expression {
+    Expression::Block {
+        bindings,
+        query_scoped_bindings: query_scoped,
         result: Box::new(result),
     }
 }
@@ -576,13 +594,13 @@ pub fn expr_literal_from_scalar(
         SV::Utf8(Some(s)) | SV::LargeUtf8(Some(s)) => Expression::LiteralString(s.clone()),
         SV::Date32(Some(d)) => Expression::LiteralDate(*d),
         // Date64 is milliseconds since the epoch; reduce to whole days.
-        SV::Date64(Some(ms)) => Expression::LiteralDate(
-            i32::try_from(ms.div_euclid(86_400_000)).map_err(|_| {
+        SV::Date64(Some(ms)) => {
+            Expression::LiteralDate(i32::try_from(ms.div_euclid(86_400_000)).map_err(|_| {
                 crate::error::EngineError::InvalidExpression(format!(
                     "context scalar date {ms} is out of the Date32 range"
                 ))
-            })?,
-        ),
+            })?)
+        }
         SV::Decimal128(Some(v), _precision, scale) => {
             // Render as a float for comparison. Precision beyond f64 is lost;
             // acceptable for a threshold comparison, documented for the host.

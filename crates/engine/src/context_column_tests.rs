@@ -20,8 +20,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, Date32Array, DictionaryArray, Float64Array, Int32Array, Int64Array,
-    StringArray};
+use arrow::array::{
+    Array, Date32Array, DictionaryArray, Float64Array, Int32Array, Int64Array, StringArray,
+};
 use arrow::datatypes::{DataType as ArrowType, Field, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
@@ -265,7 +266,10 @@ async fn in_filter_slice_changes_segmentation_and_is_cache_keyed() {
         ..group_by_status(vec![])
     };
     let sliced = by_status(&engine.query(req).await.unwrap());
-    assert_eq!(sliced["Paid"], 100.0, "in_filter slice must move the as-of date");
+    assert_eq!(
+        sliced["Paid"], 100.0,
+        "in_filter slice must move the as-of date"
+    );
     assert_eq!(sliced["Open"], 100.0);
 }
 
@@ -389,7 +393,11 @@ fn dag_engine(model: DataModel) -> Engine {
         .store(
             "Calendar",
             RecordBatch::try_new(
-                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                Arc::new(Schema::new(vec![Field::new(
+                    "date",
+                    ArrowType::Date32,
+                    true,
+                )])),
                 vec![Arc::new(Date32Array::from(vec![days(2024, 3, 31)]))],
             )
             .unwrap(),
@@ -464,7 +472,11 @@ async fn circular_context_column_references_fail_closed() {
             .store(
                 "Invoice",
                 RecordBatch::try_new(
-                    Arc::new(Schema::new(vec![Field::new("amount", ArrowType::Float64, true)])),
+                    Arc::new(Schema::new(vec![Field::new(
+                        "amount",
+                        ArrowType::Float64,
+                        true,
+                    )])),
                     vec![Arc::new(Float64Array::from(vec![1.0]))],
                 )
                 .unwrap(),
@@ -494,7 +506,10 @@ fn detail_amount_status(batches: &[RecordBatch]) -> HashMap<i64, String> {
     for b in batches {
         let a = b.column(col_idx(b, "amount"));
         let s = b.column(col_idx(b, "PaymentStatus"));
-        let amounts = a.as_any().downcast_ref::<Float64Array>().expect("amount f64");
+        let amounts = a
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("amount f64");
         for row in 0..b.num_rows() {
             out.insert(amounts.value(row) as i64, str_key(s.as_ref(), row));
         }
@@ -592,7 +607,11 @@ async fn drillthrough_context_column_under_role_no_leak() {
         .store(
             "Calendar",
             RecordBatch::try_new(
-                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                Arc::new(Schema::new(vec![Field::new(
+                    "date",
+                    ArrowType::Date32,
+                    true,
+                )])),
                 vec![Arc::new(Date32Array::from(vec![days(2024, 3, 31)]))],
             )
             .unwrap(),
@@ -701,11 +720,7 @@ fn cross_table_model() -> DataModel {
             .unwrap(),
         ))
         .add_table(in_mem(
-            Table::new(
-                "Calendar",
-                vec![Column::new("date", DataType::Date)],
-            )
-            .unwrap(),
+            Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap(),
         ))
         .add_relationship(Relationship::many_to_one(
             "Invoice_Customer",
@@ -736,7 +751,12 @@ fn cross_table_engine(with_orphan: bool) -> Engine {
         engine.bind_table(t, 0, SourceBinding::new("public", &t.to_lowercase()));
     }
     let (mut dates, mut amounts, mut custs) = (
-        vec![days(2024, 1, 15), days(2024, 3, 15), days(2024, 6, 15), days(2024, 12, 15)],
+        vec![
+            days(2024, 1, 15),
+            days(2024, 3, 15),
+            days(2024, 6, 15),
+            days(2024, 12, 15),
+        ],
         vec![100.0, 50.0, 30.0, 20.0],
         vec![1i64, 2, 1, 2],
     );
@@ -786,7 +806,11 @@ fn cross_table_engine(with_orphan: bool) -> Engine {
         .store(
             "Calendar",
             RecordBatch::try_new(
-                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                Arc::new(Schema::new(vec![Field::new(
+                    "date",
+                    ArrowType::Date32,
+                    true,
+                )])),
                 vec![Arc::new(Date32Array::from(vec![
                     days(2024, 1, 31),
                     days(2024, 2, 29),
@@ -940,7 +964,11 @@ async fn rls_on_referenced_table_restricts_the_fact_no_leak() {
         .store(
             "Calendar",
             RecordBatch::try_new(
-                Arc::new(Schema::new(vec![Field::new("date", ArrowType::Date32, true)])),
+                Arc::new(Schema::new(vec![Field::new(
+                    "date",
+                    ArrowType::Date32,
+                    true,
+                )])),
                 vec![Arc::new(Date32Array::from(vec![
                     days(2024, 1, 31),
                     days(2024, 3, 31),
@@ -960,7 +988,10 @@ async fn rls_on_referenced_table_restricts_the_fact_no_leak() {
     let r = by_paid_tier(&batches);
     assert_eq!(r.get("Gold"), Some(&100.0));
     assert_eq!(r.get("Unpaid"), Some(&30.0));
-    assert!(r.get("Silver").is_none(), "Silver-customer rows must not leak: {r:?}");
+    assert!(
+        r.get("Silver").is_none(),
+        "Silver-customer rows must not leak: {r:?}"
+    );
 }
 
 #[tokio::test]
@@ -971,12 +1002,19 @@ async fn left_join_keeps_unmatched_fact_rows_without_inflation() {
     // hold; the orphan lands in the NULL-tier group.
     let engine = cross_table_engine(true);
     let batches = engine.query(group_by_paid_tier()).await.unwrap();
-    assert_eq!(total_revenue(&batches), 270.0, "no rows dropped or duplicated");
+    assert_eq!(
+        total_revenue(&batches),
+        270.0,
+        "no rows dropped or duplicated"
+    );
     let r = by_paid_tier(&batches);
     assert_eq!(r["Gold"], 100.0);
     assert_eq!(r["Silver"], 50.0);
     assert_eq!(r["Unpaid"], 50.0);
-    assert_eq!(r["(null)"], 70.0, "orphan-FK paid invoice kept with NULL tier");
+    assert_eq!(
+        r["(null)"], 70.0,
+        "orphan-FK paid invoice kept with NULL tier"
+    );
 }
 
 #[tokio::test]
@@ -985,7 +1023,10 @@ async fn in_memory_context_column_is_not_pushed() {
     // connector, so the context column must aggregate locally — never emit a
     // pushed join-aggregation (which only PostgreSQL can execute).
     let engine = ctx_engine();
-    let (_batches, plan) = engine.query_explained(group_by_status(vec![])).await.unwrap();
+    let (_batches, plan) = engine
+        .query_explained(group_by_status(vec![]))
+        .await
+        .unwrap();
     let json = serde_json::to_string(&plan).unwrap();
     assert!(
         !json.contains("PushedJoinAggregation"),
@@ -1148,9 +1189,7 @@ mod context_pushdown {
             for row in 0..b.num_rows() {
                 let v = if let Some(a) = m.as_any().downcast_ref::<Float64Array>() {
                     a.value(row)
-                } else if let Some(a) =
-                    m.as_any().downcast_ref::<arrow::array::Decimal128Array>()
-                {
+                } else if let Some(a) = m.as_any().downcast_ref::<arrow::array::Decimal128Array>() {
                     let scale = match m.data_type() {
                         ArrowType::Decimal128(_, s) => *s,
                         _ => 0,
@@ -1204,7 +1243,10 @@ mod context_pushdown {
         };
         let (batches, plan) = engine.query_explained(request).await.unwrap();
         assert_pushed(&plan);
-        assert_matches(&engine_by_timing(&batches), &oracle(&pool, "2013-06-01").await);
+        assert_matches(
+            &engine_by_timing(&batches),
+            &oracle(&pool, "2013-06-01").await,
+        );
     }
 
     #[tokio::test]
@@ -1222,7 +1264,10 @@ mod context_pushdown {
         };
         let (batches, plan) = engine.query_explained(request).await.unwrap();
         assert_pushed(&plan);
-        assert_matches(&engine_by_timing(&batches), &oracle(&pool, "2012-06-01").await);
+        assert_matches(
+            &engine_by_timing(&batches),
+            &oracle(&pool, "2012-06-01").await,
+        );
     }
 
     /// Like `pg_engine`, but the as-of reference is **related** to the fact

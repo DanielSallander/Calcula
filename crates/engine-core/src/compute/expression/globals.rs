@@ -19,7 +19,11 @@ pub fn expand_global_variables(
     } else {
         // If the expression is already a Block, merge QUERY bindings into it.
         match expanded {
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
                 let mut all_bindings = Vec::new();
                 for name in &query_globals {
                     // Only add if not already bound in the existing block.
@@ -33,6 +37,7 @@ pub fn expand_global_variables(
                 all_bindings.extend(bindings);
                 Expression::Block {
                     bindings: all_bindings,
+                    query_scoped_bindings,
                     result,
                 }
             }
@@ -48,6 +53,7 @@ pub fn expand_global_variables(
                     .collect();
                 Expression::Block {
                     bindings,
+                    query_scoped_bindings: Vec::new(),
                     result: Box::new(other),
                 }
             }
@@ -172,8 +178,12 @@ fn collect_query_global_refs(
             collect_query_global_refs(operand, model, found);
             collect_query_global_refs(percentile, model, found);
         }
-        Expression::Block { bindings, result } => {
-            for (_, binding_expr) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 collect_query_global_refs(binding_expr, model, found);
             }
             collect_query_global_refs(result, model, found);
@@ -330,8 +340,18 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
             expr: Box::new(expand_scalar_globals(inner, model)),
             predicates: predicates.clone(),
         },
-        Expression::Block { bindings, result } => {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
             let expanded_bindings = bindings
+                .iter()
+                .map(|(name, binding_expr)| {
+                    (name.clone(), expand_scalar_globals(binding_expr, model))
+                })
+                .collect();
+            let expanded_query_scoped = query_scoped_bindings
                 .iter()
                 .map(|(name, binding_expr)| {
                     (name.clone(), expand_scalar_globals(binding_expr, model))
@@ -339,6 +359,7 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
                 .collect();
             Expression::Block {
                 bindings: expanded_bindings,
+                query_scoped_bindings: expanded_query_scoped,
                 result: Box::new(expand_scalar_globals(result, model)),
             }
         }
@@ -704,7 +725,9 @@ mod tests {
 
         // Should be wrapped in a Block with the QUERY binding.
         match &expanded {
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings, result, ..
+            } => {
                 assert_eq!(bindings.len(), 1);
                 assert_eq!(bindings[0].0, "city_sales");
                 assert!(matches!(bindings[0].1, Expression::Query { .. }));
@@ -753,6 +776,7 @@ mod tests {
         // Existing block with a scalar VAR, referencing a QUERY global in result.
         let expr = Expression::Block {
             bindings: vec![("factor".into(), lit(2.0))],
+            query_scoped_bindings: Vec::new(),
             result: Box::new(Expression::Aggregate {
                 operation: AggregateOp::Average,
                 operand: Box::new(Expression::QualifiedColumnRef {

@@ -33,11 +33,7 @@ impl<'a> MeasureEngine<'a> {
     ) -> EngineResult<AggregateResult> {
         use crate::compute::expression::Expression;
 
-        let Expression::Block {
-            bindings,
-            result: _,
-        } = expr
-        else {
+        let Expression::Block { bindings, .. } = expr else {
             return Err(crate::error::EngineError::InvalidExpression(
                 "Expected Block with Query bindings".into(),
             ));
@@ -130,11 +126,7 @@ impl<'a> MeasureEngine<'a> {
     ) -> EngineResult<RecordBatch> {
         use crate::compute::expression::Expression;
 
-        let Expression::Block {
-            bindings,
-            result: _,
-        } = expr
-        else {
+        let Expression::Block { bindings, .. } = expr else {
             return Err(crate::error::EngineError::InvalidExpression(
                 "Expected Block with Query bindings".into(),
             ));

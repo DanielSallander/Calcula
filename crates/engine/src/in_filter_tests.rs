@@ -223,7 +223,10 @@ async fn scalar_filter_on_filter_only_dimension_restricts_the_fact() {
         ..Default::default()
     };
     let r = by_product(&engine.query(req).await.unwrap());
-    assert_eq!(r["Bikes"], 100.0, "East-only Bikes = 100 (region filter applied)");
+    assert_eq!(
+        r["Bikes"], 100.0,
+        "East-only Bikes = 100 (region filter applied)"
+    );
     assert_eq!(r["Helmets"], 40.0, "East-only Helmets = 40");
 }
 

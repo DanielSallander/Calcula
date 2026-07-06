@@ -157,8 +157,12 @@ fn collect_variable_names(expr: &Expression, model: &DataModel, names: &mut Vec<
                 collect_variable_names(a, model, names);
             }
         }
-        Expression::Block { bindings, result } => {
-            for (_, e) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            for (_, e) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 collect_variable_names(e, model, names);
             }
             collect_variable_names(result, model, names);
@@ -299,8 +303,12 @@ fn collect_context_names_from_expr(expr: &Expression, model: &DataModel, names: 
                 collect_context_names_from_expr(a, model, names);
             }
         }
-        Expression::Block { bindings, result } => {
-            for (_, binding_expr) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 collect_context_names_from_expr(binding_expr, model, names);
             }
             collect_context_names_from_expr(result, model, names);
@@ -414,8 +422,12 @@ fn collect_userelationship_names(expr: &Expression, names: &mut Vec<String>) {
         | Expression::Using { expr: inner, .. } => {
             collect_userelationship_names(inner, names);
         }
-        Expression::Block { bindings, result } => {
-            for (_, binding_expr) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 collect_userelationship_names(binding_expr, names);
             }
             collect_userelationship_names(result, names);
@@ -502,8 +514,12 @@ pub(super) fn collect_query_binding_names(expr: &Expression) -> Vec<String> {
 
 fn collect_query_names_recursive(expr: &Expression, names: &mut Vec<String>) {
     match expr {
-        Expression::Block { bindings, result } => {
-            for (name, binding_expr) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            for (name, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 if matches!(binding_expr, Expression::Query { .. }) {
                     names.push(name.to_lowercase());
                 }

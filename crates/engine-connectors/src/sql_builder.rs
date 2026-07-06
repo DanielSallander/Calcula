@@ -719,14 +719,16 @@ pub(crate) fn build_join_aggregation_sql(
     // and the GROUP BY (raw).
     for cg in &request.computed_group_by {
         let resolved = resolve_is_in_scope(&cg.expression, &group_by_pairs);
-        let expr_sql = dialect.render_join_expression(&resolved, &request.table_map, &request.group_by)?;
+        let expr_sql =
+            dialect.render_join_expression(&resolved, &request.table_map, &request.group_by)?;
         select_parts.push(format!("{expr_sql} AS {}", dialect.quote_ident(&cg.alias)));
         group_by_parts.push(expr_sql);
     }
 
     for m in &request.measures {
         let resolved = resolve_is_in_scope(&m.expression, &group_by_pairs);
-        let expr_sql = dialect.render_join_expression(&resolved, &request.table_map, &request.group_by)?;
+        let expr_sql =
+            dialect.render_join_expression(&resolved, &request.table_map, &request.group_by)?;
         select_parts.push(format!("{expr_sql} AS {}", dialect.quote_ident(&m.alias)));
     }
 
@@ -915,8 +917,10 @@ mod tests {
     fn build_filter_conditions_integer_kind_falls_back_when_value_not_integer() {
         // Defense in depth: a value that does not parse as an integer is never
         // inlined unquoted — it falls back to the safe bound-parameter path.
-        let filters = vec![FilterCondition::new("region_id", FilterOperator::Equal, "5; DROP")
-            .with_kind(InValueKind::Integer)];
+        let filters = vec![
+            FilterCondition::new("region_id", FilterOperator::Equal, "5; DROP")
+                .with_kind(InValueKind::Integer),
+        ];
         let mut params = Vec::new();
         let pg = build_filter_conditions(&PostgresDialect, &filters, &mut params);
         assert_eq!(pg[0], "\"region_id\"::text = $1");
@@ -1028,7 +1032,11 @@ mod tests {
                 function: AggregateFunction::Sum,
                 alias: Some("total".into()),
             }],
-            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
+            filters: vec![FilterCondition::new(
+                "status",
+                FilterOperator::Equal,
+                "active",
+            )],
             group_by: vec!["region".into()],
             limit: Some(10),
             ..Default::default()
@@ -1344,7 +1352,11 @@ mod tests {
             schema: Some("sales".into()),
             table: "orders".into(),
             columns: vec!["id".into(), "amount".into()],
-            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
+            filters: vec![FilterCondition::new(
+                "status",
+                FilterOperator::Equal,
+                "active",
+            )],
             in_filters: vec![in_filter("region_id", &["1", "2"], InValueKind::Integer)],
             limit: Some(5),
             ..Default::default()
@@ -1496,7 +1508,11 @@ mod tests {
                 column: "category".into(),
             }],
             computed_group_by: vec![],
-            filters: vec![FilterCondition::new("status", FilterOperator::Equal, "active")],
+            filters: vec![FilterCondition::new(
+                "status",
+                FilterOperator::Equal,
+                "active",
+            )],
             table_map: vec![("Sales".into(), "orders".into())],
         };
 

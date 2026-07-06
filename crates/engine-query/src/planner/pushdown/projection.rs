@@ -53,8 +53,18 @@ pub(super) fn compute_table_projections(
         match expand_measure_refs(measure.expression(), model) {
             Ok(ref_expanded) => {
                 let expanded = expand_global_variables(&ref_expanded, model);
-                let analyzed = Measure::new(measure.name(), expanded);
-                collector.walk(analyzed.expression());
+                if expanded.has_query_scoped_bindings() {
+                    // An unresolved GVAR here means the facade did not resolve it
+                    // (a bypass). Fall back to a broad fetch; the executor's guard
+                    // then fails the query closed rather than under-fetching.
+                    collector.set_global_fallback(format!(
+                        "measure '{}': unresolved query-scoped (GVAR) binding reached the planner",
+                        measure.name()
+                    ));
+                } else {
+                    let analyzed = Measure::new(measure.name(), expanded);
+                    collector.walk(analyzed.expression());
+                }
             }
             Err(e) => {
                 collector.set_global_fallback(format!(
@@ -861,7 +871,8 @@ mod tests {
         };
 
         let (_plan, node) =
-            PushdownPlanner::plan_explained(&request, &fallback_model, &registry, &[], &[]).unwrap();
+            PushdownPlanner::plan_explained(&request, &fallback_model, &registry, &[], &[])
+                .unwrap();
         let fallbacks = node
             .properties
             .iter()

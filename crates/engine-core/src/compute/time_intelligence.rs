@@ -616,11 +616,7 @@ pub fn time_intelligence_route(
             expr: _,
             offset,
             granularity,
-        } => (
-            period_shift_name(*offset, *granularity),
-            *granularity,
-            true,
-        ),
+        } => (period_shift_name(*offset, *granularity), *granularity, true),
         _ => return Ok(None),
     };
 
@@ -811,7 +807,11 @@ pub fn lower_time_intelligence_filtered(
             "CLOSINGBALANCE"
         };
         let (date_table, date_key_column) = require_date_key(function, model)?;
-        let boundary_days = if *opening { min_context_days } else { as_of_days };
+        let boundary_days = if *opening {
+            min_context_days
+        } else {
+            as_of_days
+        };
         let boundary = date32_to_naive(boundary_days).ok_or_else(|| {
             time_intelligence_error(
                 function,
@@ -1012,7 +1012,15 @@ pub fn lower_to_date_explicit_range(
             format!("the as-of date probe returned an out-of-range value ({as_of_days} days)"),
         )
     })?;
-    build_filtered_range_keep(inner, model, date_table, date_key_column, start, end, description)
+    build_filtered_range_keep(
+        inner,
+        model,
+        date_table,
+        date_key_column,
+        start,
+        end,
+        description,
+    )
 }
 
 /// Convert a `Date32` value (days since 1970-01-01) to a [`NaiveDate`].

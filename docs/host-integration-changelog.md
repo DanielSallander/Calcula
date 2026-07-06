@@ -16,7 +16,7 @@ It is the authoritative hand-off surface between the engine and its hosts. It is
 The shared model file carries a `format_version: u32` field (serde key `format_version`, defaults to `0` for legacy files). The engine's current maximum is:
 
 ```rust
-pub const MODEL_FORMAT_VERSION: u32 = 9; // engine-core::model::schema
+pub const MODEL_FORMAT_VERSION: u32 = 13; // engine-core::model::schema
 ```
 
 Opening a model whose `format_version` is **higher** than the engine supports fails closed with:
@@ -46,8 +46,26 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `10` | KPIs — model gained `kpis` (author-defined status markup over a base measure: target + status bands). |
 | `11` | Dynamic row-level security — a role's `FilterPredicate` gained a `dynamic` field (`USERNAME()` / `CUSTOMDATA()` identity tokens). |
 | `12` | Context-driven calculated columns — model gained `context_columns` (a groupable column whose row-level expression resolves a scalar measure from the query's filter context). |
+| `13` | Query-scoped variables (`GVAR`) — the `Block` (VAR/RETURN) expression gained `query_scoped_bindings`: variables evaluated once per query filter context, ignoring the group-by axis. |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
+
+---
+
+## Query-scoped variables — `GVAR` (format version 13)
+
+**Measure authoring — new keyword.** A measure's `VAR … RETURN` block may now also declare `GVAR` (query-scoped) variables. A `GVAR` is evaluated **once per query** — against the query's outer filter/slicer context and active RLS role, but **without** the group-by/row axis — and substituted as a constant everywhere it is referenced. Contrast: a plain `VAR` is inlined and re-evaluated per group. Canonical use is "% of grand total" or "compare each row to a whole-context value":
+
+```
+GVAR grand = SUM(Sales[amount])
+RETURN DIVIDE(SUM(Sales[amount]), grand)
+```
+
+- **Model JSON (`format_version` 13).** The `Block` expression node gained an additive field `query_scoped_bindings` (serde `default` + `skip_serializing_if`), a list of `(name, expression)` pairs parallel to `bindings`. Measures that use no `GVAR` are unchanged on the wire. A pre-v13 engine would silently drop the field and miscompute, so writing a measure that uses `GVAR` must stamp `format_version >= 13`.
+- **Public API.** `Expression::Block` gained the `query_scoped_bindings` field; new builder `expr::block_with_globals(query_scoped, bindings, result)`; new inspector `Expression::has_query_scoped_bindings()`. `expression_to_formula` emits `GVAR name = …` lines before `VAR` lines.
+- **Semantics / result contract.** No change to the result shape — a `GVAR` measure returns one value column like any measure. The value is a pure function of the query's filter context (already part of the query cache key), so caching is unaffected.
+- **Errors the host can observe.** Authoring/validation errors surface as `EngineError::InvalidExpression` (a `GVAR` binding that is not scalar, references a `VAR` or a later/self `GVAR`, duplicate name, collides with a model global-variable name, or is nested below the measure root). Query-time fail-closed combinations surface as `QueryError::InvalidQuery` (currently: `GVAR` together with a calculation group).
+- **Not supported (v1, fails closed):** `GVAR` in a calculated column or model global variable; evaluation through the lower-level in-memory `MeasureEngine`; combination with a calculation group; `GVAR` under **multiple active RLS roles** (`set_active_roles` with >1 role — query under a single role instead); and evaluation via `query_auto_tier` / `query_explained` / `query_auto_refresh` (resolution is wired into `Engine::query` / `query_with_meta` — the other entry points fail closed with `QueryError::InvalidQuery` rather than mis-evaluate). Adding `GVAR` to a measure is backward-compatible for authoring: `GVAR` is only a keyword at a declaration start, so existing measures that use `gvar` as a variable name still parse.
 
 ---
 

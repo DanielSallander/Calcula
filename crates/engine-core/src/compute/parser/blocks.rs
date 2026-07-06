@@ -106,29 +106,46 @@ impl Parser {
         matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "VAR")
     }
 
+    /// Check if the current token is `GVAR` (case-insensitive) — a query-scoped
+    /// (global) variable declaration.
+    pub(super) fn peek_is_gvar(&self) -> bool {
+        matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "GVAR")
+    }
+
     /// Check if the current token is `RETURN` (case-insensitive).
     fn peek_is_return(&self) -> bool {
         matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "RETURN")
     }
 
-    /// Parse a VAR/RETURN block:
+    /// Parse a `VAR` / `GVAR` / `RETURN` block:
     ///
     /// ```text
-    /// VAR name = expression
-    /// VAR name = expression
+    /// GVAR maxDate = MAX(dim_date[date])   -- query-scoped (once per query)
+    /// VAR  local   = SUM(fact[amount])     -- per-row / per-group
     /// RETURN result_expression
     /// ```
     ///
-    /// Produces `Expression::Block { bindings, result }`.
+    /// `VAR` and `GVAR` declarations may be interleaved; `GVAR` bindings are
+    /// collected into `query_scoped_bindings` (evaluated once per query context
+    /// at the facade), `VAR` bindings into `bindings` (inlined per group).
+    /// Produces `Expression::Block { bindings, query_scoped_bindings, result }`.
     pub(super) fn parse_var_return_block(&mut self) -> EngineResult<Expression> {
         let mut bindings = Vec::new();
+        let mut query_scoped = Vec::new();
 
-        while self.peek_is_var() {
-            self.advance()?; // consume VAR
+        while self.peek_is_var() || self.peek_is_gvar() {
+            let is_global = self.peek_is_gvar();
+            let keyword = if is_global { "GVAR" } else { "VAR" };
+            self.advance()?; // consume VAR / GVAR
 
             // Variable name.
             let var_name = match self.advance()?.clone() {
                 Token::Ident(s) => {
+                    // VAR and RETURN are matched mid-stream (loop condition /
+                    // RETURN detection) so they must stay reserved as names.
+                    // GVAR is only ever matched at a declaration start (via
+                    // `peek_is_gvar`), so — for backward compatibility — it
+                    // remains usable as a binding name.
                     let upper = s.to_uppercase();
                     if upper == "VAR" || upper == "RETURN" {
                         return Err(self.parse_err_prev(format!(
@@ -138,9 +155,9 @@ impl Parser {
                     s
                 }
                 tok => {
-                    return Err(
-                        self.parse_err_prev(format!("VAR: expected variable name, got {tok:?}"))
-                    );
+                    return Err(self.parse_err_prev(format!(
+                        "{keyword}: expected variable name, got {tok:?}"
+                    )));
                 }
             };
 
@@ -149,17 +166,21 @@ impl Parser {
 
             // Parse the binding expression.
             let binding_expr = self.parse_expression()?;
-            bindings.push((var_name, binding_expr));
+            if is_global {
+                query_scoped.push((var_name, binding_expr));
+            } else {
+                bindings.push((var_name, binding_expr));
+            }
         }
 
-        if bindings.is_empty() {
-            return Err(self.parse_err("VAR block must have at least one VAR declaration"));
+        if bindings.is_empty() && query_scoped.is_empty() {
+            return Err(self.parse_err("VAR block must have at least one VAR or GVAR declaration"));
         }
 
         // Expect RETURN.
         if !self.peek_is_return() {
             return Err(self.parse_err(format!(
-                "expected RETURN after VAR declarations, got {:?}",
+                "expected RETURN after VAR/GVAR declarations, got {:?}",
                 self.peek()
             )));
         }
@@ -167,7 +188,7 @@ impl Parser {
 
         let result = self.parse_expression()?;
 
-        Ok(expr::block(bindings, result))
+        Ok(expr::block_with_globals(query_scoped, bindings, result))
     }
 }
 
@@ -181,7 +202,9 @@ mod tests {
     fn parse_var_return_simple() {
         let expr = parse_measure_expression("VAR total = SUM(Sales[amount]) RETURN total").unwrap();
         match &expr {
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings, result, ..
+            } => {
                 assert_eq!(bindings.len(), 1);
                 assert_eq!(bindings[0].0, "total");
                 assert!(bindings[0].1.has_aggregate());
@@ -198,7 +221,9 @@ mod tests {
         )
         .unwrap();
         match &expr {
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings, result, ..
+            } => {
                 assert_eq!(bindings.len(), 2);
                 assert_eq!(bindings[0].0, "revenue");
                 assert_eq!(bindings[1].0, "cost");
@@ -215,7 +240,9 @@ mod tests {
         )
         .unwrap();
         match &expr {
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings, result, ..
+            } => {
                 assert_eq!(bindings.len(), 2);
                 assert!(matches!(result.as_ref(), Expression::SafeDivide { .. }));
             }
@@ -295,6 +322,79 @@ mod tests {
         assert!(err.contains("reserved"));
     }
 
+    // --- GVAR (query-scoped variable) parser tests ---
+
+    #[test]
+    fn parse_gvar_only_block() {
+        let expr =
+            parse_measure_expression("GVAR maxDate = MAX(dim_date[date]) RETURN maxDate").unwrap();
+        match &expr {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                assert!(bindings.is_empty(), "no VAR bindings");
+                assert_eq!(query_scoped_bindings.len(), 1);
+                assert_eq!(query_scoped_bindings[0].0, "maxDate");
+                assert!(query_scoped_bindings[0].1.has_aggregate());
+                assert!(matches!(result.as_ref(), Expression::ColumnRef(n) if n == "maxDate"));
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gvar_and_var_interleaved() {
+        // Interleaved GVAR/VAR are routed by keyword, not source order.
+        let expr = parse_measure_expression(
+            "VAR local = SUM(Sales[amount]) \
+             GVAR grand = SUM(Sales[amount]) \
+             RETURN DIVIDE(local, grand)",
+        )
+        .unwrap();
+        match &expr {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                ..
+            } => {
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0].0, "local");
+                assert_eq!(query_scoped_bindings.len(), 1);
+                assert_eq!(query_scoped_bindings[0].0, "grand");
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gvar_case_insensitive() {
+        let expr = parse_measure_expression("gvar g = SUM(Sales[amount]) return g * 2").unwrap();
+        match &expr {
+            Expression::Block {
+                query_scoped_bindings,
+                ..
+            } => assert_eq!(query_scoped_bindings.len(), 1),
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gvar_without_return_fails() {
+        let result = parse_measure_expression("GVAR g = SUM(Sales[amount])");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("RETURN"));
+    }
+
+    #[test]
+    fn gvar_is_usable_as_a_variable_name() {
+        // Backward compatibility: GVAR is only a keyword at a declaration start,
+        // so it stays usable as a VAR/GVAR binding name (unlike VAR/RETURN).
+        let expr = parse_measure_expression("VAR gvar = SUM(Sales[amount]) RETURN gvar").unwrap();
+        assert!(matches!(expr, Expression::Block { .. }));
+    }
+
     #[test]
     fn parse_var_return_with_scalar_functions() {
         let expr = parse_measure_expression(
@@ -314,7 +414,10 @@ mod tests {
             "VAR tbl = QUERY(SUM(Sales[amount]) AS revenue BY Date[year]) RETURN AVG(tbl[revenue])",
         )
         .unwrap();
-        if let Expression::Block { bindings, result } = &expr {
+        if let Expression::Block {
+            bindings, result, ..
+        } = &expr
+        {
             assert_eq!(bindings.len(), 1);
             assert_eq!(bindings[0].0, "tbl");
             if let Expression::Query {

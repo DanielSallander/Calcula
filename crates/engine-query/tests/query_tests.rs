@@ -95,7 +95,11 @@ async fn pushed_aggregate_with_filter() {
         .fetch_data(&FetchRequest {
             schema: Some("sales".into()),
             table: "salesorderdetail".into(),
-            filters: vec![FilterCondition::new("productid", FilterOperator::Equal, "776")],
+            filters: vec![FilterCondition::new(
+                "productid",
+                FilterOperator::Equal,
+                "776",
+            )],
             aggregates: vec![AggregateExpr {
                 column: "orderqty".into(),
                 function: AggregateFunction::Sum,
@@ -308,7 +312,11 @@ async fn end_to_end_pushed_with_filter() {
     let request = QueryRequest {
         measures: vec!["TotalQty".into()],
         group_by: vec![],
-        filters: vec![FilterCondition::new("productid", FilterOperator::Equal, "776")],
+        filters: vec![FilterCondition::new(
+            "productid",
+            FilterOperator::Equal,
+            "776",
+        )],
         lookups: vec![],
         ..Default::default()
     };

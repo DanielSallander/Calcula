@@ -140,9 +140,7 @@ mod tests {
                 )
                 .unwrap(),
             )
-            .add_table(
-                Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap(),
-            )
+            .add_table(Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap())
             .add_measure(sum_measure("Revenue", "Invoice", "amount"))
             .add_measure(Measure::new(
                 "AsOfDate",
@@ -284,10 +282,18 @@ mod tests {
 
     #[test]
     fn duplicate_context_column_name_is_rejected() {
-        let a =
-            ContextColumn::new("PaymentStatus", "Invoice", payment_status_expr(), DataType::String);
-        let b =
-            ContextColumn::new("PaymentStatus", "Invoice", payment_status_expr(), DataType::String);
+        let a = ContextColumn::new(
+            "PaymentStatus",
+            "Invoice",
+            payment_status_expr(),
+            DataType::String,
+        );
+        let b = ContextColumn::new(
+            "PaymentStatus",
+            "Invoice",
+            payment_status_expr(),
+            DataType::String,
+        );
         let err = model_with_context_columns(vec![a, b]).unwrap_err();
         assert!(matches!(err, EngineError::DuplicateName(_)), "got: {err:?}");
     }
@@ -343,9 +349,7 @@ mod tests {
                 )
                 .unwrap(),
             )
-            .add_table(
-                Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap(),
-            )
+            .add_table(Table::new("Calendar", vec![Column::new("date", DataType::Date)]).unwrap())
             .add_relationship(Relationship::many_to_one(
                 "Invoice_Customer",
                 "Invoice",
@@ -415,8 +419,12 @@ mod tests {
     fn context_column_may_reference_another_on_same_table() {
         // PaidFlag references the PaymentStatus context column — build accepts
         // it (a dependency, inlined at query time), not rejected as unknown.
-        let a =
-            ContextColumn::new("PaymentStatus", "Invoice", payment_status_expr(), DataType::String);
+        let a = ContextColumn::new(
+            "PaymentStatus",
+            "Invoice",
+            payment_status_expr(),
+            DataType::String,
+        );
         let b = ContextColumn::new(
             "PaidFlag",
             "Invoice",
@@ -437,8 +445,12 @@ mod tests {
 
     #[test]
     fn inline_context_column_refs_flattens_dependency() {
-        let a =
-            ContextColumn::new("PaymentStatus", "Invoice", payment_status_expr(), DataType::String);
+        let a = ContextColumn::new(
+            "PaymentStatus",
+            "Invoice",
+            payment_status_expr(),
+            DataType::String,
+        );
         let b = ContextColumn::new(
             "PaidFlag",
             "Invoice",

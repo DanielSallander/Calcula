@@ -19,7 +19,10 @@ use crate::error::{ConnectorError, ConnectorResult};
 /// Convert a slice of `PgRow` values into Arrow `RecordBatch` values.
 ///
 /// The `schema` determines the Arrow data type used for each column.
-pub fn rows_to_record_batches(rows: &[PgRow], schema: &Schema) -> ConnectorResult<Vec<RecordBatch>> {
+pub fn rows_to_record_batches(
+    rows: &[PgRow],
+    schema: &Schema,
+) -> ConnectorResult<Vec<RecordBatch>> {
     crate::arrow_build::rows_to_record_batches::<PgReader>(rows, schema)
 }
 

@@ -133,6 +133,13 @@ impl QueryExecutor {
         for (i, measure) in unsafe_measures.iter().enumerate() {
             let ref_expanded = expand_measure_refs(measure.expression(), model)?;
             let expanded = expand_global_variables(&ref_expanded, model);
+            if expanded.has_query_scoped_bindings() {
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "internal: measure '{}' reached the executor with an unresolved query-scoped \
+                     (GVAR) binding (it must be resolved at the Engine facade)",
+                    measure.name()
+                )));
+            }
             let (stripped, eval_ctx) = resolver.resolve(&expanded)?;
 
             // Find the override relationship.
@@ -295,7 +302,10 @@ impl QueryExecutor {
 
         // The tables FULL OUTER JOINed after the first.
         let tables_to_join: Vec<String> = if has_normal {
-            override_table_names.iter().map(|(t, _)| t.clone()).collect()
+            override_table_names
+                .iter()
+                .map(|(t, _)| t.clone())
+                .collect()
         } else {
             override_table_names[1..]
                 .iter()
@@ -317,8 +327,10 @@ impl QueryExecutor {
                 if all_group_tables.len() == 1 {
                     format!("{first_table}.{c}")
                 } else {
-                    let parts: Vec<String> =
-                        all_group_tables.iter().map(|t| format!("{t}.{c}")).collect();
+                    let parts: Vec<String> = all_group_tables
+                        .iter()
+                        .map(|t| format!("{t}.{c}"))
+                        .collect();
                     format!("COALESCE({}) AS {c}", parts.join(", "))
                 }
             })

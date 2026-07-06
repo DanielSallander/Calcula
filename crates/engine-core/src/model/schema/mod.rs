@@ -130,9 +130,15 @@ use crate::model::table_variable::TableVariable;
 ///   silently drop on a load→save round-trip — and a query grouping by such a
 ///   column would fail outright — so the [`ModelFormatTooNew`] gate refuses v12
 ///   files on a pre-v12 engine.
+/// - `13` — the `Block` expression (VAR/RETURN) gained
+///   `query_scoped_bindings`, the serialized form of query-scoped (`GVAR`)
+///   variables — scalars evaluated once per query filter context, ignoring the
+///   group-by axis. A pre-v13 engine that ignored the field would silently drop
+///   the `GVAR` bindings and leave their references dangling (a wrong number),
+///   so the [`ModelFormatTooNew`] gate refuses v13 files on a pre-v13 engine.
 ///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 12;
+pub const MODEL_FORMAT_VERSION: u32 = 13;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -961,7 +967,10 @@ mod tests {
         // Valid: references an existing measure and a real qualified column.
         let good = Measure::new("Double", parse_measure_expression("[Revenue] * 2").unwrap());
         assert!(model.validate_candidate_measure(&good).is_ok());
-        let good2 = Measure::new("More", parse_measure_expression("SUM(Sales[amount])").unwrap());
+        let good2 = Measure::new(
+            "More",
+            parse_measure_expression("SUM(Sales[amount])").unwrap(),
+        );
         assert!(model.validate_candidate_measure(&good2).is_ok());
 
         // Unknown referenced measure.
@@ -969,8 +978,7 @@ mod tests {
         assert!(model.validate_candidate_measure(&bad_ref).is_err());
 
         // Unknown qualified column on a real table.
-        let bad_col =
-            Measure::new("Y", parse_measure_expression("SUM(Sales[nope])").unwrap());
+        let bad_col = Measure::new("Y", parse_measure_expression("SUM(Sales[nope])").unwrap());
         assert!(model.validate_candidate_measure(&bad_col).is_err());
 
         // Self-reference closes a cycle.
@@ -1066,7 +1074,7 @@ mod tests {
             .unwrap();
 
         let edited = model.with_measures(vec![
-            count_measure("Orders", "Sales", "id").with_source("COUNT(Sales[id])"),
+            count_measure("Orders", "Sales", "id").with_source("COUNT(Sales[id])")
         ]);
         edited.validate().unwrap();
         assert_eq!(edited.measures().len(), 1);
@@ -1080,8 +1088,8 @@ mod tests {
     #[test]
     fn with_measures_result_fails_validate_on_dangling_measure_ref() {
         use crate::compute::measure::sum_measure;
-        use crate::compute::parser::parse_measure_expression;
         use crate::compute::measure::Measure;
+        use crate::compute::parser::parse_measure_expression;
 
         let model = DataModel::builder()
             .add_table(sales_table())

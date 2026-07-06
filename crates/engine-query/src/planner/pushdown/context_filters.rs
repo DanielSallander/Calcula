@@ -110,8 +110,12 @@ fn collect_keep_predicates_recursive(expr: &Expression, out: &mut Vec<FilterPred
                 collect_keep_predicates_recursive(a, out);
             }
         }
-        Expression::Block { bindings, result } => {
-            for (_, binding_expr) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 collect_keep_predicates_recursive(binding_expr, out);
             }
             collect_keep_predicates_recursive(result, out);

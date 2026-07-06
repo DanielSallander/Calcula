@@ -533,19 +533,27 @@ impl QueryExecutor {
         let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
         if let Some(plan_node) = plan {
-            let mut node =
-                PlanNode::new(PlanOperation::MeasureEvaluation, format!("Rank window: {name}"));
+            let mut node = PlanNode::new(
+                PlanOperation::MeasureEvaluation,
+                format!("Rank window: {name}"),
+            );
             node.duration = (s1_elapsed + s2_elapsed).into();
             node.add_child(
-                PlanNode::new(PlanOperation::DataFusionExecution, "Aggregate Order Key (Stage 1)")
-                    .with_property("result_rows", PlanValue::Number(s1_rows as f64))
-                    .with_duration(s1_elapsed),
+                PlanNode::new(
+                    PlanOperation::DataFusionExecution,
+                    "Aggregate Order Key (Stage 1)",
+                )
+                .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                .with_duration(s1_elapsed),
             );
             node.add_child(
-                PlanNode::new(PlanOperation::DataFusionExecution, "Rank Function (Stage 2)")
-                    .with_property("sql", PlanValue::Text(sql))
-                    .with_property("result_rows", PlanValue::Number(s2_rows as f64))
-                    .with_duration(s2_elapsed),
+                PlanNode::new(
+                    PlanOperation::DataFusionExecution,
+                    "Rank Function (Stage 2)",
+                )
+                .with_property("sql", PlanValue::Text(sql))
+                .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+                .with_duration(s2_elapsed),
             );
             plan_node.add_child(node);
         }
@@ -914,7 +922,9 @@ impl QueryExecutor {
         granularity: DateGranularity,
         where_sql: &str,
     ) -> QueryResult<Option<i32>> {
-        let date_table = model.table(&plan_info.date_table).map_err(QueryError::Engine)?;
+        let date_table = model
+            .table(&plan_info.date_table)
+            .map_err(QueryError::Engine)?;
         let role_col = |role: DateRole| -> Option<String> {
             date_table
                 .columns()
@@ -1885,7 +1895,10 @@ async fn join_window_results(
             .map(|i| format!("__wjoin_{i}.{}", q(GROUPING_ID_COLUMN)))
             .collect::<Vec<_>>()
             .join(", ");
-        select_parts.push(format!("COALESCE({coalesced}) AS {}", q(GROUPING_ID_COLUMN)));
+        select_parts.push(format!(
+            "COALESCE({coalesced}) AS {}",
+            q(GROUPING_ID_COLUMN)
+        ));
     }
 
     // FROM __wjoin_0 [FULL OUTER JOIN __wjoin_i ON COALESCE(priors) = this | CROSS JOIN].
@@ -2027,7 +2040,9 @@ pub(super) async fn join_window_with_normal(
     }
     if has_gid {
         let gid = q(GROUPING_ID_COLUMN);
-        select_parts.push(format!("COALESCE(__wn_win.{gid}, __wn_norm.{gid}) AS {gid}"));
+        select_parts.push(format!(
+            "COALESCE(__wn_win.{gid}, __wn_norm.{gid}) AS {gid}"
+        ));
     }
 
     let mut sql = format!("SELECT {} FROM __wn_win", select_parts.join(", "));

@@ -210,8 +210,8 @@ pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
     }
     let mut parser = Parser::new(tokens, input.len());
 
-    // Check for VAR/RETURN block syntax.
-    if parser.peek_is_var() {
+    // Check for VAR/GVAR/RETURN block syntax.
+    if parser.peek_is_var() || parser.peek_is_gvar() {
         let expr = parser.parse_var_return_block()?;
         if !parser.at_end() {
             return Err(parser.parse_err(format!(

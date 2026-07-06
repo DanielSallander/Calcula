@@ -52,11 +52,19 @@ impl Expression {
             | Expression::KeepIn { expr, .. } => {
                 expr.collect_column_refs(refs);
             }
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
                 // Collect refs from binding expressions and result, but exclude
-                // VAR binding names since those are local variables, not real columns.
-                let binding_names: Vec<&str> =
-                    bindings.iter().map(|(name, _)| name.as_str()).collect();
+                // VAR/GVAR binding names since those are local variables, not
+                // real columns.
+                let binding_names: Vec<&str> = bindings
+                    .iter()
+                    .chain(query_scoped_bindings.iter())
+                    .map(|(name, _)| name.as_str())
+                    .collect();
 
                 // Collect column names produced by Query bindings (aliases +
                 // group-by columns) — these are intermediate table columns,
@@ -77,7 +85,7 @@ impl Expression {
                     }
                 }
 
-                for (_, binding_expr) in bindings {
+                for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                     let mut binding_refs = Vec::new();
                     binding_expr.collect_column_refs(&mut binding_refs);
                     for r in binding_refs {
@@ -306,8 +314,12 @@ impl Expression {
             | Expression::UseRelationship { expr, .. } => {
                 expr.collect_context_filter_tables(tables);
             }
-            Expression::Block { bindings, result } => {
-                for (_, binding_expr) in bindings {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                     binding_expr.collect_context_filter_tables(tables);
                 }
                 result.collect_context_filter_tables(tables);
@@ -547,8 +559,12 @@ impl Expression {
             | Expression::Iterate {
                 expression: expr, ..
             } => expr.collect_measure_refs(names),
-            Expression::Block { bindings, result } => {
-                for (_, binding_expr) in bindings {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                     binding_expr.collect_measure_refs(names);
                 }
                 result.collect_measure_refs(names);
@@ -732,8 +748,12 @@ impl Expression {
             | Expression::Iterate {
                 expression: expr, ..
             } => expr.collect_qualified_column_refs(refs),
-            Expression::Block { bindings, result } => {
-                for (_, binding_expr) in bindings {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                     binding_expr.collect_qualified_column_refs(refs);
                 }
                 result.collect_qualified_column_refs(refs);
@@ -820,7 +840,9 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
-            | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_qualified_column_refs(refs),
+            | Expression::SemiAdditiveBalance { expr, .. } => {
+                expr.collect_qualified_column_refs(refs)
+            }
             Expression::InList { expr, values } => {
                 expr.collect_qualified_column_refs(refs);
                 for v in values {
@@ -912,8 +934,12 @@ impl Expression {
             | Expression::Iterate {
                 expression: expr, ..
             } => expr.collect_call_names(names),
-            Expression::Block { bindings, result } => {
-                for (_, binding_expr) in bindings {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                for (_, binding_expr) in bindings.iter().chain(query_scoped_bindings.iter()) {
                     binding_expr.collect_call_names(names);
                 }
                 result.collect_call_names(names);
@@ -1179,10 +1205,7 @@ mod tests {
     fn measure_references_found_inside_nested_variadic_nodes() {
         // A MeasureRef buried in GREATEST(...) must still be found (a node the
         // old `has_measure_ref` walker missed via its `_ => false` arm).
-        let expr = Expression::Greatest(vec![
-            col("x"),
-            Expression::MeasureRef("Buried".into()),
-        ]);
+        let expr = Expression::Greatest(vec![col("x"), Expression::MeasureRef("Buried".into())]);
         assert_eq!(expr.measure_references(), vec!["Buried"]);
     }
 

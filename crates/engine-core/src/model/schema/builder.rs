@@ -364,14 +364,50 @@ impl DataModelBuilder {
         // every expression tree — and the filter predicates embedded in
         // context definitions and table variables — before any SQL can be
         // generated from them.
+        // Query-scoped (GVAR) variables are only legal at the top level of a
+        // measure; a GVAR name must not collide with a model-level
+        // `GlobalVariable` (both are referenced as bare identifiers, so the
+        // precedence would be ambiguous — see `expand_scalar_globals`).
+        let global_variable_names: std::collections::HashSet<String> = self
+            .global_variables
+            .iter()
+            .map(|gv| gv.name().to_ascii_lowercase())
+            .collect();
         for measure in &self.measures {
             measure.expression().validate()?;
+            measure.expression().validate_query_scoped_top_level()?;
+            for gvar in measure.expression().root_query_scoped_names() {
+                if global_variable_names.contains(&gvar.to_ascii_lowercase()) {
+                    return Err(EngineError::InvalidExpression(format!(
+                        "query-scoped variable (GVAR) '{gvar}' in measure '{}' collides with a \
+                         model global variable of the same name; rename one of them",
+                        measure.name()
+                    )));
+                }
+            }
         }
+        // GVAR is a query-path measure feature; it cannot be resolved for
+        // row-level calculated columns or for model-level global variables, so
+        // reject it there outright.
         for cc in &self.calculated_columns {
             cc.expression().validate()?;
+            if cc.expression().has_query_scoped_bindings() {
+                return Err(EngineError::InvalidExpression(format!(
+                    "calculated column '{}' uses a query-scoped (GVAR) variable, which is only \
+                     supported in measures",
+                    cc.name()
+                )));
+            }
         }
         for gv in &self.global_variables {
             gv.expression().validate()?;
+            if gv.expression().has_query_scoped_bindings() {
+                return Err(EngineError::InvalidExpression(format!(
+                    "global variable '{}' uses a query-scoped (GVAR) variable, which is only \
+                     supported in measures",
+                    gv.name()
+                )));
+            }
         }
         for ctx in &self.contexts {
             use crate::model::context::ContextOp;
@@ -750,9 +786,8 @@ impl DataModelBuilder {
         let mut seen_context_cols = std::collections::HashSet::new();
         for cc in &self.context_columns {
             let host_ctx_cols = context_cols_by_host.get(&cc.table().to_lowercase());
-            let is_host_ctx_col = |name: &str| {
-                host_ctx_cols.is_some_and(|s| s.contains(&name.to_lowercase()))
-            };
+            let is_host_ctx_col =
+                |name: &str| host_ctx_cols.is_some_and(|s| s.contains(&name.to_lowercase()));
             // Name uniqueness among context columns.
             if !seen_context_cols.insert(cc.name()) {
                 return Err(EngineError::DuplicateName(format!(
@@ -764,10 +799,7 @@ impl DataModelBuilder {
             if seen_calc_cols.contains(cc.name()) {
                 return Err(EngineError::InvalidContextColumn {
                     name: cc.name().to_string(),
-                    reason: format!(
-                        "name conflicts with calculated column '{}'",
-                        cc.name()
-                    ),
+                    reason: format!("name conflicts with calculated column '{}'", cc.name()),
                 });
             }
 

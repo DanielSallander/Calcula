@@ -80,7 +80,23 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             | Expression::KeepIn { expr, .. }
             | Expression::ClearExcept { expr, .. } => self.render_plain(expr)?,
             Expression::Iterate { expression, .. } => self.render_plain(expression)?,
-            Expression::Block { .. } => self.render_plain(&expr.inline_bindings())?,
+            Expression::Block {
+                query_scoped_bindings,
+                ..
+            } => {
+                // Query-scoped (GVAR) bindings must be resolved to literals at
+                // the Engine facade before rendering; a survivor here would be
+                // silently dropped by inline_bindings, leaving a dangling column
+                // reference. Fail closed (as with an unexpanded MeasureRef).
+                if !query_scoped_bindings.is_empty() {
+                    return Err(EngineError::InvalidExpression(
+                        "internal: a query-scoped (GVAR) binding reached SQL rendering \
+                         unresolved (it must be resolved at the Engine facade)"
+                            .to_string(),
+                    ));
+                }
+                self.render_plain(&expr.inline_bindings())?
+            }
             Expression::IsBlank(inner) => {
                 format!("({} IS NULL)", self.render_plain(inner)?)
             }

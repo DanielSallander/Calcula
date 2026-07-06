@@ -127,9 +127,7 @@ mod tests {
     /// A model with `Sales(amount)` and a `Revenue` measure, plus the given KPIs.
     fn model_with_kpis(kpis: Vec<Kpi>) -> crate::error::EngineResult<DataModel> {
         let mut b = DataModel::builder()
-            .add_table(
-                Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-            )
+            .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
             .add_measure(sum_measure("Revenue", "Sales", "amount"))
             .add_measure(sum_measure("Cost", "Sales", "amount"));
         for k in kpis {
@@ -171,14 +169,20 @@ mod tests {
     fn unknown_base_measure_fails() {
         let kpi = Kpi::new("K", "Nope", KpiTarget::Constant(1.0));
         let err = model_with_kpis(vec![kpi]).unwrap_err();
-        assert!(matches!(err, EngineError::MeasureNotFound(_)), "got: {err:?}");
+        assert!(
+            matches!(err, EngineError::MeasureNotFound(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]
     fn unknown_target_measure_fails() {
         let kpi = Kpi::new("K", "Revenue", KpiTarget::Measure("Nope".into()));
         let err = model_with_kpis(vec![kpi]).unwrap_err();
-        assert!(matches!(err, EngineError::MeasureNotFound(_)), "got: {err:?}");
+        assert!(
+            matches!(err, EngineError::MeasureNotFound(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -196,12 +200,8 @@ mod tests {
     #[test]
     fn serde_round_trips_and_legacy_loads_without_kpis() {
         // Round-trip a model carrying a KPI.
-        let model = model_with_kpis(vec![Kpi::new(
-            "K",
-            "Revenue",
-            KpiTarget::Constant(100.0),
-        )
-        .with_status_band(StatusBand::new(0.9, KpiStatus::OnTrack))])
+        let model = model_with_kpis(vec![Kpi::new("K", "Revenue", KpiTarget::Constant(100.0))
+            .with_status_band(StatusBand::new(0.9, KpiStatus::OnTrack))])
         .unwrap();
         let json = serde_json::to_string(&model).unwrap();
         let back: DataModel = serde_json::from_str(&json).unwrap();

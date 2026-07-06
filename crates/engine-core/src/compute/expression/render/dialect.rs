@@ -83,8 +83,7 @@ pub trait Dialect {
     /// The local dialect returns the placeholder `comment`; a source dialect
     /// MUST return `Err` (it cannot represent these inline), so the planner
     /// falls back to local execution rather than emitting broken SQL.
-    fn materialized_placeholder(&self, comment: &str, expr: &Expression)
-        -> EngineResult<String>;
+    fn materialized_placeholder(&self, comment: &str, expr: &Expression) -> EngineResult<String>;
 }
 
 /// DataFusion-compatible SQL for local execution (the engine's internal query
@@ -154,11 +153,7 @@ impl Dialect for DataFusionDialect {
         true
     }
 
-    fn materialized_placeholder(
-        &self,
-        comment: &str,
-        _expr: &Expression,
-    ) -> EngineResult<String> {
+    fn materialized_placeholder(&self, comment: &str, _expr: &Expression) -> EngineResult<String> {
         Ok(comment.to_string())
     }
 }
@@ -267,11 +262,7 @@ impl Dialect for PostgresDialect {
         false
     }
 
-    fn materialized_placeholder(
-        &self,
-        _comment: &str,
-        expr: &Expression,
-    ) -> EngineResult<String> {
+    fn materialized_placeholder(&self, _comment: &str, expr: &Expression) -> EngineResult<String> {
         Err(unsupported(expr))
     }
 }

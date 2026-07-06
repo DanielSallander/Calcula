@@ -119,9 +119,24 @@ impl Expression {
                     .collect(),
                 default: default.as_ref().map(|d| Box::new(d.substitute_vars(env))),
             },
-            Expression::Block { bindings, result } => {
-                // Recursively inline inner blocks too.
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                // Recursively inline inner blocks too. GVAR (query-scoped)
+                // bindings are normally resolved to literals at the facade
+                // before this runs; carry them through here — substituting the
+                // incoming env and shadowing it with each binding in turn — so a
+                // generic substitution pass never silently drops them. GVAR
+                // names precede VAR names in scope (a VAR may reference a GVAR).
                 let mut inner_env = env.clone();
+                let mut new_query_scoped = Vec::new();
+                for (name, binding_expr) in query_scoped_bindings {
+                    let resolved = binding_expr.substitute_vars(&inner_env);
+                    inner_env.insert(name.clone(), resolved.clone());
+                    new_query_scoped.push((name.clone(), resolved));
+                }
                 let mut new_bindings = Vec::new();
                 for (name, binding_expr) in bindings {
                     let resolved = binding_expr.substitute_vars(&inner_env);
@@ -130,6 +145,7 @@ impl Expression {
                 }
                 Expression::Block {
                     bindings: new_bindings,
+                    query_scoped_bindings: new_query_scoped,
                     result: Box::new(result.substitute_vars(&inner_env)),
                 }
             }
@@ -211,12 +227,10 @@ impl Expression {
                 intervals: *intervals,
                 granularity: *granularity,
             },
-            Expression::SemiAdditiveBalance { expr, opening } => {
-                Expression::SemiAdditiveBalance {
-                    expr: Box::new(expr.substitute_vars(env)),
-                    opening: *opening,
-                }
-            }
+            Expression::SemiAdditiveBalance { expr, opening } => Expression::SemiAdditiveBalance {
+                expr: Box::new(expr.substitute_vars(env)),
+                opening: *opening,
+            },
             // Context operations: recurse into inner expression.
             Expression::Keep {
                 expr,
@@ -334,9 +348,7 @@ impl Expression {
         env: &std::collections::HashMap<String, Expression>,
     ) -> Expression {
         match self {
-            Expression::MeasureRef(name) => {
-                env.get(name).cloned().unwrap_or_else(|| self.clone())
-            }
+            Expression::MeasureRef(name) => env.get(name).cloned().unwrap_or_else(|| self.clone()),
             Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
                 left: Box::new(left.substitute_measure_refs(env)),
                 op: *op,
@@ -344,15 +356,24 @@ impl Expression {
             },
             Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
                 function: *function,
-                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_measure_refs(env))
+                    .collect(),
             },
             Expression::TextFunc { function, args } => Expression::TextFunc {
                 function: *function,
-                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_measure_refs(env))
+                    .collect(),
             },
             Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
                 function: *function,
-                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_measure_refs(env))
+                    .collect(),
             },
             Expression::Comparison { left, op, right } => Expression::Comparison {
                 left: Box::new(left.substitute_measure_refs(env)),
@@ -371,9 +392,7 @@ impl Expression {
                 Box::new(left.substitute_measure_refs(env)),
                 Box::new(right.substitute_measure_refs(env)),
             ),
-            Expression::Not(inner) => {
-                Expression::Not(Box::new(inner.substitute_measure_refs(env)))
-            }
+            Expression::Not(inner) => Expression::Not(Box::new(inner.substitute_measure_refs(env))),
             Expression::IsBlank(inner) => {
                 Expression::IsBlank(Box::new(inner.substitute_measure_refs(env)))
             }
@@ -395,7 +414,10 @@ impl Expression {
                 cases: cases
                     .iter()
                     .map(|(v, r)| {
-                        (v.substitute_measure_refs(env), r.substitute_measure_refs(env))
+                        (
+                            v.substitute_measure_refs(env),
+                            r.substitute_measure_refs(env),
+                        )
                     })
                     .collect(),
                 default: default
@@ -403,17 +425,24 @@ impl Expression {
                     .map(|d| Box::new(d.substitute_measure_refs(env))),
             },
             Expression::Coalesce(exprs) => Expression::Coalesce(
-                exprs.iter().map(|e| e.substitute_measure_refs(env)).collect(),
+                exprs
+                    .iter()
+                    .map(|e| e.substitute_measure_refs(env))
+                    .collect(),
             ),
             Expression::NullIf { expr, value } => Expression::NullIf {
                 expr: Box::new(expr.substitute_measure_refs(env)),
                 value: Box::new(value.substitute_measure_refs(env)),
             },
             Expression::Greatest(args) => Expression::Greatest(
-                args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+                args.iter()
+                    .map(|a| a.substitute_measure_refs(env))
+                    .collect(),
             ),
             Expression::Least(args) => Expression::Least(
-                args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+                args.iter()
+                    .map(|a| a.substitute_measure_refs(env))
+                    .collect(),
             ),
             Expression::IfError { expr, alternate } => Expression::IfError {
                 expr: Box::new(expr.substitute_measure_refs(env)),
@@ -421,7 +450,10 @@ impl Expression {
             },
             Expression::InList { expr, values } => Expression::InList {
                 expr: Box::new(expr.substitute_measure_refs(env)),
-                values: values.iter().map(|v| v.substitute_measure_refs(env)).collect(),
+                values: values
+                    .iter()
+                    .map(|v| v.substitute_measure_refs(env))
+                    .collect(),
             },
             Expression::SafeDivide {
                 numerator,
@@ -436,7 +468,10 @@ impl Expression {
             },
             Expression::Call { name, args } => Expression::Call {
                 name: name.clone(),
-                args: args.iter().map(|a| a.substitute_measure_refs(env)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| a.substitute_measure_refs(env))
+                    .collect(),
             },
             // Leaf nodes and any non-row-level node (aggregate / window /
             // context op): clone unchanged. A measure reference buried inside a
@@ -503,9 +538,15 @@ impl Expression {
                 op: *op,
                 right: Box::new(sub(right)),
             },
-            Expression::And(left, right) => Expression::And(Box::new(sub(left)), Box::new(sub(right))),
-            Expression::Or(left, right) => Expression::Or(Box::new(sub(left)), Box::new(sub(right))),
-            Expression::Xor(left, right) => Expression::Xor(Box::new(sub(left)), Box::new(sub(right))),
+            Expression::And(left, right) => {
+                Expression::And(Box::new(sub(left)), Box::new(sub(right)))
+            }
+            Expression::Or(left, right) => {
+                Expression::Or(Box::new(sub(left)), Box::new(sub(right)))
+            }
+            Expression::Xor(left, right) => {
+                Expression::Xor(Box::new(sub(left)), Box::new(sub(right)))
+            }
             Expression::Not(inner) => Expression::Not(Box::new(sub(inner))),
             Expression::IsBlank(inner) => Expression::IsBlank(Box::new(sub(inner))),
             Expression::If {
@@ -696,8 +737,16 @@ impl Expression {
                     .as_ref()
                     .map(|d| Box::new(d.substitute_selected_measure(replacement))),
             },
-            Expression::Block { bindings, result } => Expression::Block {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => Expression::Block {
                 bindings: bindings
+                    .iter()
+                    .map(|(name, e)| (name.clone(), e.substitute_selected_measure(replacement)))
+                    .collect(),
+                query_scoped_bindings: query_scoped_bindings
                     .iter()
                     .map(|(name, e)| (name.clone(), e.substitute_selected_measure(replacement)))
                     .collect(),
@@ -783,12 +832,10 @@ impl Expression {
                 intervals: *intervals,
                 granularity: *granularity,
             },
-            Expression::SemiAdditiveBalance { expr, opening } => {
-                Expression::SemiAdditiveBalance {
-                    expr: Box::new(expr.substitute_selected_measure(replacement)),
-                    opening: *opening,
-                }
-            }
+            Expression::SemiAdditiveBalance { expr, opening } => Expression::SemiAdditiveBalance {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                opening: *opening,
+            },
             Expression::Keep {
                 expr,
                 filters,
@@ -912,7 +959,21 @@ impl Expression {
     /// materialized, not inlined as scalar expressions.
     pub fn inline_bindings(&self) -> Expression {
         match self {
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
+                // Query-scoped (GVAR) bindings must have been resolved to
+                // literals and emptied by the facade before rendering/inlining.
+                // A survivor here would drop the GVAR values and leave their
+                // references dangling (a wrong number) — the expand-site guards
+                // (engine-query) and the MeasureEngine guard fail closed in
+                // release; this documents the invariant in debug.
+                debug_assert!(
+                    query_scoped_bindings.is_empty(),
+                    "inline_bindings reached a Block with unresolved query-scoped (GVAR) bindings"
+                );
                 let mut env = std::collections::HashMap::new();
                 for (name, binding_expr) in bindings {
                     // Skip Query/Window/Offset/Index bindings (and the

@@ -88,27 +88,29 @@ mod refresh;
 #[cfg(test)]
 mod calc_group_tests;
 #[cfg(test)]
+mod clear_reset_tests;
+#[cfg(test)]
+mod context_column_tests;
+#[cfg(test)]
 mod detail_tests;
 #[cfg(test)]
 mod disk_cache_tests;
 #[cfg(test)]
+mod gvar_tests;
+#[cfg(test)]
 mod having_tests;
 #[cfg(test)]
-mod clear_reset_tests;
+mod in_filter_tests;
 #[cfg(test)]
 mod meta_tests;
 #[cfg(test)]
 mod rank_tests;
 #[cfg(test)]
-mod topn_tests;
-#[cfg(test)]
-mod in_filter_tests;
-#[cfg(test)]
 mod security_tests;
 #[cfg(test)]
-mod context_column_tests;
-#[cfg(test)]
 mod test_fixtures;
+#[cfg(test)]
+mod topn_tests;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -160,9 +162,9 @@ pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
     ContextColumn, ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole,
-    FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh, JoinCondition,
-    JoinOperator, Kpi, KpiStatus, KpiTarget, RaggedBehavior, RefreshStrategy, Relationship,
-    SecurityRole, StatusBand, StorageMode, Table, TableVariable,
+    FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh,
+    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, RaggedBehavior, RefreshStrategy,
+    Relationship, SecurityRole, StatusBand, StorageMode, Table, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -183,8 +185,8 @@ pub use engine_connectors::{ConnectorError, ConnectorResult};
 
 // --- Re-exports from engine-query ---
 
-pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::csv_connector::CsvConnector;
+pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::parquet_connector::ParquetConnector;
 pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
@@ -338,6 +340,95 @@ fn predicate_to_filter_condition(p: &FilterPredicate) -> FilterCondition {
     FilterCondition::new(p.column.clone(), operator, p.value.clone())
 }
 
+/// The `f64` value of a numeric literal expression, if it is one.
+fn const_f64(e: &Expression) -> Option<f64> {
+    match e {
+        Expression::LiteralFloat(v) => Some(*v),
+        Expression::LiteralInt(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+/// Fold a **constant** scalar expression (built only from literals via
+/// arithmetic / `DIVIDE` / `COALESCE`) to a single literal, or `None` if it is
+/// not a compile-time constant.
+///
+/// Used to evaluate a query-scoped (`GVAR`) binding that, after substituting
+/// earlier `GVAR` literals, references no table (e.g. `GVAR b = a`, `GVAR c =
+/// a / 2`): there is nothing to query, so the value is computed directly.
+fn fold_const_scalar(expr: &Expression) -> Option<Expression> {
+    match expr {
+        Expression::LiteralFloat(_)
+        | Expression::LiteralInt(_)
+        | Expression::LiteralDate(_)
+        | Expression::LiteralString(_)
+        | Expression::LiteralBool(_)
+        | Expression::Blank => Some(expr.clone()),
+        Expression::BinaryOp { left, op, right } => {
+            let lf = fold_const_scalar(left)?;
+            let rf = fold_const_scalar(right)?;
+            // SQL NULL arithmetic: any Blank (NULL) operand yields Blank — the
+            // same result the executor produces when the Blank is substituted
+            // into the RETURN and rendered (`NULL op x = NULL`). This keeps a
+            // Blank earlier-GVAR consistent whether it lands in a later GVAR
+            // binding (here) or in the RETURN.
+            if matches!(lf, Expression::Blank) || matches!(rf, Expression::Blank) {
+                return Some(Expression::Blank);
+            }
+            let (l, r) = (const_f64(&lf)?, const_f64(&rf)?);
+            let v = match op {
+                ArithmeticOp::Add => l + r,
+                ArithmeticOp::Subtract => l - r,
+                ArithmeticOp::Multiply => l * r,
+                ArithmeticOp::Divide => {
+                    if r == 0.0 {
+                        return Some(Expression::Blank);
+                    }
+                    l / r
+                }
+            };
+            Some(Expression::LiteralFloat(v))
+        }
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => {
+            let n = fold_const_scalar(numerator)?;
+            if matches!(n, Expression::Blank) {
+                return Some(Expression::Blank);
+            }
+            let d = fold_const_scalar(denominator)?;
+            // A Blank or zero denominator triggers the DIVIDE alternate (or Blank).
+            if matches!(d, Expression::Blank) {
+                return match alternate {
+                    Some(a) => fold_const_scalar(a),
+                    None => Some(Expression::Blank),
+                };
+            }
+            let (nv, dv) = (const_f64(&n)?, const_f64(&d)?);
+            if dv == 0.0 {
+                match alternate {
+                    Some(a) => fold_const_scalar(a),
+                    None => Some(Expression::Blank),
+                }
+            } else {
+                Some(Expression::LiteralFloat(nv / dv))
+            }
+        }
+        Expression::Coalesce(items) => {
+            for it in items {
+                let f = fold_const_scalar(it)?;
+                if !matches!(f, Expression::Blank) {
+                    return Some(f);
+                }
+            }
+            Some(Expression::Blank)
+        }
+        _ => None,
+    }
+}
+
 /// Whether `lhs op rhs` holds for a measure-value filter.
 fn measure_filter_passes(lhs: f64, op: FilterOperator, rhs: f64) -> bool {
     match op {
@@ -444,9 +535,7 @@ fn apply_ranking(batches: &[RecordBatch], rank: &RankBy) -> QueryResult<Vec<Reco
             .iter()
             .position(|f| f.name().eq_ignore_ascii_case(name))
             .ok_or_else(|| {
-                QueryError::InvalidQuery(format!(
-                    "rank_by {what} '{name}' is not a result column"
-                ))
+                QueryError::InvalidQuery(format!("rank_by {what} '{name}' is not a result column"))
             })
     };
 
@@ -532,9 +621,7 @@ fn apply_ranking(batches: &[RecordBatch], rank: &RankBy) -> QueryResult<Vec<Reco
         let mut prev: Option<(bool, f64)> = None; // (is_null, value)
         for (pos, &row) in sorted.iter().enumerate() {
             let cell = (measure.is_null(row), measure.value(row));
-            let is_tie = prev.is_some_and(|(pn, pv)| {
-                pn == cell.0 && (cell.0 || pv == cell.1)
-            });
+            let is_tie = prev.is_some_and(|(pn, pv)| pn == cell.0 && (cell.0 || pv == cell.1));
             if is_tie {
                 // Same rank as the previous row (dense and standard agree on ties).
             } else if rank.dense {
@@ -598,8 +685,8 @@ fn apply_topn_with_ties(batches: &[RecordBatch], topn: &TopN) -> QueryResult<Vec
     };
 
     let measure_idx = resolve(&topn.measure, "measure")?;
-    let measure_f64 =
-        arrow::compute::cast(batch.column(measure_idx), &ArrowType::Float64).map_err(|e| {
+    let measure_f64 = arrow::compute::cast(batch.column(measure_idx), &ArrowType::Float64)
+        .map_err(|e| {
             QueryError::InvalidQuery(format!(
                 "top_n measure '{}' must be numeric: {e}",
                 topn.measure
@@ -701,7 +788,10 @@ fn apply_topn_with_ties(batches: &[RecordBatch], topn: &TopN) -> QueryResult<Vec
     let filtered = arrow::compute::filter_record_batch(&batch, &mask)?;
 
     if let Some(out_name) = &topn.output_column {
-        let kept_counts: Vec<i64> = (0..rows).filter(|&r| keep[r]).map(|r| tie_count[r]).collect();
+        let kept_counts: Vec<i64> = (0..rows)
+            .filter(|&r| keep[r])
+            .map(|r| tie_count[r])
+            .collect();
         let mut columns: Vec<arrow::array::ArrayRef> = filtered.columns().to_vec();
         columns.push(std::sync::Arc::new(Int64Array::from(kept_counts)));
         let mut fields: Vec<Field> = filtered
@@ -759,7 +849,10 @@ fn build_result_metadata(
             for measure in &request.measures {
                 for item in group.items() {
                     if app.items.is_empty()
-                        || app.items.iter().any(|i| i.eq_ignore_ascii_case(item.name()))
+                        || app
+                            .items
+                            .iter()
+                            .any(|i| i.eq_ignore_ascii_case(item.name()))
                     {
                         calc_map.insert(
                             synthetic_measure_name(measure, item.name()),
@@ -1543,12 +1636,16 @@ impl Engine {
                 None => Ok(p.clone()),
                 Some(kind) => {
                     let (identity, label, setter) = match kind {
-                        DynamicValue::Username => {
-                            (self.user_identity.as_deref(), "USERNAME()", "set_user_identity")
-                        }
-                        DynamicValue::CustomData => {
-                            (self.custom_data.as_deref(), "CUSTOMDATA()", "set_custom_data")
-                        }
+                        DynamicValue::Username => (
+                            self.user_identity.as_deref(),
+                            "USERNAME()",
+                            "set_user_identity",
+                        ),
+                        DynamicValue::CustomData => (
+                            self.custom_data.as_deref(),
+                            "CUSTOMDATA()",
+                            "set_custom_data",
+                        ),
                     };
                     let value = identity.ok_or_else(|| {
                         QueryError::Engine(EngineError::RowLevelSecurityNotEnforceable {
@@ -2137,38 +2234,34 @@ impl Engine {
         }
 
         let role_filters = self.active_role_filters()?;
-        // Resolve host-only context-driven calculated columns' scalars so the
-        // planner can push their CASE into the source GROUP BY (single-fact,
-        // pushable shape, supporting connector). Empty for any other query —
-        // the planner then aggregates locally and the executor resolves the
-        // scalar itself.
-        let context_column_cases = self
-            .resolve_pushable_context_columns(&request, &token)
-            .await?;
-        let plan = if context_column_cases.is_empty() {
-            PushdownPlanner::plan(effective_request, model, &self.registry, &role_filters)?
-        } else {
-            PushdownPlanner::plan_with_context_columns(
+
+        // Query-scoped (GVAR) resolution. For each requested — or transitively
+        // referenced — measure whose top-level block declares `GVAR` bindings,
+        // evaluate each `GVAR` ONCE (under the outer filter/slicer context and
+        // active role, with NO group-by axis) and overlay the measure with the
+        // resulting scalar literals substituted in. Runs only on a cache miss;
+        // fails closed in combination with a calculation group. `None` when the
+        // query touches no GVAR measure — the common case, no extra work.
+        let gvar_model = self
+            .resolve_query_scoped_bindings(
                 effective_request,
                 model,
-                &self.registry,
-                &role_filters,
-                &context_column_cases,
-            )?
-        };
-        let batches = map_script_error(
-            QueryExecutor::execute_with_cancellation(
-                &plan,
-                model,
-                &self.registry,
-                Some(&self.cache),
-                Some(self.max_inline_in_values),
-                Some(self.effective_udfs.as_ref()),
+                overlay.is_some(),
                 &role_filters,
                 &token,
             )
-            .await,
-        )?;
+            .await?;
+        let plan_model: &DataModel = gvar_model.as_ref().unwrap_or(model);
+
+        let batches = self
+            .plan_and_execute(
+                &request,
+                effective_request,
+                plan_model,
+                &role_filters,
+                &token,
+            )
+            .await?;
 
         // Store the result unless the cache version moved while executing
         // (a concurrent `clear_query_cache`): a stale-keyed entry could
@@ -2180,6 +2273,319 @@ impl Engine {
             }
         }
         Ok(batches)
+    }
+
+    /// Plan and execute a query against `model`, resolving any pushable
+    /// context-driven calculated columns first.
+    ///
+    /// Extracted from [`query_with_cancellation`](Self::query_with_cancellation)
+    /// so the same plan→execute core can also run an inner query against an
+    /// **overlay** model (a query-scoped `GVAR` scalar) — no cache read/write.
+    /// `context_request` drives context-column resolution (host-only, over
+    /// `self.model`); `plan_request` drives planning/execution over `model`
+    /// (which may be a calculation-group or GVAR overlay).
+    async fn plan_and_execute(
+        &self,
+        context_request: &QueryRequest,
+        plan_request: &QueryRequest,
+        model: &DataModel,
+        role_filters: &[FilterPredicate],
+        token: &CancellationToken,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let context_column_cases = self
+            .resolve_pushable_context_columns(context_request, token)
+            .await?;
+        let plan = if context_column_cases.is_empty() {
+            PushdownPlanner::plan(plan_request, model, &self.registry, role_filters)?
+        } else {
+            PushdownPlanner::plan_with_context_columns(
+                plan_request,
+                model,
+                &self.registry,
+                role_filters,
+                &context_column_cases,
+            )?
+        };
+        map_script_error(
+            QueryExecutor::execute_with_cancellation(
+                &plan,
+                model,
+                &self.registry,
+                Some(&self.cache),
+                Some(self.max_inline_in_values),
+                Some(self.effective_udfs.as_ref()),
+                role_filters,
+                token,
+            )
+            .await,
+        )
+    }
+
+    /// Resolve query-scoped (`GVAR`) variables for every measure in `request`'s
+    /// measure closure that declares them, returning an overlay model with
+    /// those measures rewritten — their `GVAR` bindings evaluated once to
+    /// literals and substituted into the VAR bindings and RETURN result — or
+    /// `None` when the query touches no GVAR measure (the common case).
+    ///
+    /// Each `GVAR` is evaluated under `request`'s outer filter/slicer context
+    /// (`filters` + `in_filters` + `or_filters`) and `role_filters`, with **no**
+    /// group-by axis, so its value is a pure function of the filter context —
+    /// which is already part of the query-cache key, so no new cache key field
+    /// is needed. Fails closed together with a calculation group (`v1`).
+    async fn resolve_query_scoped_bindings(
+        &self,
+        request: &QueryRequest,
+        model: &DataModel,
+        calc_group_active: bool,
+        role_filters: &[FilterPredicate],
+        token: &CancellationToken,
+    ) -> QueryResult<Option<DataModel>> {
+        let gvar_measures = self.query_scoped_measures_in_closure(request, model);
+        if gvar_measures.is_empty() {
+            return Ok(None);
+        }
+        if calc_group_active {
+            return Err(QueryError::InvalidQuery(
+                "GVAR (query-scoped variables) is not supported together with a calculation \
+                 group; evaluate them in separate requests"
+                    .to_string(),
+            ));
+        }
+        // v1: GVAR does not compose with MULTIPLE active RLS roles. The
+        // multi-role union injects role restrictions as `or_filters` and plans
+        // with an empty role-filter set (`active_role_filters()` returns `&[]`),
+        // so the inner GVAR fact query would bypass the `rls_relevance`
+        // enforceability gate that a single role gets — and `or_filters`
+        // propagation silently no-ops for non-single-equi dimension→fact shapes,
+        // leaking the unrestricted aggregate. Fail closed until a per-inner-fact
+        // enforceability probe lands. (A single role is safe: its inner query
+        // carries the role's predicates and hits the fail-closed gate.)
+        if self.active_roles.len() > 1 {
+            return Err(QueryError::InvalidQuery(
+                "GVAR (query-scoped variables) is not supported with multiple active roles; \
+                 query under a single role, or evaluate the GVAR measure in a separate request"
+                    .to_string(),
+            ));
+        }
+        // Resolve in dependency order (a GVAR measure may reference another via
+        // `[Measure]`), rewriting an incremental overlay so a later measure's
+        // inner query sees earlier measures already resolved.
+        let order = Self::query_scoped_topo_order(&gvar_measures, model);
+        let mut overlay_measures: Vec<Measure> = model.measures().to_vec();
+        for name in order {
+            let current = model.with_measures(overlay_measures.clone());
+            let resolved = self
+                .resolve_one_query_scoped_measure(&name, &current, request, role_filters, token)
+                .await?;
+            if let Some(slot) = overlay_measures
+                .iter_mut()
+                .find(|m| m.name().eq_ignore_ascii_case(&name))
+            {
+                *slot = resolved;
+            }
+        }
+        Ok(Some(model.with_measures(overlay_measures)))
+    }
+
+    /// Names of measures in `request`'s transitive measure-reference closure
+    /// whose own top-level expression declares query-scoped (`GVAR`) bindings.
+    fn query_scoped_measures_in_closure(
+        &self,
+        request: &QueryRequest,
+        model: &DataModel,
+    ) -> Vec<String> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut frontier: Vec<String> = request.measures.clone();
+        let mut out: Vec<String> = Vec::new();
+        while let Some(name) = frontier.pop() {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                continue;
+            }
+            let Ok(measure) = model.measure(&name) else {
+                continue;
+            };
+            if measure.expression().has_query_scoped_bindings() {
+                out.push(measure.name().to_string());
+            }
+            for r in measure.expression().measure_references() {
+                frontier.push(r.to_string());
+            }
+        }
+        out
+    }
+
+    /// Dependency-first ordering of the GVAR-bearing measures: if measure `A`
+    /// transitively references GVAR-bearing measure `B`, `B` precedes `A` so
+    /// `A`'s inner query sees `B` already resolved. Cycles are impossible
+    /// (rejected at model build); `visited` also guards re-entry.
+    fn query_scoped_topo_order(gvar_measures: &[String], model: &DataModel) -> Vec<String> {
+        let gvar_set: std::collections::HashSet<String> = gvar_measures
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut order: Vec<String> = Vec::new();
+        for name in gvar_measures {
+            Self::query_scoped_topo_visit(name, model, &gvar_set, &mut visited, &mut order);
+        }
+        order
+    }
+
+    fn query_scoped_topo_visit(
+        name: &str,
+        model: &DataModel,
+        gvar_set: &std::collections::HashSet<String>,
+        visited: &mut std::collections::HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        let key = name.to_ascii_lowercase();
+        if !visited.insert(key.clone()) {
+            return;
+        }
+        let Ok(measure) = model.measure(name) else {
+            return;
+        };
+        for r in measure.expression().measure_references() {
+            if gvar_set.contains(&r.to_ascii_lowercase()) {
+                Self::query_scoped_topo_visit(r, model, gvar_set, visited, order);
+            }
+        }
+        if gvar_set.contains(&key) {
+            order.push(measure.name().to_string());
+        }
+    }
+
+    /// Rewrite one GVAR-bearing measure (looked up in `model`, which already
+    /// reflects earlier-resolved measures) with its `GVAR` bindings evaluated
+    /// to literals and substituted into the VAR bindings and RETURN result.
+    async fn resolve_one_query_scoped_measure(
+        &self,
+        name: &str,
+        model: &DataModel,
+        request: &QueryRequest,
+        role_filters: &[FilterPredicate],
+        token: &CancellationToken,
+    ) -> QueryResult<Measure> {
+        let measure = model.measure(name).map_err(QueryError::Engine)?;
+        let Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } = measure.expression()
+        else {
+            // Not a GVAR block after all — leave it untouched.
+            return Ok(measure.clone());
+        };
+
+        // Resolve each GVAR in declaration order; a later GVAR may reference an
+        // earlier one (validation forbids referencing a VAR or a later GVAR).
+        let mut env: std::collections::HashMap<String, Expression> =
+            std::collections::HashMap::new();
+        for (gname, gbinding) in query_scoped_bindings {
+            let resolved_binding = gbinding.substitute_vars(&env);
+            let lit = self
+                .eval_query_scoped_scalar(model, &resolved_binding, request, role_filters, token)
+                .await?;
+            env.insert(gname.clone(), lit);
+        }
+
+        let new_bindings: Vec<(String, Expression)> = bindings
+            .iter()
+            .map(|(n, e)| (n.clone(), e.substitute_vars(&env)))
+            .collect();
+        let new_result = result.substitute_vars(&env);
+        // With no VAR bindings left, unwrap the Block to the bare result.
+        let new_expr = if new_bindings.is_empty() {
+            new_result
+        } else {
+            expression::block(new_bindings, new_result)
+        };
+        // Inline measure references so the resolved (ephemeral) overlay measure
+        // is self-contained and its fact table is inferable: a resolved RETURN
+        // that reaches its fact only through a `[Measure]` reference (e.g.
+        // `GVAR total = [Revenue] RETURN DIVIDE([Revenue], total)`) would
+        // otherwise carry an empty cached table into the planner. The persisted
+        // model keeps the references; only this per-query overlay copy is
+        // expanded (the executor would expand them anyway).
+        let new_expr = engine_core::compute::expression::expand_measure_refs(&new_expr, model)
+            .map_err(QueryError::Engine)?;
+
+        // Preserve host-facing measure metadata.
+        let mut resolved = Measure::new(measure.name(), new_expr);
+        if let Some(g) = measure.group() {
+            resolved = resolved.with_group(g);
+        }
+        if let Some(f) = measure.format_string() {
+            resolved = resolved.with_format_string(f);
+        }
+        if let Some(d) = measure.description() {
+            resolved = resolved.with_description(d);
+        }
+        if let Some(s) = measure.source() {
+            resolved = resolved.with_source(s);
+        }
+        if measure.is_hidden() {
+            resolved = resolved.hidden();
+        }
+        Ok(resolved)
+    }
+
+    /// Evaluate one query-scoped (`GVAR`) binding expression to a scalar
+    /// literal, under the query's outer filter/slicer context (`filters` +
+    /// `in_filters` + `or_filters`) and `role_filters`, with **no** group-by
+    /// axis. Returns [`Expression::Blank`] when the value is NULL (legitimate,
+    /// e.g. an aggregate over an empty context) rather than erroring.
+    async fn eval_query_scoped_scalar(
+        &self,
+        model: &DataModel,
+        binding_expr: &Expression,
+        request: &QueryRequest,
+        role_filters: &[FilterPredicate],
+        token: &CancellationToken,
+    ) -> QueryResult<Expression> {
+        use engine_core::compute::expression::{expand_measure_refs, expr_literal_from_arrow};
+
+        // Inline any `[Measure]` references first, so a binding like
+        // `GVAR total = [Revenue]` (or `[Revenue] * 0.5`) infers a fact table and
+        // evaluates via the inner query, rather than being misrouted to the
+        // constant folder (which cannot evaluate a measure reference). Earlier
+        // GVAR measures it references were already resolved in `model` (topo
+        // order), so their literals are inlined.
+        let binding_expr = expand_measure_refs(binding_expr, model).map_err(QueryError::Engine)?;
+
+        // A binding that reduces to a constant (e.g. it references only earlier
+        // GVARs) has no fact table to query — fold it directly.
+        if infer_fact_table(&binding_expr).is_none() {
+            return match fold_const_scalar(&binding_expr) {
+                Some(lit) => Ok(lit),
+                None => Err(QueryError::InvalidQuery(
+                    "a query-scoped (GVAR) binding has no inferable fact table and is not a \
+                     constant; reference columns with qualified table[column] syntax"
+                        .to_string(),
+                )),
+            };
+        }
+
+        const EPHEMERAL: &str = "__gvar_scalar__";
+        let ephemeral = Measure::new(EPHEMERAL, binding_expr.clone());
+        let eval_model = model
+            .with_overlay_measures(vec![ephemeral])
+            .map_err(QueryError::Engine)?;
+        let inner = QueryRequest {
+            measures: vec![EPHEMERAL.to_string()],
+            filters: request.filters.clone(),
+            in_filters: request.in_filters.clone(),
+            or_filters: request.or_filters.clone(),
+            ..Default::default()
+        };
+        // Box the recursive call: this runs through the same plan→execute core.
+        let batches =
+            Box::pin(self.plan_and_execute(&inner, &inner, &eval_model, role_filters, token))
+                .await?;
+        match batches.iter().find(|b| b.num_rows() > 0) {
+            Some(b) => expr_literal_from_arrow(b.column(0).as_ref(), 0).map_err(QueryError::Engine),
+            None => Ok(Expression::Blank),
+        }
     }
 
     /// Evaluate a query carrying a measure-value ranking (`RANKX`-style).
@@ -2765,9 +3171,8 @@ impl Engine {
                 };
                 let batches = Box::pin(self.query_with_cancellation(inner, token.clone())).await?;
                 let lit = match batches.iter().find(|b| b.num_rows() > 0) {
-                    Some(b) => {
-                        expr_literal_from_arrow(b.column(0).as_ref(), 0).map_err(QueryError::Engine)?
-                    }
+                    Some(b) => expr_literal_from_arrow(b.column(0).as_ref(), 0)
+                        .map_err(QueryError::Engine)?,
                     None => Expression::Blank,
                 };
                 if matches!(lit, Expression::Blank) {

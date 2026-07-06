@@ -138,11 +138,20 @@ fn walk(
                 walk(cond, measure_names, global_names, block_vars, deps);
             }
         }
-        Expression::Block { bindings, result } => {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
             // Process bindings — each binding's expression can reference
             // earlier bindings or external refs. The binding *names* are
-            // local scope.
+            // local scope. Query-scoped (GVAR) names are in scope first (a VAR
+            // may reference a GVAR), so process them before the VAR bindings.
             let mut local_vars = block_vars.clone();
+            for (name, binding_expr) in query_scoped_bindings {
+                walk(binding_expr, measure_names, global_names, &local_vars, deps);
+                local_vars.insert(name.clone());
+            }
             for (name, binding_expr) in bindings {
                 walk(binding_expr, measure_names, global_names, &local_vars, deps);
                 local_vars.insert(name.clone());
@@ -360,7 +369,10 @@ mod tests {
         // a known measure name (the ambiguity the name-aware walker resolves).
         let expr = Expression::MeasureRef("Total".into()).add(col("Margin"));
         let deps = extract_dependencies(&expr, &names(&["Total", "Margin"]), &HashSet::new());
-        assert_eq!(deps.measures, vec!["Total".to_string(), "Margin".to_string()]);
+        assert_eq!(
+            deps.measures,
+            vec!["Total".to_string(), "Margin".to_string()]
+        );
         assert!(deps.columns.is_empty());
     }
 
@@ -389,10 +401,16 @@ mod tests {
 
     #[test]
     fn using_reports_context_name() {
-        let expr = using(agg(AggregateOp::Sum, qualified_col("Sales", "amount")), "FY24");
+        let expr = using(
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+            "FY24",
+        );
         let deps = extract_dependencies(&expr, &HashSet::new(), &HashSet::new());
         assert_eq!(deps.contexts, vec!["FY24".to_string()]);
-        assert_eq!(deps.columns, vec![("Sales".to_string(), "amount".to_string())]);
+        assert_eq!(
+            deps.columns,
+            vec![("Sales".to_string(), "amount".to_string())]
+        );
     }
 
     #[test]
@@ -406,7 +424,12 @@ mod tests {
 
         let with_in = keep_in(
             agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
-            vec![InPredicate::new("Sales", "product_id", "top_products", "id")],
+            vec![InPredicate::new(
+                "Sales",
+                "product_id",
+                "top_products",
+                "id",
+            )],
         );
         let deps = extract_dependencies(&with_in, &HashSet::new(), &HashSet::new());
         assert_eq!(deps.table_variables, vec!["top_products".to_string()]);
@@ -417,11 +440,8 @@ mod tests {
         // Bare ColumnRef matching a global, and a QualifiedColumnRef whose
         // qualifier is a QUERY global's output table.
         let expr = col("target_rate").add(qualified_col("monthly", "revenue"));
-        let deps = extract_dependencies(
-            &expr,
-            &HashSet::new(),
-            &names(&["target_rate", "monthly"]),
-        );
+        let deps =
+            extract_dependencies(&expr, &HashSet::new(), &names(&["target_rate", "monthly"]));
         assert_eq!(
             deps.globals,
             vec!["target_rate".to_string(), "monthly".to_string()]
@@ -438,20 +458,19 @@ mod tests {
                 "x".to_string(),
                 agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
             )],
-            Expression::ColumnRef("x".to_string())
-                .divide(Expression::MeasureRef("Total".into())),
+            Expression::ColumnRef("x".to_string()).divide(Expression::MeasureRef("Total".into())),
         );
         let deps = extract_dependencies(&expr, &names(&["x", "Total"]), &HashSet::new());
         assert_eq!(deps.measures, vec!["Total".to_string()]);
-        assert_eq!(deps.columns, vec![("Sales".to_string(), "amount".to_string())]);
+        assert_eq!(
+            deps.columns,
+            vec![("Sales".to_string(), "amount".to_string())]
+        );
     }
 
     #[test]
     fn measure_ref_buried_in_variadic_node_found() {
-        let expr = Expression::Greatest(vec![
-            lit_int(0),
-            Expression::MeasureRef("Buried".into()),
-        ]);
+        let expr = Expression::Greatest(vec![lit_int(0), Expression::MeasureRef("Buried".into())]);
         let deps = extract_dependencies(&expr, &HashSet::new(), &HashSet::new());
         assert_eq!(deps.measures, vec!["Buried".to_string()]);
     }

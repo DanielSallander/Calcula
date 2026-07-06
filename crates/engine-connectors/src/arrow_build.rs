@@ -64,8 +64,11 @@ pub(crate) trait RowReader {
         scale: i8,
         hint: &Self::Hint,
     ) -> ConnectorResult<Option<i128>>;
-    fn get_string(row: &Self::Row, col: usize, hint: &Self::Hint)
-        -> ConnectorResult<Option<String>>;
+    fn get_string(
+        row: &Self::Row,
+        col: usize,
+        hint: &Self::Hint,
+    ) -> ConnectorResult<Option<String>>;
     fn get_bool(row: &Self::Row, col: usize) -> ConnectorResult<Option<bool>>;
     fn get_date(row: &Self::Row, col: usize) -> ConnectorResult<Option<NaiveDate>>;
     fn get_timestamp_micros(

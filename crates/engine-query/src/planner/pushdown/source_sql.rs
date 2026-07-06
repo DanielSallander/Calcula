@@ -130,15 +130,31 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
             args.iter().any(has_unpushable_ops)
         }
         // Block with QUERY bindings requires two-stage evaluation — not pushable.
-        Expression::Block { bindings, .. }
-            if bindings
+        // A Block carrying query-scoped (GVAR) bindings is likewise not pushable:
+        // GVARs must be resolved to literals at the facade before planning, so a
+        // survivor here must be forced onto the local path where the executor's
+        // fail-closed guard catches it (never rendered raw into source SQL).
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            ..
+        } if !query_scoped_bindings.is_empty()
+            || bindings
                 .iter()
                 .any(|(_, e)| matches!(e, Expression::Query { .. })) =>
         {
             true
         }
-        Expression::Block { bindings, result } => {
-            bindings.iter().any(|(_, e)| has_unpushable_ops(e)) || has_unpushable_ops(result)
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            bindings
+                .iter()
+                .chain(query_scoped_bindings.iter())
+                .any(|(_, e)| has_unpushable_ops(e))
+                || has_unpushable_ops(result)
         }
         Expression::Switch {
             expr,

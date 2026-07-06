@@ -290,7 +290,10 @@ pub(crate) fn resolve_credentials(auth: AuthMethod) -> ConnectorResult<ResolvedC
         AuthMethod::EnvironmentVariable {
             username_var,
             password_var,
-        } => (resolve_env_var(&username_var)?, resolve_env_var(&password_var)?),
+        } => (
+            resolve_env_var(&username_var)?,
+            resolve_env_var(&password_var)?,
+        ),
     };
     validate_no_nul("username", &username)?;
     validate_no_nul("password", &password)?;
@@ -300,8 +303,9 @@ pub(crate) fn resolve_credentials(auth: AuthMethod) -> ConnectorResult<ResolvedC
 /// Read a required environment variable, mapping an unset variable to a
 /// connection error that names it (the value itself is never logged).
 fn resolve_env_var(var: &str) -> ConnectorResult<String> {
-    std::env::var(var)
-        .map_err(|_| ConnectorError::ConnectionFailed(format!("environment variable '{var}' not set")))
+    std::env::var(var).map_err(|_| {
+        ConnectorError::ConnectionFailed(format!("environment variable '{var}' not set"))
+    })
 }
 
 #[cfg(test)]

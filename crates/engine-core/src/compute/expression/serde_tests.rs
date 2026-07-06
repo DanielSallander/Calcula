@@ -19,6 +19,60 @@ fn table_ref_serialization_roundtrip() {
 }
 
 #[test]
+fn query_scoped_bindings_serialization_roundtrip() {
+    // A block carrying a GVAR (query-scoped) binding round-trips.
+    let expr = block_with_globals(
+        vec![(
+            "grand".into(),
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        )],
+        vec![],
+        safe_divide(
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+            col("grand"),
+            None,
+        ),
+    );
+    let json = serde_json::to_string(&expr).unwrap();
+    assert!(json.contains("query_scoped_bindings"));
+    let restored: Expression = serde_json::from_str(&json).unwrap();
+    match restored {
+        Expression::Block {
+            query_scoped_bindings,
+            bindings,
+            ..
+        } => {
+            assert_eq!(query_scoped_bindings.len(), 1);
+            assert_eq!(query_scoped_bindings[0].0, "grand");
+            assert!(bindings.is_empty());
+        }
+        other => panic!("expected Block, got {other:?}"),
+    }
+}
+
+#[test]
+fn block_without_query_scoped_bindings_omits_the_field() {
+    // Backward compatibility: an ordinary VAR block does not emit the new key,
+    // and legacy JSON without it deserializes to an empty list.
+    let expr = block(
+        vec![(
+            "total".into(),
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        )],
+        col("total"),
+    );
+    let json = serde_json::to_string(&expr).unwrap();
+    assert!(
+        !json.contains("query_scoped_bindings"),
+        "empty query_scoped_bindings must be skipped: {json}"
+    );
+    // Legacy JSON (pre-v13, no field) still deserializes.
+    let legacy = r#"{"Block":{"bindings":[["total",{"Aggregate":{"operation":"Sum","operand":{"QualifiedColumnRef":{"table_or_var":"Sales","column":"amount"}}}}]],"result":{"ColumnRef":"total"}}}"#;
+    let restored: Expression = serde_json::from_str(legacy).unwrap();
+    assert!(!restored.has_query_scoped_bindings());
+}
+
+#[test]
 fn keep_in_serialization_roundtrip() {
     let expr = keep_in(
         agg(AggregateOp::Sum, col("amount")),

@@ -110,7 +110,9 @@ fn topn_engine() -> Engine {
                 ])),
                 vec![
                     Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
-                    Arc::new(StringArray::from(vec!["Bikes", "Helmets", "Tires", "Widgets"])),
+                    Arc::new(StringArray::from(vec![
+                        "Bikes", "Helmets", "Tires", "Widgets",
+                    ])),
                 ],
             )
             .unwrap(),
@@ -270,7 +272,10 @@ async fn topn_then_order_and_limit_truncates_exactly() {
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2, "limit truncates the tie-inclusive result exactly");
     // The top row is Bikes (highest revenue).
-    assert_eq!(str_key(batches[0].column(col_idx(&batches[0], "name")).as_ref(), 0), "Bikes");
+    assert_eq!(
+        str_key(batches[0].column(col_idx(&batches[0], "name")).as_ref(), 0),
+        "Bikes"
+    );
 }
 
 #[tokio::test]

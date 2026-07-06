@@ -81,7 +81,6 @@ fn ctx_col_unsupported(feature: &str) -> crate::error::QueryError {
     ))
 }
 
-
 impl QueryExecutor {
     /// Execute a local aggregation: fetch data, join, and aggregate via DataFusion.
     ///
@@ -148,6 +147,28 @@ impl QueryExecutor {
         // Cancellation checkpoint: before any work (covers pre-cancelled
         // tokens — no fetch is ever issued).
         check_cancelled(token)?;
+
+        // Fail closed if a query-scoped (GVAR) measure reached the executor
+        // unresolved (a facade-bypass path, e.g. a query entry point that did
+        // not run `resolve_query_scoped_bindings`). GVARs must be resolved to
+        // literals at the Engine facade before planning; rendering one here
+        // would drop the binding and leave a dangling column reference (silently
+        // wrong or an opaque SQL error). This top-of-function check covers every
+        // local sub-path — window, QUERY, multi-group, pre-aggregate,
+        // split-override, and the main SQL builder — since they all route
+        // through here. A measure that *references* a GVAR measure has an empty
+        // inferred table, forcing `needs_expansion`, so the post-expansion guard
+        // below catches that case.
+        if let Some(m) = measures
+            .iter()
+            .find(|m| m.expression().has_query_scoped_bindings())
+        {
+            return Err(crate::error::QueryError::InvalidQuery(format!(
+                "internal: measure '{}' reached the executor with an unresolved query-scoped \
+                 (GVAR) binding (it must be resolved at the Engine facade)",
+                m.name()
+            )));
+        }
 
         // Defense in depth: a DYNAMIC row-level-security predicate
         // (USERNAME()/CUSTOMDATA()) must have been substituted to a concrete
@@ -222,6 +243,13 @@ impl QueryExecutor {
                 .map(|m| {
                     let ref_expanded = expand_measure_refs(m.expression(), model)?;
                     let expanded_expr = expand_global_variables(&ref_expanded, model);
+                    if expanded_expr.has_query_scoped_bindings() {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "internal: measure '{}' reached the executor with an unresolved \
+                             query-scoped (GVAR) binding (it must be resolved at the Engine facade)",
+                            m.name()
+                        )));
+                    }
                     Ok(Measure::new(m.name(), expanded_expr))
                 })
                 .collect::<Result<Vec<_>, EngineError>>()?
@@ -431,7 +459,9 @@ impl QueryExecutor {
             // scalar filter) must still propagate its surviving keys to the
             // fact, so `in_filters` counts here too.
             if inmemory_indices.contains(&i)
-                || (request.filters.is_empty() && request.in_filters.is_empty() && request.or_groups.is_empty())
+                || (request.filters.is_empty()
+                    && request.in_filters.is_empty()
+                    && request.or_groups.is_empty())
             {
                 continue;
             }
@@ -527,7 +557,9 @@ impl QueryExecutor {
         // reach the fact.
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             if !inmemory_indices.contains(&i)
-                || (request.filters.is_empty() && request.in_filters.is_empty() && request.or_groups.is_empty())
+                || (request.filters.is_empty()
+                    && request.in_filters.is_empty()
+                    && request.or_groups.is_empty())
             {
                 continue;
             }
@@ -1041,8 +1073,10 @@ impl QueryExecutor {
             .await?;
             let ordered_names: Vec<String> =
                 measures.iter().map(|m| m.name().to_string()).collect();
-            let window_names: Vec<String> =
-                window_measures.iter().map(|m| m.name().to_string()).collect();
+            let window_names: Vec<String> = window_measures
+                .iter()
+                .map(|m| m.name().to_string())
+                .collect();
             let combined = super::window::join_window_with_normal(
                 &ctx,
                 window_batches,
@@ -1211,6 +1245,14 @@ impl QueryExecutor {
         for m in measures {
             let ref_expanded = expand_measure_refs(m.expression(), model)?;
             let expanded = expand_global_variables(&ref_expanded, model);
+            if expanded.has_query_scoped_bindings() {
+                return Err(EngineError::InvalidExpression(format!(
+                    "internal: measure '{}' reached the executor with an unresolved query-scoped \
+                     (GVAR) binding (it must be resolved at the Engine facade)",
+                    m.name()
+                ))
+                .into());
+            }
             let (_stripped, eval_ctx) = resolver.resolve(&expanded)?;
 
             let has_unsafe_group_by_override =

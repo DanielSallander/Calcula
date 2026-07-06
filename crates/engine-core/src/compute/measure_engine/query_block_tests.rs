@@ -124,6 +124,7 @@ async fn evaluate_query_in_var_avg_of_monthly_sums() {
         .add_measure(expression_measure(
             "AvgMonthlyRevenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {
@@ -179,6 +180,7 @@ async fn evaluate_query_in_var_max_of_monthly_sums() {
         .add_measure(expression_measure(
             "MaxMonthlyRevenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {
@@ -252,6 +254,7 @@ async fn evaluate_query_in_var_with_cross_table_group_by() {
         .add_measure(expression_measure(
             "MaxCategoryRevenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "by_cat".to_string(),
                     Expression::Query {
@@ -308,6 +311,7 @@ async fn evaluate_query_in_var_grouped_output() {
         .add_measure(expression_measure(
             "AvgMonthlyRevenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {
@@ -366,6 +370,7 @@ async fn evaluate_query_in_var_count_of_groups() {
         .add_measure(expression_measure(
             "MonthCount",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {
@@ -424,6 +429,7 @@ async fn evaluate_query_in_var_keep_on_intermediate_table() {
         .add_measure(expression_measure(
             "Month2Revenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {
@@ -488,6 +494,7 @@ async fn evaluate_query_in_var_keep_multiple_filters() {
         .add_measure(expression_measure(
             "SingleCell",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "detail".to_string(),
                     Expression::Query {
@@ -554,6 +561,7 @@ async fn evaluate_query_in_var_keep_grouped() {
         .add_measure(expression_measure(
             "FilteredRevenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {
@@ -621,6 +629,7 @@ async fn evaluate_query_in_var_keep_scalar_sum() {
         .add_measure(expression_measure(
             "RecentRevenue",
             Expression::Block {
+                query_scoped_bindings: Vec::new(),
                 bindings: vec![(
                     "monthly".to_string(),
                     Expression::Query {

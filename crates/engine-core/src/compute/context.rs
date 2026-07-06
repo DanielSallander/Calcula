@@ -503,26 +503,46 @@ impl<'a> ContextResolver<'a> {
                 Ok(inner)
             }
 
-            Expression::Block { bindings, result } => {
+            Expression::Block {
+                bindings,
+                query_scoped_bindings,
+                result,
+            } => {
                 // Walk binding expressions to strip context ops from scalar
                 // bindings, but leave Query bindings untouched — their
                 // aggregate expressions carry context ops that must be
                 // resolved during QUERY materialization (not here).
-                let mut stripped_bindings = Vec::new();
-                for (name, binding_expr) in bindings {
+                //
+                // Query-scoped (GVAR) bindings are normally resolved to literals
+                // and emptied by the facade before context resolution runs;
+                // strip and preserve them the same way so a survivor is never
+                // silently dropped.
+                let strip_binding = |slf: &Self,
+                                     name: &str,
+                                     binding_expr: &Expression|
+                 -> EngineResult<(String, Expression)> {
                     if matches!(binding_expr, Expression::Query { .. }) {
                         // Keep Query bindings as-is; context is resolved
                         // during materialize_query / materialize_query_in_pipeline.
-                        stripped_bindings.push((name.clone(), binding_expr.clone()));
+                        Ok((name.to_string(), binding_expr.clone()))
                     } else {
                         let mut binding_ctx = EvaluationContext::new();
-                        let stripped = self.walk(binding_expr, &mut binding_ctx)?;
-                        stripped_bindings.push((name.clone(), stripped));
+                        let stripped = slf.walk(binding_expr, &mut binding_ctx)?;
+                        Ok((name.to_string(), stripped))
                     }
+                };
+                let mut stripped_bindings = Vec::new();
+                for (name, binding_expr) in bindings {
+                    stripped_bindings.push(strip_binding(self, name, binding_expr)?);
+                }
+                let mut stripped_query_scoped = Vec::new();
+                for (name, binding_expr) in query_scoped_bindings {
+                    stripped_query_scoped.push(strip_binding(self, name, binding_expr)?);
                 }
                 let stripped_result = self.walk(result, ctx)?;
                 Ok(Expression::Block {
                     bindings: stripped_bindings,
+                    query_scoped_bindings: stripped_query_scoped,
                     result: Box::new(stripped_result),
                 })
             }
@@ -1026,7 +1046,6 @@ impl<'a> ContextResolver<'a> {
         }
         Ok(())
     }
-
 
     /// Validate that a traversal path consists of valid relationship hops.
     fn validate_traversal_path(&self, path: &RelationshipPath) -> EngineResult<()> {

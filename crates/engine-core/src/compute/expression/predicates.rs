@@ -220,7 +220,9 @@ mod tests {
         let c = FilterPredicate::custom_data("Geography", "region", ComparisonOp::Equal);
         assert_eq!(c.dynamic, Some(DynamicValue::CustomData));
         // A plain predicate is static.
-        assert!(FilterPredicate::new("T", "c", ComparisonOp::Equal, "v").dynamic.is_none());
+        assert!(FilterPredicate::new("T", "c", ComparisonOp::Equal, "v")
+            .dynamic
+            .is_none());
     }
 
     #[test]

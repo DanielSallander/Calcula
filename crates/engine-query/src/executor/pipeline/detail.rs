@@ -102,7 +102,10 @@ impl QueryExecutor {
         cache: Option<&InMemoryCache>,
         max_inline_in_values: Option<usize>,
         role_filters: &[FilterPredicate],
-        context_column_exprs: &[(crate::request::ColumnRef, engine_core::compute::expression::Expression)],
+        context_column_exprs: &[(
+            crate::request::ColumnRef,
+            engine_core::compute::expression::Expression,
+        )],
         token: &CancellationToken,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Cancellation checkpoint: before any work.
@@ -496,7 +499,10 @@ impl QueryExecutor {
 /// so no row is added or dropped.
 async fn append_context_columns(
     batches: Vec<RecordBatch>,
-    exprs: &[(crate::request::ColumnRef, engine_core::compute::expression::Expression)],
+    exprs: &[(
+        crate::request::ColumnRef,
+        engine_core::compute::expression::Expression,
+    )],
     detail_table: &str,
 ) -> QueryResult<Vec<RecordBatch>> {
     if batches.is_empty() {

@@ -37,8 +37,16 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         | Expression::Using { expr, .. }
         | Expression::UseRelationship { expr, .. }
         | Expression::KeepIn { expr, .. } => has_measure_ref(expr),
-        Expression::Block { bindings, result } => {
-            bindings.iter().any(|(_, e)| has_measure_ref(e)) || has_measure_ref(result)
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            bindings
+                .iter()
+                .chain(query_scoped_bindings.iter())
+                .any(|(_, e)| has_measure_ref(e))
+                || has_measure_ref(result)
         }
         Expression::Window { inner, .. }
         | Expression::Offset { inner, .. }
@@ -228,13 +236,22 @@ fn expand_measure_refs_inner(
             operation: *operation,
             operand: Box::new(expand_measure_refs_inner(operand, model, visited)?),
         }),
-        Expression::Block { bindings, result } => {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
             let expanded_bindings = bindings
+                .iter()
+                .map(|(name, e)| Ok((name.clone(), expand_measure_refs_inner(e, model, visited)?)))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?;
+            let expanded_query_scoped = query_scoped_bindings
                 .iter()
                 .map(|(name, e)| Ok((name.clone(), expand_measure_refs_inner(e, model, visited)?)))
                 .collect::<crate::error::EngineResult<Vec<_>>>()?;
             Ok(Expression::Block {
                 bindings: expanded_bindings,
+                query_scoped_bindings: expanded_query_scoped,
                 result: Box::new(expand_measure_refs_inner(result, model, visited)?),
             })
         }
@@ -295,12 +312,10 @@ fn expand_measure_refs_inner(
             intervals: *intervals,
             granularity: *granularity,
         }),
-        Expression::SemiAdditiveBalance { expr, opening } => {
-            Ok(Expression::SemiAdditiveBalance {
-                expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
-                opening: *opening,
-            })
-        }
+        Expression::SemiAdditiveBalance { expr, opening } => Ok(Expression::SemiAdditiveBalance {
+            expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+            opening: *opening,
+        }),
         Expression::SafeDivide {
             numerator,
             denominator,
@@ -530,8 +545,15 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         | Expression::Using { expr, .. }
         | Expression::UseRelationship { expr, .. }
         | Expression::KeepIn { expr, .. } => infer_fact_table(expr),
-        Expression::Block { bindings, result } => {
-            for (_, e) in bindings {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            // A fact may appear only inside a binding (VAR *or* GVAR), e.g.
+            // `GVAR t = SUM(Fact[amt]) RETURN t/2`, so scan both binding lists
+            // before the result.
+            for (_, e) in bindings.iter().chain(query_scoped_bindings.iter()) {
                 if let Some(t) = infer_fact_table(e) {
                     return Some(t);
                 }

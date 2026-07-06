@@ -869,6 +869,38 @@ let pct_of_total = expression_measure(
 
 **SQL generation:** VAR bindings are inlined into the result expression before SQL generation. `VAR a = SUM(x) VAR b = a * 2 RETURN b + 1` generates SQL: `((SUM("x") * 2) + 1)`.
 
+### GVAR / RETURN (Query-Scoped Variables)
+
+**A variable evaluated once per query, ignoring the row/group axis.**
+
+A `GVAR` (query-scoped variable) is declared like a `VAR` but is evaluated **once per query context** rather than once per group / visual row. It is computed against the query's **outer filter/slicer context** (page filters, slicers, multi-select and cross-column OR slicers) and the **active row-level-security role**, but **without** the group-by axis. Its scalar value is then substituted as a constant everywhere it is referenced.
+
+This is the natural tool for "compare each row to a whole-context value" — e.g. a threshold, a max date, or a grand total — where recomputing per row would be both wasteful and wrong:
+
+```
+GVAR maxDate = MAX(DimDate[Date])
+RETURN CALCULATE(SUM(FactSales[Amount]), FactOrderDate[Date] > maxDate)
+```
+
+`maxDate` is computed a single time for the whole query (not once per visual row), so every row filters against the same boundary.
+
+**"% of grand total" — the canonical example:**
+```
+GVAR grand = SUM(Sales[amount])          -- once per query = the whole-context total
+RETURN DIVIDE(SUM(Sales[amount]), grand) -- each group / the total
+```
+Written with a plain `VAR grand = …`, `grand` would be re-evaluated per group and the ratio would be `1.0` everywhere. With `GVAR`, each group shows its share of the total.
+
+**Slicer-respecting, not an absolute constant.** A `GVAR` still sees the query's slicers — it just drops the row/group axis. With a slicer restricting the data (e.g. one product), `grand` reflects that slice, not the unfiltered total. (This is what distinguishes a `GVAR` from a model-level [global variable](#global-variables), which is inlined statically and re-evaluated per row.)
+
+**Rules:**
+- `GVAR` and `VAR` may be interleaved before `RETURN`; they are routed by keyword, not source order.
+- A `VAR` **may** reference a `GVAR` (the GVAR is resolved to a literal first). A `GVAR` may reference an **earlier** `GVAR`, but **not** a `VAR` (a query-scoped value cannot depend on a per-row local) and **not** a later/self `GVAR`.
+- A `GVAR` binding must be a **scalar** — `QUERY`, window (`WINDOW`/`OFFSET`/`INDEX`/`RANK`) and time-intelligence expressions are rejected.
+- A `GVAR` binding may reference another measure (`GVAR total = [Revenue]`), an earlier `GVAR`, or a constant expression of earlier `GVAR`s (`GVAR half = total / 2`).
+- `GVAR` is a measure feature only (not calculated columns / model global variables) and is resolved by the query engine facade (`Engine::query` / `query_with_meta`). A `GVAR` that resolves to `BLANK` (e.g. an aggregate over an empty context) propagates `BLANK` — it is not an error.
+- **Not yet supported (fails closed):** `GVAR` together with a calculation group; `GVAR` under **multiple active RLS roles** (query under a single role); and evaluation through `query_auto_tier` / `query_explained` / `query_auto_refresh` (use `Engine::query` / `query_with_meta`).
+
 ### QUERY-in-VAR (Two-Stage Aggregation)
 
 **Aggregate of aggregates using intermediate grouped tables.**

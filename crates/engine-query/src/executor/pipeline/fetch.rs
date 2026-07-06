@@ -92,10 +92,7 @@ pub(super) async fn filter_cached_batch_or_groups(
         })
         .collect();
 
-    let sql = format!(
-        "SELECT * FROM _cached WHERE ({})",
-        group_sqls.join(" OR ")
-    );
+    let sql = format!("SELECT * FROM _cached WHERE ({})", group_sqls.join(" OR "));
     let batches = filter_ctx.sql(&sql).await?.collect().await?;
     if batches.is_empty() {
         Ok(RecordBatch::new_empty(batch.schema()))

@@ -31,11 +31,11 @@ mod validate;
 mod walkers;
 
 pub use builders::{
-    agg, and, blank, block, call, clear, clear_except, clear_inner, clear_outer, closing_balance,
-    coalesce, col, compare, count_rows, dates_in_period, datetime_fn, expr_literal_from_arrow,
-    expr_literal_from_scalar, first_value, has_one_value,
-    if_error, if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in,
-    keep_vars, lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
+    agg, and, blank, block, block_with_globals, call, clear, clear_except, clear_inner,
+    clear_outer, closing_balance, coalesce, col, compare, count_rows, dates_in_period, datetime_fn,
+    expr_literal_from_arrow, expr_literal_from_scalar, first_value, has_one_value, if_error,
+    if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars,
+    lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
     period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,
     scalar_fn, selected_value, switch, table_ref, text_fn, to_date, traverse, use_relationship,
     using, window_expr, xor,
@@ -48,9 +48,7 @@ pub(crate) use functions::{
 pub use globals::expand_global_variables;
 pub use lineage::{extract_dependencies, ExpressionDependencies};
 pub use measure_refs::{expand_measure_refs, has_measure_ref, infer_fact_table};
-pub use predicates::{
-    ComparisonOp, DynamicValue, FilterPredicate, InPredicate, RelationshipPath,
-};
+pub use predicates::{ComparisonOp, DynamicValue, FilterPredicate, InPredicate, RelationshipPath};
 pub use render::{
     BareQualifier, ColumnQualifier, DataFusionDialect, Dialect, LowercaseTableQualifier,
     MultiTableQualifier, PostgresDialect, SqlRenderer, TableAliasQualifier,
@@ -361,6 +359,23 @@ pub enum Expression {
     Block {
         /// Named intermediate values.
         bindings: Vec<(String, Expression)>,
+        /// Query-scoped variables (`GVAR`): each is evaluated **once per query
+        /// context** — against the query's outer filter/slicer context (and
+        /// active RLS role) but **without** the group-by/row axis — and
+        /// substituted as a literal everywhere it is referenced, at the facade,
+        /// before planning. Empty for an ordinary `VAR` block.
+        ///
+        /// A `Block` reaching context resolution or SQL rendering with a
+        /// non-empty `query_scoped_bindings` is an internal error (like an
+        /// unexpanded [`MeasureRef`](Expression::MeasureRef)): the facade
+        /// resolves and empties this list first.
+        ///
+        /// NOTE: this is unrelated to the model-level
+        /// [`GlobalVariable`](crate::model::global_variable::GlobalVariable)
+        /// feature (see [`expand_global_variables`]), which is inlined
+        /// statically and re-evaluated per row — the opposite semantics.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        query_scoped_bindings: Vec<(String, Expression)>,
         /// The result expression (may reference binding names).
         result: Box<Expression>,
     },

@@ -259,11 +259,7 @@ fn lc_has(set: &std::collections::HashSet<String>, target_lc: &str) -> bool {
     set.iter().any(|s| s.eq_ignore_ascii_case(target_lc))
 }
 
-fn lc_pair_has(
-    set: &std::collections::HashSet<(String, String)>,
-    t_lc: &str,
-    c_lc: &str,
-) -> bool {
+fn lc_pair_has(set: &std::collections::HashSet<(String, String)>, t_lc: &str, c_lc: &str) -> bool {
     set.iter()
         .any(|(t, c)| t.eq_ignore_ascii_case(t_lc) && c.eq_ignore_ascii_case(c_lc))
 }
@@ -807,9 +803,12 @@ pub(super) fn hoist_measure_sql(
                 stripped.to_case_when_sql(&condition, &fact_model_name.to_lowercase())?
             };
             let col_sql = match axis_clear_partition(&ctx, group_columns) {
-                Some(partition) => {
-                    wrap_axis_clear(inner_sql, &stripped, &partition, "a percent-of-parent measure")?
-                }
+                Some(partition) => wrap_axis_clear(
+                    inner_sql,
+                    &stripped,
+                    &partition,
+                    "a percent-of-parent measure",
+                )?,
                 None => inner_sql,
             };
             Ok(push_hoist(hoist, col_sql))

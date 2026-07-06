@@ -233,7 +233,7 @@ fn collect_qualified_column_refs(expr: &Expression, refs: &mut Vec<(String, Stri
 /// sub-expression slots of every node kind. It powers the calc-item
 /// validation walks (measure-ref and qualified-column collection) without
 /// duplicating the full match in each. Leaf nodes return an empty list.
-fn child_expressions(expr: &Expression) -> Vec<&Expression> {
+pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
     let mut out: Vec<&Expression> = Vec::new();
     match expr {
         Expression::ColumnRef(_)
@@ -364,12 +364,28 @@ fn child_expressions(expr: &Expression) -> Vec<&Expression> {
             out.push(expr);
             out.extend(values.iter());
         }
-        Expression::Block { bindings, result } => {
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
             out.extend(bindings.iter().map(|(_, e)| e));
+            out.extend(query_scoped_bindings.iter().map(|(_, e)| e));
             out.push(result);
         }
     }
     out
+}
+
+/// Returns `true` if `expr` contains an [`Expression::Query`] (a table-producing
+/// two-stage aggregation) node anywhere in its tree.
+///
+/// Used to enforce that a query-scoped (`GVAR`) binding is a genuine scalar: a
+/// `QUERY` may be nested at any expression position, so a top-level
+/// [`Expression::is_query`] check alone would miss `SUM(x) + QUERY(...)`.
+pub(crate) fn contains_query(expr: &Expression) -> bool {
+    matches!(expr, Expression::Query { .. })
+        || child_expressions(expr).iter().any(|c| contains_query(c))
 }
 
 /// Format the synthetic result-column / measure name for measure `measure`

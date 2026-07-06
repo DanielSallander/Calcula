@@ -274,9 +274,15 @@ mod tests {
         let (_dir, conn) = fixture();
         let table = conn.introspect_table("public", "sales").await.unwrap();
         assert_eq!(table.columns().len(), 2);
-        assert_eq!(table.column("region").unwrap().data_type(), &DataType::String);
+        assert_eq!(
+            table.column("region").unwrap().data_type(),
+            &DataType::String
+        );
         // amount infers to an integer type.
-        assert_eq!(table.column("amount").unwrap().data_type(), &DataType::Int64);
+        assert_eq!(
+            table.column("amount").unwrap().data_type(),
+            &DataType::Int64
+        );
     }
 
     #[tokio::test]
@@ -356,8 +362,16 @@ mod tests {
                 schema: Some("public".into()),
                 table: "sales".into(),
                 or_groups: vec![
-                    vec![FilterCondition::new("region", FilterOperator::Equal, "West")],
-                    vec![FilterCondition::new("amount", FilterOperator::GreaterThan, "50")],
+                    vec![FilterCondition::new(
+                        "region",
+                        FilterOperator::Equal,
+                        "West",
+                    )],
+                    vec![FilterCondition::new(
+                        "amount",
+                        FilterOperator::GreaterThan,
+                        "50",
+                    )],
                 ],
                 ..Default::default()
             })
