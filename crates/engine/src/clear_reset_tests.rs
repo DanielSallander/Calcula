@@ -260,3 +260,116 @@ async fn plain_revenue_unaffected_alongside_bare_clear() {
     assert!((gt["Bikes"] - 190.0).abs() < 1e-9);
     assert!((gt["Helmets"] - 190.0).abs() < 1e-9);
 }
+
+// --- Percent-of-parent fixture: 3 products across 2 categories -------------
+// Product(id, category, name): 1 Bikes/Road, 2 Bikes/Trail, 3 Safety/Helmet.
+// Sales SUM(amount): Road 100, Trail 50, Helmet 30.
+// Category totals: Bikes 150, Safety 30.
+
+fn parent_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Product",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("category", DataType::String),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Product",
+            "Sales",
+            "prod_id",
+            "Product",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_measure(expression_measure(
+            "PctOfParent",
+            parse_measure(
+                "DIVIDE(SUM(Sales[amount]), \
+                 SUM(Sales[amount], CLEAREXCEPT(Product, Product[category])))",
+            )
+            .unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Product", 0, SourceBinding::new("public", "product"));
+    engine
+        .cache
+        .store(
+            "Sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("prod_id", ArrowType::Int64, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 3])),
+                    Arc::new(Float64Array::from(vec![100.0, 50.0, 30.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Product",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("id", ArrowType::Int64, true),
+                    Field::new("category", ArrowType::Utf8, true),
+                    Field::new("name", ArrowType::Utf8, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 3])),
+                    Arc::new(StringArray::from(vec!["Bikes", "Bikes", "Safety"])),
+                    Arc::new(StringArray::from(vec!["Road", "Trail", "Helmet"])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn percent_of_parent_partitions_by_category() {
+    // DIVIDE(SUM(x), SUM(x, CLEAREXCEPT(Product, category))) — each product's
+    // share of its CATEGORY total (a partitioned window), via the two-level
+    // query. Road 100/150, Trail 50/150, Helmet 30/30.
+    let engine = parent_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into(), "PctOfParent".into()],
+        group_by: vec![
+            ColumnRef::new("Product", "category"),
+            ColumnRef::new("Product", "name"),
+        ],
+        ..Default::default()
+    };
+    let batches = engine.query(req).await.unwrap();
+    let pct = grouped(&batches, "PctOfParent");
+    assert!((pct["Road"] - 100.0 / 150.0).abs() < 1e-9, "Road {}", pct["Road"]);
+    assert!((pct["Trail"] - 50.0 / 150.0).abs() < 1e-9, "Trail {}", pct["Trail"]);
+    assert!((pct["Helmet"] - 1.0).abs() < 1e-9, "Helmet {}", pct["Helmet"]);
+    // The two Bikes products' shares sum to 1.0 within their category.
+    assert!((pct["Road"] + pct["Trail"] - 1.0).abs() < 1e-9);
+}

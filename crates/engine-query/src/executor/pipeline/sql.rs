@@ -634,6 +634,204 @@ pub(super) fn resolve_compound_sql(
     }
 }
 
+/// Does `expr` contain a CLEAR/RESET that leaves a NON-empty group-by partition
+/// (percent-of-parent, e.g. `CLEAREXCEPT(dim, dim[keepcol])`)? Such a measure
+/// needs the two-level-query wrapper (`hoist_measure_sql`) — a window aggregate
+/// over a partition cannot be a scalar subquery, nor nested in an expression.
+///
+/// Walks the compound combinators to the leaf context-op sub-expressions and
+/// resolves each independently (mirroring `resolve_compound_sql`'s dispatch).
+pub(super) fn contains_partitioned_clear(
+    expr: &Expression,
+    model: &DataModel,
+    group_columns: &[GroupColumn],
+) -> QueryResult<bool> {
+    let any = |es: &[&Expression]| -> QueryResult<bool> {
+        for e in es {
+            if contains_partitioned_clear(e, model, group_columns)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    match expr {
+        Expression::BinaryOp { left, right, .. } => any(&[left, right]),
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => match alternate {
+            Some(a) => any(&[numerator, denominator, a]),
+            None => any(&[numerator, denominator]),
+        },
+        Expression::ScalarFunc { args, .. } => any(&args.iter().collect::<Vec<_>>()),
+        Expression::Coalesce(exprs) => any(&exprs.iter().collect::<Vec<_>>()),
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => any(&[condition, then_expr, else_expr]),
+        Expression::IsBlank(inner) | Expression::Not(inner) => {
+            contains_partitioned_clear(inner, model, group_columns)
+        }
+        _ if expr.has_context_ops() => {
+            let (_, ctx) = ContextResolver::new(model).resolve(expr)?;
+            Ok(axis_clear_partition(&ctx, group_columns).is_some_and(|p| !p.is_empty()))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Push an inner-query column and return a reference to it (`__hN`).
+fn push_hoist(hoist: &mut Vec<(String, String)>, sql: String) -> String {
+    let name = format!("__h{}", hoist.len());
+    hoist.push((name.clone(), sql));
+    name
+}
+
+/// Render a compound measure that clears a PARTITIONED group-by axis
+/// (percent-of-parent) for the two-level query: every leaf aggregate and every
+/// windowed clear is pushed to `hoist` as an inner-query column (a top-level
+/// SELECT item, which DataFusion supports), and the returned string is the
+/// OUTER expression referencing those columns by their `__hN` names.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn hoist_measure_sql(
+    expr: &Expression,
+    model: &DataModel,
+    fact_table: &str,
+    fact_model_name: &str,
+    group_columns: &[GroupColumn],
+    context_join_tables: &mut Vec<String>,
+    override_joins: &mut Vec<OverrideJoinEntry>,
+    hoist: &mut Vec<(String, String)>,
+) -> QueryResult<String> {
+    macro_rules! recurse {
+        ($e:expr) => {
+            hoist_measure_sql(
+                $e,
+                model,
+                fact_table,
+                fact_model_name,
+                group_columns,
+                context_join_tables,
+                override_joins,
+                hoist,
+            )?
+        };
+    }
+    match expr {
+        Expression::BinaryOp { left, op, right } => {
+            let l = recurse!(left);
+            let r = recurse!(right);
+            Ok(format!("({l} {} {r})", op.as_sql()))
+        }
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => {
+            let n = recurse!(numerator);
+            let d = recurse!(denominator);
+            let alt = match alternate {
+                Some(a) => recurse!(a),
+                None => "NULL".to_string(),
+            };
+            Ok(format!(
+                "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE) / {d} END"
+            ))
+        }
+        Expression::ScalarFunc { function, args } => {
+            let mut mapped = Vec::with_capacity(args.len());
+            for a in args {
+                mapped.push(recurse!(a));
+            }
+            Ok(function.to_sql_strs(&mapped))
+        }
+        Expression::Coalesce(exprs) => {
+            let mut mapped = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                mapped.push(recurse!(e));
+            }
+            Ok(format!("COALESCE({})", mapped.join(", ")))
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let c = recurse!(condition);
+            let t = recurse!(then_expr);
+            let e = recurse!(else_expr);
+            Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
+        }
+        Expression::IsBlank(inner) => {
+            let i = recurse!(inner);
+            Ok(format!("({i} IS NULL)"))
+        }
+        Expression::Not(inner) => {
+            let i = recurse!(inner);
+            Ok(format!("(NOT {i})"))
+        }
+        // A context-op aggregate: render its inner aggregate (CASE WHEN for KEEP,
+        // else the plain aggregate), wrap in the window if it clears the axis,
+        // and hoist the whole thing as one inner column.
+        _ if expr.has_context_ops() => {
+            let (stripped, ctx) = ContextResolver::new(model).resolve(expr)?;
+            reject_unconsumed_in_filters("a compound context expression", &ctx)?;
+            let effective = ctx.effective_filters(&[]);
+            for f in &effective {
+                if f.table != fact_model_name {
+                    context_join_tables.push(f.table.clone());
+                }
+            }
+            let alias_map =
+                build_override_alias_map(&ctx, model, fact_model_name, fact_table, override_joins);
+            let inner_sql = if effective.is_empty() {
+                resolve_compound_sql(
+                    &stripped,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    group_columns,
+                    context_join_tables,
+                    override_joins,
+                )?
+            } else {
+                let condition = build_condition_sql_with_aliases(
+                    &effective,
+                    fact_table,
+                    fact_model_name,
+                    model,
+                    &alias_map,
+                )?;
+                stripped.to_case_when_sql(&condition, &fact_model_name.to_lowercase())?
+            };
+            let col_sql = match axis_clear_partition(&ctx, group_columns) {
+                Some(partition) => {
+                    wrap_axis_clear(inner_sql, &stripped, &partition, "a percent-of-parent measure")?
+                }
+                None => inner_sql,
+            };
+            Ok(push_hoist(hoist, col_sql))
+        }
+        // A bare aggregate: hoist its per-group value as an inner column.
+        Expression::Aggregate { .. } => {
+            let sql = resolve_compound_sql(
+                expr,
+                model,
+                fact_table,
+                fact_model_name,
+                group_columns,
+                context_join_tables,
+                override_joins,
+            )?;
+            Ok(push_hoist(hoist, sql))
+        }
+        // Leaves (literals, etc.): inline into the outer expression.
+        _ => Ok(expr.to_sql_string()?),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

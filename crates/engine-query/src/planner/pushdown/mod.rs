@@ -769,7 +769,7 @@ impl PushdownPlanner {
         };
 
         // Collect all referenced tables (deduplication happens below).
-        let all_tables: Vec<&str> = measure_tables
+        let referenced_tables: Vec<&str> = measure_tables
             .iter()
             .chain(group_by_tables.iter())
             .chain(context_tables.iter())
@@ -782,6 +782,40 @@ impl PushdownPlanner {
             .chain(context_ref_tables.iter().map(|s| s.as_str()))
             .chain(in_filter_tables.iter().copied())
             .chain(or_filter_table.iter().copied())
+            .collect();
+
+        // A scalar request filter (`request.filters`) whose column is owned by
+        // NO already-referenced table is a "filter-only dimension" slicer (e.g.
+        // slice by a region that is neither grouped nor measured). Its table must
+        // be pulled into the fetch set — and the query forced onto the local
+        // two-phase-propagation path (see `has_in_filters` below) — so the
+        // restriction reaches the fact. Otherwise the pushed paths, which do not
+        // join a filter-only dimension, silently drop the filter. Mirrors the
+        // `in_filter_tables` handling for IN-list slicers.
+        let referenced: std::collections::HashSet<&str> =
+            referenced_tables.iter().copied().collect();
+        let scalar_filter_only_tables: Vec<&str> = request
+            .filters
+            .iter()
+            .filter(|f| {
+                !model
+                    .tables()
+                    .iter()
+                    .any(|t| t.column(&f.column).is_ok() && referenced.contains(t.name()))
+            })
+            .flat_map(|f| {
+                model
+                    .tables()
+                    .iter()
+                    .filter(move |t| t.column(&f.column).is_ok())
+                    .map(|t| t.name())
+            })
+            .collect();
+
+        let all_tables: Vec<&str> = referenced_tables
+            .iter()
+            .copied()
+            .chain(scalar_filter_only_tables.iter().copied())
             .collect();
 
         // Verify all tables have registered sources (skip QUERY binding names).
@@ -863,7 +897,12 @@ impl PushdownPlanner {
         // slicer restricts the fact through the existing two-phase propagation —
         // so this is the single, well-tested path for these filters rather than
         // threading them through the single-statement pushed-join builders too.
-        let has_in_filters = !request.in_filters.is_empty() || !request.or_filters.is_empty();
+        // A filter-only-dimension scalar slicer also forces the local
+        // two-phase-propagation path (its restriction cannot be pushed through a
+        // dimension the pushed paths never join).
+        let has_in_filters = !request.in_filters.is_empty()
+            || !request.or_filters.is_empty()
+            || !scalar_filter_only_tables.is_empty();
 
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
         let all_pushable = measures.iter().all(|m| {

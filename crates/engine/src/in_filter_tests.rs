@@ -209,6 +209,25 @@ async fn in_filter_on_filter_only_dimension_restricts_the_fact() {
 }
 
 #[tokio::test]
+async fn scalar_filter_on_filter_only_dimension_restricts_the_fact() {
+    // A SCALAR request filter (`filters`, not `in_filters`) on Region while
+    // grouping by Product — Region is neither grouped nor measured. It must
+    // still restrict the fact via two-phase propagation. Regression: this used
+    // to be silently dropped (returning the unfiltered 130/60) because a
+    // filter-only-dimension table was never added to the fetch set.
+    let engine = slicer_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into()],
+        group_by: vec![ColumnRef::new("Product", "name")],
+        filters: vec![cond("region", FilterOperator::Equal, "East")],
+        ..Default::default()
+    };
+    let r = by_product(&engine.query(req).await.unwrap());
+    assert_eq!(r["Bikes"], 100.0, "East-only Bikes = 100 (region filter applied)");
+    assert_eq!(r["Helmets"], 40.0, "East-only Helmets = 40");
+}
+
+#[tokio::test]
 async fn multi_value_in_filter_keeps_all_listed() {
     // Region IN ('East', 'West') = every region → unchanged totals.
     let engine = slicer_engine();

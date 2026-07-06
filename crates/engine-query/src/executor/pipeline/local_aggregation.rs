@@ -1291,6 +1291,15 @@ impl QueryExecutor {
         // Aliased JOINs from USERELATIONSHIP overrides.
         let mut override_joins: Vec<OverrideJoinEntry> = Vec::new();
 
+        // Two-level-query state for percent-of-parent measures: `hoist_cols` are
+        // inner-query columns (raw aggregates + partitioned windows), and
+        // `outer_measures` are the outer projections (percent-of-parent measures
+        // divide the hoisted columns; every other measure passes through from the
+        // inner). `needs_wrap` gates whether the outer SELECT is built at all.
+        let mut hoist_cols: Vec<(String, String)> = Vec::new();
+        let mut outer_measures: Vec<(String, String)> = Vec::new();
+        let mut needs_wrap = false;
+
         for measure in measures {
             let name = measure.name();
             let expr = measure.expression();
@@ -1307,6 +1316,29 @@ impl QueryExecutor {
                         | Expression::Coalesce(_)
                         | Expression::If { .. }
                 );
+
+            // Percent-of-parent: a CLEAR/RESET that keeps a surviving group-by
+            // column in its partition. A window aggregate cannot nest in a scalar
+            // expression (nor be a scalar subquery), so hoist the measure's
+            // aggregates + windows into inner-query columns and divide in the
+            // outer SELECT (built after the inner statement is assembled).
+            if is_compound_with_context
+                && super::sql::contains_partitioned_clear(expr, model, &group_columns)?
+            {
+                needs_wrap = true;
+                let outer = super::sql::hoist_measure_sql(
+                    expr,
+                    model,
+                    fact_table,
+                    fact_model_name,
+                    &group_columns,
+                    &mut context_join_tables,
+                    &mut override_joins,
+                    &mut hoist_cols,
+                )?;
+                outer_measures.push((name.to_string(), outer));
+                continue;
+            }
 
             let sql_fragment = if is_compound_with_context {
                 // Compound expression: resolve each sub-aggregate independently.
@@ -1390,7 +1422,19 @@ impl QueryExecutor {
                     }
                 }
             };
+            // If wrapping, non-partitioned measures are computed in the inner
+            // query and passed through unchanged by the outer SELECT.
+            outer_measures.push((
+                name.to_string(),
+                format!("__base.{}", quote_ident_double(name)),
+            ));
             select_parts.push(sql_fragment);
+        }
+
+        // Inner-query columns hoisted from percent-of-parent measures (raw
+        // aggregates + partitioned windows); the outer SELECT divides them.
+        for (col_name, col_sql) in &hoist_cols {
+            select_parts.push(format!("{col_sql} AS {}", quote_ident_double(col_name)));
         }
 
         // ROLLUP totals: project the trailing `__grouping_id` bitmask column.
@@ -1696,17 +1740,93 @@ impl QueryExecutor {
             }
         }
 
+        // Percent-of-parent two-level query: the statement built above becomes an
+        // inner subquery exposing group columns + hoisted aggregate/window columns
+        // (a window aggregate is a valid top-level column but cannot nest in a
+        // scalar expression); the outer SELECT divides them. Supported only in a
+        // plain grouped query — anything that post-processes rows (ORDER BY,
+        // LIMIT, totals, lookups, hierarchies, context columns, USERELATIONSHIP)
+        // fails closed rather than risk a wrong interaction.
+        if needs_wrap {
+            // Only the plain grouped shape is supported. Row post-processing that
+            // this two-level rendering does not thread through fails closed.
+            let plain = !rollup
+                && lookup_specs.is_empty()
+                && hier.is_none()
+                && !has_context_columns
+                && override_joins.is_empty()
+                && !hide_members;
+            if !plain {
+                return Err(crate::error::QueryError::InvalidQuery(
+                    "percent-of-parent (a partitioned CLEAR/RESET such as CLEAREXCEPT) is \
+                     currently supported only in a plain grouped query on the local path — \
+                     without totals, lookups, hierarchies, context columns, or USERELATIONSHIP. \
+                     Compute the parent total as its own measure and divide host-side."
+                        .into(),
+                ));
+            }
+            // Outer ORDER BY over the projected output columns (group-by column
+            // names / measure names). A sort-by-column substitution (display vs
+            // sort column) cannot be expressed against the outer projection.
+            let mut outer_order: Vec<String> = Vec::new();
+            for clause in order_by {
+                let term = match &clause.target {
+                    OrderTarget::Column(col) => {
+                        let sort_col = model
+                            .table(&col.table)
+                            .ok()
+                            .and_then(|t| t.sort_column_for(&col.column).ok())
+                            .unwrap_or(col.column.as_str());
+                        if !sort_col.eq_ignore_ascii_case(&col.column) {
+                            return Err(crate::error::QueryError::InvalidQuery(
+                                "percent-of-parent with ORDER BY a sort-substituted column is not \
+                                 yet supported on the local path; order in the host."
+                                    .into(),
+                            ));
+                        }
+                        quote_ident_double(&col.column)
+                    }
+                    OrderTarget::Measure(name) => quote_ident_double(name),
+                };
+                outer_order.push(if clause.descending {
+                    format!("{term} DESC")
+                } else {
+                    term
+                });
+            }
+
+            let mut outer_select: Vec<String> = group_by
+                .iter()
+                .map(|d| format!("__base.{}", quote_ident_double(&d.column)))
+                .collect();
+            for (m_name, outer_sql) in &outer_measures {
+                outer_select.push(format!("{outer_sql} AS {}", quote_ident_double(m_name)));
+            }
+            sql = format!("SELECT {} FROM ({sql}) AS __base", outer_select.join(", "));
+            if !outer_order.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(&outer_order.join(", "));
+            }
+            if let Some(n) = limit {
+                sql.push_str(&format!(" LIMIT {n}"));
+            }
+        }
+
         // ORDER BY / LIMIT (terms built alongside the SELECT list above).
         // With a HideMembers post-filter, ORDER BY stays in the SQL (the
         // Arrow filter preserves row order) but LIMIT must wait until after
         // filtering — otherwise hidden rows would consume the row budget.
-        if !order_terms.is_empty() {
-            sql.push_str(" ORDER BY ");
-            sql.push_str(&order_terms.join(", "));
-        }
-        if order_in_sql && !hide_members {
-            if let Some(n) = limit {
-                sql.push_str(&format!(" LIMIT {n}"));
+        // When wrapped, ORDER BY / LIMIT are applied to the OUTER query above
+        // (the inner `order_terms` reference inner-only column names).
+        if !needs_wrap {
+            if !order_terms.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(&order_terms.join(", "));
+            }
+            if order_in_sql && !hide_members {
+                if let Some(n) = limit {
+                    sql.push_str(&format!(" LIMIT {n}"));
+                }
             }
         }
 
