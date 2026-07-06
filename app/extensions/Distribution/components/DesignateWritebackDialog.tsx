@@ -5,6 +5,7 @@
 //          or from the WritebackPane "Edit" button on a draft region (edit).
 
 import React, { useState, useCallback } from "react";
+import { listWritebackValidators } from "@api/writebackValidators";
 import { emitAppEvent } from "@api";
 import {
   addWritebackRegion,
@@ -55,6 +56,7 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
   const [min, setMin] = useState(s?.min != null ? String(s.min) : "");
   const [max, setMax] = useState(s?.max != null ? String(s.max) : "");
   const [enumValues, setEnumValues] = useState((s?.enumValues ?? []).join(", "));
+  const [customValidator, setCustomValidator] = useState<string>(s?.customValidator ?? "");
   const [visibility, setVisibility] = useState<string>(editing?.visibility ?? "own_plus_aggregate");
   const [submissionPolicy, setSubmissionPolicy] = useState<string>(editing?.submissionPolicy ?? "on_submit");
   const [versionBinding, setVersionBinding] = useState<string>(editing?.versionBinding ?? "lenient");
@@ -85,6 +87,7 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
       if (valueType === "enum" && enumValues.trim()) {
         schema.enumValues = enumValues.split(",").map((v) => v.trim()).filter(Boolean);
       }
+      if (customValidator) schema.customValidator = customValidator;
 
       const lifecycle: LifecyclePolicyConfig = {
         policy: lifecyclePolicy as LifecyclePolicyConfig["policy"],
@@ -136,7 +139,7 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
     } finally {
       setSubmitting(false);
     }
-  }, [editing, data, mode, valueType, required, min, max, enumValues, visibility, submissionPolicy, versionBinding, lifecyclePolicy, deadline, aggregationHint, expectedRespondents, onClose]);
+  }, [editing, data, mode, valueType, required, min, max, enumValues, customValidator, visibility, submissionPolicy, versionBinding, lifecyclePolicy, deadline, aggregationHint, expectedRespondents, onClose]);
 
   const sel = editing?.selector;
   const rangeLabel = editing
@@ -192,6 +195,18 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
           <label>
             Allowed values (comma-separated):
             <input type="text" value={enumValues} onChange={(e) => setEnumValues(e.target.value)} style={{ width: "100%" }} />
+          </label>
+        )}
+
+        {listWritebackValidators().length > 0 && (
+          <label title="An advisory, subscriber-side check layered on the built-in schema. Extensions register these.">
+            Custom validator:
+            <select value={customValidator} onChange={(e) => setCustomValidator(e.target.value)} style={{ marginLeft: 8 }}>
+              <option value="">None</option>
+              {listWritebackValidators().map((v) => (
+                <option key={v.name} value={v.name}>{v.label}</option>
+              ))}
+            </select>
           </label>
         )}
 

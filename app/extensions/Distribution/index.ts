@@ -47,6 +47,7 @@ import {
   getRegionForCell,
 } from "./lib/writebackStore";
 import { registerCommitGuard } from "@api/commitGuards";
+import { runWritebackValidator } from "@api/writebackValidators";
 import {
   saveWritebackDraft,
   refreshData,
@@ -437,6 +438,21 @@ function activate(context: ExtensionContext): void {
           } else {
             submissionValue = { type: "text", value: trimmed };
           }
+      }
+    }
+
+    // Advisory custom validator (distribution brick 3): a publisher-declared,
+    // subscriber-side UX check layered on top of the authoritative built-in
+    // schema. Unknown/unregistered validators are skipped. Runs BEFORE the
+    // draft save so a rejection keeps the user in edit mode with the message.
+    if (region.customValidator && trimmed !== "") {
+      const verdict = runWritebackValidator(region.customValidator, trimmed, {
+        valueType: region.valueType,
+        regionId: region.regionId,
+      });
+      if (verdict) {
+        context.ui.notifications.showToast(verdict, { type: "warning", duration: 5000 });
+        return { action: "retry" as const };
       }
     }
 

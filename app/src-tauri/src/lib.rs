@@ -86,6 +86,7 @@ pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
+pub mod calp_registry;
 pub mod managed_policy;
 pub mod state_digest;
 pub mod security;
@@ -4424,6 +4425,10 @@ pub fn run() {
             calp_commands::calp_publish_model,
             calp_commands::calp_pull,
             calp_commands::calp_browse_registry,
+            // Registry providers (distribution brick 1): saved-registry catalog
+            calp_registry::calp_list_registries,
+            calp_registry::calp_add_registry,
+            calp_registry::calp_remove_registry,
             calp_commands::calp_inspect_package,
             calp_commands::calp_get_subscriptions,
             calp_commands::calp_get_package_objects,

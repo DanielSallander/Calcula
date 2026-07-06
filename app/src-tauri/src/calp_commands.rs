@@ -8,7 +8,6 @@ use crate::AppState;
 use crate::bi::types::BiState;
 
 use calp::manifest::SubscriptionManifest;
-use calp::registry::LocalRegistry;
 use calp::version::{SemVer, VersionPin};
 use identity::{CellId, SheetId};
 
@@ -25,6 +24,66 @@ pub struct PublishParams {
     pub kind: String,
     pub sheet_indices: Vec<usize>,
     pub published_by: String,
+    /// Extra custom objects supplied by frontend distributable-object providers
+    /// (distribution brick 4). Merged with the Rust-collected built-in custom
+    /// objects (cell types). Absent when no provider contributed.
+    #[serde(default)]
+    pub custom_objects: Option<Vec<FrontendCustomObject>>,
+}
+
+/// A custom object contributed by a FRONTEND provider for publishing
+/// (distribution brick 4). Mirrors `calp::publish::PublishCustomObject` over
+/// the IPC boundary; `payload` is opaque provider-owned JSON.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendCustomObject {
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub sheet_id: Option<identity::SheetId>,
+    pub payload: serde_json::Value,
+}
+
+impl From<FrontendCustomObject> for calp::publish::PublishCustomObject {
+    fn from(f: FrontendCustomObject) -> Self {
+        calp::publish::PublishCustomObject {
+            kind: f.kind,
+            id: f.id,
+            name: f.name,
+            sheet_id: f.sheet_id,
+            payload: f.payload,
+        }
+    }
+}
+
+/// Collect the workbook's cell-type assignments (for the selected sheets) as
+/// generic custom objects — one per sheet that has assignments (distribution
+/// brick 4 dogfood). Mirrors how controls travel, but through the open channel.
+fn collect_cell_type_custom_objects(
+    state: &AppState,
+    sheet_indices: &[usize],
+) -> Result<Vec<calp::publish::PublishCustomObject>, String> {
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    let selected: std::collections::HashSet<identity::SheetId> = sheet_indices
+        .iter()
+        .filter_map(|&i| sheet_ids.get(i).copied())
+        .collect();
+    let cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+    let objects = crate::cell_types::collect_cell_types_for_save(&cell_types, &sheet_ids)
+        .into_iter()
+        .filter(|s| selected.contains(&s.sheet_id))
+        .map(|s| calp::publish::PublishCustomObject {
+            kind: "cellType".to_string(),
+            // Stable per-sheet id so refresh replaces the same object.
+            id: format!("cellType-{}", s.sheet_id),
+            name: "Cell Types".to_string(),
+            sheet_id: Some(s.sheet_id),
+            payload: s.cells,
+        })
+        .collect();
+    Ok(objects)
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +129,25 @@ pub struct PullResponse {
     /// Trust outcome: "firstUse" (publisher key newly pinned) or "verified"
     /// (matched a prior pin). The frontend can surface a first-use notice.
     pub trust_status: String,
+    /// Generic custom objects of kinds NOT handled Rust-side (distribution
+    /// brick 4), surfaced so frontend distributable-object providers can
+    /// materialize them. Built-in kinds (cellType) are already applied and are
+    /// NOT included here. Payloads are already integrity-verified.
+    #[serde(default)]
+    pub custom_objects: Vec<PulledCustomObjectDto>,
+}
+
+/// A pulled custom object handed to the frontend for provider materialization
+/// (distribution brick 4). `sheet_index` is the LOCAL sheet index (the package
+/// sheet remapped), or null for workbook-scoped / unresolvable objects.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PulledCustomObjectDto {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    pub sheet_index: Option<usize>,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -424,7 +502,7 @@ pub fn calp_publish(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
+    let registry = crate::calp_registry::open_registry(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     let version = SemVer::parse(&params.version)
@@ -459,6 +537,15 @@ pub fn calp_publish(
         excluded_regions,
     } = assembly;
 
+    // Cell types travel via the generic custom-object channel (brick 4
+    // dogfood): one per selected sheet, kind "cellType", payload = the sheet's
+    // opaque cell-type assignments. Frontend providers can add more via
+    // params.custom_objects (merged in — moved out of params before the request
+    // literal consumes its other fields).
+    let frontend_custom_objects = params.custom_objects.unwrap_or_default();
+    let mut custom_objects = collect_cell_type_custom_objects(&state, &sheet_indices)?;
+    custom_objects.extend(frontend_custom_objects.into_iter().map(Into::into));
+
     let request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
@@ -475,6 +562,7 @@ pub fn calp_publish(
         notebooks: None,
         data_sources,
         excluded_regions,
+        custom_objects,
     };
 
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
@@ -536,7 +624,7 @@ pub fn calp_publish_model(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
+    let registry = crate::calp_registry::open_registry(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let version = SemVer::parse(&params.version).map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -586,6 +674,7 @@ pub fn calp_publish_model(
         notebooks: None,
         data_sources,
         excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
     };
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
@@ -1226,7 +1315,7 @@ pub fn calp_pull(
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&params.registry_path))
+    let registry = crate::calp_registry::open_registry(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     let version_pin = VersionPin::parse(&params.version_pin)
@@ -1496,6 +1585,50 @@ pub fn calp_pull(
         }
     }
 
+    // Materialize generic custom objects (distribution brick 4). Cell types
+    // (the dogfood) are applied Rust-side, mirroring controls: reconstruct a
+    // per-sheet SavedSheetCellTypes and materialize with the package->local
+    // sheet remap. Unknown kinds fall through to the frontend response
+    // (`custom_objects`) for third-party distributable-object providers. Every
+    // custom object is recorded in the subscription ledger.
+    let mut frontend_custom_objects: Vec<PulledCustomObjectDto> = Vec::new();
+    {
+        let cell_type_saved: Vec<persistence::SavedSheetCellTypes> = result
+            .custom_objects
+            .iter()
+            .filter(|co| co.kind == "cellType")
+            .filter_map(|co| {
+                co.package_sheet_id.map(|sid| persistence::SavedSheetCellTypes {
+                    sheet_id: sid,
+                    cells: co.payload.clone(),
+                })
+            })
+            .collect();
+        if !cell_type_saved.is_empty() {
+            let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+            crate::cell_types::materialize_saved_cell_types(
+                &cell_type_saved,
+                &mut cell_types,
+                |sid| pkg_to_index.get(&sid).copied(),
+            );
+        }
+        for co in &result.custom_objects {
+            sub_objects.push(sub_object(&co.kind, co.id.clone(), co.name.clone()));
+            // Non-built-in kinds go to the frontend for provider materialization.
+            if co.kind != "cellType" {
+                frontend_custom_objects.push(PulledCustomObjectDto {
+                    kind: co.kind.clone(),
+                    id: co.id.clone(),
+                    name: co.name.clone(),
+                    sheet_index: co
+                        .package_sheet_id
+                        .and_then(|sid| pkg_to_index.get(&sid).copied()),
+                    payload: co.payload.clone(),
+                });
+            }
+        }
+    }
+
     // Materialize pulled pane controls (Controls pane) into PaneControlState —
     // shared with the refresh path (see materialize_pulled_pane_controls for
     // the collision/ordering semantics). Ledger entries come from the APPLIED
@@ -1638,6 +1771,7 @@ pub fn calp_pull(
         scripts_pulled,
         publisher_name,
         trust_status,
+        custom_objects: frontend_custom_objects,
     })
 }
 
@@ -1648,7 +1782,7 @@ pub fn calp_browse_registry(
     window: tauri::Window,
 ) -> Result<Vec<PackageInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let names = registry.list_packages().map_err(|e| e.to_string())?;
@@ -1774,7 +1908,7 @@ pub fn calp_inspect_package(
     window: tauri::Window,
 ) -> Result<PackageInspection, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let pin = VersionPin::parse(&version_pin).map_err(|e| e.to_string())?;
@@ -1783,18 +1917,17 @@ pub fn calp_inspect_package(
         .map_err(|e| e.to_string())?;
     let version = resolved.to_string();
 
-    let manifest = registry
-        .get_version_manifest(&package_name, &version)
-        .map_err(|e| e.to_string())?;
-
-    // S5 phase 2: verify the manifest's Ed25519 signature + TOFU pin BEFORE
-    // surfacing the contents — inspect is a pre-pull trust surface, so an
+    // S5 phase 2: read the manifest bytes ONCE, verify the Ed25519 signature +
+    // TOFU pin over exactly those bytes, and parse the contents from them BEFORE
+    // surfacing anything — inspect is a pre-pull trust surface, so an
     // unsigned/tampered/hijacked package must fail to inspect, not just to pull.
-    let ver_dir = registry.version_dir(&package_name, &version).map_err(|e| e.to_string())?;
-    let trust = calp::integrity::verify_manifest_signature(
-        &ver_dir,
-        &manifest,
+    // Transport-agnostic (reads manifest + .sig via the transport) so an HTTP
+    // registry is verified exactly like a local one — no local dir required, and
+    // no split-view between the signed bytes and the surfaced inventory.
+    let (trust, manifest) = calp::integrity::verify_and_load_manifest_via(
+        registry.as_ref(),
         &package_name,
+        &version,
         &calcula_profile_dir(),
     )
     .map_err(|e| e.to_string())?;
@@ -2584,7 +2717,7 @@ pub fn calp_refresh_preview(
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-        let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+        let registry = crate::calp_registry::open_registry(&registry_path)
             .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
         let group: Vec<_> = indices.iter()
             .map(|&i| subs.subscriptions[i].clone())
@@ -2626,7 +2759,7 @@ pub fn calp_refresh_apply(
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
         let mut all_payloads = Vec::new();
         for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-            let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+            let registry = crate::calp_registry::open_registry(&registry_path)
                 .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
             let group: Vec<_> = indices.iter()
                 .map(|&i| subs.subscriptions[i].clone())
@@ -2850,6 +2983,32 @@ pub fn calp_refresh_apply(
                 }
             }
         }
+    }
+
+    // Cell types (distribution brick 4): refresh analog of the calp_pull
+    // materialization — RESET each refreshed sheet's assignments then apply the
+    // new version's, mirroring CF/DV so publisher add/change/remove all land.
+    {
+        let refreshed_indices: std::collections::HashSet<usize> =
+            cfdv_pkg_to_index.values().copied().collect();
+        let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+        cell_types.retain(|(si, _, _), _| !refreshed_indices.contains(si));
+        let saved: Vec<persistence::SavedSheetCellTypes> = payloads
+            .iter()
+            .flat_map(|p| p.pull_result.custom_objects.iter())
+            .filter(|co| co.kind == "cellType")
+            .filter_map(|co| {
+                co.package_sheet_id.map(|sid| persistence::SavedSheetCellTypes {
+                    sheet_id: sid,
+                    cells: co.payload.clone(),
+                })
+            })
+            .collect();
+        crate::cell_types::materialize_saved_cell_types(
+            &saved,
+            &mut cell_types,
+            |sid| cfdv_pkg_to_index.get(&sid).copied(),
+        );
     }
 
     // Materialize refreshed sheet presentation state (merges, freeze panes,
@@ -3592,6 +3751,7 @@ pub fn calp_dev_subscribe(
         // (not a signed registry package), so there is no publisher to verify.
         publisher_name: String::new(),
         trust_status: "dev".to_string(),
+        custom_objects: Vec::new(),
     })
 }
 
@@ -3777,6 +3937,7 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         // Dev re-pull: local-folder source, no signed publisher to verify.
         publisher_name: String::new(),
         trust_status: "dev".to_string(),
+        custom_objects: Vec::new(),
     })
 }
 
@@ -3899,6 +4060,14 @@ pub fn calp_get_writeback_regions(
                         calp::writeback::ValueType::Enum => "enum",
                     }.to_string());
                     e.required = Some(schema.required);
+                    // Custom validator name rides the schema's forward-compat
+                    // `extra` map (author writes `customValidator`), surfaced so
+                    // the subscriber client can run it as an advisory check.
+                    e.custom_validator = schema
+                        .extra
+                        .get("customValidator")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                 }
                 if let Some(calp::writeback::LifecyclePolicy::UntilDeadline { deadline: Some(dl) }) =
                     &decl.lifecycle
@@ -3933,12 +4102,19 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
             continue;
         }
         let registry_path = subscription_registry_path(sub);
-        let registry = match calp::registry::LocalRegistry::open(std::path::Path::new(registry_path)) {
+        let registry = match crate::calp_registry::open_registry(registry_path) {
             Ok(r) => r,
             Err(_) => continue,
         };
-        if let Ok(ver_manifest) = registry.get_version_manifest(
-            &sub.package_name, &sub.resolved_version,
+        // Trust-bearing read: these region declarations drive GATHER cell
+        // geometry AND schema validation, and rebuild runs on plain workbook
+        // OPEN (no pull() in the path), so an HTTP subscription would otherwise
+        // re-install regions from an unsigned manifest a hostile server fully
+        // controls (moving/expanding selectors to remap which cells GATHER
+        // reads/writes). Verify the Ed25519 signature + TOFU over the single
+        // trusted manifest copy; on failure, skip (never install unsigned decls).
+        if let Ok((_, ver_manifest)) = calp::integrity::verify_and_load_manifest_via(
+            registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
         ) {
             if let Some(ref wb_regions) = ver_manifest.writeback_regions {
                 all_decls.extend(wb_regions.iter().cloned());
@@ -4097,12 +4273,17 @@ fn owning_subscription_for_region(
         }
         let registry_path = subscription_registry_path(sub).to_string();
         let Ok(registry) =
-            calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+            crate::calp_registry::open_registry(&registry_path)
         else {
             continue;
         };
-        let Ok(manifest) =
-            registry.get_version_manifest(&sub.package_name, &sub.resolved_version)
+        // Verify before believing a subscription's claim to own this region —
+        // the authoritative submit re-validates too, but locating the target
+        // registry from an unsigned manifest would let a hostile registry claim
+        // regions it does not legitimately declare.
+        let Ok((_, manifest)) = calp::integrity::verify_and_load_manifest_via(
+            registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
+        )
         else {
             continue;
         };
@@ -4126,7 +4307,7 @@ fn owning_subscription_for_region(
 /// order). Used for lenient carry-forward — a subscriber pinned behind must
 /// not see submissions made against newer versions.
 fn older_package_versions(
-    registry: &calp::registry::LocalRegistry,
+    registry: &dyn calp::RegistryTransport,
     package_name: &str,
     resolved_version: &str,
 ) -> Vec<String> {
@@ -4161,7 +4342,7 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
         return false;
     };
     let Ok(registry) =
-        calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+        crate::calp_registry::open_registry(&registry_path)
     else {
         return false;
     };
@@ -4434,7 +4615,7 @@ fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
             continue;
         };
         let Ok(registry) =
-            calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+            crate::calp_registry::open_registry(&registry_path)
         else {
             continue;
         };
@@ -4549,7 +4730,7 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
     }
 
     // Write to registry BEFORE mutating local state.
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     // RE-VALIDATE on the authoritative submit path (P0). Schema + lifecycle
@@ -4557,14 +4738,18 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
     // scripted client calling calp_submit_region directly, or a tampered .cala
     // seeding the writeback layer, would otherwise land schema/lifecycle-
     // violating values in the shared registry where GATHER aggregates them. The
-    // declaration is resolved from the SIGNED version manifest, not the in-memory
-    // layer. Validation runs over the whole batch BEFORE any write, so a single
-    // bad value rejects the submit atomically (drafts stay for correction).
-    let decl = registry
-        .get_version_manifest(&package_name, &resolved_version)
-        .ok()
-        .and_then(|m| m.writeback_regions)
-        .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
+    // declaration is resolved from the signature-VERIFIED version manifest
+    // (Ed25519 + TOFU over the single trusted copy), not the in-memory layer, so
+    // this trust gate stays sound even if the write side is ever made writable
+    // over an HTTP transport. Validation runs over the whole batch BEFORE any
+    // write, so a single bad value rejects the submit atomically (drafts stay
+    // for correction).
+    let decl = calp::integrity::verify_and_load_manifest_via(
+        &*registry, &package_name, &resolved_version, &calcula_profile_dir(),
+    )
+    .ok()
+    .and_then(|(_, m)| m.writeback_regions)
+    .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
     if let Some(decl) = &decl {
         // COMPLETENESS (P1): a region the publisher marked `required` must have
         // every cell filled before submit — otherwise a contributor can submit a
@@ -4795,7 +4980,7 @@ pub fn calp_export_package_html(
     let path = registry_path
         .strip_prefix("file://")
         .unwrap_or(&registry_path);
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(path))
+    let registry = crate::calp_registry::open_registry(path)
         .map_err(|e| e.to_string())?;
     let export_mode = match mode.as_str() {
         "viewer" => calp::HtmlExportMode::Viewer,
@@ -4812,7 +4997,7 @@ pub fn calp_export_package_html(
 /// profile dir (written by the first publish), a subscriber does not, and a
 /// different publisher's key won't match. Returns a user-facing error otherwise.
 fn require_publisher(
-    registry: &calp::registry::LocalRegistry,
+    registry: &dyn calp::RegistryTransport,
     package_name: &str,
     version: &str,
 ) -> Result<(), String> {
@@ -4863,7 +5048,7 @@ pub fn calp_set_submission_state(
 
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     // AUTHORIZATION (P0): approve/reject is publisher-only. Without this, any
@@ -4986,7 +5171,7 @@ fn load_region_current_submissions(
 ) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let mut versions = vec![resolved_version.clone()];
@@ -5268,7 +5453,7 @@ pub fn calp_export_region_submissions_parquet(
 /// any write to a version's submissions; failures are logged, not surfaced — the
 /// JSON slots remain the source of truth and the next write self-heals the rollup.
 fn materialize_submissions_parquet(
-    registry: &calp::registry::LocalRegistry,
+    registry: &dyn calp::RegistryTransport,
     package: &str,
     version: &str,
 ) {
@@ -5296,7 +5481,7 @@ fn materialize_submissions_parquet(
 /// package-level, default OFF, flippable any time by the publisher. It gates
 /// *whether* the rollup is regenerated, not a security boundary, so the unsigned
 /// package manifest is the right home (no per-version, no signing churn).
-fn rollup_enabled(registry: &calp::registry::LocalRegistry, package: &str) -> bool {
+fn rollup_enabled(registry: &dyn calp::RegistryTransport, package: &str) -> bool {
     registry
         .get_package_manifest(package)
         .ok()
@@ -5313,7 +5498,7 @@ pub fn calp_get_writeback_rollup(
 ) -> Result<bool, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, _v, registry_path) = owning_subscription_for_region(&state, &region_id)?;
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
     Ok(rollup_enabled(&registry, &package_name))
 }
@@ -5331,7 +5516,7 @@ pub fn calp_set_writeback_rollup(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
     require_publisher(&registry, &package_name, &resolved_version)?;
 
@@ -5381,7 +5566,7 @@ pub fn calp_region_response_status(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let registry = calp::registry::LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let expected: Vec<String> = registry
@@ -5606,14 +5791,20 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
             .strip_prefix("file://")
             .unwrap_or(&sub.registry_url);
 
-        let registry = match calp::registry::LocalRegistry::open(std::path::Path::new(registry_path)) {
+        let registry = match crate::calp_registry::open_registry(registry_path) {
             Ok(r) => r,
             Err(_) => continue,
         };
 
-        // Load the version manifest to get writeback regions
-        let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
-            Ok(m) => m,
+        // Load the version manifest to get writeback regions. GATHER
+        // materializes the surviving submissions into workbook cells, and the
+        // region declaration governs on_approval filtering, own_only/anonymize
+        // visibility, and schema + deadline integrity — so it MUST come from the
+        // signature-verified manifest, never a raw (split-viewable) HTTP GET.
+        let ver_manifest = match calp::integrity::verify_and_load_manifest_via(
+            registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
+        ) {
+            Ok((_, m)) => m,
             Err(_) => continue,
         };
 
@@ -5642,9 +5833,13 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
             older_package_versions(&registry, &sub.package_name, &sub.resolved_version)
                 .iter()
                 .filter_map(|version| {
-                    let manifest = registry
-                        .get_version_manifest(&sub.package_name, version)
-                        .ok()?;
+                    // Older versions' region schemas gate lenient carry-forward;
+                    // verify them exactly as the current version.
+                    let manifest = calp::integrity::verify_and_load_manifest_via(
+                        registry.as_ref(), &sub.package_name, version, &calcula_profile_dir(),
+                    )
+                    .map(|(_, m)| m)
+                    .ok()?;
                     let mut by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                         std::collections::HashMap::new();
                     for s in registry.load_all_submissions(&sub.package_name, version).ok()? {
@@ -6300,7 +6495,7 @@ pub fn calp_next_version(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = LocalRegistry::open(std::path::Path::new(&registry_path))
+    let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let manifest = registry.get_package_manifest(&package_name)
@@ -6931,7 +7126,7 @@ pub async fn calp_refresh_data(
                 .strip_prefix("file://")
                 .unwrap_or(&sub.registry_url);
 
-            let registry = match calp::LocalRegistry::open(std::path::Path::new(registry_path)) {
+            let registry = match crate::calp_registry::open_registry(registry_path) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -6942,10 +7137,36 @@ pub async fn calp_refresh_data(
             };
 
             for ds in &ver_manifest.data_sources {
-                let ver_dir = std::path::Path::new(registry_path)
-                    .join(&sub.package_name)
-                    .join(&sub.resolved_version);
-                let model_path = ver_dir.join(&ds.model_path);
+                // Resolve the model artifact THROUGH the transport, never by hand.
+                // publish dedups artifacts into a content-addressed blob store and
+                // deletes the per-version copy, so `ver_dir/models/{id}/model.json`
+                // no longer exists after any publish — local_artifact_path does the
+                // dir-first / blob-fallback resolution that keeps the lazy read
+                // working. It also returns None for non-local transports (HTTP),
+                // which we skip cleanly instead of reading a bogus "https:/…" path.
+                let model_path = match registry.local_artifact_path(
+                    &sub.package_name,
+                    &sub.resolved_version,
+                    &ds.model_path,
+                ) {
+                    Ok(Some(p)) => p,
+                    Ok(None) => {
+                        crate::log_warn!(
+                            "CALP",
+                            "Data source '{}' model refresh is unsupported for this registry transport (no local artifact); skipping",
+                            ds.id
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        crate::log_warn!(
+                            "CALP",
+                            "Failed to resolve model path for {}: {}",
+                            ds.id, e
+                        );
+                        continue;
+                    }
+                };
 
                 let saved_conn = sub.data_source_configs.iter()
                     .find(|c| c.data_source_id == ds.id)
@@ -7097,7 +7318,7 @@ pub fn calp_save_data_source_config(
             .strip_prefix("file://")
             .unwrap_or(&sub.registry_url);
 
-        let registry = match calp::LocalRegistry::open(std::path::Path::new(registry_path)) {
+        let registry = match crate::calp_registry::open_registry(registry_path) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -7148,7 +7369,7 @@ pub fn calp_get_data_sources(
             .strip_prefix("file://")
             .unwrap_or(&sub.registry_url);
 
-        let registry = match calp::LocalRegistry::open(std::path::Path::new(registry_path)) {
+        let registry = match crate::calp_registry::open_registry(registry_path) {
             Ok(r) => r,
             Err(_) => continue,
         };

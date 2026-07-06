@@ -187,3 +187,127 @@ pub trait RegistryTransport {
     /// transport returns its `RegistryLock`.
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError>;
 }
+
+/// A boxed transport is itself a transport: forward every call to the inner
+/// `dyn RegistryTransport`. This lets a factory return `Box<dyn RegistryTransport>`
+/// (routing local vs HTTP at runtime) and callers keep passing `&registry` where
+/// `&dyn RegistryTransport` is expected — `&Box<dyn T>` coerces to `&dyn T` only
+/// once `Box<dyn T>: T` holds. (Defaulted trait methods are forwarded explicitly
+/// too, so a concrete transport's overrides — e.g. LocalRegistry's blob dedup —
+/// are preserved through the box.)
+impl RegistryTransport for Box<dyn RegistryTransport> {
+    fn list_packages(&self) -> Result<Vec<String>, CalpError> {
+        (**self).list_packages()
+    }
+    fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
+        (**self).get_package_manifest(package_name)
+    }
+    fn write_package_manifest(&self, manifest: &PackageManifest) -> Result<(), CalpError> {
+        (**self).write_package_manifest(manifest)
+    }
+    fn get_version_manifest(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<VersionManifest, CalpError> {
+        (**self).get_version_manifest(package_name, version)
+    }
+    fn write_version_manifest(
+        &self,
+        package_name: &str,
+        version: &str,
+        manifest: &VersionManifest,
+    ) -> Result<(), CalpError> {
+        (**self).write_version_manifest(package_name, version, manifest)
+    }
+    fn version_exists(&self, package_name: &str, version: &str) -> bool {
+        (**self).version_exists(package_name, version)
+    }
+    fn resolve_version(
+        &self,
+        package_name: &str,
+        pin: &VersionPin,
+    ) -> Result<SemVer, CalpError> {
+        (**self).resolve_version(package_name, pin)
+    }
+    fn list_versions(&self, package_name: &str) -> Result<Vec<SemVer>, CalpError> {
+        (**self).list_versions(package_name)
+    }
+    fn write_artifact(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), CalpError> {
+        (**self).write_artifact(package_name, version, rel_path, bytes)
+    }
+    fn read_artifact(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        (**self).read_artifact(package_name, version, rel_path)
+    }
+    fn list_artifacts(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<String>, CalpError> {
+        (**self).list_artifacts(package_name, version)
+    }
+    fn clear_version(&self, package_name: &str, version: &str) -> Result<(), CalpError> {
+        (**self).clear_version(package_name, version)
+    }
+    fn commit_artifacts_as_blobs(
+        &self,
+        package_name: &str,
+        version: &str,
+        checksums: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), CalpError> {
+        (**self).commit_artifacts_as_blobs(package_name, version, checksums)
+    }
+    fn local_artifact_path(
+        &self,
+        package_name: &str,
+        version: &str,
+        rel_path: &str,
+    ) -> Result<Option<std::path::PathBuf>, CalpError> {
+        (**self).local_artifact_path(package_name, version, rel_path)
+    }
+    fn save_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        (**self).save_submission(package_name, version, submission)
+    }
+    fn load_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+        submitter_id: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        (**self).load_submissions(package_name, version, submitter_id)
+    }
+    fn load_region_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+        region_id: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        (**self).load_region_submissions(package_name, version, region_id)
+    }
+    fn load_all_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        (**self).load_all_submissions(package_name, version)
+    }
+    fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
+        (**self).lock()
+    }
+}

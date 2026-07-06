@@ -3,6 +3,12 @@
 // CONTEXT: Extensions import from here — never directly from @tauri-apps/api.
 
 import { invokeBackend } from "./backend";
+import {
+  collectDistributableObjects,
+  materializePulledObjects,
+  type DistributableObjectPayload,
+  type PulledDistributableObject,
+} from "./distributableObjects";
 
 // ============================================================================
 // Types
@@ -15,6 +21,9 @@ export interface PublishParams {
   kind: string;
   sheetIndices: number[];
   publishedBy: string;
+  /** Custom objects contributed by distributable-object providers (brick 4).
+   *  publishPackage fills this automatically from registered providers. */
+  customObjects?: DistributableObjectPayload[];
 }
 
 export interface PublishResponse {
@@ -76,6 +85,9 @@ export interface PullResponse {
   publisherName: string;
   /** "firstUse" (publisher key newly pinned) or "verified" (matched a pin). */
   trustStatus: string;
+  /** Custom objects of kinds NOT handled Rust-side (brick 4), for frontend
+   *  provider materialization. pullPackage dispatches these automatically. */
+  customObjects?: PulledDistributableObject[];
 }
 
 /** Contents of a package version, for pre-pull review. */
@@ -257,8 +269,12 @@ export interface StructuralConflict {
 // Backend Wrappers
 // ============================================================================
 
-export function publishPackage(params: PublishParams): Promise<PublishResponse> {
-  return invokeBackend("calp_publish", { params });
+export async function publishPackage(params: PublishParams): Promise<PublishResponse> {
+  // Fill custom objects from registered distributable-object providers (brick 4)
+  // unless the caller already supplied them. Built-in cell types are collected
+  // Rust-side and merged there — these are the third-party providers' objects.
+  const customObjects = params.customObjects ?? (await collectDistributableObjects());
+  return invokeBackend("calp_publish", { params: { ...params, customObjects } });
 }
 
 /**
@@ -322,8 +338,14 @@ export function getPackageObjects(packageName: string): Promise<PackageObjectsRe
   return invokeBackend("calp_get_package_objects", { packageName });
 }
 
-export function pullPackage(params: PullParams): Promise<PullResponse> {
-  return invokeBackend("calp_pull", { params });
+export async function pullPackage(params: PullParams): Promise<PullResponse> {
+  const response = await invokeBackend<PullResponse>("calp_pull", { params });
+  // Dispatch custom objects of non-built-in kinds to their frontend providers
+  // (brick 4). Built-in kinds (cell types) were already materialized Rust-side.
+  if (response.customObjects && response.customObjects.length > 0) {
+    await materializePulledObjects(response.customObjects);
+  }
+  return response;
 }
 
 export function browseRegistry(registryPath: string): Promise<PackageInfo[]> {
@@ -505,6 +527,10 @@ export interface WritebackRegionEntry {
   required?: boolean;
   /** Submission deadline (ISO 8601) for an until_deadline region. */
   deadline?: string;
+  /** Name of a publisher-declared custom validator (advisory, subscriber-side;
+   *  distribution brick 3). Run against typed input as an as-you-type check on
+   *  top of the authoritative built-in schema. */
+  customValidator?: string;
 }
 
 /** Fetch the current writeback regions from the backend. */
@@ -558,6 +584,10 @@ export interface ValueSchemaConfig {
   enumValues?: string[];
   maxLength?: number;
   pattern?: string;
+  /** Name of a custom validator (distribution brick 3). Rides the schema's
+   *  forward-compatible `extra` map on the Rust side — advisory, subscriber-side
+   *  UX check layered on the authoritative built-in constraints. */
+  customValidator?: string;
 }
 
 export interface LifecyclePolicyConfig {

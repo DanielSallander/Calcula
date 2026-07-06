@@ -121,6 +121,7 @@ fn publish_version(
         notebooks: None,
         data_sources: Vec::new(),
         excluded_regions: Vec::new(),
+        custom_objects: Vec::new(),
     };
     publish::publish(reg, &request, prof).unwrap();
 }

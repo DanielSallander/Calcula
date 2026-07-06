@@ -391,17 +391,41 @@ fn verify_manifest_signature_bytes(
     }
 }
 
-/// Transport-agnostic counterpart to `verify_manifest_signature`: read the raw
-/// `version-manifest.json` bytes and the detached `version-manifest.sig` via the
-/// transport, then run the same crypto + TOFU gate. An absent signature (or an
-/// empty asserted `publisher_key`) means the package is unsigned -> hard error.
-pub fn verify_manifest_signature_via(
+/// Transport-agnostic origin gate: read the raw `version-manifest.json` bytes
+/// ONCE via the transport, verify the detached `version-manifest.sig` Ed25519
+/// signature over *exactly those bytes*, apply TOFU pinning, and return the
+/// manifest parsed from the verified bytes together with its trust status.
+///
+/// This is the ONLY sound way to obtain a trusted manifest over an untrusted
+/// transport. A previous design fetched the manifest once for parsing and
+/// *re-fetched* it for signature verification; over HTTP those are two
+/// independent reads and a hostile server can return a genuinely-signed
+/// manifest for the crypto check and a *different* body for the payload (a
+/// "split-view" that lets an attacker rewrite `artifact_checksums`,
+/// `min_app_version`, or the object inventory under a valid publisher badge).
+/// Here the bytes that are cryptographically checked ARE the bytes every
+/// downstream gate trusts, so no such divergence is possible.
+///
+/// An absent signature (or an empty asserted `publisher_key`) means the package
+/// is unsigned -> hard error (no backward compat).
+pub fn verify_and_load_manifest_via(
     t: &dyn RegistryTransport,
     package: &str,
     version: &str,
-    manifest: &VersionManifest,
     profile_dir: &Path,
-) -> Result<TrustStatus, CalpError> {
+) -> Result<(TrustStatus, VersionManifest), CalpError> {
+    // The single trusted copy of the manifest bytes. Everything downstream
+    // (publisher_key, checksums, min_app_version, inventory) is parsed from
+    // exactly these bytes AND is what the signature is checked against.
+    let manifest_bytes = t
+        .read_artifact(package, version, VERSION_MANIFEST_FILE)?
+        .ok_or_else(|| {
+            CalpError::Registry(format!(
+                "version-manifest.json not found for {package}@{version}"
+            ))
+        })?;
+    let manifest: VersionManifest = serde_json::from_slice(&manifest_bytes)?;
+
     // (1) Unsigned packages are rejected outright (no backward compat).
     let sig_bytes = t.read_artifact(package, version, VERSION_MANIFEST_SIG_FILE)?;
     let sig_bytes = match (manifest.publisher_key.is_empty(), sig_bytes) {
@@ -414,23 +438,16 @@ pub fn verify_manifest_signature_via(
         }
     };
 
-    // Read the RAW manifest bytes via the transport — never a re-serialization
-    // of the parsed manifest (re-serializing may not be byte-identical).
-    let manifest_bytes = t
-        .read_artifact(package, version, VERSION_MANIFEST_FILE)?
-        .ok_or_else(|| CalpError::MissingSignature {
-            package: package.to_string(),
-            version: version.to_string(),
-        })?;
-
+    // (2)+(3) Crypto + TOFU over the SAME bytes we parsed `manifest` from.
     let sig_hex = String::from_utf8_lossy(&sig_bytes);
-    verify_manifest_signature_bytes(
+    let trust = verify_manifest_signature_bytes(
         &manifest_bytes,
         sig_hex.trim(),
-        manifest,
+        &manifest,
         package,
         profile_dir,
-    )
+    )?;
+    Ok((trust, manifest))
 }
 
 // ---------------------------------------------------------------------------

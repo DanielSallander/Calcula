@@ -17,7 +17,7 @@ use crate::error::CalpError;
 use crate::manifest::Subscription;
 use crate::overrides::{OverrideLayer, OverrideValue};
 use crate::pull::{self, PullRequest, PullResult};
-use crate::registry::LocalRegistry;
+use crate::transport::RegistryTransport;
 use crate::version::VersionPin;
 
 // ============================================================================
@@ -114,7 +114,7 @@ pub struct RefreshResult {
 
 /// Compute a refresh preview for all subscriptions without applying changes.
 pub fn compute_preview(
-    registry: &LocalRegistry,
+    registry: &dyn RegistryTransport,
     subscriptions: &[Subscription],
     override_layer: &OverrideLayer,
 ) -> Result<RefreshPreview, CalpError> {
@@ -235,7 +235,7 @@ pub struct RefreshPayload {
 /// Returns payloads ready for atomic application, or an error if any pull fails
 /// (in which case nothing should be applied — all-or-nothing).
 pub fn pull_all_updates(
-    registry: &LocalRegistry,
+    registry: &dyn RegistryTransport,
     subscriptions: &[Subscription],
     profile_dir: &Path,
 ) -> Result<Vec<RefreshPayload>, CalpError> {
@@ -380,6 +380,7 @@ mod tests {
     use super::*;
     use persistence::SavedCell;
     use crate::manifest::SubscribedSheet;
+    use crate::registry::LocalRegistry;
     use tempfile::TempDir;
     use crate::publish::{self, PublishRequest};
     use crate::version::SemVer;
@@ -413,6 +414,7 @@ mod tests {
                 notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
             };
             publish::publish(&reg, &request, prof).unwrap();
         }
@@ -589,6 +591,7 @@ mod tests {
                 notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
             };
             publish::publish(&reg, &request, prof.path()).unwrap();
         }

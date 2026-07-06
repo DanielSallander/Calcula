@@ -7,6 +7,7 @@ import React, { useState } from "react";
 import type { DialogProps } from "@api";
 import { publishPackage, publishPreview } from "@api";
 import type { PublishReport } from "@api";
+import { listPackageKinds } from "@api/packageKinds";
 import { PublishReportView } from "./PackageExplorerPanel";
 
 export function PublishDialog({ onClose }: DialogProps) {
@@ -96,9 +97,11 @@ export function PublishDialog({ onClose }: DialogProps) {
       <div style={fieldStyle}>
         <label>Kind</label>
         <select style={inputStyle} value={kind} onChange={(e) => setKind(e.target.value)}>
-          <option value="report">Report</option>
-          <option value="template">Template</option>
-          <option value="dataset">Dataset</option>
+          {listPackageKinds().map((k) => (
+            <option key={k.id} value={k.id} title={k.description}>
+              {k.label}
+            </option>
+          ))}
         </select>
       </div>
       <div style={fieldStyle}>

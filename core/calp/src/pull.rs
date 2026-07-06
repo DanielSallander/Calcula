@@ -75,12 +75,30 @@ pub struct PullResult {
     /// button scripts travel separately as consent-gated object_scripts.
     /// Empty for packages published before pane controls were carried.
     pub pane_controls: Vec<SavedPaneControl>,
+    /// Generic custom objects carried by the package (distribution brick 4).
+    /// Each carries its `kind`, id, name, the PACKAGE `sheet_id` (un-remapped;
+    /// the Tauri layer maps it to a local sheet), and the opaque JSON payload.
+    /// Built-in kinds (cellType) are materialized Rust-side on pull; unknown
+    /// kinds are surfaced to frontend distributable-object providers.
+    pub custom_objects: Vec<PulledCustomObject>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
     pub trust_status: TrustStatus,
     /// The publisher's display name asserted in the (now verified) manifest.
     pub publisher_name: String,
+}
+
+/// A generic custom object pulled from a package (distribution brick 4).
+pub struct PulledCustomObject {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    /// The PACKAGE sheet id (un-remapped) for per-sheet objects; None =
+    /// workbook-scoped.
+    pub package_sheet_id: Option<SheetId>,
+    /// Opaque app-owned JSON payload (already integrity-verified).
+    pub payload: serde_json::Value,
 }
 
 /// A data source pulled from a package, ready for connection resolution.
@@ -113,18 +131,20 @@ pub fn pull(
     let version_str = resolved.to_string();
     let pkg = request.package_name.as_str();
     let ver = version_str.as_str();
-    let ver_manifest = registry.get_version_manifest(pkg, ver)?;
 
-    // ORIGIN GATE (S5 phase 2): verify the manifest's Ed25519 signature and
-    // apply TOFU publisher pinning BEFORE the integrity gate below. The
-    // checksum map lives inside the manifest, so the manifest must be proven a
-    // trusted root before its checksums are believed. A tampered manifest,
-    // a wrong/changed publisher key, or an unsigned package all fail here.
-    let trust_status = crate::integrity::verify_manifest_signature_via(
+    // ORIGIN GATE (S5 phase 2): read the manifest bytes ONCE, verify the
+    // manifest's Ed25519 signature over exactly those bytes, apply TOFU
+    // publisher pinning, and parse the verified bytes into `ver_manifest`.
+    // Everything downstream — the checksum map, min_app_version, and the object
+    // inventory that drives materialization — is then sourced from the single
+    // cryptographically-verified copy, so a hostile transport cannot present a
+    // signed manifest for the crypto check and a different one for the payload.
+    // A tampered manifest, a wrong/changed publisher key, or an unsigned
+    // package all fail here.
+    let (trust_status, ver_manifest) = crate::integrity::verify_and_load_manifest_via(
         registry,
         pkg,
         ver,
-        &ver_manifest,
         profile_dir,
     )?;
 
@@ -486,6 +506,25 @@ pub fn pull(
         })
         .collect::<Result<Vec<_>, CalpError>>()?;
 
+    // Generic custom objects (brick 4): read each declared payload via the
+    // transport. The artifacts were integrity-verified above (their SHA-256s
+    // are in the signed manifest), so a tampered payload has already failed the
+    // pull. A payload that fails to parse as JSON is skipped (defensive).
+    let mut pulled_custom_objects: Vec<PulledCustomObject> = Vec::new();
+    for co in &ver_manifest.custom_objects {
+        if let Some(bytes) = registry.read_artifact(pkg, ver, &co.payload_path)? {
+            if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                pulled_custom_objects.push(PulledCustomObject {
+                    kind: co.kind.clone(),
+                    id: co.id.clone(),
+                    name: co.name.clone(),
+                    package_sheet_id: co.sheet_id,
+                    payload,
+                });
+            }
+        }
+    }
+
     Ok(PullResult {
         package_name: request.package_name.clone(),
         resolved_version: resolved,
@@ -505,6 +544,7 @@ pub fn pull(
         data_validations: pulled_data_validations,
         controls: pulled_controls,
         pane_controls: pulled_pane_controls,
+        custom_objects: pulled_custom_objects,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -552,6 +592,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(reg, &request, prof).unwrap();
         wb
@@ -587,6 +628,66 @@ mod tests {
     }
 
     #[test]
+    fn custom_objects_round_trip_through_publish_and_pull() {
+        // Distribution brick 4: a generic custom object (opaque JSON payload,
+        // per-sheet) survives publish -> pull with its kind/id/name/payload and
+        // its package sheet id intact (so the app layer can remap it).
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let wb = make_test_workbook();
+        let sheet0_id = wb.sheets[0].id;
+        let request = PublishRequest {
+            workbook: &wb,
+            package_name: "co-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-05-18T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: vec![crate::publish::PublishCustomObject {
+                kind: "cellType".to_string(),
+                id: "cellType-sheet0".to_string(),
+                name: "Cell Types".to_string(),
+                sheet_id: Some(sheet0_id),
+                payload: serde_json::json!([
+                    { "row": 1, "col": 0, "typeId": "calcula.checkbox", "params": {} }
+                ]),
+            }],
+        };
+        publish::publish(&reg, &request, prof.path()).unwrap();
+
+        let pull_req = PullRequest {
+            package_name: "co-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.custom_objects.len(), 1);
+        let co = &result.custom_objects[0];
+        assert_eq!(co.kind, "cellType");
+        assert_eq!(co.id, "cellType-sheet0");
+        assert_eq!(co.name, "Cell Types");
+        assert_eq!(co.package_sheet_id, Some(sheet0_id));
+        // Opaque payload round-trips byte-for-byte through the signed artifact.
+        assert_eq!(
+            co.payload,
+            serde_json::json!([
+                { "row": 1, "col": 0, "typeId": "calcula.checkbox", "params": {} }
+            ])
+        );
+    }
+
+    #[test]
     fn pull_restores_per_cell_style_indices() {
         // A cell carrying a non-default style index. data.json serializes
         // style_index 0, so the cell->style association must survive
@@ -616,6 +717,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -675,6 +777,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
         assert_eq!(pub_result.control_sheets_published, 1);
@@ -753,6 +856,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
         assert_eq!(pub_result.pane_controls_published, 2);
@@ -830,6 +934,7 @@ mod tests {
                 notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
             };
             publish::publish(&reg, &publish_req, prof.path()).unwrap();
         }
@@ -906,6 +1011,7 @@ mod tests {
                 bindings: Vec::new(),
             }],
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
         assert_eq!(pub_result.sheets_published, 0);
@@ -974,6 +1080,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -1030,6 +1137,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -1087,6 +1195,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -1155,6 +1264,7 @@ mod tests {
                 notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
             };
             publish::publish(&reg, &request, prof.path()).unwrap();
         }
@@ -1432,6 +1542,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 
@@ -1518,6 +1629,7 @@ mod tests {
             notebooks: None,      // None => all from the workbook
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         let pub_result = publish::publish(&reg, &request, prof.path()).unwrap();
         assert_eq!(pub_result.modules_published, 1);
@@ -1634,6 +1746,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 

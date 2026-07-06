@@ -479,6 +479,7 @@ impl WritebackIndex {
                     value_type: None,
                     required: None,
                     deadline: None,
+                    custom_validator: None,
                 });
             }
         }
@@ -521,6 +522,14 @@ pub struct WritebackRegionEntry {
     /// so the subscriber UI can show a countdown / overdue state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+    /// The name of a publisher-declared custom validator (distribution brick 3),
+    /// surfaced so the subscriber's client can run it as an ADVISORY as-you-type
+    /// check. Hard enforcement stays with the built-in `ValueSchema` gate on the
+    /// authoritative Rust submit path; a custom validator only adds a
+    /// frontend-side UX check on top (a client without the named validator
+    /// registered simply skips it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_validator: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

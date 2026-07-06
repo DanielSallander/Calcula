@@ -1,10 +1,16 @@
 // FILENAME: app/extensions/Distribution/components/SubscribeDialog.tsx
 // PURPOSE: Dialog for subscribing to (pulling) a .calp package.
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
 import { pullPackage, emitAppEvent, AppEvents } from "@api";
 import { inspectPackage, browseRegistry, type PackageInspection, type PackageInfo } from "@api/distribution";
+import {
+  listRegistries,
+  addRegistry,
+  isHttpRegistry,
+  type SavedRegistry,
+} from "@api/distributionRegistries";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-api";
 import { pivot } from "@api/pivot";
@@ -32,6 +38,25 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   // The packages found in the chosen registry (D6 — no more blind text entry).
   const [packages, setPackages] = useState<PackageInfo[] | null>(null);
   const [browsing, setBrowsing] = useState(false);
+
+  // Saved-registry catalog (distribution brick 1): pick a known local OR http
+  // registry instead of typing a path/URL blind.
+  const [saved, setSaved] = useState<SavedRegistry[]>([]);
+  useEffect(() => {
+    listRegistries().then(setSaved).catch(() => setSaved([]));
+  }, []);
+
+  const handleSaveRegistry = async () => {
+    const location = registryPath.trim();
+    if (!location) return;
+    const name = window.prompt("Name this registry", location) ?? location;
+    try {
+      const id = crypto.randomUUID();
+      setSaved(await addRegistry({ id, name, location }));
+    } catch {
+      // ignore persistence failures — the path still works ad-hoc
+    }
+  };
 
   const handleBrowse = async () => {
     try {
@@ -298,15 +323,36 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       <h3 style={{ margin: "0 0 12px 0" }}>Subscribe to Package</h3>
 
       <div style={fieldStyle}>
-        <label>Registry Path</label>
+        <label>Registry</label>
+        {saved.length > 0 && (
+          <select
+            style={{ ...inputStyle, marginBottom: 4 }}
+            value=""
+            onChange={(e) => {
+              if (e.target.value) { setRegistryPath(e.target.value); setPackages(null); }
+            }}
+          >
+            <option value="">Saved registries…</option>
+            {saved.map((r) => (
+              <option key={r.id} value={r.location}>
+                {r.name}{isHttpRegistry(r.location) ? "  (web)" : ""}
+              </option>
+            ))}
+          </select>
+        )}
         <div style={{ display: "flex", gap: "4px" }}>
           <input style={{ ...inputStyle, flex: 1 }} value={registryPath} onChange={(e) => { setRegistryPath(e.target.value); setPackages(null); }}
-            placeholder="C:\shared\registry" />
+            placeholder="C:\shared\registry  or  https://host/registry" />
           <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>Browse...</button>
           <button onClick={handleListPackages} disabled={browsing} style={{ whiteSpace: "nowrap" }}>
             {browsing ? "..." : "List Packages"}
           </button>
         </div>
+        {registryPath.trim() && (
+          <button onClick={handleSaveRegistry} style={{ marginTop: 4, fontSize: 12, alignSelf: "flex-start" }}>
+            ★ Save this registry
+          </button>
+        )}
       </div>
 
       {packages && packages.length > 0 && (

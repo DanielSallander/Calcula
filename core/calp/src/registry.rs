@@ -929,6 +929,7 @@ mod tests {
             module_scripts: Vec::new(),
             notebooks: Vec::new(),
             data_sources: Vec::new(),
+            custom_objects: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1006,6 +1007,7 @@ mod tests {
             module_scripts: Vec::new(),
             notebooks: Vec::new(),
             data_sources: Vec::new(),
+            custom_objects: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1065,6 +1067,7 @@ mod tests {
             module_scripts: Vec::new(),
             notebooks: Vec::new(),
             data_sources: Vec::new(),
+            custom_objects: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };
@@ -1110,6 +1113,7 @@ mod tests {
             module_scripts: Vec::new(),
             notebooks: Vec::new(),
             data_sources: Vec::new(),
+            custom_objects: Vec::new(),
             artifact_checksums: std::collections::BTreeMap::new(),
             extra: std::collections::HashMap::new(),
         };

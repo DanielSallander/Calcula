@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use identity::EntityId;
+use identity::{EntityId, SheetId};
 use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, Workbook};
 
 use crate::error::CalpError;
@@ -65,6 +65,25 @@ pub struct PublishRequest<'a> {
     /// Cell regions to exclude from published sheet data (e.g., pivot output).
     /// These regions are recalculated by subscribers from the source definition.
     pub excluded_regions: Vec<ExcludedRegion>,
+    /// Generic custom objects to carry in the package (distribution brick 4) —
+    /// the open channel for object families beyond the built-in set. Each is
+    /// written as an opaque-JSON artifact under `custom_objects/{kind}/{id}.json`
+    /// and listed in the manifest. Built-in producers (cell types) and
+    /// third-party providers both feed this.
+    pub custom_objects: Vec<PublishCustomObject>,
+}
+
+/// A custom object to publish (distribution brick 4). `payload` is opaque
+/// app-owned JSON the publisher's producer supplies; the .calp layer only
+/// stores + checksums it and records the manifest entry.
+pub struct PublishCustomObject {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    /// For per-sheet objects: the package sheet id (remapped on pull). None =
+    /// workbook-scoped.
+    pub sheet_id: Option<SheetId>,
+    pub payload: serde_json::Value,
 }
 
 /// Result of a publish operation.
@@ -311,6 +330,22 @@ pub fn publish(
         }
     }).collect();
 
+    // Generic custom objects (brick 4): index-based artifact paths avoid any
+    // path-injection from extension-supplied kind/id while keeping ids unique.
+    let published_custom_objects: Vec<PublishedCustomObject> = request
+        .custom_objects
+        .iter()
+        .enumerate()
+        .map(|(i, co)| PublishedCustomObject {
+            kind: co.kind.clone(),
+            id: co.id.clone(),
+            name: co.name.clone(),
+            sheet_id: co.sheet_id,
+            payload_path: format!("custom_objects/{i}.json"),
+            extra: std::collections::HashMap::new(),
+        })
+        .collect();
+
     let mut version_manifest = VersionManifest {
         format_version: 1,
         package_name: request.package_name.clone(),
@@ -344,6 +379,7 @@ pub fn publish(
             bindings: ds.bindings.clone(),
             extra: std::collections::HashMap::new(),
         }).collect(),
+        custom_objects: published_custom_objects,
         // Filled in below, after all artifacts are on disk in final form.
         artifact_checksums: std::collections::BTreeMap::new(),
         extra: std::collections::HashMap::new(),
@@ -357,6 +393,17 @@ pub fn publish(
     let pkg = request.package_name.as_str();
     let ver = version_str.as_str();
     registry.clear_version(pkg, ver)?;
+
+    // Write generic custom-object payloads (brick 4). Opaque JSON; the .calp
+    // layer stores + checksums but never interprets them.
+    for (i, co) in request.custom_objects.iter().enumerate() {
+        registry.write_artifact(
+            pkg,
+            ver,
+            &format!("custom_objects/{i}.json"),
+            serde_json::to_string_pretty(&co.payload)?.as_bytes(),
+        )?;
+    }
 
     // Write sheet data (cells, styles, layout as JSON)
     for &idx in &request.sheet_indices {
@@ -844,6 +891,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         let result = publish(&reg, &request, prof.path()).unwrap();
 
@@ -896,6 +944,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         let result = publish(&reg, &request, prof.path()).unwrap();
         assert!(result.warnings.is_empty(), "warnings: {:?}", result.warnings);
@@ -959,6 +1008,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
 
         let result = publish(&reg, &request, prof.path()).unwrap();
@@ -1026,6 +1076,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
 
         let result = publish(&reg, &request, prof.path()).unwrap();
@@ -1057,6 +1108,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
         publish(&reg, &request, prof.path()).unwrap();
 
@@ -1125,6 +1177,7 @@ mod tests {
                 notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
         }
@@ -1183,6 +1236,7 @@ mod tests {
             notebooks: None,
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
         };
 
         publish(&reg, &request, prof.path()).unwrap();
@@ -1212,6 +1266,7 @@ mod tests {
                 notebooks: None,
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
         }

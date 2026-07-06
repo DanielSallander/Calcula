@@ -140,6 +140,16 @@ pub struct VersionManifest {
     /// database through pivots (and CUBE formulas, planned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data_sources: Vec<PackageDataSource>,
+    /// Generic custom objects (distribution brick 4): the OPEN channel for
+    /// object families beyond the built-in set. Each entry names a `kind`
+    /// (registered by an extension, or a built-in like "cellType"), a stable
+    /// id, and a version-relative `payload_path` whose artifact is opaque
+    /// app-owned JSON. Optional + forward-compatible: an older reader that does
+    /// not know a kind ignores it; the payload is still integrity-checked like
+    /// every other artifact. This is how a third party's own object definitions
+    /// (e.g. a custom pivot's config) travel in a package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_objects: Vec<PublishedCustomObject>,
     /// SHA-256 checksums (lowercase hex) of every artifact in the version
     /// directory, keyed by version-dir-relative path with forward slashes
     /// (e.g. "sheets/{sheet_id}/data.json"). The version manifest itself is
@@ -154,6 +164,29 @@ pub struct VersionManifest {
     /// to make this root tamper-proof — see integrity.rs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifact_checksums: BTreeMap<String, String>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// A generic custom object bundled with a .calp package (distribution brick 4).
+/// The manifest entry; the payload lives at `payload_path` as opaque JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedCustomObject {
+    /// The object kind (extension-registered, or a built-in like "cellType").
+    pub kind: String,
+    /// Stable object id (idempotent across versions).
+    pub id: String,
+    /// Human-readable name (shown in the package explorer / subscriber ledger).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// For per-sheet objects: the PACKAGE sheet id (remapped to a local sheet on
+    /// pull, like controls/CF/DV). None for workbook-scoped objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_id: Option<SheetId>,
+    /// Version-relative artifact path (forward slashes), e.g.
+    /// "custom_objects/cellType/{id}.json".
+    pub payload_path: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }

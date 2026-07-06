@@ -180,6 +180,7 @@ pub fn skin_publish(
         module_scripts: Vec::new(),
         notebooks: Vec::new(),
         data_sources: Vec::new(),
+        custom_objects: Vec::new(),
         artifact_checksums: BTreeMap::new(),
         extra: std::collections::HashMap::new(),
     };
@@ -235,11 +236,11 @@ pub fn skin_pull(
 ) -> Result<PulledSkin, CalpError> {
     let version = registry.resolve_version(package_name, pin)?;
     let version_str = version.to_string();
-    let manifest = registry.get_version_manifest(package_name, &version_str)?;
 
-    // (1) signature + TOFU, then (2) integrity — both before reading the payload.
-    let trust =
-        integrity::verify_manifest_signature_via(registry, package_name, &version_str, &manifest, profile_dir)?;
+    // (1) signature + TOFU (over the single trusted manifest copy), then
+    // (2) integrity — both before reading the payload.
+    let (trust, manifest) =
+        integrity::verify_and_load_manifest_via(registry, package_name, &version_str, profile_dir)?;
     integrity::verify_version_artifacts_via(registry, package_name, &version_str, &manifest)?;
 
     let bytes = registry
