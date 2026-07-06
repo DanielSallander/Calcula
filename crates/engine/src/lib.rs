@@ -106,6 +106,8 @@ mod security_tests;
 #[cfg(test)]
 mod context_column_tests;
 #[cfg(test)]
+mod nested_ctx_probe_tmp;
+#[cfg(test)]
 mod test_fixtures;
 
 use std::sync::Arc;

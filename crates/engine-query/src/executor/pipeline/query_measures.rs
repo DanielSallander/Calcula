@@ -59,6 +59,21 @@ impl QueryExecutor {
 
             // Resolve context operations.
             let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
+            // Only simple `alias[col] op literal` KEEP predicates compose with
+            // the two-stage QUERY path (they flow through `effective` below).
+            // Expression conditions (column-vs-column/expression) and KEEP-IN
+            // membership filters are NOT applied here — fail closed rather than
+            // silently drop them and return an unfiltered aggregate.
+            if !eval_ctx.conditions.is_empty() || !eval_ctx.in_filters.is_empty() {
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "QUERY-in-VAR measure '{name}' uses a KEEP with an expression condition \
+                     (column vs column/expression) or an IN-variable membership filter that the \
+                     two-stage aggregation path does not apply. Only simple `alias[column] op \
+                     value` KEEP predicates on the intermediate are supported — rewrite the \
+                     filter in that form, or precompute the compared quantity as an aliased \
+                     QUERY column and filter on it."
+                )));
+            }
             let effective = eval_ctx.effective_filters(&[]);
 
             let Expression::Block { bindings, .. } = &stripped_expr else {

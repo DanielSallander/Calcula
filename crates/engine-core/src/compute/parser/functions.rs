@@ -152,7 +152,9 @@ impl Parser {
             Token::Ident(s) => {
                 let upper = s.to_uppercase();
                 match upper.as_str() {
-                    "DAY" | "MONTH" | "YEAR" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => upper,
+                    // HOUR/MINUTE/SECOND intentionally rejected — the renderer
+                    // has no sub-day arm and would silently return days.
+                    "DAY" | "MONTH" | "YEAR" | "QUARTER" => upper,
                     _ => {
                         return Err(self.parse_err_prev(format!(
                             "DATEDIFF: invalid interval '{s}', expected DAY, MONTH, YEAR, or QUARTER"

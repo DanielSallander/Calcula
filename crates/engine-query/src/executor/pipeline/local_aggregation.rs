@@ -39,7 +39,7 @@ use super::order_limit::{
 };
 use super::sql::{
     build_condition_sql_with_conditions, build_override_alias_map, collect_qualified_tables,
-    resolve_compound_sql, OverrideJoinEntry,
+    reject_unconsumed_in_filters, resolve_compound_sql, OverrideJoinEntry,
 };
 use super::QueryExecutor;
 
@@ -1309,6 +1309,9 @@ impl QueryExecutor {
             } else {
                 // Standard path: resolve the whole expression as a unit.
                 let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
+                // KEEP(... IN variable[column]) membership filters cannot be
+                // applied here and must not be silently dropped.
+                reject_unconsumed_in_filters(name, &eval_ctx)?;
                 let effective = eval_ctx.effective_filters(&[]);
 
                 // Record tables that need JOINs from resolved filters.

@@ -222,6 +222,30 @@ fn qualify_condition_sql(expr: &Expression) -> QueryResult<String> {
 /// effects (`context_join_tables`, `override_joins`) that drive JOIN
 /// construction. Leaf rendering already delegates to the unified renderer via
 /// `to_sql_string`/`to_case_when_sql`.
+/// Fail closed when a resolved context carries `KEEP(... IN variable[column])`
+/// membership filters (`eval_ctx.in_filters`) that the local aggregation render
+/// cannot apply.
+///
+/// The CASE-WHEN render paths only consult `effective_filters()` plus boolean
+/// `conditions`; an `in_filter` would be silently dropped, returning an
+/// unfiltered — wrong — number (the TREATAS / set-membership footgun). The
+/// pushed connector path and the engine-core scalar `MeasureEngine` DO apply
+/// them; only this path cannot yet, so we refuse rather than mislead.
+pub(super) fn reject_unconsumed_in_filters(
+    label: &str,
+    ctx: &EvaluationContext,
+) -> QueryResult<()> {
+    if !ctx.in_filters.is_empty() {
+        return Err(crate::error::QueryError::InvalidQuery(format!(
+            "measure '{label}' uses a KEEP(... IN variable[column]) membership filter, which \
+             is not yet applied on the local aggregation path and would otherwise be silently \
+             ignored (returning an unfiltered result). Express the set membership via a \
+             request-level in_filters slicer, or query a source that pushes the IN subquery."
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn resolve_compound_sql(
     expr: &Expression,
     model: &DataModel,
@@ -377,6 +401,7 @@ pub(super) fn resolve_compound_sql(
         _ if expr.has_context_ops() => {
             let resolver = ContextResolver::new(model);
             let (stripped, ctx) = resolver.resolve(expr)?;
+            reject_unconsumed_in_filters("a compound context expression", &ctx)?;
             let effective = ctx.effective_filters(&[]);
 
             for f in &effective {

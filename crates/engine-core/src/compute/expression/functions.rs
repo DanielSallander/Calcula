@@ -98,9 +98,13 @@ pub enum DateTimeFunction {
 /// Interval keywords accepted by `DATEDIFF(start, end, interval)`.
 ///
 /// Mirrors the parser allow-list in `parser.rs::parse_datediff_call`.
-pub(crate) const DATEDIFF_INTERVALS: [&str; 7] = [
-    "DAY", "MONTH", "YEAR", "QUARTER", "HOUR", "MINUTE", "SECOND",
-];
+///
+/// HOUR/MINUTE/SECOND are deliberately excluded: the SQL renderer
+/// (`DateTimeFunction::DateDiff`) has no arms for sub-day intervals, so
+/// accepting them would silently fall through to the DAY formula and return
+/// days for an hour/minute/second request. Failing closed at parse/validate
+/// time keeps the documented DAY/MONTH/YEAR/QUARTER contract honest.
+pub(crate) const DATEDIFF_INTERVALS: [&str; 4] = ["DAY", "MONTH", "YEAR", "QUARTER"];
 
 /// Interval keywords accepted by `DATEADD(date, n, interval)`.
 ///
@@ -437,6 +441,27 @@ mod tests {
             assert!(
                 parsed.validate().is_ok(),
                 "validator rejected LAST_DAY {kw}"
+            );
+        }
+    }
+
+    #[test]
+    fn datediff_rejects_sub_day_intervals() {
+        // HOUR/MINUTE/SECOND have no renderer arm and would silently return
+        // days — the parser must reject them so no wrong number can ship.
+        use crate::compute::parser::parse_measure_expression;
+
+        for kw in ["HOUR", "MINUTE", "SECOND"] {
+            let text = format!("MAX(DATEDIFF(fact[d1], fact[d2], {kw}))");
+            assert!(
+                parse_measure_expression(&text).is_err(),
+                "DATEDIFF must reject sub-day interval {kw}"
+            );
+            // DATEADD/DATE_TRUNC still accept them (they render via INTERVAL).
+            let add = format!("MAX(DATEADD(fact[d], 1, {kw}))");
+            assert!(
+                parse_measure_expression(&add).is_ok(),
+                "DATEADD should still accept {kw}"
             );
         }
     }
