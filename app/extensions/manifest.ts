@@ -41,6 +41,7 @@ import GoToSpecialExtension from "./GoToSpecial";
 import FlashFillExtension from "./FlashFill";
 import CustomFillListsExtension from "./CustomFillLists";
 import AdvancedFilterExtension from "./AdvancedFilter";
+import ReportsExtension from "./Reports";
 import SubtotalsExtension from "./Subtotals";
 import CsvImportExportExtension from "./CsvImportExport";
 import WatchWindowExtension from "./WatchWindow";
@@ -152,6 +153,7 @@ export const builtInExtensions: ExtensionModule[] = [
   FlashFillExtension,
   CustomFillListsExtension,
   AdvancedFilterExtension,
+  ReportsExtension,
   SubtotalsExtension,
   // ExternalData creates the "externalData" menu — must load before CSV/BI
   ExternalDataExtension,

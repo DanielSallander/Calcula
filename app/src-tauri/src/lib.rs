@@ -75,6 +75,7 @@ pub mod cell_behaviors;
 pub mod slicer;
 pub mod ribbon_filter;
 pub mod pane_control;
+pub mod report;
 pub mod control_values;
 pub mod timeline_slicer;
 pub mod mcp;
@@ -3776,6 +3777,7 @@ pub fn run() {
         .manage(slicer::SlicerState::new())
         .manage(ribbon_filter::RibbonFilterState::new())
         .manage(pane_control::PaneControlState::new())
+        .manage(report::ReportState::default())
         .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
         .manage(managed_policy::ManagedAppearanceState(std::sync::Mutex::new(appearance_policy)))
@@ -3990,6 +3992,10 @@ pub fn run() {
             pivot::update_bi_pivot_fields,
             pivot::headless::run_design_query,
             pivot::headless::get_connection_bi_model,
+            report::create_report,
+            report::refresh_report,
+            report::delete_report,
+            report::list_reports,
             pivot::set_bi_lookup_columns,
             pivot::show_report_filter_pages,
             pivot::add_calculated_field,

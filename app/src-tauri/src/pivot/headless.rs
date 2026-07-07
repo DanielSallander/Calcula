@@ -97,6 +97,25 @@ pub async fn run_design_query(
     bi_state: State<'_, BiState>,
     request: DesignQueryRequest,
 ) -> Result<PivotViewResponse, String> {
+    let (def, mut cache, view) = compute_design_query_view(&bi_state, &request).await?;
+    Ok(view_to_response(&view, &def, &mut cache))
+}
+
+/// Compile + run a design query and compute its pivot view — WITHOUT writing to
+/// the grid or persisting anything. Shared by `run_design_query` (charts, which
+/// serialize the view to a response) and the report commands (which materialize
+/// the same view into grid cells via `write_pivot_to_grid`).
+pub(crate) async fn compute_design_query_view(
+    bi_state: &BiState,
+    request: &DesignQueryRequest,
+) -> Result<
+    (
+        pivot_engine::PivotDefinition,
+        pivot_engine::PivotCache,
+        pivot_engine::PivotView,
+    ),
+    String,
+> {
     // ---- Bounded-v1 validation -------------------------------------------
     if request.value_fields.is_empty() {
         return Err("A design query needs at least one measure (VALUES).".to_string());
@@ -155,10 +174,10 @@ pub async fn run_design_query(
     let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
 
     // ---- Ensure the connection + tables are warm (offline-first) ---------
-    let all_warm = crate::bi::commands::bi_tables_cache_warm(&bi_state, connection_id, &table_refs).await;
+    let all_warm = crate::bi::commands::bi_tables_cache_warm(bi_state, connection_id, &table_refs).await;
     if !all_warm {
-        crate::bi::commands::auto_connect_bi_connection(&bi_state, connection_id).await?;
-        crate::bi::commands::auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
+        crate::bi::commands::auto_connect_bi_connection(bi_state, connection_id).await?;
+        crate::bi::commands::auto_bind_tables_on_connection(bi_state, connection_id, &table_refs).await?;
     }
     {
         // One-time refresh of any in-memory table never refreshed this session.
@@ -198,7 +217,7 @@ pub async fn run_design_query(
     // ---- Run the query (with this connection's RLS role) -----------------
     let (batches, result_columns) = {
         let mut engine = engine_arc.lock().await;
-        crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
+        crate::bi::commands::apply_connection_role(&mut engine, bi_state, connection_id);
         engine.query_with_meta(query_request).await
     }
     .map_err(|e| format!("BI query failed: {}", e))?;
@@ -277,7 +296,7 @@ pub async fn run_design_query(
             .collect();
     }
 
-    // ---- Compute + serialize (no grid write, no persistence) -------------
+    // ---- Compute the view (no grid write, no persistence) ----------------
     let view = safe_calculate_pivot(&def, &mut cache);
-    Ok(view_to_response(&view, &def, &mut cache))
+    Ok((def, cache, view))
 }
