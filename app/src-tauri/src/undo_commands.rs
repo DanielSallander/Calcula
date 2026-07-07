@@ -629,6 +629,7 @@ fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf:
 fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_delete_restore(pc, d, inv); }
 fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
 fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
+fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -666,6 +667,9 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // undo/redo (re-fetches the active viewport when the restored sheet IS active;
     // a non-active restored sheet re-materializes from grids[idx] on sheet switch).
     m.insert("script_grid_cells", RestoreSpec { restore: r_script_grid_cells, change_class: Objects, defer: true });
+    // Grid reports: cell-based restore of the report cells + definitions + region.
+    // Tagged Objects so the frontend fires grid:refresh on undo/redo.
+    m.insert("report_restore", RestoreSpec { restore: r_report_restore, change_class: Objects, defer: true });
     m
 });
 
@@ -765,6 +769,89 @@ fn apply_script_grid_cells_restore(
         data: serde_json::to_vec(&ScriptGridCellsSnapshot {
             sheet_index: snapshot.sheet_index,
             cells: inverse_cells,
+        })
+        .unwrap_or_default(),
+    });
+}
+
+/// Restore a grid-report snapshot for undo/redo: restore the affected cells, the
+/// report-definitions list, and each report's protected region, then record the
+/// current state as the inverse (redo). Cell-based (mirrors script_grid_cells),
+/// so it works offline without re-running the design query.
+fn apply_report_restore(
+    state: &AppState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: crate::report::ReportUndoSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize report snapshot: {}", e);
+            return;
+        }
+    };
+
+    // --- Restore grid cells (capture current for the inverse/redo) ---
+    let mut inverse_cells: Vec<(u32, u32, Option<engine::Cell>)> =
+        Vec::with_capacity(snapshot.cells.len());
+    {
+        let mut mirror = state.grid.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if snapshot.sheet_index < grids.len() {
+            let is_active = snapshot.sheet_index == active_sheet;
+            for (row, col, restore_to) in &snapshot.cells {
+                let current = grids[snapshot.sheet_index].get_cell(*row, *col).cloned();
+                inverse_cells.push((*row, *col, current));
+                match restore_to {
+                    Some(cell) => {
+                        grids[snapshot.sheet_index].set_cell(*row, *col, cell.clone());
+                        if is_active {
+                            mirror.set_cell(*row, *col, cell.clone());
+                        }
+                    }
+                    None => {
+                        grids[snapshot.sheet_index].clear_cell(*row, *col);
+                        if is_active {
+                            mirror.clear_cell(*row, *col);
+                        }
+                    }
+                }
+            }
+            if is_active {
+                mirror.recalculate_bounds();
+            }
+        }
+    }
+
+    // Drop any merged regions inside the restored box (report merges become stale
+    // on undo; pre-op the box was typically empty of merges).
+    if let (Some(first), Some(last)) = (snapshot.cells.first(), snapshot.cells.last()) {
+        let (sr, sc, er, ec) = (first.0, first.1, last.0, last.1);
+        let mut merged = state.merged_regions.lock().unwrap();
+        merged.retain(|m| {
+            !(m.start_row >= sr && m.end_row <= er && m.start_col >= sc && m.end_col <= ec)
+        });
+    }
+
+    // --- Restore report definitions + regions (capture current for redo) ---
+    let current_defs = state.report_definitions.lock().unwrap().clone();
+    *state.report_definitions.lock().unwrap() = snapshot.definitions.clone();
+    {
+        let mut regions = state.protected_regions.lock().unwrap();
+        regions.retain(|r| r.region_type != "report");
+    }
+    for r in &snapshot.definitions {
+        crate::report::reregister_report_region(state, r);
+    }
+    crate::report::sync_reports_to_extension_data(state);
+
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "report_restore".to_string(),
+        data: serde_json::to_vec(&crate::report::ReportUndoSnapshot {
+            sheet_index: snapshot.sheet_index,
+            cells: inverse_cells,
+            definitions: current_defs,
         })
         .unwrap_or_default(),
     });

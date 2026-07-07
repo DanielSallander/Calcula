@@ -125,9 +125,9 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
       });
       emitAppEvent(AppEvents.GRID_REFRESH);
       if (result && result.overwrittenCellCount > 0) {
-        // No undo yet in Slice 1 — inform the user their cells were replaced.
+        // Inform the user their cells were replaced (Ctrl+Z reverts it).
         setError(
-          `Report created. Note: ${result.overwrittenCellCount} existing cell(s) were overwritten.`,
+          `Report created. Note: ${result.overwrittenCellCount} existing cell(s) were overwritten (Ctrl+Z to undo).`,
         );
         setBusy(false);
         return;

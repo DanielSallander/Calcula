@@ -12,7 +12,7 @@
 
 use tauri::State;
 
-use engine::CellValue;
+use engine::{Cell, CellValue};
 
 use crate::bi::types::BiState;
 use crate::pivot::headless::{compute_design_query_view, DesignQueryRequest};
@@ -53,7 +53,7 @@ pub struct SavedReport {
 
 /// Mirror the in-memory report definitions into extension_data so they persist
 /// with the workbook (extension_data is saved + loaded automatically).
-fn sync_reports_to_extension_data(state: &AppState) {
+pub fn sync_reports_to_extension_data(state: &AppState) {
     let defs = state.report_definitions.lock().unwrap();
     if let Ok(v) = serde_json::to_value(&*defs) {
         state
@@ -62,6 +62,64 @@ fn sync_reports_to_extension_data(state: &AppState) {
             .unwrap()
             .insert(REPORTS_EXT_KEY.to_string(), v);
     }
+}
+
+/// Undo/redo snapshot for a report mutation: the affected grid cells (as they
+/// were, to restore) plus the full report-definitions list. A single symmetric
+/// snapshot covers create / refresh / delete — restore reverts to it and captures
+/// the current state as the inverse (redo). Cell-based (not re-materialize) so
+/// undo works offline. See `undo_commands::apply_report_restore`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReportUndoSnapshot {
+    pub sheet_index: usize,
+    /// (row, col, cell-to-restore-to). `None` means the cell was empty.
+    pub cells: Vec<(u32, u32, Option<Cell>)>,
+    pub definitions: Vec<SavedReport>,
+}
+
+/// Snapshot the current cells within a bounding box (inclusive) on a sheet.
+fn snapshot_box_cells(
+    state: &AppState,
+    sheet_idx: usize,
+    bounds: (u32, u32, u32, u32),
+) -> Vec<(u32, u32, Option<Cell>)> {
+    let (sr, sc, er, ec) = bounds;
+    let grids = state.grids.lock().unwrap();
+    let grid = match grids.get(sheet_idx) {
+        Some(g) => g,
+        None => return Vec::new(),
+    };
+    let mut cells = Vec::new();
+    for row in sr..=er {
+        for col in sc..=ec {
+            cells.push((row, col, grid.get_cell(row, col).cloned()));
+        }
+    }
+    cells
+}
+
+/// Record an undo entry (kind "report_restore") capturing the cells in `bounds`
+/// (before the mutation) and the current report-definitions list.
+fn record_report_undo(
+    state: &AppState,
+    sheet_idx: usize,
+    bounds: (u32, u32, u32, u32),
+    description: &str,
+) {
+    let cells = snapshot_box_cells(state, sheet_idx, bounds);
+    let definitions = state.report_definitions.lock().unwrap().clone();
+    let snapshot = ReportUndoSnapshot { sheet_index: sheet_idx, cells, definitions };
+    let data = serde_json::to_vec(&snapshot).unwrap_or_default();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    undo_stack.begin_transaction(description);
+    undo_stack.record_custom_restore("report_restore".to_string(), data, description);
+    undo_stack.commit_transaction();
+}
+
+/// Union of two inclusive regions (used to snapshot both the old and new report
+/// extents before a refresh).
+fn union_bounds(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
 }
 
 /// Re-register a report's protected region from its saved bounds. Called on load
@@ -312,6 +370,17 @@ pub async fn create_report(
 
     let report_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     let dest = (request.anchor_row, request.anchor_col);
+    let end_row = request.anchor_row + (visible_rows.max(1) as u32) - 1;
+    let end_col = request.anchor_col + (view.col_count.max(1) as u32) - 1;
+
+    // Undo snapshot: the target cells as they are now + the current report list.
+    record_report_undo(
+        &state,
+        request.sheet_index,
+        (request.anchor_row, request.anchor_col, end_row, end_col),
+        "Create report",
+    );
+
     let overwritten = materialize(
         &state,
         &pivot_state,
@@ -323,8 +392,6 @@ pub async fn create_report(
         &view,
     );
 
-    let end_row = request.anchor_row + (visible_rows.max(1) as u32) - 1;
-    let end_col = request.anchor_col + (view.col_count.max(1) as u32) - 1;
     state.report_definitions.lock().unwrap().push(SavedReport {
         id: report_id,
         name: request.name,
@@ -356,13 +423,17 @@ pub async fn refresh_report(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RefreshReportRequest,
 ) -> Result<ReportResult, String> {
-    let (sheet_idx, dest) = {
+    let (sheet_idx, dest, old_bounds) = {
         let defs = state.report_definitions.lock().unwrap();
         let def = defs
             .iter()
             .find(|d| d.id == request.report_id)
             .ok_or_else(|| format!("Report {} not found", request.report_id))?;
-        (def.sheet_index, (def.anchor_row, def.anchor_col))
+        (
+            def.sheet_index,
+            (def.anchor_row, def.anchor_col),
+            (def.anchor_row, def.anchor_col, def.end_row, def.end_col),
+        )
     };
 
     let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
@@ -373,6 +444,12 @@ pub async fn refresh_report(
             visible_rows, MAX_REPORT_ROWS
         ));
     }
+
+    let end_row = dest.0 + (visible_rows.max(1) as u32) - 1;
+    let end_col = dest.1 + (view.col_count.max(1) as u32) - 1;
+    // Undo snapshot covering both the old and new report extents.
+    let box_bounds = union_bounds(old_bounds, (dest.0, dest.1, end_row, end_col));
+    record_report_undo(&state, sheet_idx, box_bounds, "Refresh report");
 
     let overwritten = materialize(
         &state,
@@ -385,8 +462,6 @@ pub async fn refresh_report(
         &view,
     );
 
-    let end_row = dest.0 + (visible_rows.max(1) as u32) - 1;
-    let end_col = dest.1 + (view.col_count.max(1) as u32) - 1;
     {
         let mut defs = state.report_definitions.lock().unwrap();
         if let Some(d) = defs.iter_mut().find(|d| d.id == request.report_id) {
@@ -413,6 +488,16 @@ pub fn delete_report(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     report_id: ReportId,
 ) -> Result<(), String> {
+    // Undo snapshot: the report's cells + the current report list, before clearing.
+    if let Some((sheet_idx, bounds)) = {
+        let defs = state.report_definitions.lock().unwrap();
+        defs.iter().find(|d| d.id == report_id).map(|d| {
+            (d.sheet_index, (d.anchor_row, d.anchor_col, d.end_row, d.end_col))
+        })
+    } {
+        record_report_undo(&state, sheet_idx, bounds, "Delete report");
+    }
+
     clear_report_region(&state, report_id);
     state.report_definitions.lock().unwrap().retain(|d| d.id != report_id);
     sync_reports_to_extension_data(&state);
