@@ -388,3 +388,27 @@ Press **Ctrl+Space** to manually trigger autocomplete.
 Changes in the Design view update the pivot table in real-time (debounced 300ms). If **Defer Layout Update** is checked, changes accumulate until the **Update** button is clicked.
 
 Syntax errors are shown as red underlines with error messages. The pivot only updates when the DSL is free of syntax errors.
+
+---
+
+## Using a design query in a chart
+
+The same DSL can drive a **chart** directly, with no pivot table in between — the
+data lives in the chart object. In **Insert ▸ Chart…**, on the **Data** tab, set
+**Data source** to **Design query**, choose a BI **Connection**, and type the DSL:
+
+```
+ROWS:    dim_product.class
+VALUES:  [TotalSales]
+FILTERS: dim_product.style = ("W")
+```
+
+The chart runs the query headlessly against the connection's model and renders
+the result — row labels become categories, value/column fields become series.
+The query re-runs when the chart is opened, refreshed, or the model's data
+changes.
+
+**v1 scope:** ROWS, COLUMNS, VALUES, FILTERS, and CALC are supported. LOOKUP
+columns, hierarchies, and calculation groups are not yet available in a chart
+design query (they still work in a pivot). A design query must have at least one
+measure (VALUES) and at least one dimension (ROWS or COLUMNS).

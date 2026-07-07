@@ -10,7 +10,7 @@ import {
   indexToCol,
   getSheets,
 } from "@api";
-import type { DialogProps } from "@api";
+import type { DialogProps, ConnectionInfo } from "@api";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 import type {
@@ -22,9 +22,11 @@ import type {
   SeriesOrientation,
   MarkOptions,
   PivotDataSource,
+  DesignQueryDataSource,
   TransformDiagnostic,
 } from "../types";
-import { isPivotDataSource } from "../types";
+import { isPivotDataSource, isDesignQueryDataSource } from "../types";
+import { chartsBackend } from "../lib/chartsBackend";
 import { createChart, getChartById, replaceChartSpec, syncChartRegions } from "../lib/chartStore";
 import { autoDetectSeries } from "../lib/chartDataReader";
 import { readChartDataResolved } from "../lib/chartDataReader";
@@ -177,6 +179,12 @@ export function CreateChartDialog({
 
   // Data tab state
   const [sourceRange, setSourceRange] = useState("");
+  // Design-query source: the chart holds pivot-layout DSL run against a BI model
+  // (data lives in the chart, no pivot table). Only offered when not in pivot mode.
+  const [sourceMode, setSourceMode] = useState<"range" | "designQuery">("range");
+  const [dslText, setDslText] = useState("");
+  const [connectionId, setConnectionId] = useState("");
+  const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [hasHeaders, setHasHeaders] = useState(true);
   const [orientation, setOrientation] = useState<SeriesOrientation>("columns");
   const [categoryIndex, setCategoryIndex] = useState(0);
@@ -241,6 +249,9 @@ export function CreateChartDialog({
 
     if (isPivotMode) {
       dataSource = { type: "pivot" as const, pivotId: pivotId! };
+    } else if (sourceMode === "designQuery") {
+      if (!connectionId || !dslText.trim()) return null;
+      dataSource = { type: "designQuery" as const, dslText, connectionId };
     } else {
       const parsed = parseRangeReference(sourceRange);
       if (!parsed) return null;
@@ -272,7 +283,7 @@ export function CreateChartDialog({
       spec.markOptions = markOptions;
     }
     return spec;
-  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, currentSheetIndex, isPivotMode, pivotId]);
+  }, [sourceRange, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, currentSheetIndex, isPivotMode, pivotId]);
 
   // Handle spec updates from the Design tab or Spec tab
   const handleSpecChange = useCallback((updates: Partial<ChartSpec>) => {
@@ -323,8 +334,15 @@ export function CreateChartDialog({
       setActiveTab(isPivotMode ? "design" : "data");
       setSpecFullView(false);
       setSpecOverlay({});
+      setSourceMode("range");
       setDialogPos(null); // Reset to centered
       loadSheets();
+
+      // Load BI connections for the design-query source picker (non-fatal).
+      chartsBackend
+        .invoke<ConnectionInfo[]>("bi_get_connections", {})
+        .then((c) => setConnections(c ?? []))
+        .catch(() => setConnections([]));
 
       // In edit mode, load the existing chart's spec
       if (isEditMode && editChartId != null) {
@@ -339,6 +357,11 @@ export function CreateChartDialog({
             const d = spec.data as { startRow: number; startCol: number; endRow: number; endCol: number };
             const range = selectionToRange(d.startRow, d.startCol, d.endRow, d.endCol);
             setSourceRange(currentSheetName ? buildSheetRange(currentSheetName, range) : range);
+          } else if (spec.data && (spec.data as { type?: string }).type === "designQuery") {
+            const dq = spec.data as DesignQueryDataSource;
+            setSourceMode("designQuery");
+            setDslText(dq.dslText);
+            setConnectionId(dq.connectionId);
           }
           // Set other spec fields
           setMark(spec.mark);
@@ -381,9 +404,9 @@ export function CreateChartDialog({
 
   // Use the user's selection as the data range. If the selection is a single
   // cell, auto-detect the surrounding data region; otherwise use the selection as-is.
-  // Skipped in pivot mode (data comes from the pivot table).
+  // Skipped in pivot mode and design-query mode (data doesn't come from a range).
   useEffect(() => {
-    if (!isOpen || hasAutoDetected || !currentSheetName || isPivotMode) return;
+    if (!isOpen || hasAutoDetected || !currentSheetName || isPivotMode || sourceMode === "designQuery") return;
 
     const sel = gridState.selection;
     if (!sel) return;
@@ -432,7 +455,7 @@ export function CreateChartDialog({
         );
         setSourceRange(buildSheetRange(currentSheetName, range));
       });
-  }, [isOpen, hasAutoDetected, currentSheetName, gridState.selection]);
+  }, [isOpen, hasAutoDetected, currentSheetName, gridState.selection, sourceMode]);
 
   // Auto-detect series when source range changes
   useEffect(() => {
@@ -492,7 +515,10 @@ export function CreateChartDialog({
   // partitions, so an empty top-level series is normal — still fetch for them.
   useEffect(() => {
     const isComposition = !!(currentSpec && (currentSpec.concat || currentSpec.facet || currentSpec.repeat));
-    if (!currentSpec || (currentSpec.series.length === 0 && !isComposition)) {
+    // Design-query charts get their series from the query result, so an empty
+    // top-level series list is normal — still fetch the preview.
+    const isAggregatedSource = !!(currentSpec && isDesignQueryDataSource(currentSpec.data));
+    if (!currentSpec || (currentSpec.series.length === 0 && !isComposition && !isAggregatedSource)) {
       setPreviewData(null);
       setResolvedSpec(null);
       setDiagnostics([]);
@@ -585,7 +611,14 @@ export function CreateChartDialog({
         throw new Error("Invalid chart configuration.");
       }
 
-      if (!isPivotMode) {
+      if (!isPivotMode && sourceMode === "designQuery") {
+        if (!connectionId) {
+          throw new Error("Please choose a BI connection for the design query.");
+        }
+        if (!dslText.trim()) {
+          throw new Error("Please enter a design query.");
+        }
+      } else if (!isPivotMode) {
         if (!sourceRange.trim()) {
           throw new Error("Please enter a data range for the chart.");
         }
@@ -609,7 +642,7 @@ export function CreateChartDialog({
       let chartX = 50;
       let chartY = 50;
 
-      if (!isPivotMode) {
+      if (!isPivotMode && sourceMode === "range") {
         const parsed = parseRangeReference(sourceRange)!;
         chartX = parsed.startCol * defaultCellWidth;
         chartY = (parsed.endRow + 2) * defaultCellHeight;
@@ -764,6 +797,14 @@ export function CreateChartDialog({
             <DataTab
               sourceRange={sourceRange}
               onSourceRangeChange={setSourceRange}
+              sourceMode={isPivotMode ? "range" : sourceMode}
+              onSourceModeChange={setSourceMode}
+              designQueryAvailable={!isPivotMode}
+              dslText={dslText}
+              onDslTextChange={setDslText}
+              connectionId={connectionId}
+              onConnectionIdChange={setConnectionId}
+              connections={connections}
               hasHeaders={hasHeaders}
               onHasHeadersChange={setHasHeaders}
               orientation={orientation}

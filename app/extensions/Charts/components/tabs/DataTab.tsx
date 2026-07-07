@@ -3,6 +3,7 @@
 //          category axis, and series selection.
 
 import React from "react";
+import type { ConnectionInfo } from "@api";
 import type { ChartSpec, ChartSeries, SeriesOrientation } from "../../types";
 import { getSeriesColor } from "../../rendering/chartTheme";
 import {
@@ -18,9 +19,24 @@ import {
   ColorSwatch,
 } from "../CreateChartDialog.styles";
 
+type SourceMode = "range" | "designQuery";
+
 interface DataTabProps {
   sourceRange: string;
   onSourceRangeChange: (value: string) => void;
+  /** Which kind of data source this chart uses. */
+  sourceMode: SourceMode;
+  onSourceModeChange: (value: SourceMode) => void;
+  /** Whether the design-query source is offered (false in pivot mode). */
+  designQueryAvailable: boolean;
+  /** Design-query DSL text. */
+  dslText: string;
+  onDslTextChange: (value: string) => void;
+  /** Selected BI connection id for the design query. */
+  connectionId: string;
+  onConnectionIdChange: (value: string) => void;
+  /** Available BI connections for the design-query picker. */
+  connections: ConnectionInfo[];
   hasHeaders: boolean;
   onHasHeadersChange: (value: boolean) => void;
   orientation: SeriesOrientation;
@@ -38,6 +54,14 @@ interface DataTabProps {
 export function DataTab({
   sourceRange,
   onSourceRangeChange,
+  sourceMode,
+  onSourceModeChange,
+  designQueryAvailable,
+  dslText,
+  onDslTextChange,
+  connectionId,
+  onConnectionIdChange,
+  connections,
   hasHeaders,
   onHasHeadersChange,
   orientation,
@@ -82,6 +106,81 @@ export function DataTab({
 
   return (
     <>
+      {/* Source mode: cell range vs design query (BI model) */}
+      {designQueryAvailable && (
+        <FieldGroup>
+          <Label>Data source</Label>
+          <RadioGroup>
+            <RadioLabel>
+              <input
+                type="radio"
+                name="sourceMode"
+                checked={sourceMode === "range"}
+                onChange={() => onSourceModeChange("range")}
+              />
+              Cell range
+            </RadioLabel>
+            <RadioLabel>
+              <input
+                type="radio"
+                name="sourceMode"
+                checked={sourceMode === "designQuery"}
+                onChange={() => onSourceModeChange("designQuery")}
+              />
+              Design query
+            </RadioLabel>
+          </RadioGroup>
+        </FieldGroup>
+      )}
+
+      {sourceMode === "designQuery" ? (
+        <>
+          {/* BI connection */}
+          <FieldGroup>
+            <Label>Connection</Label>
+            <Select
+              value={connectionId}
+              onChange={(e) => onConnectionIdChange(e.target.value)}
+            >
+              <option value="">— Select a BI connection —</option>
+              {connections.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </Select>
+          </FieldGroup>
+
+          {/* Design query DSL */}
+          <FieldGroup>
+            <Label>Design query</Label>
+            <textarea
+              value={dslText}
+              onChange={(e) => onDslTextChange(e.target.value)}
+              spellCheck={false}
+              placeholder={"ROWS:    dim_product.class\nVALUES:  [TotalSales]\nFILTERS: dim_product.style = (\"W\")"}
+              style={{
+                width: "100%",
+                minHeight: "140px",
+                resize: "vertical",
+                fontFamily: "var(--font-mono, monospace)",
+                fontSize: "12px",
+                lineHeight: "1.5",
+                padding: "8px",
+                boxSizing: "border-box",
+                background: "var(--input-bg, var(--bg-secondary))",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-color)",
+                borderRadius: "4px",
+              }}
+            />
+            <span style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+              The query runs against the connection's model — the data lives in the chart, no pivot table needed.
+            </span>
+          </FieldGroup>
+        </>
+      ) : (
+      <>
       {/* Source Range */}
       <FieldGroup>
         <Label>Data Range</Label>
@@ -185,6 +284,8 @@ export function DataTab({
           )}
         </SeriesList>
       </FieldGroup>
+      </>
+      )}
     </>
   );
 }
