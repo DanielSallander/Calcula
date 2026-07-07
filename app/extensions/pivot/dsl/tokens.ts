@@ -48,6 +48,14 @@ export enum TokenType {
   Star = '*',
   Slash = '/',
   Caret = '^',
+  // Comparison + concat operators (used inside CALC expressions; opaque to the
+  // DSL parser, evaluated by the Rust engine).
+  Greater = '>',
+  Less = '<',
+  GreaterEqual = '>=',
+  LessEqual = '<=',
+  NotEqual = '<>',
+  Ampersand = '&',
 
   // --- Structural ---
   Newline = 'NEWLINE',
@@ -114,6 +122,44 @@ export const VISUAL_CALC_FUNCTIONS: ReadonlyMap<string, string> = new Map([
   // Lookup functions
   ['lookup', 'Find a value where field matches a condition'],
   ['lookupwithtotals', 'Find a value including total rows'],
+]);
+
+/**
+ * Transformation function names for CALC expressions. Unlike visual-calc
+ * functions, these are pure/post-aggregation (no reset/axis parameter) and can
+ * return text or booleans as well as numbers. Evaluated in the Rust engine
+ * (core/pivot-engine/src/calculated.rs).
+ */
+export const TRANSFORM_FUNCTIONS: ReadonlyMap<string, string> = new Map([
+  // Conditional
+  ['if', 'IF(condition, then, [else]) — conditional value'],
+  ['switch', 'SWITCH(expr, v1, r1, …, [default]) — match a value to a result'],
+  // Boolean
+  ['and', 'AND(a, b, …) — true if all arguments are true'],
+  ['or', 'OR(a, b, …) — true if any argument is true'],
+  ['not', 'NOT(x) — boolean negation'],
+  // Scalar math
+  ['abs', 'ABS(x) — absolute value'],
+  ['round', 'ROUND(x, digits) — round to N decimals'],
+  ['min', 'MIN(a, b, …) — smallest argument'],
+  ['max', 'MAX(a, b, …) — largest argument'],
+  ['ceiling', 'CEILING(x, [significance]) — round up'],
+  ['floor', 'FLOOR(x, [significance]) — round down'],
+  ['sqrt', 'SQRT(x) — square root'],
+  ['mod', 'MOD(x, divisor) — remainder'],
+  ['int', 'INT(x) — round down to an integer'],
+  ['sign', 'SIGN(x) — -1, 0, or 1'],
+  ['power', 'POWER(base, exponent)'],
+  // Text
+  ['concat', 'CONCAT(a, b, …) — join values as text'],
+  ['left', 'LEFT(text, [count]) — leading characters'],
+  ['right', 'RIGHT(text, [count]) — trailing characters'],
+  ['mid', 'MID(text, start, count) — substring (1-based)'],
+  ['len', 'LEN(text) — character count'],
+  ['upper', 'UPPER(text) — uppercase'],
+  ['lower', 'LOWER(text) — lowercase'],
+  ['trim', 'TRIM(text) — remove surrounding whitespace'],
+  ['text', 'TEXT(value, format) — format a number as text'],
 ]);
 
 /** Reset parameter options for visual calculation functions. */

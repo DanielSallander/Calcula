@@ -2679,14 +2679,19 @@ impl<'a> PivotCalculator<'a> {
                                 col_ctx: None, // TODO: populate for COLUMNS axis support
                             };
                             crate::calculated::eval_calc_formula_with_ctx(&cf.formula, &field_values, &ctx)
-                                .unwrap_or(f64::NAN)
+                                .unwrap_or_else(crate::calculated::CalcValue::Error)
                         } else {
                             crate::calculated::eval_calc_formula(&cf.formula, &field_values)
-                                .unwrap_or(f64::NAN)
+                                .unwrap_or_else(crate::calculated::CalcValue::Error)
                         };
 
-                        let mut cell = PivotViewCell::data(result);
-                        cell.number_format = cf.number_format.clone();
+                        // A number format only makes sense for numeric results; text /
+                        // boolean / error results carry their own display.
+                        let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
+                        let mut cell = PivotViewCell::data_value(result.into());
+                        if is_numeric {
+                            cell.number_format = cf.number_format.clone();
+                        }
 
                         if row_item.is_subtotal {
                             cell.cell_type = PivotCellType::RowSubtotal;
@@ -2842,10 +2847,13 @@ impl<'a> PivotCalculator<'a> {
 
             for cf in &calc_fields {
                 let result = crate::calculated::eval_calc_formula(&cf.formula, &field_values)
-                    .unwrap_or(f64::NAN);
+                    .unwrap_or_else(crate::calculated::CalcValue::Error);
 
-                let mut cell = PivotViewCell::data(result);
-                cell.number_format = cf.number_format.clone();
+                let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
+                let mut cell = PivotViewCell::data_value(result.into());
+                if is_numeric {
+                    cell.number_format = cf.number_format.clone();
+                }
 
                 if row_item.is_subtotal {
                     cell.cell_type = PivotCellType::RowSubtotal;
@@ -2919,14 +2927,17 @@ impl<'a> PivotCalculator<'a> {
                             col_ctx,
                         };
                         crate::calculated::eval_calc_formula_with_ctx(&cf.formula, &field_values, &ctx)
-                            .unwrap_or(f64::NAN)
+                            .unwrap_or_else(crate::calculated::CalcValue::Error)
                     } else {
                         crate::calculated::eval_calc_formula(&cf.formula, &field_values)
-                            .unwrap_or(f64::NAN)
+                            .unwrap_or_else(crate::calculated::CalcValue::Error)
                     };
 
-                    let mut cell = PivotViewCell::data(result);
-                    cell.number_format = cf.number_format.clone();
+                    let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
+                    let mut cell = PivotViewCell::data_value(result.into());
+                    if is_numeric {
+                        cell.number_format = cf.number_format.clone();
+                    }
 
                     let is_row_total = row_item.is_subtotal || row_item.is_grand_total;
                     let is_col_total = col_item.is_subtotal || col_item.is_grand_total;
@@ -3543,11 +3554,46 @@ mod tests {
         });
         
         let view = calculate_pivot(&definition, &mut cache);
-        
+
         // Should have filter rows
         // filter_row_count includes the spacing row after the filter fields
         assert_eq!(view.filter_row_count, 2);
         assert_eq!(view.filter_rows.len(), 1);
         assert_eq!(view.filter_rows[0].field_name, "Region");
+    }
+
+    #[test]
+    fn test_calculated_field_text_result() {
+        use crate::definition::CalculatedField;
+        use crate::view::PivotCellValue;
+
+        // Row-only pivot (Region), a Sum of Sales value, and a text-returning CALC.
+        // North aggregates to 250 (-> "Low"), South to 450 and the grand total to 700
+        // (-> "High"). This proves an IF that yields text reaches the pivot cell as
+        // PivotCellValue::Text end-to-end (not a number/NaN).
+        let mut cache = create_test_cache();
+        let mut definition = PivotDefinition::new(test_pivot_id(), (0, 0), (4, 2));
+        definition.row_fields.push(PivotField::new(0, "Region".to_string()));
+        definition.value_fields.push(ValueField::new(2, "Sum of Sales".to_string(), AggregationType::Sum));
+        definition.calculated_fields.push(CalculatedField {
+            name: "Band".to_string(),
+            formula: "IF('Sum of Sales' > 300, \"High\", \"Low\")".to_string(),
+            number_format: Some("#,##0".to_string()),
+        });
+
+        let view = calculate_pivot(&definition, &mut cache);
+
+        let mut found_high = false;
+        let mut found_low = false;
+        for row_cells in &view.cells {
+            for cell in row_cells {
+                if let PivotCellValue::Text(ref s) = cell.value {
+                    if s == "High" { found_high = true; }
+                    if s == "Low" { found_low = true; }
+                }
+            }
+        }
+        assert!(found_high, "an aggregate > 300 should produce a 'High' text cell");
+        assert!(found_low, "an aggregate <= 300 should produce a 'Low' text cell");
     }
 }

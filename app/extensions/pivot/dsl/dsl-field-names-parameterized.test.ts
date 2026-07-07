@@ -233,7 +233,8 @@ describe('Field name lexing - 100 names', () => {
   );
 
   // --- Unknown/special characters produce errors ---
-  const unknownChars: string[] = ['@', '!', '~', '`', '?', '&', '%', '$', '{', '}', '\\', '|'];
+  // NB: '&', '<', '>' are NOT here — they are now the concat/comparison operators.
+  const unknownChars: string[] = ['@', '!', '~', '`', '?', '%', '$', '{', '}', '\\', '|'];
 
   it.each(unknownChars)(
     'reports error for unknown character %s',

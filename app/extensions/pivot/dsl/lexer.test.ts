@@ -204,7 +204,8 @@ describe('Lexer edge cases', () => {
   // --- Unknown characters ---
 
   it('reports error for unknown characters but continues lexing', () => {
-    const { tokens, errors } = lex('ROWS: Region & Product');
+    // '@' is not part of the DSL (unlike '&', which is now the concat operator).
+    const { tokens, errors } = lex('ROWS: Region @ Product');
     expect(errors.length).toBeGreaterThan(0);
     expect(errors[0].message).toContain('Unexpected character');
     // Should still produce tokens for ROWS, Region, Product

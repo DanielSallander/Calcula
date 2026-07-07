@@ -156,6 +156,40 @@ describe('Parser', () => {
     expect(ast.calculatedFields[0].expression).toContain('[Sales]');
   });
 
+  it('lexes comparison + concat operators without errors', () => {
+    // >=, <=, <> must lex as single tokens; >, <, & and string literals too.
+    const { tokens, errors } = lex('CALC: F = IF([Sales] >= 100, "Hi", "Lo") & "!"');
+    expect(errors).toHaveLength(0);
+    const values = tokens.map(t => t.value);
+    expect(values).toContain('>=');
+    expect(values).toContain('&');
+    expect(values).toContain('Hi');
+  });
+
+  it('captures a transform CALC expression opaquely (round-trip safe)', () => {
+    const { tokens } = lex('CALC: Rating = IF([Sales] > 1000, "High", "Low")');
+    const { ast, errors } = parse(tokens);
+    expect(errors).toHaveLength(0);
+    expect(ast.calculatedFields).toHaveLength(1);
+    const expr = ast.calculatedFields[0].expression;
+    // String literals keep double quotes; the > operator and brackets survive.
+    expect(expr).toContain('"High"');
+    expect(expr).toContain('"Low"');
+    expect(expr).toContain('>');
+    expect(expr).toContain('[Sales]');
+  });
+
+  it('compiles a SWITCH CALC preserving its formula body', () => {
+    const result = run('VALUES: Sum(Sales), CALC Tier = SWITCH(Region, "W", 1, "E", 2, 0)');
+    expect(result.parseErrors).toHaveLength(0);
+    expect(result.calculatedFields).toHaveLength(1);
+    const formula = result.calculatedFields[0].formula;
+    // The SWITCH body (function name + string literals) survives compilation.
+    expect(formula).toContain('SWITCH');
+    expect(formula).toContain('"W"');
+    expect(formula).toContain('"E"');
+  });
+
   it('parses SAVE AS clause', () => {
     const { tokens } = lex('ROWS: Region\nSAVE AS "My Layout"');
     const { ast, errors } = parse(tokens);

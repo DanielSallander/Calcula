@@ -179,6 +179,30 @@ export function lex(input: string): LexResult {
       continue;
     }
 
+    // Two-character comparison operators (>=, <=, <>). Checked before the
+    // single-character map so '>' / '<' don't shadow them.
+    if (ch === '>' || ch === '<') {
+      const next = pos + 1 < input.length ? input[pos + 1] : '';
+      if (ch === '>' && next === '=') {
+        advance(); advance();
+        tokens.push(makeToken(TokenType.GreaterEqual, '>=', startCol, startLine));
+        continue;
+      }
+      if (ch === '<' && next === '=') {
+        advance(); advance();
+        tokens.push(makeToken(TokenType.LessEqual, '<=', startCol, startLine));
+        continue;
+      }
+      if (ch === '<' && next === '>') {
+        advance(); advance();
+        tokens.push(makeToken(TokenType.NotEqual, '<>', startCol, startLine));
+        continue;
+      }
+      advance();
+      tokens.push(makeToken(ch === '>' ? TokenType.Greater : TokenType.Less, ch, startCol, startLine));
+      continue;
+    }
+
     // Single-character symbols
     const symbolMap: Record<string, TokenType> = {
       ':': TokenType.Colon,
@@ -192,6 +216,7 @@ export function lex(input: string): LexResult {
       '*': TokenType.Star,
       '/': TokenType.Slash,
       '^': TokenType.Caret,
+      '&': TokenType.Ampersand,
     };
 
     const symType = symbolMap[ch];

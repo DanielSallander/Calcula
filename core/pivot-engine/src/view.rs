@@ -78,6 +78,22 @@ impl From<f64> for PivotCellValue {
     }
 }
 
+impl From<crate::calculated::CalcValue> for PivotCellValue {
+    fn from(value: crate::calculated::CalcValue) -> Self {
+        use crate::calculated::CalcValue;
+        match value {
+            CalcValue::Number(n) => PivotCellValue::Number(n),
+            CalcValue::Text(s) => PivotCellValue::Text(s),
+            CalcValue::Bool(b) => PivotCellValue::Boolean(b),
+            CalcValue::Blank => PivotCellValue::Empty,
+            // CalcValue::Error carries a bare code (e.g. "DIV/0!"); the `#` is added
+            // downstream by the view→response conversion, matching the existing
+            // PivotCellValue::Error convention.
+            CalcValue::Error(e) => PivotCellValue::Error(e),
+        }
+    }
+}
+
 impl PivotCellValue {
     pub fn text(s: impl Into<String>) -> Self {
         PivotCellValue::Text(s.into())
@@ -143,6 +159,27 @@ impl PivotViewCell {
     pub fn data(value: f64) -> Self {
         PivotViewCell {
             value: PivotCellValue::Number(value),
+            formatted_value: String::new(), // formatted on-demand by the frontend
+            cell_type: PivotCellType::Data,
+            indent_level: 0,
+            is_collapsed: false,
+            is_expandable: false,
+            number_format: None,
+            row_span: 1,
+            col_span: 1,
+            is_bold: false,
+            background_style: BackgroundStyle::Normal,
+            group_path: Vec::new(),
+            value_field_index: None,
+            filter_field_index: None,
+        }
+    }
+
+    /// Creates a data cell from an already-boxed [`PivotCellValue`]. Used by
+    /// calculated fields, whose result may be a number, text, boolean, or error.
+    pub fn data_value(value: PivotCellValue) -> Self {
+        PivotViewCell {
+            value,
             formatted_value: String::new(), // formatted on-demand by the frontend
             cell_type: PivotCellType::Data,
             indent_level: 0,

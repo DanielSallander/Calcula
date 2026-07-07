@@ -547,7 +547,7 @@ const lexerErrorTests: [string, string, number][] = [
   ['unterminated string', '"hello', 1],
   ['unterminated bracket', '[Total', 1],
   ['unknown character @', '@', 1],
-  ['unknown character &', '&', 1],
+  // '&' is now the concat operator (no longer an error).
   ['unknown character ~', '~', 1],
 ];
 

@@ -7,7 +7,7 @@ import { loader } from '@monaco-editor/react';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import type { SourceField } from '../../_shared/components/types';
 import type { BiPivotModelInfo } from './types';
-import { AGGREGATION_NAMES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES, VISUAL_CALC_FUNCTIONS, VISUAL_CALC_RESET_OPTIONS } from '../dsl/tokens';
+import { AGGREGATION_NAMES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES, TRANSFORM_FUNCTIONS, VISUAL_CALC_FUNCTIONS, VISUAL_CALC_RESET_OPTIONS } from '../dsl/tokens';
 
 // Monaco worker setup (local, no CDN)
 self.MonacoEnvironment = {
@@ -181,11 +181,13 @@ export function registerPivotDslLanguage(): void {
           [/\b(ASC|DESC)\b/i, 'keyword.sort'],
           [/\b(Sum|Count|Average|Min|Max|CountNumbers|StdDev|StdDevP|Var|VarP|Product)\s*(?=\()/i, 'type.identifier'],
           [/\b(RunningSum|MovingAverage|Previous|Next|First|Last|Parent|GrandTotal|Children|Leaves|Range|IsAtLevel|Lookup|LookupWithTotals|Collapse|CollapseAll|Expand|ExpandAll)\s*(?=\()/i, 'type.identifier'],
+          [/\b(IF|SWITCH|AND|OR|NOT|ABS|ROUND|MIN|MAX|CEILING|FLOOR|SQRT|MOD|INT|SIGN|POWER|CONCAT|CONCATENATE|LEFT|RIGHT|MID|LEN|UPPER|LOWER|TRIM|TEXT)\s*(?=\()/i, 'type.identifier'],
           [/\b(HIGHESTPARENT|LOWESTPARENT)\b/i, 'keyword.modifier'],
           [/\b[a-zA-Z][\w]*(-[a-zA-Z][\w]*)+\b/, 'variable.predefined'],
           [/[A-Za-z_]\w*\.[A-Za-z_]\w*/, 'variable.name'],
           [/[A-Za-z_]\w*/, 'identifier'],
-          [/[=,:()+\-*/^]/, 'delimiter'],
+          [/(>=|<=|<>|>|<|=|&)/, 'operator'],
+          [/[,:()+\-*/^]/, 'delimiter'],
         ],
       },
     });
@@ -337,6 +339,19 @@ export function registerPivotDslLanguage(): void {
           if (currentBiModel) {
             addMeasureSuggestions(suggestions, range);
           }
+          // Transformation functions (IF/SWITCH/math/text) — post-aggregation.
+          for (const [fn, desc] of TRANSFORM_FUNCTIONS) {
+            const upperName = fn.toUpperCase();
+            suggestions.push({
+              label: { label: `${upperName}()`, description: 'Transform' },
+              kind: monaco.languages.CompletionItemKind.Function,
+              insertText: `${upperName}($0)`,
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              detail: desc,
+              sortText: `00_${fn}`,
+              range,
+            });
+          }
           // Visual calculation functions
           for (const [fn, desc] of VISUAL_CALC_FUNCTIONS) {
             const upperName = fn.toUpperCase();
@@ -346,7 +361,7 @@ export function registerPivotDslLanguage(): void {
               insertText: `${upperName}($0)`,
               insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
               detail: desc,
-              sortText: `00_${fn}`,
+              sortText: `01_${fn}`,
               range,
             });
           }
@@ -357,7 +372,7 @@ export function registerPivotDslLanguage(): void {
               kind: monaco.languages.CompletionItemKind.EnumMember,
               insertText: opt.label,
               detail: opt.description,
-              sortText: `01_${opt.label}`,
+              sortText: `02_${opt.label}`,
               range,
             });
           }

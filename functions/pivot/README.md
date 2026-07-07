@@ -1,6 +1,33 @@
-# Pivot Visual Calculation Functions
+# Pivot CALC Functions
 
-Visual calculation functions operate on the pivot table's visual axis, enabling calculations that reference other rows, parent/child hierarchy levels, and positional data. They are used inside `CALC` expressions in the Pivot Design view.
+Functions used inside `CALC` expressions in the Pivot Design view fall into two
+groups: **transformation functions** (conditional / math / text, evaluated
+post-aggregation, context-free) and **visual calculation functions** (which
+reference other rows, parent/child hierarchy levels, and positional data on the
+pivot's visual axis).
+
+## Transformation Functions
+
+Conditional logic, comparisons, scalar math, and text handling on top of
+aggregated values. `IF`/`SWITCH` can return text labels and booleans, not just
+numbers.
+
+| Function | Category | Syntax | Description |
+|----------|----------|--------|-------------|
+| IF | Conditional | `IF(cond, then, [else])` | Branch on a condition |
+| SWITCH | Conditional | `SWITCH(expr, v1, r1, …, [default])` | Match a value to a result |
+| AND / OR / NOT | Boolean | `AND(a, b, …)` | Boolean combinators |
+| ABS / ROUND / MIN / MAX | Math | `ROUND(x, digits)` | Scalar math |
+| CEILING / FLOOR / SQRT / MOD / INT / SIGN / POWER | Math | `MOD(x, y)` | Scalar math |
+| CONCAT / LEFT / RIGHT / MID / LEN | Text | `CONCAT(a, b, …)` | Build / slice text |
+| UPPER / LOWER / TRIM / TEXT | Text | `TEXT(value, format)` | Transform text |
+
+Comparison (`>`, `<`, `>=`, `<=`, `=`, `<>`) and concatenation (`&`) operators are
+also available. See: [Transformation Functions](transform-functions.md).
+
+## Visual Calculation Functions
+
+Visual calculation functions operate on the pivot table's visual axis, enabling calculations that reference other rows, parent/child hierarchy levels, and positional data.
 
 ## Quick Reference
 

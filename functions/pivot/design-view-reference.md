@@ -160,7 +160,10 @@ SAVE AS "Quarterly Review"
 
 ## Calculated Field Expressions
 
-Calculated fields support arithmetic and visual calculation functions.
+Calculated fields support arithmetic, transformation functions (conditional /
+math / text), and visual calculation functions. Expressions are evaluated
+**after aggregation** — a field reference resolves to the aggregated value for
+the current cell.
 
 ### Arithmetic
 
@@ -170,13 +173,76 @@ CALC Margin = ([Revenue] - [Cost]) / [Revenue]
 CALC Adjusted = [Sales] * 1.1 + 500
 ```
 
-Operators: `+`, `-`, `*`, `/`, parentheses, unary negation
+Operators: `+`, `-`, `*`, `/`, parentheses, unary negation. Division by zero
+yields `#DIV/0!`.
 
 ### Field References
 
 - Bracket notation: `[TotalSales]` (BI measures)
 - Bare names: `Revenue`, `Cost` (grid pivot fields)
 - Quoted names: `'Total Sales'` (names with spaces)
+
+### Transformation Functions
+
+Transformation functions add conditional logic, comparisons, and text handling
+on top of aggregated values. Unlike visual-calc functions they need no pivot
+context, and — importantly — **`IF`/`SWITCH` can return text labels or booleans**,
+not just numbers.
+
+**Comparison & boolean operators**
+
+`>`, `<`, `>=`, `<=`, `=`, `<>` compare two values and yield a boolean. Combine
+them with `AND(...)`, `OR(...)`, `NOT(...)`:
+
+```
+CALC Big     = [Sales] > 1000
+CALC InBand  = AND([Sales] > 100, [Sales] < 1000)
+```
+
+**Conditional**
+
+| Function | Syntax | Description |
+|----------|--------|-------------|
+| IF | `IF(condition, then, [else])` | Returns `then` when the condition is true, else `else` (or blank) |
+| SWITCH | `SWITCH(expr, v1, r1, …, [default])` | Matches `expr` to the first `vi` and returns `ri`; a trailing odd argument is the default |
+
+```
+CALC Rating = IF([Sales] > 1000, "High", "Low")
+CALC Tier   = SWITCH([Region], "W", 1, "E", 2, 0)
+CALC Bonus  = IF([Margin] >= 0.3, [Sales] * 0.1, 0)
+```
+
+**Scalar math**
+
+`ABS(x)`, `ROUND(x, digits)`, `MIN(a, …)`, `MAX(a, …)`, `CEILING(x, [significance])`,
+`FLOOR(x, [significance])`, `SQRT(x)`, `MOD(x, divisor)`, `INT(x)`, `SIGN(x)`,
+`POWER(base, exp)`.
+
+```
+CALC Rounded = ROUND([Margin] * 100, 1)
+CALC Capped  = MIN([Sales], 10000)
+```
+
+**Text**
+
+`CONCAT(a, …)` (or the `&` operator), `LEFT(text, [n])`, `RIGHT(text, [n])`,
+`MID(text, start, count)`, `LEN(text)`, `UPPER(text)`, `LOWER(text)`,
+`TRIM(text)`, `TEXT(value, format)`.
+
+```
+CALC Label = [Class] & " — " & [Style]
+CALC Code  = UPPER(LEFT([Product], 3))
+CALC Pct   = TEXT([Margin], "0.0%")
+```
+
+**Type coercion & errors** — booleans coerce to `1`/`0` in arithmetic; blanks
+count as `0`; comparisons are numeric when both sides are numeric, otherwise
+case-insensitive text. Runtime problems surface as error values in the cell
+(`#DIV/0!`, `#VALUE!`, `#NUM!`). `IF` only evaluates the branch it takes, so an
+error in the untaken branch is not raised.
+
+See the [Transformation Functions reference](transform-functions.md) for full
+details.
 
 ### Visual Calculation Functions
 
