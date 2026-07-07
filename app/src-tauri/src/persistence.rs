@@ -1758,6 +1758,22 @@ pub fn open_file(
     *state.object_scripts.lock().unwrap() = workbook.object_scripts.clone();
     *state.extension_data.lock().unwrap() = workbook.extension_data.clone();
 
+    // Restore grid reports from extension_data (their cells reload as ordinary
+    // grid content; re-register each report's protected region from its bounds).
+    {
+        let reports: Vec<crate::report::SavedReport> = state
+            .extension_data
+            .lock()
+            .unwrap()
+            .get(crate::report::REPORTS_EXT_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        for r in &reports {
+            crate::report::reregister_report_region(&state, r);
+        }
+        *state.report_definitions.lock().unwrap() = reports;
+    }
+
     // Restore named ranges (defined names). The save builders populate
     // workbook.named_ranges and the format now serializes them, but without this
     // the parsed names never reach runtime state — so defined names silently
@@ -2234,6 +2250,7 @@ pub fn new_file(
     state.object_scripts.lock().unwrap().clear();
     state.extension_data.lock().unwrap().clear();
     state.pivot_layouts.lock().unwrap().clear();
+    state.report_definitions.lock().unwrap().clear();
 
     // Clear subscription metadata
     *state.subscriptions.lock().map_err(|e| e.to_string())? =

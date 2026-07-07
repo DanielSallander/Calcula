@@ -10,8 +10,6 @@
 //! Deferred to follow-up slices: .cala persistence, undo, .calp distribution,
 //! interactive filters, true pagination.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::State;
 
 use engine::CellValue;
@@ -29,10 +27,16 @@ pub type ReportId = identity::EntityId;
 /// Safety cap on materialized rows so a runaway query can't fill a sheet.
 const MAX_REPORT_ROWS: usize = 100_000;
 
-/// A report definition. (Slice 1 keeps it in memory; persistence is a follow-up.)
+/// Extension-data key under which reports persist (the sanctioned, feature-neutral
+/// workbook persistence channel — no new typed .cala field needed).
+pub const REPORTS_EXT_KEY: &str = "calcula.reports";
+
+/// A saved grid report. Lives in `AppState.report_definitions` (in-memory) and is
+/// mirrored into `extension_data["calcula.reports"]` so it persists with the
+/// workbook. The materialized cells persist as ordinary grid content.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReportDefinition {
+pub struct SavedReport {
     pub id: ReportId,
     pub name: String,
     /// The pivot-layout DSL text (kept for editing + refresh recompile on the frontend).
@@ -41,12 +45,40 @@ pub struct ReportDefinition {
     pub sheet_index: usize,
     pub anchor_row: u32,
     pub anchor_col: u32,
+    /// Last materialized region bounds (inclusive) — lets the protected region be
+    /// re-registered on load without re-running the query.
+    pub end_row: u32,
+    pub end_col: u32,
 }
 
-/// In-memory registry of reports (managed Tauri state, parallel to PivotState).
-#[derive(Default)]
-pub struct ReportState {
-    pub reports: Mutex<HashMap<ReportId, ReportDefinition>>,
+/// Mirror the in-memory report definitions into extension_data so they persist
+/// with the workbook (extension_data is saved + loaded automatically).
+fn sync_reports_to_extension_data(state: &AppState) {
+    let defs = state.report_definitions.lock().unwrap();
+    if let Ok(v) = serde_json::to_value(&*defs) {
+        state
+            .extension_data
+            .lock()
+            .unwrap()
+            .insert(REPORTS_EXT_KEY.to_string(), v);
+    }
+}
+
+/// Re-register a report's protected region from its saved bounds. Called on load
+/// (the cells themselves are restored as ordinary grid content).
+pub fn reregister_report_region(state: &AppState, r: &SavedReport) {
+    let mut regions = state.protected_regions.lock().unwrap();
+    regions.retain(|reg| !(reg.region_type == "report" && reg.owner_id == r.id));
+    regions.push(ProtectedRegion {
+        id: format!("report-{}", r.id),
+        region_type: "report".to_string(),
+        owner_id: r.id,
+        sheet_index: r.sheet_index,
+        start_row: r.anchor_row,
+        start_col: r.anchor_col,
+        end_row: r.end_row,
+        end_col: r.end_col,
+    });
 }
 
 // ============================================================================
@@ -264,13 +296,12 @@ fn materialize(
 pub async fn create_report(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
-    report_state: State<'_, ReportState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: CreateReportRequest,
 ) -> Result<ReportResult, String> {
-    let (def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
+    let (_def, _cache, view) = compute_design_query_view(&bi_state, &request.query).await?;
     let visible_rows = view.rows.iter().filter(|r| r.visible).count();
     if visible_rows > MAX_REPORT_ROWS {
         return Err(format!(
@@ -278,7 +309,6 @@ pub async fn create_report(
             visible_rows, MAX_REPORT_ROWS
         ));
     }
-    let _ = def; // definition is transient; the report re-runs its DSL on refresh
 
     let report_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
     let dest = (request.anchor_row, request.anchor_col);
@@ -293,18 +323,20 @@ pub async fn create_report(
         &view,
     );
 
-    report_state.reports.lock().unwrap().insert(
-        report_id,
-        ReportDefinition {
-            id: report_id,
-            name: request.name,
-            dsl_text: request.dsl_text,
-            connection_id: request.query.connection_id,
-            sheet_index: request.sheet_index,
-            anchor_row: request.anchor_row,
-            anchor_col: request.anchor_col,
-        },
-    );
+    let end_row = request.anchor_row + (visible_rows.max(1) as u32) - 1;
+    let end_col = request.anchor_col + (view.col_count.max(1) as u32) - 1;
+    state.report_definitions.lock().unwrap().push(SavedReport {
+        id: report_id,
+        name: request.name,
+        dsl_text: request.dsl_text,
+        connection_id: request.query.connection_id,
+        sheet_index: request.sheet_index,
+        anchor_row: request.anchor_row,
+        anchor_col: request.anchor_col,
+        end_row,
+        end_col,
+    });
+    sync_reports_to_extension_data(&state);
 
     Ok(ReportResult {
         report_id,
@@ -319,16 +351,16 @@ pub async fn create_report(
 pub async fn refresh_report(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
-    report_state: State<'_, ReportState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     request: RefreshReportRequest,
 ) -> Result<ReportResult, String> {
     let (sheet_idx, dest) = {
-        let reports = report_state.reports.lock().unwrap();
-        let def = reports
-            .get(&request.report_id)
+        let defs = state.report_definitions.lock().unwrap();
+        let def = defs
+            .iter()
+            .find(|d| d.id == request.report_id)
             .ok_or_else(|| format!("Report {} not found", request.report_id))?;
         (def.sheet_index, (def.anchor_row, def.anchor_col))
     };
@@ -353,6 +385,17 @@ pub async fn refresh_report(
         &view,
     );
 
+    let end_row = dest.0 + (visible_rows.max(1) as u32) - 1;
+    let end_col = dest.1 + (view.col_count.max(1) as u32) - 1;
+    {
+        let mut defs = state.report_definitions.lock().unwrap();
+        if let Some(d) = defs.iter_mut().find(|d| d.id == request.report_id) {
+            d.end_row = end_row;
+            d.end_col = end_col;
+        }
+    }
+    sync_reports_to_extension_data(&state);
+
     Ok(ReportResult {
         report_id: request.report_id,
         row_count: visible_rows as u32,
@@ -365,20 +408,20 @@ pub async fn refresh_report(
 #[tauri::command]
 pub fn delete_report(
     state: State<'_, AppState>,
-    report_state: State<'_, ReportState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     report_id: ReportId,
 ) -> Result<(), String> {
     clear_report_region(&state, report_id);
-    report_state.reports.lock().unwrap().remove(&report_id);
+    state.report_definitions.lock().unwrap().retain(|d| d.id != report_id);
+    sync_reports_to_extension_data(&state);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&pane_control_state, &ribbon_filter_state)));
     Ok(())
 }
 
 /// List all report definitions.
 #[tauri::command]
-pub fn list_reports(report_state: State<'_, ReportState>) -> Result<Vec<ReportDefinition>, String> {
-    Ok(report_state.reports.lock().unwrap().values().cloned().collect())
+pub fn list_reports(state: State<'_, AppState>) -> Result<Vec<SavedReport>, String> {
+    Ok(state.report_definitions.lock().unwrap().clone())
 }

@@ -326,6 +326,9 @@ pub struct AppState {
     pub reference_style: Mutex<String>,
     /// Saved pivot layout configurations (persisted in .cala)
     pub pivot_layouts: Mutex<Vec<::persistence::SavedPivotLayout>>,
+    /// Grid report definitions (design-query materialized into cells). Persisted
+    /// via extension_data["calcula.reports"]; see src/report.rs.
+    pub report_definitions: Mutex<Vec<crate::report::SavedReport>>,
     /// Object scripts for scriptable objects (primitive + component scripts)
     pub object_scripts: Mutex<Vec<::persistence::SavedObjectScript>>,
     /// Generic per-extension persisted state (extension id -> arbitrary JSON).
@@ -479,6 +482,7 @@ pub fn create_app_state() -> AppState {
         scroll_areas: Mutex::new(vec![None]),
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: Mutex::new(Vec::new()),
+        report_definitions: Mutex::new(Vec::new()),
         object_scripts: Mutex::new(Vec::new()),
         extension_data: Mutex::new(std::collections::HashMap::new()),
         sheet_ids: Mutex::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
@@ -3777,7 +3781,6 @@ pub fn run() {
         .manage(slicer::SlicerState::new())
         .manage(ribbon_filter::RibbonFilterState::new())
         .manage(pane_control::PaneControlState::new())
-        .manage(report::ReportState::default())
         .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
         .manage(managed_policy::ManagedAppearanceState(std::sync::Mutex::new(appearance_policy)))
