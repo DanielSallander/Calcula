@@ -8,7 +8,13 @@ import type {
   ZoneField,
   AggregationType,
   SortOrder,
-  MeasureField,
+  // Pivot-layout / BI-model types now live in _shared (with the DSL that uses
+  // them). Imported here for internal use; re-exported below for continuity.
+  ShowValuesAs,
+  LayoutConfig,
+  CalculatedFieldDef,
+  ValueColumnRefDef,
+  AppliedCalcGroup,
 } from '../../_shared/components/types';
 
 // Re-export shared types used by both Pivot and Tablix
@@ -29,31 +35,29 @@ export {
   getValueFieldDisplayName,
 } from '../../_shared/components/types';
 
+// Re-export the pivot-layout / BI-model types that moved to _shared alongside
+// the pivot-layout DSL, so existing `../components/types` importers keep working.
+export type {
+  ShowValuesAs,
+  ReportLayout,
+  ValuesPosition,
+  LayoutConfig,
+  CalculatedFieldDef,
+  ValueColumnRefDef,
+  BiPivotModelInfo,
+  BiModelTable,
+  BiModelColumn,
+  BiCalcGroup,
+  BiCalcGroupItem,
+  AppliedCalcGroup,
+  BiHierarchyMeta,
+  BiHierarchyLevel,
+  BiRaggedBehavior,
+} from '../../_shared/components/types';
+
 // --- Pivot-specific types below ---
 
 export type PivotId = string;
-
-// Show values as matching ShowValuesAs enum
-export type ShowValuesAs =
-  | 'normal'
-  | 'percent_of_total'
-  | 'percent_of_row'
-  | 'percent_of_column'
-  | 'percent_of_parent_row'
-  | 'percent_of_parent_column'
-  | 'difference'
-  | 'percent_difference'
-  | 'running_total'
-  | 'percent_of_running_total'
-  | 'rank_ascending'
-  | 'rank_descending'
-  | 'index';
-
-// Report layout matching ReportLayout enum
-export type ReportLayout = 'compact' | 'outline' | 'tabular';
-
-// Values position matching ValuesPosition enum
-export type ValuesPosition = 'columns' | 'rows';
 
 // Field configuration matching PivotFieldConfig in pivot_commands.rs
 export interface PivotFieldConfig {
@@ -74,32 +78,6 @@ export interface ValueFieldConfig {
   showValuesAs?: ShowValuesAs;
   customName?: string;
 }
-
-// Layout configuration matching LayoutConfig in pivot_commands.rs
-export interface LayoutConfig {
-  showRowGrandTotals?: boolean;
-  showColumnGrandTotals?: boolean;
-  reportLayout?: ReportLayout;
-  repeatRowLabels?: boolean;
-  showEmptyRows?: boolean;
-  showEmptyCols?: boolean;
-  valuesPosition?: ValuesPosition;
-  autoFitColumnWidths?: boolean;
-  /** PivotTable style theme ID (frontend-only for now) */
-  styleId?: string;
-}
-
-/** Inline calculated field definition. */
-export interface CalculatedFieldDef {
-  name: string;
-  formula: string;
-  numberFormat?: string;
-}
-
-/** Reference to a value or calculated field in the unified column ordering. */
-export type ValueColumnRefDef =
-  | { type: 'value'; index: number }
-  | { type: 'calculated'; index: number };
 
 // Update request matching UpdatePivotFieldsRequest in pivot_commands.rs
 export interface UpdatePivotFieldsRequest {
@@ -125,78 +103,6 @@ export interface PivotEditorState {
 }
 
 // --- BI Pivot Types ---
-
-/** BI model info sent from backend for the hierarchical field list */
-export interface BiPivotModelInfo {
-  tables: BiModelTable[];
-  measures: MeasureField[];
-  /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
-  lookupColumns?: string[];
-  /** The connection ID this pivot is associated with (BI pivots only) */
-  connectionId?: string;
-  /** Hierarchies defined in the BI model (drill-down paths). */
-  hierarchies?: BiHierarchyMeta[];
-  /** Calculation groups defined in the BI model. */
-  calculationGroups?: BiCalcGroup[];
-  /** The calculation group currently applied to this pivot (None = none). */
-  appliedCalculationGroup?: AppliedCalcGroup;
-  /** ISO-8601 time this pivot's data was last fetched ("Data as of …"). */
-  dataAsOf?: string;
-}
-
-/** A calculation group + its items (read-only metadata). */
-export interface BiCalcGroup {
-  name: string;
-  items: BiCalcGroupItem[];
-}
-
-export interface BiCalcGroupItem {
-  name: string;
-  source?: string;
-}
-
-/** A calculation group applied to a pivot: group name + selected items
- *  (empty = all items, declaration order). */
-export interface AppliedCalcGroup {
-  group: string;
-  items: string[];
-}
-
-/** Table metadata from a BI model */
-export interface BiModelTable {
-  name: string;
-  columns: BiModelColumn[];
-}
-
-/** Column metadata from a BI model table */
-export interface BiModelColumn {
-  name: string;
-  dataType: string;
-  isNumeric: boolean;
-  /** Custom lookup resolution expression (e.g., "MAX(category_name)"). */
-  lookupResolution?: string;
-  /** Sort-by column name: sort this column's pivot items by another column's values.
-   *  Example: monthName sorted by monthNumber for calendar ordering. */
-  sortByColumn?: string;
-}
-
-/** Ragged hierarchy behavior — how to handle missing intermediate levels. */
-export type BiRaggedBehavior = 'ShowBlanks' | 'HideMembers' | 'RepeatParent' | 'ShowAsLeaf';
-
-/** A single level within a hierarchy. */
-export interface BiHierarchyLevel {
-  column: string;
-  displayName?: string;
-  optional?: boolean;
-}
-
-/** A hierarchy defined on a BI model table — represents a drill-down path. */
-export interface BiHierarchyMeta {
-  name: string;
-  table: string;
-  levels: BiHierarchyLevel[];
-  raggedBehavior?: BiRaggedBehavior;
-}
 
 /** Reference to a hierarchy placed on a pivot axis (sent to backend). */
 export interface BiHierarchyFieldRef {

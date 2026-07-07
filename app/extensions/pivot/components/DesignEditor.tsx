@@ -5,11 +5,11 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import Editor, { type OnMount, type OnChange } from '@monaco-editor/react';
 import type * as monaco from 'monaco-editor';
-import { processDsl, serialize, type CompileContext } from '../dsl';
-import { LANGUAGE_ID, registerPivotDslLanguage, setDslEditorContext } from './pivotDslLanguage';
+import { processDsl, serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
+import { LANGUAGE_ID, registerPivotDslLanguage, setDslEditorContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from './types';
-import type { DslError } from '../dsl/errors';
+import type { DslError } from '../../_shared/dsl/pivotLayout/errors';
 
 interface DesignEditorProps {
   sourceFields: SourceField[];

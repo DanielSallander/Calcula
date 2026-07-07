@@ -3988,6 +3988,7 @@ pub fn run() {
             pivot::get_pivot_drill_behavior,
             pivot::create_pivot_from_bi_model,
             pivot::update_bi_pivot_fields,
+            pivot::headless::run_design_query,
             pivot::set_bi_lookup_columns,
             pivot::show_report_filter_pages,
             pivot::add_calculated_field,

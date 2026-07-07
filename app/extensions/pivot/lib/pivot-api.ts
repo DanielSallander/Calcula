@@ -1106,8 +1106,8 @@ export async function showReportFilterPages(
 // Pivot DSL API
 // ============================================================================
 
-import { processDsl, serialize, type CompileContext, type CompileResult } from '../dsl';
-import type { DslError } from '../dsl/errors';
+import { processDsl, serialize, type CompileContext, type CompileResult } from '../../_shared/dsl/pivotLayout';
+import type { DslError } from '../../_shared/dsl/pivotLayout/errors';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 
 /** Result from validating DSL text against a pivot's fields. */

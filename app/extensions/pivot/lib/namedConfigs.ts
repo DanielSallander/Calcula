@@ -2,7 +2,7 @@
 // PURPOSE: CRUD operations for named pivot layout configs with source binding.
 // CONTEXT: Stored in localStorage for now; future integration with .calp publish format.
 
-import { lex, parse } from '../dsl';
+import { lex, parse } from '../../_shared/dsl/pivotLayout';
 import type { SourceField, BiPivotModelInfo } from '../components/types';
 
 const STORAGE_KEY = 'calcula.pivot.namedConfigs';

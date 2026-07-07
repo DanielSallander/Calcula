@@ -4333,7 +4333,7 @@ pub fn get_pivot_drill_behavior(
 /// the item in `calc_item` (so the editor/refresh can collapse it back), and
 /// shows `Measure [Item]` as its `custom_name`. Indices are contiguous from
 /// `measure_start`, matching the cache value block.
-fn expand_bi_value_fields(
+pub(crate) fn expand_bi_value_fields(
     value_fields: &[BiValueFieldRef],
     item_names: &[String],
     measure_start: usize,
@@ -4497,7 +4497,7 @@ mod calc_group_expand_tests {
     }
 }
 
-fn extract_bi_model_metadata(
+pub(crate) fn extract_bi_model_metadata(
     engine: &bi_engine::Engine,
 ) -> (
     Vec<BiModelTableMeta>,
