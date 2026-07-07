@@ -22,17 +22,35 @@ const LANGUAGE_ID = 'pivot-layout-dsl';
 let languageRegistered = false;
 let completionDisposable: monaco.IDisposable | null = null;
 
+/**
+ * A named control/ribbon-filter that a DSL FILTERS clause can reference by
+ * `@Name` (e.g. `Category = @Region`). Supplied by the Reports editor only;
+ * the language module stays feature-neutral (no @api dependency).
+ */
+export interface DslControlHint {
+  name: string;
+  /** Short family label shown in the completion description (e.g. "filter"). */
+  kind?: string;
+  /** Current-value preview shown as completion detail. */
+  detail?: string;
+}
+
 /** Mutable refs for autocomplete context (updated when pivot data changes). */
 let currentSourceFields: SourceField[] = [];
 let currentBiModel: BiPivotModelInfo | undefined;
+let currentControlHints: DslControlHint[] = [];
 
-/** Update the field context used for autocomplete suggestions. */
+/** Update the field context used for autocomplete suggestions. `controlHints`
+ *  enables `@Name` completion (Reports @param binding); omit it (pivot/chart
+ *  editors) to clear it. */
 export function setDslEditorContext(
   sourceFields: SourceField[],
   biModel?: BiPivotModelInfo,
+  controlHints?: DslControlHint[],
 ): void {
   currentSourceFields = sourceFields;
   currentBiModel = biModel;
+  currentControlHints = controlHints ?? [];
 }
 
 /**
@@ -201,7 +219,7 @@ export function registerPivotDslLanguage(): void {
 
   // Register completion provider
   completionDisposable = monaco.languages.registerCompletionItemProvider(LANGUAGE_ID, {
-    triggerCharacters: [' ', ':', ',', '.', '(', '['],
+    triggerCharacters: [' ', ':', ',', '.', '(', '[', '@'],
     provideCompletionItems(model, position) {
       const lineText = model.getValueInRange({
         startLineNumber: position.lineNumber,
@@ -220,6 +238,24 @@ export function registerPivotDslLanguage(): void {
 
       const suggestions: monaco.languages.CompletionItem[] = [];
       const lineTrimmed = lineText.trim().toUpperCase();
+
+      // @Control param completion: a report's FILTERS line can bind a value to a
+      // Controls-pane control or ribbon filter by name (e.g. `Category = @Region`).
+      // Fires when the cursor follows an `@`. Only the Reports editor supplies
+      // control hints, so this is naturally inert in pivot/chart editors.
+      if (currentControlHints.length > 0 && /@\w*$/.test(lineText)) {
+        for (const hint of currentControlHints) {
+          suggestions.push({
+            label: { label: `@${hint.name}`, description: hint.kind ?? 'control' },
+            kind: monaco.languages.CompletionItemKind.Variable,
+            insertText: hint.name,
+            detail: hint.detail,
+            sortText: `00_${hint.name}`,
+            range,
+          });
+        }
+        return { suggestions };
+      }
 
       // Determine which clause the cursor is in.
       // Override to 'CALC' if the current line has an inline CALC expression

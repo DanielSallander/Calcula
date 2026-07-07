@@ -16,6 +16,23 @@ import { FilterPaneEvents } from "./filterPaneEvents";
 import { applyRibbonFilter, clearRibbonFilter } from "./filterPaneFilterBridge";
 import { cellEvents } from "@api/cellEvents";
 import { emitAppEvent, AppEvents } from "@api/events";
+import {
+  CONTROL_VALUE_CHANGED,
+  type ControlValue,
+  type ControlValueChangedDetail,
+} from "@api/controlValues";
+
+/** A ribbon filter's value under GET.CONTROLVALUE / @api/controlValues semantics
+ *  (mirrors the Rust snapshot builder): all selected -> "(All)", one -> Text,
+ *  several -> TextList. Owned here (the ribbon-filter store) and re-used by
+ *  controlsPaneStore's buildNamedControlList so the dependency stays one-way. */
+export function filterControlValue(selectedItems: string[] | null): ControlValue {
+  if (selectedItems === null) return { kind: "text", value: "(All)" };
+  if (selectedItems.length === 1) {
+    return { kind: "text", value: selectedItems[0] };
+  }
+  return { kind: "textList", value: selectedItems };
+}
 
 /** Fire-and-forget: re-evaluate GET.CONTROLVALUE formulas bound to `names`
  *  (ALL control names when omitted, e.g. after a rename) and apply the
@@ -198,6 +215,21 @@ export async function updateFilterSelectionAsync(
         detail: { filterId, selectedItems },
       }),
     );
+
+    // Complete the @api/controlValues facade for the ribbon-filter family: any
+    // consumer observing onControlValueChange (e.g. a grid report bound to this
+    // filter via @Name) reacts to the new selection, exactly as it would for a
+    // pane control. Non-transient — a ribbon selection is a committed change,
+    // never a mid-drag preview frame.
+    if (updatedFilter) {
+      const detail: ControlValueChangedDetail = {
+        id: updatedFilter.id,
+        name: updatedFilter.name,
+        value: filterControlValue(selectedItems),
+        transient: false,
+      };
+      window.dispatchEvent(new CustomEvent(CONTROL_VALUE_CHANGED, { detail }));
+    }
   } catch (err) {
     console.error("[FilterPane] Failed to update filter selection:", err);
   }

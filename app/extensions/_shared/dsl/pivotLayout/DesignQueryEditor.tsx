@@ -12,6 +12,7 @@ import {
   LANGUAGE_ID,
   registerPivotDslLanguage,
   setDslEditorContext,
+  type DslControlHint,
 } from "./pivotDslLanguage";
 import type { BiPivotModelInfo } from "../../components/types";
 
@@ -20,6 +21,9 @@ interface DesignQueryEditorProps {
   onChange: (value: string) => void;
   /** The BI model driving autocomplete (field + measure names). */
   biModel?: BiPivotModelInfo | null;
+  /** Named controls / ribbon filters for `@Name` completion (Reports @param
+   *  binding). Omit for editors that don't support @params (pivots, charts). */
+  controlHints?: DslControlHint[];
   /** Editor height (CSS). Defaults to 160px. */
   height?: string;
 }
@@ -28,6 +32,7 @@ export function DesignQueryEditor({
   value,
   onChange,
   biModel,
+  controlHints,
   height = "160px",
 }: DesignQueryEditorProps): React.ReactElement {
   useEffect(() => {
@@ -35,10 +40,10 @@ export function DesignQueryEditor({
   }, []);
 
   // The DSL editor context is module-global (shared with the pivot Design view);
-  // re-set it whenever the supplied model changes.
+  // re-set it whenever the supplied model or control hints change.
   useEffect(() => {
-    setDslEditorContext([], biModel ?? undefined);
-  }, [biModel]);
+    setDslEditorContext([], biModel ?? undefined, controlHints);
+  }, [biModel, controlHints]);
 
   const handleChange: OnChange = useCallback((v) => onChange(v ?? ""), [onChange]);
 

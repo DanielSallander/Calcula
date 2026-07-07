@@ -7,14 +7,30 @@ import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps, ConnectionInfo } from "@api";
 import { emitAppEvent, AppEvents } from "@api/events";
 import { DesignQueryEditor } from "../../_shared/dsl/pivotLayout/DesignQueryEditor";
+import type { DslControlHint } from "../../_shared/dsl/pivotLayout/pivotDslLanguage";
 import {
   compileDesignQuery,
   type DesignQueryRequest,
 } from "../../_shared/dsl/pivotLayout/designQuery";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
-import { getControlValue } from "@api/controlValues";
+import { getControlValue, listControlValues, type ControlValue } from "@api/controlValues";
 import { reportsBackend } from "../lib/reportsBackend";
 import { substituteControlParams } from "../lib/paramSubstitution";
+
+/** One-line preview of a control's current value, for the `@Name` completion. */
+function describeControlValue(v: ControlValue | undefined): string | undefined {
+  if (!v) return undefined;
+  switch (v.kind) {
+    case "text":
+      return v.value;
+    case "number":
+      return String(v.value);
+    case "boolean":
+      return v.value ? "true" : "false";
+    case "textList":
+      return v.value.join(", ");
+  }
+}
 
 const DSL_TEMPLATE =
   "# Report — ROWS become row groups, VALUES become measure columns.\n" +
@@ -54,6 +70,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
   const [dslText, setDslText] = useState(DSL_TEMPLATE);
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [biModel, setBiModel] = useState<BiPivotModelInfo | null>(null);
+  const [controlHints, setControlHints] = useState<DslControlHint[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -61,7 +78,8 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
   const anchorRow = dialogData.anchorRow ?? 0;
   const anchorCol = dialogData.anchorCol ?? 0;
 
-  // Load connections on open.
+  // Load connections + snapshot the named controls / ribbon filters on open
+  // (for @Name autocomplete — a report's FILTERS can bind to either family).
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
@@ -69,6 +87,13 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
       .invoke<ConnectionInfo[]>("bi_get_connections", {})
       .then((c) => setConnections(c ?? []))
       .catch(() => setConnections([]));
+    setControlHints(
+      listControlValues().map((c) => ({
+        name: c.name,
+        kind: c.source === "ribbonFilter" ? "filter" : c.controlType,
+        detail: describeControlValue(c.value),
+      })),
+    );
   }, [isOpen]);
 
   // Fetch the selected connection's model (for autocomplete + compile).
@@ -211,10 +236,17 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         </select>
 
         <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Design query</label>
-        <DesignQueryEditor value={dslText} onChange={setDslText} biModel={biModel} height="180px" />
+        <DesignQueryEditor
+          value={dslText}
+          onChange={setDslText}
+          biModel={biModel}
+          controlHints={controlHints}
+          height="180px"
+        />
         <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
-          Materializes at <strong>{destination}</strong>. Bind a Controls-pane value in FILTERS with{" "}
-          <code>@ControlName</code> (the report re-runs when it changes). Ctrl+Space suggests fields.
+          Materializes at <strong>{destination}</strong>. Bind a Controls-pane value or ribbon
+          filter in FILTERS with <code>@Name</code> (type <code>@</code> for suggestions; the report
+          re-runs when it changes). Ctrl+Space suggests fields.
         </div>
 
         {error && (

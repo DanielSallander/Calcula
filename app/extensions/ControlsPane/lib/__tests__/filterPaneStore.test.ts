@@ -49,6 +49,8 @@ vi.mock("../filterPaneEvents", () => ({
   },
 }));
 
+import { CONTROL_VALUE_CHANGED } from "@api/controlValues";
+import type { ControlValueChangedDetail } from "@api/controlValues";
 import type { RibbonFilter } from "../filterPaneTypes";
 import {
   getAllFilters,
@@ -321,6 +323,66 @@ describe("updateFilterSelectionAsync", () => {
 
     const filter = getFilterById("f-1");
     expect(filter?.selectedItems).toEqual(["X"]);
+  });
+
+  // --- @api/controlValues facade completion (ribbon-filter targeting) --------
+  // A ribbon-filter selection change must fire the app-wide CONTROL_VALUE_CHANGED
+  // so onControlValueChange consumers (e.g. a grid report bound via @Name) react
+  // the same way they do for a pane control.
+
+  /** Pull the CONTROL_VALUE_CHANGED detail out of a dispatchEvent spy. */
+  function controlValueDetail(
+    spy: ReturnType<typeof vi.spyOn>,
+  ): ControlValueChangedDetail | undefined {
+    for (const call of spy.mock.calls) {
+      const ev = call[0] as CustomEvent<ControlValueChangedDetail>;
+      if (ev?.type === CONTROL_VALUE_CHANGED) return ev.detail;
+    }
+    return undefined;
+  }
+
+  it("fires CONTROL_VALUE_CHANGED with a single-select value (text)", async () => {
+    mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
+    mockApplyRibbonFilter.mockResolvedValue(undefined);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    await updateFilterSelectionAsync("f-1", ["X"]);
+
+    expect(controlValueDetail(dispatchSpy)).toEqual({
+      id: "f-1",
+      name: "Test Filter",
+      value: { kind: "text", value: "X" },
+      transient: false,
+    });
+    dispatchSpy.mockRestore();
+  });
+
+  it("fires CONTROL_VALUE_CHANGED with a multi-select value (textList)", async () => {
+    mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
+    mockApplyRibbonFilter.mockResolvedValue(undefined);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    await updateFilterSelectionAsync("f-1", ["Apple", "Banana"]);
+
+    expect(controlValueDetail(dispatchSpy)?.value).toEqual({
+      kind: "textList",
+      value: ["Apple", "Banana"],
+    });
+    dispatchSpy.mockRestore();
+  });
+
+  it("fires CONTROL_VALUE_CHANGED with (All) when the selection is cleared", async () => {
+    mockUpdateRibbonFilterSelection.mockResolvedValue(undefined);
+    mockClearRibbonFilter.mockResolvedValue(undefined);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    await updateFilterSelectionAsync("f-1", null);
+
+    expect(controlValueDetail(dispatchSpy)?.value).toEqual({
+      kind: "text",
+      value: "(All)",
+    });
+    dispatchSpy.mockRestore();
   });
 });
 

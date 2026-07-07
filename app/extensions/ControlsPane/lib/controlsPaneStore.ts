@@ -21,7 +21,7 @@ import type {
 import * as api from "./controlsPaneApi";
 import { recalcControlDependents } from "./filterPaneApi";
 import { ControlsPaneEvents } from "./controlsPaneEvents";
-import { getAllFilters } from "./filterPaneStore";
+import { getAllFilters, filterControlValue } from "./filterPaneStore";
 import {
   CONTROL_VALUE_CHANGED,
   type ControlValueChangedDetail,
@@ -243,16 +243,6 @@ export function getPaneItems(): PaneItem[] {
 // ============================================================================
 // @api/controlValues provider mapping
 // ============================================================================
-
-/** A ribbon filter's value under GET.CONTROLVALUE semantics (mirrors the Rust
- *  snapshot builder): all selected -> "(All)", one -> Text, several -> TextList. */
-function filterControlValue(selectedItems: string[] | null): ControlValue {
-  if (selectedItems === null) return { kind: "text", value: "(All)" };
-  if (selectedItems.length === 1) {
-    return { kind: "text", value: selectedItems[0] };
-  }
-  return { kind: "textList", value: selectedItems };
-}
 
 /** Enumerate every named control the pane knows about, for the
  *  @api/controlValues provider. Pane controls first, then ribbon filters —

@@ -34,11 +34,20 @@ vi.mock("../filterPaneApi", () => ({
     mockRecalcControlDependents(...args),
 }));
 
-// The store merges ribbon filters via filterPaneStore.getAllFilters only.
+// The store merges ribbon filters via filterPaneStore.getAllFilters and derives
+// each filter's control value via filterPaneStore.filterControlValue.
 const mockGetAllFilters = vi.fn((): RibbonFilter[] => []);
 
 vi.mock("../filterPaneStore", () => ({
   getAllFilters: (...args: unknown[]) => mockGetAllFilters(...args),
+  // Real mapping (mirrors the Rust snapshot builder) so buildNamedControlList
+  // produces the expected (All)/text/textList values.
+  filterControlValue: (selectedItems: string[] | null) =>
+    selectedItems === null
+      ? { kind: "text", value: "(All)" }
+      : selectedItems.length === 1
+        ? { kind: "text", value: selectedItems[0] }
+        : { kind: "textList", value: selectedItems },
 }));
 
 vi.mock("../controlsPaneEvents", () => ({
