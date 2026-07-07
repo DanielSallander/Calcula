@@ -776,6 +776,97 @@ pub struct ModelTableInfo {
     /// Whether this connection has a source binding for the table.
     pub bound: bool,
     pub columns: Vec<ModelColumnInfo>,
+    /// InMemory cache refresh strategies (empty = never auto-refresh; the cache
+    /// is populated on first query and reused).
+    pub refresh_strategies: Vec<RefreshStrategyDto>,
+    /// Incremental-refresh filter (re-fetch only volatile rows), or null.
+    pub incremental_refresh: Option<String>,
+}
+
+/// One InMemory refresh strategy, flattened into a `type`-discriminated struct
+/// (the engine `RefreshStrategy` is an enum). Only the fields relevant to
+/// `type` are populated.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshStrategyDto {
+    /// "interval" | "containsCurrentDate" | "dailyAfter" | "sourceQuery"
+    pub r#type: String,
+    #[serde(default)]
+    pub secs: Option<u64>,
+    #[serde(default)]
+    pub column: Option<String>,
+    #[serde(default)]
+    pub hour: Option<u8>,
+    #[serde(default)]
+    pub minute: Option<u8>,
+    #[serde(default)]
+    pub sql: Option<String>,
+    #[serde(default)]
+    pub source_table: Option<String>,
+}
+
+fn refresh_strategy_from_dto(d: &RefreshStrategyDto) -> Result<bi_engine::RefreshStrategy, String> {
+    Ok(match d.r#type.as_str() {
+        "interval" => bi_engine::RefreshStrategy::Interval {
+            secs: d.secs.ok_or("An interval strategy needs a number of seconds")?,
+        },
+        "containsCurrentDate" => bi_engine::RefreshStrategy::ContainsCurrentDate {
+            column: d
+                .column
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .ok_or("A contains-current-date strategy needs a date column")?,
+        },
+        "dailyAfter" => bi_engine::RefreshStrategy::DailyAfter {
+            hour: d.hour.ok_or("A daily-after strategy needs an hour")?,
+            minute: d.minute.ok_or("A daily-after strategy needs a minute")?,
+        },
+        "sourceQuery" => bi_engine::RefreshStrategy::SourceQuery {
+            sql: d
+                .sql
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("A source-query strategy needs a SQL query")?,
+            source_table: d
+                .source_table
+                .clone()
+                .filter(|s| !s.trim().is_empty()),
+        },
+        other => return Err(format!("Unknown refresh strategy '{}'", other)),
+    })
+}
+
+fn refresh_strategy_to_dto(s: &bi_engine::RefreshStrategy) -> RefreshStrategyDto {
+    let mut dto = RefreshStrategyDto {
+        r#type: String::new(),
+        secs: None,
+        column: None,
+        hour: None,
+        minute: None,
+        sql: None,
+        source_table: None,
+    };
+    match s {
+        bi_engine::RefreshStrategy::Interval { secs } => {
+            dto.r#type = "interval".to_string();
+            dto.secs = Some(*secs);
+        }
+        bi_engine::RefreshStrategy::ContainsCurrentDate { column } => {
+            dto.r#type = "containsCurrentDate".to_string();
+            dto.column = Some(column.clone());
+        }
+        bi_engine::RefreshStrategy::DailyAfter { hour, minute } => {
+            dto.r#type = "dailyAfter".to_string();
+            dto.hour = Some(*hour);
+            dto.minute = Some(*minute);
+        }
+        bi_engine::RefreshStrategy::SourceQuery { sql, source_table } => {
+            dto.r#type = "sourceQuery".to_string();
+            dto.sql = Some(sql.clone());
+            dto.source_table = source_table.clone();
+        }
+    }
+    dto
 }
 
 fn default_join_operator() -> String {
@@ -1386,6 +1477,14 @@ fn build_overview(
                 storage_mode: format!("{:?}", t.storage_mode()),
                 bound: bindings.iter().any(|b| b.model_table == t.name()),
                 columns,
+                refresh_strategies: t
+                    .refresh_strategies()
+                    .iter()
+                    .map(refresh_strategy_to_dto)
+                    .collect(),
+                incremental_refresh: t
+                    .incremental_refresh()
+                    .map(|i| i.refresh_filter().to_string()),
             }
         })
         .collect();
@@ -2612,6 +2711,44 @@ pub async fn bi_model_set_table_storage_mode(
             return Err(format!("Table '{}' not found", table_name));
         };
         table.set_storage_mode(mode);
+        let edited = base.with_tables(tables);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Set a table's InMemory refresh strategies + incremental-refresh policy.
+/// The strategies are honored lazily by the engine's query_auto_refresh path
+/// (evaluated on each query; a stale table is re-fetched before the query
+/// runs). validate() checks strategy shapes + the incremental filter grammar.
+#[tauri::command]
+pub async fn bi_model_set_table_refresh(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    table_name: String,
+    strategies: Vec<RefreshStrategyDto>,
+    incremental_refresh: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let strats = strategies
+            .iter()
+            .map(refresh_strategy_from_dto)
+            .collect::<Result<Vec<_>, String>>()?;
+        let incr = incremental_refresh
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(bi_engine::IncrementalRefresh::new);
+        let mut tables = base.tables().to_vec();
+        let Some(table) = tables.iter_mut().find(|t| t.name() == table_name) else {
+            return Err(format!("Table '{}' not found", table_name));
+        };
+        table.set_refresh_strategies(strats);
+        table.set_incremental_refresh(incr);
         let edited = base.with_tables(tables);
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)

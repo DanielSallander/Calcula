@@ -117,6 +117,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_set_default_lookup_resolution",
     "bi_model_set_metadata",
     "bi_model_set_table_storage_mode",
+    "bi_model_set_table_refresh",
     "bi_model_refresh_table",
     "bi_model_function_catalog",
     "bi_model_undo",

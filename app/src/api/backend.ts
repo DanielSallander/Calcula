@@ -3631,6 +3631,19 @@ export interface ModelColumnInfo {
   formula: string | null;
 }
 
+/** One InMemory refresh strategy (`type`-discriminated; only the fields for
+ * `type` are populated). */
+export interface RefreshStrategyDto {
+  /** "interval" | "containsCurrentDate" | "dailyAfter" | "sourceQuery" */
+  type: string;
+  secs?: number | null;
+  column?: string | null;
+  hour?: number | null;
+  minute?: number | null;
+  sql?: string | null;
+  sourceTable?: string | null;
+}
+
 export interface ModelTableInfo {
   name: string;
   displayName: string | null;
@@ -3639,6 +3652,10 @@ export interface ModelTableInfo {
   storageMode: string;
   bound: boolean;
   columns: ModelColumnInfo[];
+  /** InMemory cache refresh strategies (empty = never auto-refresh). */
+  refreshStrategies: RefreshStrategyDto[];
+  /** Incremental-refresh filter (re-fetch only volatile rows), or null. */
+  incrementalRefresh: string | null;
 }
 
 export interface RelationshipConditionDto {
@@ -4179,6 +4196,20 @@ export async function biModelSetTableStorageMode(
     connectionId,
     tableName,
     storageMode,
+  });
+}
+
+export async function biModelSetTableRefresh(params: {
+  connectionId: string;
+  tableName: string;
+  strategies: RefreshStrategyDto[];
+  incrementalRefresh?: string | null;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_set_table_refresh", {
+    connectionId: params.connectionId,
+    tableName: params.tableName,
+    strategies: params.strategies,
+    incrementalRefresh: params.incrementalRefresh ?? null,
   });
 }
 

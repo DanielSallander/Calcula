@@ -7,12 +7,24 @@ import React, { useEffect, useState } from "react";
 import {
   biModelDeleteCalcColumn,
   biModelRefreshTable,
+  biModelSetTableRefresh,
   biModelSetTableStorageMode,
   biModelUpdateTable,
 } from "@api";
-import type { ModelColumnInfo, ModelOverview, ModelTableInfo } from "@api";
+import type {
+  ModelColumnInfo,
+  ModelOverview,
+  ModelTableInfo,
+  RefreshStrategyDto,
+} from "@api";
 
 const STORAGE_MODES = ["DirectQuery", "InMemory"];
+const STRATEGY_TYPES = [
+  { value: "interval", label: "Every N seconds" },
+  { value: "containsCurrentDate", label: "Missing today's date" },
+  { value: "dailyAfter", label: "Daily after time" },
+  { value: "sourceQuery", label: "Source query changed" },
+];
 import { Badge, Field, SELECTION_BG, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
@@ -85,6 +97,16 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
               applyOverview={applyOverview}
               reportError={reportError}
             />
+
+            {table.storageMode === "InMemory" && (
+              <RefreshStrategyCard
+                connectionId={connectionId}
+                table={table}
+                readOnly={readOnly}
+                applyOverview={applyOverview}
+                reportError={reportError}
+              />
+            )}
 
             <div style={{ ...styles.sectionHeader, marginTop: 12, marginBottom: 8 }}>
               <span style={styles.sectionTitle}>Columns ({table.columns.length})</span>
@@ -341,6 +363,210 @@ function TableMetaForm({
           onClick={() => void save()}
         >
           {busy ? "Saving…" : "Save table"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Refresh-strategy editor (InMemory tables)
+// ============================================================================
+// The engine honors these lazily on each query (query_auto_refresh): a table
+// whose cache a strategy marks stale is re-fetched from source before the
+// query runs. Only meaningful for InMemory tables.
+
+interface StrategyDraft {
+  type: string;
+  secs: string;
+  column: string;
+  hour: string;
+  minute: string;
+  sql: string;
+  sourceTable: string;
+}
+
+function emptyStrategyDraft(): StrategyDraft {
+  return { type: "interval", secs: "3600", column: "", hour: "6", minute: "0", sql: "", sourceTable: "" };
+}
+
+function strategyDtoToDraft(d: RefreshStrategyDto): StrategyDraft {
+  return {
+    type: d.type,
+    secs: d.secs != null ? String(d.secs) : "3600",
+    column: d.column ?? "",
+    hour: d.hour != null ? String(d.hour) : "6",
+    minute: d.minute != null ? String(d.minute) : "0",
+    sql: d.sql ?? "",
+    sourceTable: d.sourceTable ?? "",
+  };
+}
+
+function strategyDraftToDto(s: StrategyDraft): RefreshStrategyDto {
+  switch (s.type) {
+    case "interval":
+      return { type: "interval", secs: Number(s.secs) || 0 };
+    case "containsCurrentDate":
+      return { type: "containsCurrentDate", column: s.column };
+    case "dailyAfter":
+      return { type: "dailyAfter", hour: Number(s.hour) || 0, minute: Number(s.minute) || 0 };
+    case "sourceQuery":
+      return { type: "sourceQuery", sql: s.sql, sourceTable: s.sourceTable.trim() || null };
+    default:
+      return { type: s.type };
+  }
+}
+
+function RefreshStrategyCard({
+  connectionId,
+  table,
+  readOnly,
+  applyOverview,
+  reportError,
+}: {
+  connectionId: string;
+  table: ModelTableInfo;
+  readOnly: boolean;
+  applyOverview: (overview: ModelOverview) => void;
+  reportError: (err: unknown) => void;
+}): React.ReactElement {
+  const [drafts, setDrafts] = useState<StrategyDraft[]>(
+    table.refreshStrategies.map(strategyDtoToDraft),
+  );
+  const [incr, setIncr] = useState(table.incrementalRefresh ?? "");
+  const [busy, setBusy] = useState(false);
+
+  // Re-seed when the selected table (or a saved overview) changes.
+  useEffect(() => {
+    setDrafts(table.refreshStrategies.map(strategyDtoToDraft));
+    setIncr(table.incrementalRefresh ?? "");
+  }, [table]);
+
+  const update = (i: number, patch: Partial<StrategyDraft>) =>
+    setDrafts((ds) => ds.map((d, j) => (j === i ? { ...d, ...patch } : d)));
+
+  const columnsOf = table.columns.map((c) => c.name);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      applyOverview(
+        await biModelSetTableRefresh({
+          connectionId,
+          tableName: table.name,
+          strategies: drafts.map(strategyDraftToDto),
+          incrementalRefresh: incr.trim() || null,
+        }),
+      );
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disabled = readOnly || busy;
+
+  return (
+    <div style={{ ...styles.card, marginTop: 10 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Refresh strategies</div>
+      <div style={{ ...styles.hint, marginBottom: 8 }}>
+        Evaluated on each query — a table a strategy marks stale is re-fetched from source
+        before the query runs. No strategy = cache once, reuse until manually refreshed.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {drafts.length === 0 && <div style={styles.hint}>No strategies.</div>}
+        {drafts.map((s, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <select
+              style={{ ...styles.input, width: 180, flexShrink: 0 }}
+              value={s.type}
+              onChange={(e) => update(i, { type: e.target.value })}
+            >
+              {STRATEGY_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            {s.type === "interval" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input
+                  style={{ ...styles.input, width: 90 }}
+                  value={s.secs}
+                  onChange={(e) => update(i, { secs: e.target.value })}
+                />
+                seconds
+              </label>
+            )}
+            {s.type === "containsCurrentDate" && (
+              <select
+                style={{ ...styles.input, minWidth: 140 }}
+                value={s.column}
+                onChange={(e) => update(i, { column: e.target.value })}
+              >
+                <option value="">(date column)</option>
+                {columnsOf.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            )}
+            {s.type === "dailyAfter" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input
+                  style={{ ...styles.input, width: 50 }}
+                  value={s.hour}
+                  onChange={(e) => update(i, { hour: e.target.value })}
+                />
+                :
+                <input
+                  style={{ ...styles.input, width: 50 }}
+                  value={s.minute}
+                  onChange={(e) => update(i, { minute: e.target.value })}
+                />
+                (local)
+              </label>
+            )}
+            {s.type === "sourceQuery" && (
+              <input
+                style={{ ...styles.input, flex: 1, minWidth: 160 }}
+                value={s.sql}
+                placeholder="SELECT MAX(loaded_at) FROM etl_log …"
+                onChange={(e) => update(i, { sql: e.target.value })}
+              />
+            )}
+            <button
+              style={styles.smallBtn}
+              onClick={() => setDrafts((ds) => ds.filter((_, j) => j !== i))}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+        <div>
+          <button
+            style={styles.smallBtn}
+            onClick={() => setDrafts((ds) => [...ds, emptyStrategyDraft()])}
+          >
+            Add strategy
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <Field
+          label="Incremental refresh filter (optional)"
+          hint="DAX-like boolean over this table's columns identifying volatile rows to re-fetch (the rest of the cache is kept). e.g. date >= DATEADD(TODAY(), -7)"
+        >
+          <input style={styles.input} value={incr} onChange={(e) => setIncr(e.target.value)} />
+        </Field>
+      </div>
+
+      <div>
+        <button style={styles.primaryBtn} disabled={disabled} onClick={() => void save()}>
+          {busy ? "Saving…" : "Save refresh strategies"}
         </button>
       </div>
     </div>

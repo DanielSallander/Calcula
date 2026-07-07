@@ -4072,6 +4072,7 @@ pub fn run() {
             bi::model_editor::bi_model_set_default_lookup_resolution,
             bi::model_editor::bi_model_set_metadata,
             bi::model_editor::bi_model_set_table_storage_mode,
+            bi::model_editor::bi_model_set_table_refresh,
             bi::model_editor::bi_model_refresh_table,
             bi::model_editor::bi_model_function_catalog,
             bi::model_editor::bi_model_undo,
