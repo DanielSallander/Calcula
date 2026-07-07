@@ -159,6 +159,13 @@ const MANAGED_SPEC_KEYS = new Set<keyof ChartSpec>([
 
 type TabId = "data" | "design" | "spec";
 
+/** Starter DSL seeded when a chart first switches to the design-query source. */
+const DESIGN_QUERY_TEMPLATE =
+  "# Design query — ROWS = categories, VALUES = series.\n" +
+  "# Ctrl+Space suggests fields and measures.\n" +
+  "ROWS: \n" +
+  "VALUES: ";
+
 export function CreateChartDialog({
   isOpen,
   onClose,
@@ -284,6 +291,15 @@ export function CreateChartDialog({
     }
     return spec;
   }, [sourceRange, sourceMode, dslText, connectionId, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, specOverlay, currentSheetIndex, isPivotMode, pivotId]);
+
+  // Switch source mode; seed a starter design query the first time (Monaco has
+  // no placeholder text).
+  const handleSourceModeChange = useCallback((mode: "range" | "designQuery") => {
+    setSourceMode(mode);
+    if (mode === "designQuery" && !dslText.trim()) {
+      setDslText(DESIGN_QUERY_TEMPLATE);
+    }
+  }, [dslText]);
 
   // Handle spec updates from the Design tab or Spec tab
   const handleSpecChange = useCallback((updates: Partial<ChartSpec>) => {
@@ -798,7 +814,7 @@ export function CreateChartDialog({
               sourceRange={sourceRange}
               onSourceRangeChange={setSourceRange}
               sourceMode={isPivotMode ? "range" : sourceMode}
-              onSourceModeChange={setSourceMode}
+              onSourceModeChange={handleSourceModeChange}
               designQueryAvailable={!isPivotMode}
               dslText={dslText}
               onDslTextChange={setDslText}

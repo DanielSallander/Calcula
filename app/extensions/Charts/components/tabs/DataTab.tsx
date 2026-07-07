@@ -6,6 +6,7 @@ import React from "react";
 import type { ConnectionInfo } from "@api";
 import type { ChartSpec, ChartSeries, SeriesOrientation } from "../../types";
 import { getSeriesColor } from "../../rendering/chartTheme";
+import { DesignQueryEditor } from "../DesignQueryEditor";
 import {
   FieldGroup,
   Label,
@@ -151,31 +152,16 @@ export function DataTab({
             </Select>
           </FieldGroup>
 
-          {/* Design query DSL */}
+          {/* Design query DSL (shared pivot-layout-dsl Monaco editor) */}
           <FieldGroup>
             <Label>Design query</Label>
-            <textarea
+            <DesignQueryEditor
               value={dslText}
-              onChange={(e) => onDslTextChange(e.target.value)}
-              spellCheck={false}
-              placeholder={"ROWS:    dim_product.class\nVALUES:  [TotalSales]\nFILTERS: dim_product.style = (\"W\")"}
-              style={{
-                width: "100%",
-                minHeight: "140px",
-                resize: "vertical",
-                fontFamily: "var(--font-mono, monospace)",
-                fontSize: "12px",
-                lineHeight: "1.5",
-                padding: "8px",
-                boxSizing: "border-box",
-                background: "var(--input-bg, var(--bg-secondary))",
-                color: "var(--text-primary)",
-                border: "1px solid var(--border-color)",
-                borderRadius: "4px",
-              }}
+              onChange={onDslTextChange}
+              connectionId={connectionId}
             />
             <span style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
-              The query runs against the connection's model — the data lives in the chart, no pivot table needed.
+              Ctrl+Space suggests fields and measures. The query runs against the connection's model — the data lives in the chart, no pivot table needed.
             </span>
           </FieldGroup>
         </>
