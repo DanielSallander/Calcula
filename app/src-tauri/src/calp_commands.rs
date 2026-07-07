@@ -6989,8 +6989,12 @@ fn capture_bi_data_sources(
             Some(engine_arc) => {
                 match engine_arc.try_lock() {
                     Ok(engine) => {
-                        serde_json::to_value(engine.model())
-                            .map_err(|e| format!("Failed to serialize model: {}", e))?
+                        let mut v = serde_json::to_value(engine.model())
+                            .map_err(|e| format!("Failed to serialize model: {}", e))?;
+                        // Ensure a GVAR model publishes stamped >= v13 so a
+                        // subscriber on an older engine fails closed cleanly.
+                        crate::bi::commands::stamp_feature_format_version(engine.model(), &mut v);
+                        v
                     }
                     Err(_) => {
                         crate::log_warn!("CALP", "Engine busy for connection {}, skipping", conn.id);

@@ -172,6 +172,13 @@ export function CalculatedMeasuresDialog(props: DialogProps): React.ReactElement
           Define measures in column form, e.g. <code>SUM(Sales[profit]) / SUM(Sales[revenue])</code>.
           They become usable in CUBE formulas, pivots, and the <code>cube.*</code> script API.
         </p>
+        <p style={s.sub}>
+          Use <code>GVAR</code> for a query-scoped value — evaluated once per query (ignores the row
+          axis, respects slicers) — for a share-of-total, e.g.{" "}
+          <code>GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)</code>. In
+          the spreadsheet, GVAR measures resolve in pivots; in a CUBE formula cell they are not
+          supported yet and return an error.
+        </p>
 
         <div style={s.row}>
           <label style={s.label}>Connection</label>

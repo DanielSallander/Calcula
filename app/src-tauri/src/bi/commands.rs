@@ -692,7 +692,10 @@ pub(crate) fn capture_local_bi_connections(
         // Otherwise serialize the live model (try_lock; fall back to the file).
         let model_json = if let Some(base) = &conn.base_model {
             match serde_json::to_value(base) {
-                Ok(v) => v,
+                Ok(mut v) => {
+                    stamp_feature_format_version(base, &mut v);
+                    v
+                }
                 Err(e) => {
                     crate::log_warn!(
                         "BI",
@@ -705,7 +708,10 @@ pub(crate) fn capture_local_bi_connections(
         } else {
             match engine_arc.try_lock() {
                 Ok(engine) => match serde_json::to_value(engine.model()) {
-                    Ok(v) => v,
+                    Ok(mut v) => {
+                        stamp_feature_format_version(engine.model(), &mut v);
+                        v
+                    }
                     Err(e) => {
                         crate::log_warn!(
                             "BI",
@@ -1071,6 +1077,45 @@ pub fn check_model_format_version(model_json: &serde_json::Value) -> Result<(), 
     Ok(())
 }
 
+/// Minimum schema `format_version` required by a query-scoped (`GVAR`) measure.
+/// A pre-v13 engine silently drops the `query_scoped_bindings` field and
+/// miscomputes, so a model that uses `GVAR` must be stamped >= 13.
+const GVAR_MIN_FORMAT_VERSION: u64 = 13;
+
+/// Bump a serialized model's `format_version` up to the minimum its features
+/// require before persisting it (`.cala` save / `.calp` publish).
+///
+/// Calcula serializes a `DataModel` with serde, which round-trips
+/// `format_version` exactly as loaded — unlike `Engine::save_model`, which
+/// always stamps `MODEL_FORMAT_VERSION`. So a model that was loaded at an older
+/// version and then given a `GVAR` measure in-app would otherwise persist
+/// under-stamped, defeating [`check_model_format_version`] for a subscriber on an
+/// older engine. This raises (never lowers) the stamp when the model uses `GVAR`.
+pub fn stamp_feature_format_version(
+    model: &bi_engine::DataModel,
+    model_json: &mut serde_json::Value,
+) {
+    let uses_gvar = model
+        .measures()
+        .iter()
+        .any(|m| m.expression().has_query_scoped_bindings());
+    if !uses_gvar {
+        return;
+    }
+    if let Some(obj) = model_json.as_object_mut() {
+        let current = obj
+            .get("format_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if current < GVAR_MIN_FORMAT_VERSION {
+            obj.insert(
+                "format_version".to_string(),
+                serde_json::Value::from(GVAR_MIN_FORMAT_VERSION),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod format_gate_tests {
     use super::*;
@@ -1092,6 +1137,53 @@ mod format_gate_tests {
             serde_json::json!({ "format_version": bi_engine::MODEL_FORMAT_VERSION as u64 + 1 });
         let err = check_model_format_version(&too_new).unwrap_err();
         assert!(err.contains("newer version of Calcula"), "unexpected: {err}");
+    }
+
+    /// A one-table model with a single measure built from `formula`.
+    fn model_with_measure(name: &str, formula: &str) -> bi_engine::DataModel {
+        let expr = bi_engine::parse_measure_expression(formula).unwrap();
+        bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![bi_engine::Column::new("amount", bi_engine::DataType::Int64)],
+                )
+                .unwrap(),
+            )
+            .add_measure(bi_engine::Measure::new(name, expr))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn stamps_gvar_model_up_to_min_version() {
+        let model = model_with_measure(
+            "Share",
+            "GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)",
+        );
+        // Simulate a model whose serialized stamp is older than the GVAR minimum
+        // (Calcula's serde round-trip preserves format_version as-loaded).
+        let mut json = serde_json::to_value(&model).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("format_version".into(), serde_json::Value::from(5u64));
+        stamp_feature_format_version(&model, &mut json);
+        assert_eq!(
+            json.get("format_version").and_then(|v| v.as_u64()),
+            Some(GVAR_MIN_FORMAT_VERSION)
+        );
+    }
+
+    #[test]
+    fn leaves_non_gvar_model_version_untouched() {
+        let model = model_with_measure("Total", "SUM(Sales[amount])");
+        let mut json = serde_json::to_value(&model).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("format_version".into(), serde_json::Value::from(5u64));
+        stamp_feature_format_version(&model, &mut json);
+        // No GVAR → the stamp is left exactly as-is (never lowered or raised).
+        assert_eq!(json.get("format_version").and_then(|v| v.as_u64()), Some(5));
     }
 }
 

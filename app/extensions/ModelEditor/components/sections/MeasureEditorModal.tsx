@@ -12,6 +12,7 @@ import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import type { ModelMeasureInfo } from "@api";
 import { biModelUpsertMeasure, biModelValidateMeasure } from "@api";
 import { Field, Modal, styles } from "../editorShared";
+import { MEASURE_LANGUAGE_ID, registerMeasureLanguage } from "../../lib/measureLanguage";
 
 // Preserve any prior worker handler so this editor never clobbers another
 // Monaco setup living in the same window.
@@ -59,6 +60,7 @@ export function MeasureEditorModal({
 
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
+    registerMeasureLanguage();
   };
 
   const setMarker = useCallback((position: number | null, message: string | null) => {
@@ -199,12 +201,12 @@ export function MeasureEditorModal({
 
       <Field
         label="Formula"
-        hint="e.g. SUM(Sales[amount]) or ([Profit] / [Revenue]) * SUM(Sales[qty]) — reference other measures as [Name], columns as Table[column]."
+        hint="e.g. SUM(Sales[amount]) or ([Profit] / [Revenue]) * SUM(Sales[qty]) — reference other measures as [Name], columns as Table[column]. Use GVAR for a query-scoped value (evaluated once per query, ignores the row axis, respects slicers) — e.g. GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)."
       >
         <div style={{ border: "1px solid #ccc", borderRadius: 3 }}>
           <Editor
             height="140px"
-            language="plaintext"
+            language={MEASURE_LANGUAGE_ID}
             value={formula}
             onChange={(v) => {
               setFormula(v ?? "");
